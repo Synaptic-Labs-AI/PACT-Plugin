@@ -747,20 +747,64 @@ class TestDependencyDriftIsDetectable:
         dead_pins = sorted(set(pins) - install_tokens - {"pip"})
         assert not dead_pins, (
             f"CONSTRAINT COVERAGE DRIFT: pins for {dead_pins} sit in "
-            f"{constraints} but the CI install line never requests them. A "
-            f"dead pin constrains nothing (an unrequested package resolves "
-            f"only as a transitive, which these `==` pins do not bound "
-            f"for) and misleads a refresh into re-verifying it. Remove the "
-            f"pin or add the package to the install line."
+            f"{constraints} but the CI install line never requests them. "
+            f"`-c` DOES bind a pinned name even as a transitive (measured: "
+            f"a urllib3 pin forced a parent's transitive resolve), so the "
+            f"pin is not inert — the problem is the mirror contract: this "
+            f"file is the install line's direct-dependency mirror, and a "
+            f"pin with no operand misleads a refresh into re-freezing it. "
+            f"Remove the pin, or name the package on the install line too. "
+            f"If this is a deliberately pinned COMPROMISED TRANSITIVE, add "
+            f"it to the install line in the same change — a pin alone "
+            f"reddens here, and a bare `!=` line breaks the `==`-only "
+            f"parse above (see the incident path in the file's header)."
         )
+
+    def _script_pip_install_commands(self, script):
+        """The script's pip-install commands, from its EXECUTED text only.
+
+        Comment lines are dropped FIRST (the script's prose may quote pip
+        commands — prose is not a declaration), and a command starting with
+        `pip install` extends through its backslash continuations. Shared by
+        every arm that reasons about the script surface, so one parse
+        contract covers them all.
+        """
+        commands = []
+        saw_install_command = False
+        collecting = False
+        command = ""
+        for raw in script.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if collecting:
+                command += " " + line.rstrip("\\").strip()
+                collecting = raw.rstrip().endswith("\\")
+                if not collecting:
+                    commands.append(command)
+                    command = ""
+                continue
+            if line.startswith("#") or "pip install" not in line:
+                continue
+            saw_install_command = True
+            command = line.rstrip("\\").strip()
+            collecting = raw.rstrip().endswith("\\")
+            if not collecting:
+                commands.append(command)
+                command = ""
+        assert saw_install_command, (
+            f"PARSE FAILURE, not parity drift: no non-comment `pip install` "
+            f"command could be read from {script}. The script changed shape "
+            f"(a requirements file, a variable-driven loop) — re-point the "
+            f"arms at the new shape; do not weaken them to a skip."
+        )
+        return commands
 
     def test_cursor_install_sh_matches_the_ci_install_line(self):
         """`.cursor/install.sh` mirrors the CI install line — asserted now.
 
         The script's header claims lockstep with the workflow's install
         line, and before this arm that claim was PROSE ONLY: when CI gained
-        `-c constraints-ci.txt` the claim broke silently (round-2 finding
-        F2) because nothing read the script. This arm holds the package SET
+        `-c constraints-ci.txt` the claim broke silently because nothing
+        read the script. This arm holds the package SET
         of both installs to each other, `pip` excepted — the script
         upgrades pip in its own earlier command by design, mirroring the
         CI line's `pip` operand. Version parity follows from set parity:
@@ -792,38 +836,7 @@ class TestDependencyDriftIsDetectable:
         )
         ci_tokens = self._ci_install_package_tokens(workflow)
 
-        # Reconstruct the script's pip-install commands from its EXECUTED
-        # text: comment lines are dropped FIRST (the script's own header
-        # quotes the CI install line in comments — prose is not a
-        # declaration), and a command starting with `pip install` extends
-        # through its backslash continuations.
-        commands = []
-        saw_install_command = False
-        collecting = False
-        command = ""
-        for raw in script.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if collecting:
-                command += " " + line.rstrip("\\").strip()
-                collecting = raw.rstrip().endswith("\\")
-                if not collecting:
-                    commands.append(command)
-                    command = ""
-                continue
-            if line.startswith("#") or "pip install" not in line:
-                continue
-            saw_install_command = True
-            command = line.rstrip("\\").strip()
-            collecting = raw.rstrip().endswith("\\")
-            if not collecting:
-                commands.append(command)
-                command = ""
-        assert saw_install_command, (
-            f"PARSE FAILURE, not parity drift: no non-comment `pip install` "
-            f"command could be read from {script}. The script changed shape "
-            f"(a requirements file, a variable-driven loop) — re-point this "
-            f"arm at the new shape; do not weaken it to a skip."
-        )
+        commands = self._script_pip_install_commands(script)
         script_tokens = set()
         package_commands = []
         for cmd in commands:
@@ -843,8 +856,8 @@ class TestDependencyDriftIsDetectable:
 
         # The constraints file must be APPLIED, not merely present in the
         # repo: the package SETS can match while versions float, if the
-        # script ever dropped its `-c` — round-2 F2's silent-break shape
-        # wearing a different flag. _applies_constraints is the same check
+        # script ever dropped its `-c` — the same silent-break shape wearing
+        # a different flag. _applies_constraints is the same check
         # the workflow side runs, so one spelling contract covers both.
         assert package_commands and all(
             self._applies_constraints(cmd) for cmd in package_commands
@@ -870,6 +883,74 @@ class TestDependencyDriftIsDetectable:
             f"carries packages CI never sees, so a local green certifies "
             f"more than the CI green does. Reconcile the two lists."
         )
+
+    def test_install_lines_admit_no_requirements_or_editable_flags(self):
+        """`-r`/`-e` on either install surface floats names invisibly.
+
+        Both flags take a VALUE, so the tokenizer consumes it and the flag
+        never reaches the package tokens: a requirements file or editable
+        path adds packages that the declared-match, coverage and
+        constraints-APPLIED arms never see, while constraints-ci.txt pins
+        none of them (it mirrors the install line's direct names only). An
+        innocent refactor to a `-r requirements-dev.txt` install is exactly
+        the honest mistake this class exists for, so the flags are refused
+        outright on BOTH surfaces. Introducing one legitimately means
+        reconciling the coverage arms to read the referenced file in the
+        same change — the red here is the reminder, not a bug.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ or .cursor/ tree by design. "
+                "This skip is NO INFORMATION about the -r/-e tripwire — "
+                "never read it as a pass."
+            )
+        forbidden = ("-r", "--requirement", "-e", "--editable")
+
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        assert workflow.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The tripwire cannot run. This is "
+            f"a FAILURE, not a skip: inside a checkout the workflow is "
+            f"required."
+        )
+        script = root / ".cursor" / "install.sh"
+        assert script.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {script} is missing. The tripwire cannot run. This is "
+            f"a FAILURE, not a skip: inside a checkout the bootstrap "
+            f"script is required."
+        )
+        script_commands = self._script_pip_install_commands(script)
+        package_commands = [
+            cmd for cmd in script_commands
+            if self._package_tokens_from_pip_argv(cmd) - {"pip"}
+        ]
+        surfaces = [
+            ("the CI install line", [self._ci_install_line(workflow)]),
+            (f"{script} install commands", package_commands),
+        ]
+        for where, commands in surfaces:
+            for cmd in commands:
+                hits = sorted({
+                    tok for tok in cmd.split()
+                    if tok in forbidden
+                    or tok.startswith("--requirement=")
+                    or tok.startswith("--editable=")
+                })
+                assert not hits, (
+                    f"REQUIREMENTS-FLAG DRIFT: {where} carries {hits} "
+                    f"({cmd.strip()!r}). Both flags take a value the "
+                    f"tokenizer consumes, so every package named by the "
+                    f"referenced file installs with NO pin this machinery "
+                    f"guarantees — the coverage arms cannot see them. Pin "
+                    f"the names as install-line operands instead, or "
+                    f"reconcile the coverage arms to read the referenced "
+                    f"file in the same change."
+                )
 
     def test_ci_branch_emits_nothing_to_stderr(self):
         """The silence is the CONTRACT, so pin it — a log line here breaks 15

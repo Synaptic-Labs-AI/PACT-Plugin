@@ -3,7 +3,10 @@
 # versions (pip freeze of the verified 3.12.3 venv, 2026-10-30 — the
 # environment the green full-suite run executed in). Merge-time resolution is
 # code execution in CI, so a version change is a reviewed change to this file,
-# not merge-time weather. Transitive dependencies float within these bounds.
+# not merge-time weather. Transitive dependencies are not listed; they float
+# within their parents' specifiers, and `-c` binds any name this file DOES
+# pin even when it arrives as a transitive (measured: a urllib3 pin forced a
+# parent package's transitive resolve to that version).
 # pip itself is NOT constrained: `pip freeze` omits it, and a pinned
 # self-upgrade can deadlock the bootstrap. Refresh deliberately (quarterly, or
 # on a red a pin explains): rebuild from the workflow's package list WITHOUT
@@ -13,6 +16,12 @@
 # whole-venv `pip freeze` would pin transitives too, which this file
 # deliberately lets float; the dead-pin coverage arm reddens on the surplus),
 # run the suite green under the new pins, and commit the version diff.
+# Incident path — a COMPROMISED TRANSITIVE: refresh is the wrong tool (a
+# rebuild WITHOUT `-c` pulls the latest, i.e. the compromised version), and
+# the file's `==`-only contract refuses an `!=` exclusion line. Pin the
+# transitive here AND name it on the install line in the same change: the
+# coverage arms then hold it at both endpoints, which a pin alone (reads as
+# dead) or a bare exclusion line cannot.
 pytest==9.2.0
 hypothesis==6.170.14
 httpx==0.28.1

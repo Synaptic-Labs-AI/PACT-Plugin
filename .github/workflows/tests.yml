@@ -111,8 +111,10 @@
 #   CONSTRAINTS: the direct dependencies above are pinned in constraints-ci.txt
 #   at the repo root and applied by the install step's `pip install -c` — what
 #   CI runs is a reviewed commit, not whatever the index serves at merge time.
-#   Transitive dependencies float within those bounds; pip itself is
-#   unconstrained (pinned self-upgrades can deadlock the bootstrap). Refresh
+#   Transitive dependencies are not listed; they float within their parents'
+#   specifiers, and `-c` binds any name this file DOES pin even when it
+#   arrives as a transitive. pip itself is unconstrained (pinned
+#   self-upgrades can deadlock the bootstrap). Refresh
 #   deliberately (quarterly, or on a red the pins explain): rebuild the
 #   environment from the package list above WITHOUT `-c` — a constrained
 #   rebuild reproduces the current pins exactly, so it can only re-confirm
@@ -161,10 +163,12 @@
 #   CI is set, so if the two lists diverge nothing installs the difference and
 #   CI shows the consequences listed above.
 #
-#   Populations are NAMED above rather than counted, and suite-wide counts are
-#   deliberately absent: a name stays checkable, a number goes stale silently,
-#   and a stale figure under a heading claiming "empirically verified" is worse
-#   than none, because the heading vouches for it.
+#   Skip populations are NAMED above rather than counted: a name stays
+#   checkable, a number goes stale silently, and a stale figure under a
+#   heading claiming "empirically verified" is worse than none, because the
+#   heading vouches for it. The one count this header does carry — the
+#   collapsed-shape measurement near the top — is tree-anchored and dated:
+#   true as of the tree it names, never a live count of the current suite.
 #   Remaining skips include intentional carve-outs (live-tmux-only probes,
 #   orchestrator carve-out, pin-caps test-design, fuzz-strategy edges),
 #   version-conditional cases, and baked-SHA differentials in files that still

@@ -29,9 +29,10 @@ fi
 
 python -m pip install --upgrade pip
 
-# CI install line (kept in lockstep with .github/workflows/tests.yml):
-#   python -m pip install --upgrade -c constraints-ci.txt pip pytest
-#   hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
+# CI-parity install: the command below mirrors the install line in
+# .github/workflows/tests.yml — the authoritative copy; read it there rather
+# than here. The package-set parity arm in
+# pact-plugin/tests/test_memory_init.py reddens if the two surfaces drift.
 # constraints-ci.txt pins the direct deps to the TEST-verified versions, so a
 # local green and a CI green resolve the same set. pip stays unconstrained
 # (pinned self-upgrades can deadlock the bootstrap); it is upgraded separately
@@ -55,6 +56,10 @@ export PATH="$NPM_GLOBAL/bin:$PATH"
 if ! command -v claude >/dev/null 2>&1; then
   if command -v npm >/dev/null 2>&1; then
     mkdir -p "$NPM_GLOBAL"
+    # Unpinned deliberately: a vendor CLI on an opt-in, local-machine smoke
+    # path — CI never installs it. The vendor re-versions frequently, so a
+    # pin would need its own refresh discipline for no CI benefit; the float
+    # is bounded to this machine's PATH.
     npm install -g --prefix "$NPM_GLOBAL" @anthropic-ai/claude-code
   else
     echo "WARNING: npm not found; skipping Claude Code CLI install (live smoke test unavailable)." >&2
