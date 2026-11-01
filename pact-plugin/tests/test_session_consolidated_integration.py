@@ -997,7 +997,7 @@ def _literal_command_template(filename, marker, *, readback_count, values):
     ]
     assert len(blocks) == 1, f"{filename}: expected one literal bash block containing {marker!r}"
     template = blocks[0] + "\n"
-    actual_readbacks = template.count("python3 -I -c '")
+    actual_readbacks = template.count("verify-last --stdin <<'JSON'")
     assert actual_readbacks == readback_count, (
         f"{filename}: literal source read-back count {actual_readbacks}, "
         f"expected {readback_count}; refusing to execute a drifted template"
@@ -1011,7 +1011,7 @@ def _literal_command_template(filename, marker, *, readback_count, values):
 
 def _inject_wrong_event_before_readback(template, session_dir, ordinal):
     """Put a valid wrong final event immediately before one literal read-back."""
-    starts = list(re.finditer(r"^[ \t]*python3 -I -c '", template, re.MULTILINE))
+    starts = list(re.finditer(r"^[ \t]*python3 -I .*verify-last --stdin <<'JSON'$", template, re.MULTILINE))
     assert 1 <= ordinal <= len(starts)
     wrong_write = (
         f'python3 "{_SESSION_JOURNAL_PY}" write \\\n'
@@ -1058,7 +1058,7 @@ def _run_pause_bash(session_dir, *, true_or_false, wrong_readback=None):
 def test_literal_extraction_rejects_missing_source_readback(tmp_path, monkeypatch):
     """A removed command-source read-back fails before the integration run."""
     source = (_PACT_PLUGIN_DIR / "commands" / "pause.md").read_text(encoding="utf-8")
-    mutated = source.replace("python3 -I -c '", "python3 -I -c# removed", 1)
+    mutated = source.replace("verify-last --stdin", "verify-last# removed", 1)
     assert mutated != source
     (tmp_path / "commands").mkdir()
     (tmp_path / "commands" / "pause.md").write_text(mutated, encoding="utf-8")

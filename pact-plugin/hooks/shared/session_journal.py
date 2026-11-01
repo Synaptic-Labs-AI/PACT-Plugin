@@ -3,7 +3,7 @@ Location: pact-plugin/hooks/shared/session_journal.py
 Summary: Append-only JSONL event store for GC-proof workflow state persistence.
 Used by: session_init.py, session_end.py, agent_handoff_emitter.py (hooks);
          orchestrate.md, comPACT.md, peer-review.md, wrap-up.md, pause.md
-         (commands invoke via CLI: python3 session_journal.py write|read|read-last).
+         (commands invoke via CLI: python3 session_journal.py write|read|read-last|verify-last).
 
 Write path: O_APPEND append, protected by an exclusive advisory lock
 (`fcntl.flock(LOCK_EX)`) around the short-write loop in `_atomic_write`.
@@ -1885,6 +1885,97 @@ def _atomic_write(path: Path, data: bytes) -> bool:
 # --- CLI ---
 
 
+def _json_same(got: Any, want: Any) -> bool:
+    """JSON equality with recursive type identity, excluding bool/int coercion."""
+    if type(got) is not type(want):
+        return False
+    if isinstance(got, dict):
+        return got.keys() == want.keys() and all(
+            _json_same(got[key], want[key]) for key in got
+        )
+    if isinstance(got, list):
+        return len(got) == len(want) and all(
+            _json_same(a, b) for a, b in zip(got, want)
+        )
+    return got == want
+
+
+def _validate_verify_last_spec(spec: Any) -> str | None:
+    """Return a reason when a verify-last spec violates its four-key contract."""
+    if not isinstance(spec, dict):
+        return "spec must be a JSON object"
+    required = {"session_dir", "exact", "nonempty", "absent"}
+    if set(spec) != required:
+        return "spec must contain exactly session_dir, exact, nonempty, absent"
+    if not isinstance(spec["session_dir"], str):
+        return "session_dir must be a string"
+    if not isinstance(spec["exact"], dict):
+        return "exact must be an object"
+    for key in ("nonempty", "absent"):
+        if not isinstance(spec[key], list) or any(
+            not isinstance(value, str) for value in spec[key]
+        ):
+            return f"{key} must be an array of strings"
+    return None
+
+
+def _verify_last() -> int:
+    """Verify the physical last journal event against a JSON spec on stdin."""
+    try:
+        raw = sys.stdin.read()
+    except (OSError, UnicodeError) as exc:
+        print(f"session_journal: failed to read verify-last --stdin: {exc}",
+              file=sys.stderr)
+        return 1
+    try:
+        spec = json.loads(raw)
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        print(f"session_journal: invalid verify-last --stdin JSON: {exc}",
+              file=sys.stderr)
+        return 1
+
+    reason = _validate_verify_last_spec(spec)
+    if reason is not None:
+        print(f"session_journal: invalid verify-last spec: {reason}",
+              file=sys.stderr)
+        return 1
+    rc = _validate_cli_session_dir(spec["session_dir"])
+    if rc != 0:
+        return rc
+
+    journal = _journal_path_from(spec["session_dir"])
+    try:
+        last_line = journal.read_text(encoding="utf-8").splitlines()[-1]
+        event = json.loads(last_line)
+    except IndexError:
+        print("session_journal: verify-last journal is empty", file=sys.stderr)
+        return 1
+    except (OSError, UnicodeError) as exc:
+        print(f"session_journal: verify-last failed to read journal: {exc}",
+              file=sys.stderr)
+        return 1
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        print(f"session_journal: invalid final journal JSON: {exc}",
+              file=sys.stderr)
+        return 1
+    if not isinstance(event, dict):
+        print("session_journal: final journal event must be a JSON object",
+              file=sys.stderr)
+        return 1
+
+    bad = [
+        key
+        for key, want in spec["exact"].items()
+        if key not in event or not _json_same(event[key], want)
+    ]
+    bad += [key for key in spec["nonempty"] if not event.get(key)]
+    bad += [key for key in spec["absent"] if key in event]
+    if bad:
+        print(f"Journal read-back failed for {bad!r}: {event!r}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _build_cli():
     """Build the journal CLI. argparse stays off the hook import path."""
     import argparse
@@ -1919,12 +2010,13 @@ def _build_cli():
         f'python3 "{prog}" read-last'
         " --type phase_transition --session-dir /abs/session"
     )
+    verify_ex = f'python3 "{prog}" verify-last --stdin'
 
     parser = _TeachParser(
         prog=prog,
         description="Session journal CLI — append and query JSONL events.",
         formatter_class=fmt,
-        epilog=_cli_examples(write_ex, read_ex, last_ex),
+        epilog=_cli_examples(write_ex, read_ex, last_ex, verify_ex),
     )
     parser._teach_example = write_ex
     sub = parser.add_subparsers(dest="command", parser_class=_TeachParser)
@@ -1996,6 +2088,17 @@ def _build_cli():
                              "this value (e.g. --exclude-scope dispatch keeps "
                              "a variety_assessed read-last on the feature-"
                              "level assessment, skipping per-dispatch mirrors).")
+
+    # --- verify-last ---
+    verify_p = sub.add_parser(
+        "verify-last",
+        help="Verify the physical last event against a JSON spec",
+        formatter_class=fmt,
+        epilog=_cli_examples(verify_ex),
+    )
+    verify_p._teach_example = verify_ex
+    verify_p.add_argument("--stdin", action="store_true", required=True,
+                          help="Read the verification spec from standard input")
     return parser
 
 
@@ -2007,6 +2110,7 @@ def main() -> int:
         write  — Append an event via make_event() + append_event()
         read   — Read events, optionally filtered by type, output JSON
         read-last — Read the most recent event of a given type, output JSON
+        verify-last — Verify the physical last event against a JSON spec
 
     Returns:
         0 on success, 1 on error.
@@ -2100,6 +2204,9 @@ def main() -> int:
         else:
             print(json.dumps(event))
         return 0
+
+    elif args.command == "verify-last":
+        return _verify_last()
 
     return 1
 

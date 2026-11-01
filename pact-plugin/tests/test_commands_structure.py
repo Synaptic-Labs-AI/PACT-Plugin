@@ -2002,10 +2002,10 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
                     or re.search(r'(?<!\S)"?\$SJ"?(?!\S)', joined) is not None
                 )
                 if has_journal_path:
-                    verb_match = re.search(r"(?:^|\s)(write|read-last|read)(?:\s|$)", joined)
+                    verb_match = re.search(r"(?:^|\s)(write|read-last|read|verify-last)(?:\s|$)", joined)
                     if verb_match and verb is None:
                         verb = verb_match.group(1)
-                    if verb in ("read", "read-last"):
+                    if verb in ("read", "read-last", "verify-last"):
                         break
                     if "--stdin <<'JSON'" in joined:
                         heredoc_open = cursor
@@ -2042,7 +2042,7 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
             later_starts = [
                 candidate[0]
                 for candidate in invocations[position + 1:]
-                if candidate[0] > heredoc_close
+                if candidate[1] == "write" and candidate[0] > heredoc_close
             ]
             segment_end = min(later_starts, default=region_end)
             parsed.append(
@@ -2169,20 +2169,6 @@ def test_journal_write_total_is_derived_and_non_vacuous():
     assert EXPECTED_JOURNAL_WRITE_TOTAL == len(JOURNAL_READBACK_MATRIX) > 0
 
 
-JOURNAL_STATIC_CODE = """import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-"""
-
 _NUMERIC_PLACEHOLDERS = {
     "{task_count}",
     "{memories_saved}",
@@ -2254,6 +2240,8 @@ def _placeholder_value(token, session_dir, replacements):
         value = True
     elif token in _ARRAY_PLACEHOLDERS:
         value = []
+    elif token == "{plugin_root}":
+        value = str(COMMANDS_DIR.parent)
     elif token.startswith("{absolute_"):
         value = "/tmp/journal-structure/artifact"
     else:
@@ -2268,7 +2256,8 @@ def _placeholder_value(token, session_dir, replacements):
 
 
 def _render_json_placeholders(text, session_dir, replacements=None, escape=True):
-    """Render typed values into the one-line JSON spec, never into static code."""
+    """Render typed values into JSON data and trusted plugin paths."""
+    text = text.replace("${CLAUDE_PLUGIN_ROOT}", str(COMMANDS_DIR.parent))
     def replace(match):
         token = match.group(0)
         value = _placeholder_value(token, session_dir, replacements)
@@ -2390,7 +2379,7 @@ def _payload_spec_problems(payload, spec):
 
 
 def _parse_readback_block(site):
-    """Extract the literal shell block; only blockquote markup is removed."""
+    """Extract the literal verify-last block; only blockquote markup is removed."""
     lines = [_journal_raw_line(line) for line in site.segment.splitlines()]
     start = next(
         (index for index, line in enumerate(lines) if line.strip() and not line.strip().startswith("#")),
@@ -2398,16 +2387,26 @@ def _parse_readback_block(site):
     )
     if start is None:
         raise AssertionError("missing read-back")
-    required_start = "if ! python3 -I -c '" if site.filename == "prune-memory.md" else "python3 -I -c '"
-    if lines[start].strip() != required_start:
-        raise AssertionError(f"first statement is {lines[start].strip()!r}")
+    match = re.fullmatch(
+        r"(if ! )?python3 -I (.+) verify-last --stdin <<'JSON'",
+        lines[start].strip(),
+    )
+    expected_prefix = "if ! " if site.filename == "prune-memory.md" else ""
+    if match is None or (match.group(1) or "") != expected_prefix:
+        raise AssertionError(f"non-canonical verify-last invocation: {lines[start].strip()!r}")
+    allowed_invocations = {
+        '"{plugin_root}/hooks/shared/session_journal.py"',
+        '"${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py"',
+        '"$SJ"',
+        "$SJ",
+    }
+    if match.group(2) not in allowed_invocations:
+        raise AssertionError(f"non-canonical journal path: {match.group(2)!r}")
     try:
-        opener = lines.index("' <<'JSON'", start + 1)
-        close = lines.index("JSON", opener + 1)
+        close = lines.index("JSON", start + 1)
     except ValueError as exc:
-        raise AssertionError("missing quoted static-code/JSON-data heredoc") from exc
-    code = "\n".join(lines[start + 1:opener]) + "\n"
-    spec_text = "\n".join(lines[opener + 1:close])
+        raise AssertionError("missing quoted verify-last JSON-data heredoc") from exc
+    spec_text = "\n".join(lines[start + 1:close])
     end = close + 1
     trailer = []
     if site.filename == "prune-memory.md":
@@ -2417,7 +2416,7 @@ def _parse_readback_block(site):
             raise AssertionError("missing prune if ! continuation") from exc
         trailer = lines[close + 1:end]
     return {
-        "code": code,
+        "invocation": lines[start].strip(),
         "spec_text": spec_text,
         "trailer": trailer,
         "raw": "\n".join(lines[start:end]),
@@ -2438,8 +2437,6 @@ def _readback_problems(site, expectation):
         block = _parse_readback_block(site)
     except AssertionError as exc:
         return problems + [f"missing immediate physical-last-line read-back: {exc}"]
-    if block["code"] != JOURNAL_STATIC_CODE:
-        problems.append("static Python differs from the placeholder-free optimized-safe contract")
     template_spec = None
     try:
         template_spec = _template_identity_loads(block["spec_text"])
@@ -2509,11 +2506,12 @@ def _canonical_readback(site_key):
     """Build an isolated valid control from the same matrix under test."""
     filename, _ordinal = site_key
     expectation = JOURNAL_READBACK_MATRIX[site_key]
-    first = "if ! python3 -I -c '" if filename == "prune-memory.md" else "python3 -I -c '"
+    if filename == "prune-memory.md":
+        first = 'if ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<\'JSON\''
+    else:
+        first = 'python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<\'JSON\''
     lines = [
         first,
-        *JOURNAL_STATIC_CODE.splitlines(),
-        "' <<'JSON'",
         _canonical_spec_text(expectation),
         "JSON",
     ]
@@ -2532,7 +2530,7 @@ def _synthetic_write_payload(readback):
     """Build the fixture payload from its spec so each mutation isolates its target."""
     if not readback:
         return {}
-    spec_text = readback.split("' <<'JSON'\n", 1)[1].split("\nJSON", 1)[0]
+    spec_text = readback.split("<<'JSON'\n", 1)[1].split("\nJSON", 1)[0]
     spec = _template_identity_loads(spec_text)
     event = _matching_journal_event(spec)
     event.pop("type", None)
@@ -2641,7 +2639,7 @@ def test_conditional_delimiter_cannot_move_readback_out_of_branch():
     body = ";;\n" + _canonical_readback(key)
     site = _one_synthetic_site(key, body)
     problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
-    assert any("first statement is ';;'" in p for p in problems)
+    assert any("non-canonical verify-last invocation" in p for p in problems)
 
 
 def test_non_bash_fence_readback_earns_no_credit():
@@ -2678,32 +2676,25 @@ def test_dropped_required_field_fails_assertion_contract():
     assert any("JSON-data spec" in p for p in problems)
 
 
-def test_commented_out_exact_comparison_earns_no_credit():
-    key = ("comPACT.md", 2)
-    body = _canonical_readback(key)
-    control = _one_synthetic_site(key, body)
-    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
-    assertion = 'bad = [key for key, want in spec["exact"].items()'
-    assert assertion in body
-    mutated_body = body.replace(assertion, "# " + assertion, 1)
-    assert mutated_body != body
-    site = _one_synthetic_site(key, mutated_body)
-    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
-    assert any("static Python differs" in p for p in problems)
-
-
-def test_commented_out_physical_read_earns_no_credit():
+@pytest.mark.parametrize("mutation", ["wrong_verb", "dropped_isolation", "read_last"])
+def test_verify_last_invocation_mutations_fail(mutation):
     key = ("orchestrate.md", 3)
     body = _canonical_readback(key)
     control = _one_synthetic_site(key, body, spelling="variable")
     assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
-    read = 'event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])'
-    assert read in body
-    mutated_body = body.replace(read, "# " + read, 1)
+    if mutation == "wrong_verb":
+        mutated_body = body.replace("verify-last", "write", 1)
+        with pytest.raises(AssertionError, match="missing journal event type"):
+            _one_synthetic_site(key, mutated_body, spelling="variable")
+        return
+    if mutation == "dropped_isolation":
+        mutated_body = body.replace("python3 -I", "python3", 1)
+    else:
+        mutated_body = body.replace("verify-last", "read-last", 1)
     assert mutated_body != body
     site = _one_synthetic_site(key, mutated_body, spelling="variable")
     problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
-    assert any("static Python differs" in p for p in problems)
+    assert any("non-canonical verify-last invocation" in problem for problem in problems)
 
 
 def test_wrong_event_type_fails_assertion_contract():
@@ -2715,17 +2706,6 @@ def test_wrong_event_type_fails_assertion_contract():
     site = _one_synthetic_site(key, mutated_body)
     problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
     assert any("JSON-data spec" in p for p in problems)
-
-
-def test_type_filtered_readlast_fails_physical_read_contract():
-    key = ("orchestrate.md", 3)
-    body = _canonical_readback(key)
-    token = 'event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])'
-    assert token in body
-    mutated_body = body.replace(token, 'event = json.loads(Path("read-last").read_text())', 1)
-    site = _one_synthetic_site(key, mutated_body, spelling="variable")
-    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
-    assert any("static Python differs" in p for p in problems)
 
 
 def test_prune_readback_must_remain_nonblocking():
@@ -2826,7 +2806,7 @@ def _render_live_readback(site_key, journal_site_map, session_dir, replacements=
     """Render only JSON data in the literal shipped block, never Python source."""
     site = journal_site_map[site_key]
     script = _parse_readback_block(site)["raw"]
-    assert "session-journal.jsonl" in script
+    assert "session_journal.py" in script
     values = {"{session_dir}": str(session_dir), **(replacements or {})}
     for token in values:
         assert token in script, f"{site_key}: placeholder {token} missing from live block"
@@ -2836,9 +2816,10 @@ def _render_live_readback(site_key, journal_site_map, session_dir, replacements=
     return script
 
 
-def _run_readback(script, session_dir):
+def _run_readback(script, session_dir, env_overrides=None):
     env = os.environ.copy()
     env["PYTHONOPTIMIZE"] = "1"
+    env.update(env_overrides or {})
     return subprocess.run(
         ["bash", "-c", script],
         cwd=str(session_dir),
@@ -3131,10 +3112,9 @@ def test_raw_readback_rejects_wrong_final_identity(
 
 
 def test_isolated_readback_ignores_hostile_cwd_json_module(tmp_path, journal_site_map):
-    """The literal isolated block validates a real journal without importing cwd code.
+    """The literal isolated CLI ignores a hostile PYTHONPATH json.py.
 
-    The temp session directory is also the caller's project-cwd surrogate. The
-    non-isolated negative control changes only the interpreter flag in that same
+    The non-isolated control changes only the interpreter flag in that same
     literal block, proving the marker is live without touching production files.
     """
     key = ("comPACT.md", 2)
@@ -3148,14 +3128,15 @@ def test_isolated_readback_ignores_hostile_cwd_json_module(tmp_path, journal_sit
         encoding="utf-8",
     )
     script = _render_live_readback(key, journal_site_map, tmp_path)
+    hostile_env = {"PYTHONPATH": str(tmp_path)}
 
-    isolated = _run_readback(script, tmp_path)
+    isolated = _run_readback(script, tmp_path, env_overrides=hostile_env)
     assert isolated.returncode == 0, isolated.stderr
     assert not marker.exists()
 
-    vulnerable = script.replace("python3 -I -c", "python3 -c", 1)
+    vulnerable = script.replace("python3 -I", "python3", 1)
     assert vulnerable != script
-    control = _run_readback(vulnerable, tmp_path)
+    control = _run_readback(vulnerable, tmp_path, env_overrides=hostile_env)
     assert control.returncode != 0
     assert marker.exists()
     assert "hostile cwd json.py imported" in control.stderr
@@ -3191,7 +3172,7 @@ def test_malformed_hostile_json_fails_before_verification(tmp_path, journal_site
     assert not marker.exists()
 
 
-def test_dead_code_mutant_is_rejected_and_cannot_fake_liveness(tmp_path):
+def test_canonical_verifier_liveness_and_missing_stdin(tmp_path):
     key = ("comPACT.md", 2)
     canonical = _canonical_readback(key)
     control = _one_synthetic_site(key, canonical)
@@ -3203,39 +3184,11 @@ def test_dead_code_mutant_is_rejected_and_cannot_fake_liveness(tmp_path):
     journal.unlink()
     assert _run_readback(script, tmp_path).returncode != 0
 
-    dead_code = "if False:\n" + "\n".join(
-        "    " + line if line else "" for line in JOURNAL_STATIC_CODE.splitlines()
-    ) + "\n"
-    mutant = canonical.replace(JOURNAL_STATIC_CODE, dead_code, 1)
+    mutant = canonical.replace(" --stdin", "", 1)
     assert mutant != canonical
     site = _one_synthetic_site(key, mutant)
     problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
-    assert any("static Python differs" in problem for problem in problems)
-    false_green = _run_readback(_render_json_placeholders(mutant, tmp_path), tmp_path)
-    assert false_green.returncode == 0
-
-
-@pytest.mark.parametrize("mutation", ["placeholder", "assert", "indent", "if_false"])
-def test_static_code_mutations_are_killed(mutation):
-    key = ("comPACT.md", 2)
-    canonical = _canonical_readback(key)
-    if mutation == "placeholder":
-        changed = JOURNAL_STATIC_CODE.replace(
-            'path = Path(spec["session_dir"])', 'path = Path("{session_dir}")', 1
-        )
-    elif mutation == "assert":
-        changed = JOURNAL_STATIC_CODE + "assert False\n"
-    elif mutation == "indent":
-        changed = JOURNAL_STATIC_CODE.replace("import json", "    import json", 1)
-    else:
-        changed = "if False:\n" + "\n".join(
-            "    " + line if line else "" for line in JOURNAL_STATIC_CODE.splitlines()
-        ) + "\n"
-    mutant = canonical.replace(JOURNAL_STATIC_CODE, changed, 1)
-    assert mutant != canonical
-    site = _one_synthetic_site(key, mutant)
-    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
-    assert any("static Python differs" in problem for problem in problems)
+    assert any("non-canonical verify-last invocation" in problem for problem in problems)
 
 
 def test_json_exact_comparison_is_type_strict(tmp_path, journal_site_map):
@@ -3299,8 +3252,10 @@ def test_read_verbs_are_excluded_from_write_census():
         "```bash\n"
         'python3 "$SJ" read --type commit\n'
         'python3 "$SJ" read-last --type commit\n'
+        'python3 "$SJ" verify-last --stdin\n'
         'python3 $SJ read --type commit\n'
         'python3 $SJ read-last --type commit\n'
+        'python3 $SJ verify-last --stdin\n'
         "```\n"
     )
     assert _parse_journal_sites("orchestrate.md", text) == []

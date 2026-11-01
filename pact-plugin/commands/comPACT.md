@@ -43,20 +43,7 @@ Create a simpler Task hierarchy than full orchestrate:
 >   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 > {"task_id": "{feature_task_id}", "variety": {"total": N}}
 > JSON
-> python3 -I -c '
-> import json
-> import sys
-> from pathlib import Path
->
-> spec = json.load(sys.stdin)
-> path = Path(spec["session_dir"]) / "session-journal.jsonl"
-> event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-> bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-> bad += [key for key in spec["nonempty"] if not event.get(key)]
-> bad += [key for key in spec["absent"] if key in event]
-> if bad:
->     raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-> ' <<'JSON'
+> python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 > {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{feature_task_id}"},"nonempty":[],"absent":["scope"]}
 > JSON
 > ```
@@ -295,20 +282,7 @@ When the task contains multiple independent items, invoke multiple specialists t
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
 JSON
    ```
@@ -320,20 +294,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
-   python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"},"nonempty":[],"absent":[]}
 JSON
    ```
@@ -398,20 +359,7 @@ Use a single specialist agent only when:
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
 JSON
    ```
@@ -423,20 +371,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
 JSON
-   python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"},"nonempty":[],"absent":[]}
 JSON
    ```
@@ -510,20 +445,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
     --type commit --session-dir '{session_dir}' --stdin <<'JSON'
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
 JSON
-  python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"commit","sha":"{short_sha}","phase":"CODE"},"nonempty":[],"absent":[]}
 JSON
   ```
@@ -548,20 +470,7 @@ JSON
     --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
   {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
 JSON
-  python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"CODE","status":"completed"},"nonempty":[],"absent":[]}
 JSON
   ```

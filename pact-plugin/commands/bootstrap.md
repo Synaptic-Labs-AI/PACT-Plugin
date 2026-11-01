@@ -42,20 +42,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON'
 {"refresh_ts": "{refresh_ts}"}
 JSON
-python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"session_refresh_consumed","refresh_ts":"{refresh_ts}"},"nonempty":[],"absent":[]}
 JSON
 ```
@@ -69,20 +56,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_pause_consumed --session-dir '{session_dir}' --stdin <<'JSON'
 {"pause_ts": "{pause_ts}"}
 JSON
-python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"session_pause_consumed","pause_ts":"{pause_ts}"},"nonempty":[],"absent":[]}
 JSON
 ```

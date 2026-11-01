@@ -5711,6 +5711,192 @@ class TestArcScopingMalformedResilience:
         assert task_ids == ["2", "3", "4"]
 
 
+class TestVerifyLastCLI:
+    """Independent subprocess coverage for verify-last's public contract."""
+
+    @staticmethod
+    def _spec(session_dir, exact=None, nonempty=None, absent=None):
+        return {
+            "session_dir": session_dir,
+            "exact": exact or {},
+            "nonempty": nonempty or [],
+            "absent": absent or [],
+        }
+
+    @staticmethod
+    def _seed(journal_file, *events):
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(
+            "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _run(spec, *args, raw=False):
+        return subprocess.run(
+            [sys.executable, _SJ_SCRIPT, *args],
+            input=spec if raw else json.dumps(spec),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def test_success_is_silent_and_read_only(self, session_dir, journal_file):
+        event = {
+            "type": "phase_transition",
+            "phase": "CODE",
+            "status": "completed",
+            "nested": {"bool": True, "int": 1, "items": [1, "x"]},
+            "present": "value",
+        }
+        self._seed(journal_file, event)
+        before = journal_file.read_bytes()
+        spec = self._spec(
+            session_dir,
+            exact={"type": "phase_transition", "nested": event["nested"]},
+            nonempty=["present"],
+            absent=["missing"],
+        )
+
+        result = self._run(spec, "verify-last", "--stdin")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+        assert result.stderr == ""
+        assert journal_file.read_bytes() == before
+
+    def test_physical_last_mismatch_reports_actual_event(self, session_dir, journal_file):
+        expected = {"type": "phase_transition", "phase": "CODE", "status": "completed"}
+        wrong = {"type": "session_refreshed", "marker": "wrong-final"}
+        self._seed(journal_file, expected, wrong)
+        spec = self._spec(session_dir, exact={"type": "phase_transition"})
+
+        result = self._run(spec, "verify-last", "--stdin")
+
+        assert result.returncode == 1
+        assert "Journal read-back failed" in result.stderr
+        assert "session_refreshed" in result.stderr
+        assert "wrong-final" in result.stderr
+
+    @pytest.mark.parametrize(
+        "exact,nonempty,absent,bad_key",
+        [
+            ({"type": "other"}, [], [], "type"),
+            ({}, ["missing"], [], "missing"),
+            ({}, [], ["unwanted"], "unwanted"),
+            ({"missing": 1}, [], [], "missing"),
+        ],
+        ids=["exact-mismatch", "nonempty-missing", "absent-present", "exact-key-missing"],
+    )
+    def test_comparator_failures_name_bad_key(
+        self, session_dir, journal_file, exact, nonempty, absent, bad_key
+    ):
+        self._seed(journal_file, {"type": "x", "unwanted": 1})
+        spec = self._spec(session_dir, exact=exact, nonempty=nonempty, absent=absent)
+
+        result = self._run(spec, "verify-last", "--stdin")
+
+        assert result.returncode == 1
+        assert bad_key in result.stderr
+
+    @pytest.mark.parametrize(
+        "got,want",
+        [
+            (1, True),
+            (1, 1.0),
+            ({"items": [1]}, {"items": [1.0]}),
+            ({"nested": 1}, {"nested": 1, "extra": 2}),
+        ],
+        ids=["bool-not-int", "int-not-float", "nested-type", "nested-keys"],
+    )
+    def test_exact_uses_deep_json_type_identity(
+        self, session_dir, journal_file, got, want
+    ):
+        self._seed(journal_file, {"key": got})
+        spec = self._spec(session_dir, exact={"key": want})
+
+        result = self._run(spec, "verify-last", "--stdin")
+
+        assert result.returncode == 1
+        assert "key" in result.stderr
+
+    @pytest.mark.parametrize(
+        "shape,expected",
+        [
+            ("non_object", "spec must be a JSON object"),
+            ("keys", "exactly session_dir, exact, nonempty, absent"),
+            ("exact", "exact must be an object"),
+            ("nonempty", "nonempty must be an array of strings"),
+            ("absent", "absent must be an array of strings"),
+            ("session_dir", "session_dir must be a string"),
+        ],
+    )
+    def test_malformed_specs_exit_1(self, session_dir, shape, expected):
+        spec = self._spec(session_dir)
+        if shape == "non_object":
+            spec = []
+        elif shape == "keys":
+            spec.pop("exact")
+        elif shape == "exact":
+            spec["exact"] = []
+        elif shape == "nonempty":
+            spec["nonempty"] = ["valid", 1]
+        elif shape == "absent":
+            spec["absent"] = "not-an-array"
+        else:
+            spec["session_dir"] = 1
+
+        result = self._run(spec, "verify-last", "--stdin")
+
+        assert result.returncode == 1
+        assert expected in result.stderr
+
+    def test_invalid_spec_json_exits_1(self, session_dir):
+        result = self._run("not-json", "verify-last", "--stdin", raw=True)
+        assert result.returncode == 1
+        assert "invalid verify-last --stdin JSON" in result.stderr
+
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            (None, "failed to read journal"),
+            ("", "journal is empty"),
+            ("not-json\n", "invalid final journal JSON"),
+            ("[]\n", "must be a JSON object"),
+            ("null\n", "must be a JSON object"),
+        ],
+        ids=["missing", "empty", "malformed", "array-event", "null-event"],
+    )
+    def test_bad_journals_exit_1(self, session_dir, journal_file, content, expected):
+        if content is not None:
+            journal_file.parent.mkdir(parents=True, exist_ok=True)
+            journal_file.write_text(content, encoding="utf-8")
+        spec = self._spec(session_dir)
+
+        result = self._run(spec, "verify-last", "--stdin")
+
+        assert result.returncode == 1
+        assert expected in result.stderr
+
+    @pytest.mark.parametrize("bad_dir", ["", "relative/session"])
+    def test_session_dir_validation_exits_1(self, bad_dir):
+        spec = self._spec(bad_dir)
+        result = self._run(spec, "verify-last", "--stdin")
+        assert result.returncode == 1
+        assert result.stderr
+
+    def test_missing_stdin_is_argparse_exit_2_with_example(self):
+        result = self._run({}, "verify-last")
+        assert result.returncode == 2
+        assert "error:" in result.stderr
+        assert f'python3 "{_SJ_SCRIPT}" verify-last --stdin' in result.stderr
+
+    def test_unknown_argument_is_argparse_exit_2(self):
+        result = self._run({}, "verify-last", "--stdin", "--nope")
+        assert result.returncode == 2
+        assert "error:" in result.stderr
+
+
 class TestJournalTeachExamples:
     # Full example lines, content-pinned. prog is the invoked script path
     # (_SJ_SCRIPT), so each rendered example is the exact pasteable string:
@@ -5727,6 +5913,7 @@ class TestJournalTeachExamples:
             f'python3 "{_SJ_SCRIPT}" read-last'
             " --type phase_transition --session-dir /abs/session"
         ),
+        "verify-last": f'python3 "{_SJ_SCRIPT}" verify-last --stdin',
     }
 
     def test_top_level_help_lists_every_example_line(self):

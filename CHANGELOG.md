@@ -26,13 +26,13 @@ The wake guidance now states that `SendMessage` fires `PreToolUse`, keeps `PostT
 
 ### What landed
 
-- Corrected the `SendMessage` hook claim in the completion-authority protocol and its byte-mirrored consolidated region, plus the matching stale hook comment. Runtime and schema behavior are unchanged.
-- Added immediate quoted-Python read-backs to all 50 journal-write templates across ten command files. Each checks the physical last event's type and stable fields; prune-memory keeps its loud, nonblocking telemetry behavior.
+- Corrected the `SendMessage` hook claim in the completion-authority protocol and its byte-mirrored consolidated region, plus the matching stale hook comment. Existing write/read behavior and event schemas are unchanged.
+- Added immediate centralized `verify-last` read-backs to all 50 journal-write templates across ten command files. Each uses the existing session journal CLI to check the physical last event's type and stable fields; prune-memory keeps its loud, nonblocking telemetry behavior.
 - Added dynamic per-site parsing, exact census reconciliation, mutation controls, and temporary-journal behavioral fixtures, plus positive and retired-claim protocol pins.
 
 ### Why
 
-The old hook claim was false for `PreToolUse`, while a type-filtered journal read can certify an older same-type event. The corrected instructions and per-write physical-last-line checks make both contracts durable without adding a runtime helper or changing the journal interface.
+The old hook claim was false for `PreToolUse`, while a type-filtered journal read can certify an older same-type event. The corrected instructions and centralized per-write physical-last-line checks make both contracts durable through the existing journal CLI, without changing event schemas or existing write/read behavior.
 
 ## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
 

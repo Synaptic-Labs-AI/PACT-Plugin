@@ -37,20 +37,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 {"task_id": "{sub_feature_task_id}", "variety": {"total": N}}
 JSON
-python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{sub_feature_task_id}"},"nonempty":[],"absent":["scope"]}
 JSON
 ```
@@ -303,20 +290,7 @@ For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#tea
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -I -c '
-import json
-import sys
-from pathlib import Path
-
-spec = json.load(sys.stdin)
-path = Path(spec["session_dir"]) / "session-journal.jsonl"
-event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
-bad += [key for key in spec["nonempty"] if not event.get(key)]
-bad += [key for key in spec["absent"] if key in event]
-if bad:
-    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
-' <<'JSON'
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
 {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
 JSON
    ```
