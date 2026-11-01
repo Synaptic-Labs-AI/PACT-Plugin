@@ -1059,7 +1059,7 @@ def _get_claude_md_path() -> Optional[Path]:
             env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(os.fsdecode(result.stdout).strip())
+            common_dir = Path(_decode_git_line(result.stdout))
             if not common_dir.is_absolute():
                 common_dir = Path.cwd() / common_dir
             repo_root = common_dir.resolve().parent
@@ -1071,6 +1071,17 @@ def _get_claude_md_path() -> Optional[Path]:
 
     # Last resort: current working directory
     return _find_existing_claude_md(Path.cwd())
+
+
+def _decode_git_line(raw: bytes) -> str:
+    """git's stdout as one path, dropping ONLY its terminating newline.
+
+    A path may end in whitespace and may contain a carriage return; a
+    strip() would truncate it, and the checkout-root verification would then
+    reject a legitimate checkout whose name ends in a space.
+    """
+    text = os.fsdecode(raw)
+    return text[:-1] if text.endswith("\n") else text
 
 
 def _git_path_under(base: Path, *args: str) -> Optional[Path]:
@@ -1094,7 +1105,7 @@ def _git_path_under(base: Path, *args: str) -> Optional[Path]:
         return None
     if result.returncode != 0 or not result.stdout.strip():
         return None
-    value = Path(os.fsdecode(result.stdout).strip())
+    value = Path(_decode_git_line(result.stdout))
     if not value.is_absolute():
         value = base / value
     try:
@@ -1190,7 +1201,26 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             project_memory_root_or_none,
         )
 
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        # THE SESSION ANCHOR DECIDES FIRST (#1653, Copilot HIGH). A forged
+        # `.git` is classified UNKNOWN by project_memory_root_or_none, but the
+        # fallback chain below could still reach the repository the gitfile
+        # NAMES -- its main checkout passes the checkout-root check, and the
+        # scope guard admits it because the forged directory's common dir IS
+        # that repository's -- so both sync writers could WRITE another
+        # project's document. Stop before probing: an unknown anchor means
+        # "cannot tell where the file is", not "look elsewhere". The anchor is
+        # the declaration, else the session record, else the cwd -- the same
+        # precedence the branches below use.
+        declared_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        if declared_project_dir:
+            anchor = Path(declared_project_dir)
+        else:
+            record_dir = get_project_dir_from_session_record()
+            anchor = Path(record_dir) if record_dir else Path.cwd()
+        if project_memory_root_or_none(anchor) is None:
+            return None, None
+
+        project_dir = declared_project_dir
         if project_dir:
             base = project_memory_root_or_none(Path(project_dir))
             if base is not None:
@@ -1224,7 +1254,7 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 # os.fsdecode: --show-toplevel prints the WORKTREE path, which
                 # is exactly where an undecodable byte lives (#1653 F1 twin).
                 worktree_root = project_memory_root_or_none(
-                    Path(os.fsdecode(result.stdout).strip())
+                    Path(_decode_git_line(result.stdout))
                 )
                 if worktree_root is not None:
                     found = _find_existing_claude_md(worktree_root)
@@ -1259,7 +1289,7 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(os.fsdecode(result.stdout).strip())
+                common_dir = Path(_decode_git_line(result.stdout))
                 if not common_dir.is_absolute():
                     common_dir = Path.cwd() / common_dir
                 common_dir = common_dir.resolve()
@@ -1313,17 +1343,22 @@ def _declared_display_root_unknown() -> bool:
     therefore not always "no file", and the sync writers ask this to report
     WHICH cause it was.
 
-    THE ANCHOR IS THE DECLARED DIR, OR THE CWD WHEN THE VARIABLE IS ABSENT --
-    the same last anchor the resolver falls back to. Without the cwd case the
-    status was unreachable with the variable unset: the resolver returned
+    THE ANCHOR IS THE DECLARED DIR, ELSE THE SESSION RECORD, ELSE THE CWD --
+    the same precedence the resolver uses. Without the cwd case the status
+    was unreachable with the variable unset (the resolver returned
     (None, None) because the cwd's root was unknown, and the sync reported
-    UNRESOLVED ("no file found") instead of ROOT_UNKNOWN ("cannot tell where
-    the file is").
+    UNRESOLVED, "no file found", instead of ROOT_UNKNOWN, "cannot tell where
+    the file is"); without the record case a forged record would resolve to
+    nothing yet report the wrong cause.
     """
     from shared.project_scope import project_memory_root_or_none
 
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
-    anchor = Path(declared) if declared else Path.cwd()
+    if declared:
+        anchor = Path(declared)
+    else:
+        record = get_project_dir_from_session_record()
+        anchor = Path(record) if record else Path.cwd()
     return project_memory_root_or_none(anchor) is None
 
 

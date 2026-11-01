@@ -370,3 +370,101 @@ def test_an_env_absent_unknown_root_reports_root_unknown(tmp_path, monkeypatch):
     )
 
     assert result.reason == wm.SyncResult.ROOT_UNKNOWN, result.reason
+
+
+# --- Copilot findings at ca9660a3 -------------------------------------------
+
+def _forged_fixture(tmp_path):
+    """A victim repository with a document, and a forged `.git` naming its
+    worktree admin dir."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    _git("init", "-q", str(victim))
+    _seed(victim)
+    victim_wt = tmp_path / "victim-wt"
+    assert _git("worktree", "add", "-q", str(victim_wt), "-b", "vwt",
+                cwd=victim).returncode == 0
+    victim_md = victim / ".claude" / "CLAUDE.md"
+    victim_md.parent.mkdir()
+    victim_md.write_text(_display_doc(), encoding="utf-8")
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / ".git").write_text(
+        f"gitdir: {victim}/.git/worktrees/victim-wt\n", encoding="utf-8"
+    )
+    return forged, victim_md
+
+
+@pytest.mark.parametrize("route", ["declared", "cwd-only", "session-record"])
+def test_both_sync_writers_stop_on_an_unknown_anchor(
+    tmp_path, monkeypatch, route
+):
+    """Copilot HIGH: the forged anchor was UNKNOWN, yet the fallback chain
+    reached the repository the gitfile NAMES and both sync writers WROTE its
+    document. Resolution now stops when the SESSION ANCHOR is unknown, on
+    all three anchor routes."""
+    import scripts.working_memory as wm
+
+    forged, victim_md = _forged_fixture(tmp_path)
+    before = victim_md.read_bytes()
+
+    if route == "declared":
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+        monkeypatch.chdir(forged)
+        monkeypatch.setattr(wm, "get_project_dir_from_session_record", lambda: None)
+    elif route == "cwd-only":
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(forged)
+        monkeypatch.setattr(wm, "get_project_dir_from_session_record", lambda: None)
+    else:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setattr(
+            wm, "get_project_dir_from_session_record", lambda: str(forged)
+        )
+    monkeypatch.setattr(wm, "env_record_project_dir_disagreement", lambda: None)
+
+    wrote = wm.sync_to_claude_md(
+        {"context": "FORGED-TOKEN-1", "goal": "g"}, memory_id="0" * 32
+    )
+    retrieved = wm.sync_retrieved_to_claude_md(
+        [{"id": "0" * 32, "context": "FORGED-TOKEN-2"}], query="q"
+    )
+
+    assert wrote.reason == wm.SyncResult.ROOT_UNKNOWN, wrote.reason
+    assert retrieved.reason == wm.SyncResult.ROOT_UNKNOWN, retrieved.reason
+    assert victim_md.read_bytes() == before, (
+        f"the {route} anchor wrote another repository's document"
+    )
+
+
+def test_a_whitespace_named_checkout_still_syncs(tmp_path, monkeypatch):
+    """Copilot OVER-BLOCK: the checkout-root verification stripped the path,
+    so a checkout named `repo ` was rejected and a declared session in an
+    empty subdirectory lost the ambient sync it previously had. Only git's
+    terminating newline may be dropped."""
+    import scripts.working_memory as wm
+
+    space = tmp_path / "repo "
+    space.mkdir()
+    _git("init", "-q", str(space))
+    _seed(space)
+    sub = space / "sub"
+    sub.mkdir()
+    space_md = space / ".claude" / "CLAUDE.md"
+    space_md.parent.mkdir()
+    space_md.write_text(_display_doc(), encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+    monkeypatch.chdir(sub)
+    monkeypatch.setattr(wm, "get_project_dir_from_session_record", lambda: None)
+    monkeypatch.setattr(wm, "env_record_project_dir_disagreement", lambda: None)
+
+    result = wm.sync_to_claude_md(
+        {"context": "SPACE-TOKEN", "goal": "g"}, memory_id="0" * 32
+    )
+
+    assert result.reason == wm.SyncResult.WROTE, result.reason
+    assert "SPACE-TOKEN" in space_md.read_text(encoding="utf-8")

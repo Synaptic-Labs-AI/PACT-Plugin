@@ -383,3 +383,40 @@ def test_f1_e_git_output_preserves_an_undecodable_path(repo):
     out = project_scope._git_output(worktree, "rev-parse", "--show-toplevel")
     assert out is not None
     assert os.fsencode(out) == os.fsencode(str(worktree))
+
+
+def test_the_admin_gitdir_read_preserves_a_carriage_return_path(repo, monkeypatch):
+    """Copilot MEDIUM: `read_text` performs UNIVERSAL-NEWLINE translation, so
+    a worktree named `wt\\rname` was read back as `wt\\nname`: the real
+    worktree was rejected and a forged directory at the newline spelling
+    passed the membership check and redirected writers. The admin file is now
+    read as BYTES and filesystem-decoded, dropping only the record terminator.
+    """
+    worktrees = repo / ".worktrees"
+    worktrees.mkdir(exist_ok=True)
+    real = worktrees / "wt\rname"
+    _git("worktree", "add", "-q", str(real), "-b", "crwt", cwd=repo)
+    admin = next((repo / ".git" / "worktrees").iterdir())
+
+    forged = worktrees / "wt\nname"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n")
+
+    # Force the `-z` listing to fail so the admin-gitdir fallback runs.
+    real_run_git = project_scope.run_git
+
+    def failing_list(args, **kwargs):
+        if "worktree" in args and "list" in args:
+            return subprocess.CompletedProcess(
+                args, 1, stdout=b"", stderr=b"forced failure"
+            )
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", failing_list)
+
+    assert project_memory_root(real) == repo.resolve(), (
+        "the real carriage-return worktree was rejected by the fallback"
+    )
+    assert project_memory_root_or_none(forged) is None, (
+        "a forged directory at the newline spelling was admitted"
+    )

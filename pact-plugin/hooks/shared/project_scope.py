@@ -385,11 +385,16 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
         return paths
     for admin in admins:
         try:
-            content = (admin / "gitdir").read_text(
-                encoding="utf-8", errors="surrogateescape"
-            )
+            # BYTES, not read_text: text mode performs UNIVERSAL-NEWLINE
+            # translation, so a worktree named `wt\rname` would read as
+            # `wt\nname`, the real worktree would be rejected, and a forged
+            # directory at the newline spelling could pass the membership
+            # check. os.fsdecode preserves every byte, and exactly one
+            # trailing newline (git's record terminator) is dropped below.
+            raw = (admin / "gitdir").read_bytes()
         except (OSError, ValueError):
             continue
+        content = os.fsdecode(raw)
         if content.endswith("\n"):
             content = content[:-1]
         # The admin `gitdir` file holds the worktree's `.git` path with NO

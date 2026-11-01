@@ -53,6 +53,12 @@ from .claude_md_markers import State, parse
 from .paths import get_claude_config_dir
 
 _BASE_CACHE = "claude-md-base.json"
+# Bump when the cached value's MEANING changes. v1 cached whatever the old
+# resolver returned (including a worktree directory or None); v2 caches only
+# the PROJECT-MEMORY root. A v1 entry must be REBUILT, not accepted: a session
+# resumed after an upgrade would otherwise keep watching the worktree copy (or
+# nothing) while the writers update MAIN.
+_BASE_CACHE_VERSION = 2
 _LAST_SEEN_DIR = "claude-md-last-seen"
 _BASELINE = "claude-md-baseline.json"
 _RECORD_KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -374,12 +380,20 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
 
     cache_path = session_dir / _BASE_CACHE
     cached = _read_json(cache_path)
-    if cached is not None and "base" in cached:
+    if (
+        isinstance(cached, dict)
+        and cached.get("version") == _BASE_CACHE_VERSION
+        and "base" in cached
+    ):
         base = cached["base"]
         if not isinstance(base, str):
             return None, None
         found = _find_existing_claude_md(Path(base))
         return (found, Path(base)) if found is not None else (None, None)
+    # A LEGACY/UNVERSIONED CACHE IS IGNORED, NOT ACCEPTED. It may hold a
+    # worktree directory or null; accepting it would leave a session resumed
+    # after an upgrade watching the worktree copy (or nothing) while the
+    # writers update MAIN. It is rebuilt from the memory root below.
 
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     memory_root = project_memory_root_or_none(
@@ -390,7 +404,9 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
         # otherwise pin the wrong file for the whole session.
         return None, None
     found = _find_existing_claude_md(memory_root)
-    _write_json(cache_path, {"base": str(memory_root)})
+    _write_json(
+        cache_path, {"version": _BASE_CACHE_VERSION, "base": str(memory_root)}
+    )
     return (found, memory_root) if found is not None else (None, None)
 
 

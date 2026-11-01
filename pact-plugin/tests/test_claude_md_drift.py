@@ -27,6 +27,7 @@ import pytest
 from clock_shift.clock_shift_env import carry_clock_shift
 from fixtures.role_frames import captured_posttoolusefailure_bash_headless
 
+from shared.claude_md_drift import _BASE_CACHE_VERSION
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
     MANAGED_START_MARKER,
@@ -869,7 +870,7 @@ _BASH_TRUE = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id
 def test_no_git_process_starts_once_the_base_is_cached(world, tmp_path):
     env, session_dir = _worktree_like(world)
     _hook(world, TRACK, _BASH_TRUE, env=env)
-    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"base": str(world.repo)}
+    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"version": _BASE_CACHE_VERSION, "base": str(world.repo)}
     shim_env, log = _shim_git(env, tmp_path)
     _sh(world, _append_pin_script(12))
     assert "count cap" in (_context(_hook(world, TRACK, _BASH_TRUE, env=shim_env)) or "")
@@ -884,7 +885,7 @@ def test_a_cached_no_file_starts_no_git_process(world, tmp_path):
     _hook(world, TRACK, _BASH_TRUE, env=env)
     # The KNOWN root is cached even when it holds no file (#1653), so a file
     # MAIN gains later is picked up by the cached-base two-file check.
-    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"base": str(world.repo)}
+    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"version": _BASE_CACHE_VERSION, "base": str(world.repo)}
     shim_env, log = _shim_git(env, tmp_path)
     _hook(world, TRACK, _BASH_TRUE, env=shim_env)
     assert not log.exists()
@@ -951,3 +952,38 @@ def test_the_hosts_load_nothing_heavy_at_module_level(module, tmp_path):
                             env=env, timeout=600)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]"
+
+
+class TestTheCacheUpgrade:
+    """A session resumed after an upgrade keeps a LEGACY cache written by the
+    old resolver (a worktree directory, or null). Accepting it leaves the
+    reader watching the worktree copy, or nothing, while the writers update
+    MAIN. The cache is versioned and legacy entries are REBUILT."""
+
+    @pytest.mark.parametrize(
+        "legacy", [{"base": "WORKTREE"}, {"base": None}], ids=["worktree", "null"]
+    )
+    def test_a_legacy_cache_is_rebuilt_from_the_memory_root(
+        self, world, monkeypatch, legacy
+    ):
+        from shared import claude_md_drift as drift
+
+        worktree = world.repo.parent / "wt"
+        worktree.mkdir(exist_ok=True)
+        entry = json.loads(json.dumps(legacy).replace("WORKTREE", str(worktree)))
+        cache = world.session_dir / drift._BASE_CACHE
+        cache.write_text(json.dumps(entry), encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(world.cfg))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world.repo))
+        monkeypatch.chdir(world.repo)
+
+        path, base = drift._resolve(world.session_dir)
+
+        assert (path, base) == (world.claude_md, world.repo), (
+            f"a legacy cache ({legacy!r}) was accepted instead of rebuilt: "
+            f"{(path, base)}"
+        )
+        rewritten = json.loads(cache.read_text(encoding="utf-8"))
+        assert rewritten.get("version") == drift._BASE_CACHE_VERSION
+        assert rewritten.get("base") == str(world.repo)
