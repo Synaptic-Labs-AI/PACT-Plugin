@@ -2789,7 +2789,7 @@ def _matching_journal_event(spec):
     list(JOURNAL_READBACK_MATRIX),
     ids=[f"{filename}#{ordinal}" for filename, ordinal in JOURNAL_READBACK_MATRIX],
 )
-def test_raw_readback_executes_and_verifies_under_optimize(
+def test_raw_readback_executes_and_verifies_under_isolation(
     site_key, tmp_path, journal_site_map
 ):
     """Literal matching/missing/wrong-event arms prove liveness for every site."""
