@@ -31,14 +31,10 @@ MUST_SCAN = PLUGIN / "hooks" / "shared" / "claude_md_markers.py"
 SOURCE_DIRS = {"hooks", "scripts", "skills", "telegram", "tests"}
 INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp", "Zs"}
 ALLOWED = {"\t", "\n", "\r", " "}
-# Format characters added after Unicode 13.0, the database Python 3.9 reads,
-# named so every interpreter CI runs refuses the same characters.
-NEWER_FORMAT = {0x0890, 0x0891, *range(0x13439, 0x13440)}
 
 
 def is_invisible(char):
-    return char not in ALLOWED and (
-        unicodedata.category(char) in INVISIBLE_CATEGORIES or ord(char) in NEWER_FORMAT)
+    return char not in ALLOWED and unicodedata.category(char) in INVISIBLE_CATEGORIES
 
 
 def python_files(root):
@@ -75,6 +71,7 @@ PLANTED = {
     "byte order mark": "\ufeff",
     "right-to-left override": "\u202e",
     "zero-width space": "\u200b",
+    # Added in Unicode 14; the 3.12 floor's Unicode 15 database names it Cf.
     "format character after Unicode 13": "\u0890",
     "line separator": "\u2028",
     "paragraph separator": "\u2029",
