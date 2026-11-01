@@ -173,11 +173,13 @@ Operator: devops-engineer (reviewer-reuse fixer). Resolved ruff: `ruff 0.16.5`.
 
 ## 11. Skew note
 
-The gate certifies a LOCAL green under the stamped local ruff. CI installs
-ruff unpinned, and CI's lint step now echoes its resolved version
-(`ruff --version`, commit 417d76b4). A local green that disagrees with a CI
-red needs BOTH stamps before it can be attributed; version verdict-parity
-beyond that is unverifiable locally and accepted as residual by the plan
+The gate certifies a LOCAL green under the stamped local ruff. CI pins ruff
+via constraints-ci.txt while the LOCAL environment floats unconstrained, and
+CI's lint step echoes its resolved version (`ruff --version`, commit
+417d76b4). A local green that disagrees with a CI red needs BOTH stamps
+before it can be attributed — the expected divergence shape is pinned CI
+against floating local — and version verdict-parity beyond that is
+unverifiable locally and accepted as residual by the plan
 (docs/plans/local-lint-gate-plan.md, Risk table).
 
 A second narrowing the byte-parity comparison does not cover: the mirror and
