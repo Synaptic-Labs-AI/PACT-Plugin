@@ -3142,7 +3142,7 @@ def test_isolated_readback_ignores_hostile_cwd_json_module(tmp_path, journal_sit
     assert "hostile cwd json.py imported" in control.stderr
 
 
-def test_hostile_placeholders_remain_json_data(tmp_path, journal_site_map):
+def test_valid_encoded_hostile_path_is_inert(tmp_path, journal_site_map):
     key = ("comPACT.md", 2)
     marker = tmp_path / "PWNED"
     hostile = f'{tmp_path}/hostile"); Path("PWNED").touch(); #'
@@ -3165,10 +3165,15 @@ def test_malformed_hostile_json_fails_before_verification(tmp_path, journal_site
     marker = tmp_path / "PWNED"
     hostile = f'{tmp_path}/hostile"); Path("PWNED").touch(); #'
     raw = _parse_readback_block(journal_site_map[key])["raw"]
-    malformed = raw.replace("{session_dir}", hostile).replace("{taskId}", hostile)
+    malformed = (
+        raw.replace("{plugin_root}", str(COMMANDS_DIR.parent))
+        .replace("{session_dir}", hostile)
+        .replace("{taskId}", hostile)
+    )
     result = _run_readback(malformed, tmp_path)
-    assert result.returncode != 0
-    assert "JSON" in result.stderr or "json" in result.stderr
+    assert result.returncode == 1
+    assert "invalid verify-last --stdin JSON" in result.stderr
+    assert "Expecting ',' delimiter" in result.stderr
     assert not marker.exists()
 
 
