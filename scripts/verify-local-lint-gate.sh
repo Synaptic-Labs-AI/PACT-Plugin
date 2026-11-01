@@ -16,9 +16,10 @@
 #      conftest escape every local gate while CI caught it. Call this script
 #      from any directory; the tree it lints is its own, never the caller's.
 #   2. Stamps the resolved `ruff --version` and the linted root into the
-#      output. CI installs ruff unpinned, so the resolved version is part of
-#      what a run certifies: a local green that disagrees with a CI red needs
-#      both versions before it can be attributed, and this stamp is the local
+#      output. CI pins ruff via constraints-ci.txt, but the LOCAL environment
+#      is unconstrained, so the resolved version is part of what a run
+#      certifies: a local green that disagrees with a CI red needs both
+#      versions before it can be attributed, and this stamp is the local
 #      half of that comparison.
 #   3. REFUSES, loudly and before linting anything, when ruff is not on PATH.
 #      A missing linter must not read as a pass, and a bare command-not-found

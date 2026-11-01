@@ -30,8 +30,13 @@ fi
 python -m pip install --upgrade pip
 
 # CI install line (kept in lockstep with .github/workflows/tests.yml):
-#   pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
-python -m pip install \
+#   python -m pip install --upgrade -c constraints-ci.txt pip pytest
+#   hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
+# constraints-ci.txt pins the direct deps to the TEST-verified versions, so a
+# local green and a CI green resolve the same set. pip stays unconstrained
+# (pinned self-upgrades can deadlock the bootstrap); it is upgraded separately
+# above, mirroring the CI line's `pip` operand.
+python -m pip install --upgrade -c constraints-ci.txt \
   pytest \
   hypothesis \
   httpx \

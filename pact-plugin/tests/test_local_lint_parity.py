@@ -195,9 +195,10 @@ def test_script_refuses_when_ruff_absent():
 def test_workflow_lint_step_echoes_resolved_ruff_version():
     """The workflow's lint step carries exactly one `ruff --version` line.
 
-    The echo is the CI half of the skew comparison: ruff installs UNPINNED,
-    so the echo is the only record of what a given CI run linted with, and
-    the gate script stamps the local half. Count-anchored like the legs: a
+    The echo is the CI half of the skew comparison: CI pins ruff via
+    constraints-ci.txt while the LOCAL environment floats, so the echo
+    records what the pinned run actually resolved, and the gate script
+    stamps the local half. Count-anchored like the legs: a
     reformat that folds or drops the line must redden here rather than
     silently disarming the comparison.
     """

@@ -114,9 +114,12 @@
 #   Transitive dependencies float within those bounds; pip itself is
 #   unconstrained (pinned self-upgrades can deadlock the bootstrap). Refresh
 #   deliberately (quarterly, or on a red the pins explain): rebuild the
-#   environment from the package list above, run the suite green, commit the
-#   version diff. A pin that blocks a needed fix is a reason to refresh, not
-#   to delete the file.
+#   environment from the package list above WITHOUT `-c` — a constrained
+#   rebuild reproduces the current pins exactly, so it can only re-confirm
+#   them and reads as nothing-to-do — freeze the result into
+#   constraints-ci.txt, run the suite green under the new pins, and commit
+#   the version diff. A pin that blocks a needed fix is a reason to refresh,
+#   not to delete the file.
 #
 #   VERIFICATION: every entry was proven by RUNNING the suite in a clean venv,
 #   never by grepping imports. This heading vouches for every entry beneath it,
@@ -349,10 +352,11 @@ jobs:
       # Where an editing session has an LSP server, its diagnostics complement
       # this check at edit time; this step is the mechanical guarantee.
       # `ruff --version` echoes the resolved version into the log: ruff is
-      # installed UNPINNED (the --select bound keeps releases from adding rule
-      # classes), so this line is the only record of what a given run linted
-      # with — the CI half of the version comparison a local-green/CI-red
-      # divergence needs. The local mirror scripts/verify-local-lint-gate.sh
+      # pinned by constraints-ci.txt, so the version a run linted with is a
+      # reviewed change — the echo is still the CI half of the comparison a
+      # local-green/CI-red divergence needs, because the LOCAL side floats
+      # (nothing constrains a contributor's own environment). The local
+      # mirror scripts/verify-local-lint-gate.sh
       # stamps its own version the same way, and
       # pact-plugin/tests/test_local_lint_parity.py byte-compares this step's
       # legs against that script.

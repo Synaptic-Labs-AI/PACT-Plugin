@@ -6,8 +6,10 @@
 # not merge-time weather. Transitive dependencies float within these bounds.
 # pip itself is NOT constrained: `pip freeze` omits it, and a pinned
 # self-upgrade can deadlock the bootstrap. Refresh deliberately (quarterly, or
-# on a red a pin explains): rebuild from the workflow's package list, run the
-# suite green, commit the version diff.
+# on a red a pin explains): rebuild from the workflow's package list WITHOUT
+# `-c` — a constrained rebuild reproduces these pins exactly, so it can only
+# re-confirm them and reads as nothing-to-do — freeze the result into this
+# file, run the suite green under the new pins, and commit the version diff.
 pytest==9.2.0
 hypothesis==6.170.14
 httpx==0.28.1
