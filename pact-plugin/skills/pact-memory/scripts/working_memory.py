@@ -2060,7 +2060,8 @@ def _target_is_inside_the_declared_project_dir(resolved_target: Path) -> bool:
         return False
     try:
         Path(resolved_target).resolve().relative_to(Path(declared).resolve())
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
+        # RuntimeError: a symlink loop, on Pythons before 3.13.
         return False
     return True
 

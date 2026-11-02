@@ -637,7 +637,8 @@ def _validate_under_pact_sessions(path: str) -> str | None:
         candidate = Path(path).resolve(strict=False)
         if candidate == sessions_root or sessions_root in candidate.parents:
             return path
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, RuntimeError):
+        # RuntimeError: a symlink loop, on Pythons before 3.13.
         pass
     return None
 

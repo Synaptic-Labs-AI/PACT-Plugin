@@ -3,8 +3,13 @@ Location: pact-plugin/tests/test_scope_symlink_loop.py
 Summary: Pins that project_scope's scope predicates REFUSE (return False)
          when `Path.resolve()` raises RuntimeError, which is what Pythons
          before 3.13 raise on a symlink loop; they must never propagate it.
+         The session-dir check and the declared-project containment check
+         must refuse the same way.
 Used by: pytest. Exercises hooks/shared/project_scope.py
-         `stays_in_declared_project` and `same_repository`.
+         `stays_in_declared_project` and `same_repository`,
+         hooks/shared/session_resume.py `_validate_under_pact_sessions`, and
+         skills/pact-memory/scripts/working_memory.py
+         `_target_is_inside_the_declared_project_dir`.
 
 The patched arms raise RuntimeError on every interpreter, so they are red on
 any Python when the `RuntimeError` catches are reverted. The real-loop arm
@@ -82,3 +87,21 @@ def test_a_real_symlink_loop_never_raises(tmp_path, loop):
     assert project_scope.stays_in_declared_project(
         tmp_path, loop, loop / "CLAUDE.md"
     ) is False
+
+
+def test_a_looping_session_dir_is_not_under_pact_sessions(loop, monkeypatch):
+    from shared.session_resume import _validate_under_pact_sessions
+
+    assert _validate_under_pact_sessions(str(loop / "session")) is None
+    _raise_on(monkeypatch, loop / "session")
+    assert _validate_under_pact_sessions(str(loop / "session")) is None
+
+
+def test_a_looping_declared_project_contains_nothing(loop, tmp_path, monkeypatch):
+    from scripts.working_memory import _target_is_inside_the_declared_project_dir
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(loop))
+    target = tmp_path / "CLAUDE.md"
+    assert _target_is_inside_the_declared_project_dir(target) is False
+    _raise_on(monkeypatch, loop)
+    assert _target_is_inside_the_declared_project_dir(target) is False
