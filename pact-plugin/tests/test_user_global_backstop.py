@@ -111,6 +111,24 @@ def test_a_drift_cache_naming_home_watches_nothing(home, tmp_path, monkeypatch):
     assert claude_md_drift._resolve(session_dir) == (None, None)
 
 
+def test_a_drift_cache_naming_home_skips_the_legacy_home_file_too(home, tmp_path, monkeypatch):
+    """With BOTH ~/.claude/CLAUDE.md and the legacy $HOME/CLAUDE.md present,
+    the re-probe returns nothing: $HOME is refused as a base, not just its
+    global candidate, so the legacy file beside it is not watched either."""
+    _config(monkeypatch, home / ".claude")
+    (home / "CLAUDE.md").write_text("# legacy\n", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / claude_md_drift._BASE_CACHE).write_text(
+        json.dumps({"version": claude_md_drift._BASE_CACHE_VERSION,
+                    "base": str(home), "enclosing": None}),
+        encoding="utf-8",
+    )
+    assert (home / ".claude" / "CLAUDE.md").exists() and (home / "CLAUDE.md").exists()
+
+    assert claude_md_drift._resolve(session_dir) == (None, None)
+
+
 def test_a_drift_cache_naming_a_project_still_watches_it(tmp_path, monkeypatch):
     """Control: the same cache naming a project re-probes its document."""
     _config(monkeypatch, tmp_path / "cfg")
