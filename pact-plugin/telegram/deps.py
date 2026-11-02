@@ -61,6 +61,10 @@ def install_dependencies(quiet: bool = False) -> tuple[bool, str]:
         Tuple of (success: bool, message: str). The message contains
         pip output on failure or a success confirmation.
     """
+    # Outside constraints-ci.txt by design: a consumer-side runtime install
+    # (run by the telegram-setup command on the user's machine). CI never
+    # executes it, and its tests mock subprocess.run, so the CI pins neither
+    # apply here nor certify what it installs.
     pip_args = [
         sys.executable, "-m", "pip", "install",
         "--user",

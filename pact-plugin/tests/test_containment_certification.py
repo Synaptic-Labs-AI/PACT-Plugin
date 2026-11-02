@@ -72,8 +72,6 @@ from __future__ import annotations
 
 import errno
 import os
-import subprocess
-import textwrap
 import unicodedata
 from pathlib import Path
 
@@ -279,26 +277,6 @@ def _volume_is_case_insensitive(base: Path) -> bool:
     probe = base / "CaseProbe"
     probe.mkdir()
     return (base / "caseprobe").exists()
-
-
-def _find_python39():
-    """Best-effort discovery of a real 3.9 interpreter, mirroring the
-    established pattern in test_bootstrap_gate.py. Returns None when absent --
-    callers skip rather than fail."""
-    import shutil
-
-    for candidate in (shutil.which("python3.9"), "/usr/bin/python3"):
-        if not candidate or not Path(candidate).exists():
-            continue
-        try:
-            probe = subprocess.run(
-                [candidate, "--version"], capture_output=True, text=True, timeout=10
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if (probe.stdout + probe.stderr).strip().startswith("Python 3.9"):
-            return candidate
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1470,91 +1448,3 @@ class TestRefusalMessageContract:
         )
         assert "ancestry traversal" in source  # the fragment IS findable
 
-
-# ===========================================================================
-# Loop handling at the version floor
-# ===========================================================================
-
-_FLOOR_PROBE = '''
-import os, sys, tempfile
-from pathlib import Path
-sys.path.insert(0, {hooks!r})
-from shared.claude_md_manager import _atomic_write_text, ContainmentError
-
-root = Path(tempfile.mkdtemp())
-results = []
-
-# target-parent chain loop
-p = root / "t" ; p.mkdir()
-os.symlink(str(p / "b"), str(p / "a")) ; os.symlink(str(p / "a"), str(p / "b"))
-try:
-    _atomic_write_text(p / "a" / "CLAUDE.md", "x\\n", p)
-    results.append("target:NO-RAISE")
-except ContainmentError as e:
-    results.append("target:ContainmentError:" + str(e))
-except BaseException as e:
-    results.append("target:RAW:" + type(e).__name__)
-
-# anchor chain loop
-q = root / "q" / "sub" ; q.mkdir(parents=True)
-os.symlink(str(root / "ab"), str(root / "aa")) ; os.symlink(str(root / "aa"), str(root / "ab"))
-try:
-    _atomic_write_text(q / "CLAUDE.md", "x\\n", root / "aa")
-    results.append("anchor:NO-RAISE")
-except ContainmentError as e:
-    results.append("anchor:ContainmentError:" + str(e))
-except BaseException as e:
-    results.append("anchor:RAW:" + type(e).__name__)
-
-print("|".join(results))
-'''
-
-
-class TestVersionFloorLoopHandling:
-    def test_loops_refuse_identically_on_a_real_39_interpreter(self):
-        """Loop handling on BOTH available interpreters.
-
-        CI runs the interpreters declared by `python-version` in
-        .github/workflows/tests.yml -- read them there rather than from a copy
-        here, because no gate couples this docstring to that list: the workflow's
-        own prose is checked against the matrix, this file is not. This arm
-        discovers a real 3.9 and SKIPS when absent, which is what happens on
-        every cell above the floor.
-
-        ON THE FLOOR CELL IT DOES NOT SKIP, AND THAT IS THE CASE TO WATCH.
-        Discovery returns a 3.9 while the running interpreter is also 3.9, so the
-        two endpoints coincide: the subprocess probe below and the in-process
-        assertions in the symlink-loop tests earlier in this file measure the same
-        interpreter twice. Nothing asserts they differ, so the arm still passes
-        while covering half of what it reads as covering. Measured on 3.9.6.
-
-        WHAT THIS DOES AND DOES NOT ESTABLISH. It measures the two ENDPOINTS,
-        3.9 and the running interpreter. 3.10-3.13 are unmeasured, and the
-        claim that the verdict is version-invariant across the middle rests on
-        CONSTRUCTION -- no `Path.resolve()` call exists in this function, so the
-        RuntimeError class that splits 3.9-3.12 from 3.13+ is unreachable
-        rather than caught. Never state this as "identical across 3.9-3.14".
-
-        SCOPE LIMIT, because the natural summary overclaims: `file_lock` runs
-        BEFORE this guard at every call site and does its own unprotected
-        `resolve()`. This makes the GUARD version-invariant; it does NOT make
-        the write path version-invariant end to end.
-        """
-        interpreter = _find_python39()
-        if interpreter is None:
-            pytest.skip("no real 3.9 interpreter available")
-
-        probe = _FLOOR_PROBE.format(hooks=str(PLUGIN_ROOT / "hooks"))
-        result = subprocess.run(
-            [interpreter, "-c", textwrap.dedent(probe)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        assert result.returncode == 0, result.stderr
-        rows = dict(
-            (part.split(":", 1)[0], part.split(":", 1)[1])
-            for part in result.stdout.strip().split("|")
-        )
-        assert rows["target"] == f"ContainmentError:{MSG_BOUNDARY}"
-        assert rows["anchor"] == f"ContainmentError:{MSG_BOUNDARY}"

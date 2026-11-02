@@ -5486,9 +5486,10 @@ def _statement_commands(head: str, code: str, masked: str) -> list[str]:
 # EVERY start position (multi-offset retry) with an O(N) per-offset forward scan
 # — measured ~4x per input-doubling on pathological no-slash / all-slash input.
 # This is NOT within-match catastrophic backtracking (an anchored re.match is
-# linear, ~2x/double), so an atomic group `(?>...)` would NOT fix it (and atomic
-# groups are unavailable anyway: they need 3.11, above the floor that
-# pyproject.toml declares). DO NOT reuse this token UNGATED; if it is ever
+# linear, ~2x/double), so an atomic group `(?>...)` would NOT fix it — the
+# retry is across offsets, outside any one match. (Atomic groups in `re`
+# need 3.11, which the 3.12 floor satisfies; they are simply the wrong tool
+# for this class.) DO NOT reuse this token UNGATED; if it is ever
 # needed ungated, bound the path segments `(?:[^\s)/]*/){0,K}` (the F1
 # mechanism), which caps the per-offset scan.
 _PROCSUB_SHELL = r"(?:[^\s)/]*/)*(?:bash|sh|zsh)(?![\w/])"

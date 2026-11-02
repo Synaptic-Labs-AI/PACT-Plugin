@@ -16,9 +16,10 @@
 #      conftest escape every local gate while CI caught it. Call this script
 #      from any directory; the tree it lints is its own, never the caller's.
 #   2. Stamps the resolved `ruff --version` and the linted root into the
-#      output. CI installs ruff unpinned, so the resolved version is part of
-#      what a run certifies: a local green that disagrees with a CI red needs
-#      both versions before it can be attributed, and this stamp is the local
+#      output. CI pins ruff via constraints-ci.txt, but the LOCAL environment
+#      is unconstrained, so the resolved version is part of what a run
+#      certifies: a local green that disagrees with a CI red needs both
+#      versions before it can be attributed, and this stamp is the local
 #      half of that comparison.
 #   3. REFUSES, loudly and before linting anything, when ruff is not on PATH.
 #      A missing linter must not read as a pass, and a bare command-not-found
@@ -74,11 +75,11 @@ fi
 
 if ! command -v ruff >/dev/null 2>&1; then
     printf 'GATE REFUSED: ruff is not available, so the lint legs cannot run.\n' >&2
-    printf '  A missing linter must not read as a pass. Install or upgrade ruff:\n' >&2
-    printf '    python3 -m pip install --upgrade ruff\n' >&2
+    printf '  A missing linter must not read as a pass. Install the ruff version CI pins, from the repo root:\n' >&2
+    printf '    python3 -m pip install -c constraints-ci.txt ruff\n' >&2
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
-    printf '    ruff check --select F401,F821 --target-version py39 pact-plugin/\n' >&2
-    printf '    ruff check --select F821 --target-version py39 pact-plugin/\n' >&2
+    printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/\n' >&2
+    printf '    ruff check --select F821 --target-version py312 pact-plugin/\n' >&2
     exit 2
 fi
 
@@ -104,7 +105,7 @@ fi
 # CI's two import-hygiene legs, verbatim and in order. The stripped form of
 # these exact lines is byte-compared against the workflow by
 # pact-plugin/tests/test_local_lint_parity.py.
-ruff check --select F401,F821 --target-version py39 pact-plugin/
+ruff check --select F401,F821 --target-version py312 pact-plugin/
 status=$?
 if [ "$status" -gt 1 ]; then
     printf 'LINT-GATE-LEG-1-ERROR exit %s\n' "$status" >&2
@@ -115,7 +116,7 @@ if [ "$status" -eq 1 ]; then
     exit "$status"
 fi
 
-ruff check --select F821 --target-version py39 pact-plugin/
+ruff check --select F821 --target-version py312 pact-plugin/
 status=$?
 if [ "$status" -gt 1 ]; then
     printf 'LINT-GATE-LEG-2-ERROR exit %s\n' "$status" >&2

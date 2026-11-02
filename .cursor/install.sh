@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 # Idempotent Cloud Agent bootstrap for the PACT plugin test harness.
 #
-# Mirrors the CI dependency set in .github/workflows/tests.yml so that a local
-# green and a CI green are the same green. Installs into a repo-local venv
-# (.venv) to keep the system interpreter clean. Safe to run repeatedly.
+# Mirrors the CI dependency set in .github/workflows/tests.yml. CI runs the
+# floor interpreter with the pins in constraints-ci.txt; this script installs
+# the same file with `-r` and refuses any interpreter below the floor. A local
+# green matches CI only on the floor version itself: a newer interpreter is
+# allowed but CI does not test it. Installs into a repo-local venv (.venv) to
+# keep the system interpreter clean. Safe to run repeatedly.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# The declared floor (requires-python in pyproject.toml), stated once here.
+PYTHON_FLOOR_MINOR=12
+
+# Refuse an interpreter below the floor. Without this, an older interpreter
+# installs the pinned set cleanly and the suite then fails on syntax-floor
+# tests whose messages never name the interpreter.
+require_floor() {
+  if ! "$1" -c "import sys; sys.exit(sys.version_info < (3, $PYTHON_FLOOR_MINOR))" 2>/dev/null; then
+    local found
+    found="$("$1" -c 'import sys; print(sys.version.split()[0])' 2>/dev/null)" || found="unknown (it did not run)"
+    echo "ERROR: $2 is Python $found; the floor is 3.$PYTHON_FLOOR_MINOR." >&2
+    echo "  $3" >&2
+    exit 1
+  fi
+}
 
 # System packages required to build pysqlite3 from source and to create venvs.
 # These normally live in the base snapshot; the guard makes the script
@@ -21,26 +40,27 @@ if ! dpkg -s build-essential >/dev/null 2>&1 \
 fi
 
 if [ ! -x .venv/bin/python ]; then
+  require_floor python3 "python3 ($(command -v python3))" \
+    "Put a Python 3.$PYTHON_FLOOR_MINOR+ python3 first on PATH and re-run."
   python3 -m venv .venv
 fi
+# An existing .venv is reused, so check the interpreter it was built with.
+# Never deleted here: it may hold work the user wants to keep.
+require_floor .venv/bin/python "the existing .venv" \
+  "Remove .venv, put a Python 3.$PYTHON_FLOOR_MINOR+ python3 first on PATH, and re-run."
 
 # shellcheck disable=SC1091
 . .venv/bin/activate
 
-python -m pip install --upgrade pip
+# The same two commands as CI's install step (.github/workflows/tests.yml):
+# constraints-ci.txt is the requirement set, so the package list lives there
+# only. pip is not pinned; its upgrade keeps `-c` so a future pip pin applies.
+python -m pip install --upgrade -c constraints-ci.txt pip
+python -m pip install -r constraints-ci.txt
 
-# CI install line (kept in lockstep with .github/workflows/tests.yml):
-#   pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
-python -m pip install \
-  pytest \
-  hypothesis \
-  httpx \
-  pytest-asyncio \
-  pyyaml \
-  pysqlite3 \
-  sqlite-vec \
-  model2vec \
-  ruff
+# Report how this venv differs from the pinned set. A warning only, never a
+# failure: a local venv may legitimately hold extra tools.
+python scripts/verify_ci_environment.py --report
 
 # Claude Code CLI — enables the live end-to-end plugin smoke test
 # (.cursor/smoke-test.sh). Installed into a user-local npm prefix so no sudo is
@@ -50,6 +70,10 @@ export PATH="$NPM_GLOBAL/bin:$PATH"
 if ! command -v claude >/dev/null 2>&1; then
   if command -v npm >/dev/null 2>&1; then
     mkdir -p "$NPM_GLOBAL"
+    # Unpinned deliberately: a vendor CLI on an opt-in, local-machine smoke
+    # path — CI never installs it. The vendor re-versions frequently, so a
+    # pin would need its own refresh discipline for no CI benefit; the float
+    # is bounded to this machine's PATH.
     npm install -g --prefix "$NPM_GLOBAL" @anthropic-ai/claude-code
   else
     echo "WARNING: npm not found; skipping Claude Code CLI install (live smoke test unavailable)." >&2

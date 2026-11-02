@@ -649,9 +649,9 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
                 # symlink child (attacker-planted `tasks/{real-dir}/x.json`
                 # → `/var/log/syslog`) must NOT be allowed to pin the
                 # parent's effective mtime to an arbitrary target; the
-                # link's own mtime is the correct signal. lstat is the
-                # portable pre-3.10 form (stat(follow_symlinks=False)
-                # requires Python 3.10+).
+                # link's own mtime is the correct signal.
+                # Path.stat(follow_symlinks=False) is equivalent at the
+                # 3.12 floor; lstat is kept as the established form here.
                 mtime = child.lstat().st_mtime
             except OSError:
                 continue

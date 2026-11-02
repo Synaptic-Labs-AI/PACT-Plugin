@@ -39,7 +39,8 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     Residual not covered here: an in-file SyntaxError / parse-time crash
     still exits 1 → fail-open; no in-file code can close that (a file cannot
     wrap its own parse). That class is held closed by the static
-    annotation-compat guard in tests/ (Python 3.9 importability rules).
+    syntax-floor guard in tests/ (parseability at the declared Python
+    floor).
     hookEventName MUST be present.
     """
     print(json.dumps({

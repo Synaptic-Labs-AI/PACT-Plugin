@@ -47,3 +47,17 @@ from import_identity_map import (  # noqa: E402
     pytest_sessionfinish,  # noqa: F401 — hook-registration re-export
     pytest_sessionstart,  # noqa: F401 — hook-registration re-export
 )
+
+
+def pytest_configure(config):
+    """Register the CI environment check that runs inside this process.
+
+    A plugin object, because this module already re-exports a
+    pytest_sessionstart. The binding is stdlib-only and gated on
+    GITHUB_ACTIONS, so outside CI it does nothing.
+    """
+    from ci_environment_binding import CIEnvironmentBinding
+
+    if not config.pluginmanager.has_plugin("ci-environment-binding"):
+        config.pluginmanager.register(
+            CIEnvironmentBinding(), "ci-environment-binding")

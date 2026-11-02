@@ -1,0 +1,38 @@
+# The CI requirement set, installed with `-r` (.github/workflows/tests.yml and
+# .cursor/install.sh); verified at runtime by scripts/verify_ci_environment.py.
+# The suite's direct dependencies, pinned to the TEST-phase-verified versions
+# (pip freeze of the verified 3.12.3 venv, 2026-10-30 — the environment the
+# green full-suite run executed in). Merge-time resolution is code execution
+# in CI, so a version change is a reviewed change to this file, not
+# merge-time weather. Transitive dependencies are not listed; they float
+# within their parents' specifiers. The verify script checks every pin at
+# its version and refuses any installed package outside the pins' dependency
+# closure, so this file is the whole CI package set.
+# Exact pins only (`name==version`, optional trailing comment): the verify
+# script refuses a wildcard, marker, extras, URL or option line.
+# pip itself is NOT pinned: `pip freeze` omits it, and a pinned self-upgrade
+# can deadlock the bootstrap. Refresh deliberately (quarterly, or on a red a
+# pin explains): install the names below UNPINNED in a clean venv (a pinned
+# install can only re-confirm these versions), freeze the same names into
+# this file (not a whole-venv `pip freeze`, which would pin the transitives
+# this file lets float), run the suite green under the new pins, and commit
+# the version diff.
+# Incident path — a COMPROMISED TRANSITIVE: refresh is the wrong tool (an
+# unpinned install pulls the latest, i.e. the compromised version). Add the
+# pin for that transitive here at a safe version: `-r` then installs it at
+# that version, and the verify script holds it there.
+# What CI does NOT certify: consumers never read this file. pact-memory's
+# runtime install (skills/pact-memory/scripts/memory_init.py) runs a bare
+# `pip install <pkg>`, so a consumer resolves the newest pysqlite3,
+# sqlite-vec and model2vec the index serves. A breaking upstream release
+# therefore reaches consumers while CI stays green on these pins; a refresh
+# is the step that would surface it.
+pytest==9.2.0
+hypothesis==6.170.14
+httpx==0.28.1
+pytest-asyncio==1.4.1
+pyyaml==6.0.3
+pysqlite3==0.6.1
+sqlite-vec==0.1.9
+model2vec==0.10.0
+ruff==0.17.3
