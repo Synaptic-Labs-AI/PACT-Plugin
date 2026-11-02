@@ -56,6 +56,15 @@ def _is_narrowing(token: str) -> bool:
                for flag in _NARROWING_TOKENS)
 _SUMMARY_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
 _COLLECTED_RE = re.compile(r"(\d+) tests? collected")
+# The CLOSED set of tokens that make a timing-bearing line a collection
+# summary. Explicit and closed on purpose: "any word that looks like an
+# outcome" drifts, and a parser that accepts the wrong line is worse than one
+# that refuses it. Without the non-collected members an error-only run
+# ("2 errors in 0.12s") and an empty one ("no tests ran in 0.01s") fall out of
+# this function and get reported as PARSE FAILURE, which names the wrong cause
+# for a collection that DID run and DID report.
+_SUMMARY_OUTCOME_RE = re.compile(
+    r"\b(?:collected|passed|failed|error|errors|deselected|no tests ran)\b")
 
 
 def _refuse(message: str) -> int:
@@ -92,7 +101,7 @@ def _discover(plugin_root: Path, repo_root: Path) -> frozenset[str]:
 def _summary_line(lines: list[str]) -> str | None:
     for raw in reversed(lines):
         line = raw.strip().strip("=").strip()
-        if _SUMMARY_RE.search(line) and "collected" in line:
+        if _SUMMARY_RE.search(line) and _SUMMARY_OUTCOME_RE.search(line):
             return line
     return None
 
