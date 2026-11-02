@@ -97,9 +97,12 @@ EXPECTED_EXCLUSION_COUNT = 24
 
 _DEPENDENCY_PINS = ("constraints-ci.txt", "pyproject.toml")
 # The files every PR's version bump touches. A broad exclusion ignores a
-# change to them unless its own test-side code names one.
+# change to them unless its closure names one or scans a tree.
 BUMP_TRIO = ("CHANGELOG.md", "README.md", ".claude-plugin/marketplace.json")
-_TRIO_NAMES = ("CHANGELOG.md", "README.md", "marketplace.json")
+# The bump-trio file stems, matched case-insensitively inside any string, so
+# a name built in pieces or formatted ('READ' + 'ME.md', f'{stem}.md' with
+# stem = 'README') still counts.
+_TRIO_STEMS = ("changelog", "readme", "marketplace")
 _REVIEW_KEYS = frozenset({"sha256", "reason", "extra_reads"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -731,6 +734,9 @@ class FileScan:
     dynamic_fixtures: tuple[str, ...]
     # Whether the module calls a directory scan, glob or walk.
     scans: bool = False
+    # Whether any non-docstring string, or literal concatenation, contains
+    # a bump-trio stem.
+    trio_stem: bool = False
 
 
 @dataclass(frozen=True)
@@ -748,8 +754,8 @@ class ExclusionView:
     # conftest fixture ('tests/conftest.py::name'). An exclusion with any
     # entry not covered by a matching review is BROAD.
     unproven: tuple[tuple[str, tuple[str, ...]], ...] = ()
-    # Whether a test-side literal names a bump-trio file; if so the trio is
-    # not carved out for this exclusion.
+    # Whether any string in the closure contains a bump-trio stem; if so the
+    # trio is not carved out for this exclusion.
     trio_named: bool = False
     # Whether any module in the closure scans, globs or walks a directory;
     # such a scan can reach a trio file no literal names, so the trio is not
@@ -2165,9 +2171,13 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
         base = root_name(func.value)
         if isinstance(base, ast.Name) and base.id == "monkeypatch":
             return True
+        if isinstance(base, ast.Call) and (canonical(base.func) or "").endswith(
+                ("MonkeyPatch.context", "MonkeyPatch")):
+            return True  # pytest.MonkeyPatch().setenv(...) inline
         if isinstance(base, ast.Name):
-            for value in bindings_of(scope_of.get(id(func), tree)).get(
-                    base.id, ()):
+            scope = scope_of.get(id(func), tree)
+            for value in [*bindings_of(scope).get(base.id, ()),
+                          *bindings_of(module_scope).get(base.id, ())]:
                 if value is not None and isinstance(value, ast.Call) and (
                         (canonical(value.func) or "").endswith(
                             ("MonkeyPatch.context", "MonkeyPatch"))):
@@ -2597,6 +2607,20 @@ def _test_side_reasons(tree: ast.Module, rel: str, roots: list[Path],
         reasons, key=lambda reason: int(reason.split(":", 1)[0]))))
 
 
+def _names_a_trio_stem(tree: ast.AST, docstrings: set[int]) -> bool:
+    """A string, a literal concatenation or an f-string part that contains a
+    bump-trio stem, in any case."""
+    for node in ast.walk(tree):
+        if id(node) in docstrings:
+            continue
+        text = (_str_constant(node) if isinstance(node, ast.Constant)
+                else _literal_string(node)
+                if isinstance(node, (ast.BinOp, ast.JoinedStr)) else None)
+        if text and any(stem in text.lower() for stem in _TRIO_STEMS):
+            return True
+    return False
+
+
 def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                is_tracked_dir) -> FileScan:
     try:
@@ -2612,7 +2636,8 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         test_side = rel.startswith("tests/") or _is_test_file(rel)
         return FileScan((), frozenset(), frozenset(), frozenset(),
                         frozenset(), None, () if test_side else unparsed,
-                        unparsed if test_side else (), (), (), scans=True)
+                        unparsed if test_side else (), (), (), scans=True,
+                        trio_stem=True)
     rel_name = path.name
     docstrings = _docstring_nodes(tree)
     literal_names = _literal_loop_names(tree)
@@ -2751,6 +2776,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         dynamic_imports=tuple(dynamic_imports),
         dynamic_fixtures=tuple(dynamic_fixtures),
         scans=scans,
+        trio_stem=_names_a_trio_stem(tree, docstrings),
     )
 
 
@@ -2867,10 +2893,7 @@ class ScanIndex:
                 repo_reach.extend(f"{rel}:{where}" for where in scan.repo_reach)
                 if scan.unproven:
                     unproven.append((rel, scan.unproven))
-                if (rel.startswith("tests/") or _is_test_file(rel)) and any(
-                        name in literal for literal in scan.literals
-                        for name in _TRIO_NAMES):
-                    trio_named = True
+                trio_named = trio_named or scan.trio_stem
                 if rel.startswith("tests/"):
                     # Test-side code is what requests fixtures: by parameter
                     # name, attribute or a usefixtures string.

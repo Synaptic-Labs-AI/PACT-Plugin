@@ -1579,6 +1579,19 @@ class TestEveryAllowlistIsAProofObligation:
          "references the I/O name pathlib.Path.read_text"),
         ("import os\ndef test_x():\n    walker = os.walk\n    return walker\n",
          "references the I/O name os.walk"),
+        ("from os import listdir\ndef test_x(p):\n    f = listdir\n    return f(p)\n",
+         "references the I/O name os.listdir"),
+        ("from os import listdir\ndef test_x(p):\n    return list(map(listdir, [p]))\n",
+         "references the I/O name os.listdir"),
+        ("import functools\nfrom os import listdir\ndef test_x(p):\n"
+         "    return functools.partial(listdir, p)()\n",
+         "references the I/O name os.listdir"),
+        ("import pytest\ndef test_x(p):\n"
+         "    pytest.MonkeyPatch().syspath_prepend(p)\n",
+         "injects an unproven value into sys.path"),
+        ("import pytest\ndef test_x(p):\n"
+         "    pytest.MonkeyPatch.context().setenv('HOME', p)\n",
+         "injects an unproven value into monkeypatch.setenv"),
         ("from pathlib import Path\ndef test_x(p):\n"
          "    return vars(Path)['read_text'](p)\n", "namespace of an imported name"),
         ("import types\ndef test_x():\n"
@@ -1798,6 +1811,24 @@ class TestEveryAllowlistIsAProofObligation:
         index = core.ScanIndex(plugin)
         assert index.view("tests/test_lists.py").scans_tree
         assert not index.view("tests/test_plain.py").scans_tree
+
+
+class TestATrioStemAnywhereKeepsTheTrio:
+    """Any string in the closure that contains a trio stem, however it is
+    built, disables the trio carve-out; production modules count too."""
+
+    @pytest.mark.parametrize("module,named", [
+        ("REPO = 'x'\nNAME = 'READ' + 'ME.md'\n", True),
+        ("STEM = 'changelog'\ndef f(stem=STEM):\n    return f'{stem}.md'\n", True),
+        ("def f(name):\n    return f'see {name} in Marketplace.json'\n", True),
+        ('def f():\n    """Reads README.md."""\n    return 1\n', False),
+        ("NAME = 'notes.md'\n", False),
+    ])
+    def test_a_stem_in_any_closure_string(self, core, tmp_path, module, named):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "helper.py", module)
+        _write(plugin / "tests" / "test_uses.py", "import helper\n")
+        assert core.ScanIndex(plugin).view("tests/test_uses.py").trio_named is named
 
 
 class TestTheTrioCarveOutOnTheRealIndex:
