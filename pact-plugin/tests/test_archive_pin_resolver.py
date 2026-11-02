@@ -142,7 +142,10 @@ class TestCrossProjectFallthroughIsRefused:
         with pytest.raises(archive_pin._Unevaluable) as exc:
             archive_pin.resolve_claude_md()
         reason = exc.value.reason
-        assert reason == "CLAUDE.md not found", reason
+        assert reason == (
+            f"CLAUDE.md not found: neither .claude/CLAUDE.md nor CLAUDE.md "
+            f"exists in {b}; nothing was archived"
+        ), reason
         assert "project_a" not in reason
 
     def test_the_other_project_really_was_resolvable(
@@ -161,6 +164,63 @@ class TestCrossProjectFallthroughIsRefused:
 
         path, _base = archive_pin.resolve_claude_md()
         assert "PIN A" in path.read_text(encoding="utf-8")
+
+
+class TestTheRefusalsSayWhatWasChecked:
+    """Exact text of the archive's not-found and unknown-root refusals."""
+
+    def test_not_found_names_the_enclosing_checkout_it_also_searched(
+        self, isolated, monkeypatch
+    ):
+        repo = isolated / "repo"
+        repo.mkdir()
+        init = subprocess.run(["git", "init", "-q", str(repo)],
+                              capture_output=True, text=True, timeout=30)
+        assert init.returncode == 0, init.stderr
+        sub = repo / "pkg"
+        sub.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+        monkeypatch.chdir(sub)
+
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+
+        assert exc.value.reason == (
+            f"CLAUDE.md not found: neither .claude/CLAUDE.md nor CLAUDE.md "
+            f"exists in {sub} or its enclosing checkout {repo}; nothing was "
+            f"archived"
+        ), exc.value.reason
+
+    @pytest.mark.parametrize("anchored", [True, False], ids=["anchor", "no-anchor"])
+    def test_the_record_is_named_only_when_there_was_an_anchor(
+        self, isolated, monkeypatch, anchored
+    ):
+        """A missing anchor went through record recovery, so the refusal says
+        the record did not verify. A None anchor (a vanished cwd nothing
+        names) never consulted a record, so it must not mention one."""
+        import shared.project_scope as project_scope
+
+        gone = isolated / "gone"
+        anchor = gone if anchored else None
+        monkeypatch.setattr(
+            project_scope, "session_memory_root",
+            lambda: project_scope.SessionRoot(
+                anchor, anchored, None, project_scope.ROOT_CAUSE_MISSING
+            ),
+        )
+
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+
+        clause = (
+            f"the project directory {gone} no longer exists and the session "
+            "record did not verify a main checkout for it"
+            if anchored else "the working directory no longer exists"
+        )
+        assert exc.value.reason == (
+            f"project memory root unknown: {clause}, so the project CLAUDE.md "
+            "cannot be identified; nothing was archived"
+        ), exc.value.reason
 
 
 class TestSameRepositoryFallthroughIsAllowed:

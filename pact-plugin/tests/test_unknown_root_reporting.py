@@ -146,6 +146,38 @@ def test_the_advisory_renders_the_cause_of_the_one_observation(
         assert "session record did not verify a main checkout" in decision.reason
 
 
+@pytest.mark.parametrize("anchored", [True, False], ids=["anchor", "no-anchor"])
+def test_the_advisory_names_the_record_only_when_there_was_an_anchor(
+    tmp_path, monkeypatch, anchored
+):
+    """Exact advisory text for cause MISSING. A missing anchor went through
+    record recovery, so the advisory says the record did not verify; a None
+    anchor (a vanished cwd nothing names) consulted no record and names none."""
+    import shared.project_scope as project_scope
+    from pin_caps_gate import _gate
+
+    gone = tmp_path / "gone"
+    anchor = gone if anchored else None
+    monkeypatch.setattr(
+        project_scope, "session_memory_root",
+        lambda: project_scope.SessionRoot(
+            anchor, anchored, None, project_scope.ROOT_CAUSE_MISSING
+        ),
+    )
+
+    decision = _gate(_write_frame(tmp_path / "CLAUDE.md"))
+
+    clause = (
+        f"the project directory {gone} no longer exists and the session record "
+        "did not verify a main checkout for it"
+        if anchored else "the working directory no longer exists"
+    )
+    assert decision is not None and decision.reason == (
+        f"PACT could not identify this session's project memory: {clause}, so "
+        "the pin cap was not checked for this Write."
+    ), decision
+
+
 def test_search_keeps_the_retrieved_sync_reason(monkeypatch):
     """ROOT_UNKNOWN used to be produced and dropped. It now reaches the same
     reason channel a save uses, so a caller can see it."""

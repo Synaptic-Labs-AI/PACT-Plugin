@@ -530,22 +530,36 @@ def resolve_claude_md():
     document must not resolve into a different project.
     """
     from shared.claude_md_manager import session_document
-    from shared.project_scope import ROOT_CAUSE_MISSING, unknown_root_reason
+    from shared.project_scope import (
+        ROOT_CAUSE_MISSING,
+        enclosing_main_checkout,
+        unknown_root_reason,
+    )
 
     session, doc = session_document()
     if doc is None:
         clause = unknown_root_reason(session.cause, session.anchor)
-        if session.cause == ROOT_CAUSE_MISSING:
+        if session.cause == ROOT_CAUSE_MISSING and session.anchor is not None:
             # Record recovery already ran for a missing anchor and did not
             # verify a main checkout, which is the only reason the cause
-            # survived. Same wording as the pin-cap gate's advisory.
+            # survived. A None anchor never reaches record recovery. Same
+            # wording as the pin-cap gate's advisory.
             clause += " and the session record did not verify a main checkout for it"
         raise _Unevaluable(
             f"project memory root unknown: {clause}, so the project CLAUDE.md "
             "cannot be identified; nothing was archived"
         )
     if not doc.exists:
-        raise _Unevaluable("CLAUDE.md not found")
+        # Name every directory the resolver probed: the root, and the main
+        # checkout enclosing it when there is one.
+        searched = f"{session.root}"
+        enclosing = enclosing_main_checkout(session.root)
+        if enclosing is not None:
+            searched += f" or its enclosing checkout {enclosing}"
+        raise _Unevaluable(
+            f"CLAUDE.md not found: neither .claude/CLAUDE.md nor CLAUDE.md "
+            f"exists in {searched}; nothing was archived"
+        )
     path, base = doc.path, doc.base
 
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")

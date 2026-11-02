@@ -930,10 +930,11 @@ def _unknown_root_decision(tool_name: str, session):
         return None
     from shared.pin_growth import PinDecision
 
-    if session.cause == ROOT_CAUSE_MISSING:
+    if session.cause == ROOT_CAUSE_MISSING and session.anchor is not None:
         # THE REMOVED-WORKTREE SHAPE NAMES ITSELF: record recovery already ran
         # for a missing anchor and did not verify a main checkout, which is
-        # the only reason the cause survived.
+        # the only reason the cause survived. A None anchor (a vanished cwd
+        # nothing names) never reaches record recovery, so it names no record.
         clause += " and the session record did not verify a main checkout for it"
     reason = (
         f"PACT could not identify this session's project memory: {clause}, "

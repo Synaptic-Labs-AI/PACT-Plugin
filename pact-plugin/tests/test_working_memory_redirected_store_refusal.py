@@ -988,6 +988,9 @@ def _moved_away_worktree_still_listed(t):
 
 
 def _live_declaration_into_the_config_root_document(t):
+    """The enclosing checkout is home, whose document is the user-global
+    <config>/CLAUDE.md. This DELIBERATELY reverses the old same-project admit:
+    project memory never manages the user-global file, so nothing resolves."""
     home = _committed_repo(t / "home")
     (home / "other").mkdir()
     return (home / "other", home / "other", _document_in(home),
@@ -1254,7 +1257,9 @@ class TestEverySiteJudgesProjectScopeAlike:
 
             with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
-            assert excinfo.value.reason == "CLAUDE.md not found", excinfo.value.reason
+            assert excinfo.value.reason.startswith("CLAUDE.md not found"), (
+                excinfo.value.reason
+            )
         else:
             result = _run_site(site)
             assert result == SyncResult(SyncResult.UNRESOLVED), (
@@ -1360,8 +1365,9 @@ class TestNoSiteTakesAWorktreeShadowCopy:
             with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
             # Main holds no document and the worktree copy is never a
-            # candidate, so there is nothing to archive.
-            assert excinfo.value.reason == "CLAUDE.md not found", (
+            # candidate, so nothing is archived; the bytes check below is the
+            # outcome, not the wording.
+            assert excinfo.value.reason.startswith("CLAUDE.md not found"), (
                 excinfo.value.reason
             )
         else:
