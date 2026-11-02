@@ -898,21 +898,19 @@ class TestHarvestRuleProse:
         is the decision's only durable home. Dropping a report line in the
         synthesis is a DEFECT — it reproduces the gap one layer up — not a
         discretionary omission of colour. The rule must name BOTH report
-        families, or a reader can exempt the union lines or the partitions."""
-        assert (
-            "THE HARVESTED MEMORY ENTRY'S `context` MUST CARRY EVERY ONE OF "
-            "THEM" in SKILL_TEXT
-        )
-        assert "A SYNTHESIS THAT DROPS A REPORT LINE IS A DEFECT" in SKILL_TEXT
-        assert (
-            "both partitions' reports and the union's per-field lines"
-            in SKILL_TEXT
-        )
-        # The duty also sits at the SYNTHESIS site, not only by the reports.
-        synthesis = SKILL_TEXT.split(
-            "3. **Synthesize ONE entry from BOTH sources together**", 1
-        )[1].split("4. **Dedup**", 1)[0]
-        assert "Every Step 3 report line for that unit lands in `context`" in synthesis
+        families, or a reader can exempt the union lines or the partitions.
+
+        THE ANCHORS ARE VOCABULARY-LEVEL ON PURPOSE. Each survives a
+        grammatical reword (EVERY ONE->ALL, SYNTHESIS->SUMMARY, a dropped
+        "both" or "Step 3"), so a legitimate reword does not tempt the next
+        editor to delete the pin. A swap of the rule's OWN TERMS
+        ("reports"->"outputs", "lands"->"is written") is SUPPOSED to red:
+        that changes what the rule says and buys a pin update. Do not loosen
+        these to absorb it."""
+        assert "MEMORY ENTRY'S `context` MUST CARRY" in SKILL_TEXT
+        assert "DROPS A REPORT LINE IS A DEFECT" in SKILL_TEXT
+        assert "partitions' reports and the union's per-field lines" in SKILL_TEXT
+        assert "report line for that unit lands in `context`" in SKILL_TEXT
 
     def test_report_lines_use_the_shared_sanitiser(self):
         """F1: the skill's hand-written report sites must interpolate through
