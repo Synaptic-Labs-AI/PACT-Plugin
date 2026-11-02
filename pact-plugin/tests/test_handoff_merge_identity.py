@@ -892,6 +892,28 @@ class TestHarvestRuleProse:
         assert "with the SAME wording" in SKILL_TEXT
         assert "report NOTHING" in SKILL_TEXT
 
+    def test_merge_report_lines_land_in_the_memory_entry(self):
+        """F4, architect option (c): a merge report records a DECISION, and
+        the journal preserves only the raw content, so the entry's `context`
+        is the decision's only durable home. Dropping a report line in the
+        synthesis is a DEFECT — it reproduces the gap one layer up — not a
+        discretionary omission of colour. The rule must name BOTH report
+        families, or a reader can exempt the union lines or the partitions."""
+        assert (
+            "THE HARVESTED MEMORY ENTRY'S `context` MUST CARRY EVERY ONE OF "
+            "THEM" in SKILL_TEXT
+        )
+        assert "A SYNTHESIS THAT DROPS A REPORT LINE IS A DEFECT" in SKILL_TEXT
+        assert (
+            "both partitions' reports and the union's per-field lines"
+            in SKILL_TEXT
+        )
+        # The duty also sits at the SYNTHESIS site, not only by the reports.
+        synthesis = SKILL_TEXT.split(
+            "3. **Synthesize ONE entry from BOTH sources together**", 1
+        )[1].split("4. **Dedup**", 1)[0]
+        assert "Every Step 3 report line for that unit lands in `context`" in synthesis
+
     def test_report_lines_use_the_shared_sanitiser(self):
         """F1: the skill's hand-written report sites must interpolate through
         `report_safe`. The helper-produced strings are already sanitised; the
