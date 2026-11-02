@@ -28,7 +28,9 @@ the value set at the registry, which is where a value-set contract belongs.
 """
 import importlib.util
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -146,7 +148,7 @@ def test_documented_payload_validates_against_the_shipped_schema(
     pairs = []
     for block in blocks:
         types = re.findall(r"--type\s+(\S+)", block)
-        payloads = re.findall(r"(?<!verify-last )--stdin\s+<<'JSON'\n(.*?)\nJSON", block, re.DOTALL)
+        payloads = re.findall(r"(?<!verify-last )--stdin\s+<<'JSON'[^\n]*\n(.*?)\nJSON", block, re.DOTALL)
         if not types and not payloads:
             continue  # a fence that emits nothing (e.g. a plain CLI call)
         assert len(types) == 1 and len(payloads) == 1, (
@@ -180,13 +182,13 @@ def test_documented_payload_validates_against_the_shipped_schema(
 def test_payload_selection_ignores_readback_but_not_duplicate_writes(
     journal, pin_event_types
 ):
-    write = """python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+    write = """if ! python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome":"cancelled","pin_count":12,"age_distribution":{}}
 JSON
 """
     readback = """python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{},"nonempty":[],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped"}}
 JSON
 """
     test_documented_payload_validates_against_the_shipped_schema(
@@ -254,7 +256,7 @@ def test_emitted_outcomes_are_declared_in_the_exit_table(prune_md):
     for block in blocks:
         if "--type pin_prune_skipped" not in block:
             continue
-        for raw in re.findall(r"<<'JSON'\n(.*?)\nJSON", block, re.DOTALL):
+        for raw in re.findall(r"<<'JSON'[^\n]*\n(.*?)\nJSON", block, re.DOTALL):
             value = json.loads(raw).get("outcome")
             if value is not None:
                 emitted.add(value)
@@ -325,3 +327,53 @@ def test_pin_pruned_cannot_be_emitted_for_an_unverified_eviction(journal):
         "memory_id": "a" * 32, "pin_count": 12,
     })
     assert ok, "a well-formed pin_pruned event must still validate"
+
+
+def _prune_fences(prune_md):
+    return [block for block in re.findall(r"```bash\n(.*?)```", prune_md, re.DOTALL) if "--type pin_" in block]
+
+
+@pytest.mark.parametrize("arm", ["write-fails", "readback-fails"])
+def test_a_failed_telemetry_emit_is_loud_and_never_blocks_the_prune(
+    arm, prune_md, tmp_path
+):
+    """Telemetry never blocks a prune: a failed write and a failed read-back
+    each print a loud message and the shell continues, even under `set -e`.
+
+    Each literal fence runs with `set -e` prepended and a sentinel appended,
+    so a fence that exits on either failure loses the sentinel.
+    """
+    fences = _prune_fences(prune_md)
+    assert len(fences) == 7, "expected one emit fence per prune outcome plus the success event"
+    expected = {
+        "write-fails": "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing",
+        "readback-fails": "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing",
+    }[arm]
+    for index, fence in enumerate(fences):
+        session_dir = tmp_path / f"fence-{index}"
+        session_dir.mkdir()
+        script = fence.replace("{session_dir}", str(session_dir))
+        if arm == "write-fails":
+            # A payload with a stray quote: the honest JSON-escaping mistake.
+            script = re.sub(r"(<<'JSON'\n)(\{.*?\})\n", r'\1\2"\n', script, count=1)
+        else:
+            # The write lands, but the read-back looks in another directory.
+            decoy = tmp_path / f"decoy-{index}"
+            decoy.mkdir()
+            script = script.replace(f'"session_dir":"{session_dir}"', f'"session_dir":"{decoy}"', 1)
+        result = subprocess.run(
+            ["bash", "-c", "set -e\n" + script + "\necho PRUNE-CONTINUED\n"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(_PLUGIN_ROOT)},
+        )
+        assert result.returncode == 0, (index, result.stderr)
+        assert "PRUNE-CONTINUED" in result.stdout, (index, result.stderr)
+        assert expected in result.stderr, (index, result.stderr)
+        journal = session_dir / "session-journal.jsonl"
+        if arm == "write-fails":
+            assert not journal.exists(), (index, "a failed write must append nothing")
+            assert "Journal read-back failed" not in result.stderr
+        else:
+            assert len(journal.read_text(encoding="utf-8").splitlines()) == 1

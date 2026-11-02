@@ -40,11 +40,11 @@ Create a simpler Task hierarchy than full orchestrate:
 > set -e
 > trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 > python3 "{plugin_root}/hooks/shared/session_journal.py" write \
->   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+>   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
 > {"task_id": "{feature_task_id}", "variety": {"total": N}}
 > JSON
-> python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-> {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{feature_task_id}"},"nonempty":[],"absent":["scope"]}
+> python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+> {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{feature_task_id}"},"absent":["scope"]}
 > JSON
 > ```
 
@@ -279,11 +279,11 @@ When the task contains multiple independent items, invoke multiple specialists t
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
    Then `agent_dispatch`:
@@ -291,15 +291,15 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
-   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"},"nonempty":[],"absent":[]}
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"}}
 JSON
    ```
 
-> ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
+> ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once.
 
 6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):
 
@@ -356,11 +356,11 @@ Use a single specialist agent only when:
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
    Then `agent_dispatch`:
@@ -368,11 +368,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
 JSON
-   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"},"nonempty":[],"absent":[]}
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"}}
 JSON
    ```
 6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):
@@ -442,11 +442,11 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
   set -e
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-    --type commit --session-dir '{session_dir}' --stdin <<'JSON'
+    --type commit --session-dir '{session_dir}' --stdin <<'JSON' &&
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
 JSON
-  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"commit","sha":"{short_sha}","phase":"CODE"},"nonempty":[],"absent":[]}
+  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"commit","sha":"{short_sha}","phase":"CODE"}}
 JSON
   ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
@@ -467,11 +467,11 @@ JSON
   set -e
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-    --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+    --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON' &&
   {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
 JSON
-  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"CODE","status":"completed"},"nonempty":[],"absent":[]}
+  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"CODE","status":"completed"}}
 JSON
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"

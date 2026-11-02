@@ -39,13 +39,15 @@ Paused state is surfaced **automatically** by the `session_init` hook: when the 
 
 ```bash
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"refresh_ts": "{refresh_ts}"}
 JSON
-python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_refresh_consumed","refresh_ts":"{refresh_ts}"},"nonempty":[],"absent":[]}
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] bootstrap.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_refresh_consumed","refresh_ts":"{refresh_ts}"}}
 JSON
 ```
+
+If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once.
 
 If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-surface once; its staleness downgrade bounds the repetition). Never write a consumption event when no refresh prompt surfaced.
 
@@ -53,11 +55,11 @@ If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-s
 
 ```bash
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_pause_consumed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type session_pause_consumed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"pause_ts": "{pause_ts}"}
 JSON
-python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_pause_consumed","pause_ts":"{pause_ts}"},"nonempty":[],"absent":[]}
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] bootstrap.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_pause_consumed","pause_ts":"{pause_ts}"}}
 JSON
 ```
 

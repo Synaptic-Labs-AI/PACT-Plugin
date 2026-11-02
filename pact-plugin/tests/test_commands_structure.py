@@ -1936,6 +1936,9 @@ class JournalWriteSite:
     segment: str
     writer_script: str
     session_dir: str
+    write_tail: str = ""
+    write_block: str = ""
+    write_guard: str = ""
 
     @property
     def site_id(self) -> str:
@@ -1972,14 +1975,30 @@ def _journal_shell_regions(text: str):
             continue
         open_fence, open_language, start = active
         if fence == open_fence and not language:
-            if open_language.lower() in ("", "bash", "sh", "shell", "zsh"):
+            if open_language.lower() in ("", "bash", "sh", "shell", "zsh", "console"):
                 yield start, index, lines
             active = None
 
 
+# Tokens that may precede python3 on a command line: a console prompt, a
+# compound-command keyword or negation, and NAME=value environment prefixes.
+_INVOCATION_PREFIX_RE = r"(?:\$\s+)?(?:(?:if|while|until|!)\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+
+
 def _is_journal_invocation_start(line: str) -> bool:
-    """Start on a bare python3 token; the journal path may be continued."""
-    return re.match(r"^python3(?:\s|$)", _journal_line(line)) is not None
+    """Start on a python3 token after any prefix; the journal path may be continued."""
+    return re.match(r"^" + _INVOCATION_PREFIX_RE + r"python3(?:\s|$)", _journal_line(line)) is not None
+
+
+def _strip_invocation_prefix(tokens: list[str]) -> list[str]:
+    """Drop the prompt, keyword and NAME=value tokens that precede python3."""
+    index = 0
+    while index < len(tokens) and (
+        tokens[index] in ("$", "if", "while", "until", "!")
+        or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index])
+    ):
+        index += 1
+    return tokens[index:]
 
 
 def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
@@ -2043,10 +2062,10 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
             if heredoc_close is None:
                 raise AssertionError(f"{filename}:{start + 1}: unclosed JSON heredoc")
             try:
-                tokens = [
+                tokens = _strip_invocation_prefix([
                     token for token in shlex.split(header.replace("\\ ", " "))
                     if token.strip() and token != "\\"
-                ]
+                ])
                 session_dir = tokens[tokens.index("--session-dir") + 1]
             except (ValueError, IndexError) as exc:
                 raise AssertionError(
@@ -2061,6 +2080,13 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
                 if candidate[1] == "write" and candidate[0] > heredoc_close
             ]
             segment_end = min(later_starts, default=region_end)
+            write_tail = _journal_line(lines[heredoc_open]).split("<<'JSON'", 1)[1].strip()
+            write_block = "\n".join(
+                _journal_raw_line(line) for line in lines[start:heredoc_open + 1]
+            )
+            write_guard = re.match(
+                "^" + _INVOCATION_PREFIX_RE, _journal_line(lines[start])
+            ).group(0).strip()
             parsed.append(
                 (
                     start + 1,
@@ -2072,6 +2098,9 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
                     "\n".join(lines[heredoc_close + 1:segment_end]),
                     writer_script,
                     session_dir,
+                    write_tail,
+                    write_block,
+                    write_guard,
                 )
             )
             strict_lines.add(start + 1)
@@ -2081,10 +2110,8 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
             f"broad={sorted(broad_lines)}, strict={sorted(strict_lines)}"
         )
     return [
-        JournalWriteSite(
-            filename, ordinal, line, event_type, payload, segment, writer_script, session_dir
-        )
-        for ordinal, (line, event_type, payload, segment, writer_script, session_dir) in enumerate(parsed, start=1)
+        JournalWriteSite(filename, ordinal, *fields)
+        for ordinal, fields in enumerate(parsed, start=1)
     ]
 
 
@@ -2126,7 +2153,7 @@ JOURNAL_READBACK_MATRIX = {
     ("peer-review.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("peer-review.md", 2): _expect("review_dispatch", 'event.get("pr_number") == {pr_number}'),
     ("peer-review.md", 3): _expect("artifact_paths", 'event.get("workflow") == "peer-review"', 'str(event.get("feature")) == "{feature}"'),
-    ("peer-review.md", 4): _expect("review_finding", 'str(event.get("task_id")) == "{reviewer_task_id}"', 'str(event.get("reviewer")) == "{reviewer-name}"'),
+    ("peer-review.md", 4): _expect("review_finding", 'str(event.get("task_id")) == "{reviewer_task_id}"', 'str(event.get("reviewer")) == "{reviewer-name}"', 'event.get("severity") == "{blocking|suggestion|nitpick}"', 'event.get("finding") == "{one-line description}"'),
     ("peer-review.md", 5): _expect("remediation", 'event.get("cycle") == {cycle_number}', 'str(event.get("task_id")) == "{fixer_task_id}"'),
     ("peer-review.md", 6): _expect("pr_ready", 'event.get("pr_number") == {pr_number}', 'event.get("commits") == {total_commit_count}'),
     ("plan-mode.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
@@ -2146,20 +2173,35 @@ JOURNAL_READBACK_MATRIX = {
     ("wrap-up.md", 1): _expect("session_consolidated", 'event.get("pass") == 2', 'event.get("task_count") == {task_count}', 'event.get("memories_saved") == {memories_saved}'),
 }
 
-EXPECTED_JOURNAL_WRITE_COUNTS = {
-    "bootstrap.md": 2,
-    "comPACT.md": 7,
-    "orchestrate.md": 18,
-    "pause.md": 2,
-    "peer-review.md": 6,
-    "plan-mode.md": 2,
-    "prune-memory.md": 7,
-    "rePACT.md": 2,
-    "refresh.md": 3,
-    "wrap-up.md": 1,
-}
+EXPECTED_JOURNAL_WRITE_COUNTS = Counter(filename for filename, _ordinal in JOURNAL_READBACK_MATRIX)
 
-EXPECTED_JOURNAL_WRITE_TOTAL = sum(EXPECTED_JOURNAL_WRITE_COUNTS.values())
+EXPECTED_JOURNAL_WRITE_TOTAL = len(JOURNAL_READBACK_MATRIX)
+
+# A failed write must fail its block. Standard sites chain the write into the
+# read-back with `&&` and end the read-back with this tail, so neither exit code
+# is discarded with or without `set -e`. prune-memory guards the write with
+# `if !` so a failed write and a failed read-back each print and continue.
+def _readback_tail(filename):
+    return (
+        '|| { rc=$?; echo "[JOURNAL WRITE FAILED] %s: write or read-back failed, '
+        'exit=$rc" >&2; exit $rc; }' % filename
+    )
+
+
+_PRUNE_WRITE_FAILED = (
+    '  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2'
+)
+_PRUNE_READBACK_FAILED = (
+    '  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2'
+)
+
+
+def _expected_write_tail(filename):
+    return "" if filename == "prune-memory.md" else "&&"
+
+
+def _expected_write_guard(filename):
+    return "if !" if filename == "prune-memory.md" else ""
 
 
 @pytest.fixture(scope="module")
@@ -2185,10 +2227,6 @@ def test_journal_write_census_matches_manifest(journal_site_map):
     assert set(journal_site_map) == set(JOURNAL_READBACK_MATRIX)
 
 
-def test_journal_write_total_is_derived_and_non_vacuous():
-    assert EXPECTED_JOURNAL_WRITE_TOTAL == len(JOURNAL_READBACK_MATRIX) > 0
-
-
 _NUMERIC_PLACEHOLDERS = {
     "{task_count}",
     "{memories_saved}",
@@ -2205,7 +2243,7 @@ _STRUCTURE_SESSION_DIR = "/tmp/journal-structure"
 def _matrix_spec(expectation):
     """Translate the established 50-site matrix into the JSON-data contract."""
     event_type, assertions = expectation
-    spec = {"session_dir": "{session_dir}", "exact": {"type": event_type}, "nonempty": [], "absent": []}
+    spec = {"session_dir": "{session_dir}", "exact": {"type": event_type}}
     raw_tokens = set()
     for assertion in assertions:
         patterns = (
@@ -2215,7 +2253,6 @@ def _matrix_spec(expectation):
             (r'event\.get\("([^"]+)"\) == (\{[^}]+\})', "raw"),
             (r'event\.get\("([^"]+)"\) == (\d+)', "number"),
             (r'event\.get\("([^"]+)"\) is (True|False)', "boolean"),
-            (r'bool\(event\.get\("([^"]+)"\)\)', "nonempty"),
             (r'"([^"]+)" not in event', "absent"),
         )
         for pattern, kind in patterns:
@@ -2233,7 +2270,7 @@ def _matrix_spec(expectation):
             elif kind == "boolean":
                 spec["exact"][key] = value == "True"
             else:
-                spec[kind].append(key)
+                spec.setdefault(kind, []).append(key)
             break
         else:
             raise AssertionError(f"unrecognized matrix comparator: {assertion}")
@@ -2278,6 +2315,8 @@ def _placeholder_value(token, session_dir, replacements):
 def _render_json_placeholders(text, session_dir, replacements=None, escape=True):
     """Render typed values into JSON data and trusted plugin paths."""
     text = text.replace("${CLAUDE_PLUGIN_ROOT}", str(COMMANDS_DIR.parent))
+    text = text.replace("{blocking|suggestion|nitpick}", "blocking")
+
     def replace(match):
         token = match.group(0)
         value = _placeholder_value(token, session_dir, replacements)
@@ -2389,10 +2428,7 @@ def _payload_spec_problems(payload, spec):
             problems.append(f"{key}: missing from write payload")
         elif not _json_same(payload[key], want):
             problems.append(f"{key}: write value {payload[key]!r}, read-back expects {want!r}")
-    for key in spec["nonempty"]:
-        if not payload.get(key):
-            problems.append(f"{key}: write value {payload.get(key)!r} is not nonempty")
-    for key in spec["absent"]:
+    for key in spec.get("absent", []):
         if key in payload:
             problems.append(f"{key}: unexpectedly present in write payload")
     return problems
@@ -2407,11 +2443,17 @@ def _parse_readback_block(site):
     )
     if start is None:
         raise AssertionError("missing read-back")
+    literal_start = start
+    expected_prefix = ""
+    if site.filename == "prune-memory.md":
+        if lines[start:start + 2] != ["then", _PRUNE_WRITE_FAILED]:
+            raise AssertionError("missing loud nonblocking prune-memory write-failure branch")
+        start += 2
+        expected_prefix = "elif ! "
     match = re.fullmatch(
-        r"(if ! )?python3 -I (.+) verify-last --stdin <<'JSON'",
+        r"((?:el)?if ! )?python3 -I (\S+) verify-last --stdin <<'JSON'(.*)",
         lines[start].strip(),
     )
-    expected_prefix = "if ! " if site.filename == "prune-memory.md" else ""
     if match is None or (match.group(1) or "") != expected_prefix:
         raise AssertionError(f"non-canonical verify-last invocation: {lines[start].strip()!r}")
     allowed_invocations = {
@@ -2435,11 +2477,17 @@ def _parse_readback_block(site):
         except ValueError as exc:
             raise AssertionError("missing prune if ! continuation") from exc
         trailer = lines[close + 1:end]
+    raw = "\n".join(lines[start:end])
+    if expected_prefix:
+        raw = raw.replace("elif ! ", "if ! ", 1)  # runnable on its own
     return {
         "invocation": lines[start].strip(),
+        "path": match.group(2),
+        "tail": match.group(3).strip(),
         "spec_text": spec_text,
         "trailer": trailer,
-        "raw": "\n".join(lines[start:end]),
+        "raw": raw,
+        "literal": "\n".join(lines[literal_start:end]),
     }
 
 
@@ -2466,10 +2514,29 @@ def _readback_problems(site, expectation):
         problems.append(
             f"writer/read-back session-dir mismatch: {site.session_dir!r}"
         )
+    if (site.write_guard, site.write_tail) != (
+        _expected_write_guard(site.filename), _expected_write_tail(site.filename)
+    ):
+        problems.append(
+            f"write exit code is discarded: guard {site.write_guard!r} and heredoc "
+            f"line end {site.write_tail!r}, expected {_expected_write_guard(site.filename)!r} "
+            f"and {_expected_write_tail(site.filename)!r}"
+        )
     try:
         block = _parse_readback_block(site)
     except AssertionError as exc:
         return problems + [f"missing immediate physical-last-line read-back: {exc}"]
+    expected_tail = "" if site.filename == "prune-memory.md" else _readback_tail(site.filename)
+    if block["tail"] != expected_tail:
+        problems.append(
+            f"read-back failure does not fail the block: tail {block['tail']!r}, "
+            f"expected {expected_tail!r}"
+        )
+    if (site.writer_script == "$SJ") != (block["path"] in ('"$SJ"', "$SJ")):
+        problems.append(
+            f"read-back path {block['path']!r} does not match writer {site.writer_script!r}: "
+            "use \"$SJ\" exactly where the write does"
+        )
     template_spec = None
     try:
         template_spec = _template_identity_loads(block["spec_text"])
@@ -2507,11 +2574,7 @@ def _readback_problems(site, expectation):
                     "write payload/read-back spec mismatch: " + "; ".join(mismatches)
                 )
     if site.filename == "prune-memory.md":
-        expected_trailer = [
-            "then",
-            '  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2',
-            "fi",
-        ]
+        expected_trailer = ["then", _PRUNE_READBACK_FAILED, "fi"]
         if block["trailer"] != expected_trailer:
             problems.append("missing loud nonblocking prune-memory continuation")
     elif block["trailer"]:
@@ -2540,22 +2603,22 @@ def _canonical_readback(site_key):
     filename, _ordinal = site_key
     expectation = JOURNAL_READBACK_MATRIX[site_key]
     if filename == "prune-memory.md":
-        first = 'if ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<\'JSON\''
+        first = (
+            "then\n" + _PRUNE_WRITE_FAILED + "\n"
+            + 'elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<\'JSON\''
+        )
     else:
-        first = 'python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<\'JSON\''
+        first = (
+            'python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<\'JSON\' '
+            + _readback_tail(filename)
+        )
     lines = [
         first,
         _canonical_spec_text(expectation),
         "JSON",
     ]
     if filename == "prune-memory.md":
-        lines.extend(
-            [
-                "then",
-                '  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2',
-                "fi",
-            ]
-        )
+        lines.extend(["then", _PRUNE_READBACK_FAILED, "fi"])
     return "\n".join(lines)
 
 
@@ -2563,34 +2626,41 @@ def _synthetic_write_payload(readback):
     """Build the fixture payload from its spec so each mutation isolates its target."""
     if not readback:
         return {}
-    spec_text = readback.split("<<'JSON'\n", 1)[1].split("\nJSON", 1)[0]
+    spec_text = readback.split("<<'JSON'", 1)[1].split("\n", 1)[1].split("\nJSON", 1)[0]
     spec = _template_identity_loads(spec_text)
     event = _matching_journal_event(spec)
     event.pop("type", None)
     return event
 
 
-def _synthetic_command_text(writes, spelling="direct", prefix="", fence="bash"):
+def _synthetic_command_text(
+    writes, spelling="direct", prefix="", fence="bash", write_tail="&&", write_guard=""
+):
     """Create isolated shell text with one (event type, read-back) tuple per write."""
     lines = [f"{prefix}```{fence}"]
+    full_verify = '"{plugin_root}/hooks/shared/session_journal.py" verify-last'
+    guard = write_guard + " " if write_guard else ""
     for event_type, readback in writes:
+        if spelling in ("variable", "variable-unquoted"):
+            sj_verify = '"$SJ" verify-last' if spelling == "variable" else "$SJ verify-last"
+            readback = readback.replace(full_verify, sj_verify)
         if spelling in ("variable", "variable-unquoted"):
             lines.append(f'{prefix}SJ="{{plugin_root}}/hooks/shared/session_journal.py"')
             sj = '"$SJ"' if spelling == "variable" else "$SJ"
-            invocation = f'{prefix}python3 {sj} write --type {event_type} --session-dir \'{{session_dir}}\' --stdin <<\'JSON\''
+            invocation = f'{prefix}{guard}python3 {sj} write --type {event_type} --session-dir \'{{session_dir}}\' --stdin <<\'JSON\' {write_tail}'
         else:
             root = "{plugin_root}" if spelling in ("direct", "split-write", "split-path") else "${CLAUDE_PLUGIN_ROOT}"
             if spelling == "split-path":
-                lines.append(f"{prefix}python3 \\")
+                lines.append(f"{prefix}{guard}python3 \\")
                 invocation = f'{prefix}  "{root}/hooks/shared/session_journal.py" write \\'
             else:
                 verb = "" if spelling == "split-write" else "write "
-                invocation = f'{prefix}python3 "{root}/hooks/shared/session_journal.py" {verb}\\'
+                invocation = f'{prefix}{guard}python3 "{root}/hooks/shared/session_journal.py" {verb}\\'
         lines.append(invocation)
         if spelling not in ("variable", "variable-unquoted"):
             continuation = "write --type" if spelling == "split-write" else "--type"
             lines.append(
-                f"{prefix}  {continuation} {event_type} --session-dir '{{session_dir}}' --stdin <<'JSON'"
+                f"{prefix}  {continuation} {event_type} --session-dir '{{session_dir}}' --stdin <<'JSON' {write_tail}"
             )
         payload = json.dumps(_synthetic_write_payload(readback), separators=(",", ":"))
         lines.extend([f"{prefix}{payload}", f"{prefix}JSON"])
@@ -2606,7 +2676,9 @@ def _one_synthetic_site(site_key, readback, spelling="direct", prefix=""):
     filename, _ordinal = site_key
     event_type, _assertions = JOURNAL_READBACK_MATRIX[site_key]
     text = _synthetic_command_text(
-        [(event_type, readback)], spelling=spelling, prefix=prefix
+        [(event_type, readback)], spelling=spelling, prefix=prefix,
+        write_tail=_expected_write_tail(filename),
+        write_guard=_expected_write_guard(filename),
     )
     sites = _parse_journal_sites(filename, text)
     assert len(sites) == 1
@@ -2744,8 +2816,8 @@ def test_wrong_event_type_fails_assertion_contract():
 def test_prune_readback_must_remain_nonblocking():
     key = ("prune-memory.md", 1)
     body = _canonical_readback(key)
-    assert body.startswith("if ! python3")
-    mutated_body = body.replace("if ! python3", "python3", 1)
+    assert "\nelif ! python3" in body
+    mutated_body = body.replace("elif ! python3", "elif python3", 1)
     site = _one_synthetic_site(key, mutated_body, spelling="plugin-root")
     problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
     assert problems
@@ -2780,7 +2852,7 @@ def test_writer_header_identity_mutations_fail(replacement_header, expected_prob
     source = path.read_text(encoding="utf-8")
     key = (path.name, 3)
     header = 'python3 "$SJ" write --type phase_transition --session-dir \'{session_dir}\''
-    needle = header + " --stdin <<'JSON'\n" + '{"phase": "{PHASE}", "status": "completed",'
+    needle = header + " --stdin <<'JSON' &&\n" + '{"phase": "{PHASE}", "status": "completed",'
     replacement = needle.replace(header, replacement_header, 1)
     control = _parse_journal_sites(path.name, source)[2]
     assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
@@ -2870,7 +2942,10 @@ def test_distinct_placeholders_do_not_collapse_when_rendered_equal():
 def _render_live_readback(site_key, journal_site_map, session_dir, replacements=None):
     """Render only JSON data in the literal shipped block, never Python source."""
     site = journal_site_map[site_key]
-    script = _parse_readback_block(site)["raw"]
+    block = _parse_readback_block(site)
+    script = block["raw"]
+    if block["path"] in ('"$SJ"', "$SJ"):
+        script = 'SJ="{plugin_root}/hooks/shared/session_journal.py"\n' + script
     assert "session_journal.py" in script
     values = {"{session_dir}": str(session_dir), **(replacements or {})}
     for token in values:
@@ -3094,9 +3169,7 @@ def _write_journal_event(session_dir, event):
 
 def _matching_journal_event(spec):
     event = dict(spec["exact"])
-    for key in spec["nonempty"]:
-        event[key] = "present"
-    for key in spec["absent"]:
+    for key in spec.get("absent", []):
         event.pop(key, None)
     return event
 
@@ -3377,3 +3450,180 @@ def test_51st_split_write_fails_census(journal_site_map):
     problems = _journal_census_problems([*journal_site_map.values(), extra])
     assert any("site count 51" in problem for problem in problems)
     assert any("orchestrate.md" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "site_key,mutation",
+    [
+        (("comPACT.md", 2), "unchained-write"),
+        (("orchestrate.md", 3), "unchained-write"),
+        (("comPACT.md", 2), "no-readback-tail"),
+        (("orchestrate.md", 3), "no-readback-tail"),
+        (("prune-memory.md", 1), "unchained-write"),
+        (("prune-memory.md", 1), "prune-readback-tail"),
+    ],
+    ids=["direct-write", "SJ-write", "direct-tail", "SJ-tail", "prune-write", "prune-tail"],
+)
+def test_discarded_exit_code_fails_structure(site_key, mutation):
+    """A write or read-back whose exit code the block can discard fails the census."""
+    filename, _ordinal = site_key
+    spelling = {"comPACT.md": "direct", "orchestrate.md": "variable", "prune-memory.md": "plugin-root"}[filename]
+    body = _canonical_readback(site_key)
+    control = _one_synthetic_site(site_key, body, spelling=spelling)
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[site_key]) == []
+    event_type = JOURNAL_READBACK_MATRIX[site_key][0]
+    if mutation == "unchained-write":
+        text = _synthetic_command_text(
+            [(event_type, body)], spelling=spelling, write_tail="", write_guard=""
+        )
+        site = _parse_journal_sites(filename, text)[0]
+        expected = "write exit code is discarded"
+    else:
+        if mutation == "no-readback-tail":
+            mutated = body.replace(" " + _readback_tail(filename), "", 1)
+        else:
+            mutated = body.replace(
+                "verify-last --stdin <<'JSON'",
+                "verify-last --stdin <<'JSON' " + _readback_tail(filename),
+                1,
+            )
+        assert mutated != body
+        site = _one_synthetic_site(site_key, mutated, spelling=spelling)
+        expected = "read-back failure does not fail the block"
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[site_key])
+    assert any(expected in problem for problem in problems), problems
+
+
+def test_sj_block_readback_must_reuse_sj():
+    """Where the write uses "$SJ", the read-back reuses it rather than the full path."""
+    key = ("orchestrate.md", 3)
+    control = _one_synthetic_site(key, _canonical_readback(key), spelling="variable")
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+    event_type = JOURNAL_READBACK_MATRIX[key][0]
+    full_path_text = _synthetic_command_text(
+        [(event_type, _canonical_readback(key))], spelling="variable"
+    ).replace('"$SJ" verify-last', '"{plugin_root}/hooks/shared/session_journal.py" verify-last')
+    site = _parse_journal_sites("orchestrate.md", full_path_text)[0]
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any("does not match writer" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    "prefix_line,fence",
+    [
+        ('PYTHONUTF8=1 python3 "{plugin_root}/hooks/shared/session_journal.py" write \\', "bash"),
+        ('if python3 "{plugin_root}/hooks/shared/session_journal.py" write \\', "bash"),
+        ('python3 "{plugin_root}/hooks/shared/session_journal.py" write \\', "console"),
+        ('$ python3 "{plugin_root}/hooks/shared/session_journal.py" write \\', "console"),
+    ],
+    ids=["env-prefix", "if-prefix", "console-fence", "console-prompt"],
+)
+def test_write_census_finds_alternative_shapes(prefix_line, fence):
+    """A write in a valid alternative shape is censused, so a missing read-back fails."""
+    key = ("orchestrate.md", 3)
+    text = (
+        f"```{fence}\n"
+        f"{prefix_line}\n"
+        "  --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON' &&\n"
+        '{"phase": "{PHASE}", "status": "completed", "skip_reason": "", "metadata": {}}\n'
+        "JSON\n"
+        "```\n"
+    )
+    sites = _parse_journal_sites("orchestrate.md", text)
+    assert len(sites) == 1
+    assert sites[0].event_type == "phase_transition"
+    problems = _readback_problems(sites[0], JOURNAL_READBACK_MATRIX[key])
+    assert any("missing immediate physical-last-line read-back" in p for p in problems)
+
+
+def _render_live_site(site_key, journal_site_map, session_dir, payload_text):
+    """Render the literal write header, a chosen payload and the literal read-back."""
+    site = journal_site_map[site_key]
+    block = _parse_readback_block(site)
+    replacements = _writer_replacements(site.payload, block["spec_text"])
+    readback = _render_json_placeholders(
+        block["literal"], session_dir, {"{session_dir}": str(session_dir), **replacements}
+    )
+    header = _render_json_placeholders(site.write_block, session_dir, replacements)
+    sj = f'SJ="{COMMANDS_DIR.parent}/hooks/shared/session_journal.py"'
+    return "\n".join([sj, header, payload_text, "JSON", readback]) + "\n", site
+
+
+def _journal_lines(session_dir):
+    journal = Path(session_dir) / "session-journal.jsonl"
+    return journal.read_text(encoding="utf-8").splitlines() if journal.exists() else []
+
+
+@pytest.mark.parametrize(
+    "site_key",
+    list(JOURNAL_READBACK_MATRIX),
+    ids=[f"{filename}#{ordinal}" for filename, ordinal in JOURNAL_READBACK_MATRIX],
+)
+def test_failed_write_fails_block_despite_stale_matching_event(
+    site_key, tmp_path, journal_site_map
+):
+    """A write that fails cannot be covered by an earlier event with the same keys.
+
+    Runs without `set -e`, as an agent may run a single fence. Standard sites
+    must exit non-zero; prune-memory must report the failure, skip its
+    read-back and continue. The unguarded control proves the stale event would
+    otherwise satisfy the read-back.
+    """
+    site = journal_site_map[site_key]
+    is_prune = site.filename == "prune-memory.md"
+    replacements = _writer_replacements(site.payload, _parse_readback_block(site)["spec_text"])
+    payload_text = _render_write_payload(site.payload, tmp_path, replacements)
+    json.loads(payload_text)
+
+    good, _ = _render_live_site(site_key, journal_site_map, tmp_path, payload_text)
+    result = _run_readback(good + "echo BLOCK-CONTINUED\n", tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "FAILED]" not in result.stderr
+    assert len(_journal_lines(tmp_path)) == 1
+
+    broken_payload = payload_text + '"'
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(broken_payload)
+    broken, _ = _render_live_site(site_key, journal_site_map, tmp_path, broken_payload)
+    result = _run_readback(broken + "echo BLOCK-CONTINUED\n", tmp_path)
+    assert "[JOURNAL WRITE FAILED]" in result.stderr, result.stderr
+    assert "Journal read-back failed" not in result.stderr
+    assert len(_journal_lines(tmp_path)) == 1
+    if is_prune:
+        assert result.returncode == 0, result.stderr
+        assert "BLOCK-CONTINUED" in result.stdout
+    else:
+        assert result.returncode != 0, f"{site_key}: failed write passed: {result.stderr}"
+        assert "BLOCK-CONTINUED" not in result.stdout
+
+    if is_prune:
+        unguarded = broken.replace("if ! python3", "python3", 1).replace(
+            "\nthen\n" + _PRUNE_WRITE_FAILED + "\nelif ! ", "\nif ! ", 1
+        )
+    else:
+        unguarded = broken.replace("<<'JSON' &&\n", "<<'JSON'\n", 1)
+    assert unguarded != broken
+    control = _run_readback(unguarded, tmp_path)
+    assert control.returncode == 0 and "FAILED]" not in control.stderr, (
+        f"{site_key}: stale event no longer satisfies the read-back, so this arm "
+        f"cannot show the guard matters: {control.stderr}"
+    )
+    assert json.loads(_journal_lines(tmp_path)[-1])["type"] == site.event_type
+
+
+_READBACK_RECOVERY = (
+    "If a journal block fails with `Journal read-back failed`, read the last few "
+    "lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, "
+    "the write landed, so do not write it again; otherwise re-run only that write "
+    "and its read-back, once."
+)
+
+
+@pytest.mark.parametrize("filename", sorted(EXPECTED_JOURNAL_WRITE_COUNTS))
+def test_each_journal_command_states_readback_recovery_once(filename):
+    """Every file with a read-back tells the agent what to do when it fails, once."""
+    text = " ".join((COMMANDS_DIR / filename).read_text(encoding="utf-8").split())
+    recovery = _READBACK_RECOVERY
+    if filename == "wrap-up.md":
+        recovery = recovery.replace("If a journal block fails", "If the block fails", 1)
+    assert text.count(recovery) == 1, f"{filename}: read-back recovery instruction count"

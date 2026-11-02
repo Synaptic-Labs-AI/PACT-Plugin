@@ -71,11 +71,11 @@ trap 'rc=$?; echo "[JOURNAL WRITE FAILED] refresh.md (bash line $LINENO): \"${BA
 case '{true_or_false}' in
   true)
     python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
-    python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}},"nonempty":[],"absent":[]}
+    python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] refresh.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}}}
 JSON
     ;;
   false)
@@ -86,11 +86,11 @@ JSON
     ;;
 esac
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"consolidation_completed": {true_or_false}, "halt_active": {halt_active}, "halt_task_ids": {halt_task_ids}, "feature_task_id": "{feature_task_id}", "feature_subject": "{feature_subject}", "team_name": "{team_name}", "next_phase": "{next_phase}", "worktrees": {worktrees}, "pr_number": {pr_number}}
 JSON
-python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_refreshed","consolidation_completed":{true_or_false},"halt_active":{halt_active},"feature_task_id":"{feature_task_id}","team_name":"{team_name}"},"nonempty":[],"absent":[]}
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] refresh.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_refreshed","consolidation_completed":{true_or_false},"halt_active":{halt_active},"feature_task_id":"{feature_task_id}","team_name":"{team_name}"}}
 JSON
 ```
 
@@ -98,15 +98,15 @@ JSON
 
 ```bash
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"consolidation_completed": {true_or_false}, "halt_active": false}
 JSON
-python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_refreshed","consolidation_completed":{true_or_false},"halt_active":false},"nonempty":[],"absent":[]}
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] refresh.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_refreshed","consolidation_completed":{true_or_false},"halt_active":false}}
 JSON
 ```
 
-> ⚠️ **Heredoc-stdin contract**: the writes use `--stdin <<'JSON' ... JSON` (quoted delimiter), so an apostrophe in a substituted value cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
+> ⚠️ **Heredoc-stdin contract**: the writes use `--stdin <<'JSON' ... JSON` (quoted delimiter), so an apostrophe in a substituted value cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once.
 
 **Event fields**:
 

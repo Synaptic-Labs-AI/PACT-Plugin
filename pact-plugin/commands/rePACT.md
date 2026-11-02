@@ -29,16 +29,16 @@ Create a nested Task hierarchy as a child of the current context:
 6. On completion: Parent task unblocked
 ```
 
-**Sub-feature journal event** (after step 1's stamp): write a feature-level `variety_assessed` event keyed on the sub-feature task id (no `scope` field — feature-level is the discriminator's absent value):
+**Sub-feature journal event** (after step 1's stamp): write a feature-level `variety_assessed` event keyed on the sub-feature task id (no `scope` field — feature-level is the discriminator's absent value). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once.
 ```bash
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] rePACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"task_id": "{sub_feature_task_id}", "variety": {"total": N}}
 JSON
-python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{sub_feature_task_id}"},"nonempty":[],"absent":["scope"]}
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] rePACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{sub_feature_task_id}"},"absent":["scope"]}
 JSON
 ```
 
@@ -287,11 +287,11 @@ For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#tea
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] rePACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] rePACT.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
 6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):

@@ -1011,7 +1011,7 @@ def _literal_command_template(filename, marker, *, readback_count, values):
 
 def _inject_wrong_event_before_readback(template, session_dir, ordinal):
     """Put a valid wrong final event immediately before one literal read-back."""
-    starts = list(re.finditer(r"^[ \t]*python3 -I .*verify-last --stdin <<'JSON'$", template, re.MULTILINE))
+    starts = list(re.finditer(r"^[ \t]*python3 -I .*verify-last --stdin <<'JSON'.*$", template, re.MULTILINE))
     assert 1 <= ordinal <= len(starts)
     wrong_write = (
         f'python3 "{_SESSION_JOURNAL_PY}" write \\\n'
@@ -1216,7 +1216,7 @@ _STUB_GH_MERGED = (
 )
 
 
-def _run_wrap_up_bash(session_dir, *, consolidation_ran, wrong_readback=None):
+def _run_wrap_up_bash(session_dir, *, consolidation_ran, wrong_readback=None, divert_to=None):
     """Execute the wrap-up.md step-5 bash template against a tmp session_dir.
 
     Substitutes the shell-clamp's {consolidation_ran} with the literal
@@ -1246,6 +1246,10 @@ def _run_wrap_up_bash(session_dir, *, consolidation_ran, wrong_readback=None):
         template = _inject_wrong_event_before_readback(
             template, session_dir, wrong_readback
         )
+    if divert_to is not None:
+        needle = f"--type session_consolidated --session-dir '{session_dir}'"
+        assert template.count(needle) == 1
+        template = template.replace(needle, f"--type session_consolidated --session-dir '{divert_to}'")
     bindir = Path(session_dir) / "stub-bin"
     bindir.mkdir(parents=True, exist_ok=True)
     gh = bindir / "gh"
@@ -1337,6 +1341,31 @@ class TestWrapUpBashConditionalEmission:
         assert result.returncode != 0
         assert "Journal read-back failed" in result.stderr
         assert "session_refresh_consumed" in result.stderr
+
+    def test_diverted_write_reaches_readback_and_fails_loud(self, tmp_path):
+        """A session_consolidated write sent elsewhere fails the block at the read-back."""
+        session_dir = tmp_path / "session"
+        decoy = tmp_path / "decoy"
+        session_dir.mkdir()
+        decoy.mkdir()
+
+        result = _run_wrap_up_bash(
+            str(session_dir), consolidation_ran="true", divert_to=str(decoy)
+        )
+
+        assert result.returncode != 0, result.stderr
+        assert "Journal read-back failed" in result.stderr
+        assert "[JOURNAL WRITE FAILED] wrap-up.md" in result.stderr
+        types = [
+            json.loads(line)["type"]
+            for line in (session_dir / "session-journal.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert types == ["session_end"], types
+        decoy_types = [
+            json.loads(line)["type"]
+            for line in (decoy / "session-journal.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert decoy_types == ["session_consolidated"], decoy_types
 
     def test_consolidation_invalid_value_fails_fast(self, tmp_path):
         """{consolidation_ran}='True' → case `*` branch exits 1 with stderr; session_end already written.

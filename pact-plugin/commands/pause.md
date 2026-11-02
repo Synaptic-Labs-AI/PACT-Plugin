@@ -72,11 +72,11 @@ trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \"${BASH
 case '{true_or_false}' in
   true)
     python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
-    python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}},"nonempty":[],"absent":[]}
+    python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] pause.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}}}
 JSON
     ;;
   false)
@@ -87,15 +87,15 @@ JSON
     ;;
 esac
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
+  --type session_paused --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}
 JSON
-python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"session_paused","pr_number":{pr_number},"consolidation_completed":{true_or_false},"team_name":"{team_name}"},"nonempty":[],"absent":[]}
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] pause.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"session_paused","pr_number":{pr_number},"consolidation_completed":{true_or_false},"team_name":"{team_name}"}}
 JSON
 ```
 
-> ⚠️ **Heredoc-stdin contract**: This write uses `--stdin <<'JSON' ... JSON` (quoted delimiter). The quoted delimiter disables bash variable expansion, so an apostrophe in `{branch}` (e.g., `feat/o'connor-fix`) or in `{pr_url}` cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars when constructing the body).
+> ⚠️ **Heredoc-stdin contract**: This write uses `--stdin <<'JSON' ... JSON` (quoted delimiter). The quoted delimiter disables bash variable expansion, so an apostrophe in `{branch}` (e.g., `feat/o'connor-fix`) or in `{pr_url}` cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars when constructing the body). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once.
 
 **Event fields**:
 | Field | Type | Description |

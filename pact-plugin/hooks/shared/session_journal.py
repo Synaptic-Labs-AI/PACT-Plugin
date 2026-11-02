@@ -1885,38 +1885,92 @@ def _atomic_write(path: Path, data: bytes) -> bool:
 # --- CLI ---
 
 
-def _json_same(got: Any, want: Any) -> bool:
-    """JSON equality with recursive type identity, excluding bool/int coercion."""
+_VERIFY_LAST_REQUIRED_KEYS = frozenset({"session_dir", "exact"})
+_VERIFY_LAST_KEYS = _VERIFY_LAST_REQUIRED_KEYS | {"absent"}
+# Journal events nest 2-3 levels; a deeper comparison fails the check.
+_VERIFY_LAST_MAX_DEPTH = 64
+_VERIFY_LAST_TAIL_CHUNK = 64 * 1024
+
+
+class _VerifyDepthExceeded(Exception):
+    """A verify-last comparison nested deeper than _VERIFY_LAST_MAX_DEPTH."""
+
+
+def _json_same(got: Any, want: Any, depth: int = 0) -> bool:
+    """JSON equality with recursive type identity, excluding bool/int coercion.
+
+    Raises _VerifyDepthExceeded past _VERIFY_LAST_MAX_DEPTH levels of nesting.
+    """
+    if depth > _VERIFY_LAST_MAX_DEPTH:
+        raise _VerifyDepthExceeded
     if type(got) is not type(want):
         return False
     if isinstance(got, dict):
         return got.keys() == want.keys() and all(
-            _json_same(got[key], want[key]) for key in got
+            _json_same(got[key], want[key], depth + 1) for key in got
         )
     if isinstance(got, list):
         return len(got) == len(want) and all(
-            _json_same(a, b) for a, b in zip(got, want)
+            _json_same(a, b, depth + 1) for a, b in zip(got, want)
         )
     return got == want
 
 
 def _validate_verify_last_spec(spec: Any) -> str | None:
-    """Return a reason when a verify-last spec violates its four-key contract."""
+    """Return a reason when a verify-last spec violates its contract.
+
+    Contract: {"session_dir": str, "exact": {"type": non-empty str, ...},
+    "absent": [str, ...]} with "absent" optional and no other keys.
+    """
     if not isinstance(spec, dict):
         return "spec must be a JSON object"
-    required = {"session_dir", "exact", "nonempty", "absent"}
-    if set(spec) != required:
-        return "spec must contain exactly session_dir, exact, nonempty, absent"
+    unknown = sorted(set(spec) - _VERIFY_LAST_KEYS)
+    if unknown:
+        return f"unknown spec key(s) {json.dumps(unknown)}"
+    missing = sorted(_VERIFY_LAST_REQUIRED_KEYS - set(spec))
+    if missing:
+        return f"missing required spec key(s) {json.dumps(missing)}"
     if not isinstance(spec["session_dir"], str):
         return "session_dir must be a string"
     if not isinstance(spec["exact"], dict):
         return "exact must be an object"
-    for key in ("nonempty", "absent"):
-        if not isinstance(spec[key], list) or any(
-            not isinstance(value, str) for value in spec[key]
-        ):
-            return f"{key} must be an array of strings"
+    event_type = spec["exact"].get("type")
+    if not isinstance(event_type, str) or not event_type:
+        return "exact.type must be a non-empty string"
+    absent = spec.get("absent", [])
+    if not isinstance(absent, list) or any(
+        not isinstance(value, str) for value in absent
+    ):
+        return "absent must be an array of strings"
     return None
+
+
+def _read_final_line(journal: Path) -> bytes | None:
+    """Return the journal's final line as bytes, or None for an empty file.
+
+    Reads backwards from EOF in fixed chunks and never reads past the start
+    of the final line. One trailing b"\\n" terminates the line; lines split
+    on b"\\n" only, so earlier lines are never read or decoded.
+    """
+    with journal.open("rb") as fh:
+        end = fh.seek(0, os.SEEK_END)
+        if end == 0:
+            return None
+        fh.seek(end - 1)
+        if fh.read(1) == b"\n":
+            end -= 1
+        start = 0
+        pos = end
+        while pos > 0:
+            step = min(_VERIFY_LAST_TAIL_CHUNK, pos)
+            pos -= step
+            fh.seek(pos)
+            newline = fh.read(step).rfind(b"\n")
+            if newline != -1:
+                start = pos + newline + 1
+                break
+        fh.seek(start)
+        return fh.read(end - start)
 
 
 def _verify_last() -> int:
@@ -1945,15 +1999,22 @@ def _verify_last() -> int:
 
     journal = _journal_path_from(spec["session_dir"])
     try:
-        last_line = journal.read_text(encoding="utf-8").splitlines()[-1]
-        event = json.loads(last_line)
-    except IndexError:
-        print("session_journal: verify-last journal is empty", file=sys.stderr)
-        return 1
-    except (OSError, UnicodeError) as exc:
+        last_line = _read_final_line(journal)
+    except OSError as exc:
         print(f"session_journal: verify-last failed to read journal: {exc}",
               file=sys.stderr)
         return 1
+    if last_line is None:
+        print("session_journal: verify-last journal is empty", file=sys.stderr)
+        return 1
+    try:
+        text = last_line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(f"session_journal: final journal line is not valid UTF-8: {exc}",
+              file=sys.stderr)
+        return 1
+    try:
+        event = json.loads(text)
     except (json.JSONDecodeError, ValueError, RecursionError) as exc:
         print(f"session_journal: invalid final journal JSON: {exc}",
               file=sys.stderr)
@@ -1963,13 +2024,17 @@ def _verify_last() -> int:
               file=sys.stderr)
         return 1
 
-    bad = [
-        key
-        for key, want in spec["exact"].items()
-        if key not in event or not _json_same(event[key], want)
-    ]
-    bad += [key for key in spec["nonempty"] if not event.get(key)]
-    bad += [key for key in spec["absent"] if key in event]
+    try:
+        bad = [
+            key
+            for key, want in spec["exact"].items()
+            if key not in event or not _json_same(event[key], want)
+        ]
+    except _VerifyDepthExceeded:
+        print("session_journal: verify-last comparison exceeds max depth "
+              f"{_VERIFY_LAST_MAX_DEPTH}", file=sys.stderr)
+        return 1
+    bad += [key for key in spec.get("absent", []) if key in event]
     if bad:
         print(f"Journal read-back failed for {bad!r}: {event!r}", file=sys.stderr)
         return 1
@@ -2093,6 +2158,12 @@ def _build_cli():
     verify_p = sub.add_parser(
         "verify-last",
         help="Verify the physical last event against a JSON spec",
+        description=(
+            "Verify the physical last event against a JSON spec on stdin:\n"
+            '  {"session_dir": "/abs/session", "exact": {"type": "commit",'
+            ' "sha": "abc1234"}, "absent": ["scope"]}\n'
+            "exact.type is required; absent is optional; no other keys."
+        ),
         formatter_class=fmt,
         epilog=_cli_examples(verify_ex),
     )
