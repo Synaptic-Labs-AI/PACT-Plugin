@@ -1005,10 +1005,8 @@ def stays_in_declared_project(
                     _rev_parse_path(resolved, "--git-common-dir")
                     == Path(recorded_common_dir)
                 )
-            if resolved == Path.home().resolve():
-                return False
         except (OSError, RuntimeError):
-            # RuntimeError: Path.home() when no home directory can be found.
+            # RuntimeError: a symlink loop, on Pythons before 3.13.
             return False
     if same_repository(anchor, resolved):
         return True

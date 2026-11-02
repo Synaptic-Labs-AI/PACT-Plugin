@@ -431,3 +431,22 @@ def test_a_removed_declaration_still_resolves_into_its_own_repository(
     )
 
     assert stays_in_declared_project(declared, resolved, document) is True
+
+
+def test_a_removed_declaration_never_resolves_into_a_git_home(tmp_path, monkeypatch):
+    """No record: a removed declaration under a git-versioned $HOME, landing
+    at $HOME with the legacy $HOME/CLAUDE.md, is refused. $HOME's own
+    .claude/CLAUDE.md is the default profile's global file, so the root is
+    user-global whichever document was found."""
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                "GIT_CEILING_DIRECTORIES"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    home = Path.home()
+    home.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", ".", cwd=home)
+    _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=home)
+    legacy = home / "CLAUDE.md"
+    legacy.write_text("# legacy\n", encoding="utf-8")
+
+    assert stays_in_declared_project(home / "proj-gone", home, legacy) is False
