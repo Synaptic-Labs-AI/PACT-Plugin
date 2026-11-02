@@ -608,3 +608,51 @@ def test_a_case_variant_is_not_user_global_where_the_volume_matches_case(
     monkeypatch.setattr(project_scope, "_case_insensitive", lambda _directory: False)
 
     assert project_scope.is_user_global_document(config / "claude.md") is False
+
+
+def _plain_project(tmp_path, monkeypatch) -> Path:
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                "GIT_CEILING_DIRECTORIES"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(project_scope, "recorded_project_dir", lambda: "")
+    project = tmp_path / "proj"
+    project.mkdir()
+    return project
+
+
+def test_a_config_root_spelled_with_dots_over_a_missing_segment_is_the_same_root(
+    tmp_path, monkeypatch
+):
+    """CLAUDE_CONFIG_DIR=<proj>/missing/../.claude names <proj>/.claude, so the
+    project's .claude/CLAUDE.md is the global file however it is spelled."""
+    project = _plain_project(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "CLAUDE_CONFIG_DIR", os.path.join(str(project), "missing", "..", ".claude")
+    )
+    assert not (project / "missing").exists()
+
+    assert memory_root_of(project) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_a_relative_config_root_is_read_against_the_cwd(tmp_path, monkeypatch):
+    """A relative CLAUDE_CONFIG_DIR is the cwd-relative path, as every other
+    consumer of the config root reads it: from <t>/work, `../proj/.claude`
+    names the project's .claude, and from elsewhere the same value names
+    another directory, so the project keeps its root."""
+    project = _plain_project(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    (work / "deeper").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", os.path.join("..", "proj", ".claude"))
+
+    monkeypatch.chdir(work)
+    assert memory_root_of(project) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+    monkeypatch.chdir(work / "deeper")
+    assert memory_root_of(project) == (project, None)
+
+
+def test_an_absolute_config_root_elsewhere_leaves_a_project_known(tmp_path, monkeypatch):
+    project = _plain_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    assert memory_root_of(project) == (project, None)

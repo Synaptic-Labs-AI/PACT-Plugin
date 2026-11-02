@@ -1303,6 +1303,10 @@ def user_global_documents() -> Tuple[Path, ...]:
     config root's, and the default profile's `~/.claude/CLAUDE.md`, which a
     profile switch makes global again. Deduplicated by same_path. A source
     that raises is skipped; an empty tuple means neither could be computed.
+
+    Each location is made absolute against the cwd and resolved, so `..` over
+    a missing segment and a relative CLAUDE_CONFIG_DIR name the directory
+    every other consumer of the config root reads and writes.
     """
     found: List[Path] = []
     for source in (
@@ -1310,9 +1314,10 @@ def user_global_documents() -> Tuple[Path, ...]:
         lambda: Path.home() / ".claude" / "CLAUDE.md",
     ):
         try:
-            path = source()
+            path = source().absolute().resolve(strict=False)
         except (OSError, RuntimeError, KeyError, ValueError):
-            # RuntimeError / KeyError: Path.home() with no resolvable home.
+            # RuntimeError / KeyError: Path.home() with no resolvable home;
+            # RuntimeError: a symlink loop, on Pythons before 3.13.
             continue
         if not any(same_path(path, kept) for kept in found):
             found.append(path)
