@@ -1386,6 +1386,12 @@ def _display_root_unknown_reason() -> Optional[str]:
     therefore not always "no file", and the sync writers ask this to report
     WHICH cause it was.
 
+    IT IS ASKED BEFORE THE SEARCH, NOT AFTER IT. The sync writers call this
+    first and use the resolver only for the PATH, so the verdict and the
+    sentence reporting it are one observation. Asking after a failed search
+    would be a second one, and a state change between the two could turn
+    ROOT_UNKNOWN into UNRESOLVED and silence the skip.
+
     THE ANCHOR IS THE DECLARED DIR, ELSE THE SESSION RECORD, ELSE THE CWD --
     the same precedence the resolver uses. Without the cwd case the status
     was unreachable with the variable unset (the resolver returned
@@ -2633,10 +2639,18 @@ def sync_to_claude_md(
     _refuse_ambient_target_under_pytest(target, claude_md_root)
     _refuse_ambient_sync_on_project_dir_disagreement(target, claude_md_root)
 
+    # THE VERDICT AND ITS TEXT ARE ONE OBSERVATION, TAKEN BEFORE THE SEARCH.
+    # The resolver below supplies only the PATH; asking why it found nothing
+    # would be a second resolution, and a state change between the two could
+    # turn ROOT_UNKNOWN into UNRESOLVED and the skip silent. Asking first is
+    # safe: a cause that says unknown does not suppress a path the search DOES
+    # find (the removed-worktree record retarget is exactly that case).
     if target is not None:
         claude_md_path = Path(target)
         resolved_root = _project_root_of(claude_md_path)
+        unknown_reason = None
     else:
+        unknown_reason = _display_root_unknown_reason()
         claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
     # Escape guard runs AFTER resolution because it needs the resolved
     # root; the guards above run before because they need only the
@@ -2677,7 +2691,6 @@ def sync_to_claude_md(
     # silently anchors on a directory named `None` if one ever exists. Naming
     # both halves here costs one condition and depends on nobody's promise.
     if claude_md_path is None or project_root is None:
-        unknown_reason = _display_root_unknown_reason()
         if unknown_reason is not None:
             # No write: the resolver could not identify the project's file.
             logger.warning(
@@ -3060,6 +3073,9 @@ def sync_retrieved_to_claude_md(
     # in production today; it protects the path's future re-enablement).
     _refuse_ambient_sync_on_project_dir_disagreement(None, claude_md_root)
 
+    # Same single observation as the sibling: the verdict and its text are
+    # taken BEFORE the search, which supplies only the path.
+    unknown_reason = _display_root_unknown_reason()
     claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
     _refuse_ambient_sync_on_declared_scope_escape(
         None, claude_md_root, resolved_root, claude_md_path
@@ -3073,7 +3089,6 @@ def sync_retrieved_to_claude_md(
     )
 
     if claude_md_path is None or project_root is None:
-        unknown_reason = _display_root_unknown_reason()
         if unknown_reason is not None:
             logger.warning(
                 "Not syncing retrieved memories to CLAUDE.md: %s, so the "

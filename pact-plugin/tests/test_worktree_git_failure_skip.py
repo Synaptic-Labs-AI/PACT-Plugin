@@ -396,7 +396,13 @@ def test_the_write_back_reports_nothing_when_no_cause_is_identified(
     repo, tmp_path, monkeypatch
 ):
     """Negative control: the guard believes the root is unknown while the
-    cause resolver says otherwise, so the channel emits NOTHING."""
+    cause resolver says otherwise, so the channel emits NOTHING.
+
+    WHAT THIS CERTIFIES, AND WHAT IT DOES NOT: it certifies that a None
+    cause produces no output. It CANNOT see a fallback placed INSIDE the
+    guarded branch, because a None cause never enters that branch; the
+    single-line production grep for the old phrase is what certifies no
+    fallback text exists there."""
     import bootstrap_marker_writer as writer
 
     forged = _forged_gitfile(repo, tmp_path, "no-cause-write-back")
@@ -490,7 +496,13 @@ def test_realign_reports_nothing_when_no_cause_is_identified(
     repo, tmp_path, monkeypatch, capsys
 ):
     """Negative control: the guard believes the root is unknown while the
-    cause resolver says otherwise, so nothing reaches stderr."""
+    cause resolver says otherwise, so nothing reaches stderr.
+
+    WHAT THIS CERTIFIES, AND WHAT IT DOES NOT: it certifies that a None
+    cause produces no output. It CANNOT see a fallback placed INSIDE the
+    guarded branch, because a None cause never enters that branch; the
+    single-line production grep for the old phrase is what certifies no
+    fallback text exists there."""
     import shared.project_scope as project_scope
     from shared.realign_team import _write_team_line
 
@@ -771,7 +783,13 @@ def test_the_prompt_gate_reports_nothing_when_no_cause_is_identified(
     repo, tmp_path, monkeypatch
 ):
     """Negative control: the guard believes the root is unknown while the
-    cause resolver says otherwise, so the gate emits no skip line."""
+    cause resolver says otherwise, so the gate emits no skip line.
+
+    WHAT THIS CERTIFIES, AND WHAT IT DOES NOT: it certifies that a None
+    cause produces no output. It CANNOT see a fallback placed INSIDE the
+    guarded branch, because a None cause never enters that branch; the
+    single-line production grep for the old phrase is what certifies no
+    fallback text exists there."""
     import bootstrap_prompt_gate as writer
     import shared.project_scope as project_scope
 
@@ -803,7 +821,13 @@ def test_the_archive_reports_no_unknown_cause_when_none_is_identified(
     RESOLUTION, not a write: with the cause resolver stubbed to None the guard
     and the resolver disagree, and the refusal must not invent one of the
     three causes. Whatever it does instead is allowed, but it may not name a
-    cause that was never identified."""
+    cause that was never identified.
+
+    WHAT THIS CERTIFIES, AND WHAT IT DOES NOT: it certifies that a None
+    cause produces no output. It CANNOT see a fallback placed INSIDE the
+    guarded branch, because a None cause never enters that branch; the
+    single-line production grep for the old phrase is what certifies no
+    fallback text exists there."""
     import archive_pin
     import shared.project_scope as project_scope
 
@@ -1301,8 +1325,12 @@ def test_the_session_start_reports_nothing_when_no_cause_is_identified(
     than guess a sentence. A plain known-root shape never reaches the guarded
     branch at all, so the discriminating shape is the disagreement: the guard
     still believes the root is unknown while the cause resolver says otherwise.
-    Stubbing the resolver to None is exactly that disagreement, and it is the
-    only route by which a reintroduced `or 'could not...'` could fire."""
+
+    WHAT THIS CERTIFIES, AND WHAT IT DOES NOT: it certifies that a None
+    cause produces no output. It CANNOT see a fallback placed INSIDE the
+    guarded branch, because a None cause never enters that branch; the
+    single-line production grep for the old phrase is what certifies no
+    fallback text exists there."""
     import session_init as gate
 
     forged = _forged_gitfile(repo, tmp_path, "no-cause-session")
