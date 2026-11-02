@@ -175,10 +175,10 @@ try:
     import shared.pact_context as pact_context
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
-    from shared.claude_md_manager import resolve_project_claude_md_path
+    from shared.claude_md_manager import resolve_managed_document
     from shared.project_scope import (
-        project_memory_root_and_cause,
-        unknown_root_reason,
+        session_memory_root,
+        unknown_root_status,
     )
     from shared.marker_schema import (
         MARKER_MAX_BYTES,
@@ -427,7 +427,7 @@ def _write_back_aligned_team_name(input_data: dict) -> str | None:
     bearing action; a write-back failure must not abort it or crash the hook.
 
     CLAUDE.md guard (HARD requirement): the target is resolved via
-    ``resolve_project_claude_md_path`` and ``exists()``-guarded BEFORE calling
+    ``resolve_managed_document`` and ``exists``-guarded BEFORE calling
     ``update_session_info``. That function's Case-0 branch CREATES a brand-new
     PACT-managed CLAUDE.md when the file is absent — and at the project-memory
     root this hook targets (the main checkout for a linked worktree, #1653)
@@ -477,43 +477,35 @@ def _write_back_aligned_team_name(input_data: dict) -> str | None:
             started_at=pact_context.get_pact_context().get("started_at") or None,
         )
 
-        # CLAUDE.md write-back: exists()-guard BEFORE update_session_info so we
-        # never trip its Case-0 create-on-absent branch in a worktree. Resolve
-        # the project CLAUDE.md path the same way update_session_info does.
+        # CLAUDE.md write-back: exists-guard BEFORE update_session_info so we
+        # never trip its Case-0 create-on-absent branch. The guard and the
+        # write use the SAME ManagedDocument.
         #
         # TOCTOU NOTE (security, mitigated / out-of-scope): there is a window
         # between this exists() check and update_session_info's write. To exploit
         # it an attacker would need write access to the project dir AS THE SAME OS
         # USER running the hook — at which point the box is already compromised
         # (they could edit CLAUDE.md, the context file, or the hook itself
-        # directly). update_session_info itself re-resolves + rewrites the whole
-        # managed block atomically under its own logic, so the only residual is a
+        # directly). update_session_info rewrites the whole managed block
+        # atomically, so the only residual is a
         # benign cosmetic write. No cross-user privilege boundary is crossed here,
         # so this is out-of-scope by the same-user trust model.
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        if not project_dir:
+        # ONE observation: the session's anchor, root and cause. Only a
+        # DECLARED anchor writes the block. An UNKNOWN root writes nothing,
+        # and the skip is RETURNED so the caller emits it as
+        # additionalContext, the same user-visible channel session_init uses.
+        session = session_memory_root()
+        if not session.declared:
             return
-        # The exists() guard and the write below must resolve the SAME target
-        # (#1653). On a worktree lead that target is the main checkout, so a
-        # guard left on the worktree would silently suppress the write.
-        #
-        # A DECLARED project dir whose memory root is UNKNOWN must write
-        # nothing: `project_memory_root` fails SAFE TO ITS INPUT, which for a
-        # writer means planting in the worktree. The skip is RETURNED so the
-        # caller emits it as additionalContext, the same user-visible channel
-        # session_init uses for its step 3/3b skip.
-        # ONE OBSERVATION DECIDES BOTH THE GUARD AND THE TEXT (see
-        # `project_memory_root_and_cause`).
-        memory_root, root_cause = project_memory_root_and_cause(project_dir)
-        if root_cause is not None:
-            return (
-                f"Project CLAUDE.md skipped: "
-                f"{unknown_root_reason(root_cause, project_dir)}, so the "
-                "project memory target is unknown; this prompt wrote nothing to "
-                "either checkout."
+        if session.cause is not None:
+            return unknown_root_status(
+                "Project CLAUDE.md",
+                session.cause,
+                session.anchor,
+                "this prompt wrote nothing to either checkout.",
             )
-        target_file, _source = resolve_project_claude_md_path(memory_root)
-        if not target_file.exists():
+        doc = resolve_managed_document(session.root)
+        if not doc.exists:
             # Absent at the project-memory root: SKIP the CLAUDE.md
             # write. The context-file write-back above already happened; the
             # human-readable line just stays absent, which is correct here.
@@ -531,8 +523,8 @@ def _write_back_aligned_team_name(input_data: dict) -> str | None:
         # team name + the full correct tuple.
         update_session_info(
             session_id, aligned, session_dir, plugin_root,
-            started=read_session_started(memory_root),
-            project_dir=memory_root,
+            started=read_session_started(doc=doc),
+            doc=doc,
         )
     except Exception as e:
         print(

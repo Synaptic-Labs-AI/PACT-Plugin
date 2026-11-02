@@ -50,12 +50,12 @@ import logging
 import os
 import shutil
 import subprocess
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 import session_init
+from shared.project_scope import SessionRoot
 
 LEAD = "PACT:pact-orchestrator"
 SESSION_ID = "dddddddd-eeee-ffff-0000-111111111111"
@@ -410,11 +410,11 @@ def test_the_write_back_reports_nothing_when_no_cause_is_identified(
     _patch_bootstrap_context(monkeypatch, writer, forged, session_dir)
     calls = []
 
-    def known_root(pd):
-        calls.append(pd)
-        return (Path(str(pd)), None)
+    def known_root():
+        calls.append(forged)
+        return SessionRoot(forged, True, forged, None)
 
-    monkeypatch.setattr(writer, "project_memory_root_and_cause", known_root)
+    monkeypatch.setattr(writer, "session_memory_root", known_root)
 
     status = writer._write_back_aligned_team_name({"agent_type": LEAD})
 
@@ -515,11 +515,11 @@ def test_realign_reports_nothing_when_no_cause_is_identified(
     monkeypatch.chdir(forged)
     calls = []
 
-    def known_root(pd):
-        calls.append(pd)
-        return (Path(str(pd)), None)
+    def known_root():
+        calls.append(forged)
+        return SessionRoot(forged, True, forged, None)
 
-    monkeypatch.setattr(project_scope, "project_memory_root_and_cause", known_root)
+    monkeypatch.setattr(project_scope, "session_memory_root", known_root)
 
     _write_team_line("sid", "session-new", str(session_dir), "/plugin")
 
@@ -805,18 +805,18 @@ def test_the_prompt_gate_reports_nothing_when_no_cause_is_identified(
     _seed_session_blocks(monkeypatch, writer, repo, forged, session_dir)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    # FAULT INJECTION, NOT A PRODUCTION SHAPE. `project_memory_root_and_cause`
-    # returns (given, cause) with a real Path on every path, so (None, None)
-    # cannot occur; this stub exists only to distinguish a cause-driven guard
-    # from a root-driven one. The call count below proves the stub is REACHED;
-    # it says nothing about a fallback placed inside the guarded branch.
+    # FAULT INJECTION: the observation reports a KNOWN root for a directory
+    # the real classifier calls unverified, so the skip text must come from
+    # the observation's cause and nothing else. The call count below proves
+    # the stub is REACHED; it says nothing about a fallback placed inside the
+    # guarded branch.
     calls = []
 
-    def no_cause(pd):
-        calls.append(pd)
-        return (None, None)
+    def no_cause():
+        calls.append(forged)
+        return SessionRoot(forged, True, forged, None)
 
-    monkeypatch.setattr(project_scope, "project_memory_root_and_cause", no_cause)
+    monkeypatch.setattr(project_scope, "session_memory_root", no_cause)
 
     out = writer._record_unrecorded_lead(_prompt_gate_frame(), str(session_dir))
 
@@ -1353,7 +1353,6 @@ def test_the_session_start_reports_nothing_when_no_cause_is_identified(
     single-line production grep for the old phrase is what certifies no
     fallback text exists there."""
     import session_init as gate
-    from shared.project_scope import SessionRoot
 
     forged = _forged_gitfile(repo, tmp_path, "no-cause-session")
     calls = []

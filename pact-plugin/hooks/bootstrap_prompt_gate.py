@@ -391,12 +391,12 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         from shared.claude_md_manager import (
             SESSION_END_MARKER,
             SESSION_START_MARKER,
-            resolve_project_claude_md_path,
+            resolve_managed_document,
         )
         from shared.project_scope import (
             _record_worktree_identity,
-            project_memory_root_and_cause,
-            unknown_root_reason,
+            session_memory_root,
+            unknown_root_status,
         )
         from shared.session_journal import append_event, make_event
         from shared.session_resume import (
@@ -415,53 +415,38 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         session_id = str(input_data["session_id"])
         team = pact_context.get_team_name()
         plugin_root = pact_context.get_plugin_root()
-        # update_session_info writes the PROJECT-MEMORY root's file (#1653):
-        # CLAUDE_PROJECT_DIR for a main checkout, the main checkout for a
-        # linked worktree. The block is looked for there, through the same
-        # resolver.
-        env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        project_dir = env_project_dir or os.getcwd()
-        # The block is read AND rewritten at the project-memory root, so a
-        # worktree lead reads the main checkout's block (#1653). Non-worktree
-        # input is returned unchanged. Only the env-declared branch below
-        # reads a block, so only it needs the root.
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "") or os.getcwd()
+        # The session's block is read AND rewritten in its ONE managed
+        # document (the main checkout's for a linked worktree), resolved from
+        # ONE observation. Only a DECLARED anchor reads or rewrites a block: a
+        # frame the platform handed no project dir rewrites nothing.
         #
         # AN UNKNOWN root means NO block read and NO rewrite, and it is
-        # REPORTED rather than silently skipped: `project_memory_root` fails
-        # OPEN to its input, so on a git failure this function would rewrite a
-        # worktree CLAUDE.md while returning "Session info updated" -- a
-        # success message about the wrong file. The journal recording below
-        # still runs; it is not project memory.
-        # ONE OBSERVATION DECIDES BOTH THE GUARD AND THE TEXT (see
-        # `project_memory_root_and_cause`): a second resolution between them
-        # could disagree and turn the skip into a silent one.
-        memory_root = None
-        root_cause = None
-        if env_project_dir:
-            resolved_root, root_cause = project_memory_root_and_cause(
-                env_project_dir
-            )
-            memory_root = resolved_root if root_cause is None else None
-
+        # REPORTED with the cause and anchor of that same observation. The
+        # journal recording below still runs; it is not project memory.
+        session = session_memory_root()
+        doc = None
         claim = None
         prev_session_dir = None
         block_status = None
-        if root_cause is not None:
-            block_status = (
-                f"Project CLAUDE.md skipped: "
-                f"{unknown_root_reason(root_cause, env_project_dir)}, so the "
-                "project memory target is unknown; the session block was not "
-                "rewritten."
-            )
+        if session.declared:
+            if session.cause is not None:
+                block_status = unknown_root_status(
+                    "Project CLAUDE.md",
+                    session.cause,
+                    session.anchor,
+                    "the session block was not rewritten.",
+                )
+            else:
+                doc = resolve_managed_document(session.root)
         try:
-            if env_project_dir and memory_root is not None:
-                claude_md, source = resolve_project_claude_md_path(memory_root)
+            if doc is not None:
                 # Read-only here (markers and the Resume line are ASCII); the
                 # rewrite below decodes strictly and skips a file that is not
                 # UTF-8, reporting it in its status.
                 content = (
-                    "" if source == "new_default"
-                    else claude_md.read_text(encoding="utf-8", errors="replace")
+                    doc.path.read_text(encoding="utf-8", errors="replace")
+                    if doc.exists else ""
                 )
                 block = parse(content).find_block(
                     SESSION_START_MARKER, SESSION_END_MARKER
@@ -469,7 +454,9 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 if block.state is State.FOUND and (
                     recorded_session_id(content) != session_id
                 ):
-                    prev_session_dir = _extract_prev_session_dir(memory_root)
+                    prev_session_dir = _extract_prev_session_dir(
+                        project_dir, doc=doc
+                    )
                     claim = check_resume_state(prev_session_dir, launch=True)
                 if block.state not in (State.FOUND, State.ABSENT):
                     # Not read and not rewritten, and nothing is locked or
@@ -485,8 +472,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     # still returns the claim. A raise up to and inside this
                     # call is caught below and classified like its status.
                     block_status = update_session_info(
-                        session_id, team, session_dir, plugin_root,
-                        project_dir=memory_root,
+                        session_id, team, session_dir, plugin_root, doc=doc,
                     )
         except Exception as e:  # noqa: BLE001 — classified and bounded below
             block_status = session_info_failure(e)

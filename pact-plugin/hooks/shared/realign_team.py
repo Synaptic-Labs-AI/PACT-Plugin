@@ -108,41 +108,35 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     bootstrap_marker_writer: the file must already exist (update_session_info
     creates one when it is absent), and the journal must already hold a
     session_start (until then bootstrap_prompt_gate owns the block)."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir or not session_dir:
+    if not session_dir:
         return
-    # The exists() guard and the write below must resolve the SAME target
-    # (#1653). On a worktree lead that target is the main checkout, so a guard
-    # left on the worktree would silently suppress the write.
-    #
-    # A DECLARED project dir whose memory root is UNKNOWN must write nothing:
-    # `project_memory_root` fails SAFE TO ITS INPUT, which for a writer means
-    # planting in the worktree. stderr is this command's problem surface (the
-    # exit contract stays 0 -- a skip is not a refusal).
-    # ONE OBSERVATION DECIDES BOTH THE GUARD AND THE TEXT (see
-    # `project_memory_root_and_cause`).
-    memory_root, root_cause = project_scope.project_memory_root_and_cause(
-        project_dir
-    )
-    if root_cause is not None:
+    # ONE observation: the session's anchor, root and cause; the exists
+    # guard and the write use the SAME ManagedDocument. Only a DECLARED
+    # anchor writes the block. An UNKNOWN root writes nothing; stderr is this
+    # command's problem surface (the exit contract stays 0 -- a skip is not a
+    # refusal).
+    session = project_scope.session_memory_root()
+    if not session.declared:
+        return
+    if session.cause is not None:
         print(
-            f"realign_team: project CLAUDE.md skipped: "
-            f"{project_scope.unknown_root_reason(root_cause, project_dir)}, so "
-            "the project memory target is unknown; nothing was written to "
-            "either checkout.",
+            project_scope.unknown_root_status(
+                "realign_team: project CLAUDE.md",
+                session.cause,
+                session.anchor,
+                "nothing was written to either checkout.",
+            ),
             file=sys.stderr,
         )
         return
-    target_file, _source = claude_md_manager.resolve_project_claude_md_path(
-        memory_root
-    )
-    if (target_file.exists()
+    doc = claude_md_manager.resolve_managed_document(session.root)
+    if (doc.exists
             and session_journal.read_last_event_from(
                 session_dir, "session_start") is not None):
         session_resume.update_session_info(
             session_id, team_name, session_dir, plugin_root,
-            started=session_resume.read_session_started(memory_root),
-            project_dir=memory_root,
+            started=session_resume.read_session_started(doc=doc),
+            doc=doc,
         )
 
 
