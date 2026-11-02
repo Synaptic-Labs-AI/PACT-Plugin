@@ -632,14 +632,18 @@ def test_gate_site_claude_md_absent_falls_back_to_original_message(
 def test_gate_site_unset_project_dir_falls_back_to_original_message(
     tmp_path, monkeypatch, capsys
 ):
-    """M2 sibling: CLAUDE_PROJECT_DIR UNSET → detector returns None (cannot
-    locate CLAUDE.md) → rule-⑧ deny with NO stale diagnosis, end-to-end. (The
-    composer appends the cause enumeration on this path.)"""
+    """M2 sibling: CLAUDE_PROJECT_DIR UNSET and the cwd (the anchor that
+    replaces it) holds no project CLAUDE.md → detector returns None → rule-⑧
+    deny with NO stale diagnosis, end-to-end. (The composer appends the cause
+    enumeration on this path.)"""
     _full_setup(monkeypatch, tmp_path, tasks=(("someone-else", "pending"),))
     _seed_team_with_lead(
         tmp_path, _TEAM, _LIVE_SESSION_ID, tasks=(("someone-else", "pending"),)
     )
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    empty = tmp_path / "no-project-memory"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
 
     code, out = _run_main(_make_input(), capsys)
 

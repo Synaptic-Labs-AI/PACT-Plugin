@@ -659,10 +659,13 @@ class TestStalenessDetection:
         assert _detect_stale_session_block({}) is None
         assert _detect_stale_session_block({"session_id": ""}) is None
 
-    def test_missing_project_dir_returns_none(self, monkeypatch):
+    def test_missing_project_dir_returns_none(self, monkeypatch, tmp_path):
+        """No declaration, so the anchor is the cwd: an empty directory with
+        no project CLAUDE.md gives no warning."""
         from bootstrap_prompt_gate import _detect_stale_session_block
 
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
 
         assert _detect_stale_session_block(
             {"session_id": self._ACTUAL}) is None
