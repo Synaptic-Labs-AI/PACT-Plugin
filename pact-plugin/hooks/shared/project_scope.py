@@ -109,17 +109,13 @@ def _git_output(directory: Path, *args: str) -> Optional[str]:
 
 
 def _rev_parse_path(directory: Path, flag: str) -> Optional[Path]:
-    """Return `git -C <directory> rev-parse <flag>` as a resolved path, or None."""
-    output = _git_output(directory, "rev-parse", flag)
-    if output is None:
-        return None
-    path = Path(output)
-    if not path.is_absolute():
-        path = Path(directory) / path
-    try:
-        return path.resolve()
-    except OSError:
-        return None
+    """Return `git -C <directory> rev-parse <flag>` as a resolved path, or None.
+
+    The path half of `_raw_rev_parse`, so every rev-parse field is read the
+    same way: UNSTRIPPED (a path's own trailing whitespace survives, matching
+    the worktree listing) and total.
+    """
+    return _raw_rev_parse(Path(directory), flag)[0]
 
 
 def same_repository(env_dir: Path, base: Path) -> bool:
