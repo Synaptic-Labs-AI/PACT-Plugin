@@ -315,3 +315,28 @@ def test_the_written_resume_line_carries_the_lead_flag_and_parses(
     assert f"`claude --agent PACT:pact-orchestrator --resume {_LIVE_ID}`" in written
     m = _RESUME_LINE_RE.search(written)
     assert m is not None and m.group(1) == _LIVE_ID
+
+
+@pytest.mark.parametrize("raised", [ValueError, RuntimeError, TypeError])
+def test_a_resolution_that_raises_any_error_is_no_warning(tmp_path, monkeypatch, raised):
+    """The detector is advisory: a resolution failure of ANY kind -- not only
+    OSError -- answers "no warning", because a raise here reaches a consumer's
+    fail-open and suppresses the whole injection, the bootstrap instruction
+    included.
+
+    Revert check: narrowing the handler to `except OSError` lets the error
+    escape the detector, and this goes red.
+    """
+    from shared import claude_md_manager
+
+    _write_claude_md(tmp_path, _RECORDED_DIFFERENT)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    # Control: the same project, resolving normally, does warn.
+    assert detect_stale_session_block({"session_id": _LIVE_ID}) is not None
+
+    def failing_resolution(*_args, **_kwargs):
+        raise raised("resolution failed")
+
+    monkeypatch.setattr(claude_md_manager, "session_document", failing_resolution)
+
+    assert detect_stale_session_block({"session_id": _LIVE_ID}) is None

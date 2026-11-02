@@ -137,3 +137,47 @@ def test_a_supplied_session_is_the_only_observation(main, monkeypatch):
     gated = gate_target(str(doc), session)
 
     assert gated == claude_md_manager.GateTarget(doc, doc, main)
+
+
+def test_a_new_subdirectory_document_is_gated_against_the_checkouts_document(
+    main, monkeypatch
+):
+    """WHAT THE GATE DOES when a subdirectory session WRITES a new
+    `<subdir>/.claude/CLAUDE.md` while the checkout root already holds one:
+    the target is gated under base `<subdir>` (the resolver's first rung once
+    the new file counts as present), and `before` is the ROOT's document,
+    because that is the session's document until the write lands. The pin
+    count is therefore compared against the root's pins.
+
+    Revert check: dropping `before` (None when the target does not exist yet)
+    makes the gate count the new file from zero, and this goes red.
+    """
+    root_doc = _doc(main / ".claude" / "CLAUDE.md")
+    sub = main / "pkg"
+    sub.mkdir()
+    new_doc = sub / ".claude" / "CLAUDE.md"
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+    monkeypatch.chdir(sub)
+    assert not new_doc.exists()
+
+    gated = gate_target(str(new_doc))
+
+    assert gated == claude_md_manager.GateTarget(new_doc, root_doc, sub)
+
+
+def test_the_no_argument_reader_never_returns_a_create_target(main, monkeypatch):
+    """A known root that holds no document resolves to the CREATE target
+    `<root>/.claude/CLAUDE.md`. The reader answers None there: a reader that
+    returned it would hand callers a file that does not exist.
+
+    Revert check: returning the resolver's path whether or not it exists
+    makes this name `<main>/.claude/CLAUDE.md`, and this goes red.
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+    monkeypatch.chdir(main)
+    _session, document = claude_md_manager.session_document()
+    # Control: the resolver really answers a create target here.
+    assert document is not None and not document.exists
+    assert document.path == main / ".claude" / "CLAUDE.md"
+
+    assert resolve_session_claude_md_path() is None
