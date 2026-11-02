@@ -144,6 +144,89 @@ class TestSnapshotTeamField:
         assert "team" not in calls[0]
 
 
+class TestEmitTeamUncertaintyGuard:
+    """The emit-side two-signal guard: b1 suppresses ONLY when the payload
+    team and the resolved store DIFFER **and** the resolved store's record
+    subject differs from the payload subject. One signal alone must still
+    emit — a stale stdin value and a subject re-scope are both legitimate
+    states, and widening the guard to either one loses real events."""
+
+    OLD_TASK = {
+        "status": "completed",
+        "owner": "coder-a",
+        "subject": "OLD subject",
+        "metadata": {"handoff": VALID_HANDOFF},
+    }
+
+    def _run(self, tmp_path, monkeypatch, capsys, payload_team, payload_subject,
+             context_team):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        calls: list[dict] = []
+        payload = {
+            **EMITTER_STDIN,
+            "team_name": payload_team,
+            "task_subject": payload_subject,
+        }
+        code = _run_main(
+            stdin_payload=payload,
+            task_data=dict(self.OLD_TASK),
+            append_calls=calls,
+            context_team_name=context_team,
+        )
+        return code, calls, capsys.readouterr().err
+
+    def test_both_signals_suppress_and_report(self, tmp_path, monkeypatch, capsys):
+        """THE ARM. The live store does not exist, so the resolver returns the
+        old store; the payload names the live team with the live subject and
+        the old record carries a different subject plus a handoff. Removing
+        the guard emits exactly one event carrying the OLD store's handoff, so
+        both the zero-events assertion and the report assertion fail."""
+        code, calls, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live",
+            payload_subject="LIVE subject",
+            context_team="session-old",
+        )
+        assert code == 0
+        assert calls == []
+        assert (
+            "resolved store 'session-old' is not the payload team "
+            "'session-live'" in err
+        )
+        assert "suppressing mixed handoff for task 12" in err
+
+    def test_team_disagreement_with_agreeing_subjects_emits(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CONTROL: a stale stdin team value with a healthy resolver must NOT
+        suppress. The subjects agreeing is the proof that the read is this
+        task's."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live",
+            payload_subject="OLD subject",
+            context_team="session-old",
+        )
+        assert code == 0
+        assert len(calls) == 1
+        assert calls[0]["team"] == "session-old"
+
+    def test_agreeing_teams_with_differing_subjects_emits(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CONTROL: a subject re-scope race. The teams agree, so the content is
+        this team's; the emitter must still emit."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-old",
+            payload_subject="LIVE subject",
+            context_team="session-old",
+        )
+        assert code == 0
+        assert len(calls) == 1
+
+
 class TestTeamFieldSchemaContract:
     HANDOFF_BASE = {
         "v": 1,

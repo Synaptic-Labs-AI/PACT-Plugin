@@ -291,6 +291,39 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # TEAM-UNCERTAINTY GUARD (b1 only). Suppress ONLY on two independent,
+        # provable signals, because no single source is trustworthy for "the
+        # session's own team": the persisted context is what goes stale in
+        # this failure, and the resolver cannot see the platform's claim.
+        #   1. the platform's stdin team_name is non-empty, the RESOLVED store
+        #      name is non-empty, and they DIFFER;
+        #   2. the resolved store's record carries a non-empty subject that
+        #      DIFFERS from the payload's task_subject.
+        # Both together prove the content read (owner, handoff) belongs to a
+        # DIFFERENT task: subject from the payload, content from the store.
+        # Suppressing loses nothing legitimate — the platform team's own task
+        # file is the authoritative copy the harvest reads. The subject
+        # comparison is what stops a stale stdin value from suppressing a
+        # legitimate event, and the team comparison is what stops a re-scoped
+        # subject from doing the same. b2 is deliberately excluded: it has no
+        # independent platform claim and its content is internally consistent.
+        payload_team = str(input_data.get("team_name") or "")
+        resolved_team = resolved_task_dir.name if resolved_task_dir else ""
+        record_subject = task_data.get("subject")
+        if (
+            payload_team and resolved_team and payload_team != resolved_team
+            and isinstance(record_subject, str) and record_subject.strip()
+            and record_subject != task_subject
+        ):
+            print(
+                f"agent_handoff_emitter: resolved store {resolved_team!r} is not the "
+                f"payload team {payload_team!r} and its record subject differs from the "
+                f"payload subject; suppressing mixed handoff for task {task_id}",
+                file=sys.stderr,
+            )
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
         # #917: canonical-journal writability precondition. The O_EXCL marker
         # below is an optimistic "we emitted it" promise claimed BEFORE
         # append_event. On a teammate TaskCompleted frame, b1 resolves the
