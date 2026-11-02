@@ -153,7 +153,8 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
     try:
         return common_dir.parent == Path(base).resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError: a symlink loop, on Pythons before 3.13.
         return False
 
 
@@ -1009,7 +1010,8 @@ def stays_in_declared_project(
         resolved = Path(resolved_root).resolve()
         if declared.resolve() == resolved:
             return True
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError: a symlink loop, on Pythons before 3.13.
         return False
     anchor = _nearest_existing_directory(declared)
     if anchor is None:
