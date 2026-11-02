@@ -13,8 +13,17 @@ sys.path) with constraints-ci.txt at the repository root:
   imports from the same environment.
 
 CI runs it immediately before the test step and as the job's last step;
-the test suite runs the same check inside its own process. It is dev
-tooling and does not ship with the plugin.
+the test suite runs the same check inside its own process, at the start
+and end of the pytest session. It is dev tooling and does not ship with
+the plugin.
+
+Not covered:
+- isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
+- removal by any route other than `pip uninstall`;
+- integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
+- `pip wheel`, `pip download` and package builds, which do not change the tested environment;
+- vendored code without distribution metadata;
+- transitive versions, which float by design (only pinned names are version-checked).
 
 Usage: python scripts/verify_ci_environment.py [--report] [--constraints PATH]
 Exit codes: 0 ok (always 0 under --report), 1 drift, 2 a constraints line

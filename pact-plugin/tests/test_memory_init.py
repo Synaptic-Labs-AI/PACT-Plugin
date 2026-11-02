@@ -440,6 +440,14 @@ class TestDependencyDriftIsDetectable:
     pinned, the verify steps sit around every test run, a word tripwire for
     tools the runtime check cannot see, the third-party action allowlist,
     and the floor-literal bind.
+
+    Not covered:
+    - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
+    - removal by any route other than `pip uninstall`;
+    - integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
+    - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
+    - vendored code without distribution metadata;
+    - transitive versions, which float by design (only pinned names are version-checked).
     """
 
     # The verify step's command as tests.yml runs it: ENFORCING (no
@@ -652,6 +660,27 @@ class TestDependencyDriftIsDetectable:
                         problems.append(
                             f"{where} step {n}: a verify step may carry no "
                             f"`working-directory:`")
+                    # A failure the job is told to IGNORE is no gate: a
+                    # verify or pytest step marked continue-on-error goes
+                    # red and the job still passes.
+                    if (is_test or is_verify) and step.get(
+                            "continue-on-error", False) is not False:
+                        problems.append(
+                            f"{where} step {n}: a verify or pytest step may "
+                            f"not carry `continue-on-error` (its failure "
+                            f"would not fail the job)")
+                    # The before-check runs unconditionally: an `if:` on it
+                    # can skip the check while the tests still run.
+                    if is_verify and n + 1 < len(runs) and \
+                            self._PYTEST_RE.search(runs[n + 1]) and "if" in step:
+                        problems.append(
+                            f"{where} step {n}: the before-check may carry no "
+                            f"`if:` (it must run before every test run)")
+                if job.get("continue-on-error", False) is not False:
+                    problems.append(
+                        f"{where}: a governed job may not carry "
+                        f"`continue-on-error` (its verify failures would not "
+                        f"fail the workflow)")
         assert governed_jobs, (
             "PARSE FAILURE, not placement drift: no workflow job names "
             "pytest/python/pip/ruff, so the placement arm checks nothing. "
@@ -682,6 +711,10 @@ class TestDependencyDriftIsDetectable:
         ("pip index flag", re.compile(
             r"--(index-url|extra-index-url|find-links|no-index|trusted-host"
             r"|pypi-url)\b")),
+        # `--target DIR` installs into a directory outside site-packages that
+        # a later sys.path insert can import from. An exact option word:
+        # ruff's `--target-version` must not match.
+        ("pip target dir", re.compile(r"--target(?![-\w])")),
     )
     # Exact line (stripped) -> the reason it is accepted. Empty today.
     _ACCEPTED_TRIPWIRE_LINES = {}
@@ -1215,7 +1248,11 @@ class TestDependencyDriftIsDetectable:
         names = [s.get("name") for s in steps]
         before = steps[names.index("Run test suite") - 1]
         assert before.get("run") == self.VERIFY_CMD, (
-            "the shipped before-check moved; re-point this arm")
+            f"the shipped step before 'Run test suite' runs "
+            f"{before.get('run')!r}, not {self.VERIFY_CMD!r}: the shipped "
+            f"workflow itself breaks the placement rule (see "
+            f"test_ci_environment_is_verified_around_every_test_run), so "
+            f"these mutations would start from a red tree")
         before_name = before["name"]
         after_name = steps[-1]["name"]
         before_block = (f"      - name: {before_name}\n"
@@ -1224,9 +1261,15 @@ class TestDependencyDriftIsDetectable:
                        f"        if: always()\n"
                        f"        run: {self.VERIFY_CMD}\n")
         assert before_block in real and real.endswith(after_block), (
-            "the shipped verify steps changed shape; re-point this arm")
+            f"the shipped verify steps are no longer written as the exact "
+            f"blocks these mutations edit (before-check: {before_block!r}; "
+            f"after-check, which must END tests.yml: {after_block!r}), so a "
+            f"mutation would not land; rebuild the blocks from the new "
+            f"spelling in this arm")
         test_line = f"        run: {self.TEST_CMD}\n"
-        assert real.count(test_line) == 1
+        assert real.count(test_line) == 1, (
+            f"tests.yml runs {self.TEST_CMD!r} {real.count(test_line)} times, "
+            f"not once, so the test-step mutations below are ambiguous")
         arm = "test_ci_environment_is_verified_around_every_test_run"
         install = "      - name: Install test dependencies\n"
         for name, text in [
@@ -1246,6 +1289,21 @@ class TestDependencyDriftIsDetectable:
             ("second-governed-job", real + (
                 "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
                 "      - run: python -m pip --version\n")),
+            ("after-continue-on-error", real.replace(
+                after_block, after_block.replace(
+                    "        if: always()\n",
+                    "        if: always()\n        continue-on-error: true\n"), 1)),
+            ("before-continue-on-error", real.replace(
+                before_block, before_block + "        continue-on-error: true\n", 1)),
+            ("pytest-continue-on-error", real.replace(
+                test_line, test_line + "        continue-on-error: true\n", 1)),
+            ("job-continue-on-error", real.replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n    continue-on-error: true\n", 1)),
+            ("before-check-if", real.replace(
+                before_block, before_block.replace(
+                    "        run: ", "        if: github.event_name == 'push'\n"
+                    "        run: "), 1)),
             ("second-pytest-step", real.replace(
                 after_block,
                 "      - name: Again\n        working-directory: pact-plugin\n"
@@ -1253,6 +1311,12 @@ class TestDependencyDriftIsDetectable:
         ]:
             self._shape_reddens(tmp_path, monkeypatch, name, arm,
                                 "VERIFY PLACEMENT DRIFT", workflow_text=text)
+        # CONTROL: `continue-on-error: false` is the default spelled out and
+        # changes nothing, so it is accepted.
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "continue-on-error-false", arm,
+            workflow_text=real.replace(
+                test_line, test_line + "        continue-on-error: false\n", 1))
         # CONTROL: release.yml's job is not governed today, measured.
         release = self._load_workflow_yaml(
             root / ".github" / "workflows" / "release.yml")
@@ -1293,6 +1357,10 @@ class TestDependencyDriftIsDetectable:
                 "scripts/ci-extra.sh": "#!/bin/sh\nconda install -y numpy\n"}), "conda"),
             ("makefile", dict(extra_files={
                 "Makefile": "deps:\n\tpoetry install\n"}), "poetry"),
+            ("pip-target", dict(workflow_text=in_block(
+                "python -m pip install --target /tmp/site evilpkg")), "--target"),
+            ("pip-target-eq", dict(workflow_text=in_block(
+                "python -m pip install --target=/tmp/site evilpkg")), "--target"),
             ("composite-action", dict(extra_files={
                 ".github/actions/x/action.yml":
                     "name: x\nruns:\n  using: composite\n  steps:\n"
@@ -1300,10 +1368,12 @@ class TestDependencyDriftIsDetectable:
         ]:
             self._shape_reddens(tmp_path, monkeypatch, name, arm,
                                 f"(?s)TRIPWIRE: .*{re.escape(token)}", **kwargs)
-        # CONTROLS: faithful lines, read-only pip, and the canonical install.
+        # CONTROLS: faithful lines, read-only pip, the canonical install, and
+        # ruff's --target-version (the shipped lint legs use it too).
         self._shape_stays_green(
             tmp_path, monkeypatch, "faithful", arm, workflow_text=in_block(
-                "pip list; python -m pip install -r constraints-ci.txt"))
+                "pip list; python -m pip install -r constraints-ci.txt; "
+                "ruff check --target-version py312 pact-plugin/"))
 
     def test_unvetted_actions_redden(self, tmp_path, monkeypatch):
         """MUTATION ARM: an unvetted action at step level, a docker image,
@@ -1662,6 +1732,136 @@ class TestCIEnvironmentBinding:
         # not asserted here.)
         right = run(pytest.__version__)
         assert "WRONG VERSION" not in right.stdout + right.stderr, right.stdout
+
+    class _Session:
+        """The two attributes pytest_sessionfinish touches."""
+        def __init__(self, exitstatus=0):
+            self.exitstatus = exitstatus
+
+    def test_session_end_gate_off_does_nothing(self, binding, monkeypatch):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        session = self._Session(0)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(session, 0)
+        assert session.exitstatus == 0
+
+    def test_session_end_passing_keeps_the_status(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(True))
+        for prior in (0, 1):
+            session = self._Session(prior)
+            binding.CIEnvironmentBinding().pytest_sessionfinish(session, prior)
+            assert session.exitstatus == prior
+
+    def test_session_end_drift_forces_3_and_names_a_prior_failure(
+            self, binding, monkeypatch, capsys):
+        """N10-1: drift found at session END sets exit status 3 with the
+        end heading and the full report, even over a run that already
+        failed, and then says so, so test failures are not hidden."""
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        clean = self._Session(0)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(clean, 0)
+        assert clean.exitstatus == 3
+        err = capsys.readouterr().err
+        assert binding.END_HEADING in err and "MISSING" in err
+        assert "ALREADY ended" not in err
+        failed = self._Session(1)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(failed, 1)
+        assert failed.exitstatus == 3
+        assert "ALREADY ended with exit status 1" in capsys.readouterr().err
+
+    def _real_rig(self, tmp_path, verify_patch=None):
+        """A runnable copy: the binding, the verify script (optionally
+        patched), a conftest registering the binding, and a constraints file
+        pinning EVERY distribution this interpreter has, so the session-start
+        check passes in whatever environment runs this test."""
+        import importlib.metadata
+        root = TestDependencyDriftIsDetectable._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout.")
+        rig = tmp_path / "rig"
+        (rig / ".claude-plugin").mkdir(parents=True)
+        (rig / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
+        (rig / "scripts").mkdir()
+        verify_text = (root / "scripts" / "verify_ci_environment.py").read_text(
+            encoding="utf-8")
+        if verify_patch is not None:
+            verify_text = verify_patch(verify_text)
+        (rig / "scripts" / "verify_ci_environment.py").write_text(
+            verify_text, encoding="utf-8")
+        (rig / "suite").mkdir()
+        shutil.copy(Path(__file__).parent / "ci_environment_binding.py",
+                    rig / "suite" / "ci_environment_binding.py")
+        (rig / "suite" / "conftest.py").write_text(
+            "from ci_environment_binding import CIEnvironmentBinding\n\n\n"
+            "def pytest_configure(config):\n"
+            "    config.pluginmanager.register(CIEnvironmentBinding(), 'ci-environment-binding')\n",
+            encoding="utf-8")
+        seen, pins = set(), []
+        for entry in sys.path:
+            for dist in importlib.metadata.distributions(path=[entry]):
+                name = dist.metadata["Name"]
+                key = re.sub(r"[-_.]+", "-", name or "").lower()
+                if name and key not in seen:
+                    seen.add(key)
+                    pins.append(f"{name}=={dist.version}")
+        (rig / "constraints-ci.txt").write_text("\n".join(pins) + "\n", encoding="utf-8")
+        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+        env.pop("PYTHONPATH", None)
+
+        def run():
+            return subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "suite"], cwd=rig, env=env, capture_output=True, text=True,
+                timeout=180)
+        return rig, run
+
+    def test_a_path_added_during_collection_is_caught_at_session_end(self, tmp_path):
+        """N10-1 reproduction (pr7-security's probe): a test MODULE that
+        inserts a directory holding an unpinned distribution into sys.path
+        at import time passes the session-START check (the path does not
+        exist yet) and must be caught at session END, exit 3, with the end
+        heading naming the distribution, and no internal error."""
+        rig, run = self._real_rig(tmp_path)
+        vendored = rig / "vendored"
+        info = vendored / "evilpkg-1.0.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: evilpkg\nVersion: 1.0\n", encoding="utf-8")
+        (rig / "suite" / "test_zz_probe.py").write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(vendored)!r})\n\n\n"
+            "def test_probe():\n    pass\n", encoding="utf-8")
+        result = run()
+        out = result.stdout + result.stderr
+        assert result.returncode == 3, out
+        assert "ci-environment-binding: " in out and " ok=True" in out, (
+            "the session-START check should pass: the path is added later")
+        assert "CI ENVIRONMENT DRIFT (pytest process, at session end)" in out
+        assert "evilpkg" in out and "UNEXPECTED" in out
+        assert "1 passed" in out
+        assert "INTERNALERROR" not in out and "Traceback" not in out
+
+    def test_a_crash_in_the_hook_is_distinguishable_from_drift(self, tmp_path):
+        """Exit code 3 is ALSO pytest's internal-error code. A crash inside
+        the check (here, check_environment raising) must look like a crash
+        (INTERNALERROR, a traceback, no drift heading), never like drift."""
+        rig, run = self._real_rig(tmp_path, verify_patch=lambda text: text.replace(
+            "def check_environment(", "def _unused_check(", 1)
+            + "\n\ndef check_environment(pins, **kwargs):\n"
+              "    raise RuntimeError('verify crashed')\n")
+        (rig / "suite" / "test_probe.py").write_text(
+            "def test_probe():\n    pass\n", encoding="utf-8")
+        result = run()
+        out = result.stdout + result.stderr
+        assert "verify crashed" in out
+        assert "INTERNALERROR" in out or "Traceback" in out, out
+        assert "CI ENVIRONMENT DRIFT" not in out, out
 
 
 class TestMaybeEmbedPending:
