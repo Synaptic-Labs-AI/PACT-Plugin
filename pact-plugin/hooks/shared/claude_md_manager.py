@@ -1187,6 +1187,16 @@ def _first_document_under(
     return None
 
 
+class UserGlobalDocumentRefused(RuntimeError):
+    """`resolve_managed_document` was about to return a user-global CLAUDE.md.
+
+    Unreachable through `memory_root_of` and `session_memory_root`, which
+    never yield such a root. If it fires, a new route to a root skipped that
+    check. Do not catch it specifically: every caller sits under a handler
+    whose failure direction is "no write".
+    """
+
+
 def resolve_managed_document(
     root: str | os.PathLike[str],
     assume_present: Path | None = None,
@@ -1206,10 +1216,25 @@ def resolve_managed_document(
     Nothing else is probed: no git toplevel, no common-dir parent and no
     cwd. The caller passes a root it obtained from `session_memory_root` or
     `memory_root_of`; an unknown root has no document.
+
+    Raises UserGlobalDocumentRefused when the document it would return, found
+    or create target, is a user-global CLAUDE.md (or that cannot be told).
     """
+    from .project_scope import is_user_global_document
+
+    document = _resolve_managed_document(Path(root), assume_present)
+    if is_user_global_document(document.path):
+        raise UserGlobalDocumentRefused(
+            f"{document.path} is a user-global CLAUDE.md, not project memory"
+        )
+    return document
+
+
+def _resolve_managed_document(
+    base: Path, assume_present: Path | None
+) -> ManagedDocument:
     from .project_scope import enclosing_main_checkout
 
-    base = Path(root)
     found = _first_document_under(base, assume_present)
     if found is not None:
         return ManagedDocument(found, base, True)
@@ -1228,13 +1253,18 @@ def session_document(
 
     The document is None exactly when the root is unknown; the SessionRoot
     then carries the cause. Every ambient reader calls this and nothing else.
+    A resolver refusal of a user-global document reads as that unknown root,
+    with cause user_global, so a reader renders it like any other skip.
     """
-    from .project_scope import session_memory_root
+    from .project_scope import ROOT_CAUSE_USER_GLOBAL, session_memory_root
 
     session = session_memory_root()
     if session.root is None:
         return session, None
-    return session, resolve_managed_document(session.root, assume_present)
+    try:
+        return session, resolve_managed_document(session.root, assume_present)
+    except UserGlobalDocumentRefused:
+        return session._replace(root=None, cause=ROOT_CAUSE_USER_GLOBAL), None
 
 
 def ensure_dot_claude_parent(path: Path) -> None:

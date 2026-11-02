@@ -347,12 +347,15 @@ def _write_baseline(session_dir: Path, base: Path, path: Path, digest: str,
 
 def _first_existing_document(bases: list[Path]) -> tuple[Path | None, Path | None]:
     """The first canonical document under the first base that holds one, with
-    that base: the session document resolver's two rungs, without git."""
+    that base: the session document resolver's two rungs, without git. A
+    user-global CLAUDE.md is never a candidate: a cache written before that
+    rule could name a root whose document is the global file."""
     from shared.claude_md_manager import managed_document_paths
+    from shared.project_scope import is_user_global_document
 
     for base in bases:
         for candidate in managed_document_paths(base):
-            if candidate.exists():
+            if candidate.exists() and not is_user_global_document(candidate):
                 return candidate, base
     return None, None
 
