@@ -493,3 +493,87 @@ def test_r9_the_z_listing_is_the_only_source_that_keeps_a_newline_path(
     )
 
     assert root_or_input(real) == repo.resolve()
+
+
+def test_a_core_worktree_redirect_leaves_its_linked_worktree_unverified(tmp_path):
+    """A git dir at `<a>/.git` whose `core.worktree` names `<b>`, with a
+    linked worktree. The common dir's parent `<a>` is NOT a checkout: git
+    reports `<b>` as the toplevel there. Every later check agrees with `<a>`
+    (git reports the same common dir at `<a>`, and the listing holds the
+    worktree), so only the toplevel-at-candidate check refuses it.
+
+    Revert check: without that check the classifier answers KNOWN `<a>`, and
+    every writer would plant `<a>/.claude/CLAUDE.md` in a directory that is no
+    checkout at all.
+    """
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    _git("init", "-q", "--separate-git-dir", str(a / ".git"), str(b), cwd=tmp_path)
+    _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=b)
+    _git("--git-dir", str(a / ".git"), "config", "core.worktree", str(b), cwd=tmp_path)
+    worktree = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "corewt", cwd=b)
+    # Control: the layout is what this arm claims -- `<a>` holds our common
+    # dir but git names `<b>` as its toplevel.
+    assert _git("rev-parse", "--show-toplevel", cwd=a).strip() == str(b.resolve())
+
+    assert project_scope.memory_root_of(worktree) == (
+        None, project_scope.ROOT_CAUSE_UNVERIFIED
+    )
+
+
+def test_a_worktree_listing_no_source_can_answer_is_unanswerable(repo, monkeypatch):
+    """Every listing source fails -- `worktree list -z`, the admin `gitdir`
+    records and the line parser -- while rev-parse still answers. That is git
+    failing to ENUMERATE, not a verified answer, so the root is UNKNOWN.
+
+    Revert check: answering the candidate as KNOWN when the listing is None
+    makes the classifier answer MAIN, and this goes red.
+    """
+    worktree = _worktree(repo, "wt-no-listing")
+    real = project_scope.run_git
+
+    def no_listing(args, **kwargs):
+        if "worktree" in args and "list" in args:
+            return subprocess.CompletedProcess(args, 1, b"", b"forced failure")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", no_listing)
+    monkeypatch.setattr(
+        project_scope, "_worktree_paths_from_admin_gitdirs", lambda _checkout: None
+    )
+    # Control: rev-parse still answers, so the listing is the only failure.
+    assert project_scope._raw_rev_parse(worktree, "--git-common-dir")[1] is True
+
+    assert project_scope.memory_root_of(worktree) == (
+        None, project_scope.ROOT_CAUSE_UNANSWERABLE
+    )
+
+
+def test_a_record_whose_worktree_is_a_sibling_of_the_declaration_is_corrupt(repo):
+    """A record for this declaration whose `worktree` field names ANOTHER
+    worktree of the same repository. The record's other fields verify and its
+    checkout contains the declaration, so only the `worktree` corroboration
+    refuses it.
+
+    Revert check: without that corroboration the record is CONTAINED and
+    recovers MAIN, and this goes red.
+    """
+    declared = _worktree(repo, "wt-declared")
+    sibling = _worktree(repo, "wt-sibling")
+    identity = {
+        "session_id": "s",
+        "declared": os.path.realpath(declared),
+        "worktree": os.path.realpath(sibling),
+        "common_dir": os.path.realpath(repo / ".git"),
+    }
+    # Control: the same record naming the declaration itself is trusted.
+    trusted = dict(identity, worktree=os.path.realpath(declared))
+    assert project_scope.record_resolution(declared, trusted)[0] == (
+        project_scope.RECORD_CONTAINED
+    )
+
+    assert project_scope.record_resolution(declared, identity) == (
+        project_scope.RECORD_CORRUPT, None
+    )
