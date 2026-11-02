@@ -831,13 +831,66 @@ class TestHarvestRuleProse:
         assert "disk_identity(task.get(" in SKILL_TEXT
         assert "emit_side_subject" in SKILL_TEXT  # the call-route entry
 
-    def test_group_mismatch_messages_are_distinguished(self):
-        """The total-mismatch message must fire only when NO group carries
-        the task file's identity; a group that lost to ANOTHER matching group
-        gets its own message, and the discriminator is tracked."""
+    def test_divergence_report_is_decided_after_the_group_loop(self):
+        """The divergence reports compare ONE task file with the WHOLE group
+        set, so both partitions decide them AFTER their loop and emit each
+        ONCE. Inside the loop they would fire once per work unit, and for a
+        multi-arc task_id the removed per-group 'not the task file's group'
+        line was false: the other group owns the file and this one has no
+        copy of its own to disagree with. A DRAINED from store reports in the
+        from section too, so the two partitions speak in the same two states
+        and are quiet in the same one."""
+        # The former per-group third message is gone, prose and pseudocode.
+        assert "is not the task file's group" not in SKILL_TEXT
+        assert "processed from the journal copy alone" not in SKILL_TEXT
         assert "disk_group_matches = disk_id in groups" in SKILL_TEXT
-        assert "journal group" in SKILL_TEXT
-        assert "processed from the journal copy alone" in SKILL_TEXT
+
+        # FROM partition: one group set per from store, one report after it,
+        # and BOTH states report — a drained from store is a reportable gap
+        # exactly as it is in the this-team partition.
+        from_block = SKILL_TEXT.split(
+            "for team, events in from_events.items():", 1
+        )[1].split("    # STEP 2", 1)[0]
+        assert "from_groups = group_by_identity(events)" in from_block
+        assert "if not from_task:" in from_block
+        assert "elif from_disk_id not in from_groups:" in from_block
+        assert from_block.count('f"group carries its identity")') == 1
+        assert from_block.count(': task file absent")') == 1
+        from_loop = from_block.split(
+            "for identity, group in from_groups.items():", 1
+        )[1].split('process(handoff, section=f"team={team}")', 1)[0]
+        assert "carries its identity" not in from_loop
+        assert "task file absent" not in from_loop
+        assert from_block.index("if not from_task:") > from_block.index(
+            'process(handoff, section=f"team={team}")'
+        )
+
+        # THIS partition: neither divergence message may sit inside the loop.
+        tail = SKILL_TEXT.split(
+            "disk_group_matches = disk_id in groups", 1
+        )[1].split("Read all HANDOFFs", 1)[0]
+        assert tail.count('f"group carries its identity")') == 1
+        this_loop = tail.split(
+            "for identity, events in groups.items():", 1
+        )[1].split("        process(handoff)", 1)[0]
+        assert "carries its identity" not in this_loop
+        assert "task file absent" not in this_loop
+        assert tail.index("        process(handoff)\n") < tail.index(
+            "elif not disk_group_matches:"
+        )
+
+    def test_divergence_report_rule_prose_states_the_once_rule(self):
+        """The rule text must carry the once-post-loop instruction and the
+        from-team parity, so a reader cannot re-derive a per-group report or
+        a total-mismatch message for a group that lost to another match."""
+        assert (
+            "decide its report AFTER the group loop and emit it ONCE per task"
+            in SKILL_TEXT
+        )
+        assert "A from-team section applies the SAME rule" in SKILL_TEXT
+        assert "both the absent-file and the no-matching-group report" in SKILL_TEXT
+        assert "with the SAME wording" in SKILL_TEXT
+        assert "report NOTHING" in SKILL_TEXT
 
     def test_report_lines_use_the_shared_sanitiser(self):
         """F1: the skill's hand-written report sites must interpolate through

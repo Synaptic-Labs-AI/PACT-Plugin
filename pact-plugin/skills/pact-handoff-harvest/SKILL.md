@@ -204,7 +204,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 🔴 **THIS RULE IS NOT MIRRORED ANY MORE — IT IS CALLED.** The substitution is implemented ONCE, in `emit_side_subject`, and BOTH emit paths and this step's `disk_identity` call it. There is no second copy to keep in step: a change to the helper changes all three consumers at once. Do not reintroduce a local `def` or an inline hash composition here; that is how the mirrors this branch removed came to exist.
 
-**A NON-MATCHING GROUP IS NOT ALWAYS A DRAIN, AND THESE CASES MUST NOT SHARE ONE MESSAGE.** Report an ABSENT task file as `handoff divergence check unavailable for task N: task file absent`. When the task file is PRESENT and NO group carries its identity, report `handoff identity mismatch for task N: task file present, no event group carries its identity`. When the task file is PRESENT and ANOTHER group carries its identity, this group is a distinct work unit (a reused task_id across arcs) and must NOT borrow the total-mismatch message: report `handoff identity mismatch for task N: journal group <identity> is not the task file's group; processed from the journal copy alone`. One message for these cases makes a present file read as a drained one, which is the strongest signal this workflow emits.
+**A NON-MATCHING GROUP IS NOT ALWAYS A DRAIN, AND THE TWO REPORTS MUST NOT SHARE ONE MESSAGE.** The check compares ONE task file against the WHOLE group set, so decide its report AFTER the group loop and emit it ONCE per task — never inside the loop, where it fires once per work unit and, for a multi-arc task_id, `no event group carries its identity` is false whenever another group carries it. Report an ABSENT task file as `handoff divergence check unavailable for task N: task file absent`. When the task file is PRESENT and NO group carries its identity, report `handoff identity mismatch for task N: task file present, no event group carries its identity`. A from-team section applies the SAME rule to THAT team's store — both the absent-file and the no-matching-group report — with the SAME wording. A group that does not carry the task file's identity while ANOTHER group does is a distinct work unit (a reused task_id across arcs): process it from the journal copy alone and report NOTHING — the other group owns that file, so this one has no file of its own to disagree with. One message for a drain and a mismatch makes a present file read as a drained one, which is the strongest signal this workflow emits.
 
 **A SUBSTITUTION IS NOT THE ONLY CAUSE OF A MISMATCH, WHICH IS WHY THE SECOND MESSAGE IS NEEDED AND NOT MERELY TIDY.** The identity terms are the agent and the subject AS THEY STOOD AT EMIT TIME. An edit to either term after an emit leaves the record holding a value that no group carries. The subject term also reaches the `TaskCompleted` emit path from the platform payload rather than from the task record. So a mismatch on a present task file is an ordinary state, it is not evidence of a drain, and it is not always closable by the substitution rule above. Report it as itself, and process each group from the journal copy alone.
 
@@ -330,7 +330,8 @@ for task_id in unprocessed:
             disk_identity(from_task.get("owner", ""), from_task.get("subject", ""))
             if from_task else None
         )
-        for identity, group in group_by_identity(events).items():
+        from_groups = group_by_identity(events)
+        for identity, group in from_groups.items():
             handoff = latest_by_ts_then_journal_order(group).handoff
             if identity == from_disk_id:
                 merged, reports = union_preferring_task_file(
@@ -341,6 +342,18 @@ for task_id in unprocessed:
                 handoff = merged
             process(handoff, section=f"team={team}")
             from_handled_any = True
+        # ONE report for THIS store's whole group set, decided AFTER the loop
+        # on the same rule as this section's: a per-group report repeats the
+        # line once per work unit. A group that lost to another matching
+        # group stays silent — that group owns the file. BOTH states report:
+        # a drained store is a reportable gap here exactly as it is below.
+        if not from_task:
+            report(f"handoff divergence check unavailable for task "
+                   f"{report_safe(task_id)}: task file absent")
+        elif from_disk_id not in from_groups:
+            report(f"handoff identity mismatch for task "
+                   f"{report_safe(task_id)}: task file present, no event "
+                   f"group carries its identity")
 
     # STEP 2: group THIS team's events by identity. An agent_handoff event
     # carries no `occupant` field, so compute the identity from the event's
@@ -384,10 +397,11 @@ for task_id in unprocessed:
         continue
 
     # More than one group means the task_id was reused across arcs. Each group
-    # is a distinct work unit. Do NOT pick one. `disk_group_matches` is what
-    # keeps the "no event group carries its identity" message TRUE: it is the
-    # total-mismatch message, and emitting it for every non-matching group
-    # would be false whenever another group matched the task file.
+    # is a distinct work unit. Do NOT pick one. A group that does not carry the
+    # task file's identity while ANOTHER group does is processed silently: the
+    # file is that other group's, so this group has no copy of its own to
+    # disagree with. `disk_group_matches` is the discriminator, and the
+    # divergence report below is decided ONCE for the whole group set.
     disk_group_matches = disk_id in groups
     for identity, events in groups.items():
         # STEP 3: latest ts, and the line that comes after it on an equal ts.
@@ -401,24 +415,20 @@ for task_id in unprocessed:
             for line in reports:
                 report(line)
             handoff = merged
-        elif not task:
-            report(f"handoff divergence check unavailable for task "
-                   f"{report_safe(task_id)}: task file absent")
-        elif not disk_group_matches:
-            # The task file is PRESENT and NO group carries its identity.
-            # This is an identity mismatch, NOT a drain. Do not reuse the
-            # drain wording for it.
-            report(f"handoff identity mismatch for task "
-                   f"{report_safe(task_id)}: task file present, no event "
-                   f"group carries its identity")
-        else:
-            # ANOTHER group matched the task file: this group is a distinct
-            # work unit (a reused task_id across arcs), not a total mismatch.
-            report(f"handoff identity mismatch for task "
-                   f"{report_safe(task_id)}: journal group "
-                   f"{report_safe(identity)} is not the task file's group; "
-                   f"processed from the journal copy alone")
         process(handoff)
+
+    # ONE divergence report for the WHOLE group set, decided AFTER the loop.
+    # Inside the loop it would fire once per work unit, and "no event group
+    # carries its identity" is false whenever another group carries it.
+    if not task:
+        report(f"handoff divergence check unavailable for task "
+               f"{report_safe(task_id)}: task file absent")
+    elif not disk_group_matches:
+        # The task file is PRESENT and NO group carries its identity. This is
+        # an identity mismatch, NOT a drain. Do not reuse the drain wording.
+        report(f"handoff identity mismatch for task "
+               f"{report_safe(task_id)}: task file present, no event "
+               f"group carries its identity")
 ```
 
 Read all HANDOFFs before proceeding to extraction.
