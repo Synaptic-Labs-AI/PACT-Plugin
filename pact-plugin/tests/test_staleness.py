@@ -21,7 +21,7 @@ import tempfile
 import textwrap
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -190,8 +190,7 @@ class TestCheckPinnedStaleness:
             "Some working memory content\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
 
@@ -205,8 +204,7 @@ class TestCheckPinnedStaleness:
             "## Working Memory\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
 
@@ -214,11 +212,7 @@ class TestCheckPinnedStaleness:
         """Should return None when CLAUDE.md does not exist."""
         from session_init import check_pinned_staleness
 
-        with patch("session_init._get_project_claude_md_path", return_value=None), \
-             patch("staleness._get_project_claude_md_path", return_value=None), \
-             patch("staleness._resolve_project_claude_md_with_base",
-                   return_value=(None, None)):
-            result = check_pinned_staleness(doc_for(None))
+        result = check_pinned_staleness(doc_for(None))
 
         assert result is None
 
@@ -236,8 +230,7 @@ class TestCheckPinnedStaleness:
             "- Some details about the feature\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
         # File should not be modified
@@ -258,8 +251,7 @@ class TestCheckPinnedStaleness:
             "- Details about the old feature\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "stale" in result.lower()
@@ -280,8 +272,7 @@ class TestCheckPinnedStaleness:
             "- No PR date mentioned here\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
         content = claude_md.read_text(encoding="utf-8")
@@ -303,8 +294,7 @@ class TestCheckPinnedStaleness:
             "- Details\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "stale" in result.lower()
@@ -328,8 +318,7 @@ class TestCheckPinnedStaleness:
             f"### Big Feature\n{big_content}\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         # Should report budget info
         assert result is not None
@@ -365,8 +354,7 @@ class TestCheckPinnedStaleness:
             "- Just a few words here\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         content = claude_md.read_text(encoding="utf-8")
         assert _BUDGET_WARNING_PREFIX not in content
@@ -387,8 +375,7 @@ class TestCheckPinnedStaleness:
             "- Old details\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "1 stale" in result
@@ -412,137 +399,10 @@ class TestCheckPinnedStaleness:
             "- Details here\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "stale" in result.lower()
-
-
-class TestGetProjectClaudeMdPath:
-    """Tests for _get_project_claude_md_path() helper."""
-
-    @pytest.fixture
-    def clean_env_no_claude_project_dir(self):
-        """Remove CLAUDE_PROJECT_DIR from the environment."""
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-        with patch.dict(os.environ, env, clear=True):
-            yield
-
-    def test_uses_env_var_when_set(self, tmp_path):
-        """Should use CLAUDE_PROJECT_DIR env var first."""
-        from session_init import _get_project_claude_md_path
-
-        claude_md = tmp_path / "CLAUDE.md"
-        claude_md.write_text("# Test", encoding="utf-8")
-
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_project_claude_md_path()
-
-        assert result == claude_md
-
-    def test_falls_back_to_git_root(self, tmp_path, clean_env_no_claude_project_dir):
-        """Should use git root when env var not set.
-
-        --git-common-dir returns the .git directory path; the code resolves
-        its parent to get the repo root where CLAUDE.md lives.
-        """
-        from session_init import _get_project_claude_md_path
-
-        claude_md = tmp_path / "CLAUDE.md"
-        claude_md.write_text("# Test", encoding="utf-8")
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = str(tmp_path / ".git") + "\n"
-
-        with patch("subprocess.run", return_value=mock_result):
-            result = _get_project_claude_md_path()
-
-        assert result == claude_md
-
-    @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
-    def test_returns_none_when_no_claude_md_found(self, tmp_path, clean_env_no_claude_project_dir):
-        """Should return None when CLAUDE.md does not exist anywhere."""
-        from session_init import _get_project_claude_md_path
-
-        with patch("subprocess.run", side_effect=FileNotFoundError()), \
-             patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_project_claude_md_path()
-
-        assert result is None
-
-    def test_finds_dot_claude_via_env_var(self, tmp_path):
-        """Should find .claude/CLAUDE.md when CLAUDE_PROJECT_DIR is set."""
-        from session_init import _get_project_claude_md_path
-
-        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
-        dot_claude.parent.mkdir()
-        dot_claude.write_text("# Test", encoding="utf-8")
-
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_project_claude_md_path()
-
-        assert result == dot_claude
-
-    def test_prefers_dot_claude_over_legacy_via_env_var(self, tmp_path):
-        """When both files exist under env var path, .claude/CLAUDE.md wins."""
-        from session_init import _get_project_claude_md_path
-
-        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
-        dot_claude.parent.mkdir()
-        dot_claude.write_text("# preferred", encoding="utf-8")
-        legacy = tmp_path / "CLAUDE.md"
-        legacy.write_text("# legacy", encoding="utf-8")
-
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_project_claude_md_path()
-
-        assert result == dot_claude
-        assert result != legacy
-
-    def test_finds_dot_claude_via_git_root(self, tmp_path, clean_env_no_claude_project_dir):
-        """Should find .claude/CLAUDE.md under the git root when env var unset."""
-        from session_init import _get_project_claude_md_path
-
-        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
-        dot_claude.parent.mkdir()
-        dot_claude.write_text("# Test", encoding="utf-8")
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = str(tmp_path / ".git") + "\n"
-
-        with patch("subprocess.run", return_value=mock_result):
-            result = _get_project_claude_md_path()
-
-        assert result == dot_claude
-
-    def test_finds_dot_claude_via_cwd(self, tmp_path, clean_env_no_claude_project_dir):
-        """Should find .claude/CLAUDE.md under the current working directory as last resort."""
-        from session_init import _get_project_claude_md_path
-
-        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
-        dot_claude.parent.mkdir()
-        dot_claude.write_text("# Test", encoding="utf-8")
-
-        with patch("subprocess.run", side_effect=FileNotFoundError()), \
-             patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_project_claude_md_path()
-
-        assert result == dot_claude
-
-    def test_finds_legacy_when_only_legacy_exists_via_env_var(self, tmp_path):
-        """Falls back to legacy ./CLAUDE.md when only it exists."""
-        from session_init import _get_project_claude_md_path
-
-        legacy = tmp_path / "CLAUDE.md"
-        legacy.write_text("# Test", encoding="utf-8")
-
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_project_claude_md_path()
-
-        assert result == legacy
 
 
 class TestSessionInitEstimateTokens:
@@ -585,14 +445,13 @@ class TestBudgetWarningIdempotency:
             f"### Big Feature\n{big_content}\n\n"
         ))
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            # First run -- should add the warning
-            result1 = check_pinned_staleness(doc_for(claude_md))
-            assert result1 is not None
-            assert "budget" in result1.lower()
+        # First run -- should add the warning
+        result1 = check_pinned_staleness(doc_for(claude_md))
+        assert result1 is not None
+        assert "budget" in result1.lower()
 
-            # Second run -- should NOT add a second warning
-            result2 = check_pinned_staleness(doc_for(claude_md))
+        # Second run -- should NOT add a second warning
+        result2 = check_pinned_staleness(doc_for(claude_md))
 
         content_after = claude_md.read_text(encoding="utf-8")
         warning_count = content_after.count(_BUDGET_WARNING_PREFIX)
@@ -1024,8 +883,7 @@ class TestStalenessModuleDirect:
         return claude_md
 
     def test_explicit_path_parameter(self, tmp_path):
-        """check_pinned_staleness(claude_md_path=...) should use the given path
-        without calling _get_project_claude_md_path."""
+        """check_pinned_staleness(claude_md_path=...) marks the given path."""
         from staleness import check_pinned_staleness, PINNED_STALENESS_DAYS
 
         old_date = (datetime.now() - timedelta(days=PINNED_STALENESS_DAYS + 10)).strftime("%Y-%m-%d")
@@ -1037,13 +895,9 @@ class TestStalenessModuleDirect:
             "- Details\n\n"
         ))
 
-        # Call with explicit path -- should NOT need _get_project_claude_md_path
-        with patch("staleness._get_project_claude_md_path") as mock_get:
-            result = check_pinned_staleness(claude_md_path=claude_md)
+        result = check_pinned_staleness(claude_md_path=claude_md)
 
-        # The path resolver should never have been called
-        mock_get.assert_not_called()
-        # But the stale entry should still be detected
+        # The stale entry is detected
         assert result is not None
         assert "stale" in result.lower()
 
@@ -1681,11 +1535,7 @@ class TestCheckPinnedStalenessHardening:
         os.symlink(str(outside_victim), str(managed_path))
         assert managed_path.is_symlink()
 
-        with patch("session_init._get_project_claude_md_path",
-                   return_value=managed_path), \
-             patch("staleness._get_project_claude_md_path",
-                   return_value=managed_path):
-            result = check_pinned_staleness(doc_for(managed_path))
+        result = check_pinned_staleness(doc_for(managed_path))
 
         assert result is not None
         assert "skipped" not in result.lower()
@@ -1726,11 +1576,7 @@ class TestCheckPinnedStalenessHardening:
         os.symlink(str(sibling), str(managed_path))
         assert managed_path.is_symlink()
 
-        with patch("session_init._get_project_claude_md_path",
-                   return_value=managed_path), \
-             patch("staleness._get_project_claude_md_path",
-                   return_value=managed_path):
-            result = check_pinned_staleness(doc_for(managed_path))
+        result = check_pinned_staleness(doc_for(managed_path))
 
         # ALLOWED: the write proceeded (a detection message, not the opaque skip).
         assert result is not None
@@ -1769,11 +1615,7 @@ class TestCheckPinnedStalenessHardening:
         managed_path.write_text(self._stale_pinned_content(), encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        with patch("session_init._get_project_claude_md_path",
-                   return_value=managed_path), \
-             patch("staleness._get_project_claude_md_path",
-                   return_value=managed_path):
-            result = check_pinned_staleness(doc_for(managed_path))
+        result = check_pinned_staleness(doc_for(managed_path))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert "lock contention" not in result.lower()
@@ -1850,9 +1692,7 @@ class TestCheckPinnedStalenessHardening:
         monkeypatch.setattr(Path, "read_text", fake_read_text)
         monkeypatch.setattr(cmm, "_atomic_write_text", tracking_atomic)
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
-             patch("staleness._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         # The inside-lock re-read detected the content change → skip write
         # → return None (idempotent skip).
@@ -1884,9 +1724,7 @@ class TestCheckPinnedStalenessHardening:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(self._stale_pinned_content(), encoding="utf-8")
 
-        with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
-             patch("staleness._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness(doc_for(claude_md))
+        result = check_pinned_staleness(doc_for(claude_md))
 
         # Function reports the stale entry was found
         assert result is not None
@@ -2571,8 +2409,8 @@ class TestStalenessLexicalBaseParity:
     check_pinned_staleness, via staleness._lexical_base_of) MUST equal the base
     the resolver itself used. session_init passes staleness a resolved PATH
     (not a base), so the containment anchor is recovered by inverting the
-    resolver's construction; if _resolve_project_claude_md_with_base ever grows
-    a THIRD path shape, that lexical formula would silently diverge and the
+    resolver's construction; if resolve_managed_document's canonical paths ever
+    grow a THIRD shape, that lexical formula would silently diverge and the
     guard would anchor on the wrong root. This test turns that divergence into
     a RED -- the single-source-of-truth safeguard the architect mandated
     (twin-drift discipline applied to anchor derivation). It exercises the REAL
@@ -2586,8 +2424,11 @@ class TestStalenessLexicalBaseParity:
         (tmp_path / ".claude" / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        path, base = st._resolve_project_claude_md_with_base()
-        assert path is not None and base is not None
+        from shared.claude_md_manager import resolve_managed_document
+
+        document = resolve_managed_document(tmp_path)
+        path, base = document.path, document.base
+        assert document.exists
         assert st._lexical_base_of(path) == base, (
             "lexical base recovery diverged from the resolver's base for the "
             ".claude/CLAUDE.md shape — option D would anchor containment on the "
@@ -2600,8 +2441,11 @@ class TestStalenessLexicalBaseParity:
         (tmp_path / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        path, base = st._resolve_project_claude_md_with_base()
-        assert path is not None and base is not None
+        from shared.claude_md_manager import resolve_managed_document
+
+        document = resolve_managed_document(tmp_path)
+        path, base = document.path, document.base
+        assert document.exists
         assert st._lexical_base_of(path) == base, (
             "lexical base recovery diverged from the resolver's base for the "
             "legacy ./CLAUDE.md shape — option D would anchor containment on "

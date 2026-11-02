@@ -163,8 +163,9 @@ def same_repository(env_dir: Path, base: Path) -> bool:
 # offered to git, a directory whose answer failed verification was, and a
 # git that never ran or could not enumerate is a third case again. Collapsing
 # them to one "unknown" produced a message that blamed git on the first and
-# third-vs-second ambiguity. These are the values `unknown_root_cause` returns
-# (plus None for a KNOWN root); compare against the constants, never literals.
+# third-vs-second ambiguity. `memory_root_of` and `session_memory_root` return
+# these as the cause (None for a KNOWN root; ROOT_CAUSE_OK is internal);
+# compare against the constants, never literals.
 ROOT_CAUSE_OK = "ok"
 ROOT_CAUSE_MISSING = "missing"
 ROOT_CAUSE_UNVERIFIED = "unverified"
@@ -180,7 +181,7 @@ def _unanswered_cause(given: Path) -> str:
     """
     return (
         ROOT_CAUSE_MISSING
-        if anchor_directory_is_missing(given)
+        if _directory_is_missing(given)
         else ROOT_CAUSE_UNANSWERABLE
     )
 
@@ -335,7 +336,7 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     cannot be stat'ed also reads as could-not-run, which is the safe
     direction: the writers skip.
     """
-    if anchor_directory_is_missing(directory):
+    if _directory_is_missing(directory):
         return None, False
     try:
         result = run_git(
@@ -429,10 +430,8 @@ def _project_memory_root_cause(
 ) -> tuple[Path, str]:
     """The memory root AND the CAUSE when it is unknown.
 
-    THE ONE PLACE THE THREE CAUSES ARE DECIDED. `_project_memory_root` folds
-    this back into a boolean for the existing callers, and
-    `unknown_root_cause` exposes the cause for the callers that render a
-    message. Deciding here rather than in each consumer is what keeps the
+    THE ONE PLACE THE THREE CAUSES ARE DECIDED; `memory_root_of` is its
+    public face. Deciding here rather than in each consumer is what keeps the
     three branches unable to disagree.
 
     `_failed_verification_root` answers in the same vocabulary, so the bare
@@ -486,153 +485,26 @@ def _project_memory_root_cause(
     return candidate, ROOT_CAUSE_OK
 
 
-def _project_memory_root(
-    project_dir: str | os.PathLike[str],
-) -> tuple[Path, bool]:
-    """The memory root AND whether git could answer.
+def _directory_is_missing(directory: str | os.PathLike[str]) -> bool:
+    """True when `directory` is not an existing directory.
 
-    `project_memory_root` keeps the fail-safe answer (the input) for both
-    cases; `project_memory_root_or_none` reports the difference so a writer
-    can skip when the target is unknown instead of planting in a worktree.
-
-    A thin fold of `_project_memory_root_cause`: every cause except
-    ROOT_CAUSE_OK is an unknown root, which is exactly the old boolean.
-    """
-    root, cause = _project_memory_root_cause(project_dir)
-    return root, cause == ROOT_CAUSE_OK
-
-
-def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
-    """Return the directory that owns this session's project memory file.
-
-    For a linked worktree -- its root or a subdirectory of one -- that is the
-    main checkout's root; for everything else (a main checkout, a
-    subdirectory of one, a non-git directory, or any git failure) it is the
-    SAME Path as `project_dir`: never resolved, absolutised or normalised
-    here. (Constructing `Path` still drops a trailing separator and `.`
-    segments; callers compare Paths, so that spelling change is not
-    observable.)
-
-    THE SAME-PATH RETURN IS LOAD-BEARING. Callers compare their output against
-    the pre-worktree behaviour, so a resolved or absolutised path would change
-    a status message for a reason that has nothing to do with worktrees.
-
-    WHY `--git-common-dir`'s PARENT IS NOT ENOUGH. It is the main root for
-    both a worktree and a main checkout, but it is NOT a checkout root for a
-    submodule or a `--separate-git-dir` repository, whose common dir lives
-    elsewhere. The discriminator below excludes those two (their git dir and
-    common dir are equal), and the candidate verification excludes a worktree
-    of a bare repository, where the parent is not a checkout root either.
-
-    Composes `_raw_rev_parse` for every git field (unstripped, so a path's own
-    trailing whitespace survives, and reporting whether git actually ran) and
-    `_git_output` only for the listing's last-resort line parser, all running
-    `git -C <dir>` with `git_env_without_location()` -- an inherited GIT_DIR
-    would otherwise make every directory report one repository, and a bare
-    `git rev-parse` would classify the hook's CWD instead of the project dir.
-    """
-    return _project_memory_root(project_dir)[0]
-
-
-def project_memory_root_or_none(
-    project_dir: str | os.PathLike[str],
-) -> Optional[Path]:
-    """The memory root, or None when the root is UNKNOWN.
-
-    None covers three facts -- the directory does not exist, its checkout
-    verification failed, or git could not run or enumerate. `unknown_root_cause`
-    names which; `unknown_root_reason` renders it for a user-facing message.
-
-    A NON-GIT directory is a KNOWN answer and returns the directory itself.
-    None is returned when git could not run (timeout, no git, an unreadable
-    worktree listing, or a directory that does not exist) AND when a linked
-    worktree's candidate main root could not be verified and the repository is
-    not bare -- a `--separate-git-dir` worktree (whose git dir lives elsewhere,
-    so common-dir's parent is not a checkout) or a forged gitfile (which names
-    a repository the directory is not part of). A BARE repository's worktree
-    stays a KNOWN root: it is a genuine checkout. Session-start writers pass
-    this so an unknown target is skipped rather than resolved to the worktree
-    by the fail-safe.
-    """
-    root, answered = _project_memory_root(project_dir)
-    return root if answered else None
-
-
-def anchor_directory_is_missing(project_dir: str | os.PathLike[str]) -> bool:
-    """True when the declared project directory does not exist.
-
-    THE READER-SIDE HALF OF THE UNKNOWN ANSWER, and not a classifier change.
-    `project_memory_root_or_none` returns None for two different facts:
-    a base that EXISTS but cannot be identified (git did not run, or a forged
-    gitfile / unverifiable worktree), and a base that is not a directory at
-    all. A WRITER must skip on both -- there is nowhere safe to plant. A READER
-    that resolves and then judges scope may continue on the second: a vanished
-    declaration holds no copy, and `stays_in_declared_project` already maps it
-    through its nearest existing ancestor. An EXISTING but unanswerable base
-    keeps the refusal, because that is the forged-gitfile and git-failure
-    class.
-
-    This is exactly `_raw_rev_parse`'s precheck, exposed: a missing directory
-    is what makes that function answer could-not-run. Anything unexpected
-    (None, a non-path) answers False, so a caller keeps the refusal.
+    The filesystem fact behind ROOT_CAUSE_MISSING: `git -C` refuses a
+    directory that is not there with the same status as a non-git one, so the
+    classifier checks this first. `is_dir()` swallows OSError, so a directory
+    that cannot be stat'ed reads as missing too, which is the safe direction.
+    Anything unexpected answers False, so the caller keeps "git could not
+    answer".
     """
     try:
-        return not Path(project_dir).is_dir()
+        return not Path(directory).is_dir()
     except (OSError, TypeError, ValueError):
         return False
-
-
-def unknown_root_cause(
-    project_dir: str | os.PathLike[str],
-) -> Optional[str]:
-    """WHY this directory's project-memory root is UNKNOWN, or None if known.
-
-    The reader-side companion to `project_memory_root_or_none`, and the same
-    exposure `anchor_directory_is_missing` made for ONE of the three causes.
-    A caller that renders a message uses this rather than inferring the cause
-    from the path itself: the three facts are decided in one place
-    (`_project_memory_root_cause`), so no consumer can order them wrongly or
-    disagree with the resolver.
-
-    Returns:
-        None            -- the root is KNOWN (including a non-git directory,
-                           which git answered as "no repository").
-        "missing"       -- the directory does not exist; git never ran on it.
-        "unverified"    -- the directory exists and git ANSWERED, but the
-                           answer failed verification: a forged gitfile, or a
-                           --separate-git-dir worktree whose main checkout
-                           cannot be identified. A BARE repository's worktree
-                           is a genuine checkout and is NOT this case.
-        "unanswerable"  -- the directory exists but git could not run, or
-                           could not enumerate the worktree records.
-    """
-    _root, cause = _project_memory_root_cause(project_dir)
-    return None if cause == ROOT_CAUSE_OK else cause
-
-
-def project_memory_root_and_cause(
-    project_dir: str | os.PathLike[str],
-) -> tuple[Path, Optional[str]]:
-    """The memory root AND the cause when it is unknown (None when known).
-
-    ONE OBSERVATION FOR THE CHANNELS THAT REPORT THIS. A caller takes its
-    guard and its message from this single resolution, so a state change
-    between a separate guard call and a separate cause call cannot turn a
-    skip into a silent one. `archive_pin` has always had this shape; this
-    function is what lets the other channels use it.
-
-    The root is the fail-safe answer (the input) even when the cause is set,
-    which is what `project_memory_root` returns; callers that must not use it
-    in that case guard on the cause, never on the root being None.
-    """
-    root, cause = _project_memory_root_cause(project_dir)
-    return root, (None if cause == ROOT_CAUSE_OK else cause)
 
 
 def unknown_root_reason(
     cause: str, project_dir: Optional[str | os.PathLike[str]]
 ) -> str:
-    """The user-facing CLAUSE for a cause returned by `unknown_root_cause`.
+    """The user-facing CLAUSE for an unknown-root cause (`SessionRoot.cause`).
 
     ONE SOURCE FOR EVERY CHANNEL THAT REPORTS THIS. Six surfaces compose their
     own sentence around this clause -- "Project CLAUDE.md skipped: ..." in
@@ -643,7 +515,7 @@ def unknown_root_reason(
     its siblings, which is how the wrong wording survived four rounds.
 
     THE CAUSE IS A PARAMETER, NOT A SECOND LOOKUP. Every channel guards on a
-    cause obtained from `project_memory_root_and_cause` and renders from that
+    cause obtained from one `session_memory_root()` and renders from that
     SAME value, so the branch that decided to report and the text it reports
     describe one observation. A caller that guards on the root being None and
     then calls this separately has reintroduced the seam the helper exists to
@@ -695,25 +567,6 @@ def unknown_root_status(
         f"{subject} skipped: {unknown_root_reason(cause, anchor)}, so the "
         f"project memory target is unknown; {consequence}"
     )
-
-
-def cwd_checkout_memory_root() -> Optional[Path]:
-    """The project-memory root of the process's current checkout, or None.
-
-    THE RETARGETING RUNG, NOT THE RAW RESOLVER. `--show-toplevel` from the cwd
-    names the checkout root (a main checkout or a linked worktree), and
-    `project_memory_root_or_none` then maps a linked worktree to the MAIN
-    checkout. A raw env/cwd resolver run from inside a sibling worktree
-    returns that sibling's own CLAUDE.md; this answers the root project memory
-    belongs to, which is what a reader that has only the cwd left should probe.
-
-    None when git cannot answer or the checkout root cannot be identified, so
-    a caller keeps its own refusal rather than guessing.
-    """
-    toplevel, ran = _raw_rev_parse(Path.cwd(), "--show-toplevel")
-    if not ran or toplevel is None:
-        return None
-    return project_memory_root_or_none(toplevel)
 
 
 def _nearest_existing_directory(path: Path) -> Optional[Path]:
@@ -851,7 +704,7 @@ def _listed_worktrees_result(
     holding the main root pass it, so a relative path from some future source
     lands under that repository rather than under whatever the cwd is.
 
-    The None/empty distinction is load-bearing for `project_memory_root`:
+    The None/empty distinction is load-bearing for the classifier:
     an EMPTY set is a real answer (no worktrees), while None means git could
     not enumerate, which the session-start writers treat as unknown.
     """
@@ -878,8 +731,8 @@ def _listed_worktrees(
 ) -> Set[Path]:
     """`_listed_worktrees_result`, with an unanswerable git reported as empty.
 
-    Every pre-existing caller keeps today's shape and signature; only
-    `project_memory_root` needs the None/empty distinction.
+    For the callers that do not need the None/empty distinction (the scope
+    guard); the classifier uses `_listed_worktrees_result`.
     """
     return _listed_worktrees_result(checkout, resolve_against) or set()
 
@@ -903,11 +756,6 @@ RECORD_ABSENT = "absent"
 RECORD_CORRUPT = "corrupt"
 RECORD_CONTAINED = "contained"
 RECORD_UNRELATED = "unrelated"
-
-
-def record_is_for_declaration(identity: Optional[dict], declared: Path) -> bool:
-    """Whether a session record for this exact declaration EXISTS."""
-    return _record_names_declaration(identity, declared)
 
 
 def record_resolution(

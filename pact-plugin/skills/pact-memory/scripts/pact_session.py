@@ -218,22 +218,18 @@ def _env_is_the_recorded_checkouts_main_root(
     """Whether `env_norm` is the MAIN root the worktree record proves for the
     recorded declaration.
 
-    The record must be FOR this declaration (`record_is_for_declaration`) and
-    its candidate root must verify (`recorded_main_root`), so a planted or
-    stale record cannot turn a disagreement into a pass. Any failure is a
-    disagreement.
+    The record must be for this declaration and its candidate root must
+    verify (`recorded_main_root` checks both), so a planted or stale record
+    cannot turn a disagreement into a pass. Any failure is a disagreement.
     """
     try:
         from shared.project_scope import (
             get_worktree_identity_from_session_record,
             recorded_main_root,
-            record_is_for_declaration,
         )
 
         declared = Path(record_value)
         identity = get_worktree_identity_from_session_record()
-        if not record_is_for_declaration(identity, declared):
-            return False
         main = recorded_main_root(declared, identity)
         if main is None:
             return False

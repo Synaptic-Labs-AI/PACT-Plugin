@@ -433,9 +433,7 @@ class TestMigrationSyncPipeline:
         claude_md.write_text(pre_404_content, encoding="utf-8")
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        # migrate_to_managed_structure resolves the CLAUDE.md location via
-        # the same get_project_claude_md_path() helper the hooks use, which
-        # honors CLAUDE_PROJECT_DIR.
+        # doc_at() builds the document from CLAUDE_PROJECT_DIR.
 
         migration_msg = migrate_to_managed_structure(doc_at())
         # Migration should have run (not skipped, not failed)

@@ -44,6 +44,7 @@ from scripts.working_memory import (
 from shared.pact_context import _build_session_path, project_slug
 from shared.paths import get_claude_config_dir
 import shared.project_scope as project_scope
+from helpers import known_root  # noqa: E402
 
 # claude_md_ambient (module-wide): the worktree-identity escape-guard
 # exemption is this module's subject; it needs the ambient resolution the
@@ -733,8 +734,8 @@ class TestARecordNamingAnotherRepositoryRedirectsNothing:
     def test_no_surface_resolves_repository_b(self, layout_root, monkeypatch, where):
         import archive_pin
         import scripts.working_memory as wm
-        from shared.claude_md_manager import session_memory_root
-        from shared.project_scope import project_memory_root_or_none
+        from shared.project_scope import session_memory_root
+        from helpers import known_root
 
         main, worktree, identity = _worktree_under_main_removed(layout_root)
         other = _repo(layout_root / "other", document=True)
@@ -759,8 +760,8 @@ class TestARecordNamingAnotherRepositoryRedirectsNothing:
         before_other = other_doc.read_bytes()
 
         # Synchronous surfaces never hand back B.
-        assert session_memory_root() != other.resolve()
-        assert project_memory_root_or_none(str(other)) is not None  # B is real
+        assert session_memory_root().root != other.resolve()
+        assert known_root(str(other)) is not None  # B is real
         try:
             resolved, _base = archive_pin.resolve_claude_md()
         except archive_pin._Unevaluable:
@@ -800,7 +801,6 @@ class TestTheRecordIsVerifiedWhenItIsWritten:
     def test_a_forged_gitfile_does_not_get_a_record(self, layout_root, monkeypatch):
         from shared.project_scope import (
             _record_worktree_identity,
-            project_memory_root_or_none,
         )
 
         main = _repo(layout_root / "R", document=True)
@@ -815,7 +815,7 @@ class TestTheRecordIsVerifiedWhenItIsWritten:
         assert not _record_path(forged).exists(), (
             "a record was written for a directory git does not list"
         )
-        assert project_memory_root_or_none(str(forged)) is None, (
+        assert known_root(str(forged)) is None, (
             "the forged directory became a known root"
         )
         assert worktree.exists()

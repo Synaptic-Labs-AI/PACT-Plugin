@@ -111,9 +111,6 @@ class TestCheckPinSlotStatus_SessionInit:
         claude_md.write_text(
             _build_pinned_claude_md(3, pin_body_chars=200), encoding="utf-8"
         )
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
         result = check_pin_slot_status(doc_for(claude_md))
         assert result is not None
         assert "3/12" in result
@@ -126,9 +123,6 @@ class TestCheckPinSlotStatus_SessionInit:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(
             "# Project\n\n## Working Memory\n", encoding="utf-8"
-        )
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
         )
         result = check_pin_slot_status(doc_for(claude_md))
         assert result == "Pin slots: 0/12 used"
@@ -145,9 +139,6 @@ class TestCheckPinSlotStatus_SessionInit:
         claude_md.write_text(
             _build_pinned_claude_md(2), encoding="utf-8"
         )
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
 
         def _raise(*a, **k):
             raise IOError("simulated")
@@ -162,9 +153,6 @@ class TestCheckPinSlotStatus_SessionInit:
         claude_md.write_text(
             _build_pinned_claude_md(5, pin_body_chars=300), encoding="utf-8"
         )
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
         results = [check_pin_slot_status(doc_for(claude_md)) for _ in range(3)]
         assert results[0] == results[1] == results[2]
 
@@ -174,9 +162,6 @@ class TestCheckPinSlotStatus_SessionInit:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(
             _build_pinned_claude_md(2), encoding="utf-8"
-        )
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
         )
 
         def _boom(_doc, _located):
@@ -206,9 +191,6 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
         )
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
         pact_context()
         import shared.pact_context as ctx_module
         monkeypatch.setattr(
@@ -239,9 +221,6 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
         session_dir.mkdir()
         # Pre-seed marker — simulating a prior armed state.
         (session_dir / PIN_STALENESS_MARKER_NAME).touch()
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
         pact_context()
         import shared.pact_context as ctx_module
         monkeypatch.setattr(
@@ -264,9 +243,6 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
         )
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
         pact_context()
         import shared.pact_context as ctx_module
         monkeypatch.setattr(
@@ -286,9 +262,6 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(
             _build_pinned_claude_md(3, stale_indices={0, 1}), encoding="utf-8"
-        )
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
         )
         pact_context()
         import shared.pact_context as ctx_module

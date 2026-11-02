@@ -179,7 +179,6 @@ class TestReadersStaySilentOnAnUncertainSection:
 
         path = tmp_path / "CLAUDE.md"
         path.write_text(UNCLOSED, encoding="utf-8")
-        monkeypatch.setattr(session_init, "_get_project_claude_md_path", lambda: path)
         assert session_init.check_pin_slot_status(session_doc()) is None
         path.write_text(_doc("", working=""), encoding="utf-8")
         assert session_init.check_pin_slot_status(session_doc()) == "Pin slots: 0/12 used"

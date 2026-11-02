@@ -1888,22 +1888,6 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     return canonical
 
 
-def session_memory_root() -> Path | None:
-    """The directory that owns this session's project memory, or None when it
-    is unknown.
-
-    A thin Path-or-None view of `project_scope.session_memory_root`, which
-    decides the anchor (CLAUDE_PROJECT_DIR, else the session record, else the
-    cwd), the root and the record recovery. An import failure is None too:
-    refuse to identify a document.
-    """
-    try:
-        from .project_scope import session_memory_root as _session_root
-    except ImportError:
-        return None
-    return _session_root().root
-
-
 class GateTarget(NamedTuple):
     """The project CLAUDE.md an Edit or Write lands on (`target`), the file the
     resolver returns before the change (`before`, None when none resolves),

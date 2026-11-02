@@ -1092,7 +1092,7 @@ def test_a_moved_main_checkout_is_unanswerable_and_writes_nothing(
     `_raw_rev_parse` turns this red (the root becomes the worktree and the
     copy is created).
     """
-    from shared.project_scope import project_memory_root_or_none
+    from helpers import known_root
 
     gone = repo / ".worktrees" / "moved-main"
     gone.mkdir(parents=True)
@@ -1106,7 +1106,7 @@ def test_a_moved_main_checkout_is_unanswerable_and_writes_nothing(
     )
     assert probe.returncode != 0, "precondition: a broken gitfile must fail"
 
-    assert project_memory_root_or_none(str(gone)) is None, (
+    assert known_root(str(gone)) is None, (
         "a broken-gitfile worktree classified as a KNOWN root"
     )
 
@@ -1381,7 +1381,7 @@ def test_a_bare_worktree_resolves_and_prints_no_skip(tmp_path, monkeypatch):
     for it: it IS a genuine checkout. This arm pins that at the message layer,
     where a careless mapping to the new "could not be verified" text would
     show up as the absence it is supposed to keep."""
-    from shared.project_scope import project_memory_root_or_none
+    from helpers import known_root
 
     seed = tmp_path / "seed"
     seed.mkdir()
@@ -1394,7 +1394,7 @@ def test_a_bare_worktree_resolves_and_prints_no_skip(tmp_path, monkeypatch):
     worktree = tmp_path / "bare-wt"
     _git("worktree", "add", "-q", str(worktree), "main", cwd=bare)
 
-    assert project_memory_root_or_none(worktree) is not None, (
+    assert known_root(worktree) is not None, (
         "a bare repository's worktree is a genuine checkout, not an unknown root"
     )
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))

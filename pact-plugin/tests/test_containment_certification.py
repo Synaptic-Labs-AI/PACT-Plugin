@@ -803,7 +803,6 @@ class TestTwoLegCompositionThroughProductionEntryPoints:
         )
 
     def test_check_pinned_staleness_refuses(self, tmp_path):
-        from unittest.mock import patch
 
         from session_init import check_pinned_staleness
 
@@ -813,9 +812,7 @@ class TestTwoLegCompositionThroughProductionEntryPoints:
         target.write_text(self._STALE, encoding="utf-8")
         victim_before = (project / "real.md").read_bytes()
 
-        with patch("session_init._get_project_claude_md_path", return_value=target), \
-             patch("staleness._get_project_claude_md_path", return_value=target):
-            result = check_pinned_staleness(doc_for(target))
+        result = check_pinned_staleness(doc_for(target))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert (project / "real.md").read_bytes() == victim_before

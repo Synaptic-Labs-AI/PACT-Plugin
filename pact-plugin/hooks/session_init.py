@@ -63,7 +63,7 @@ from shared.task_utils import (
 )
 
 # Import staleness detection (extracted to staleness.py for maintainability).
-# Underscore aliases (_get_project_claude_md_path, _estimate_tokens) and the
+# The underscore alias (_estimate_tokens) and the
 # uppercase constants are re-exported here so test_staleness.py can keep
 # importing them via `from session_init import ...`. Removing these would
 # break the staleness test suite, even though pyright flags them as unused
@@ -73,7 +73,6 @@ from staleness import (  # noqa: F401
     check_pinned_block_signal as _staleness_block_check,
     PINNED_STALENESS_DAYS,
     PINNED_CONTEXT_TOKEN_BUDGET,
-    _get_project_claude_md_path,
     _estimate_tokens,
     locate_pinned,
 )

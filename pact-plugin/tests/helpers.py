@@ -796,3 +796,21 @@ def session_doc():
 
     _session, document = session_document()
     return document if document is not None else doc_for(None)
+
+
+def known_root(directory):
+    """The KNOWN project-memory root of `directory`, or None when unknown:
+    `project_scope.memory_root_of(directory)[0]`."""
+    from shared.project_scope import memory_root_of
+
+    return memory_root_of(directory)[0]
+
+
+def root_or_input(directory):
+    """The KNOWN root, else `directory` itself as a Path: the classifier's
+    answer with an unknown root folded back to its input, for arms that state
+    the answer as one path."""
+    from pathlib import Path
+
+    root = known_root(directory)
+    return root if root is not None else Path(directory)

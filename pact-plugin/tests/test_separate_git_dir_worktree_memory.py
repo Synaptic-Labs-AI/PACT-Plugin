@@ -76,13 +76,13 @@ def sep_worktree(tmp_path):
 
 
 def test_the_resolver_reports_unknown_while_the_reader_fails_open(sep_worktree):
-    from shared.project_scope import project_memory_root, project_memory_root_or_none
+    from helpers import known_root, root_or_input
 
     _work, wt, _md = sep_worktree
-    assert project_memory_root_or_none(wt) is None, (
+    assert known_root(wt) is None, (
         "an unverified non-bare linked worktree must be UNKNOWN to writers"
     )
-    assert project_memory_root(wt) == wt, (
+    assert root_or_input(wt) == wt, (
         "the reader fail-open answer must stay the input"
     )
 
@@ -189,7 +189,7 @@ def test_a_bare_repository_worktree_stays_a_known_root(tmp_path, monkeypatch):
     """A bare repository's worktree IS a genuine checkout: it keeps today's
     behaviour (its own root, writers act there), not the unknown the non-bare
     shape gets."""
-    from shared.project_scope import project_memory_root_or_none
+    from helpers import known_root
     from test_pin_marker_writer import build_claude_md
 
     import pin_marker_writer
@@ -204,7 +204,7 @@ def test_a_bare_repository_worktree_stays_a_known_root(tmp_path, monkeypatch):
     added = _git("worktree", "add", "-q", str(wt), cwd=bare)
     assert added.returncode == 0, added.stderr
 
-    assert project_memory_root_or_none(wt) == wt
+    assert known_root(wt) == wt
 
     # Behavioural half of the statement: KNOWN means writers still act here.
     wt_md = wt / ".claude" / "CLAUDE.md"
@@ -224,7 +224,7 @@ def test_a_forged_gitfile_is_unknown_and_the_archive_refuses(
     used to let the archive's fall-through resolve that project's document.
     The resolver now reports UNKNOWN, so the archive refuses."""
     import archive_pin
-    from shared.project_scope import project_memory_root_or_none
+    from helpers import known_root
 
     work, _wt, _md = sep_worktree
     victim = tmp_path / "victim"
@@ -245,7 +245,7 @@ def test_a_forged_gitfile_is_unknown_and_the_archive_refuses(
         f"gitdir: {victim}/.git/worktrees/victim-wt\n", encoding="utf-8"
     )
 
-    assert project_memory_root_or_none(forged) is None
+    assert known_root(forged) is None
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
@@ -281,7 +281,7 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
     branch decides both. RED before that fix, green with it.
     """
     import archive_pin
-    from shared.project_scope import project_memory_root_or_none
+    from helpers import known_root
 
     main = tmp_path / "moved-main"
     main.mkdir()
@@ -296,7 +296,7 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
     wt_md.parent.mkdir()
     wt_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
 
-    assert project_memory_root_or_none(moved) is None, (
+    assert known_root(moved) is None, (
         "a moved worktree still verified as its own root"
     )
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(moved))

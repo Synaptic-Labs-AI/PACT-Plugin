@@ -1,15 +1,15 @@
 """The REAL CLAUDE.md resolution path for archive_pin — driven, not mocked.
 
 THIS FILE EXISTS BECAUSE NOTHING ELSE EXERCISES THE ACTUAL RESOLVER.
-`get_project_claude_md_path` is monkeypatched in both places it appears
+The session resolver is monkeypatched in both places it appears
 (test_check_pin_caps.py's `patched_claude_md`, test_archive_pin.py's
 `claude_md` fixture), so every existing test hands the code a path it already
 decided on. That is precisely why a resolver defect survived PREPARE,
 ARCHITECT, CODE, TEST and three reviews: no test could see it, because no
 test ever asked the resolver a question.
 
-So nothing here patches `get_project_claude_md_path`, `resolve_claude_md`, or
-`_resolve_project_claude_md_with_base`. The tests set `CLAUDE_PROJECT_DIR`
+So nothing here patches the session resolver or `resolve_claude_md`. The
+tests set `CLAUDE_PROJECT_DIR`
 and the working directory — the two real inputs — and let resolution run.
 
 THE DEFECT UNDER TEST. Resolution order is CLAUDE_PROJECT_DIR -> git

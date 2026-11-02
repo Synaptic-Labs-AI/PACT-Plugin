@@ -10,7 +10,7 @@ is updated, its siblings must stay in sync.
 
 Resolvers under test:
 1. shared.claude_md_manager.resolve_project_claude_md_path  -- canonical
-2. staleness.get_project_claude_md_path                      -- hooks/
+2. staleness.resolve_session_claude_md_path                  -- hooks/
 3. working_memory._resolve_display_claude_md_path            -- skills/
 4. memory_api.PACTMemory._find_project_root                  -- skills/ (walks UP)
 5. worktree_guard inline probe                                -- hooks/ (inline)
@@ -71,11 +71,11 @@ def resolver_claude_md_manager(tmp: Path, monkeypatch) -> str:
 
 
 def resolver_staleness(tmp: Path, monkeypatch) -> str:
-    """Public entry exercises env-var short-circuit + git fallback chain."""
-    from staleness import get_project_claude_md_path
+    """The session reader, driven through the declared directory."""
+    from staleness import resolve_session_claude_md_path
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp))
-    return _classify_path(get_project_claude_md_path(), tmp)
+    return _classify_path(resolve_session_claude_md_path(), tmp)
 
 
 def resolver_working_memory(tmp: Path, monkeypatch) -> str:

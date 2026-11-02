@@ -180,10 +180,7 @@ class TestSite1StalenessParentAndMultiHop:
         managed.write_text(_STALE, encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        from unittest.mock import patch
-        with patch("session_init._get_project_claude_md_path", return_value=managed), \
-             patch("staleness._get_project_claude_md_path", return_value=managed):
-            result = check_pinned_staleness(doc_for(managed))
+        result = check_pinned_staleness(doc_for(managed))
 
         # Lexical base = proj (parent.name=='.claude' -> parent.parent); target
         # resolves into `outside` -> escapes -> opaque refuse, victim untouched.
@@ -207,10 +204,7 @@ class TestSite1StalenessParentAndMultiHop:
         managed.write_text(_STALE, encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        from unittest.mock import patch
-        with patch("session_init._get_project_claude_md_path", return_value=managed), \
-             patch("staleness._get_project_claude_md_path", return_value=managed):
-            result = check_pinned_staleness(doc_for(managed))
+        result = check_pinned_staleness(doc_for(managed))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert (outside / "CLAUDE.md").read_text(encoding="utf-8") == before

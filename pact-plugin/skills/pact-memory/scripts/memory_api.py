@@ -495,12 +495,10 @@ class PACTMemory:
         # two share one derivation of the path exactly as they already share
         # one derivation of the name. Passing no `start` runs git in the cwd,
         # which is this strategy's base.
-        # NOTE: Twin pattern in working_memory.py (_get_claude_md_path) and
-        #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
-        #       Those two couple the resolution to a CLAUDE.md existence check
-        #       and return the root only when one is found there, so they need
-        #       restructuring rather than substitution and are deliberately not
-        #       migrated onto this helper.
+        # The project CLAUDE.md is NOT located this way: its resolver
+        # classifies the session's root through project_scope.memory_root_of,
+        # which verifies the main checkout rather than trusting the common
+        # dir's parent. This derivation names the project for its id only.
         repo_root = main_repo_root()
         if repo_root is not None:
             project_name = repo_root.name

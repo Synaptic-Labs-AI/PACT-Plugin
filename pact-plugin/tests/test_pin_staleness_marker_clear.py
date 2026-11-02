@@ -63,25 +63,13 @@ STALE_SIGNAL = "2 stale pins remain in Pinned Context"
 def _patch_the_resolver(monkeypatch, staleness, replacement):
     """Rebind EVERY module name that points at the managed-file resolver.
 
-    `staleness` binds the resolver under TWO names: the canonical
-    `get_project_claude_md_path`, and an alias assigned at import time,
-    `_get_project_claude_md_path = get_project_claude_md_path`. THE TWO NAMES
-    HOLD ONE OBJECT, AND REBINDING ONE LEAVES THE OTHER POINTING AT THE
-    ORIGINAL.
-
-    THIS COST ME A FALSE RESULT AND IT IS RECORDED SO IT IS NOT REPEATED. The
-    fixtures patched the ALIAS. The conservative repair imports the CANONICAL
-    name, so it took the real resolver, walked to the real managed file, and
-    the arm reported the repair as absent while it was present. A pending arm
-    that cannot see its own subject land is worse than no arm: it holds the
-    team at a state the tree left.
-
-    A caller takes whichever name it imports, so a fixture must cover each of
-    them. `raising=True` is the default and it is wanted: if a name goes, this
+    `staleness` binds the session's resolver under one name,
+    `resolve_session_claude_md_path`. If an alias is ever added, a patch of
+    one name leaves the other pointing at the original, so add it here.
+    `raising=True` is the default and it is wanted: if the name goes, this
     raises rather than patch nothing in silence.
     """
-    for name in ("get_project_claude_md_path", "_get_project_claude_md_path",
-                 "resolve_session_claude_md_path"):
+    for name in ("resolve_session_claude_md_path",):
         monkeypatch.setattr(staleness, name, replacement)
 
 
@@ -453,9 +441,7 @@ def edit_route_bed(tmp_path, monkeypatch):
     reads the name in the `shared` package namespace at call time. A PATCH
     BINDS TO A NAME RATHER THAN TO A FUNCTION, so the correct name is the one
     THE CALLER IMPORTS. An AST walk of module-level `name = name` bindings
-    across `hooks/` finds ONE alias in the tree, `_get_project_claude_md_path`
-    in `staleness`, and NONE for this predicate. The walk reports that known
-    alias, which is the control that the walk is live. If a second binding
+    across `hooks/` finds NONE for this predicate. If a binding
     appears later, this fixture wants the same treatment
     `_patch_the_resolver` gives the other resolver.
 

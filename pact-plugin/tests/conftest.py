@@ -371,7 +371,7 @@ def _scrub_claude_project_dir_env():
        DIRECT assignment (NOT ``monkeypatch.setenv``), so it is never restored
        and LEAKS into later tests — an order-dependent pollution vector that
        redirects ``CLAUDE_PROJECT_DIR``-keyed resolvers (e.g.
-       ``staleness.get_project_claude_md_path``) away from the test's intended
+       ``staleness.resolve_session_claude_md_path``) away from the test's intended
        root. The setup-time POP makes every test start from a
        guaranteed-unset baseline regardless of what an earlier test left
        behind — strictly stronger than the snapshot/restore-only posture this

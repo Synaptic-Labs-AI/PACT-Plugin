@@ -3,11 +3,11 @@
 F1 fixed the four sites inside `shared/project_scope.py`. Three reader modules
 run git themselves with `text=True`, so the same `UnicodeDecodeError` escaped
 them -- and F1 makes them REACHABLE, because session_init now proceeds on a
-path it used to die on early. Each arm drives a READER (not
-`project_memory_root`) whose first-rung probe misses, so the git launcher runs:
+path it used to die on early. Each arm drives a READER whose path reaches
+git:
 
-  - `staleness._resolve_project_claude_md_with_base`'s `--git-common-dir`
-    launcher (via `get_project_claude_md_path`);
+  - `staleness.resolve_session_claude_md_path`, which reaches git only
+    through `project_scope`;
   - `working_memory._resolve_display_claude_md_with_base`, which now reaches
     git only through `project_scope`;
   - `memory_api.main_repo_root`'s `--git-common-dir` launcher.
@@ -59,14 +59,15 @@ def bad_main_repo(tmp_path, monkeypatch):
     return main, worktree, main_md
 
 
-def test_the_staleness_reader_resolves_main(bad_main_repo):
-    """Launcher: `staleness._resolve_project_claude_md_with_base`'s
-    `git rev-parse --git-common-dir` (reached through
-    `get_project_claude_md_path`, first-rung probe on the worktree misses)."""
-    from staleness import get_project_claude_md_path
+def test_the_staleness_reader_resolves_main(bad_main_repo, monkeypatch):
+    """The session reader reaches MAIN through `project_scope`'s git readers
+    (session-record rung stubbed to a miss)."""
+    from shared import project_scope
+    from staleness import resolve_session_claude_md_path
 
+    monkeypatch.setattr(project_scope, "recorded_project_dir", lambda: "")
     main, worktree, main_md = bad_main_repo
-    assert get_project_claude_md_path(worktree) == main_md
+    assert resolve_session_claude_md_path() == main_md
 
 
 def test_the_working_memory_readers_resolve_main(bad_main_repo, monkeypatch):

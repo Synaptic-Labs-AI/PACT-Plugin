@@ -22,7 +22,7 @@ import subprocess
 import pytest
 
 import shared.project_scope as project_scope
-from shared.project_scope import project_memory_root, project_memory_root_or_none
+from helpers import known_root, root_or_input
 
 
 def _git(*args, cwd):
@@ -54,25 +54,25 @@ def _worktree(main, name):
 
 
 def test_a1_main_checkout_returns_input(repo):
-    assert project_memory_root(repo) == repo
+    assert root_or_input(repo) == repo
 
 
 def test_a2_linked_worktree_returns_main_checkout(repo):
     worktree = _worktree(repo, "wt-a2")
-    assert project_memory_root(worktree) == repo.resolve()
+    assert root_or_input(worktree) == repo.resolve()
 
 
 def test_a3_subdirectory_of_a_worktree_returns_main_checkout(repo):
     worktree = _worktree(repo, "wt-a3")
     subdir = worktree / "pkg"
     subdir.mkdir()
-    assert project_memory_root(subdir) == repo.resolve()
+    assert root_or_input(subdir) == repo.resolve()
 
 
 def test_a4_non_git_directory_returns_input(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert project_memory_root(plain) == plain
+    assert root_or_input(plain) == plain
 
 
 def test_a5a_separate_git_dir_returns_input(tmp_path):
@@ -85,7 +85,7 @@ def test_a5a_separate_git_dir_returns_input(tmp_path):
         "init", "-q", f"--separate-git-dir={tmp_path / 'sep.git'}", ".",
         cwd=checkout,
     )
-    assert project_memory_root(checkout) == checkout
+    assert root_or_input(checkout) == checkout
 
 
 def test_a5b_worktree_of_a_bare_repo_returns_input(tmp_path):
@@ -101,7 +101,7 @@ def test_a5b_worktree_of_a_bare_repo_returns_input(tmp_path):
     _git("clone", "-q", "--bare", str(src), str(bare), cwd=tmp_path)
     worktree = tmp_path / "bare-wt"
     _git("worktree", "add", "-q", str(worktree), cwd=bare)
-    assert project_memory_root(worktree) == worktree
+    assert root_or_input(worktree) == worktree
 
 
 def test_a6_inherited_git_dir_is_stripped(repo, monkeypatch):
@@ -109,20 +109,20 @@ def test_a6_inherited_git_dir_is_stripped(repo, monkeypatch):
     helper's git calls run without the location variables."""
     worktree = _worktree(repo, "wt-a6")
     monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
-    assert project_memory_root(worktree) == repo.resolve()
+    assert root_or_input(worktree) == repo.resolve()
 
 
 def test_a7_git_failure_returns_input(repo, monkeypatch):
     worktree = _worktree(repo, "wt-a7")
     monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
-    assert project_memory_root(worktree) == worktree
+    assert root_or_input(worktree) == worktree
 
 
 def test_a8_non_worktree_input_is_returned_exactly(tmp_path):
     """No resolve, no absolutise: the comparison the byte-identical guarantee
     makes is a string comparison."""
     given = str(tmp_path / "missing" / ".." / "also-missing")
-    assert str(project_memory_root(given)) == given
+    assert str(root_or_input(given)) == given
 
 
 def test_a9_forged_gitfile_returns_input(repo, tmp_path):
@@ -133,7 +133,7 @@ def test_a9_forged_gitfile_returns_input(repo, tmp_path):
     forged = tmp_path / "forged"
     forged.mkdir()
     (forged / ".git").write_text(f"gitdir: {admin}\n")
-    assert project_memory_root(forged) == forged
+    assert root_or_input(forged) == forged
 
 
 def test_a9b_forged_gitfile_with_a_relative_path_returns_input(repo, tmp_path):
@@ -146,7 +146,7 @@ def test_a9b_forged_gitfile_with_a_relative_path_returns_input(repo, tmp_path):
     (forged / ".git").write_text(
         f"gitdir: {os.path.relpath(admin, forged)}\n"
     )
-    assert project_memory_root(forged) == forged
+    assert root_or_input(forged) == forged
 
 
 def test_a10_a_repo_nested_in_a_worktree_returns_input(repo):
@@ -172,7 +172,7 @@ def test_a10_a_repo_nested_in_a_worktree_returns_input(repo):
     nested = worktree / "nested"
     nested.mkdir()
     _git("init", "-q", ".", cwd=nested)
-    assert project_memory_root(nested) == nested
+    assert root_or_input(nested) == nested
 
 
 def test_a11_a_worktree_path_with_a_newline_redirects_to_main(repo, tmp_path):
@@ -184,7 +184,7 @@ def test_a11_a_worktree_path_with_a_newline_redirects_to_main(repo, tmp_path):
     """
     path = tmp_path / "wt\nnl"
     _git("worktree", "add", "-q", str(path), "-b", "nl", cwd=repo)
-    assert project_memory_root(path) == repo.resolve()
+    assert root_or_input(path) == repo.resolve()
 
 
 def test_a11b_when_z_is_unsupported_the_line_parser_still_resolves(
@@ -202,7 +202,7 @@ def test_a11b_when_z_is_unsupported_the_line_parser_still_resolves(
         return real(args, **kwargs)
 
     monkeypatch.setattr(project_scope, "run_git", fake_run_git)
-    assert project_memory_root(worktree) == repo.resolve()
+    assert root_or_input(worktree) == repo.resolve()
 
 
 def test_a11c_the_fallback_still_guards_forged_gitfiles(repo, tmp_path, monkeypatch):
@@ -233,8 +233,8 @@ def test_a11c_the_fallback_still_guards_forged_gitfiles(repo, tmp_path, monkeypa
 
     monkeypatch.setattr(project_scope, "run_git", fake_run_git)
 
-    assert project_memory_root(forged_absolute) == forged_absolute
-    assert project_memory_root(forged_relative) == forged_relative
+    assert root_or_input(forged_absolute) == forged_absolute
+    assert root_or_input(forged_relative) == forged_relative
 
 
 def test_a12_a_worktree_path_with_a_trailing_space_redirects_to_main(
@@ -244,7 +244,7 @@ def test_a12_a_worktree_path_with_a_trailing_space_redirects_to_main(
     stripped toplevel does not, so a legitimate worktree fell back to itself."""
     path = tmp_path / "wt-space "
     _git("worktree", "add", "-q", str(path), "-b", "space", cwd=repo)
-    assert project_memory_root(path) == repo.resolve()
+    assert root_or_input(path) == repo.resolve()
 
 
 def test_a12b_a_main_checkout_path_with_a_trailing_space_is_a_valid_root(
@@ -260,7 +260,7 @@ def test_a12b_a_main_checkout_path_with_a_trailing_space_is_a_valid_root(
     _git("commit", "-qm", "seed", cwd=main)
     worktree = main / ".worktrees" / "wt"
     _git("worktree", "add", "-q", str(worktree), "-b", "sp-main", cwd=main)
-    assert project_memory_root(worktree) == main.resolve()
+    assert root_or_input(worktree) == main.resolve()
 
 
 def test_a13_a_forged_path_one_space_away_is_not_admitted(repo):
@@ -271,7 +271,7 @@ def test_a13_a_forged_path_one_space_away_is_not_admitted(repo):
     forged = real.parent / (real.name + " ")
     forged.mkdir()
     (forged / ".git").write_text(f"gitdir: {admin}\n")
-    assert project_memory_root(forged) == forged
+    assert root_or_input(forged) == forged
 
 
 def test_a11d_a_newline_path_survives_a_forced_z_failure(repo, tmp_path, monkeypatch):
@@ -291,7 +291,7 @@ def test_a11d_a_newline_path_survives_a_forced_z_failure(repo, tmp_path, monkeyp
         return real(args, **kwargs)
 
     monkeypatch.setattr(project_scope, "run_git", fake_run_git)
-    assert project_memory_root(path) == repo.resolve()
+    assert root_or_input(path) == repo.resolve()
 
 
 def test_a14_a_git_failure_is_reported_unknown(repo, monkeypatch):
@@ -299,8 +299,8 @@ def test_a14_a_git_failure_is_reported_unknown(repo, monkeypatch):
     while `project_memory_root` keeps its fail-safe input for readers."""
     worktree = _worktree(repo, "wt-unknown")
     monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
-    assert project_memory_root_or_none(worktree) is None
-    assert project_memory_root(worktree) == worktree
+    assert known_root(worktree) is None
+    assert root_or_input(worktree) == worktree
 
 
 def test_f1_f_a_missing_directory_is_unknown_while_a_non_git_one_is_known(tmp_path):
@@ -314,8 +314,8 @@ def test_f1_f_a_missing_directory_is_unknown_while_a_non_git_one_is_known(tmp_pa
     present.mkdir()
 
     assert not missing.exists()
-    assert project_memory_root_or_none(missing) is None
-    assert project_memory_root_or_none(present) == present, (
+    assert known_root(missing) is None
+    assert known_root(present) == present, (
         "the control shape -- an existing non-git directory -- stopped being "
         "a known root"
     )
@@ -326,7 +326,7 @@ def test_a14b_a_non_git_directory_is_a_known_answer(tmp_path):
     a plain project directory must keep its writers."""
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert project_memory_root_or_none(plain) == plain
+    assert known_root(plain) == plain
 
 
 def test_a15_a_separate_git_dir_with_a_trailing_space_returns_input(tmp_path):
@@ -343,7 +343,7 @@ def test_a15_a_separate_git_dir_with_a_trailing_space_returns_input(tmp_path):
     checkout.mkdir()
     _git("init", "-q", f"--separate-git-dir={tmp_path / 'sep.git '}", ".",
          cwd=checkout)
-    assert project_memory_root(checkout) == checkout
+    assert root_or_input(checkout) == checkout
 
 
 # --- F1 (#1653): undecodable path bytes must still classify -----------------
@@ -364,7 +364,7 @@ def _bad_worktree(main):
 def test_f1_a_own_invalid_utf8_path_returns_main(repo):
     """Site 1: `_raw_rev_parse` decodes git's --git-dir/--git-common-dir."""
     worktree = _bad_worktree(repo)
-    assert project_memory_root(worktree) == repo.resolve()
+    assert root_or_input(worktree) == repo.resolve()
 
 
 def test_f1_b_an_ascii_worktree_beside_an_invalid_one_returns_main(repo):
@@ -373,7 +373,7 @@ def test_f1_b_an_ascii_worktree_beside_an_invalid_one_returns_main(repo):
     arm A -- an A-only fix leaves this red."""
     _bad_worktree(repo)
     worktree = _worktree(repo, "wt-f1b")
-    assert project_memory_root(worktree) == repo.resolve()
+    assert root_or_input(worktree) == repo.resolve()
 
 
 def test_f1_c_admin_gitdir_fallback_decodes(repo, monkeypatch):
@@ -391,7 +391,7 @@ def test_f1_c_admin_gitdir_fallback_decodes(repo, monkeypatch):
         return real_run_git(args, **kwargs)
 
     monkeypatch.setattr(project_scope, "run_git", failing_list)
-    assert project_memory_root(worktree) == repo.resolve()
+    assert root_or_input(worktree) == repo.resolve()
 
 
 def test_f1_e_git_output_preserves_an_undecodable_path(repo):
@@ -427,7 +427,7 @@ def test_d2_a_relative_admin_gitdir_record_resolves(repo, monkeypatch):
 
     monkeypatch.setattr(project_scope, "run_git", failing_list)
 
-    assert project_memory_root(worktree) == repo.resolve(), (
+    assert root_or_input(worktree) == repo.resolve(), (
         "the relative admin-gitdir record was not resolved against the main root"
     )
 
@@ -461,10 +461,10 @@ def test_the_admin_gitdir_read_preserves_a_carriage_return_path(repo, monkeypatc
 
     monkeypatch.setattr(project_scope, "run_git", failing_list)
 
-    assert project_memory_root(real) == repo.resolve(), (
+    assert root_or_input(real) == repo.resolve(), (
         "the real carriage-return worktree was rejected by the fallback"
     )
-    assert project_memory_root_or_none(forged) is None, (
+    assert known_root(forged) is None, (
         "a forged directory at the newline spelling was admitted"
     )
 
@@ -491,4 +491,4 @@ def test_r9_the_z_listing_is_the_only_source_that_keeps_a_newline_path(
         lambda _checkout: None,
     )
 
-    assert project_memory_root(real) == repo.resolve()
+    assert root_or_input(real) == repo.resolve()
