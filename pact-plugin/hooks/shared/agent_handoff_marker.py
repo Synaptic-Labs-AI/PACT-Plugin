@@ -348,11 +348,19 @@ def report_safe(value: object, limit: int = _REPORT_VALUE_MAX) -> str:
 
     Report lines are read by an agent that may act on them, and field names
     come from the task file and the append-only journal — both outside this
-    module's control. C0 control characters (including CR and LF) would let a
-    value forge or split a report line, so they are stripped, and the result
-    is length-capped so one value cannot swallow the line.
+    module's control. A value would forge or split a report line at ANY
+    boundary the consumer treats as a line break, so this strips BOTH sets:
+      - C0 controls and DEL (\\x00-\\x1f, \\x7f), which covers CR and LF; and
+      - every boundary `str.splitlines()` recognises that C0 does not cover:
+        NEL U+0085, LINE SEPARATOR U+2028 and PARAGRAPH SEPARATOR U+2029.
+    An ASCII-only class leaves the last three, and a renderer that splits on
+    `splitlines()` — Python's own, and many log consumers — would still see a
+    forged line. Removing them via `splitlines()` rather than a third
+    hand-written class keeps the set correct if Python's notion widens. The
+    result is length-capped so one value cannot swallow the line.
     """
-    return re.sub(r"[\x00-\x1f\x7f]", "", str(value))[:limit]
+    without_controls = re.sub(r"[\x00-\x1f\x7f]", "", str(value))
+    return "".join(without_controls.splitlines())[:limit]
 
 
 def _identity(raw_key: str) -> str:

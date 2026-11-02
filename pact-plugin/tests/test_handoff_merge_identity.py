@@ -28,6 +28,7 @@ from shared.agent_handoff_marker import (
     mixed_old_format_event,
     occupant_hash,
     old_format_destination,
+    report_safe,
     union_preferring_task_file,
 )
 
@@ -64,6 +65,24 @@ class TestDiskIdentity:
         assert disk_identity("coder-a", "land the arms") == occupant_hash(
             "coder-a", "land the arms"
         )
+
+
+class TestReportSafe:
+    """The sanitiser itself: every line boundary a consumer may split on,
+    not only the ASCII ones. `str.splitlines()` — Python's own, and many log
+    consumers — recognises all of these."""
+
+    @pytest.mark.parametrize(
+        "sep", ["\n", "\r", "\r\n", "\x85", "\u2028", "\u2029"]
+    )
+    def test_every_line_boundary_is_stripped(self, sep):
+        assert report_safe("before" + sep + "after") == "beforeafter"
+
+    def test_non_line_controls_are_still_stripped(self):
+        assert report_safe("a\x00b\x07c\x7fd") == "abcd"
+
+    def test_visible_text_survives_and_the_value_is_capped(self):
+        assert report_safe("x" * 500, limit=10) == "xxxxxxxxxx"
 
 
 class TestUnionPreferringTaskFile:
@@ -307,6 +326,19 @@ class TestUnionPreferringTaskFile:
         )
         assert any("weirdkey" in line for line in reports)
         assert all("\n" not in line for line in reports)
+
+    @pytest.mark.parametrize("sep", ["\x85", "\u2028"])
+    def test_report_field_name_strips_unicode_line_separators(self, sep):
+        """DISCRIMINATING for the ASCII-only class: NEL and LINE SEPARATOR are
+        not C0, so the old sanitiser left them and a `splitlines()` renderer
+        would see a forged line."""
+        _, reports = union_preferring_task_file(
+            {"produced": "p", ("weird" + sep + "key"): "x"},
+            {"produced": "p2"},
+            "61",
+        )
+        assert any("weirdkey" in line for line in reports)
+        assert sep not in "\n".join(reports)
 
     def test_report_field_name_is_length_capped(self):
         long_key = "k" * 500

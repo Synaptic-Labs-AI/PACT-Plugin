@@ -15,6 +15,8 @@ events in production when the resolver returns "".
 """
 from unittest.mock import patch
 
+import pytest
+
 from fixtures.emitter import VALID_HANDOFF, _run_main
 
 from shared.session_journal import _validate_event_schema
@@ -213,6 +215,23 @@ class TestEmitTeamUncertaintyGuard:
         assert "\nFORGED" not in err
         assert "session-liveFORGED: approved" in err
         assert err.count("\n") == 1  # the report line plus print's newline
+
+    @pytest.mark.parametrize("sep", ["\x85", "\u2028"])
+    def test_payload_team_cannot_forge_a_unicode_line(
+        self, tmp_path, monkeypatch, capsys, sep
+    ):
+        """NEL and LINE SEPARATOR are not C0; `splitlines()` splits on both,
+        so an ASCII-only sanitiser would still let this forge a line."""
+        code, calls, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live" + sep + "FORGED: approved",
+            payload_subject="LIVE subject",
+            context_team="session-old",
+        )
+        assert code == 0
+        assert calls == []
+        assert len(err.splitlines()) == 1
+        assert "session-liveFORGED: approved" in err
 
     def test_team_disagreement_with_agreeing_subjects_emits(
         self, tmp_path, monkeypatch, capsys
