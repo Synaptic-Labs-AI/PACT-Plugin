@@ -425,3 +425,133 @@ def test_an_unresolved_ceiling_after_an_empty_entry_reaches_a_broken_gitfile(
 
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(link))
     assert _project_memory_root_cause(proj) == (proj, ROOT_CAUSE_OK)
+
+
+# ---------------------------------------------------------------------------
+# One arm per broken layout: the classifier answers UNANSWERABLE AND a lead
+# SessionStart there writes nothing and says why. Each layout is real git
+# under tmp_path; the exit-1 row uses a `git` shim on PATH (git itself never
+# exits 1 for rev-parse at a healthy worktree), and the ownership rows use
+# git's own GIT_TEST_ASSUME_DIFFERENT_OWNER switch, honoured since git 2.35.
+#
+# Revert check for every row: without the metadata rule in `_raw_rev_parse`
+# the cause is "ok" and the root is the directory itself, so the classifier
+# assertion goes red, and the lead start creates `.claude/CLAUDE.md` in the
+# worktree (or the main checkout, for the main row), so the no-write
+# assertion goes red too.
+# ---------------------------------------------------------------------------
+
+_SKIP_LINE = (
+    "Project CLAUDE.md skipped: git could not answer, so the project memory "
+    "target is unknown"
+)
+
+
+def _exit_one_git_on_path(tmp_path, monkeypatch):
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    git = shim / "git"
+    git.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+def _broken(tmp_path, monkeypatch, row):
+    """Build `row` and return (the directory to start in, its main checkout)."""
+    main = _main(tmp_path)
+    worktree = main / ".worktrees" / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+    if row == "exit_one_stub":
+        _exit_one_git_on_path(tmp_path, monkeypatch)
+        return worktree, main
+    if row == "moved_main":
+        outside = tmp_path / "outside"
+        _git("worktree", "move", str(worktree), str(outside), cwd=main)
+        main = main.rename(tmp_path / "moved")
+        return outside, main
+    if row == "deleted_admin":
+        shutil.rmtree(main / ".git" / "worktrees" / "wt")
+        return worktree, main
+    if row == "dubious_worktree":
+        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        return worktree, main
+    if row == "dubious_main":
+        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        return main, main
+    raise AssertionError(row)
+
+
+def _lead_start(monkeypatch, project_dir):
+    import io
+    import json
+    from unittest.mock import patch
+
+    import session_init
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.chdir(project_dir)
+    stdin = json.dumps({
+        "session_id": "cdcdcdcd-1111-4222-8333-444444444444",
+        "source": "startup",
+        "agent_type": "PACT:pact-orchestrator",
+    })
+    with patch("sys.stdin", io.StringIO(stdin)), \
+         patch("sys.stdout", new_callable=io.StringIO) as out:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    return json.loads(out.getvalue()).get("systemMessage", "")
+
+
+_ROWS = [
+    "exit_one_stub", "moved_main", "deleted_admin", "dubious_worktree",
+    "dubious_main",
+]
+
+
+@pytest.mark.parametrize(
+    "row", ["exit_one_stub", "dubious_worktree", "dubious_main"]
+)
+def test_a_broken_layout_is_unanswerable(tmp_path, monkeypatch, row):
+    """The rows the arms above do not already build. The moved-main and
+    deleted-admin rows have their own classifier arms and appear below only
+    for the SessionStart half."""
+    start, _main_checkout = _broken(tmp_path, monkeypatch, row)
+
+    root, cause = _project_memory_root_cause(start)
+
+    assert cause == ROOT_CAUSE_UNANSWERABLE, (row, root, cause)
+
+
+@pytest.mark.parametrize("row", _ROWS)
+def test_a_lead_start_in_a_broken_layout_writes_nothing_and_says_why(
+    tmp_path, monkeypatch, row
+):
+    start, main_checkout = _broken(tmp_path, monkeypatch, row)
+    monkeypatch.setattr(
+        project_scope, "get_worktree_identity_from_session_record", lambda: {}
+    )
+
+    message = _lead_start(monkeypatch, start)
+
+    assert _SKIP_LINE in message, (row, message)
+    for base in {start, main_checkout}:
+        assert not (base / ".claude" / "CLAUDE.md").exists(), (row, base)
+        assert not (base / "CLAUDE.md").exists(), (row, base)
+
+
+def test_the_same_lead_start_in_a_healthy_worktree_creates_mains_document(
+    tmp_path, monkeypatch
+):
+    """Control for the rows above: the start they run really does create a
+    document when the root is known, so their no-write assertions are not
+    vacuous."""
+    main = _main(tmp_path)
+    worktree = main / ".worktrees" / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+
+    message = _lead_start(monkeypatch, worktree)
+
+    assert _SKIP_LINE not in message
+    assert (main / ".claude" / "CLAUDE.md").exists()
+    assert not (worktree / ".claude" / "CLAUDE.md").exists()
