@@ -19,9 +19,11 @@ import sys
 from pathlib import Path
 
 import ci_contract
+from ci_full_run_record import OWNER_ENV
 
 PLUGIN = Path(__file__).with_name("ci_full_run_record.py")
 RECORD_NAME = ".pytest-run-record.json"
+COLLECTION_RECORD_NAME = ".full-collection-record.json"
 
 PASSING_SUITE = '''\
 import pytest
@@ -64,7 +66,48 @@ def pytest_configure(config):
 '''
 
 
-def _rig(tmp_path, suite_text):
+NESTING_SUITE = '''\
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+RECORD = Path(os.environ["GITHUB_WORKSPACE"]) / ".pytest-run-record.json"
+
+
+def test_a_nested_session_runs_while_the_outer_one_is_open():
+    plugin_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    if os.environ.get("RIG_NESTED_UNCLAIMED") == "1":
+        env.pop("{owner}", None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         str(plugin_root / "inner_case.py")],
+        cwd=str(plugin_root), capture_output=True, text=True, env=env,
+        timeout=120)
+    assert "2 passed" in proc.stdout, proc.stdout + proc.stderr
+    expect_written = os.environ.get("RIG_NESTED_UNCLAIMED") == "1"
+    assert RECORD.exists() is expect_written, (
+        "nested session record state was not the expected one")
+'''.replace("{owner}", OWNER_ENV)
+
+INNER_CASE = '''\
+def test_inner_one():
+    assert True
+
+
+def test_inner_two():
+    assert True
+'''
+
+SILENT_REMOVAL_CONFTEST = '''
+
+def pytest_collection_modifyitems(items):
+    del items[-1]
+'''
+
+
+def _rig(tmp_path, suite_text, extra_conftest=""):
     root = tmp_path / "rig"
     (root / ".claude-plugin").mkdir(parents=True)
     (root / ".claude-plugin" / "marketplace.json").write_text(
@@ -72,7 +115,8 @@ def _rig(tmp_path, suite_text):
     plugin_root = root / "pact-plugin"
     (plugin_root / "tests").mkdir(parents=True)
     shutil.copy2(PLUGIN, plugin_root / "tests" / PLUGIN.name)
-    (plugin_root / "conftest.py").write_text(RIG_CONFTEST, encoding="utf-8")
+    (plugin_root / "conftest.py").write_text(
+        RIG_CONFTEST + extra_conftest, encoding="utf-8")
     (plugin_root / "tests" / "test_sample.py").write_text(
         suite_text, encoding="utf-8")
     workspace = root / "workspace"
@@ -80,14 +124,19 @@ def _rig(tmp_path, suite_text):
     return root, plugin_root, workspace
 
 
-def _run(plugin_root, workspace=None, args=(), gated=True):
+def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
     env = os.environ.copy()
     env.pop("GITHUB_ACTIONS", None)
     env.pop("GITHUB_WORKSPACE", None)
+    # The certifying session that runs THIS module has claimed ownership;
+    # the rig session is a fresh outermost session and must claim its own.
+    env.pop(OWNER_ENV, None)
+    env.pop("PYTEST_ADDOPTS", None)
     if gated:
         env["GITHUB_ACTIONS"] = "true"
     if workspace is not None:
         env["GITHUB_WORKSPACE"] = str(workspace)
+    env.update(extra_env or {})
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
          *args],
@@ -100,10 +149,26 @@ def _record(workspace):
     return json.loads((workspace / RECORD_NAME).read_text(encoding="utf-8"))
 
 
-def _verify(root, record_path):
+def _verify(root, record_path, collection_count=None):
+    """Run the real verifier against the record and a matching collection record.
+
+    The collection record is written beside the run record with the run's
+    own collected count (or `collection_count`), so each scenario reaches the
+    condition it is about rather than a collection mismatch.
+    """
+    record = json.loads(Path(record_path).read_text(encoding="utf-8"))
+    collection = Path(record_path).with_name(COLLECTION_RECORD_NAME)
+    collection.write_text(json.dumps({
+        "schema_version": 1,
+        "collected_items": (record["collected"] if collection_count is None
+                            else collection_count),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+    }), encoding="utf-8")
     verifier = ci_contract.require_root("the full-run verifier") / "scripts" / "verify_full_run.py"
     proc = subprocess.run(
-        [sys.executable, str(verifier), "--record", str(record_path)],
+        [sys.executable, str(verifier), "--record", str(record_path),
+         "--collection-record", str(collection)],
         capture_output=True, text=True, timeout=120)
     return proc
 
@@ -115,7 +180,11 @@ def test_a_passing_session_records_skips_and_xfail_xpass(tmp_path):
     record = _record(workspace)
     assert not (root / RECORD_NAME).exists(), (
         "the record must land under GITHUB_WORKSPACE, never the repo root")
-    assert record["schema_version"] == 1
+    assert record["schema_version"] == 2
+    assert record["items_before_modifyitems"] == 4
+    assert record["items_after_modifyitems"] == 4
+    assert record["run_id"] == os.environ.get("GITHUB_RUN_ID")
+    assert record["run_attempt"] == os.environ.get("GITHUB_RUN_ATTEMPT")
     assert record["collected"] == 4
     assert record["passed"] == 1
     assert record["skipped"] == 1
@@ -184,3 +253,60 @@ def test_a_gated_run_without_a_workspace_writes_nothing_and_says_so(tmp_path):
         "a gated run with no GITHUB_WORKSPACE must not fall back to the repo "
         "root")
     assert "GITHUB_WORKSPACE is empty" in proc.stderr
+
+def test_a_collect_only_session_writes_nothing(tmp_path):
+    """A collection is not a run, so it never leaves a run record behind."""
+    root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
+    proc = _run(plugin_root, workspace, ["--collect-only"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (workspace / RECORD_NAME).exists(), (
+        "a collect-only session wrote a run record")
+
+
+def test_a_nested_session_cannot_stand_in_for_the_outer_one(tmp_path):
+    """Only the outermost gated session writes; a nested one is silent.
+
+    The rig's single test spawns a nested gated session that inherits the
+    whole environment and checks, while the outer session is still open,
+    that the nested run left no record. The record that exists afterwards is
+    the outer session's: one test, not the nested session's two.
+    """
+    root, plugin_root, workspace = _rig(tmp_path, NESTING_SUITE)
+    (plugin_root / "inner_case.py").write_text(INNER_CASE, encoding="utf-8")
+    proc = _run(plugin_root, workspace)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = _record(workspace)
+    assert record["collected"] == 1 and record["passed"] == 1, record
+    assert record["terminal_node_ids"] == [
+        "tests/test_sample.py::"
+        "test_a_nested_session_runs_while_the_outer_one_is_open"], record
+
+
+def test_an_unclaimed_nested_session_would_write(tmp_path):
+    """Counter-arm: without the ownership claim the nested session writes.
+
+    This proves the nested session in the arm above is gated and reaches
+    the writer, so its silence there is the ownership claim at work and not
+    an inert rig.
+    """
+    root, plugin_root, workspace = _rig(tmp_path, NESTING_SUITE)
+    (plugin_root / "inner_case.py").write_text(INNER_CASE, encoding="utf-8")
+    proc = _run(plugin_root, workspace,
+                extra_env={"RIG_NESTED_UNCLAIMED": "1"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_an_unreported_item_removal_fails_the_verifier(tmp_path):
+    """A hook that drops an item without deselecting it is caught."""
+    root, plugin_root, workspace = _rig(
+        tmp_path, PASSING_SUITE, extra_conftest=SILENT_REMOVAL_CONFTEST)
+    proc = _run(plugin_root, workspace)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = _record(workspace)
+    assert record["items_before_modifyitems"] == 4, record
+    assert record["items_after_modifyitems"] == 3, record
+    assert record["deselected"] == 0, record
+    assert record["passed"] == 1, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "RUN-VERIFY-FAILURE COLLECTION-HOOK-NARROWING:" in verdict.stderr

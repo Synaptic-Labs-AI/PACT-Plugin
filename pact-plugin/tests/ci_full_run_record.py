@@ -2,27 +2,44 @@
 
 Location: pact-plugin/tests/ci_full_run_record.py
 
-Summary: A pytest plugin object that writes the counts, summary line and
-terminal node IDs of THIS run to ``${GITHUB_WORKSPACE}/.pytest-run-record.json``
-(or the repository root when GITHUB_WORKSPACE is unset), so
+Summary: A pytest plugin object that writes the counts, summary line, terminal
+node IDs, collection-hook item counts and run identity of THIS run to
+``${GITHUB_WORKSPACE}/.pytest-run-record.json``, so
 ``scripts/verify_full_run.py`` can check the run that certifies a merge rather
-than a separate collection of it.
+than a separate collection of it. There is no other location: with
+GITHUB_WORKSPACE unset nothing is written.
 
 Used by: pact-plugin/conftest.py, registered in ``pytest_configure``.
 
-GATED ON GITHUB_ACTIONS, and written ONLY under GITHUB_WORKSPACE. There is
-no repository-root fallback: a stray artifact in the working tree is worse
-than a probe that sets two environment variables. To probe a local run:
+GATED ON GITHUB_ACTIONS, and written ONLY under GITHUB_WORKSPACE. A stray
+artifact in the working tree is worse than a probe that sets two environment
+variables. To probe a local run:
 ``GITHUB_ACTIONS=true GITHUB_WORKSPACE=/tmp/<rig> python -m pytest ...``.
 A run with GITHUB_ACTIONS unset writes nothing; a gated run with no
 workspace prints a loud diagnostic and writes nothing (the verifier then
 fails on the absent record, which is the fail-closed direction).
+
+ONLY THE OUTERMOST SESSION WRITES. The certifying suite spawns nested pytest
+sessions, and every one of them inherits GITHUB_ACTIONS and GITHUB_WORKSPACE,
+so the record path alone cannot tell the certifying session from a child. The
+first instance in a process tree claims ``OWNER_ENV`` in the environment;
+every session that finds it already claimed is nested and writes nothing. A
+test that builds a child environment for its own record (a rig) must remove
+``OWNER_ENV`` from that environment, or its child is treated as nested.
+A collect-only session is not a run and writes nothing either.
 
 WHY THE TERMINAL SUMMARY IS THE SOURCE. ``deselected`` comes from the
 terminal reporter's stats, never ``len(session.items)``: deselection shrinks
 the item list before tests run, so the item list cannot see it. The summary
 line is built from the same reporter's ``build_summary_stats_line`` so the
 record carries the line pytest would have printed.
+
+WHY THE COLLECTION HOOK IS WRAPPED. A ``pytest_collection_modifyitems``
+implementation can drop items without reporting them as deselected; that
+shrinks the collect-only count and the run count equally, so comparing the
+two cannot see it. The outermost wrapper records the item count before and
+after every other implementation, and the verifier requires
+``after + deselected == before``.
 
 WRITTEN EVEN WHEN THE SESSION FAILED. A record that exists only on success
 cannot evidence a failure. The write is atomic (temp + ``os.replace``) so the
@@ -35,8 +52,11 @@ import os
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+import pytest
+
+SCHEMA_VERSION = 2
 RECORD_NAME = ".pytest-run-record.json"
+OWNER_ENV = "PACT_FULL_RUN_RECORD_OWNER"
 
 
 def _gated_repo_root():
@@ -54,12 +74,16 @@ def _gated_repo_root():
     return None
 
 
-def record_path():
-    """The verifier's only path: under GITHUB_WORKSPACE, or None.
+def _claim_ownership():
+    """True for the first instance in a process tree, False for any nested one."""
+    if os.environ.get(OWNER_ENV):
+        return False
+    os.environ[OWNER_ENV] = str(os.getpid())
+    return True
 
-    No repository-root fallback: the record must never appear in a working
-    tree by accident.
-    """
+
+def record_path():
+    """The verifier's only path: under GITHUB_WORKSPACE, or None."""
     workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
     if not workspace:
         return None
@@ -78,9 +102,22 @@ class FullRunRecord:
     """Session-start to session-end recorder of the certifying run."""
 
     def __init__(self):
-        self._root = _gated_repo_root()
+        root = _gated_repo_root()
+        self._root = root if root is not None and _claim_ownership() else None
         self._terminal_node_ids = []
         self._seen_node_ids = set()
+        self._items_before = None
+        self._items_after = None
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_collection_modifyitems(self, session, config, items):
+        before = len(items)
+        try:
+            return (yield)
+        finally:
+            if self._items_before is None:
+                self._items_before = before
+                self._items_after = len(items)
 
     def pytest_runtest_logreport(self, report):
         """Record every node ID that reached ANY terminal outcome.
@@ -105,7 +142,7 @@ class FullRunRecord:
         return f"{text} in {_format_duration(elapsed)}"
 
     def pytest_sessionfinish(self, session, exitstatus):
-        if self._root is None:
+        if self._root is None or session.config.option.collectonly:
             return
         path = record_path()
         if path is None:
@@ -145,6 +182,11 @@ class FullRunRecord:
             "exitstatus": int(exitstatus),
             "summary_line": summary_line,
             "terminal_node_ids": list(self._terminal_node_ids),
+            "items_before_modifyitems": self._items_before,
+            "items_after_modifyitems": self._items_after,
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "owner_pid": os.getpid(),
         }
         temp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
         try:

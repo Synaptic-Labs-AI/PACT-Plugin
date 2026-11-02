@@ -15,11 +15,18 @@ INDEPENDENCE (load-bearing)
   the thing it certifies inherits its bugs.
 
 INVOCATION
-  python scripts/verify_full_collection.py      (from the repository root)
+  python scripts/verify_full_collection.py [--record PATH]   (from the repo root)
 
-  The workflow invokes it exactly that way. Its `run:` text must never
-  contain the token `pytest`: test_ci_collection_scope.py permits exactly one
-  pytest invocation in tests.yml and parses that token.
+  The workflow passes --record with an explicit path under $GITHUB_WORKSPACE.
+  Its `run:` text must never contain the token `pytest`:
+  test_ci_collection_scope.py permits exactly one pytest invocation in
+  tests.yml and parses that token.
+
+THE RECORD IS WRITTEN ONLY WHERE --record SAYS
+  Never to a location read from the environment. The suite's own tests run
+  this guard in rigs while the certifying step runs, and they inherit
+  GITHUB_WORKSPACE; an ambient default let those rigs overwrite the real
+  record with a rig's count.
 
 EXIT CODES
   0 green; 2 scope mismatch or parse failure; 3 refusal (no checkout, empty
@@ -153,10 +160,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Prove the full suite still collects the whole corpus.")
     parser.add_argument(
         "--record", default=None,
-        help="write a collection record here (default: "
-             "${GITHUB_WORKSPACE}/.full-collection-record.json when "
-             "GITHUB_WORKSPACE is set; no record is written otherwise, so a "
-             "local run leaves the tree clean)",
+        help="write a collection record to this path. Without it no record "
+             "is written; the path is never derived from the environment.",
     )
     args = parser.parse_args(argv)
     repo_root = _repo_root()
@@ -267,22 +272,16 @@ def main(argv: list[str] | None = None) -> int:
     collected_items = int(count_match.group(1))
 
     # A record so the certifying RUN can be compared against this independent
-    # collection. Only written inside a CI workspace (or when asked): a local
-    # run must not leave an artifact in the tree.
+    # collection, written only to the explicit --record path.
     if args.record:
-        record_path: Path | None = Path(args.record)
-    elif os.environ.get("GITHUB_WORKSPACE"):
-        record_path = (Path(os.environ["GITHUB_WORKSPACE"])
-                       / ".full-collection-record.json")
-    else:
-        record_path = None
-    if record_path is not None:
-        _write_record(record_path, {
+        _write_record(Path(args.record), {
             "schema_version": 1,
             "collected_items": collected_items,
             "collected_files": len(collected),
             "discovered_files": len(discovered),
             "subject": os.environ.get("GITHUB_SHA") or "local",
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         })
 
     subject = os.environ.get("GITHUB_SHA") or "local"

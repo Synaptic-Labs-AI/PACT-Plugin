@@ -8,10 +8,12 @@ WHAT THIS EXISTS TO STOP
   exited 0 left the required check green with the corpus unexecuted.
 
 HOW IT KNOWS
-  An in-band pytest plugin writes a run record at pytest_sessionfinish. This
-  script reads that record and refuses to certify anything it cannot prove.
-  A missing record is a FAILURE, never "nothing to check": the whole point is
-  that the gate must not be green when the evidence is absent.
+  An in-band pytest plugin writes a run record at pytest_sessionfinish, and
+  verify_full_collection.py writes a collection record to the path the
+  workflow passes it. This script reads BOTH and refuses to certify anything
+  it cannot prove. A missing record is a FAILURE, never "nothing to check":
+  the whole point is that the gate must not be green when the evidence is
+  absent.
 
 THE SKIP IDENTITY, AND WHY IT IS NOT `executed == collected`
   The suite carries legitimate skips. A skip produces no call-phase report,
@@ -20,6 +22,8 @@ THE SKIP IDENTITY, AND WHY IT IS NOT `executed == collected`
   `passed + failed + errors + skipped + xfailed + xpassed == collected`,
   which also equals "every collected node ID reached a terminal outcome".
   Both are checked: the arithmetic, and the size of the terminal node-ID set.
+  Skips are bounded separately by SKIP_CEILING, and a run that passed
+  nothing fails whatever else it reports.
 
 FAIL CLOSED, ALWAYS. Every condition below is a named failure with exit 1.
 There is no skip path and no "warn" path.
@@ -33,13 +37,21 @@ import os
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RECORD_NAME = ".pytest-run-record.json"
-COLLECTION_RECORD_NAME = ".full-collection-record.json"
+
+# The most skips a certifying run may report. Set from the CI-observed count
+# of the tree that introduced this gate (27 skipped). A commit that adds a
+# legitimate skip raises this number in the SAME commit, stating the skip it
+# admits; a run above the ceiling fails rather than certifying a suite that
+# quietly stopped executing part of itself.
+SKIP_CEILING = 27
 
 _REQUIRED_KEYS = (
     "collected", "passed", "skipped", "failed", "errors", "deselected",
     "xfailed", "xpassed", "exitstatus", "summary_line", "terminal_node_ids",
+    "items_before_modifyitems", "items_after_modifyitems", "run_id",
+    "run_attempt",
 )
 _ACCOUNTING_KEYS = (
     "passed", "failed", "errors", "skipped", "xfailed", "xpassed",
@@ -122,22 +134,39 @@ def _require_int(record: dict, key: str) -> int:
     return value
 
 
+def _require_run_identity(record: dict, label: str) -> None:
+    """Under Actions, the record must name THIS run and THIS attempt.
+
+    A record committed to the tree, or left by another run, otherwise reads
+    exactly like the real one.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    for key, env_name in (("run_id", "GITHUB_RUN_ID"),
+                          ("run_attempt", "GITHUB_RUN_ATTEMPT")):
+        expected = os.environ.get(env_name)
+        if not expected or record.get(key) != expected:
+            raise RunFailure(
+                "RUN-IDENTITY",
+                f"{label}: {key} is {record.get(key)!r} but {env_name} is "
+                f"{expected!r}; the record does not belong to this run",
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify the in-band record of the certifying full-suite run.")
     parser.add_argument("--record", default=None,
                         help=f"run record path (default: "
-                             f"${{GITHUB_WORKSPACE}}/{RECORD_NAME}, else the "
-                             f"repository root)")
+                             f"${{GITHUB_WORKSPACE}}/{RECORD_NAME}; there is "
+                             f"no fallback when GITHUB_WORKSPACE is unset)")
     parser.add_argument("--collection-record", default=None,
-                        help=f"optional collection record path (default: "
-                             f"${{GITHUB_WORKSPACE}}/{COLLECTION_RECORD_NAME} "
-                             f"when it exists)")
-    parser.add_argument("--repo-root", default=None)
+                        help="collection record path, as written by "
+                             "verify_full_collection.py --record. Required: "
+                             "without it the run fails "
+                             "COLLECTION-RECORD-ABSENT.")
     args = parser.parse_args(argv)
 
-    repo_root = (Path(args.repo_root).resolve() if args.repo_root
-                 else Path(__file__).resolve().parent.parent)
     try:
         record_path = (Path(args.record) if args.record
                        else _default_record_path())
@@ -151,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         _require_keys(record)
+        _require_run_identity(record, "run record")
         _require_summary(record)
 
         collected = _require_int(record, "collected")
@@ -170,6 +200,30 @@ def main(argv: list[str] | None = None) -> int:
             raise RunFailure("FAILED", f"failed is {counts['failed']}")
         if counts["errors"] != 0:
             raise RunFailure("ERRORS", f"errors is {counts['errors']}")
+        if counts["passed"] <= 0:
+            raise RunFailure(
+                "NOTHING-PASSED",
+                f"passed is {counts['passed']}; a run that passed nothing "
+                f"executed nothing worth certifying",
+            )
+        if counts["skipped"] > SKIP_CEILING:
+            raise RunFailure(
+                "SKIP-CEILING",
+                f"skipped is {counts['skipped']}, above the committed ceiling "
+                f"{SKIP_CEILING}. Raise SKIP_CEILING in the commit that adds "
+                f"a legitimate skip; otherwise find what stopped executing.",
+            )
+
+        before = _require_int(record, "items_before_modifyitems")
+        after = _require_int(record, "items_after_modifyitems")
+        if after != collected or after + deselected != before:
+            raise RunFailure(
+                "COLLECTION-HOOK-NARROWING",
+                f"the collection hooks took {before} items to {after} with "
+                f"{deselected} reported deselected and {collected} collected. "
+                f"Items removed without being reported as deselected are a "
+                f"narrowing the count comparison cannot see.",
+            )
 
         terminal = record.get("terminal_node_ids")
         if not isinstance(terminal, list) or any(
@@ -201,27 +255,32 @@ def main(argv: list[str] | None = None) -> int:
                 "; ".join(problems),
             )
 
-        collection_counts = None
-        collection_path = (Path(args.collection_record)
-                           if args.collection_record
-                           else record_path.with_name(COLLECTION_RECORD_NAME))
-        if collection_path.is_file():
-            collection = _load(collection_path, "COLLECTION-RECORD-ABSENT")
-            collection_counts = collection.get("collected_items")
-            if not isinstance(collection_counts, int):
-                raise RunFailure(
-                    "COLLECTION-RECORD-BAD",
-                    f"{collection_path} carries collected_items "
-                    f"{collection_counts!r}; expected an integer",
-                )
-            if collection_counts != collected:
-                raise RunFailure(
-                    "COLLECTION-COUNT-MISMATCH",
-                    f"the certifying run collected {collected} items but the "
-                    f"independent collection saw {collection_counts}. A "
-                    f"run-only narrowing is exactly what this comparison "
-                    f"exists to catch.",
-                )
+        if not args.collection_record:
+            raise RunFailure(
+                "COLLECTION-RECORD-ABSENT",
+                "no --collection-record was given. The run is always compared "
+                "with an independent collection; a missing comparison is a "
+                "failure, never a skipped check.",
+            )
+        collection = _load(Path(args.collection_record),
+                           "COLLECTION-RECORD-ABSENT")
+        collection_count = collection.get("collected_items")
+        if (not isinstance(collection_count, int)
+                or isinstance(collection_count, bool)):
+            raise RunFailure(
+                "COLLECTION-RECORD-BAD",
+                f"{args.collection_record} carries collected_items "
+                f"{collection_count!r}; expected an integer",
+            )
+        _require_run_identity(collection, "collection record")
+        if collection_count != collected:
+            raise RunFailure(
+                "COLLECTION-COUNT-MISMATCH",
+                f"the certifying run collected {collected} items but the "
+                f"independent collection saw {collection_count}. A "
+                f"run-only narrowing is exactly what this comparison "
+                f"exists to catch.",
+            )
     except RunFailure as failure:
         print(f"RUN-VERIFY-FAILURE {failure.condition}: {failure.detail}",
               file=sys.stderr)
@@ -232,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         f"FULL-RUN-OK collected={collected} passed={counts['passed']} "
         f"skipped={counts['skipped']} failed={counts['failed']} "
         f"errors={counts['errors']} deselected={deselected} "
-        f"collection_count={collection_counts} subject={subject}"
+        f"collection_count={collection_count} subject={subject}"
     )
     return 0
 

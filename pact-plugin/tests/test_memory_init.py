@@ -627,7 +627,7 @@ class TestDependencyDriftIsDetectable:
         )
 
     def test_ci_environment_is_verified_around_every_test_run(self):
-        """The runtime check runs in the SAME place as the tests (F1(a), F2).
+        """The runtime check runs in the SAME place as the tests.
 
         For every GOVERNED job (any step whose `run` names pytest, python,
         pip or ruff) in every workflow under .github/workflows/:
@@ -788,7 +788,7 @@ class TestDependencyDriftIsDetectable:
         )
 
     def test_the_fast_lane_is_present_or_wholly_absent(self):
-        """B1: a deleted fast lane is a LOUD skip; a half-deleted one fails.
+        """A deleted fast lane is a LOUD skip; a half-deleted one fails.
 
         The full gate must survive deletion of the fast lane. This is the
         fast-dependent half: it skips with a reason naming every missing file
@@ -819,7 +819,7 @@ class TestDependencyDriftIsDetectable:
             "the complete fast lane does not declare the fast-suite job the "
             "governed-workflow profile requires")
 
-    # C-LITE TRIPWIRE. Tools whose installs the runtime check cannot see
+    # INSTALL TRIPWIRE. Tools whose installs the runtime check cannot see
     # (isolated environments), the uninstall verb, and the index-redirect
     # belt. Read as WORDS over a fixed text set; no argv parsing.
     _TRIPWIRE_PATTERNS = (
@@ -1241,7 +1241,7 @@ class TestDependencyDriftIsDetectable:
     def test_ruff_target_version_is_bound_to_the_floor(self, tmp_path, monkeypatch):
         """MUTATION ARM (fourth floor statement): a lint leg's
         `--target-version` drifting from the declared floor reddens the
-        floor-literal arm. Before round 7 it was bound to nothing but the
+        floor-literal arm. Without this arm it is bound to nothing but the
         local lint script's byte parity, which moves WITH it. The same arm
         certifies the fifth statement: .cursor/install.sh's
         `PYTHON_FLOOR_MINOR` moved alone reddens it too."""
@@ -1359,7 +1359,7 @@ class TestDependencyDriftIsDetectable:
             extra_files={"constraints-ci.txt": pins.replace(line + "\n", "", 1)})
 
     def test_verify_placement_mutations_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (F1(a), F2): every way the verify steps can stop
+        """MUTATION ARM: every way the verify steps can stop
         bracketing a test run reddens the placement arm; release.yml's job
         is measured NOT governed (it names none of the governed tools)."""
         root = self._require_root("verify-step placement")
@@ -1448,7 +1448,7 @@ class TestDependencyDriftIsDetectable:
             "steps, or the placement arm's governed set needs a decision")
 
     def test_tripwire_families_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (C-lite, F6/F7/F8): one shape per token family,
+        """MUTATION ARM (install tripwire): one shape per token family,
         on each surface of the text set; faithful lines stay green."""
         root = self._require_root("the isolated-environment tripwire")
         real = (root / ".github" / "workflows" / "tests.yml").read_text(
@@ -1583,12 +1583,12 @@ class TestVerifyCiEnvironmentScript:
         assert not (verdict.wrong_version or verdict.missing or verdict.shadowed)
         rendered = verdict.render()
         assert "UNEXPECTED" in rendered
-        # F9: the runner-image remedy names where the baseline lives.
+        # The runner-image remedy names where the baseline lives.
         assert "RUNNER_BASELINE" in rendered
         assert "scripts/verify_ci_environment.py" in rendered
 
     def test_shadowed_checks_the_first_copy(self, verify, tmp_path):
-        """F4: the copy Python imports (first on the path) is the one
+        """The copy Python imports (first on the path) is the one
         checked, and any second copy is SHADOWED with every location."""
         first, second = tmp_path / "first", tmp_path / "second"
         self._dist(first, "alpha", "0.9")
@@ -1629,7 +1629,7 @@ class TestVerifyCiEnvironmentScript:
         assert self._check(verify, {"alpha": "1.0"}, tmp_path).unexpected == ("gamma",)
 
     def test_requested_extras_reach_their_dependencies(self, verify, tmp_path):
-        """F5: root -> child[fast] -> grand; extra == "fast" allows grand."""
+        """root -> child[fast] -> grand; extra == "fast" allows grand."""
         self._dist(tmp_path, "root-pkg", "1.0", requires=["child[fast]"])
         self._dist(tmp_path, "child", "1.0", requires=['grand; extra == "fast"'])
         self._dist(tmp_path, "grand", "1.0")
@@ -1689,7 +1689,7 @@ class TestVerifyCiEnvironmentScript:
         assert verify.read_pins(constraints) == {"ruff": "0.17.3"}
 
     def test_interpreter_mismatch_reports_the_unresolved_pair(self, verify, tmp_path, monkeypatch):
-        """F3: a `python3` on PATH in another DIRECTORY than sys.executable
+        """A `python3` on PATH in another DIRECTORY than sys.executable
         is a mismatch, reported unresolved; one in the same directory is
         not; none at all is."""
         elsewhere = tmp_path / "bin" / "python3"
@@ -1735,7 +1735,7 @@ class TestVerifyCiEnvironmentScript:
 
 
 class TestCIEnvironmentBinding:
-    """The session check (F1(b)) in tests/ci_environment_binding.py."""
+    """The session check in tests/ci_environment_binding.py."""
 
     @pytest.fixture
     def binding(self):
@@ -1784,8 +1784,8 @@ class TestCIEnvironmentBinding:
     def test_unexpected_distribution_exit_names_the_runner_baseline(
             self, binding, monkeypatch):
         """A runner-image extra fails LOUD by design; the exit-3 message
-        names RUNNER_BASELINE as the remedy (Bugbot's 'aborts on empty
-        baseline' concern is the intended behaviour, with this remedy)."""
+        names RUNNER_BASELINE as the remedy (aborting on an empty baseline
+        is the intended behaviour, with this remedy)."""
         verify = TestDependencyDriftIsDetectable._verify_script()
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
         stub = self._stub(False, verify.Verdict({}, (), ("image-extra",), {}, None))

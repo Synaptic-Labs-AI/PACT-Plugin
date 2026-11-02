@@ -18,6 +18,8 @@ The runtime option probe at the bottom proves the bare-vs-filtered shape the
 whole design leans on is observable, not assumed.
 """
 
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -57,6 +59,13 @@ FAKE_ERRORS = '''\
 print("tests/test_alpha.py::test_alpha")
 print("tests/test_ci_collection_scope.py::test_anchor")
 print("2 tests collected, 1 error in 0.01s")
+'''
+
+FAKE_NONZERO_EXIT = '''\
+print("tests/test_alpha.py::test_alpha")
+print("tests/test_ci_collection_scope.py::test_anchor")
+print("2 tests collected in 0.01s")
+raise SystemExit(1)
 '''
 
 
@@ -103,10 +112,15 @@ def _install_fake_pytest(rig, body):
     _write(rig / "pact-plugin" / "pytest.py", body)
 
 
-def _run_guard(rig):
+def _run_guard(rig, args=(), env_overrides=None):
+    env = None
+    if env_overrides is not None:
+        env = os.environ.copy()
+        env.pop("PYTEST_ADDOPTS", None)
+        env.update(env_overrides)
     proc = subprocess.run(
-        [sys.executable, str(rig / GUARD)], cwd=str(rig),
-        capture_output=True, text=True, timeout=300)
+        [sys.executable, str(rig / GUARD), *args], cwd=str(rig),
+        capture_output=True, text=True, timeout=300, env=env)
     return proc, proc.stdout + proc.stderr
 
 
@@ -185,7 +199,7 @@ def test_an_absent_summary_is_a_parse_failure_not_a_scope_mismatch(tmp_path):
     [(FAKE_DESELECTED, "deselected"), (FAKE_ERRORS, "errors")],
 )
 def test_a_deselected_or_error_summary_is_rejected(tmp_path, fake, case_id):
-    """F3: the token scan is the only catch for a partial deselection.
+    """The token scan is the only catch for a partial deselection.
 
     A deselection leaves the file collected, so the file-set comparison
     passes; only this scan sees it. Deleting the scan must redden here.
@@ -205,6 +219,82 @@ def test_an_unresolvable_node_id_base_is_refused(tmp_path):
     proc, output = _run_guard(rig)
     assert proc.returncode == 2, output
     assert "unresolvable node-ID base" in output, output
+
+
+def test_an_ambient_workspace_receives_no_record(tmp_path):
+    """The record goes only where --record says, never to GITHUB_WORKSPACE.
+
+    The suite runs this guard in rigs while the certifying step runs, and
+    the rigs inherit GITHUB_WORKSPACE. A record at an ambient default was
+    overwritten with a rig's count before the evidence step read it.
+    """
+    rig = _base_rig(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    proc, output = _run_guard(
+        rig, env_overrides={"GITHUB_WORKSPACE": str(workspace)})
+    assert proc.returncode == 0, output
+    assert list(workspace.iterdir()) == [], (
+        f"the guard wrote into the ambient GITHUB_WORKSPACE without --record: "
+        f"{sorted(path.name for path in workspace.iterdir())}")
+
+
+def test_an_explicit_record_path_receives_the_count(tmp_path):
+    """--record writes the collected item count the run is compared with."""
+    rig = _base_rig(tmp_path)
+    record = tmp_path / "out" / "collection.json"
+    proc, output = _run_guard(rig, args=("--record", str(record)),
+                              env_overrides={})
+    assert proc.returncode == 0, output
+    data = json.loads(record.read_text(encoding="utf-8"))
+    assert isinstance(data["collected_items"], int)
+    assert data["collected_items"] > 0, data
+
+
+def test_an_inherited_pytest_addopts_is_refused(tmp_path):
+    """Inherited options can narrow the collection; the guard refuses them."""
+    rig = _base_rig(tmp_path)
+    proc, output = _run_guard(rig, env_overrides={"PYTEST_ADDOPTS": "-q"})
+    assert proc.returncode == 2, output
+    assert "PYTEST_ADDOPTS is set" in output, output
+
+
+def test_a_missing_non_vacuity_anchor_is_a_failure(tmp_path):
+    """A corpus without the anchor module is reported, not compared green."""
+    rig = _base_rig(tmp_path)
+    (rig / ANCHOR).unlink()
+    proc, output = _run_guard(rig)
+    assert proc.returncode == 2, output
+    assert "non-vacuity anchor" in output, output
+
+
+def test_a_strict_markers_addopts_is_not_reported_as_narrowing(tmp_path):
+    """The `-m` inside `--strict-markers` is not a marker expression."""
+    rig = _base_rig(tmp_path)
+    _write(rig / "pact-plugin" / "pytest.ini",
+           "[pytest]\naddopts = --strict-markers\n")
+    proc, output = _run_guard(rig)
+    assert proc.returncode == 0, output
+    assert "narrowing flag" not in output, output
+
+
+def test_a_marker_expression_addopts_is_reported_as_narrowing(tmp_path):
+    """The exact `-m` token in addopts is a narrowing and is rejected."""
+    rig = _base_rig(tmp_path)
+    _write(rig / "pact-plugin" / "pytest.ini",
+           "[pytest]\naddopts = -m slow\n")
+    proc, output = _run_guard(rig)
+    assert proc.returncode == 2, output
+    assert "addopts carries a narrowing flag" in output, output
+
+
+def test_a_nonzero_collection_exit_is_a_failure(tmp_path):
+    """A parseable summary from a collection that exited nonzero fails."""
+    rig = _base_rig(tmp_path)
+    _install_fake_pytest(rig, FAKE_NONZERO_EXIT)
+    proc, output = _run_guard(rig)
+    assert proc.returncode == 2, output
+    assert "the collection command exited 1" in output, output
 
 
 class TestRuntimeOptionProbe:

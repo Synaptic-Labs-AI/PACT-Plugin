@@ -25,6 +25,17 @@ RUN_FORM = (
 COLLECT_FORM = (
     'python ../scripts/run_fast_suite.py --collect-only --base-sha "$BASE_SHA"'
 )
+FAST_EVIDENCE_CMD = (
+    'python scripts/verify_fast_summary.py --base-sha "$BASE_SHA"'
+)
+FULL_COLLECTION_CMD = (
+    'python scripts/verify_full_collection.py '
+    '--record "$GITHUB_WORKSPACE/.full-collection-record.json"'
+)
+FULL_EVIDENCE_CMD = (
+    'python scripts/verify_full_run.py '
+    '--collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"'
+)
 FAST_JOB = "fast-suite"
 FULL_JOB = "full-suite"
 FULL_IF = (
@@ -56,6 +67,30 @@ def _on_block(doc):
         "PARSE FAILURE: the workflow has no `on:` trigger block (PyYAML may "
         "have read it as the boolean key True; neither spelling was found)."
     )
+
+
+def _assert_step_cannot_be_silenced(steps, run_text, where):
+    """The ONE step running `run_text` carries neither `if:` nor
+    `continue-on-error`.
+
+    Indexed over `steps`, never over `run_texts(steps)`: that list drops
+    every `uses:` step, so a position taken from it addresses a different
+    step. Any `if:` key fails, `success()` included, and so does any
+    `continue-on-error` value. A step whose text drifted matches nothing and
+    fails here by name rather than passing because no step was checked.
+    """
+    matches = [step for step in steps
+               if isinstance(step.get("run"), str)
+               and step["run"].strip() == run_text]
+    assert len(matches) == 1, (
+        f"{where}: expected exactly one step running {run_text!r}; found "
+        f"{len(matches)}. A changed run text must be re-pinned here, not "
+        f"left unchecked.")
+    for key in ("if", "continue-on-error"):
+        assert key not in matches[0], (
+            f"{where}: the step running {run_text!r} carries `{key}:` "
+            f"({matches[0][key]!r}). An evidence step that can be skipped or "
+            f"made non-fatal certifies nothing.")
 
 
 def _fast_doc(root):
@@ -186,6 +221,13 @@ class TestFastWorkflowHygiene:
                     f"step {index} ({run!r}) carries continue-on-error")
         assert not problems, "\n".join(problems)
 
+    def test_the_evidence_step_cannot_be_silenced(self):
+        root = ci_contract.require_root("the fast evidence step")
+        steps = ci_contract.steps_of(
+            ci_contract.jobs_of(_fast_doc(root))[FAST_JOB])
+        _assert_step_cannot_be_silenced(
+            steps, FAST_EVIDENCE_CMD, "fast-tests.yml evidence step")
+
     def test_the_full_constraints_file_is_installed(self):
         root = ci_contract.require_root("the fast dependency install")
         steps = ci_contract.steps_of(
@@ -211,7 +253,7 @@ class TestFastWorkflowHygiene:
         )
 
     def test_actions_are_allowlisted_and_sha_pinned(self):
-        """Both workflows, not only the fast one (security finding F4).
+        """Both workflows, not only the fast one.
 
         This catches drift and honest mistakes. It is NOT an adversarial
         barrier: a PR can edit this pin and the workflow in the same commit,
@@ -239,7 +281,7 @@ class TestFastWorkflowHygiene:
 
 
 class TestWorkflowHardening:
-    """Security finding F4: minimal permissions and no pull_request_target.
+    """Minimal permissions and no pull_request_target.
 
     A drift guard, not an adversarial barrier: the reviewed PR can edit these
     pins alongside the workflows.
@@ -343,9 +385,11 @@ def _assert_full_workflow_contract(root):
 
     collection_guard = [run for run in runs
                         if "verify_full_collection.py" in run]
-    assert collection_guard == ["python scripts/verify_full_collection.py"], (
+    assert collection_guard == [FULL_COLLECTION_CMD], (
         f"expected one collection-guard step; found {collection_guard!r}"
     )
+    _assert_step_cannot_be_silenced(
+        steps, FULL_COLLECTION_CMD, "tests.yml collection guard")
     assert not re.search(r"\bpytest\b", collection_guard[0]), (
         "the collection guard's run text names pytest; "
         "test_ci_collection_scope permits exactly one such line"
@@ -358,10 +402,10 @@ def _assert_full_workflow_contract(root):
     assert runs[-1] == ci_contract.VERIFY_CMD, "the after-verify is not the last step"
     assert str(steps[-1].get("if", "")).strip() in ("always()", "${{ always() }}")
 
-    # F1-pin: the certifying run's own evidence step. It must be the step
+    # The certifying run's own evidence step. It must be the step
     # immediately after the test step, must not name pytest (the one-pytest
     # rule), and must not be silenceable.
-    evidence_cmd = "python scripts/verify_full_run.py"
+    evidence_cmd = FULL_EVIDENCE_CMD
     assert (root / "scripts" / "verify_full_run.py").is_file(), (
         "scripts/verify_full_run.py is missing; the evidence step cannot run")
     assert position + 1 < len(runs), "no step follows the test step"
@@ -391,9 +435,8 @@ def _assert_full_workflow_contract(root):
     assert step_run_positions[position + 1] == evidence_index, (
         "the runs list and the steps list disagree about which step follows "
         "the test step; the continue-on-error pin would check the wrong step")
-    assert steps[evidence_index].get("continue-on-error", False) is False, (
-        "the run-evidence step may not carry continue-on-error; a silenced "
-        "evidence check cannot certify anything")
+    _assert_step_cannot_be_silenced(
+        steps, evidence_cmd, "tests.yml run-evidence step")
 
     merge_steps = [step for step in steps
                    if step.get("name") == "Assert the merge-group certification subject"]
@@ -482,7 +525,7 @@ class TestRemovability:
             f"the full-collection guard failed in a rig with no fast files "
             f"(rc={proc.returncode}).\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         )
-        # M6: EXECUTE the fast-dependent arms; they must skip loudly.
+        # EXECUTE the fast-dependent arms; they must skip loudly.
         arms = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rA",
              "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
@@ -500,7 +543,7 @@ class TestRemovability:
         assert "FAILED" not in arms.stdout and "ERROR" not in arms.stdout
 
     def test_a_partially_deleted_fast_lane_fails(self, tmp_path):
-        """B1: one side present without the other is a failure, not a skip."""
+        """One side present without the other is a failure, not a skip."""
         rig = self._rig(tmp_path)
         partial = rig / ".github/workflows/fast-tests.yml"
         partial.parent.mkdir(parents=True, exist_ok=True)

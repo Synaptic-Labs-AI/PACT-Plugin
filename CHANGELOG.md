@@ -22,7 +22,7 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-Pull requests now get an advisory, measured subset of the pytest suite for fast feedback, while the unrestricted suite becomes the required check and runs on the merge queue. The pull-request run reports the job as skipped, so the required check is never left pending and queue entry is not blocked, and the merge-queue run is what certifies the commit that lands.
+Pull requests now get an advisory, measured subset of the pytest suite for fast feedback, and the unrestricted suite is ready to become the required check once the merge queue is enabled; this release ships the workflows, not the ruleset change. The pull-request run reports the job as skipped, so a required check is never left pending and queue entry is not blocked, and the merge-queue run is what certifies the commit that lands.
 
 ### What landed
 
@@ -30,12 +30,15 @@ Pull requests now get an advisory, measured subset of the pytest suite for fast 
 - The full workflow gains `merge_group` and `workflow_dispatch` triggers, keeps `pull_request` and pushes to `main`, renames its job to the stable check name `full-suite`, and gates the job to the merge group, push and dispatch events. A skipped job reports success, which is what keeps the required check from blocking queue entry, while the merge-group run executes the suite unrestricted and asserts that the event's merge-group SHA, the run SHA and the checked-out commit agree. Push to `main` still audits the landed commit, and manual dispatch runs the whole suite for the no-queue fallback.
 - An independent full-collection guard that compares pytest's collected file set with a filesystem discovery, refuses deselection and collection errors, rejects `testpaths` and narrowing `addopts`, and reads no fast-lane file, so the required gate stays meaningful even if the fast workflow, manifest and selector were deleted.
 - In-band evidence of the certifying run itself. A pytest plugin records what the full-suite run actually collected, passed, skipped, failed and deselected, and a following step compares that record against the independent collection count, so a run that drops tests cannot report a green gate.
+- The evidence is bound to the run it certifies. The collection guard writes its record only to the path the workflow passes it, so the suite's own guard tests cannot overwrite it; only the outermost pytest session writes the run record, so a nested session the suite spawns cannot stand in for the certifying one; and both records carry the run id and attempt, which the verifier requires to match the job.
+- The run verifier fails closed on more shapes: a missing collection record, a run that passed nothing, more skips than a committed ceiling (27, raised in the commit that adds a legitimate skip), and items a collection hook removed without reporting them as deselected. Every named failure has a test that reaches it.
+- The second lint leg now also covers `scripts/`, where the gate scripts live, in both the workflow and the local lint mirror. The four CI artifact files are gitignored.
 - The governed-workflow contract generalised to a (workflow path, job id) profile that names the pinned fast-runner path as a test step. A wrapper invocation contains the token `python` but not `pytest`, so the previous text-only classification would have passed with no environment check anywhere near the fast lane; both runner invocations are now bracketed by the runtime environment check like any other test step.
 - Four duplicate-test consolidations where static analysis and fixture inspection both agreed removal was safe: two constant-default tests in `test_embedding_catchup.py`, two known-reason tests in `test_intentional_wait.py`, two semicolon-detection tests in `test_merge_guard.py`, and two alone-message tests in `test_peer_inject.py`. The other 52 exact-body groups from the same analysis remain overlap candidates and were left untouched.
 
 ### Why
 
-The unrestricted suite takes about 23 minutes, and every pull request paid it while the merge itself was ungated, so the complete result was arriving after the merge rather than before it. A curated lane gives minutes-scale feedback, and the merge queue is where the complete suite becomes binding. The two halves only work together: a narrowed CI lane is trustworthy precisely because the unrestricted gate stays complete and independent, which is why the collection guard shares nothing with the fast path and why the fast lane remains advisory.
+The unrestricted suite takes about 25 minutes. It ran on every pull request, but it was not a required check, so a red result did not stop a merge and the complete suite certified nothing. A curated lane gives minutes-scale feedback, and the merge queue is where the complete suite becomes binding. The two halves only work together: a narrowed CI lane is trustworthy precisely because the unrestricted gate stays complete and independent, which is why the collection guard shares nothing with the fast path and why the fast lane remains advisory.
 
 ## v4.8.17: minimum Python 3.12, single 3.12 CI job (issue #1681)
 
