@@ -1167,13 +1167,50 @@ def _load_selector(repo_root):
     return module
 
 
+_SHIPPED = {}
+
+
 def _shipped_manifest():
+    """(repo_root, core, manifest, index), built once per session.
+
+    The scan index parses every module in every exclusion's closure; the
+    contracts below share one copy instead of each paying for it.
+    """
     repo_root, _ = _require_checkout()
     _require_fast_lane(repo_root)
-    core = _load_selector(repo_root)
-    manifest = core.load_manifest(
-        repo_root / "scripts" / "fast_suite_exclusions.json")
-    return repo_root, core, manifest
+    key = str(repo_root)
+    if key not in _SHIPPED:
+        core = _load_selector(repo_root)
+        manifest = core.load_manifest(
+            repo_root / "scripts" / "fast_suite_exclusions.json")
+        index = core.ScanIndex(repo_root / "pact-plugin")
+        _SHIPPED[key] = (repo_root, core, manifest, index)
+    return _SHIPPED[key]
+
+
+def _select_real(changed, value_inert=()):
+    """select() over the real tree for `changed`, with real closure views."""
+    repo_root, core, manifest, index = _shipped_manifest()
+    facts = core.gather_facts(repo_root, manifest, changed, None, index=index)
+    if value_inert:
+        facts = core.ChangeFacts(
+            views=facts.views, value_inert=frozenset(value_inert),
+            conftest_verdicts=facts.conftest_verdicts,
+            conftest_imported=facts.conftest_imported)
+    return core.select(core.discover(repo_root), manifest, changed, "ok",
+                       facts)
+
+
+def _closure_modules():
+    """(exclusion, module, FileScan) for every module of every closure."""
+    _, _, manifest, index = _shipped_manifest()
+    rows = []
+    for exclusion in manifest.exclusions:
+        for rel in sorted(index.view(exclusion.path).closure):
+            rows.append((exclusion.path, rel, index.scan(rel)))
+    assert len({row[0] for row in rows}) == len(manifest.exclusions), (
+        "SCAN FAILURE: some exclusion has an empty closure.")
+    return rows
 
 
 class TestTheSeamListsCoverEveryExclusionsImportClosure:
@@ -1186,15 +1223,14 @@ class TestTheSeamListsCoverEveryExclusionsImportClosure:
     """
 
     def test_every_known_seam_an_exclusion_reaches_is_one_of_its_seams(self):
-        repo_root, core, manifest = _shipped_manifest()
-        plugin_root = repo_root / "pact-plugin"
+        _, _, manifest, index = _shipped_manifest()
         known = {seam for exclusion in manifest.exclusions
                  for seam in exclusion.production_seams}
         assert known, "the manifest maps no seams; the check would be vacuous"
         gaps = []
         reached_any = False
         for exclusion in manifest.exclusions:
-            closure = core.import_closure(plugin_root, [exclusion.path])
+            closure = index.closure([exclusion.path])
             # Non-vacuity: the closure starts at the module itself.
             assert exclusion.path in closure, (
                 f"CLOSURE FAILURE, not a manifest regression: "
@@ -1217,75 +1253,192 @@ class TestTheSeamListsCoverEveryExclusionsImportClosure:
 
     def test_a_gh_helpers_change_adds_back_the_retirement_gaps_test(self):
         """Behavioural proof: a gh_helpers mutant fails this excluded test."""
-        repo_root, core, manifest = _shipped_manifest()
-        selection = core.select(
-            core.discover(repo_root), manifest,
-            ["pact-plugin/hooks/shared/gh_helpers.py"], "ok")
+        selection = _select_real(["pact-plugin/hooks/shared/gh_helpers.py"])
         assert selection.select_all_reason is None, selection.select_all_reason
         added = {entry.path for entry in selection.added_back}
         assert "tests/test_merge_guard_retirement_gaps.py" in added, added
 
 
-def _string_literals(path):
-    """Every string constant in a module, f-string fragments included."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
-        return None
-    return [node.value for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+class TestTheVersionBumpCannotReachAnExcludedTest:
+    """A version-only plugin.json change is ignored (value_inert_keys).
 
-
-class TestNoExcludedTestReadsAnInertPath:
-    """An inert path neither selects everything nor adds anything back.
-
-    That is safe only while no excluded test can read it, so this scans every
-    module in every exclusion's import closure for a string naming an inert
-    path, by repo path, plugin path or bare filename. Reddens when an
-    excluded test, or a module it imports, starts naming one.
+    Safe while no excluded test can compare against a pinned version, so no
+    module in any exclusion's closure may hold a version-shaped literal.
     """
 
-    def test_no_closure_module_names_an_inert_path(self):
-        repo_root, core, manifest = _shipped_manifest()
-        plugin_root = repo_root / "pact-plugin"
-        assert manifest.inert_paths, (
-            "the manifest lists no inert paths; this contract has no subject")
-        tokens = {}
-        for inert in manifest.inert_paths:
-            names = {inert, Path(inert).name}
-            plugin_relative = core.repo_to_plugin(inert)
-            if plugin_relative:
-                names.add(plugin_relative)
-            tokens[inert] = names
-        hits = []
-        scanned = 0
-        for exclusion in manifest.exclusions:
-            for rel in sorted(core.import_closure(plugin_root, [exclusion.path])):
-                literals = _string_literals(plugin_root / rel)
-                assert literals is not None, (
-                    f"SCAN FAILURE: {rel} in the closure of {exclusion.path} "
-                    f"did not parse, so it was not scanned.")
-                scanned += 1
-                for inert, names in tokens.items():
-                    for literal in literals:
-                        if any(name in literal for name in names):
-                            hits.append(
-                                f"{exclusion.path} -> {rel}: "
-                                f"{literal[:80]!r} names {inert}")
-        assert scanned >= len(manifest.exclusions), (
-            "SCAN FAILURE: fewer modules scanned than there are exclusions.")
+    def test_no_closure_module_holds_a_version_literal(self):
+        _, core, _, _ = _shipped_manifest()
+        hits = sorted({f"{rel}: {literal!r}"
+                       for _, rel, scan in _closure_modules()
+                       for literal in scan.literals
+                       if core._SEMVER_RE.fullmatch(literal)})
         assert not hits, (
-            "An excluded test can read an inert path, so a change to it must "
-            "not leave that test excluded:\n  " + "\n  ".join(sorted(set(hits)))
-            + "\nRemove the path from inert_paths."
-        )
+            "A module an excluded test loads holds a version literal, so a "
+            "version bump could change its result:\n  " + "\n  ".join(hits)
+            + "\nRemove 'version' from value_inert_keys or the literal.")
 
-    def test_the_scan_sees_a_literal_naming_an_inert_path(self, tmp_path):
-        """Non-vacuity: the token match fires on the spelling it looks for."""
-        probe = tmp_path / "probe.py"
-        probe.write_text(
-            'MANIFEST = Path(root) / ".claude-plugin" / "plugin.json"\n'
-            'DOC = f"{root}/README.md"\n', encoding="utf-8")
-        literals = _string_literals(probe)
-        assert any("plugin.json" in literal for literal in literals)
-        assert any("README.md" in literal for literal in literals)
+    def test_the_detector_sees_a_version_literal(self, tmp_path):
+        """Non-vacuity: the same scan and pattern fire on a planted literal."""
+        repo_root, core, _, _ = _shipped_manifest()
+        plugin = tmp_path / "pact-plugin"
+        (plugin / "tests").mkdir(parents=True)
+        (plugin / "tests" / "test_pinned.py").write_text(
+            'EXPECTED = "4.8.18"\n', encoding="utf-8")
+        scan = core.ScanIndex(plugin).scan("tests/test_pinned.py")
+        assert any(core._SEMVER_RE.fullmatch(literal)
+                   for literal in scan.literals)
+
+    def test_a_version_only_bump_adds_nothing_back(self):
+        path = "pact-plugin/.claude-plugin/plugin.json"
+        selection = _select_real([path], value_inert=[path])
+        assert selection.select_all_reason is None
+        assert selection.added_back == ()
+
+    def test_any_other_plugin_json_change_reaches_its_readers(self):
+        """Control: plugin.json is read (actor_identity, bootstrap_gate)."""
+        selection = _select_real(["pact-plugin/.claude-plugin/plugin.json"])
+        assert selection.select_all_reason is None
+        assert selection.added_back, "no reader of plugin.json was found"
+
+
+class TestTheClosureCanSeeEveryDependency:
+    """The add-back rules see imports, fixture names and listed directories
+    statically. These are the dependency forms they cannot see; none may
+    appear in a module an excluded test loads."""
+
+    def test_no_closure_module_imports_by_a_computed_name(self):
+        hits = sorted({f"{rel}: {where}" for _, rel, scan in _closure_modules()
+                       for where in scan.dynamic_imports})
+        assert not hits, (
+            "Computed imports hide a dependency from the closure:\n  "
+            + "\n  ".join(hits))
+
+    def test_no_closure_module_requests_a_fixture_by_a_computed_name(self):
+        hits = sorted({f"{rel}: {where}" for _, rel, scan in _closure_modules()
+                       for where in scan.dynamic_fixtures})
+        assert not hits, (
+            "A computed getfixturevalue hides a conftest dependency:\n  "
+            + "\n  ".join(hits))
+
+
+class TestScanningExclusionsAreAddedBackForTheirTrees:
+    """An excluded test that scans the real checkout comes back when any
+    file under a scanned directory changes. The scanning set is DETECTED from
+    each closure (a scan call anchored to __file__), never written down."""
+
+    def _scanners(self):
+        _, _, manifest, index = _shipped_manifest()
+        return {exclusion.path: index.view(exclusion.path).scan_roots
+                for exclusion in manifest.exclusions
+                if index.view(exclusion.path).scan_roots}
+
+    def test_every_anchored_scan_yields_roots(self):
+        empty = sorted({rel for _, rel, scan in _closure_modules()
+                        if scan.scanner_roots is not None
+                        and not scan.scanner_roots})
+        assert not empty, f"an anchored scan with no root: {empty}"
+
+    def test_the_detector_finds_the_known_tree_scanners(self):
+        """Positive controls, computed by the detector itself."""
+        scanners = self._scanners()
+        census = scanners.get("tests/test_claude_md_locator_census.py", set())
+        mint = scanners.get("tests/test_merge_guard_refused_is_mintable.py",
+                            set())
+        assert {"hooks", "telegram"} <= census, sorted(census)
+        assert "tests" in mint, sorted(mint)
+
+    def test_every_detected_root_adds_its_exclusion_back(self):
+        misses = []
+        for path, roots in sorted(self._scanners().items()):
+            for root in sorted(roots):
+                probe = "zz_probe.txt" if root == "." else f"{root}/zz_probe.txt"
+                selection = _select_real([f"pact-plugin/{probe}"])
+                if path not in {entry.path for entry in selection.added_back}:
+                    misses.append(f"{path}: root {root}")
+        assert not misses, "\n".join(misses)
+
+    @pytest.mark.parametrize("changed", [
+        "pact-plugin/hooks/track_files.py",
+        "pact-plugin/hooks/merge_guard_pre.py",
+    ])
+    def test_a_hook_change_adds_back_the_locator_census(self, changed):
+        selection = _select_real([changed])
+        reasons = {entry.path: entry.reason for entry in selection.added_back}
+        assert "tests/test_claude_md_locator_census.py" in reasons, reasons
+
+    @pytest.mark.parametrize("scanner", [
+        "tests/test_clock_shift_instrument.py",
+        "tests/test_embedding_model_load_is_cache_first.py",
+    ])
+    def test_a_new_hook_file_adds_back_the_whole_plugin_scanners(self, scanner):
+        """Both rglob the whole plugin from Path(__file__).parents[1]. A hook
+        that starts naming the census exemption variable fails the
+        clock-shift guard, so any hooks/*.py change must bring them back."""
+        selection = _select_real(["pact-plugin/hooks/names_the_exemption.py"])
+        reasons = {entry.path: entry.reason for entry in selection.added_back}
+        assert reasons.get(scanner) == "scanned_tree", reasons
+
+    def test_an_unmapped_hook_reaches_the_census_through_the_scanner(self):
+        """track_files.py is in no census seam list: only the scanner rule
+        can add it."""
+        selection = _select_real(["pact-plugin/hooks/track_files.py"])
+        reasons = {entry.path: entry.reason for entry in selection.added_back}
+        assert reasons.get(
+            "tests/test_claude_md_locator_census.py") == "scanned_tree"
+
+    def test_a_changed_test_module_adds_back_the_mint_matrix(self):
+        """refused_is_mintable rglobs tests/ for test modules."""
+        selection = _select_real(["pact-plugin/tests/test_import_hygiene.py"])
+        assert selection.select_all_reason is None
+        reasons = {entry.path: entry.reason for entry in selection.added_back}
+        assert reasons.get(
+            "tests/test_merge_guard_refused_is_mintable.py") == "scanned_tree"
+
+    def test_the_readme_adds_nothing_back_except_whole_plugin_scanners(self):
+        """The README is read by no excluded test. Only scanners of the
+        whole plugin (root '.') can see it."""
+        selection = _select_real(["pact-plugin/README.md"])
+        assert selection.select_all_reason is None
+        whole = {path for path, roots in self._scanners().items()
+                 if "." in roots}
+        assert {entry.path for entry in selection.added_back} == whole
+        assert all(entry.reason == "scanned_tree"
+                   for entry in selection.added_back)
+
+
+class TestProcessGlobalConftestFixturesSelectEverything:
+    """A change to a process-global autouse fixture in tests/conftest.py
+    reaches every test, so it must select everything, never a subset."""
+
+    @pytest.mark.parametrize("fixture", [
+        "_isolate_merge_token_dir_to_tmp",
+        "_refuse_claude_md_writes_outside_tmp",
+        "_isolate_memory_store_to_tmp",
+    ])
+    def test_a_change_to_the_fixture_selects_all(self, fixture):
+        repo_root, core, manifest, index = _shipped_manifest()
+        conftest = repo_root / "pact-plugin" / "tests" / "conftest.py"
+        source = conftest.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        node = next(
+            (item for item in tree.body
+             if isinstance(item, ast.FunctionDef) and item.name == fixture),
+            None)
+        assert node is not None, f"{fixture} is no longer in {conftest}"
+        lines = source.splitlines(keepends=True)
+        changed = "".join(lines[:node.end_lineno]) + (
+            "    _probe_change = None\n") + "".join(lines[node.end_lineno:])
+        verdict = core.classify_conftest_change(
+            source, changed, True,
+            resolve=lambda dotted: core._production_files(dotted, index))
+        assert verdict.select_all == f"autouse-unscoped:{fixture}", verdict
+        facts = core.ChangeFacts(
+            views={exclusion.path: index.view(exclusion.path)
+                   for exclusion in manifest.exclusions},
+            value_inert=frozenset(),
+            conftest_verdicts={"tests/conftest.py": verdict},
+            conftest_imported=frozenset())
+        selection = core.select(core.discover(repo_root), manifest,
+                                ["pact-plugin/tests/conftest.py"], "ok", facts)
+        assert selection.select_all_reason == (
+            f"conftest:tests/conftest.py:autouse-unscoped:{fixture}")

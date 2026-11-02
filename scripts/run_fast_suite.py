@@ -48,11 +48,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fast_suite_selection import (  # noqa: E402  (path must precede import)
     ManifestError,
     build_argv,
-    changed_paths,
-    discover,
     load_manifest,
     parse_pytest_summary,
-    select,
+    select_for_change,
 )
 
 SCHEMA_VERSION = 1
@@ -358,13 +356,21 @@ def main(argv: list[str] | None = None) -> int:
             print(error, file=sys.stderr)
         return 2
 
-    changed, status = changed_paths(args.base_sha, repo_root)
-    selection = select(discover(repo_root), manifest, changed, status)
+    selection, _, _ = select_for_change(repo_root, manifest, args.base_sha)
+    seconds = {entry.path: entry.displayed_seconds
+               for entry in manifest.exclusions}
+    saved = sum(seconds.get(path, 0.0) for path in selection.excluded)
     print(f"FAST-SUITE-SELECTION status={selection.status} "
           f"select_all={selection.select_all_reason} "
           f"included={len(selection.included)} "
           f"excluded={len(selection.excluded)} "
-          f"added_back={len(selection.added_back)}", file=sys.stderr)
+          f"added_back={len(selection.added_back)} "
+          f"estimated_saved_seconds={saved:.0f}", file=sys.stderr)
+    for entry in selection.added_back:
+        print(f"  ADDED-BACK {entry.path} reason={entry.reason} "
+              f"changed={entry.matched_changed} "
+              f"evidence={entry.evidence or entry.matched_seam}",
+              file=sys.stderr)
 
     if args.collect_only:
         return _collect_only(args, selection, manifest_path, plugin_root,

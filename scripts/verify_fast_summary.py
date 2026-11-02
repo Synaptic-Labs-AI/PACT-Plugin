@@ -32,11 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fast_suite_selection import (  # noqa: E402  (path must precede import)
     ManifestError,
-    changed_paths,
-    discover,
     load_manifest,
     parse_pytest_summary,
-    select,
+    select_for_change,
 )
 
 SCHEMA_VERSION = 1
@@ -264,8 +262,8 @@ def main(argv: list[str] | None = None) -> int:
                 "MANIFEST-INVALID",
                 f"{manifest_path}: " + "; ".join(exc.errors),
             ) from exc
-        changed, status = changed_paths(independent_base, repo_root)
-        recomputed = select(discover(repo_root), manifest, changed, status)
+        recomputed, _, _ = select_for_change(repo_root, manifest,
+                                             independent_base)
         expected = sorted(recomputed.included)
 
         # 10: both sets non-empty.

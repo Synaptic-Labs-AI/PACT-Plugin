@@ -31,6 +31,7 @@ from fast_suite_selection import (  # noqa: E402  (path must precede import)
     ManifestError,
     changed_paths,
     discover,
+    gather_facts,
     load_manifest,
     select,
     to_pytest_args,
@@ -154,7 +155,10 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     try:
-        selection = select(discover(repo_root), manifest, changed, status)
+        facts = gather_facts(repo_root, manifest, changed,
+                             args.base_sha if status == "ok" else None)
+        selection = select(discover(repo_root), manifest, changed, status,
+                           facts)
         ignore_args = to_pytest_args(selection, plugin_root)
     except ValueError as exc:
         print(f"selection error: {exc}", file=sys.stderr)
@@ -181,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
                     "reason": entry.reason,
                     "matched_changed": entry.matched_changed,
                     "matched_seam": entry.matched_seam,
+                    "evidence": entry.evidence,
                 }
                 for entry in selection.added_back
             ],

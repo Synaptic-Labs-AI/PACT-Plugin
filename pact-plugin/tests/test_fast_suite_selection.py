@@ -85,7 +85,7 @@ def core():
 
 
 def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None,
-              machinery=SELECTION_MACHINERY, inert=()):
+              machinery=SELECTION_MACHINERY):
     seams = seams or {}
     exclusions = tuple(
         core.Exclusion(
@@ -103,13 +103,37 @@ def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None,
         selection_machinery=tuple(machinery),
         guard_files=GUARD_FILES,
         exclusions=exclusions,
-        inert_paths=tuple(inert),
     )
 
 
-def _select(core, changed=(), status="ok", discovered=DISCOVERED, **kwargs):
-    return core.select(discovered, _manifest(core, **kwargs), list(changed),
-                       status)
+def _view(core, closure=(), targets=(), literals=(), names=(),
+          path_literals=(), scan_roots=()):
+    return core.ExclusionView(
+        closure=frozenset(closure), import_targets=frozenset(targets),
+        literals=frozenset(literals), test_names=frozenset(names),
+        path_literals=frozenset(path_literals),
+        scan_roots=frozenset(scan_roots))
+
+
+def _facts(core, manifest, views=None, value_inert=(), verdicts=None,
+           conftest_imported=()):
+    views = views or {}
+    return core.ChangeFacts(
+        views={exclusion.path: views.get(
+            exclusion.path, _view(core, closure=(exclusion.path,)))
+            for exclusion in manifest.exclusions},
+        value_inert=frozenset(value_inert),
+        conftest_verdicts=dict(verdicts or {}),
+        conftest_imported=frozenset(conftest_imported),
+    )
+
+
+def _select(core, changed=(), status="ok", discovered=DISCOVERED,
+            facts=None, **kwargs):
+    """`facts` is a dict of _facts keyword arguments."""
+    manifest = _manifest(core, **kwargs)
+    return core.select(discovered, manifest, list(changed), status,
+                       _facts(core, manifest, **(facts or {})))
 
 
 def _assert_select_all(result, discovered=DISCOVERED):
@@ -117,6 +141,10 @@ def _assert_select_all(result, discovered=DISCOVERED):
     assert result.included == discovered
     assert result.excluded == frozenset()
     assert result.added_back == ()
+
+
+def _reasons(result):
+    return [(entry.path, entry.reason) for entry in result.added_back]
 
 
 class TestDefaultInclusion:
@@ -134,11 +162,12 @@ class TestDefaultInclusion:
         assert result.select_all_reason is None
         assert "tests/test_fast.py" in result.included
 
-    def test_a_changed_skill_test_is_not_unmapped_production(self, core):
+    def test_a_changed_skill_test_adds_nothing_back(self, core):
         result = _select(
             core, changed=["pact-plugin/skills/pact-example/test_skill_loading.py"])
         assert result.select_all_reason is None
         assert "skills/pact-example/test_skill_loading.py" in result.included
+        assert result.added_back == ()
 
 
 class TestAddBacks:
@@ -153,8 +182,8 @@ class TestAddBacks:
         add_back = result.added_back[0]
         assert add_back.path == "tests/test_slow.py"
         assert add_back.reason == "changed_test"
-        # matched_changed is REPO-relative: exactly the path
-        # changed_paths returned, prefix present.
+        # matched_changed is REPO-relative: exactly the path changed_paths
+        # returned, prefix present.
         assert add_back.matched_changed == "pact-plugin/tests/test_slow.py"
 
     def test_changed_mapped_seam_adds_back_dependents(self, core):
@@ -168,87 +197,38 @@ class TestAddBacks:
         assert len(result.added_back) == 1
         add_back = result.added_back[0]
         assert add_back.reason == "changed_seam"
-        # matched_seam is PLUGIN-relative (the manifest seam); matched_changed
-        # is REPO-relative (the path changed_paths returned).
         assert add_back.matched_seam == "hooks/merge_guard_pre.py"
         assert add_back.matched_changed == "pact-plugin/hooks/merge_guard_pre.py"
 
 
 @pytest.mark.parametrize(
-    "case_id,changed,status,kwargs,reason",
+    "case_id,changed,status,reason",
     [
-        ("git-error", (), "git-error", {}, "changed-paths:git-error"),
-        ("invalid-base", (), "invalid-base", {}, "changed-paths:invalid-base"),
-        ("empty-diff", (), "empty-diff", {}, "changed-paths:empty-diff"),
-        (
-            "selection-machinery",
-            ("scripts/run_fast_suite.py",),
-            "ok",
-            {},
-            "selection-machinery",
-        ),
-        (
-            "constraints-pin",
-            ("constraints-ci.txt",),
-            "ok",
-            {},
-            "selection-machinery",
-        ),
-        (
-            "pyproject-pin",
-            ("pyproject.toml",),
-            "ok",
-            {},
-            "selection-machinery",
-        ),
-        (
-            "shared-conftest",
-            ("pact-plugin/tests/conftest.py",),
-            "ok",
-            {},
-            "shared-conftest",
-        ),
-        (
-            "plugin-root-conftest",
-            ("pact-plugin/conftest.py",),
-            "ok",
-            {},
-            "shared-conftest",
-        ),
-        (
-            "shared-fixture",
-            ("pact-plugin/tests/fixtures/sample.py",),
-            "ok",
-            {},
-            "shared-fixture",
-        ),
-        (
-            "test-support-file",
-            ("pact-plugin/tests/helpers.py",),
-            "ok",
-            {},
-            "test-support-file",
-        ),
-        (
-            "plugin-root-file",
-            ("pact-plugin/setup.cfg",),
-            "ok",
-            {},
-            "plugin-root-file",
-        ),
-        (
-            "unmapped-production",
-            ("pact-plugin/hooks/unmapped.py",),
-            "ok",
-            {},
-            "unmapped-production:hooks/unmapped.py",
-        ),
+        ("git-error", (), "git-error", "changed-paths:git-error"),
+        ("invalid-base", (), "invalid-base", "changed-paths:invalid-base"),
+        ("empty-diff", (), "empty-diff", "changed-paths:empty-diff"),
+        ("selection-machinery", ("scripts/run_fast_suite.py",), "ok",
+         "selection-machinery"),
+        ("constraints-pin", ("constraints-ci.txt",), "ok",
+         "selection-machinery"),
+        ("pyproject-pin", ("pyproject.toml",), "ok", "selection-machinery"),
+        # A changed conftest with no classification cannot be cleared.
+        ("conftest-without-verdict", ("pact-plugin/tests/conftest.py",), "ok",
+         "conftest:tests/conftest.py:no-verdict"),
     ],
 )
-def test_select_all_fail_closed(core, case_id, changed, status, kwargs, reason):
+def test_select_all_fail_closed(core, case_id, changed, status, reason):
     """Every fail-closed rule selects everything and says why."""
-    result = _select(core, changed=changed, status=status, **kwargs)
+    result = _select(core, changed=changed, status=status)
     assert result.select_all_reason == reason, case_id
+    _assert_select_all(result)
+
+
+def test_a_plugin_change_without_facts_selects_all(core):
+    """A caller that forgets the facts must not narrow the run."""
+    result = core.select(DISCOVERED, _manifest(core),
+                         ["pact-plugin/hooks/anything.py"], "ok", None)
+    assert result.select_all_reason == "change-facts-unavailable"
     _assert_select_all(result)
 
 
@@ -267,28 +247,6 @@ def test_changed_test_wins_over_changed_seam(core):
     assert result.added_back[0].reason == "changed_test"
 
 
-def test_multiple_unmapped_paths_name_the_first(core):
-    """The SELECT_ALL reason names the FIRST unmapped changed path."""
-    result = _select(
-        core,
-        changed=["pact-plugin/hooks/zeta.py", "pact-plugin/hooks/alpha.py"],
-    )
-    assert result.select_all_reason == "unmapped-production:hooks/zeta.py"
-
-
-def test_mapped_and_unmapped_production_in_one_change_selects_all(core):
-    """One unmapped production path is enough; mapped ones cannot rescue it."""
-    result = _select(
-        core,
-        changed=[
-            "pact-plugin/hooks/merge_guard_pre.py",
-            "pact-plugin/hooks/unmapped.py",
-        ],
-        seams={"tests/test_slow.py": ("hooks/merge_guard_pre.py",)},
-    )
-    assert result.select_all_reason == "unmapped-production:hooks/unmapped.py"
-
-
 @pytest.mark.parametrize("pin", ["constraints-ci.txt", "pyproject.toml"])
 def test_the_dependency_pins_select_all_without_a_machinery_entry(core, pin):
     """The hard-coded pin rule fires on its own, not via the manifest list."""
@@ -299,49 +257,177 @@ def test_the_dependency_pins_select_all_without_a_machinery_entry(core, pin):
     _assert_select_all(result)
 
 
-VERSION_BUMP = (
-    ".claude-plugin/marketplace.json",
-    "CHANGELOG.md",
-    "README.md",
-    "pact-plugin/.claude-plugin/plugin.json",
-    "pact-plugin/README.md",
-)
+class TestUnmappedPython:
+    """An unmapped .py (production or test support) adds back by import
+    closure, never ALL."""
 
-
-class TestInertPaths:
-    """The version bump every PR carries must not widen the fast lane."""
-
-    @pytest.mark.parametrize("path,reason", [
-        ("pact-plugin/README.md", "plugin-root-file"),
-        ("pact-plugin/.claude-plugin/plugin.json",
-         "unmapped-production:.claude-plugin/plugin.json"),
+    @pytest.mark.parametrize("changed", [
+        "pact-plugin/hooks/unmapped.py",          # production
+        "pact-plugin/tests/support_helper.py",    # test support
+        "pact-plugin/tests/fixtures/sample.py",   # fixture, not conftest-imported
     ])
-    def test_a_bump_file_selects_all_when_not_inert(self, core, path, reason):
-        """Control: without the inert list these paths widen the lane."""
-        assert _select(core, changed=[path]).select_all_reason == reason
-
-    def test_the_whole_bump_applies_every_exclusion(self, core):
-        result = _select(core, changed=VERSION_BUMP, inert=VERSION_BUMP)
+    def test_a_file_in_the_closure_adds_its_exclusion_back(self, core, changed):
+        rel = changed.removeprefix("pact-plugin/")
+        result = _select(core, changed=[changed], facts={"views": {
+            "tests/test_slow.py": _view(core, closure=(
+                "tests/test_slow.py", rel))}})
         assert result.select_all_reason is None
+        assert _reasons(result) == [("tests/test_slow.py", "closure")]
+
+    def test_a_file_in_no_closure_adds_nothing(self, core):
+        result = _select(core, changed=["pact-plugin/hooks/unmapped.py"])
+        assert result.select_all_reason is None
+        assert result.added_back == ()
         assert result.excluded == frozenset({"tests/test_slow.py"})
+
+    def test_a_deleted_module_named_by_an_import_adds_back(self, core):
+        """A deletion is no longer in any closure; its import target is."""
+        result = _select(core, changed=["pact-plugin/hooks/gone.py"], facts={
+            "views": {"tests/test_slow.py": _view(
+                core, closure=("tests/test_slow.py",),
+                targets=("hooks/gone.py",))}})
+        assert _reasons(result) == [("tests/test_slow.py", "closure")]
+
+
+class TestDataFiles:
+    """A non-.py file adds back only exclusions that can read it."""
+
+    def test_a_literal_naming_the_path_adds_back(self, core):
+        result = _select(core, changed=["pact-plugin/commands/x.md"], facts={
+            "views": {"tests/test_slow.py": _view(
+                core, closure=("tests/test_slow.py",),
+                literals=("commands/x.md",))}})
+        assert _reasons(result) == [("tests/test_slow.py", "data_reference")]
+
+    def test_a_literal_naming_the_basename_adds_back(self, core):
+        result = _select(core, changed=["pact-plugin/hooks/hooks.json"], facts={
+            "views": {"tests/test_slow.py": _view(
+                core, closure=("tests/test_slow.py",),
+                literals=("hooks.json",))}})
+        assert _reasons(result) == [("tests/test_slow.py", "data_reference")]
+
+    def test_a_constructed_ancestor_directory_adds_back(self, core):
+        result = _select(core, changed=["pact-plugin/commands/x.md"], facts={
+            "views": {"tests/test_slow.py": _view(
+                core, closure=("tests/test_slow.py",),
+                path_literals=("commands",))}})
+        assert _reasons(result) == [("tests/test_slow.py", "constructed_path")]
+
+    def test_a_file_nothing_reads_adds_nothing(self, core):
+        """The README case: no literal, no ancestor, no listing."""
+        result = _select(core, changed=["pact-plugin/README.md"], facts={
+            "views": {"tests/test_slow.py": _view(
+                core, closure=("tests/test_slow.py",),
+                literals=("commands/x.md",), path_literals=("hooks",))}})
+        assert result.select_all_reason is None
         assert result.added_back == ()
 
-    def test_an_inert_path_does_not_hide_a_seam_change(self, core):
-        result = _select(
-            core,
-            changed=[*VERSION_BUMP, "pact-plugin/hooks/merge_guard_pre.py"],
-            seams={"tests/test_slow.py": ("hooks/merge_guard_pre.py",)},
-            inert=VERSION_BUMP,
-        )
+
+class TestValueInertKeys:
+    """A version-only plugin.json change neither widens nor adds back."""
+
+    PATH = "pact-plugin/.claude-plugin/plugin.json"
+
+    def _views(self, core):
+        return {"tests/test_slow.py": _view(
+            core, closure=("tests/test_slow.py",), literals=("plugin.json",))}
+
+    def test_a_value_inert_change_is_dropped(self, core):
+        result = _select(core, changed=[self.PATH], facts={
+            "views": self._views(core), "value_inert": (self.PATH,)})
         assert result.select_all_reason is None
+        assert result.added_back == ()
+
+    def test_any_other_change_is_an_ordinary_data_change(self, core):
+        result = _select(core, changed=[self.PATH],
+                         facts={"views": self._views(core)})
+        assert _reasons(result) == [("tests/test_slow.py", "data_reference")]
+
+
+class TestScannedTrees:
+    """A scanner exclusion sees every file under its roots, any type."""
+
+    def _views(self, core, *roots):
+        return {"tests/test_slow.py": _view(
+            core, closure=("tests/test_slow.py",), scan_roots=roots)}
+
+    @pytest.mark.parametrize("changed", [
+        "pact-plugin/hooks/any_hook.py",       # an unmapped .py
+        "pact-plugin/hooks/slow_seam.py",      # a mapped seam: seam rule first
+        "pact-plugin/hooks/hooks.json",        # data
+    ])
+    def test_any_file_under_a_root_adds_back(self, core, changed):
+        result = _select(core, changed=[changed],
+                         facts={"views": self._views(core, "hooks")})
         assert [entry.path for entry in result.added_back] == [
             "tests/test_slow.py"]
+        assert result.added_back[0].reason in ("scanned_tree", "changed_seam")
 
-    def test_an_inert_path_does_not_hide_an_unmapped_change(self, core):
+    def test_an_unmapped_python_file_names_the_scanner_rule(self, core):
+        result = _select(core, changed=["pact-plugin/hooks/any_hook.py"],
+                         facts={"views": self._views(core, "hooks")})
+        assert _reasons(result) == [("tests/test_slow.py", "scanned_tree")]
+
+    def test_a_file_outside_every_root_adds_nothing(self, core):
+        result = _select(core, changed=["pact-plugin/skills/x/y.py"],
+                         facts={"views": self._views(core, "hooks")})
+        assert result.added_back == ()
+
+    def test_the_plugin_root_sees_everything(self, core):
+        result = _select(core, changed=["pact-plugin/tests/test_fast.py"],
+                         facts={"views": self._views(core, ".")})
+        assert _reasons(result) == [("tests/test_slow.py", "scanned_tree")]
+
+    def test_a_built_directory_does_not_cover_python_files(self, core):
+        """A built directory adds back on data files only; a Python file
+        reaches a directory reader only through the scanner rule."""
+        result = _select(core, changed=["pact-plugin/hooks/any_hook.py"],
+                         facts={"views": {"tests/test_slow.py": _view(
+                             core, closure=("tests/test_slow.py",),
+                             path_literals=("hooks",))}})
+        assert result.added_back == ()
+
+
+class TestConftestVerdicts:
+    """select() applies the conftest classification gather_facts recorded."""
+
+    CONFTEST = "pact-plugin/tests/conftest.py"
+
+    def test_a_global_shape_selects_all_and_names_it(self, core):
+        result = _select(core, changed=[self.CONFTEST], facts={"verdicts": {
+            "tests/conftest.py": core.ConftestVerdict("hook:pytest_configure")}})
+        assert result.select_all_reason == (
+            "conftest:tests/conftest.py:hook:pytest_configure")
+        _assert_select_all(result)
+
+    def test_a_changed_fixture_adds_back_only_its_users(self, core):
+        manifest_paths = ("tests/test_slow.py", "tests/test_other.py")
         result = _select(
-            core, changed=[*VERSION_BUMP, "pact-plugin/hooks/unmapped.py"],
-            inert=VERSION_BUMP)
-        assert result.select_all_reason == "unmapped-production:hooks/unmapped.py"
+            core, changed=[self.CONFTEST], exclusion_paths=manifest_paths,
+            discovered=DISCOVERED | {"tests/test_other.py"},
+            facts={"verdicts": {"tests/conftest.py": core.ConftestVerdict(
+                None, frozenset({"seeded_home"}))},
+                "views": {"tests/test_slow.py": _view(
+                    core, closure=("tests/test_slow.py",),
+                    names=("seeded_home",))}})
+        assert _reasons(result) == [("tests/test_slow.py", "fixture_name")]
+
+    def test_a_scoped_autouse_adds_back_closures_that_load_its_module(self, core):
+        result = _select(core, changed=[self.CONFTEST], facts={
+            "verdicts": {"tests/conftest.py": core.ConftestVerdict(
+                None, frozenset(), frozenset({"hooks/shared/merge_guard_common.py"}))},
+            "views": {"tests/test_slow.py": _view(core, closure=(
+                "tests/test_slow.py", "hooks/shared/merge_guard_common.py"))}})
+        assert _reasons(result) == [("tests/test_slow.py", "autouse_module")]
+
+    def test_a_conftest_imported_module_is_classified_too(self, core):
+        result = _select(
+            core, changed=["pact-plugin/tests/fixtures/seed.py"], facts={
+                "conftest_imported": ("tests/fixtures/seed.py",),
+                "verdicts": {"tests/fixtures/seed.py": core.ConftestVerdict(
+                    "module-level-effect")}})
+        assert result.select_all_reason == (
+            "conftest:tests/fixtures/seed.py:module-level-effect")
 
 
 class TestEmptySeams:
@@ -358,6 +444,173 @@ class TestEmptySeams:
         result = _select(core, changed=["pact-plugin/tests/test_fast.py"],
                          seams={"tests/test_slow.py": ()})
         assert result.excluded == frozenset({"tests/test_slow.py"})
+
+
+class TestClassifyConftestChange:
+    """The pure conftest classifier. Unknown statement kinds select
+    everything."""
+
+    BASE = (
+        '"""doc."""\n'
+        "import pytest\n"
+        "import shared.merge_guard_common as mgc\n"
+        "SEED = 1\n"
+        "@pytest.fixture\n"
+        "def seeded_home(tmp_path):\n    return tmp_path\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def _scrub(monkeypatch):\n    monkeypatch.delenv('X', raising=False)\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def _guard(monkeypatch):\n"
+        "    monkeypatch.setattr(mgc, 'TOKEN_TTL', 1)\n"
+        "def pytest_configure(config):\n    pass\n"
+    )
+
+    @staticmethod
+    def _resolve(dotted):
+        return frozenset({"hooks/shared/merge_guard_common.py"}) if (
+            dotted == "shared.merge_guard_common") else frozenset()
+
+    def _classify(self, core, new, old=None, is_conftest=True):
+        return core.classify_conftest_change(
+            self.BASE if old is None else old, new, is_conftest,
+            resolve=self._resolve)
+
+    def test_an_unchanged_file_changes_nothing(self, core):
+        verdict = self._classify(core, self.BASE)
+        assert verdict == core.ConftestVerdict(None)
+
+    def test_a_docstring_only_change_changes_nothing(self, core):
+        verdict = self._classify(core, self.BASE.replace("doc.", "docs."))
+        assert verdict == core.ConftestVerdict(None)
+
+    @pytest.mark.parametrize("edit,reason", [
+        (lambda s: s.replace("    pass\n", "    config.x = 1\n"),
+         "hook:pytest_configure"),
+        (lambda s: s + "import os\nos.environ['HOME'] = '/x'\n",
+         "module-level-effect"),
+        (lambda s: s + "if True:\n    SEED = 2\n", "module-level-effect"),
+        (lambda s: s.replace("'X'", "'Y'"), "autouse-unscoped:_scrub"),
+        (lambda s: s + "pytest_plugins = ['x']\n", "hook:pytest_plugins"),
+    ])
+    def test_a_global_shape_selects_all(self, core, edit, reason):
+        assert self._classify(core, edit(self.BASE)).select_all == reason
+
+    @pytest.mark.parametrize("literal", [
+        ".claude", "~/.claude/teams", "a-b.json", "merge-authorized-*.consumed",
+        "..", "x..y",
+    ])
+    def test_a_non_module_string_does_not_scope_an_autouse_fixture(
+            self, core, literal):
+        """A string that is not an identifier-dotted name names no module,
+        even when the resolver would answer for the empty name."""
+        source = (
+            "import pytest\n"
+            "@pytest.fixture(autouse=True)\n"
+            "def _isolate(monkeypatch, tmp_path):\n"
+            f"    monkeypatch.setenv('HOME', str(tmp_path / {literal!r}))\n")
+        verdict = core.classify_conftest_change(
+            "import pytest\n", source, True,
+            resolve=lambda dotted: frozenset({"hooks/__init__.py"})
+            if not dotted or not all(
+                part.isidentifier() for part in dotted.split("."))
+            else frozenset())
+        assert verdict.select_all == "autouse-unscoped:_isolate"
+
+    @pytest.mark.parametrize("filename", [
+        "config.json", "working_memory.md", "memory.db", "search.py",
+        "constants.txt", "config",
+    ])
+    def test_a_file_name_whose_stem_is_a_module_does_not_scope(
+            self, core, filename):
+        """str(tmp_path / "config.json") names a file, not the config module."""
+        source = (
+            "import pytest\n"
+            "@pytest.fixture(autouse=True)\n"
+            "def _home(monkeypatch, tmp_path):\n"
+            f"    monkeypatch.setenv('HOME', str(tmp_path / {filename!r}))\n")
+        stem = filename.split(".")[0]
+        verdict = core.classify_conftest_change(
+            "import pytest\n", source, True,
+            resolve=lambda dotted: frozenset({f"skills/x/scripts/{stem}.py"})
+            if dotted == stem else frozenset())
+        assert verdict.select_all == "autouse-unscoped:_home"
+
+    @pytest.mark.parametrize("call", [
+        "monkeypatch.setattr('hooks.shared.pact_context.X', 1)",
+        "monkeypatch.delattr('hooks.shared.pact_context.X')",
+        "mock.patch('hooks.shared.pact_context.X')",
+    ])
+    def test_a_patch_target_names_its_module(self, core, call):
+        source = (
+            "import pytest\nfrom unittest import mock\n"
+            "@pytest.fixture(autouse=True)\n"
+            f"def _patched(monkeypatch):\n    {call}\n")
+        verdict = core.classify_conftest_change(
+            "import pytest\nfrom unittest import mock\n", source, True,
+            resolve=lambda dotted: frozenset({"hooks/shared/pact_context.py"})
+            if dotted == "hooks.shared.pact_context" else frozenset())
+        assert verdict.select_all is None
+        assert verdict.modules == frozenset({"hooks/shared/pact_context.py"})
+
+    def test_a_dotted_monkeypatch_target_still_scopes(self, core):
+        verdict = self._classify(core, self.BASE.replace(
+            "monkeypatch.setattr(mgc, 'TOKEN_TTL', 1)",
+            "monkeypatch.setattr('shared.merge_guard_common.TOKEN_TTL', 2)"))
+        assert verdict.modules == frozenset(
+            {"hooks/shared/merge_guard_common.py"})
+
+    def test_production_files_refuses_an_invalid_name(self, core, tmp_path):
+        plugin = tmp_path / "pact-plugin"
+        _write(plugin / "hooks" / "__init__.py", "")
+        _write(plugin / "hooks" / "shared" / "__init__.py", "")
+        index = core.ScanIndex(plugin)
+        for name in ("", ".", "a..b", "hooks-x", " shared"):
+            assert core._production_files(name, index) == frozenset(), name
+        assert core._production_files("shared", index) == frozenset(
+            {"hooks/shared/__init__.py"})
+
+    def test_a_conftest_added_or_removed_selects_all(self, core):
+        assert core.classify_conftest_change(
+            None, self.BASE, True).select_all == "conftest-added-or-removed"
+        assert core.classify_conftest_change(
+            self.BASE, None, True).select_all == "conftest-added-or-removed"
+
+    def test_a_changed_fixture_reports_its_name(self, core):
+        verdict = self._classify(
+            core, self.BASE.replace("return tmp_path", "return tmp_path / 'h'"))
+        assert verdict.select_all is None
+        assert verdict.names == frozenset({"seeded_home"})
+
+    def test_a_scoped_autouse_reports_its_module(self, core):
+        verdict = self._classify(core, self.BASE.replace("'TOKEN_TTL', 1",
+                                                         "'TOKEN_TTL', 2"))
+        assert verdict.select_all is None
+        assert verdict.modules == frozenset(
+            {"hooks/shared/merge_guard_common.py"})
+
+    def test_a_removed_fixture_module_reports_every_name(self, core):
+        """A conftest-imported module being deleted is not a conftest
+        removal: its names still identify the exclusions that used them."""
+        verdict = core.classify_conftest_change(
+            "def helper():\n    pass\n", None, False)
+        assert verdict.select_all is None
+        assert verdict.names == frozenset({"helper"})
+
+
+class TestJsonValueInert:
+    """The version-bump comparison: parsed JSON, the ignored keys removed."""
+
+    @pytest.mark.parametrize("old,new,expected", [
+        ('{"name": "p", "version": "1.0.0"}', '{"name": "p", "version": "1.0.1"}', True),
+        ('{"name": "p", "version": "1.0.0"}', '{\n  "version": "1.0.1",\n  "name": "p"\n}', True),
+        ('{"name": "p", "version": "1.0.0"}', '{"name": "q", "version": "1.0.1"}', False),
+        ('{"name": "p"}', '{"name": "p", "extra": 1}', False),
+        ('{"name": "p"}', "not json", False),
+        (None, '{"name": "p"}', False),
+        ('[1]', '[1]', False),
+    ])
+    def test_the_comparison(self, core, old, new, expected):
+        assert core.json_change_is_value_inert(old, new, ("version",)) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +667,7 @@ def _build_rig(tmp_path):
             "wall_seconds_total": 11.0,
         },
         "selection_machinery": list(SELECTION_MACHINERY),
-        "inert_paths": [],
+        "value_inert_keys": {},
         "guard_files": guards,
         "exclusions": exclusion_entries,
     }
@@ -435,12 +688,14 @@ def test_valid_rig_loads(core, tmp_path):
     assert len(manifest.guard_files) == 10
 
 
-def test_inert_paths_and_empty_seams_load(core, tmp_path):
+def test_value_inert_keys_and_empty_seams_load(core, tmp_path):
     root, _, document = _build_rig(tmp_path)
-    document["inert_paths"] = [".claude-plugin/marketplace.json"]
+    document["value_inert_keys"] = {
+        ".claude-plugin/marketplace.json": ["version"]}
     document["exclusions"][0]["production_seams"] = []
     manifest = core.load_manifest(_write_manifest(root, document))
-    assert manifest.inert_paths == (".claude-plugin/marketplace.json",)
+    assert manifest.value_inert_keys == (
+        (".claude-plugin/marketplace.json", ("version",)),)
     assert manifest.exclusions[0].production_seams == ()
 
 
@@ -538,33 +793,38 @@ def _swap_a_guard_for_a_real_but_wrong_path(document, root):
             "is under tests/",
         ),
         (
-            "inert-key-missing",
-            lambda doc, root: doc.pop("inert_paths"),
-            "missing required key 'inert_paths'",
+            "value-inert-key-missing",
+            lambda doc, root: doc.pop("value_inert_keys"),
+            "missing required key 'value_inert_keys'",
         ),
         (
-            "inert-python-file",
+            "value-inert-not-an-object",
+            lambda doc, root: doc.update({"value_inert_keys": ["x.json"]}),
+            "value_inert_keys: expected an object",
+        ),
+        (
+            "value-inert-not-json-file",
             lambda doc, root: doc.update(
-                {"inert_paths": ["pact-plugin/hooks/seam_0.py"]}),
-            "is a Python file and cannot be inert",
+                {"value_inert_keys": {"pact-plugin/hooks/seam_0.py": ["v"]}}),
+            "must be a .json file",
         ),
         (
-            "inert-missing-on-disk",
-            lambda doc, root: doc.update({"inert_paths": ["NOT-THERE.md"]}),
-            "Inert paths are repo-relative",
-        ),
-        (
-            "inert-is-machinery",
+            "value-inert-missing-on-disk",
             lambda doc, root: doc.update(
-                {"inert_paths": ["scripts/fast_suite_exclusions.json"]}),
+                {"value_inert_keys": {"NOT-THERE.json": ["version"]}}),
+            "is not a readable JSON file",
+        ),
+        (
+            "value-inert-is-machinery",
+            lambda doc, root: doc.update({"value_inert_keys": {
+                "scripts/fast_suite_exclusions.json": ["version"]}}),
             "is selection machinery",
         ),
         (
-            "inert-duplicate",
-            lambda doc, root: doc.update({"inert_paths": [
-                ".claude-plugin/marketplace.json",
-                ".claude-plugin/marketplace.json"]}),
-            "duplicate inert path",
+            "value-inert-empty-keys",
+            lambda doc, root: doc.update({"value_inert_keys": {
+                ".claude-plugin/marketplace.json": []}}),
+            "expected a non-empty list of key names",
         ),
         (
             "seam-is-directory",
@@ -847,3 +1107,240 @@ class TestImportClosure:
         assert "conftest.py" not in closure
         assert "hooks/shared/unrelated.py" not in closure
         assert "tests/helper.py" not in closure
+
+
+class TestScanIndex:
+    """What one module contributes to its exclusions' views."""
+
+    def _scan(self, core, tmp_path, rel, source):
+        plugin = tmp_path / "pact-plugin"
+        _write(plugin / rel, source)
+        (plugin / "hooks").mkdir(parents=True, exist_ok=True)
+        return core.ScanIndex(plugin).scan(rel)
+
+    def test_docstrings_and_prose_are_not_literals(self, core, tmp_path):
+        scan = self._scan(core, tmp_path, "tests/test_a.py",
+                          '"""agents/only_in_a_docstring.md"""\n'
+                          'MESSAGE = "see commands/x.md for details"\n'
+                          'TARGET = "commands/x.md"\n')
+        assert scan.literals == frozenset({"commands/x.md"})
+
+    def test_only_path_positions_are_path_literals(self, core, tmp_path):
+        scan = self._scan(core, tmp_path, "hooks/m.py",
+                          'from pathlib import Path\n'
+                          'KINDS = {"commands": 1}\n'
+                          'def f(root):\n'
+                          '    return (Path(root) / "agents").glob("*.md")\n')
+        assert "agents" in scan.path_literals
+        assert "commands" not in scan.path_literals
+
+    def test_a_file_anchored_scan_is_a_scanner_of_its_directory(
+            self, core, tmp_path):
+        scan = self._scan(core, tmp_path, "tests/test_b.py",
+                          'from pathlib import Path\n'
+                          'HERE = Path(__file__).resolve().parent\n'
+                          'def test_x():\n'
+                          '    return sorted(HERE.rglob("*.md"))\n')
+        assert scan.scanner_roots == frozenset({"tests"})
+
+    def test_a_parents_anchor_scans_from_that_depth(self, core, tmp_path):
+        scan = self._scan(core, tmp_path, "tests/test_c.py",
+                          'from pathlib import Path\n'
+                          'ROOT = Path(__file__).resolve().parents[1]\n'
+                          'def test_x():\n'
+                          '    return sorted(ROOT.rglob("*.py"))\n')
+        assert scan.scanner_roots == frozenset({"."})
+
+    @pytest.mark.parametrize("anchor,expected", [
+        # One resolver, every spelling. From tests/, one level up is the
+        # module's directory and two levels up is the plugin root.
+        ("Path(__file__).parent", "tests"),
+        ("Path(__file__).resolve().parents[0]", "tests"),
+        ("os.path.dirname(__file__)", "tests"),
+        ("Path(__file__).parent.parent", "."),
+        ("Path(__file__).resolve().parents[1]", "."),
+        ("os.path.dirname(os.path.dirname(__file__))", "."),
+        # Depths that cannot be resolved, or that climb above the plugin,
+        # are the plugin root, never the module's own directory.
+        ("Path(__file__).parents[DEPTH]", "."),
+        ("Path(__file__).parents[4]", "."),
+        ("locate(__file__)", "."),
+        ("Path(other_module.__file__).parent", "."),
+        # A literal joined after the anchor narrows it.
+        ("Path(__file__).parent / 'fixtures'", "tests/fixtures"),
+        ("Path(__file__).parent.joinpath('fixtures', 'corpus')",
+         "tests/fixtures/corpus"),
+    ])
+    def test_every_anchor_spelling_resolves_the_same_way(
+            self, core, tmp_path, anchor, expected):
+        scan = self._scan(core, tmp_path, "tests/test_depth.py",
+                          'import os\nfrom pathlib import Path\n'
+                          'import other_module\nDEPTH = 1\n'
+                          'def locate(path):\n    return Path(path)\n'
+                          f'ROOT = {anchor}\n'
+                          'def test_x():\n'
+                          '    return sorted(Path(ROOT).rglob("*"))\n')
+        assert scan.scanner_roots == frozenset({expected})
+
+    def test_an_anchored_scope_that_scans_no_checkout_path_is_no_scanner(
+            self, core, tmp_path):
+        """ast.walk and a tmp_path listing next to a __file__ read."""
+        scan = self._scan(core, tmp_path, "tests/test_reads_itself.py",
+                          'import ast\nfrom pathlib import Path\n'
+                          'def test_x(tmp_path):\n'
+                          '    tree = ast.parse(Path(__file__).read_text())\n'
+                          '    list(ast.walk(tree))\n'
+                          '    list(tmp_path.iterdir())\n')
+        assert scan.scanner_roots is None
+
+    def test_scope_literals_naming_directories_are_the_roots(
+            self, core, tmp_path):
+        """Only the scanning function's literals and the constants it uses;
+        a directory word elsewhere in the module is not a root."""
+        (tmp_path / "pact-plugin" / "skills").mkdir(parents=True)
+        (tmp_path / "pact-plugin" / "agents").mkdir(parents=True)
+        (tmp_path / "pact-plugin" / "__pycache__").mkdir(parents=True)
+        scan = self._scan(core, tmp_path, "tests/test_d.py",
+                          'from pathlib import Path\n'
+                          'PLUGIN = Path(__file__).parents[1]\n'
+                          'TOPS = ("hooks", "skills", "__pycache__")\n'
+                          'OTHER = "agents"\n'
+                          'def test_x():\n'
+                          '    for top in TOPS:\n'
+                          '        list((PLUGIN / top).rglob("*.py"))\n')
+        assert scan.scanner_roots == frozenset({"hooks", "skills"})
+
+    def test_a_tmp_path_scan_is_not_a_scanner(self, core, tmp_path):
+        scan = self._scan(core, tmp_path, "tests/test_e.py",
+                          'def test_x(tmp_path):\n'
+                          '    list((tmp_path / "hooks").rglob("*"))\n')
+        assert scan.scanner_roots is None
+
+    def test_a_seeded_scanner_exclusion_is_added_back(self, core, tmp_path):
+        """End to end: detection, view and select() on a rig."""
+        plugin = tmp_path / "pact-plugin"
+        _write(plugin / "tests" / "docs" / "test_reads_docs.py",
+               'from pathlib import Path\n'
+               'def test_x():\n'
+               '    assert list(Path(__file__).parent.glob("*.md")) is not None\n')
+        _write(plugin / "tests" / "docs" / "x.md", "notes\n")
+        manifest = _manifest(core, exclusion_paths=(
+            "tests/docs/test_reads_docs.py",), seams={
+            "tests/docs/test_reads_docs.py": ()})
+        index = core.ScanIndex(plugin)
+        facts = core.ChangeFacts(
+            views={"tests/docs/test_reads_docs.py": index.view(
+                "tests/docs/test_reads_docs.py")},
+            value_inert=frozenset(), conftest_verdicts={},
+            conftest_imported=frozenset())
+        discovered = frozenset({"tests/docs/test_reads_docs.py"})
+        hit = core.select(discovered, manifest,
+                          ["pact-plugin/tests/docs/x.md"], "ok", facts)
+        miss = core.select(discovered, manifest,
+                           ["pact-plugin/hooks/x.md"], "ok", facts)
+        assert _reasons(hit) == [
+            ("tests/docs/test_reads_docs.py", "scanned_tree")]
+        assert miss.added_back == ()
+
+    def test_computed_imports_and_fixtures_are_recorded(self, core, tmp_path):
+        scan = self._scan(core, tmp_path, "tests/test_g.py",
+                          'import importlib\n'
+                          'NAMES = (("a", "b"),)\n'
+                          'def test_x(request, name):\n'
+                          '    for left, right in NAMES:\n'
+                          '        __import__(right)\n'
+                          '    importlib.import_module(name)\n'
+                          '    request.getfixturevalue(name)\n'
+                          '    request.getfixturevalue("tmp_path")\n')
+        assert scan.dynamic_imports == ("test_g.py:6:import_module",)
+        assert scan.dynamic_fixtures == ("test_g.py:7",)
+
+
+def _git_rig(tmp_path):
+    repo = tmp_path / "factsrig"
+    plugin = repo / "pact-plugin"
+    _write(plugin / ".claude-plugin" / "plugin.json",
+           '{"name": "pact", "version": "1.0.0"}\n')
+    _write(plugin / "tests" / "conftest.py",
+           "import pytest\n\n@pytest.fixture\ndef seeded(tmp_path):\n"
+           "    return tmp_path\n")
+    _write(plugin / "tests" / "test_slow.py",
+           "def test_ok(seeded):\n    assert seeded\n")
+    _git(repo.parent, "init", "-q", str(repo))
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    return repo, plugin, _git(repo, "rev-parse", "HEAD")
+
+
+def _facts_manifest(core):
+    return core.Manifest(
+        path_base="plugin_root", selection_machinery=SELECTION_MACHINERY,
+        guard_files=GUARD_FILES,
+        exclusions=(core.Exclusion("tests/test_slow.py", 1.0, 1, "rig", ()),),
+        value_inert_keys=(("pact-plugin/.claude-plugin/plugin.json",
+                           ("version",)),))
+
+
+class TestGatherFacts:
+    """The content-dependent inputs come from the merge base and HEAD."""
+
+    PLUGIN_JSON = "pact-plugin/.claude-plugin/plugin.json"
+
+    def _commit(self, repo, rel, text):
+        (repo / rel).write_text(text, encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "change")
+
+    def test_a_version_bump_is_value_inert(self, core, tmp_path):
+        repo, _, base = _git_rig(tmp_path)
+        self._commit(repo, self.PLUGIN_JSON,
+                     '{\n  "name": "pact",\n  "version": "1.0.1"\n}\n')
+        facts = core.gather_facts(repo, _facts_manifest(core),
+                                  [self.PLUGIN_JSON], base)
+        assert facts.value_inert == frozenset({self.PLUGIN_JSON})
+
+    def test_a_bump_with_another_key_is_not(self, core, tmp_path):
+        repo, _, base = _git_rig(tmp_path)
+        self._commit(repo, self.PLUGIN_JSON,
+                     '{"name": "other", "version": "1.0.1"}\n')
+        facts = core.gather_facts(repo, _facts_manifest(core),
+                                  [self.PLUGIN_JSON], base)
+        assert facts.value_inert == frozenset()
+
+    def test_without_a_base_nothing_is_value_inert(self, core, tmp_path):
+        repo, _, _ = _git_rig(tmp_path)
+        self._commit(repo, self.PLUGIN_JSON,
+                     '{"name": "pact", "version": "1.0.1"}\n')
+        facts = core.gather_facts(repo, _facts_manifest(core),
+                                  [self.PLUGIN_JSON], None)
+        assert facts.value_inert == frozenset()
+
+    def test_a_changed_fixture_adds_back_its_user(self, core, tmp_path):
+        repo, _, base = _git_rig(tmp_path)
+        self._commit(repo, "pact-plugin/tests/conftest.py",
+                     "import pytest\n\n@pytest.fixture\ndef seeded(tmp_path):\n"
+                     "    return tmp_path / 'x'\n")
+        changed = ["pact-plugin/tests/conftest.py"]
+        manifest = _facts_manifest(core)
+        facts = core.gather_facts(repo, manifest, changed, base)
+        assert facts.conftest_verdicts["tests/conftest.py"].names == frozenset(
+            {"seeded"})
+        discovered = core.discover(repo)
+        result = core.select(discovered, manifest, changed, "ok", facts)
+        assert _reasons(result) == [("tests/test_slow.py", "fixture_name")]
+
+    def test_a_changed_hook_selects_all(self, core, tmp_path):
+        repo, _, base = _git_rig(tmp_path)
+        path = repo / "pact-plugin" / "tests" / "conftest.py"
+        path.write_text(path.read_text(encoding="utf-8")
+                        + "\ndef pytest_configure(config):\n    pass\n",
+                        encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "hook")
+        changed = ["pact-plugin/tests/conftest.py"]
+        manifest = _facts_manifest(core)
+        facts = core.gather_facts(repo, manifest, changed, base)
+        result = core.select(core.discover(repo), manifest, changed, "ok",
+                             facts)
+        assert result.select_all_reason == (
+            "conftest:tests/conftest.py:hook:pytest_configure")

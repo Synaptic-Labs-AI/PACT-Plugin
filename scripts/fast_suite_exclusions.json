@@ -24,9 +24,11 @@
     "constraints-ci.txt",
     "pyproject.toml"
   ],
-  "inert_paths": [
-    "pact-plugin/README.md"
-  ],
+  "value_inert_keys": {
+    "pact-plugin/.claude-plugin/plugin.json": [
+      "version"
+    ]
+  },
   "guard_files": [
     "tests/test_ci_collection_scope.py",
     "tests/test_import_hygiene.py",

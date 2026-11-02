@@ -100,7 +100,7 @@ def rig(tmp_path):
         "path_base": "plugin_root",
         "baseline": BASELINE,
         "selection_machinery": list(SELECTION_MACHINERY),
-        "inert_paths": [],
+        "value_inert_keys": {},
         "guard_files": guards,
         "exclusions": entries,
     }
@@ -277,6 +277,57 @@ def test_the_ordinary_selection_is_accepted(tmp_path, rig):
     assert proc.returncode == 0, proc.stderr
     assert "VERIFY-OK" in proc.stdout
     assert "select_all=None" in proc.stdout
+
+
+def _commit_closure_change(root, plugin):
+    """Make test_slow_0 import a support module, then change that module.
+
+    Returns (base, head, expected) for the closure add-back: test_slow_0 comes
+    back by closure, the other 23 exclusions stay applied.
+    """
+    _write(plugin / "tests" / "support_mod.py", "VALUE = 1\n")
+    _write(plugin / "tests" / "test_slow_0.py",
+           "import support_mod\n\ndef test_ok():\n"
+           "    assert support_mod.VALUE\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "import a support module")
+    base = _git(root, "rev-parse", "HEAD")
+    _write(plugin / "tests" / "support_mod.py", "VALUE = 2\n")
+    _git(root, "commit", "-q", "-am", "change the support module")
+    head = _git(root, "rev-parse", "HEAD")
+    expected = [path for path in _discovered(plugin)
+                if path == "tests/test_slow_0.py"
+                or not path.startswith("tests/test_slow_")]
+    return base, head, expected
+
+
+def test_a_closure_add_back_is_accepted(tmp_path, rig):
+    """The verifier recomputes with the same rules: a support-module change
+    adds back only the exclusion that imports it."""
+    root, plugin, manifest = rig
+    base, head, expected = _commit_closure_change(root, plugin)
+    summary, canary, _ = _artifacts(
+        root, plugin, manifest, base_sha=base, head_sha=head,
+        expected_files=expected, selection_status="ok",
+        select_all_reason=None, excluded=23, added_back=1)
+    proc = _run(summary, canary, base, root, manifest)
+    assert proc.returncode == 0, proc.stderr
+    assert "select_all=None" in proc.stdout
+
+
+def test_a_selection_that_misses_a_closure_add_back_is_refused(tmp_path, rig):
+    """Artifacts that ran the old narrow answer (all 24 applied) fail."""
+    root, plugin, manifest = rig
+    base, head, _ = _commit_closure_change(root, plugin)
+    narrow = [path for path in _discovered(plugin)
+              if not path.startswith("tests/test_slow_")]
+    summary, canary, _ = _artifacts(
+        root, plugin, manifest, base_sha=base, head_sha=head,
+        expected_files=narrow, selection_status="ok",
+        select_all_reason=None, excluded=24, added_back=0)
+    proc = _run(summary, canary, base, root, manifest)
+    assert proc.returncode == 1
+    assert "EXPECTED-SET-MISMATCH" in proc.stderr
 
 
 def test_a_decorated_summary_is_accepted(tmp_path, rig):
