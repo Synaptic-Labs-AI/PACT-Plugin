@@ -770,6 +770,23 @@ class TestHarvestRuleProse:
         # M-2: the P6 CORE guarantee. Flipping "never union it" to "union it"
         # would merge a realigned team's copy into this team's task file.
         assert "never union it with this team's task file" in SKILL_TEXT
+        assert "UNION IT WITH THAT TEAM'S TASK FILE" in SKILL_TEXT
+
+    def test_from_team_partition_unions_with_its_own_store(self):
+        """Bugbot's High finding: the from-team loop must read THAT team's
+        store and union that copy. The journal alone drops task-file-only
+        content, and reading THIS team's store produced a false 'task file
+        absent' report for a task that lives in the from store."""
+        block = SKILL_TEXT.split(
+            "for team, events in from_events.items():", 1
+        )[1].split("    # STEP 2", 1)[0]
+        assert "read_task_json(task_id, team)" in block
+        assert "union_preferring_task_file(" in block
+        assert 'section=f"team={team}"' in block
+        # The main section still reads THIS team's store, and the false gap
+        # for an all-from-team task is guarded.
+        assert "read_task_json(task_id, this_team)" in SKILL_TEXT
+        assert "if not from_handled_any:" in SKILL_TEXT
 
     def test_old_format_cross_check_present(self):
         assert "AN OLD-FORMAT EVENT CARRIES NO `team` FIELD" in SKILL_TEXT

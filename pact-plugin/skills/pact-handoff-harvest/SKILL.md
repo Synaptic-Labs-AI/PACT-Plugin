@@ -132,7 +132,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 **SELECTION, because `agent_handoff` is a multi-event family.** Do not take the first match. The first match is the FIRST emit, which is the superseded copy. Use the rule Step 3.1 uses for snapshots:
 
-1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: run Step 2 and Step 8 for it against its own `## team={from}` section and THAT team's task store, and never union it with this team's task file. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
+1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: run Step 2 and Step 8 for it against its own `## team={from}` section and THAT team's task store, and never union it with this team's task file. **UNION IT WITH THAT TEAM'S TASK FILE**: read that store's `{task_id}.json` and apply the same union, because each copy can hold content the other lacks. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
 2. Group the match by the `(agent, task_subject)` identity the event carries. Compute that identity with the shared `occupant_hash` function and not with a local reimplementation. An `agent_handoff` event carries no `occupant` field, so compute the identity from the event's own fields. The platform reuses task_ids across arcs, and a reused task_id carries one identity for each arc. When the group count is more than one, process each group as a distinct work unit. Do not pick one group. **DO NOT FOLD THE TEAM INTO `occupant_hash`.** The marker filename and the `task_metadata_snapshot` occupant are `occupant_hash(agent, subject)` alone, so a team inside the hash re-keys every existing marker and breaks every existing snapshot join. The team term routes partitions and is never a term of the group key.
 3. In each group take the **latest `ts`**, and take the **last in journal order on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties. The later line in journal order is the authoritative one, the same tie-break Step 3.1 uses).
 4. The task file belongs to at most one group. Union the task-file copy into the group with the identity `occupant_hash(owner, subject)` computed from the task record, and report each other group through the report-message rule below.
@@ -314,13 +314,33 @@ for task_id in unprocessed:
                     report(outcome.report)
                 this_team_events.append(e)
 
+    # A from-team work unit is processed under THAT team's section against
+    # THAT team's store. It is NEVER unioned with THIS team's task file —
+    # and it IS unioned with ITS OWN, because each copy of a HANDOFF can hold
+    # content the other lacks. Reading THIS team's store here would also
+    # produce a false "task file absent" report for a task that lives in the
+    # from store.
+    from_handled_any = False
     for team, events in from_events.items():
-        # THAT team's work unit: its own section and store, and NEVER unioned
-        # with this team's task file. This runs AFTER the old-format
-        # classification above, because that classification can add to it.
-        for group in group_by_identity(events).values():
-            process(latest_by_ts_then_journal_order(group).handoff,
-                    section=f"team={team}")
+        from_task = read_task_json(task_id, team)
+        from_disk = (
+            from_task.get("metadata", {}).get("handoff") if from_task else None
+        ) or {}
+        from_disk_id = (
+            disk_identity(from_task.get("owner", ""), from_task.get("subject", ""))
+            if from_task else None
+        )
+        for identity, group in group_by_identity(events).items():
+            handoff = latest_by_ts_then_journal_order(group).handoff
+            if identity == from_disk_id:
+                merged, reports = union_preferring_task_file(
+                    handoff, from_disk, task_id
+                )
+                for line in reports:
+                    report(line)
+                handoff = merged
+            process(handoff, section=f"team={team}")
+            from_handled_any = True
 
     # STEP 2: group THIS team's events by identity. An agent_handoff event
     # carries no `occupant` field, so compute the identity from the event's
@@ -329,6 +349,7 @@ for task_id in unprocessed:
 
     # EMPTY DICT once the drain removed it, and NOT None. read_task_json is
     # fail-open: a missing file, a malformed file and an IO error all give {}.
+    # THIS section's store: the from-team sections read their own above.
     task = read_task_json(task_id, this_team)
     # Hash the SUBSTITUTED subject, because that is what the emit paths
     # hashed. The owner substitution (platform teammate name on an empty
@@ -353,7 +374,11 @@ for task_id in unprocessed:
 
     if not groups:
         if not task:
-            report_gap(task_id)
+            # A task whose work units were ALL from-team partitions has no
+            # task file in THIS section's store, and that is not a gap: the
+            # from section already processed it against ITS own file.
+            if not from_handled_any:
+                report_gap(task_id)
         else:
             process(disk_handoff)  # task file only, no journal copy to union
         continue
