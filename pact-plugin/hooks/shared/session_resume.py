@@ -693,7 +693,12 @@ def _extract_prev_session_dir(
     the resolved project slug if the Session dir line is absent (backward
     compat with sessions that wrote team name but not session dir) or names
     a directory that is no longer there (the line was written before the
-    directory moved to the resolved slug).
+    directory moved to the resolved slug). The fallback ASSUMES the previous
+    session ran from the same project directory as this one: it rebuilds
+    that session's directory from THIS session's slug. That holds when a
+    session resumes in place; a block last written by a lead in a different
+    worktree (or subdirectory) names a directory under another slug, and the
+    rebuilt path does not match it.
 
     Both extracted paths (primary and fallback) are validated against the
     canonical pact-sessions prefix via _validate_under_pact_sessions before
