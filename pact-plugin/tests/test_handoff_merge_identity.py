@@ -81,6 +81,11 @@ class TestReportSafe:
     def test_non_line_controls_are_still_stripped(self):
         assert report_safe("a\x00b\x07c\x7fd") == "abcd"
 
+    def test_c1_controls_are_stripped_even_when_not_line_boundaries(self):
+        """\x9b is C1 but not a line boundary. An enumerated class widened
+        only to NEL would leave it; the category filter does not."""
+        assert report_safe("before\x9bafter") == "beforeafter"
+
     def test_visible_text_survives_and_the_value_is_capped(self):
         assert report_safe("x" * 500, limit=10) == "xxxxxxxxxx"
 

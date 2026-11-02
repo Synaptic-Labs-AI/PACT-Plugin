@@ -74,6 +74,7 @@ import errno
 import hashlib
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
@@ -342,6 +343,11 @@ _REQUIRED = frozenset(HANDOFF_REQUIRED_FIELDS)
 # line-swallowing vector.
 _REPORT_VALUE_MAX = 128
 
+# Unicode categories stripped from report values: Cc = control (C0, DEL and
+# C1, including NEL U+0085), Zl = line separator (U+2028), Zp = paragraph
+# separator (U+2029).
+_REPORT_STRIP_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
 
 def report_safe(value: object, limit: int = _REPORT_VALUE_MAX) -> str:
     """Make a value safe to interpolate into a ONE-LINE report (CWE-117).
@@ -349,18 +355,23 @@ def report_safe(value: object, limit: int = _REPORT_VALUE_MAX) -> str:
     Report lines are read by an agent that may act on them, and field names
     come from the task file and the append-only journal — both outside this
     module's control. A value would forge or split a report line at ANY
-    boundary the consumer treats as a line break, so this strips BOTH sets:
-      - C0 controls and DEL (\\x00-\\x1f, \\x7f), which covers CR and LF; and
-      - every boundary `str.splitlines()` recognises that C0 does not cover:
-        NEL U+0085, LINE SEPARATOR U+2028 and PARAGRAPH SEPARATOR U+2029.
-    An ASCII-only class leaves the last three, and a renderer that splits on
-    `splitlines()` — Python's own, and many log consumers — would still see a
-    forged line. Removing them via `splitlines()` rather than a third
-    hand-written class keeps the set correct if Python's notion widens. The
-    result is length-capped so one value cannot swallow the line.
+    boundary the consumer treats as a line break.
+
+    STRIP BY UNICODE CATEGORY, NOT BY AN ENUMERATED CLASS. Every character
+    whose category is Cc, Zl or Zp is removed. An enumeration is only as
+    complete as the list someone thought of — this function has already been
+    widened once, after an ASCII-only class was found to miss NEL U+0085,
+    LINE SEPARATOR U+2028 and PARAGRAPH SEPARATOR U+2029 — while the category
+    filter is complete over the standard's own classification and stays
+    complete if Unicode adds another separator. The result is length-capped
+    so one value cannot swallow the line.
     """
-    without_controls = re.sub(r"[\x00-\x1f\x7f]", "", str(value))
-    return "".join(without_controls.splitlines())[:limit]
+    text = "".join(
+        ch
+        for ch in str(value)
+        if unicodedata.category(ch) not in _REPORT_STRIP_CATEGORIES
+    )
+    return text[:limit]
 
 
 def _identity(raw_key: str) -> str:
