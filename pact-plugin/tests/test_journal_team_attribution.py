@@ -148,10 +148,12 @@ class TestSnapshotTeamField:
 
 class TestEmitTeamUncertaintyGuard:
     """The emit-side two-signal guard: b1 suppresses ONLY when the payload
-    team and the resolved store DIFFER **and** the resolved store's record
-    subject differs from the payload subject. One signal alone must still
-    emit — a stale stdin value and a subject re-scope are both legitimate
-    states, and widening the guard to either one loses real events."""
+    team NAMES AN EXISTING STORE (the live-claim gate) and DIFFERS from the
+    resolved store, **and** the resolved store's record subject differs from
+    the payload subject. One signal alone must still emit — an inert legacy
+    stdin value, an absent payload store and a subject re-scope are all
+    legitimate states, and widening the guard to any one of them loses real
+    events."""
 
     OLD_TASK = {
         "status": "completed",
@@ -161,9 +163,16 @@ class TestEmitTeamUncertaintyGuard:
     }
 
     def _run(self, tmp_path, monkeypatch, capsys, payload_team, payload_subject,
-             context_team):
+             context_team, create_payload_store=False):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        if create_payload_store:
+            # The live-claim gate requires the payload's store to EXIST. The
+            # harness materialises only the context team's store, so the
+            # both-stores fixture creates this one explicitly.
+            (tmp_path / ".claude" / "tasks" / payload_team).mkdir(
+                parents=True, exist_ok=True
+            )
         calls: list[dict] = []
         payload = {
             **EMITTER_STDIN,
@@ -178,17 +187,39 @@ class TestEmitTeamUncertaintyGuard:
         )
         return code, calls, capsys.readouterr().err
 
-    def test_both_signals_suppress_and_report(self, tmp_path, monkeypatch, capsys):
-        """THE ARM. The live store does not exist, so the resolver returns the
-        old store; the payload names the live team with the live subject and
-        the old record carries a different subject plus a handoff. Removing
-        the guard emits exactly one event carrying the OLD store's handoff, so
-        both the zero-events assertion and the report assertion fail."""
+    def test_non_tty_short_name_with_absent_store_emits(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE RED SEAM CASE, as a unit arm. On the non-TTY substrate stdin
+        carries the inert SHORT_NAME while the resolver lands on the
+        FULL_UUID store; the short name's store does not exist, so signal 1
+        is not an independent claim. MUST EMIT. Removing the live-claim gate
+        suppresses here (the old behaviour)."""
+        uuid_team = "9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c"
+        code, calls, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-1a2b3c4d",
+            payload_subject="LIVE subject",
+            context_team=uuid_team,
+        )
+        assert code == 0
+        assert len(calls) == 1
+        assert calls[0]["team"] == uuid_team
+        assert "suppressing mixed handoff" not in err
+
+    def test_both_stores_exist_suppresses_and_reports(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE SUPPRESSION ARM. Both stores exist, the resolver returns the
+        OLD store, the payload names the LIVE store, and the record subject
+        differs. Removing the guard (or the live-claim gate) emits an event
+        carrying the OLD store's handoff, so both assertions fail."""
         code, calls, err = self._run(
             tmp_path, monkeypatch, capsys,
             payload_team="session-live",
             payload_subject="LIVE subject",
             context_team="session-old",
+            create_payload_store=True,
         )
         assert code == 0
         assert calls == []
@@ -209,36 +240,58 @@ class TestEmitTeamUncertaintyGuard:
             payload_team="session-live\nFORGED: approved",
             payload_subject="LIVE subject",
             context_team="session-old",
+            create_payload_store=True,
         )
+        # The live-claim gate resolves the payload name through the path
+        # validator, which REJECTS a line boundary, so this name cannot satisfy
+        # signal 1: no report is produced at all and the event emits. That is
+        # stronger than a sanitised report \u2014 the injection never reaches one.
+        # report_safe itself is exercised by TestReportSafe and the merge
+        # field-name arm, where the value DOES reach a report.
         assert code == 0
-        assert calls == []
-        assert "\nFORGED" not in err
-        assert "session-liveFORGED: approved" in err
-        assert err.count("\n") == 1  # the report line plus print's newline
+        assert len(calls) == 1
+        assert "FORGED" not in err
 
     @pytest.mark.parametrize("sep", ["\x85", "\u2028"])
     def test_payload_team_cannot_forge_a_unicode_line(
         self, tmp_path, monkeypatch, capsys, sep
     ):
-        """NEL and LINE SEPARATOR are not C0; `splitlines()` splits on both,
-        so an ASCII-only sanitiser would still let this forge a line."""
+        """Same property for the Unicode boundaries: the path validator
+        rejects them, so the payload can never name a live store and never
+        reaches a report. report_safe covers the values that do."""
         code, calls, err = self._run(
             tmp_path, monkeypatch, capsys,
             payload_team="session-live" + sep + "FORGED: approved",
             payload_subject="LIVE subject",
             context_team="session-old",
+            create_payload_store=True,
         )
         assert code == 0
-        assert calls == []
-        assert len(err.splitlines()) == 1
-        assert "session-liveFORGED: approved" in err
+        assert len(calls) == 1
+        assert "FORGED" not in err
 
-    def test_team_disagreement_with_agreeing_subjects_emits(
+    def test_both_stores_exist_with_agreeing_subjects_emits(
         self, tmp_path, monkeypatch, capsys
     ):
-        """CONTROL: a stale stdin team value with a healthy resolver must NOT
-        suppress. The subjects agreeing is the proof that the read is this
-        task's."""
+        """CONTROL: widening the guard to ANY subject mismatch must redden
+        this. Both stores exist and the teams disagree, but the subjects
+        agree, so the read is this task's and the emitter must emit."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live",
+            payload_subject="OLD subject",
+            context_team="session-old",
+            create_payload_store=True,
+        )
+        assert code == 0
+        assert len(calls) == 1
+        assert calls[0]["team"] == "session-old"
+
+    def test_absent_store_with_agreeing_subjects_emits(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CONTROL: the live-claim gate alone keeps this emitting even when
+        the payload store is absent — signal 1 cannot fire."""
         code, calls, _ = self._run(
             tmp_path, monkeypatch, capsys,
             payload_team="session-live",

@@ -81,7 +81,7 @@ from shared.agent_handoff_marker import (
 )
 from shared.session_journal import append_event, get_journal_path, make_event
 from shared.task_metadata_snapshot import emit_task_metadata_snapshot
-from shared.task_utils import read_task_json, resolve_task_dir
+from shared.task_utils import read_task_json, resolve_task_dir, task_dir_for
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -296,23 +296,43 @@ def main() -> None:
         # provable signals, because no single source is trustworthy for "the
         # session's own team": the persisted context is what goes stale in
         # this failure, and the resolver cannot see the platform's claim.
-        #   1. the platform's stdin team_name is non-empty, the RESOLVED store
-        #      name is non-empty, and they DIFFER;
+        #   1. the payload's stdin team_name names an EXISTING task store (the
+        #      LIVE-CLAIM GATE), the resolved store name is non-empty, and
+        #      the two DIFFER;
         #   2. the resolved store's record carries a non-empty subject that
         #      DIFFERS from the payload's task_subject.
         # Both together prove the content read (owner, handoff) belongs to a
         # DIFFERENT task: subject from the payload, content from the store.
-        # Suppressing loses nothing legitimate — the platform team's own task
-        # file is the authoritative copy the harvest reads. The subject
-        # comparison is what stops a stale stdin value from suppressing a
-        # legitimate event, and the team comparison is what stops a re-scoped
-        # subject from doing the same. b2 is deliberately excluded: it has no
-        # independent platform claim and its content is internally consistent.
+        #
+        # THE LIVE-CLAIM GATE, and why signal 1 needs it: on the non-TTY
+        # substrate stdin carries the deprecated inert SHORT_NAME while the
+        # resolver correctly lands on the FULL_UUID store. Comparing an inert
+        # legacy value against a real store name fires on EVERY emit, and with
+        # a differing subject it suppresses a legitimate write. A stdin value
+        # is an independent claim only when a store of that name exists.
+        #
+        # COVERAGE: this suppresses ONLY the both-stores-exist case. When the
+        # payload's store does not exist, the event is emitted with `team` =
+        # the store actually read; the harvest rejects it as foreign and the
+        # live team's task file remains authoritative. Weaker prevention, no
+        # false-suppression mode — and that trade is deliberate.
+        #
+        # The subject comparison is what stops a stale stdin value from
+        # suppressing a legitimate event, and the team comparison is what
+        # stops a re-scoped subject from doing the same. b2 is deliberately
+        # excluded: it has no independent platform claim and its content is
+        # internally consistent.
         payload_team = str(input_data.get("team_name") or "")
         resolved_team = resolved_task_dir.name if resolved_task_dir else ""
+        # task_dir_for validates and anchors the caller-supplied name; it
+        # makes no existence claim, so the live-claim test is the is_dir().
+        payload_store = task_dir_for(payload_team) if payload_team else None
+        payload_team_is_live = bool(payload_store and payload_store.is_dir())
         record_subject = task_data.get("subject")
         if (
-            payload_team and resolved_team and payload_team != resolved_team
+            payload_team_is_live
+            and resolved_team
+            and payload_team != resolved_team
             and isinstance(record_subject, str) and record_subject.strip()
             and record_subject != task_subject
         ):
