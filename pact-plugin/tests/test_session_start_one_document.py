@@ -148,6 +148,33 @@ def test_an_unknown_root_reads_no_predecessor(repo, monkeypatch):
     assert all(result is None for result in found), found
 
 
+def test_the_resume_line_fallback_uses_the_sessions_own_slug(repo):
+    """A worktree session's document lives in MAIN, but its session
+    directory is named from the WORKTREE (project_slug never normalises to
+    the main checkout). A Current Session block with only a Resume line must
+    therefore resolve the worktree slug's directory. Revert check: deriving
+    the slug from the document's base names `<sessions>/main/<sid>`, a
+    directory no writer used, and this goes red."""
+    from shared import build_session_path, project_slug
+    from shared.claude_md_manager import resolve_managed_document
+    from shared.session_resume import _extract_prev_session_dir, update_session_info
+
+    worktree = repo / ".worktrees" / "feature-x"
+    _git("worktree", "add", "-q", str(worktree), "-b", "feature-x", cwd=repo)
+    assert ensure_project_memory_md(repo) is not None
+    doc = resolve_managed_document(repo)
+    previous = "12121212-3434-5656-7878-909090909090"
+    # No session_dir: the block carries the Resume line and no Session dir.
+    assert update_session_info(previous, "session-12121212", doc=doc)
+    assert "- Session dir:" not in doc.path.read_text(encoding="utf-8")
+
+    found = _extract_prev_session_dir(str(worktree), doc=doc)
+
+    expected = str(build_session_path(project_slug(str(worktree)), previous))
+    assert found == expected, (found, expected)
+    assert project_slug(str(worktree)) != project_slug(str(repo))
+
+
 def test_a_subdirectory_with_its_own_document_keeps_it(repo, monkeypatch):
     """Control: the enclosing rung applies only when the subdirectory holds
     no document; its own document wins and the toplevel's is untouched."""

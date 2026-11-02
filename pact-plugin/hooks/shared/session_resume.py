@@ -705,10 +705,13 @@ def _extract_prev_session_dir(
     pact-sessions tree.
 
     Args:
-        project_dir: CLAUDE_PROJECT_DIR path. Ignored when `doc` is given.
-        doc: The session's managed document. Read when it exists; the
-            fallback slug derives from `doc.base`, the directory it was
-            found under.
+        project_dir: The session's project directory (CLAUDE_PROJECT_DIR,
+            else the cwd): the source of the fallback slug, exactly as the
+            session-directory writers derive it. Without `doc` it is also
+            where the document is resolved.
+        doc: The session's managed document, read when it exists. Its base
+            is NOT a slug source: for a worktree or subdirectory session it
+            is the main checkout, whose slug no writer used.
 
     Returns:
         Previous session directory path string, or None if not found
@@ -718,7 +721,7 @@ def _extract_prev_session_dir(
         # None means no document exists -- nothing to read
         if found is None:
             return None
-        claude_md, slug_base = found
+        claude_md, _base = found
 
         # No lock. Every writer of the project CLAUDE.md replaces it whole
         # (_atomic_write_text: a temp file, then os.replace), so this read
@@ -769,11 +772,13 @@ def _extract_prev_session_dir(
         # The Resume pattern reads both the current line and one written
         # before the `--agent` flag was added.
         session_id = recorded_session_id(content)
-        if session_id:
-            # Same slug derivation and sanitisation as every session path,
-            # so the fallback lands on the directory the writers used.
+        if session_id and project_dir:
+            # The slug comes from the session's project directory, the same
+            # source session_init and pact_context.init use, so the fallback
+            # lands on the directory the writers used. project_slug never
+            # normalises to the main checkout, so neither may this.
             derived = str(
-                _build_session_path(project_slug(str(slug_base)), session_id)
+                _build_session_path(project_slug(str(project_dir)), session_id)
             )
             return _validate_under_pact_sessions(derived)
 
