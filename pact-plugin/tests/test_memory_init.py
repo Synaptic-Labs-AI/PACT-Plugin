@@ -461,6 +461,33 @@ class TestDependencyDriftIsDetectable:
     _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
     _PYTEST_RE = re.compile(r"\bpytest\b")
 
+    # PROFILES: the ONE (workflow path, job id) pair allowed to run a test
+    # step that is not TEST_CMD. Keying on the pair — rather than admitting a
+    # second global grammar — stops a future workflow from claiming the
+    # exemption for a narrowed suite.
+    _PROFILES = {
+        (".github/workflows/tests.yml", "full-suite"): [
+            (r"^python -m pytest -ra$", 1),
+        ],
+        (".github/workflows/fast-tests.yml", "fast-suite"): [
+            (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
+             r'"\$\{\{ github\.event\.pull_request\.base\.sha \}\}"$', 1),
+            (r'^python \.\./scripts/run_fast_suite\.py --collect-only '
+             r'--base-sha "\$\{\{ github\.event\.pull_request\.base\.sha '
+             r'\}\}"$', 1),
+        ],
+    }
+
+    # The generic arm for every OTHER workflow: TEST_CMD, optionally with
+    # whole-file absolute ignore flags.
+    _GENERIC_ALLOWED = re.compile(
+        r"^python -m pytest -ra( --ignore=[A-Za-z0-9._/-]+)*$")
+
+    # The pinned fast runner. A wrapper invocation names `python` but not
+    # `pytest`, so without this classifier the verify bracket silently does
+    # not bind to it.
+    _FAST_RUNNER_RE = re.compile(r"^python \.\./scripts/run_fast_suite\.py\b")
+
     def _source_repo_root(self):
         """Repo root by a POSITIVE marker, or None when this is not a checkout.
 
@@ -603,9 +630,14 @@ class TestDependencyDriftIsDetectable:
         For every GOVERNED job (any step whose `run` names pytest, python,
         pip or ruff) in every workflow under .github/workflows/:
           (i) its LAST step runs VERIFY_CMD with `if: always()`;
-          (ii) every step whose `run` names pytest is EXACTLY TEST_CMD and is
-               IMMEDIATELY preceded by a step running VERIFY_CMD;
-          (iii) no verify step and no pytest step carries `env:` or
+          (ii) every TEST STEP is IMMEDIATELY preceded by VERIFY_CMD. A
+               TEST STEP is one whose `run` names pytest OR matches the
+               pinned fast runner path. In a profiled job (exactly one
+               (workflow path, job id) pair per profile) the step must match
+               one of that profile's pinned forms; everywhere else a pytest
+               step must match TEST_CMD or the generic whole-file ignore
+               arm, and the fast runner is not allowed at all;
+          (iii) no verify step and no test step carries `env:` or
                `shell:`, and no verify step carries `working-directory:`
                (VERIFY_CMD names the script relative to the repo root).
         Together these make the process pytest runs in the process the
@@ -640,13 +672,43 @@ class TestDependencyDriftIsDetectable:
                     problems.append(
                         f"{where}: the LAST step must run "
                         f"`{self.VERIFY_CMD}` with `if: always()`")
+                profile = self._PROFILES.get((rel, jid))
+                if profile is not None:
+                    for pattern, expected_count in profile:
+                        matched = sum(
+                            1 for run in runs
+                            if re.fullmatch(pattern, run.strip()))
+                        if matched != expected_count:
+                            problems.append(
+                                f"{where}: the pinned form {pattern!r} "
+                                f"matches {matched} step(s), expected "
+                                f"exactly {expected_count}. A renamed step "
+                                f"reddens instead of silently ceasing to be "
+                                f"the test step.")
                 for n, (step, run) in enumerate(zip(steps, runs)):
                     is_verify = run.strip() == self.VERIFY_CMD
-                    is_test = bool(self._PYTEST_RE.search(run))
-                    if is_test and run.strip() != self.TEST_CMD:
-                        problems.append(
-                            f"{where} step {n}: a pytest step must run "
-                            f"exactly `{self.TEST_CMD}`, not {run.strip()!r}")
+                    names_pytest = bool(self._PYTEST_RE.search(run))
+                    names_runner = bool(self._FAST_RUNNER_RE.search(run))
+                    is_test = names_pytest or names_runner
+                    if is_test:
+                        if profile is not None:
+                            if not any(re.fullmatch(pattern, run.strip())
+                                       for pattern, _ in profile):
+                                problems.append(
+                                    f"{where} step {n}: {run.strip()!r} "
+                                    f"matches no pinned profile pattern for "
+                                    f"this job")
+                        elif names_runner:
+                            problems.append(
+                                f"{where} step {n}: the pinned fast runner "
+                                f"is only allowed in the profiled "
+                                f"(fast-tests.yml, fast-suite) pair")
+                        elif not self._GENERIC_ALLOWED.fullmatch(run.strip()):
+                            problems.append(
+                                f"{where} step {n}: a pytest step must run "
+                                f"exactly `{self.TEST_CMD}` (or the generic "
+                                f"whole-file ignore form), not "
+                                f"{run.strip()!r}")
                     if is_test and (n == 0 or runs[n - 1].strip() != self.VERIFY_CMD):
                         problems.append(
                             f"{where} step {n}: a pytest step must be "
@@ -671,8 +733,10 @@ class TestDependencyDriftIsDetectable:
                             f"would not fail the job)")
                     # The before-check runs unconditionally: an `if:` on it
                     # can skip the check while the tests still run.
-                    if is_verify and n + 1 < len(runs) and \
-                            self._PYTEST_RE.search(runs[n + 1]) and "if" in step:
+                    if is_verify and n + 1 < len(runs) and (
+                            self._PYTEST_RE.search(runs[n + 1])
+                            or self._FAST_RUNNER_RE.search(runs[n + 1])) \
+                            and "if" in step:
                         problems.append(
                             f"{where} step {n}: the before-check may carry no "
                             f"`if:` (it must run before every test run)")
@@ -681,6 +745,21 @@ class TestDependencyDriftIsDetectable:
                         f"{where}: a governed job may not carry "
                         f"`continue-on-error` (its verify failures would not "
                         f"fail the workflow)")
+        assert self._PROFILES, (
+            "PARSE FAILURE: the profile map is empty, so no job can be "
+            "admitted to run a non-TEST_CMD test step. Re-point it; do not "
+            "delete it."
+        )
+        for profile_path, profile_job in self._PROFILES:
+            profile_file = root / profile_path
+            assert profile_file.is_file(), (
+                f"the pinned profile {profile_path!r} names a workflow that "
+                f"does not exist under {root}. A renamed workflow reddens "
+                f"here instead of silently dropping its admission.")
+            profile_doc = self._load_workflow_yaml(profile_file)
+            assert profile_job in ((profile_doc or {}).get("jobs") or {}), (
+                f"the pinned profile {profile_path!r} names job "
+                f"{profile_job!r}, which that workflow does not declare.")
         assert governed_jobs, (
             "PARSE FAILURE, not placement drift: no workflow job names "
             "pytest/python/pip/ruff, so the placement arm checks nothing. "

@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "path_base": "plugin_root",
+  "baseline": {
+    "measured_at_commit": "d02ccf601987feddfa2d210e920bc42dee00d21f",
+    "interpreter": "3.12.3",
+    "pytest": "9.2.0",
+    "platform": "linux",
+    "collected_node_ids": 29311,
+    "excluded_node_ids": 6837,
+    "retained_node_ids": 22474,
+    "retained_files": 469,
+    "excluded_files": 24,
+    "displayed_seconds_total": 1261.64,
+    "wall_seconds_total": 1393.62
+  },
+  "production_roots": [
+    "hooks/",
+    "scripts/",
+    "skills/",
+    "telegram/",
+    "bin/"
+  ],
+  "selection_machinery": [
+    "scripts/fast_suite_selection.py",
+    "scripts/fast_suite_args.py",
+    "scripts/run_fast_suite.py",
+    "scripts/verify_fast_summary.py",
+    "scripts/fast_suite_exclusions.json",
+    ".github/workflows/fast-tests.yml",
+    "constraints-ci.txt",
+    "pyproject.toml"
+  ],
+  "guard_files": [
+    "tests/test_ci_collection_scope.py",
+    "tests/test_import_hygiene.py",
+    "tests/test_local_lint_parity.py",
+    "tests/test_path_setup_pin.py",
+    "tests/test_suite_home_isolation.py",
+    "tests/test_conftest_config_root_isolation.py",
+    "tests/test_audit_protocol.py",
+    "tests/test_memory_store_isolation.py",
+    "skills/pact-handoff-harvest/test_skill_loading_harvest.py",
+    "skills/pact-agent-teams/test_skill_loading_agent_teams.py"
+  ],
+  "exclusions": [
+    {
+      "path": "tests/test_merge_guard_refused_is_mintable.py",
+      "displayed_seconds": 142.06,
+      "tests": 7,
+      "mechanism": "mint matrix over nested refusal shapes",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_snapshot_provenance_semantics.py",
+      "displayed_seconds": 82.72,
+      "tests": 11,
+      "mechanism": "deep-pressure totality over lookalike provenance values",
+      "production_seams": [
+        "hooks/shared/session_journal.py",
+        "hooks/shared/task_metadata_snapshot.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_substitution_mint.py",
+      "displayed_seconds": 79.91,
+      "tests": 2196,
+      "mechanism": "large substitution-mint matrix",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_task_metadata_snapshot.py",
+      "displayed_seconds": 54.68,
+      "tests": 31,
+      "mechanism": "deep-pressure totality over metadata payloads",
+      "production_seams": [
+        "hooks/shared/task_metadata_snapshot.py"
+      ]
+    },
+    {
+      "path": "tests/test_snapshot_key_count_discriminator.py",
+      "displayed_seconds": 50.98,
+      "tests": 15,
+      "mechanism": "key-count discriminator totality matrix",
+      "production_seams": [
+        "hooks/shared/task_metadata_snapshot.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_review_fixes.py",
+      "displayed_seconds": 45.81,
+      "tests": 1705,
+      "mechanism": "large review-fix regression matrix",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_memory_cli.py",
+      "displayed_seconds": 37.21,
+      "tests": 186,
+      "mechanism": "real CLI subprocess and database work",
+      "production_seams": [
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
+        "skills/pact-memory/scripts/working_memory.py"
+      ]
+    },
+    {
+      "path": "tests/test_pin_growth_populations.py",
+      "displayed_seconds": 36.4,
+      "tests": 58,
+      "mechanism": "pin-growth population matrices",
+      "production_seams": [
+        "hooks/pin_caps_gate.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/pin_growth.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_1140_carrier5_cert.py",
+      "displayed_seconds": 32.86,
+      "tests": 297,
+      "mechanism": "carrier certification matrix over nested compounds",
+      "production_seams": [
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_claude_md_locator_census.py",
+      "displayed_seconds": 32.06,
+      "tests": 95,
+      "mechanism": "whole-tree AST census of shipped CLAUDE.md parse sites; its true subject is every production module, so an unmapped production change forces SELECT_ALL",
+      "production_seams": [
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/pin_growth.py"
+      ]
+    },
+    {
+      "path": "tests/test_working_memory_fidelity.py",
+      "displayed_seconds": 27.09,
+      "tests": 17,
+      "mechanism": "working-memory fidelity over many project populations",
+      "production_seams": [
+        "skills/pact-memory/scripts/working_memory.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_perf.py",
+      "displayed_seconds": 25.96,
+      "tests": 17,
+      "mechanism": "parser performance and deep tokenization cases",
+      "production_seams": [
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_claude_md_corpus_writers.py",
+      "displayed_seconds": 24.57,
+      "tests": 831,
+      "mechanism": "large corpus-writer matrix",
+      "production_seams": [
+        "hooks/pin_caps.py",
+        "hooks/session_init.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/pin_markers.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/working_memory.py"
+      ]
+    },
+    {
+      "path": "tests/test_bootstrap_prompt_gate_unrecorded_lead.py",
+      "displayed_seconds": 24.03,
+      "tests": 36,
+      "mechanism": "subprocess hook runs per case",
+      "production_seams": [
+        "hooks/bootstrap_marker_writer.py",
+        "hooks/bootstrap_prompt_gate.py",
+        "hooks/session_init.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_fan_out.py",
+      "displayed_seconds": 20.84,
+      "tests": 765,
+      "mechanism": "merge-guard fan-out matrix",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_retirement_gaps.py",
+      "displayed_seconds": 20.73,
+      "tests": 182,
+      "mechanism": "retirement-gap regression matrix",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_telegram_tools.py",
+      "displayed_seconds": 20.32,
+      "tests": 72,
+      "mechanism": "telegram tool rate-limit and reply-queue timing arms",
+      "production_seams": [
+        "telegram/telegram_client.py",
+        "telegram/tools.py"
+      ]
+    },
+    {
+      "path": "tests/test_claude_md_drift.py",
+      "displayed_seconds": 20.14,
+      "tests": 65,
+      "mechanism": "clock-shift subprocess matrix over the drift writers",
+      "production_seams": [
+        "hooks/missed_wake_scan.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_drift.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/pact_context.py",
+        "hooks/track_files.py"
+      ]
+    },
+    {
+      "path": "tests/test_embedding_model_load_is_cache_first.py",
+      "displayed_seconds": 16.35,
+      "tests": 9,
+      "mechanism": "embedding model load and cache arms",
+      "production_seams": [
+        "skills/pact-memory/scripts/embeddings.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_pr_state_retirement.py",
+      "displayed_seconds": 13.84,
+      "tests": 74,
+      "mechanism": "PR-state retirement regression matrix",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    },
+    {
+      "path": "tests/test_archive_pin.py",
+      "displayed_seconds": 13.62,
+      "tests": 117,
+      "mechanism": "archive-pin corpus census over CLAUDE.md fixtures",
+      "production_seams": [
+        "hooks/pin_caps.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/project_scope.py",
+        "hooks/staleness.py",
+        "skills/pact-memory/scripts/config.py"
+      ]
+    },
+    {
+      "path": "tests/test_clock_shift_instrument.py",
+      "displayed_seconds": 12.26,
+      "tests": 17,
+      "mechanism": "clock-shift instrument subprocess probes",
+      "production_seams": [
+        "tests/clock_shift/clock_shift_census.py"
+      ]
+    },
+    {
+      "path": "tests/test_pin_caps_gate_credit.py",
+      "displayed_seconds": 11.88,
+      "tests": 18,
+      "mechanism": "pin-caps credit matrix",
+      "production_seams": [
+        "hooks/shared/claude_md_drift.py"
+      ]
+    },
+    {
+      "path": "tests/test_merge_guard_nested_compound.py",
+      "displayed_seconds": 11.2,
+      "tests": 3,
+      "mechanism": "nested compound detection matrix",
+      "production_seams": [
+        "hooks/merge_guard_post.py",
+        "hooks/merge_guard_pre.py",
+        "hooks/shared/merge_guard_common.py"
+      ]
+    }
+  ]
+}

@@ -69,6 +69,7 @@ follows the same convention where it reads the same workflow, to check that a
 runtime environment check brackets every test run.
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -547,3 +548,91 @@ def test_no_second_checkout_sits_inside_the_collection_root():
         f"run looks healthier than the real suite. Move or remove it, then "
         f"re-run before trusting any count from this session."
     )
+
+
+class TestTheFastManifestNamesRealCorpusFiles:
+    """The fast manifest may only name files the full corpus can collect.
+
+    This is the FILE-LEVEL COMPLETENESS arm, and the only arm this module
+    gains for the fast lane. The fast-workflow SHAPE lives in
+    ``test_fast_workflow_contract.py``: one module owning two contradictory
+    subjects — "what is the full corpus" and "is the fast workflow shaped
+    right" — is how a guard starts lying.
+
+    Membership and existence only; never a count. The manifest's cardinality
+    and schema rules are validated by ``scripts/fast_suite_args.py --check``,
+    which this arm runs as the entry point rather than reimplementing.
+    """
+
+    def test_manifest_paths_exist_and_appear_in_the_discovered_corpus(self):
+        repo_root, _ = _require_checkout()
+        plugin_root = _plugin_root()
+        manifest = repo_root / "scripts" / "fast_suite_exclusions.json"
+        cli = repo_root / "scripts" / "fast_suite_args.py"
+        assert manifest.is_file(), (
+            f"source checkout detected at {repo_root} but {manifest} is "
+            f"missing. The fast selection manifest is part of the reviewed "
+            f"contract; its absence is a FAILURE, not a skip."
+        )
+        assert cli.is_file(), (
+            f"source checkout detected at {repo_root} but {cli} is missing; "
+            f"the manifest cannot be validated."
+        )
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        guard_files = list(document.get("guard_files") or [])
+        exclusions = [entry.get("path") for entry in document.get("exclusions") or []]
+        named = guard_files + exclusions
+        assert guard_files, "the manifest names no guard files to retain"
+        assert exclusions, "the manifest names no exclusions"
+        assert all(isinstance(path, str) and path for path in named), (
+            f"the manifest carries a non-string path: {named!r}"
+        )
+        duplicates = sorted({path for path in named if named.count(path) > 1})
+        assert not duplicates, f"the manifest names a path twice: {duplicates}"
+
+        corpus = {
+            path.relative_to(plugin_root).as_posix()
+            for path in plugin_root.rglob("test_*.py")
+            if ".worktrees" not in path.relative_to(plugin_root).parts
+        }
+        # NON-VACUITY, ground truth independent of the scan: this module is
+        # executing, so it is on disk and must be in the corpus the scan built.
+        this_module = f"{Path(__file__).parent.name}/{Path(__file__).name}"
+        assert corpus, (
+            "SCAN FAILURE, not a manifest regression: the rglob over "
+            f"{plugin_root} returned nothing, so the comparison below would "
+            "pass vacuously."
+        )
+        assert this_module in corpus, (
+            f"SCAN FAILURE, not a manifest regression: {this_module} is "
+            f"executing yet absent from the discovered corpus."
+        )
+
+        missing_on_disk = sorted(
+            path for path in named if not (plugin_root / path).is_file())
+        not_test_modules = sorted(
+            path for path in named
+            if not (path.endswith(".py") and Path(path).name.startswith("test_")))
+        not_in_corpus = sorted(path for path in named if path not in corpus)
+        assert not missing_on_disk, (
+            f"the manifest names paths that do not exist under {plugin_root}: "
+            f"{missing_on_disk}. A moved or renamed file must fail loudly; a "
+            f"glob or a stale path would silently stop covering its tests."
+        )
+        assert not not_test_modules, (
+            f"the manifest names non-test modules: {not_test_modules}. Only "
+            f"test_*.py files may be excluded or retained."
+        )
+        assert not not_in_corpus, (
+            f"the manifest names files the discovered corpus does not see: "
+            f"{not_in_corpus}. Every named file must be collectable from the "
+            f"bare invocation."
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(cli), "--check"], cwd=str(repo_root),
+            capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, (
+            f"scripts/fast_suite_args.py --check exited {proc.returncode}.\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )

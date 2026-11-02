@@ -1,12 +1,22 @@
 # PACT plugin test suite — continuous integration.
 #
 # WHAT THIS DOES
-#   Runs the pact-plugin pytest suite on every pull request and on pushes to
-#   `main`. Its primary job is to auto-run the structural + meta-tests — the
+#   Runs the UNRESTRICTED pact-plugin pytest suite as the required merge gate.
+#   The job is `full-suite` (the required check context) and it EXECUTES on
+#   `merge_group`, where the queue's combined commit is certified, and on
+#   pushes to `main`, where the landed commit is audited. On `pull_request`
+#   the job is deliberately SKIPPED: a job-level skip reports Success, so the
+#   required check is never left Pending and queue entry is not blocked,
+#   while the advisory `fast-tests` workflow does the PR-time work. A
+#   WORKFLOW-level skip would emit no check run at all and deadlock the
+#   queue, so this gate must stay a job-level `if:` and this file must never
+#   gain path or branch filters.
+#
+#   Its primary job is to auto-run the structural + meta-tests — the
 #   seam-dependent-hook presence/anti-mock checks in
 #   `pact-plugin/tests/test_hook_infra_classifier.py`, which key off the
-#   `SEAM_DEPENDENT_HOOKS` SSOT in `hooks/shared/hook_infra_classifier.py` — on
-#   every hook-infra PR, so a regression in those gates cannot merge unseen.
+#   `SEAM_DEPENDENT_HOOKS` SSOT in `hooks/shared/hook_infra_classifier.py` —
+#   before a merge lands, so a regression in those gates cannot merge unseen.
 #   It also keeps `main` green by catching direct pushes.
 #
 #   This is locus-a auto-enforcement. It is NOT a runtime hook — it never loads
@@ -198,6 +208,9 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
 # Minimal privilege: this workflow only checks out the repo and runs pytest —
 # it needs read access to repo contents and nothing else. Pinning the token
@@ -206,8 +219,17 @@ permissions:
   contents: read
 
 jobs:
-  pytest:
+  full-suite:
+    # ON pull_request THIS JOB SKIPS, AND A SKIPPED JOB REPORTS SUCCESS.
+    # That is the shape the merge queue needs: the check exists on the PR
+    # (so it is never left Pending) and the full suite runs on the merge
+    # group. A WORKFLOW-level skip would emit no check run at all and block
+    # the queue forever, so this gate must stay here and never move into
+    # `on:` filters. The positive list keeps push-to-main detection and the
+    # workflow_dispatch fallback alive, and fails closed on a new trigger.
+    if: github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     # THE TESTED SET. IT IS NOT THE SUPPORTED FLOOR, AND THE TWO ARE
     # DIFFERENT QUESTIONS THAT LIVE IN DIFFERENT FILES.
     #   THE TESTED SET is the interpreter this job runs: 3.12, set below.
@@ -252,6 +274,21 @@ jobs:
           # A literal this file declares, not event input, so it carries no
           # injection surface.
           python-version: "3.12"
+
+      # THE CERTIFICATION SUBJECT. On a merge-group run the merge group's
+      # head SHA is what the queue will push, so the three reads must agree
+      # before a single test runs: the event payload, the run's own SHA, and
+      # the commit actually checked out. Printing it gives the rollout its
+      # one comparable artifact. `env:` is permitted here: this is neither a
+      # verify nor a test step.
+      - name: Assert the merge-group certification subject
+        if: github.event_name == 'merge_group'
+        env:
+          MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          test "$MERGE_GROUP_HEAD" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          echo "CERTIFIED-MERGE-GROUP-HEAD $GITHUB_SHA"
 
       # HuggingFace model cache. THE ONE PATH THE IN-TEST REMEDIES CANNOT REACH.
       #
@@ -438,6 +475,15 @@ jobs:
       # adds a package, it shows as UNEXPECTED: add it to RUNNER_BASELINE in
       # the script with a reason. `--report` (print everything, exit 0) is
       # for local diagnosis only.
+      # INDEPENDENT OF THE WHOLE FAST LANE. This guard reads only the corpus
+      # on disk and its own collection command, so deleting the fast
+      # workflow, the manifest and the selector leaves it green. Its `run:`
+      # line deliberately does not contain the token `pytest`:
+      # test_ci_collection_scope.py permits exactly one pytest invocation in
+      # this file and parses that token.
+      - name: Verify the full collection scope
+        run: python scripts/verify_full_collection.py
+
       - name: Verify the CI environment (before tests)
         run: python scripts/verify_ci_environment.py
 
