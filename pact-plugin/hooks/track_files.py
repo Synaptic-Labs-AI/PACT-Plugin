@@ -351,9 +351,10 @@ def clear_pin_staleness_marker_if_resolved(
         # determinate. TERM ONE: is that shape reachable. TERM TWO: is an
         # outside editor in the writer population this project guards. Neither
         # term is measured, and one answer does not settle the other.
-        # #1653: follow the project-memory root, like every writer. A
-        # worktree session reads MAIN's file; a non-worktree session keeps
-        # today's resolver, and None means "nothing to read".
+        # Read the session's one managed document (session_document: one
+        # anchor, one root, one resolver). A worktree session reads the main
+        # checkout's file; None means the root is unknown or holds no
+        # document, so there is nothing to read.
         claude_md_path = resolve_session_claude_md_path()
         if claude_md_path is None:
             return
