@@ -106,6 +106,15 @@ class TestLeadSideGateTeamField:
         assert len(calls) == 1
         assert calls[0]["task_subject"] == "(no subject)"
 
+    @pytest.mark.parametrize("subject", ["", "   "])
+    def test_whitespace_subject_emits_the_sentinel(self, subject):
+        """M-6 (b2 site): a whitespace subject must reach the event as the
+        sentinel, or the emit hashes the raw whitespace while the harvest
+        hashes the sentinel — identity mismatch, union skipped."""
+        calls = self._emit("session-abc", subject=subject)
+        assert len(calls) == 1
+        assert calls[0]["task_subject"] == "(no subject)"
+
     def test_resolved_store_name_is_recorded(self):
         calls = self._emit("session-abc")
         assert len(calls) == 1
@@ -124,7 +133,7 @@ class TestLeadSideGateTeamField:
 
 
 class TestSnapshotTeamField:
-    def _emit(self, team_name):
+    def _emit(self, team_name, subject="collect the arms"):
         from shared.task_metadata_snapshot import emit_task_metadata_snapshot
 
         calls: list[dict] = []
@@ -139,7 +148,7 @@ class TestSnapshotTeamField:
             side_effect=lambda event: (calls.append(event) or True),
         ):
             emit_task_metadata_snapshot(
-                team_name, "12", "collect the arms", "coder-a",
+                team_name, "12", subject, "coder-a",
                 {"audit_summary": "a finding"},
             )
         return calls
@@ -153,6 +162,16 @@ class TestSnapshotTeamField:
         calls = self._emit("")
         assert len(calls) == 1
         assert "team" not in calls[0]
+
+    @pytest.mark.parametrize("subject", ["", "   "])
+    def test_whitespace_subject_emits_the_sentinel(self, subject):
+        """M-6 (snapshot site): if this branch loses `.strip()`, the snapshot
+        hashes the raw whitespace while the harvest hashes the sentinel —
+        identity mismatch, union skipped. The writer still carries its own
+        branch; commit 14 wired the two emit paths, not this one."""
+        calls = self._emit("session-abc", subject=subject)
+        assert len(calls) == 1
+        assert calls[0]["subject"] == "(no subject)"
 
 
 class TestEmitTeamUncertaintyGuard:
@@ -201,6 +220,24 @@ class TestEmitTeamUncertaintyGuard:
             context_team_name=context_team,
         )
         return code, calls, capsys.readouterr().err
+
+    @pytest.mark.parametrize("subject", ["", "   "])
+    def test_whitespace_subject_emits_the_sentinel(
+        self, tmp_path, monkeypatch, capsys, subject
+    ):
+        """M-6 (b1 site): the shared helper is STRICT, so a whitespace payload
+        subject reaches the event as the sentinel. Dropping `.strip()` would
+        hash the raw whitespace while the harvest hashes the sentinel —
+        identity mismatch, union skipped."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-abc",
+            payload_subject=subject,
+            context_team="session-abc",
+        )
+        assert code == 0
+        assert len(calls) == 1
+        assert calls[0]["task_subject"] == "(no subject)"
 
     def test_non_str_subject_is_sentinel_not_event_loss(
         self, tmp_path, monkeypatch, capsys

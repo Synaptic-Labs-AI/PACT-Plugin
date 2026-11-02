@@ -308,6 +308,20 @@ class TestUnionPreferringTaskFile:
             )
             assert merged == {"decisions": []}
 
+    def test_none_is_empty_under_a_proper_subset(self):
+        """KEEP-None RATIONALE, pinned. The empty-value arm above uses EQUAL
+        key sets, where removing None from _EMPTY_VALUES changes nothing.
+        Here the task file is a PROPER SUBSET, so dropping None makes the
+        disk's null win — the erasure the narrowing exists to prevent."""
+        journal = {"decisions": ["j"], "uncertainty": ["u"]}
+        disk = {"decisions": None}
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged["decisions"] == ["j"]
+        assert any(
+            "restored from the journal" in line and "decisions" in line
+            for line in reports
+        )
+
     def test_p10_proper_subset_disk_zero_is_content(self):
         """DISCRIMINATING (proper subset): D = {decisions} is a proper subset
         of J = {decisions, uncertainty}, so 0 is content on the disk side and
@@ -527,17 +541,20 @@ class TestMixedOldFormatEvent:
             "named store carries the identity"
         )
 
-    def test_an_identity_match_wins_over_a_later_content_match(self):
-        """The two-pass scan: a coincidental content match in a second store
-        must not override the store whose identity the event carries."""
-        same = self._task("review-backend", "NEW subject")
+    def test_an_identity_match_wins_over_an_earlier_content_match(self):
+        """The two-pass scan: the CONTENT match comes FIRST, so a classifier
+        that short-circuits at the first content match returns MIXED here.
+        The correct classifier checks every candidate and finds the identity
+        match in the second one. (The order was the reverse before: with the
+        identity match first, the short-circuit mutant passed every arm.)"""
         foreign = self._task("review-backend", "OLD subject")
+        same = self._task("review-backend", "NEW subject")
         outcome = self._classify(
             "review-backend",
             "NEW subject",
             [
-                {"team": "session-this", "task": same},
                 {"team": "session-old", "task": foreign},
+                {"team": "session-this", "task": same},
             ],
         )
         assert outcome.state == OLD_FORMAT_OWNED
@@ -571,6 +588,28 @@ class TestMixedOldFormatEvent:
         )
         assert outcome.state == OLD_FORMAT_UNMATCHED
         assert old_format_destination(outcome, "session-this") == "this"
+
+    def test_mixed_report_is_sanitised(self):
+        """SITE 2 of report_safe: the classifier's own report interpolates the
+        task id and the team. Without the sanitiser a line boundary in either
+        forges a report line. This is the report site the one-sided count pin
+        did not reach."""
+        outcome = mixed_old_format_event(
+            "57\nFORGED",
+            "review-backend",
+            "NEW subject",
+            dict(self.EVENT_HANDOFF),
+            [
+                {
+                    "team": "session-old\nFORGED",
+                    "task": self._task("review-backend", "OLD subject"),
+                }
+            ],
+        )
+        assert outcome.state == OLD_FORMAT_MIXED
+        assert "\n" not in outcome.report
+        assert "57FORGED" in outcome.report
+        assert "session-oldFORGED" in outcome.report
 
     def test_non_dict_event_handoff_is_unmatched(self):
         outcome = mixed_old_format_event(
@@ -688,11 +727,24 @@ class TestResumeGroupingKey:
 # protection: a filter-shaped rewrite deletes the clauses they assert.
 # =============================================================================
 class TestHarvestRuleProse:
+    """PROSE PINS. These protect the INSTRUCTION SURFACE, not behaviour: a
+    code mutant cannot redden them (test-only changes), and a text deletion
+    reddens them on their own assertion.
+
+    A REWORD MEANS UPDATING THE PIN, NEVER DELETING IT. A pin that is deleted
+    because it reddened on a harmless reword leaves the rule unpinned, which
+    is the state these pins exist to prevent. Tighten or loosen the anchor and
+    keep the assertion.
+    """
+
     def test_partition_clause_present(self):
         assert (
             "THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING "
             "ANOTHER TEAM" in SKILL_TEXT
         )
+        # M-2: the FOREIGN clause. Removing "do not union it" flips the
+        # instruction to allow merging a foreign event.
+        assert "do not process it, do not union it" in SKILL_TEXT
 
     def test_step3_selection_text_carries_no_filter_wording(self):
         """A negated rule ('not a filter') is re-derived into the positive one
@@ -715,11 +767,16 @@ class TestHarvestRuleProse:
             in SKILL_TEXT
         )
         assert "run Step 2 and Step 8 for it against its own `## team={from}` section" in SKILL_TEXT
+        # M-2: the P6 CORE guarantee. Flipping "never union it" to "union it"
+        # would merge a realigned team's copy into this team's task file.
+        assert "never union it with this team's task file" in SKILL_TEXT
 
     def test_old_format_cross_check_present(self):
         assert "AN OLD-FORMAT EVENT CARRIES NO `team` FIELD" in SKILL_TEXT
         assert "handoff cross-team check unavailable for task N" in SKILL_TEXT
         assert "DO NOT ENUMERATE THE TASKS ROOT" in SKILL_TEXT
+        # M-2: flipping "discard" to "keep" would process a mixed event.
+        assert "discard a mixed event" in SKILL_TEXT
 
     def test_old_format_routing_uses_the_structured_outcome(self):
         """The pseudocode must ROUTE on the outcome, not collapse every
@@ -813,6 +870,9 @@ class TestHarvestRuleProse:
 
     def test_snapshot_section_join_present(self):
         assert "handoff snapshot identity mismatch for task N" in SKILL_TEXT
+        # M-2: the DROP is the rule; "is reported" without "DROPPED" would
+        # let a foreign snapshot's metadata be used.
+        assert "names another team is DROPPED and reported" in SKILL_TEXT
 
     def test_occupant_hash_is_not_folded_with_team(self):
         assert "DO NOT FOLD THE TEAM INTO `occupant_hash`" in SKILL_TEXT
