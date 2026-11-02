@@ -8,10 +8,8 @@ Tests cover:
 4. Edge cases - graceful degradation, already-installed dependencies
 """
 
-import ast
 import os
 import re
-import shlex
 import json
 import shutil
 import subprocess
@@ -433,9 +431,27 @@ class TestDependencyDriftIsDetectable:
     Visibility does not cross the process boundary regardless: pytest's warnings
     summary only collects warnings raised in the pytest process.
 
-    Hence drift is caught STATICALLY, below. A failing test is louder than any
-    log line and is immune to capture, to the process boundary and to `-r`.
+    Hence drift is caught by TESTS, not log lines. What CI actually installs
+    is no longer inferred from CI text: scripts/verify_ci_environment.py
+    compares the INSTALLED environment with constraints-ci.txt in CI (a step
+    before every test run and as each job's last step) and inside the pytest
+    process itself (tests/ci_environment_binding.py). This class keeps the
+    bounded STATIC checks that complement it: memory_init's packages are
+    pinned, the verify steps sit around every test run, a word tripwire for
+    tools the runtime check cannot see, the third-party action allowlist,
+    and the floor-literal bind.
     """
+
+    # The verify step's command as tests.yml runs it. It carries `--report`
+    # until the runner baseline is measured; dropping `--report` from the
+    # workflow is the one-constant flip here.
+    VERIFY_CMD = "python scripts/verify_ci_environment.py --report"
+    # The test step's command, exactly: the placement arm pins it so the
+    # tested process is the process the verify steps checked.
+    TEST_CMD = "python -m pytest -ra"
+    # A job is GOVERNED when any step's run text names one of these.
+    _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
+    _PYTEST_RE = re.compile(r"\bpytest\b")
 
     def _source_repo_root(self):
         """Repo root by a POSITIVE marker, or None when this is not a checkout.
@@ -462,467 +478,21 @@ class TestDependencyDriftIsDetectable:
                 return base
         return None
 
-    # pip's option tables, MEASURED from pip's own parser (pip 26.2.2, the
-    # version CI's unconstrained pip upgrade resolved when measured:
-    # `create_command("install").parser`, every option group, `takes_value()`),
-    # plus three legacy value options older pips still accept
-    # (`--install-option`, `--global-option`, `--build-option`) and `--hash`.
-    # A newer pip's option missing here fails CLOSED: an unknown long flag
-    # is refused by the flag allowlist (`_PIP_ALLOWED_INSTALL_FLAGS`), and
-    # an unknown value-taking flag leaves its value read as a package
-    # operand, which the coverage arm reports as UNPINNED naming it.
-    _PIP_FLAGS_WITH_VALUE = frozenset({
-        "--abi", "--all-releases", "--build-constraint", "--cache-dir",
-        "--cert", "--client-cert", "--config-settings", "--constraint",
-        "--default-timeout", "--editable", "--exists-action",
-        "--extra-index-url", "--find-links", "--group", "--implementation",
-        "--index-url", "--keyring-provider", "--local-log", "--log",
-        "--log-file", "--no-binary", "--only-binary", "--only-final",
-        "--platform", "--prefix", "--progress-bar", "--proxy", "--pypi-url",
-        "--python", "--python-version", "--refresh-package", "--report",
-        "--requirement", "--requirements-from-script", "--resume-retries",
-        "--retries", "--root", "--root-user-action", "--source",
-        "--source-dir", "--source-directory", "--src", "--target",
-        "--timeout", "--trusted-host", "--upgrade-strategy",
-        "--uploaded-prior-to", "--use-deprecated", "--use-feature",
-        "--install-option", "--global-option", "--build-option", "--hash",
-    })
-
-    # The GLOBAL subset of the value options (pip reads them before AND
-    # after the subcommand; the parser consumes them wherever they appear).
-    _PIP_GLOBAL_FLAGS_WITH_VALUE = frozenset({
-        "--python", "--log", "--log-file", "--local-log", "--proxy",
-        "--retries", "--timeout", "--default-timeout", "--exists-action",
-        "--trusted-host", "--cert", "--client-cert", "--cache-dir",
-        "--use-feature", "--use-deprecated", "--keyring-provider",
-        "--resume-retries",
-    })
-
-    # pip's value-LESS long options, measured the same way. Listed so an
-    # ABBREVIATED long option (pip's optparse accepts any unique prefix:
-    # `--extra-index` IS `--extra-index-url`) resolves to its full name
-    # against the whole option set before any comparison.
-    _PIP_KNOWN_LONG_FLAGS = frozenset({
-        "--break-system-packages", "--check-build-dependencies", "--compile",
-        "--debug", "--disable-pip-version-check", "--dry-run",
-        "--force-reinstall", "--help", "--ignore-installed",
-        "--ignore-requires-python", "--isolated", "--no-build-isolation",
-        "--no-cache-dir", "--no-clean", "--no-color", "--no-compile",
-        "--no-dependencies", "--no-deps", "--no-index", "--no-input",
-        "--no-proxy-env", "--no-python-version-warning",
-        "--no-require-hashes", "--no-user", "--no-warn-conflicts",
-        "--no-warn-script-location", "--only-dependencies", "--only-deps",
-        "--pre", "--prefer-binary", "--quiet", "--require-hashes",
-        "--require-venv", "--require-virtualenv", "--upgrade",
-        "--use-pep517", "--user", "--verbose", "--version",
-    })
-
-    # pip's short options, measured: those that take a VALUE (read attached,
-    # `-rreq.txt`, or as the next word; a bundle `-Ur req.txt` ends at the
-    # first value-taking letter) and those that do not. Both map to the
-    # long name, so every comparison reads ONE name. An unknown short
-    # letter stays `-X` and is refused by the flag allowlist.
-    _PIP_SHORT_WITH_VALUE = {
-        "c": "--constraint", "r": "--requirement", "e": "--editable",
-        "i": "--index-url", "f": "--find-links", "t": "--target",
-        "C": "--config-settings",
-    }
-    _PIP_SHORT_FLAGS = {
-        "U": "--upgrade", "I": "--ignore-installed", "V": "--version",
-        "h": "--help", "q": "--quiet", "v": "--verbose",
-    }
-
-    # The ONLY options a pip install in CI or the bootstrap may carry: the
-    # ones the canonical line and .cursor/install.sh use (`--upgrade`,
-    # `--constraint constraints-ci.txt`), plus value-less options that
-    # change logging or caching, never WHAT is resolved or from where.
-    # Everything else — a new install source (`--group`,
-    # `--requirements-from-script`), a resolver knob, a target directory —
-    # is refused naming itself; vet it and add it here in the same change.
-    _PIP_ALLOWED_INSTALL_FLAGS = frozenset({
-        "--upgrade", "--constraint", "--quiet", "--verbose",
-        "--no-cache-dir", "--disable-pip-version-check", "--no-input",
-        "--no-color", "--no-python-version-warning",
-    })
-
-    # pip's subcommands. The subcommand is the first non-option word that
-    # names one, so the VALUE of a global option this parser does not know
-    # is skipped rather than misread as the subcommand.
-    _PIP_SUBCOMMANDS = frozenset({
-        "install", "download", "uninstall", "freeze", "inspect", "list",
-        "show", "check", "config", "search", "cache", "index", "wheel",
-        "hash", "completion", "debug", "help", "lock",
-    })
-
-    # The PROGRAM, not a substring of the command: `pip`, `pip3` and
-    # `pip3.N` (setup-python and venvs ship all three), by bare name or by
-    # path. `python -m pip`, `python -mpip` and `uv pip` are recognised in
-    # `_pip_argv_start` — a path-qualified `/usr/bin/uv pip` is caught by the
-    # bare `pip` word itself, which this regex matches. `pipx` is a different program and does NOT match
-    # here — the installer-program allowlist owns it.
-    _PIP_PROGRAM_RE = re.compile(r"(?:^|/)pip(?:3(?:\.\d+)?)?$")
-    _PYTHON_PROGRAM_RE = re.compile(r"(?:^|/)python(?:3(?:\.\d+)?)?$")
-
-    # Install-line flags named with their own message (every other flag
-    # not on `_PIP_ALLOWED_INSTALL_FLAGS` is refused too, generically):
-    # the install-SOURCE flags (-r/-e, `--group`, `--requirements-from-script`)
-    # add packages from a file, path or dependency group the coverage arms
-    # never read, and the index/source flags
-    # resolve the pinned names from a source constraints-ci.txt never
-    # vetted (its `==` pins carry no hashes).
-    _PIP_REQUIREMENT_FLAGS = frozenset({
-        "--requirement", "--editable", "--group", "--requirements-from-script",
-    })
-    _PIP_REDIRECT_FLAGS = frozenset({
-        "--index-url", "--extra-index-url", "--find-links",
-        "--trusted-host", "--no-index", "--pypi-url",
-    })
-
-    # One constraints-ci.txt line: a PEP 508 name, `==`, one literal
-    # PEP 440 version (local labels allowed) — nothing after it.
-    _EXACT_PIN_RE = re.compile(
-        r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?==[0-9][A-Za-z0-9.+!]*")
-
-    @staticmethod
-    def _normalise_pin_name(name):
-        """PEP 503 normalisation: lowercase, [-_.] runs collapse to '-'.
-
-        Applied on BOTH sides of every comparison, so a legitimate
-        'sqlite_vec'/'sqlite-vec' spelling difference does not read as
-        drift. Version specifiers and extras are stripped first so
-        'pytest>=8' still matches 'pytest'.
-        """
-        head = re.split(r"[=<>!~;\[]", name)[0]
-        return re.sub(r"[-_.]+", "-", head).strip().lower()
-
-    @classmethod
-    def _simple_commands(cls, text, keep_redirect_targets=False):
-        """Shell text -> one word list per SIMPLE COMMAND it executes.
-
-        The unit every install arm reasons about is the command the shell
-        runs, never a line of text. Comment-only lines are dropped first
-        (prose may quote pip commands; prose is not a declaration);
-        backslash continuations are joined; each logical line is split the
-        way the shell splits it (quotes removed, `#` comments dropped) and
-        then cut at the list operators `;`, `&&`, `||`, `|`, `&` and at
-        parentheses, so `cd x && pip install y` and `$(pip install y)` each
-        yield the install as its own command. Redirection operators are
-        never words; their TARGETS are dropped too unless
-        `keep_redirect_targets` (the runtime-config scan needs `> pip.conf`
-        and `>> $GITHUB_ENV`; argv parsing must not read them as operands).
-        A command that runs a STRING as code is read into, recursively:
-        `bash|sh|dash|zsh|ksh -c '<string>'` (bundled `-ec`/`-lc` too) and
-        `eval <words>` re-enter this model, and `python -c '<code>'` goes
-        through `_python_shell_texts`, so an install inside the string is a
-        command like any other. A line shlex cannot split
-        (an unbalanced quote that continues on a later line) falls back to
-        whitespace splitting — it is still read, never skipped.
-        """
-        logical = []
-        pending = None
-        for raw in text.splitlines():
-            line = raw.strip()
-            if pending is None and line.startswith("#"):
-                continue
-            joined = line if pending is None else f"{pending} {line}".strip()
-            if line.endswith("\\"):
-                pending = joined[:-1].rstrip()
-                continue
-            pending = None
-            logical.append(joined)
-        if pending is not None:
-            logical.append(pending)
-        commands = []
-        for line in logical:
-            if not line:
-                continue
-            try:
-                lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-                lexer.whitespace_split = True
-                tokens = list(lexer)
-            except ValueError:
-                tokens = line.split()
-            current = []
-            skip_target = False
-            for tok in tokens:
-                if skip_target:
-                    skip_target = False
-                    if keep_redirect_targets:
-                        current.append(tok)
-                    continue
-                if tok and set(tok) <= set("<>&") and set(tok) & set("<>"):
-                    if current and current[-1].isdigit():
-                        current.pop()  # the fd of `2>&1`
-                    skip_target = True
-                    continue
-                if tok and set(tok) <= set("();|&"):
-                    if current:
-                        commands.append(current)
-                    current = []
-                    continue
-                current.append(tok)
-            if current:
-                commands.append(current)
-        expanded = []
-        for words in commands:
-            expanded.append(words)
-            i, program = cls._command_program(words)
-            if program is None:
-                continue
-            rest = words[i + 1:]
-            if program == "eval" and rest:
-                expanded += cls._simple_commands(
-                    " ".join(rest), keep_redirect_targets)
-            elif program.rsplit("/", 1)[-1] in cls._SHELLS:
-                for k, tok in enumerate(rest):
-                    if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", tok):
-                        if k + 1 < len(rest):
-                            expanded += cls._simple_commands(
-                                rest[k + 1], keep_redirect_targets)
-                        break
-            elif cls._PYTHON_PROGRAM_RE.search(program) and "-c" in rest:
-                k = rest.index("-c")
-                if k + 1 < len(rest):
-                    for chunk in cls._python_shell_texts(rest[k + 1]):
-                        expanded += cls._simple_commands(
-                            chunk, keep_redirect_targets)
-        return expanded
-
-    @classmethod
-    def _pip_argv_start(cls, words):
-        """Index of pip's first ARGUMENT in a simple command, or None.
-
-        Finds the pip PROGRAM anywhere in the command, so a wrapper in
-        front (`sudo`, `env X=1`, `time`) does not hide it: `pip`/`pip3`/
-        `pip3.N` by name or path, `python -m pip` / `python -mpip` (python
-        options before `-m` skipped, `-W`/`-X` with their values), and
-        `uv pip`. The FIRST program occurrence wins, so the `pip` operand
-        of `pip install --upgrade pip` is an operand, not a second program.
-        """
-        for i, word in enumerate(words):
-            if cls._PIP_PROGRAM_RE.search(word):
-                return i + 1
-            if word == "uv" and words[i + 1:i + 2] == ["pip"]:
-                return i + 2
-            if cls._PYTHON_PROGRAM_RE.search(word):
-                j = i + 1
-                while j < len(words) and words[j].startswith("-"):
-                    if words[j] == "-m":
-                        if words[j + 1:j + 2] == ["pip"]:
-                            return j + 2
-                        break
-                    if words[j].startswith("-m"):
-                        if words[j][2:] == "pip":
-                            return j + 1
-                        break
-                    if words[j] in ("-W", "-X"):
-                        j += 1
-                    j += 1
-        return None
-
-    @classmethod
-    def _resolve_long_option(cls, name):
-        """A long option's full name, resolving pip's unique-prefix
-        abbreviations against every long option this parser knows."""
-        known = (cls._PIP_FLAGS_WITH_VALUE | cls._PIP_GLOBAL_FLAGS_WITH_VALUE
-                 | cls._PIP_KNOWN_LONG_FLAGS)
-        if name in known:
-            return name
-        candidates = [k for k in known if k.startswith(name) and k.startswith("--")]
-        return candidates[0] if len(candidates) == 1 else name
-
-    @classmethod
-    def _parse_pip_words(cls, words):
-        """A simple command's pip argv, or None when it runs no pip.
-
-        Returns (subcommand, options, operands). `options` lists
-        (long-name, value-or-None) from BOTH global and subcommand
-        positions, with every spelling pip accepts reduced to one form:
-        `--flag value`, `--flag=value`, an abbreviated long flag, `-X value`,
-        `-Xvalue` and a short bundle (`-Uq`, `-Urreq.txt`). Operands are the
-        words after the subcommand that are neither flags nor flag values.
-        """
-        start = cls._pip_argv_start(words)
-        if start is None:
-            return None
-        valued = cls._PIP_FLAGS_WITH_VALUE | cls._PIP_GLOBAL_FLAGS_WITH_VALUE
-        subcommand = None
-        options = []
-        operands = []
-        rest = words[start:]
-        i = 0
-        while i < len(rest):
-            tok = rest[i]
-            i += 1
-            if tok.startswith("--") and len(tok) > 2:
-                name, eq, value = tok.partition("=")
-                name = cls._resolve_long_option(name)
-                if eq:
-                    options.append((name, value))
-                elif name in valued:
-                    options.append((name, rest[i] if i < len(rest) else ""))
-                    i += 1
-                else:
-                    options.append((name, None))
-            elif tok.startswith("-") and len(tok) > 1:
-                for k, letter in enumerate(tok[1:], start=1):
-                    if letter in cls._PIP_SHORT_WITH_VALUE:
-                        value = tok[k + 1:]
-                        if not value:
-                            value = rest[i] if i < len(rest) else ""
-                            i += 1
-                        options.append((cls._PIP_SHORT_WITH_VALUE[letter], value))
-                        break
-                    options.append(
-                        (cls._PIP_SHORT_FLAGS.get(letter, "-" + letter), None))
-            elif subcommand is None:
-                if tok in cls._PIP_SUBCOMMANDS:
-                    subcommand = tok
-            else:
-                operands.append(tok)
-        return subcommand, options, operands
-
-    @classmethod
-    def _pip_installs_in(cls, text):
-        """Every pip INSTALL the shell text executes: (command, parse) pairs.
-
-        `command` is the simple command's words re-joined with single
-        spaces — a display and comparison form, not the source spelling.
-        """
-        found = []
-        for words in cls._simple_commands(text):
-            parsed = cls._parse_pip_words(words)
-            if parsed is not None and parsed[0] == "install":
-                found.append((" ".join(words), parsed))
-        return found
-
-    @classmethod
-    def _install_parse(cls, command):
-        """The parse of the ONE pip install in `command`, or None."""
-        found = cls._pip_installs_in(command)
-        return found[0][1] if len(found) == 1 else None
-
-    @classmethod
-    def _package_tokens_from_pip_argv(cls, command):
-        """Package-name tokens of one `pip install` command string.
-
-        The operands of the shared argv parse: the words after the
-        `install` subcommand that are neither flags nor the VALUE of a flag
-        that takes one (separate, attached or `=` form). Everything before
-        the subcommand is the invocation and its global options. Deriving
-        the boundary from pip's own argv grammar beats filtering a list of
-        command words, which would turn a package legitimately named after
-        a command into false drift. A command that is not exactly one pip
-        install yields no tokens, which the parse non-vacuity assertions
-        report as a PARSE FAILURE.
-        """
-        parsed = cls._install_parse(command)
-        if parsed is None:
-            return set()
-        return {cls._normalise_pin_name(tok) for tok in parsed[2] if tok}
-
-    @classmethod
-    def _applies_constraints(cls, command):
-        """Does a pip-install command APPLY constraints-ci.txt?
-
-        Read from the parse, so every spelling pip accepts counts —
-        `-c constraints-ci.txt`, `-cconstraints-ci.txt`,
-        `--constraint constraints-ci.txt`, `--constraint=constraints-ci.txt`,
-        an abbreviated `--constr` — and the repo-root path spellings
-        `_is_repo_constraints` accepts; anything naming another file is a
-        re-point, not a pass.
-        """
-        parsed = cls._install_parse(command)
-        if parsed is None:
-            return False
-        return any(
-            name == "--constraint" and cls._is_repo_constraints(value)
-            for name, value in parsed[1]
-        )
-
-    # The constraints file as the shipped install commands name it, run
-    # from the repo root (tests.yml's install step has no working-directory;
-    # install.sh cd's to the repo root first): `constraints-ci.txt`, plus
-    # the equivalent `./` and workspace-rooted spellings.
-    _REPO_CONSTRAINTS_SPELLINGS = frozenset({
-        "constraints-ci.txt", "./constraints-ci.txt",
-        "$GITHUB_WORKSPACE/constraints-ci.txt",
-        "${GITHUB_WORKSPACE}/constraints-ci.txt",
-        "${{ github.workspace }}/constraints-ci.txt",
-    })
-
-    @classmethod
-    def _is_repo_constraints(cls, value):
-        """Does a `--constraint` value name the repo's constraints-ci.txt?"""
-        return value is not None and re.sub(
-            r"\$\{\{\s*github\.workspace\s*\}\}", "${{ github.workspace }}",
-            value) in cls._REPO_CONSTRAINTS_SPELLINGS
-
-    def _ci_install_line(self, workflow):
-        """The workflow's single `run:` line carrying a pip install.
-
-        The parse anchors on the `run:` line — the EXECUTED command — never
-        on any line merely mentioning an install: workflow comment prose
-        may name the command (the CONSTRAINTS paragraph does), and prose is
-        not a declaration. Whether the line installs is decided by the
-        shared argv parse, so every program spelling (`pip3.12`,
-        `python -mpip`, `uv pip`) and global options before the subcommand
-        count. Exactly-one is asserted here so every consumer (tokens,
-        coverage, application) shares one parse contract; the census arm
-        then holds every OTHER executed install in the execution population
-        (`_execution_population`) to this one. Folded plain scalars are REFUSED before the filter
-        runs — see `_refuse_plain_scalar_run_continuations`.
-        """
-        text = workflow.read_text(encoding="utf-8")
-        self._refuse_plain_scalar_run_continuations(text)
-        install_lines = [
-            ln for ln in text.splitlines()
-            if ln.lstrip().startswith("run:")
-            and self._pip_installs_in(ln.lstrip()[len("run:"):])
-        ]
-        assert install_lines, (
-            f"PARSE FAILURE, not dependency drift: {workflow} contains no "
-            f"`run:` line carrying a pip install, so the CI dependency "
-            f"declaration cannot be read. The workflow changed shape — "
-            f"re-point this parity test at the new shape; do not weaken it "
-            f"to a skip."
-        )
-        assert len(install_lines) == 1, (
-            f"PARSE AMBIGUITY, not dependency drift: {len(install_lines)} "
-            f"`run:` lines carrying a pip install were read from "
-            f"{workflow} ({install_lines}). This guard reasons about THE CI "
-            f"install line, singular — a second install step must be "
-            f"reconciled here, not silently first-matched."
-        )
-        return install_lines[0]
-
-    @staticmethod
-    def _workflow_population(root):
-        """The ENTRY files CI starts from: every `.yml`/`.yaml` under
-        `.github/workflows/` (a second workflow runs with the same checkout
-        and token as tests.yml), plus every `action.yml`/`action.yaml`
-        under `.github/actions/` (read even when unused — over-catch).
-        What those files go on to EXECUTE is followed by
-        `_execution_population`; this list is only where the walk starts.
-        """
-        files = []
-        workflows = root / ".github" / "workflows"
-        if workflows.is_dir():
-            files += sorted(
-                p for p in workflows.iterdir()
-                if p.is_file() and p.suffix in (".yml", ".yaml")
+    def _require_root(self, what):
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ tree by design. This skip is "
+                f"NO INFORMATION about {what} — never read it as a pass."
             )
-        actions = root / ".github" / "actions"
-        if actions.is_dir():
-            files += sorted(
-                p for p in actions.rglob("*")
-                if p.is_file() and p.name in ("action.yml", "action.yaml")
-            )
-        return files
+        return root
 
     @staticmethod
     def _load_workflow_yaml(path, text=None):
-        """yaml.safe_load of one population file; unparseable is a FAILURE."""
+        """yaml.safe_load of one workflow or action; unparseable is a FAILURE."""
         try:
             return yaml.safe_load(
                 text if text is not None else path.read_text(encoding="utf-8"))
@@ -933,455 +503,66 @@ class TestDependencyDriftIsDetectable:
                 f"enumerated. GitHub would refuse to run it; fix the syntax."
             ) from exc
 
-    @classmethod
-    def _steps_of(cls, doc):
-        """Every step mapping in one parsed workflow or composite action."""
-        return [step for _wd, step in cls._steps_with_workdir(doc)]
-
     @staticmethod
-    def _steps_with_workdir(doc):
-        """(working-directory or None, step) for every step in one parsed
-        workflow or composite action; a step's own `working-directory`
-        wins over its job's `defaults.run.working-directory`."""
-        out = []
+    def _steps_of(doc):
+        """Every step mapping in one parsed workflow or composite action."""
+        steps = []
         if not isinstance(doc, dict):
-            return out
+            return steps
         for job in (doc.get("jobs") or {}).values():
-            if not isinstance(job, dict):
-                continue
-            defaults = ((job.get("defaults") or {}).get("run") or {}) \
-                if isinstance(job.get("defaults"), dict) else {}
-            job_wd = defaults.get("working-directory") \
-                if isinstance(defaults, dict) else None
-            for step in job.get("steps") or []:
-                if isinstance(step, dict):
-                    out.append((step.get("working-directory") or job_wd, step))
+            if isinstance(job, dict):
+                steps += [s for s in job.get("steps") or [] if isinstance(s, dict)]
         runs = doc.get("runs")
         if isinstance(runs, dict):
-            for step in runs.get("steps") or []:
-                if isinstance(step, dict):
-                    out.append((step.get("working-directory"), step))
-        return out
-
-    # Script files the follower can READ: shell through the shell model,
-    # Python through `_python_shell_texts`. A followed repo script in any
-    # other language is refused, never skipped.
-    _SHELL_SCRIPT_SUFFIXES = (".sh", ".bash")
-    _PYTHON_SCRIPT_SUFFIXES = (".py",)
-    _SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
-    _COMMAND_WRAPPERS = frozenset({"sudo", "env", "exec", "time", "command", "nohup"})
-
-    # `$GITHUB_WORKSPACE` and `${{ github.workspace }}` ARE the checkout:
-    # a path built on them names a repo file. Every other variable (the
-    # runner's $RUNNER_TEMP, $HOME, ...) names a path outside the repo.
-    _WORKSPACE_PREFIX_RE = re.compile(
-        r"^(?:\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}"
-        r"|\$\{\{\s*github\.workspace\s*\}\})/")
-
-    @classmethod
-    def _command_program(cls, words):
-        """(index, word) of a simple command's PROGRAM, past leading
-        `VAR=value` assignments and wrappers (`sudo`, `env`, ...)."""
-        i = 0
-        while i < len(words):
-            word = words[i]
-            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word) \
-                    or word.rsplit("/", 1)[-1] in cls._COMMAND_WRAPPERS \
-                    or (i > 0 and words[i - 1].rsplit("/", 1)[-1]
-                        in cls._COMMAND_WRAPPERS and word.startswith("-")):
-                i += 1
-                continue
-            return i, word
-        return None, None
-
-    @classmethod
-    def _script_operand(cls, words):
-        """The repo-script token a simple command EXECUTES, or None.
-
-        Either the program word itself when it is a path (`./x.sh`,
-        `scripts/x.sh`, `$GITHUB_WORKSPACE/x.sh`), or the first operand of
-        a shell (`bash x.sh`, `sh x.sh`, `source x.sh`, `. x.sh`) or of a
-        python interpreter (`python x.py`). `-c` strings are not scripts
-        (`_simple_commands` reads them as commands), and neither are
-        `python -`/`python -m <module>` (stdin and an installed module).
-        """
-        i, program = cls._command_program(words)
-        if program is None:
-            return None
-        base = program.rsplit("/", 1)[-1]
-        is_shell = base in cls._SHELLS or program in ("source", ".")
-        is_python = bool(cls._PYTHON_PROGRAM_RE.search(program))
-        if not (is_shell or is_python):
-            return program if ("/" in program or program.endswith(
-                cls._SHELL_SCRIPT_SUFFIXES + cls._PYTHON_SCRIPT_SUFFIXES)) \
-                else None
-        rest = words[i + 1:]
-        j = 0
-        while j < len(rest):
-            tok = rest[j]
-            if tok in ("-c", "-m", "-") or (
-                    is_shell and re.match(r"^-[A-Za-z]*c[A-Za-z]*$", tok)):
-                return None
-            if tok in ("-o", "+o", "-W", "-X"):
-                j += 2
-                continue
-            if tok.startswith(("-", "+")) and tok != "--":
-                j += 1
-                continue
-            if tok == "--":
-                j += 1
-                continue
-            return tok
-        return None
-
-    @classmethod
-    def _resolve_repo_script(cls, token, root, workdir):
-        """A script token -> (path or None, reason).
-
-        Returns the repo file it names, or None with a reason: `external`
-        for a path outside the checkout (absolute, or built on a runner
-        variable other than the workspace), and `missing` for a token that
-        clearly names a repo file (a relative path or a script suffix)
-        that does not exist — which the follower refuses rather than skips.
-        """
-        token = cls._WORKSPACE_PREFIX_RE.sub("", token)
-        if "$" in token or token.startswith(("/", "~")):
-            candidate = Path(token) if token.startswith("/") else None
-            if candidate is not None:
-                try:
-                    candidate.resolve().relative_to(root.resolve())
-                    return candidate, "ok" if candidate.is_file() else "missing"
-                except ValueError:
-                    pass
-            return None, "external"
-        bases = [root / workdir, root] if workdir else [root]
-        for base in bases:
-            candidate = base / token
-            if candidate.is_file():
-                return candidate, "ok"
-        # Fail closed only on a token that CLEARLY names a repo file — an
-        # explicit relative path or a script suffix. A bare `a/b` word (an
-        # awk or sed pattern inside a followed script) is not a script.
-        if token.startswith(("./", "../")) or token.endswith(
-                cls._SHELL_SCRIPT_SUFFIXES + cls._PYTHON_SCRIPT_SUFFIXES):
-            return None, "missing"
-        return None, "external"
-
-    @classmethod
-    def _python_shell_texts(cls, code):
-        """Shell texts a piece of Python could execute, read via ast.
-
-        Every str constant is offered to the shell model as a command line
-        (`subprocess.run("pip install x", shell=True)`), and every
-        list/tuple of str constants as an argv (`["pip", "install", "x"]`).
-        Over-catch by design: a docstring that reads like a pip command
-        reads as one. Code that does not parse is returned whole, as text.
-        """
-        try:
-            tree = ast.parse(code)
-        except SyntaxError:
-            return [code]
-        texts = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                texts.append(node.value)
-            elif isinstance(node, (ast.List, ast.Tuple)) and node.elts and all(
-                    isinstance(e, ast.Constant) and isinstance(e.value, str)
-                    for e in node.elts):
-                texts.append(" ".join(shlex.quote(e.value) for e in node.elts))
-        return texts
-
-    @classmethod
-    def _execution_population(cls, root):
-        """Everything CI EXECUTES, followed from the entry files.
-
-        Returns (yaml_files, steps, texts, files): every workflow / action
-        file read, every (label, step) in them, every (label, shell text)
-        CI runs, and every file the walk read (the rig copies exactly
-        these) — each step's `run:` string plus the text of every repo
-        script a run step executes, recursively. Followed:
-          - `uses: ./<path>` at step level (a local action anywhere in
-            the repo; its composite `runs.steps` are walked in turn) and at
-            job level (a local reusable workflow);
-          - every repo script a command executes (`_script_operand`),
-            resolved against the step's working-directory then the repo
-            root; shell scripts are read as shell, Python through ast.
-        Refused (fail closed, never skipped): a followed local action
-        whose `runs.using` is not `composite` (its code is JS or a
-        container this reader cannot parse), a `uses: ./` path with no
-        action file, a script token that names a repo file that does not
-        exist, and a followed script in another language. Not followed:
-        paths outside the checkout (absolute, or on runner variables such
-        as $RUNNER_TEMP), `python -`/`-m`, and third-party actions — those
-        are held by the action allowlist instead.
-        """
-        cached = cls._EXECUTION_CACHE.get(root.resolve())
-        if cached is not None and cached[0] == cls._read_signature(
-                root, cached[1][3]):
-            return cached[1]
-        yaml_files, steps, texts, files = [], [], [], []
-        seen = set()
-
-        def rel(path):
-            try:
-                return path.resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                return str(path)
-
-        def follow_texts(label, text, workdir):
-            texts.append((label, text))
-            for words in cls._simple_commands(text):
-                token = cls._script_operand(words)
-                if token is None:
-                    continue
-                path, why = cls._resolve_repo_script(token, root, workdir)
-                if why == "external":
-                    continue
-                assert why == "ok", (
-                    f"UNRESOLVED SCRIPT, not a clean read: {label} executes "
-                    f"{token!r}, which names a repo file that does not exist "
-                    f"(looked under working-directory {workdir!r} and the "
-                    f"repo root). The census cannot read what it would run; "
-                    f"fix the path."
-                )
-                visit_script(path, workdir)
-
-        def visit_script(path, workdir):
-            key = path.resolve()
-            if key in seen:
-                return
-            seen.add(key)
-            files.append(path)
-            text = path.read_text(encoding="utf-8")
-            first = text.splitlines()[0] if text else ""
-            if path.suffix in cls._PYTHON_SCRIPT_SUFFIXES or (
-                    not path.suffix and "python" in first and first.startswith("#!")):
-                for n, chunk in enumerate(cls._python_shell_texts(text)):
-                    follow_texts(f"{rel(path)} (python text {n})", chunk, workdir)
-                return
-            assert path.suffix in cls._SHELL_SCRIPT_SUFFIXES or (
-                not path.suffix and first.startswith("#!")
-                and re.search(r"\b(ba|z|k|da)?sh\b", first)), (
-                f"UNREADABLE SCRIPT: CI executes {rel(path)}, a script this "
-                f"census cannot read (not shell, not Python). It would run "
-                f"unread; extend the census to read it in the same change, "
-                f"or run it through a readable script."
-            )
-            follow_texts(rel(path), text, workdir)
-
-        def visit_yaml(path, followed_action=False):
-            key = path.resolve()
-            if key in seen:
-                return
-            seen.add(key)
-            files.append(path)
-            text = path.read_text(encoding="utf-8")
-            cls._refuse_plain_scalar_run_continuations(text)
-            doc = cls._load_workflow_yaml(path, text)
-            yaml_files.append(path)
-            if isinstance(doc, dict):
-                runs = doc.get("runs")
-                if followed_action and isinstance(runs, dict):
-                    assert str(runs.get("using", "")).lower() == "composite", (
-                        f"UNREADABLE LOCAL ACTION: {rel(path)} is used by CI "
-                        f"but runs as {runs.get('using')!r}, whose code (JS "
-                        f"or a container) this census cannot read. It would "
-                        f"run unread; make it a composite action, or extend "
-                        f"the census in the same change."
-                    )
-                for job in (doc.get("jobs") or {}).values():
-                    uses = job.get("uses") if isinstance(job, dict) else None
-                    if isinstance(uses, str) and uses.startswith("./"):
-                        target = root / uses[2:].split("@")[0]
-                        assert target.is_file(), (
-                            f"UNRESOLVED LOCAL WORKFLOW: {rel(path)} calls "
-                            f"{uses!r}, which is not a file in this checkout."
-                        )
-                        visit_yaml(target)
-            for n, (workdir, step) in enumerate(cls._steps_with_workdir(doc)):
-                label = (f"{rel(path)} step {n} "
-                         f"({step.get('name', step.get('uses', 'run'))})")
-                steps.append((label, step))
-                uses = step.get("uses")
-                if isinstance(uses, str) and uses.startswith("./"):
-                    action_dir = root / uses[2:].split("@")[0]
-                    action = next((action_dir / name for name in
-                                   ("action.yml", "action.yaml")
-                                   if (action_dir / name).is_file()), None)
-                    assert action is not None, (
-                        f"UNRESOLVED LOCAL ACTION: {label} uses {uses!r}, but "
-                        f"{rel(action_dir)} holds no action.yml/action.yaml."
-                    )
-                    visit_yaml(action, followed_action=True)
-                run = step.get("run")
-                if isinstance(run, str):
-                    follow_texts(label, run, workdir)
-
-        for entry in cls._workflow_population(root):
-            visit_yaml(entry)
-        result = (yaml_files, steps, texts, files)
-        cls._EXECUTION_CACHE[root.resolve()] = (
-            cls._read_signature(root, files), result)
-        return result
-
-    # The walk re-parses every followed file, and every arm asks for it, so
-    # one result is reused per root — but ONLY while every file it read and
-    # the entry set are byte-for-byte unchanged (path, size, mtime_ns): a
-    # mutation to any read file, or a new entry file, forces a fresh walk.
-    _EXECUTION_CACHE = {}
-
-    @classmethod
-    def _read_signature(cls, root, files):
-        paths = sorted(set(files) | set(cls._workflow_population(root)))
-        signature = []
-        for path in paths:
-            try:
-                st = path.stat()
-                signature.append((str(path), st.st_size, st.st_mtime_ns))
-            except FileNotFoundError:
-                signature.append((str(path), None, None))
-        return tuple(signature)
-
-    @classmethod
-    def _population_steps(cls, root):
-        """(label, step) for every step CI executes (`_execution_population`).
-
-        Read STRUCTURALLY: a block-style step, a flow-style step
-        (`- {name: x, run: ...}`), a folded scalar and a block scalar are
-        all one mapping to the parser, so the `run:` string each yields is
-        the string the runner executes. Plain-scalar folds are also refused
-        line-wise (`_refuse_plain_scalar_run_continuations`) as an
-        over-catch belt.
-        """
-        return cls._execution_population(root)[1]
-
-    @classmethod
-    def _population_texts(cls, root):
-        """(label, shell text) for every `run:` string and every followed
-        repo script CI executes."""
-        return cls._execution_population(root)[2]
-
-    @classmethod
-    def _population_installs(cls, root):
-        """Every executed pip install across the population, labelled."""
-        installs = []
-        for label, text in cls._population_texts(root):
-            for command, parsed in cls._pip_installs_in(text):
-                installs.append((label, command, parsed))
-        return installs
+            steps += [s for s in runs.get("steps") or [] if isinstance(s, dict)]
+        return steps
 
     @staticmethod
-    def _refuse_plain_scalar_run_continuations(workflow_text):
-        """REFUSE a `run:` plain scalar written across folded lines.
+    def _workflow_files(root):
+        """Every `.yml`/`.yaml` under `.github/workflows/`."""
+        workflows = root / ".github" / "workflows"
+        if not workflows.is_dir():
+            return []
+        return sorted(p for p in workflows.iterdir()
+                      if p.is_file() and p.suffix in (".yml", ".yaml"))
 
-        YAML folds a deeper-indented bare line after `run: <text>` into
-        ONE executed string, while every arm in this class reads line by
-        line — so an operand, or a whole `pip3 install`, named only on the
-        fold executes invisible to the census (round-5 probe, ground-
-        truthed with yaml.safe_load: all arms green with the fold
-        carrying the package). The shape is refused outright rather than
-        modelled, per the round-5 security recommendation: this workflow
-        has no legitimate use for it (`run: |` is the multi-command idiom
-        it already uses twice), and a refusal reddens on the next honest
-        fold the moment it lands instead of silently reading half a
-        command. The census now reads every step structurally, so a fold
-        is no longer invisible to it; the refusal stays as an over-catch
-        belt for the line-oriented canonical parse (`_ci_install_line`).
-        Block scalars (`run: |`, `run: >`) are legal.
-        """
-        run_indent = None
-        for raw in workflow_text.splitlines():
-            stripped = raw.strip()
-            if not stripped or stripped.startswith("#"):
-                # Blank and comment lines never execute. They do not end
-                # the plain scalar for this check either: a comment cannot
-                # continue one, but the next deeper line still folds (as
-                # whitespace at worst) — keep the check armed past them.
-                continue
-            indent = len(raw) - len(raw.lstrip(" "))
-            if run_indent is not None:
-                if indent > run_indent:
-                    raise AssertionError(
-                        f"PLAIN-SCALAR RUN CONTINUATION, not a readable "
-                        f"command: {stripped!r} is folded by YAML into the "
-                        f"plain `run:` scalar above it, so it EXECUTES "
-                        f"while every line-oriented arm in this class "
-                        f"reads the first line only — an install or "
-                        f"operand named there is invisible to the census "
-                        f"(probed: all arms green with the fold carrying "
-                        f"the package). Write the step as ONE line or a "
-                        f"`run: |` block; do not fold plain scalars."
-                    )
-                run_indent = None  # a dedented line ends the scalar
-            if re.match(r"^\s*-?\s*run:\s*[|>]", raw):
-                continue  # block scalar: deeper body lines are legal
-            key = re.match(r"^(\s*-?\s*)run:", raw)
-            if key:
-                # The scalar's indent is the column of the `run` KEY, not
-                # of a list dash before it: in `- run: x` + `  shell: bash`
-                # the sibling key sits at the key's column and ends the
-                # scalar — measuring from the dash refused that faithful
-                # step shape as a fold.
-                run_indent = len(key.group(1))
+    @staticmethod
+    def _action_files(root):
+        """Every `action.yml`/`action.yaml` under `.github/actions/`."""
+        actions = root / ".github" / "actions"
+        if not actions.is_dir():
+            return []
+        return sorted(p for p in actions.rglob("*")
+                      if p.is_file() and p.name in ("action.yml", "action.yaml"))
 
-    def _ci_install_package_tokens(self, workflow):
-        """Package-name tokens of the workflow's single `pip install` line.
-
-        Compared as TOKENS of the install line, never substrings of it. A
-        substring test fails OPEN on the most plausible next edit: this
-        suite does `import pysqlite3 as sqlite3`, so an editor adding
-        'sqlite3' to a package list would find it inside 'pysqlite3', pass,
-        and assert a package is installed that is not. Measured against the
-        real install line, 'sqlite3', 'sqlite', 'vec', 'yaml' and 'asyncio'
-        are ALL substrings of it and none is a package operand.
-        """
-        install_line = self._ci_install_line(workflow)
-        install_tokens = self._package_tokens_from_pip_argv(install_line)
-
-        # PARSE NON-VACUITY — asserted before any comparison built on the
-        # tokens, and with DISTINCT messages, because "I could not read the
-        # line" and "a package is missing" must never produce the same
-        # outcome. If a workflow refactor defeats this parser,
-        # `install_tokens` silently empties and every set difference over it
-        # passes VACUOUSLY: the guard would be dead while green, which is
-        # the exact failure it exists to prevent.
-        #
-        # The anchor has GROUND TRUTH INDEPENDENT OF THE PARSE: this code is
-        # executing under pytest, so CI demonstrably installs pytest. If a
-        # correct parse of the CI install line does not contain it, the
-        # parse is wrong — not the dependency set.
-        _PARSE_ANCHOR = "pytest"
-        assert install_tokens, (
-            f"PARSE FAILURE, not dependency drift: no package operands could "
-            f"be read from the CI install line. The line is "
-            f"{install_line.strip()!r}. The tokeniser models "
-            f"`pip install <flags> <packages>`; a refactor to a "
-            f"requirements file or a multi-line form defeats it. Re-point "
-            f"the parser — do NOT relax the assertions built on the token "
-            f"set, which would pass vacuously over an empty one."
+    @staticmethod
+    def _verify_script(root=None):
+        """scripts/verify_ci_environment.py, loaded by path (it is dev
+        tooling at the repo root, not an importable package)."""
+        import importlib.util
+        root = root or TestDependencyDriftIsDetectable._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout, so "
+                        "scripts/verify_ci_environment.py is absent.")
+        script = root / "scripts" / "verify_ci_environment.py"
+        assert script.is_file(), (
+            f"source checkout detected at {root} but {script} is missing: "
+            f"the runtime environment check cannot run. FAILURE, not skip."
         )
-        assert _PARSE_ANCHOR in install_tokens, (
-            f"PARSE FAILURE, not dependency drift: the parsed operands "
-            f"{sorted(install_tokens)} do not contain {_PARSE_ANCHOR!r}, but "
-            f"this test is RUNNING under pytest, so CI installs it. The "
-            f"parse is therefore wrong, not the dependency set. Re-point "
-            f"the parser."
-        )
-        return install_tokens
+        spec = importlib.util.spec_from_file_location(
+            "_pact_verify_ci_environment_under_test", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
-    def test_declared_packages_match_the_ci_install_line(self):
-        """Every package memory_init would install must be declared by CI.
+    def test_memory_init_packages_are_pinned(self):
+        """Every package memory_init would install is a CI pin.
 
-        WHAT THIS PROVES: the two lists cannot silently diverge. If a package is
-        added here and not to the workflow, this goes RED with the name in the
-        message — which is the drift signal the silent branch cannot emit.
-
-        WHAT IT DOES NOT PROVE: that any runtime message is visible in a CI log.
-        Nothing asserts that, because nothing safely can — see the class
-        docstring. It also does not prove the reverse direction: CI may install
-        packages this module does not know about, which is harmless.
+        Under CI memory_init's install path is skipped (silently, see the
+        class docstring), so a package it needs must reach the environment
+        through constraints-ci.txt, the one CI requirement set. Names are
+        compared after PEP 503 normalisation.
         """
-        from scripts.memory_init import check_and_install_dependencies  # noqa: F401
         import inspect
 
         from scripts import memory_init
@@ -1391,739 +572,301 @@ class TestDependencyDriftIsDetectable:
         assert declared, (
             "could not read the package list out of "
             "check_and_install_dependencies — the list changed shape and this "
-            "parity test is now vacuous. Re-point it; do not delete it."
+            "check is now vacuous. Re-point it; do not delete it."
         )
-
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json above "
-                f"{Path(__file__).resolve()}, so this is not a PACT source "
-                "checkout. The expected case is an INSTALLED PLUGIN CACHE, "
-                "which has no .github/ tree by design. This skip is NO "
-                "INFORMATION about dependency drift — never read it as a pass."
-            )
-
-        # INSIDE a checkout, absence is a FAILURE. Reaching here means the
-        # marker was found, so the workflow is expected to exist and parse; if
-        # it does not, the drift detector is broken and must say so loudly
-        # rather than skip and read as green.
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) but "
-            f"{workflow} is missing. The drift detector cannot run. This is a "
-            f"FAILURE, not a skip: inside a checkout the workflow is required."
-        )
-        install_tokens = self._ci_install_package_tokens(workflow)
-
-        declared_tokens = {self._normalise_pin_name(p) for p in declared}
-        missing = sorted(declared_tokens - install_tokens)
+        root = self._require_root("memory_init's pins")
+        verify = self._verify_script(self._real_repo_root())
+        pins = verify.read_pins(root / "constraints-ci.txt")
+        missing = sorted(
+            verify.normalize(name) for name in declared
+            if verify.normalize(name) not in pins)
         assert not missing, (
             f"DEPENDENCY DRIFT: {missing} are installed by "
-            f"memory_init.check_and_install_dependencies but are NOT in the CI "
-            f"workflow's install line. Under CI the install path is skipped, so "
+            f"memory_init.check_and_install_dependencies but are NOT pinned "
+            f"in constraints-ci.txt. Under CI the install path is skipped, so "
             f"these would be absent at runtime and the branch reports it "
             f"NOWHERE (it is deliberately silent — the CLI's stderr is a JSON "
-            f"contract). Add them to the workflow, or remove them here."
+            f"contract). Pin them in constraints-ci.txt, or remove them here."
         )
 
-    def test_constraints_pins_cover_the_install_line(self):
-        """constraints-ci.txt and the CI install line must cover each other.
+    def test_ci_environment_is_verified_around_every_test_run(self):
+        """The runtime check runs in the SAME place as the tests (F1(a), F2).
 
-        The constrained install is only as good as its coverage. A direct
-        dependency the install line requests with NO pin floats on the
-        index — the exact merge-time weather the constraints file exists to
-        prevent — and a pin for a package the line never requests is dead
-        weight that misleads a refresh. `pip` is the ONE deliberate
-        exception in the unpinned direction (a pinned self-upgrade can
-        deadlock the bootstrap), named in both the workflow's CONSTRAINTS
-        note and the file's own header.
+        For every GOVERNED job (any step whose `run` names pytest, python,
+        pip or ruff) in every workflow under .github/workflows/:
+          (i) its LAST step runs VERIFY_CMD with `if: always()`;
+          (ii) every step whose `run` names pytest is EXACTLY TEST_CMD and is
+               IMMEDIATELY preceded by a step running VERIFY_CMD;
+          (iii) no verify step and no pytest step carries `env:` or
+               `shell:`, and no verify step carries `working-directory:`
+               (VERIFY_CMD names the script relative to the repo root).
+        Together these make the process pytest runs in the process the
+        verify step just checked, and the after-check sees whatever the
+        tests or later steps installed.
         """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. The expected case is an INSTALLED PLUGIN "
-                "CACHE, which has no .github/ tree by design. This skip is "
-                "NO INFORMATION about constraint coverage — never read it "
-                "as a pass."
-            )
-        constraints = root / "constraints-ci.txt"
-        assert constraints.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {constraints} is missing. The CI install line's `-c` "
-            f"names it, so CI's own install step would fail — this is a "
-            f"FAILURE, not a skip."
+        root = self._require_root("verify-step placement")
+        workflows = self._workflow_files(root)
+        assert workflows, (
+            f"source checkout detected at {root} but no workflow under "
+            f".github/workflows/: the placement arm cannot run. FAILURE."
         )
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {workflow} is missing. The coverage guard cannot run. "
-            f"This is a FAILURE, not a skip: inside a checkout the "
-            f"workflow is required."
-        )
-        install_line = self._ci_install_line(workflow)
-        # Tokens come through the shared helper so the non-vacuity anchors
-        # (ground truth: this test runs under pytest) fire on this path too.
-        install_tokens = self._ci_install_package_tokens(workflow)
-
-        # The install line must APPLY the constraints file, not merely ship
-        # it beside the workflow: without `-c` every pin in the file is dead
-        # at install time and every direct dependency floats — while the
-        # coverage comparison below still passes, because it compares the
-        # line's package NAMES against the pin names and never looks at the
-        # line's flags. The script-side twin of this check runs in
-        # test_cursor_install_sh_matches_the_ci_install_line.
-        assert self._applies_constraints(install_line), (
-            f"CONSTRAINT APPLICATION DRIFT: the CI install line "
-            f"{install_line.strip()!r} does not apply constraints-ci.txt "
-            f"(`-c`/`--constraint`). Merge-time resolution then floats — "
-            f"the exact weather the file exists to prevent. Restore the "
-            f"flag."
-        )
-
-        pins = {}
-        for raw in constraints.read_text(encoding="utf-8").splitlines():
-            # pip's requirements format ends a line at whitespace + `#`:
-            # `ruff==0.17.3  # lint` IS the exact pin `ruff==0.17.3`, so the
-            # comment is stripped before any check reads the line.
-            line = re.split(r"(?:^|\s)#", raw, maxsplit=1)[0].strip()
-            if not line:
-                continue
-            assert "==" in line, (
-                f"PARSE FAILURE, not coverage drift: {constraints} carries "
-                f"a non-pin line {line!r}. The file's contract is one "
-                f"`name==version` pin per direct dependency — a line with "
-                f"no `==` is either prose that lost its `#` or a range "
-                f"constraint, and both must be reconciled by hand."
-            )
-            # `==` PRESENCE is not an exact pin: `ruff==0.17.*` is a range
-            # and `ruff==0.17.3; python_version < "3.11"` is a pin that is
-            # INACTIVE on the CI interpreter, so the direct dependency
-            # floats while the name still reads as pinned. The contract is
-            # the whole line: a name, `==`, one literal version.
-            assert self._EXACT_PIN_RE.fullmatch(line), (
-                f"INEXACT PIN, not coverage drift: {constraints} carries "
-                f"{line!r}, which is not an exact `name==version` pin (a "
-                f"wildcard, an environment marker, an extra or a second "
-                f"clause). Such a line constrains a range or nothing at all "
-                f"on the CI interpreter while the name still reads as "
-                f"pinned. Write one literal version."
-            )
-            name, _, _version = line.partition("==")
-            pins[self._normalise_pin_name(name)] = line
-
-        unpinned = sorted(install_tokens - set(pins) - {"pip"})
-        assert not unpinned, (
-            f"CONSTRAINT COVERAGE DRIFT: {unpinned} are requested by the "
-            f"CI install line but NOT pinned in {constraints}. An unpinned "
-            f"direct dependency resolves to whatever the index serves at "
-            f"merge time — the exact weather the constraints file exists "
-            f"to prevent. Pin it (pip freeze of a verified venv) or remove "
-            f"it from the install line."
-        )
-        dead_pins = sorted(set(pins) - install_tokens - {"pip"})
-        assert not dead_pins, (
-            f"CONSTRAINT COVERAGE DRIFT: pins for {dead_pins} sit in "
-            f"{constraints} but the CI install line never requests them. "
-            f"`-c` DOES bind a pinned name even as a transitive (measured: "
-            f"a urllib3 pin forced a parent's transitive resolve), so the "
-            f"pin is not inert — the problem is the mirror contract: this "
-            f"file is the install line's direct-dependency mirror, and a "
-            f"pin with no operand misleads a refresh into re-freezing it. "
-            f"Remove the pin, or name the package on the install line too. "
-            f"If this is a deliberately pinned COMPROMISED TRANSITIVE, add "
-            f"it to the install line in the same change — a pin alone "
-            f"reddens here, and a bare `!=` line breaks the `==`-only "
-            f"parse above (see the incident path in the file's header)."
-        )
-
-    def _script_pip_install_commands(self, script):
-        """The script's pip install commands, from EXECUTED text only.
-
-        Read through the same shell model and argv parse as the workflow
-        (`_pip_installs_in`): comment-only lines are dropped first (the
-        script's prose may quote pip commands — prose is not a
-        declaration), backslash continuations are joined, and each SIMPLE
-        command is parsed as pip argv. So a wrapped `python -m pip \\` +
-        `install pkg`, a `pip3`/`pip3.N`/`python -mpip` spelling, and global
-        options before `install` all enumerate like the canonical spelling,
-        while the apt-get bootstrap lines never reach the arms. Shared by
-        every arm that reasons about the script surface, so one parse
-        contract covers them all.
-        """
-        commands = [
-            command for command, _parsed in
-            self._pip_installs_in(script.read_text(encoding="utf-8"))
-        ]
-        assert commands, (
-            f"PARSE FAILURE, not parity drift: no non-comment pip "
-            f"install command could be read from {script}. The script "
-            f"changed shape (a requirements file, a variable-driven loop) "
-            f"— re-point the arms at the new shape; do not weaken them "
-            f"to a skip."
-        )
-        return commands
-
-    def test_cursor_install_sh_matches_the_ci_install_line(self):
-        """`.cursor/install.sh` mirrors the CI install line — asserted now.
-
-        The script's header claims lockstep with the workflow's install
-        line, and before this arm that claim was PROSE ONLY: when CI gained
-        `-c constraints-ci.txt` the claim broke silently because nothing
-        read the script. This arm holds the package SET
-        of both installs to each other, `pip` excepted — the script
-        upgrades pip in its own earlier command by design, mirroring the
-        CI line's `pip` operand. Version parity follows from set parity:
-        every install command in the script applies the same
-        constraints-ci.txt.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. The expected case is an INSTALLED PLUGIN "
-                "CACHE, which has no .github/ or .cursor/ tree by design. "
-                "This skip is NO INFORMATION about install-line parity — "
-                "never read it as a pass."
-            )
-        script = root / ".cursor" / "install.sh"
-        assert script.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {script} is missing. The local-mirror parity guard cannot "
-            f"run. This is a FAILURE, not a skip: inside a checkout the "
-            f"bootstrap script is required."
-        )
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {workflow} is missing. The parity guard cannot run. "
-            f"This is a FAILURE, not a skip: inside a checkout the "
-            f"workflow is required."
-        )
-        ci_tokens = self._ci_install_package_tokens(workflow)
-
-        commands = self._script_pip_install_commands(script)
-        script_tokens = set()
-        for cmd in commands:
-            script_tokens |= self._package_tokens_from_pip_argv(cmd)
-
-        ci_side = ci_tokens - {"pip"}
-        script_side = script_tokens - {"pip"}
-        assert script_side, (
-            f"PARSE FAILURE, not parity drift: the `pip install` commands in "
-            f"{script} yielded no package operands. The CI mirror is the "
-            f"point of those commands, so an empty read means the parse no "
-            f"longer models the script."
-        )
-
-        # The constraints file must be APPLIED, not merely present in the
-        # repo: the package SETS can match while versions float, if the
-        # script ever dropped its `-c` — the same silent-break shape wearing
-        # a different flag. _applies_constraints is the same check
-        # the workflow side runs, so one spelling contract covers both.
-        # EVERY command, the pip-upgrade command included: a zero-package
-        # install carries no operands, so a token-based filter would exempt
-        # exactly the command a re-pointed or missing `-c` could ride while
-        # the set comparison stays green.
-        assert commands and all(
-            self._applies_constraints(cmd) for cmd in commands
-        ), (
-            f"LOCAL-MIRROR DRIFT: an install command in {script} "
-            f"does not apply constraints-ci.txt (`-c`/`--constraint`). The "
-            f"package sets still match, so the set comparison above cannot "
-            f"see this — but local versions float, silently undoing the "
-            f"lockstep the script's header claims. Restore the flag."
-        )
-        missing_locally = sorted(ci_side - script_side)
-        assert not missing_locally, (
-            f"LOCAL-MIRROR DRIFT: {missing_locally} are installed by CI's "
-            f"install line but NOT by {script}. A local green and a CI green "
-            f"then run different dependency sets — the exact divergence the "
-            f"script's lockstep header exists to prevent. Add them to the "
-            f"script, or remove them from the workflow."
-        )
-        extra_locally = sorted(script_side - ci_side)
-        assert not extra_locally, (
-            f"LOCAL-MIRROR DRIFT: {extra_locally} are installed by "
-            f"{script} but NOT by CI's install line. The local environment "
-            f"carries packages CI never sees, so a local green certifies "
-            f"more than the CI green does. Reconcile the two lists."
-        )
-
-    def test_install_lines_admit_no_requirements_or_editable_flags(self):
-        """Only VETTED options on either install surface (flag allowlist).
-
-        ALLOWLIST polarity: every option on every pip install in CI and the
-        bootstrap must be in `_PIP_ALLOWED_INSTALL_FLAGS` (the options the
-        shipped lines use plus value-less logging/caching options), and a
-        `--constraint` must name constraints-ci.txt; anything else reddens
-        UNVETTED PIP FLAG DRIFT naming it, so an option pip adds later fails
-        closed. Two families keep their own, more specific message:
-
-        The install-SOURCE flags (`-r`/`-e`, `--group`,
-        `--requirements-from-script`) take a VALUE the parse consumes, so a
-        requirements file, editable path, dependency group or script's
-        inline dependencies add packages that the declared-match, coverage and
-        constraints-APPLIED arms never see, while constraints-ci.txt pins
-        none of them (it mirrors the install line's direct names only). The
-        index/source flags (`--index-url`/`-i`, `--extra-index-url`,
-        `--find-links`/`-f`, `--trusted-host`, `--no-index`, `--pypi-url`)
-        keep every
-        package NAME intact — so every name arm stays green — while the
-        pinned versions resolve from a source the constraints file never
-        vetted, and its `==` pins carry no hashes. The same redirect through
-        `PIP_*` environment is the env arm's; this is its argv twin.
-
-        The flags are read from the shared argv parse, never as literal
-        text, so every spelling pip accepts is one option here: `-r f`,
-        `-rf`, `--requirement f`, `--requirement=f`, an abbreviated long
-        flag, a short bundle, and a global option placed before `install`.
-        Refused on both parsed surfaces: the workflow's install line and
-        EVERY pip install command in the script — the pip-upgrade command
-        included, where a flag would otherwise ride with no package
-        operands to betray it. Introducing one legitimately means
-        reconciling the coverage arms to read the referenced file or source
-        in the same change — the red here is the reminder, not a bug.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. The expected case is an INSTALLED PLUGIN "
-                "CACHE, which has no .github/ or .cursor/ tree by design. "
-                "This skip is NO INFORMATION about the install-flag allowlist — "
-                "never read it as a pass."
-            )
-
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {workflow} is missing. The tripwire cannot run. This is "
-            f"a FAILURE, not a skip: inside a checkout the workflow is "
-            f"required."
-        )
-        script = root / ".cursor" / "install.sh"
-        assert script.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {script} is missing. The tripwire cannot run. This is "
-            f"a FAILURE, not a skip: inside a checkout the bootstrap "
-            f"script is required."
-        )
-        script_commands = self._script_pip_install_commands(script)
-        surfaces = [
-            ("the CI install line", [self._ci_install_line(workflow)]),
-            (f"{script} install commands", script_commands),
-        ]
-        for where, commands in surfaces:
-            for cmd in commands:
-                parsed = self._install_parse(cmd)
-                assert parsed is not None, (
-                    f"PARSE FAILURE, not a clean read: {where} command "
-                    f"{cmd.strip()!r} is not exactly one pip install."
-                )
-                names = {name for name, _value in parsed[1]}
-                requirement_hits = sorted(names & self._PIP_REQUIREMENT_FLAGS)
-                assert not requirement_hits, (
-                    f"REQUIREMENTS-FLAG DRIFT: {where} carries "
-                    f"{requirement_hits} ({cmd.strip()!r}). Both flags take "
-                    f"a value the parse consumes, so every package named by "
-                    f"the referenced file installs with NO pin this "
-                    f"machinery guarantees — the coverage arms cannot see "
-                    f"them. Pin the names as install-line operands instead, "
-                    f"or reconcile the coverage arms to read the referenced "
-                    f"file in the same change."
-                )
-                redirect_hits = sorted(names & self._PIP_REDIRECT_FLAGS)
-                assert not redirect_hits, (
-                    f"INDEX-REDIRECT DRIFT: {where} carries {redirect_hits} "
-                    f"({cmd.strip()!r}). Every package name stays intact, "
-                    f"so the name arms stay green, while the pinned "
-                    f"versions resolve from a source constraints-ci.txt "
-                    f"never vetted — its `==` pins carry no hashes. Remove "
-                    f"the flag, or record the source as a reviewed decision "
-                    f"in this arm in the same change."
-                )
-                # ALLOWLIST POLARITY: every other option must be on the
-                # vetted set, and a constraints option must name the
-                # repo's own file — a second or re-pointed constraints
-                # file loosens the pins the coverage arm checks.
-                unvetted = sorted(
-                    names - self._PIP_ALLOWED_INSTALL_FLAGS
-                    - self._PIP_REQUIREMENT_FLAGS - self._PIP_REDIRECT_FLAGS)
-                foreign_constraints = sorted(
-                    value for name, value in parsed[1]
-                    if name == "--constraint"
-                    and not self._is_repo_constraints(value))
-                assert not unvetted and not foreign_constraints, (
-                    f"UNVETTED PIP FLAG DRIFT: {where} carries "
-                    f"{unvetted + [f'--constraint {v}' for v in foreign_constraints]} "
-                    f"({cmd.strip()!r}). A pip install in CI or the "
-                    f"bootstrap may carry only the vetted options "
-                    f"{sorted(self._PIP_ALLOWED_INSTALL_FLAGS)} (and "
-                    f"--constraint naming constraints-ci.txt): any other "
-                    f"option can change WHAT resolves or from WHERE — a new "
-                    f"install source, a resolver strategy, a target "
-                    f"directory — where no coverage arm looks. Confirm the "
-                    f"option changes neither, then add it to "
-                    f"_PIP_ALLOWED_INSTALL_FLAGS in the same change."
-                )
-
-    def test_every_executed_pip_install_is_the_canonical_install_line(self):
-        """Census: no executed pip install anywhere in CI but the canonical one.
-
-        POPULATION, stated so a green is read at its true width: what CI
-        EXECUTES, followed from its entry files (`_execution_population`):
-        every step of every workflow under `.github/workflows/`, every
-        local action a `uses: ./<path>` names wherever it lives (its
-        composite `runs.steps` walked recursively), every local reusable
-        workflow a job calls, and every repo script a command executes —
-        by path or as the operand of a shell or python — resolved against
-        the step's working-directory, read as shell (Python through ast),
-        recursively. Steps are read with yaml.safe_load, so flow-style
-        steps and folded or block scalars read as the runner reads them;
-        each text is cut into simple commands, `-c` strings and `eval`
-        included, and parsed as pip argv (`_pip_installs_in`), so a
-        program spelling (`pip3.12`, `python -mpip`, `uv pip`) or a global
-        option before `install` cannot hide one. A followed local action
-        that is not composite, a followed script in another language, and
-        a script path that does not exist are REFUSED, not skipped.
-        SCOPE: the guard covers the PYTHON dependency set constraints-ci.txt
-        pins; system and other-language package managers (apt-get, npm,
-        brew) are separate supply chains outside it, by design.
-        Not read here: third-party actions and reusable workflows (their
-        code is not in this tree — the allowlist arm holds them), paths
-        outside the checkout (absolute, or on runner variables such as
-        $RUNNER_TEMP), `python -`/`python -m <module>`, and installs done
-        WITHOUT a pip program (an action input — see
-        test_no_action_input_installs_packages — or another installer —
-        see test_no_tool_runner_executes_unpinned_code).
-
-        Exactly ONE install may exist across that population, and it must
-        be the canonical install line every coverage / constraints /
-        tripwire arm reads, compared by PARSE (same options, same
-        operands), so a second install of any shape reddens here even when
-        the canonical parse still succeeds.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. The expected case is an INSTALLED PLUGIN "
-                "CACHE, which has no .github/ tree by design. This skip is "
-                "NO INFORMATION about extra installs — never read it as a "
-                "pass."
-            )
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {workflow} is missing. The census cannot run. This is a "
-            f"FAILURE, not a skip: inside a checkout the workflow is "
-            f"required."
-        )
-        canonical = self._ci_install_line(workflow)
-        canonical_parse = self._install_parse(canonical.lstrip()[len("run:"):])
-        census = self._population_installs(root)
-        assert census, (
-            "PARSE FAILURE, not census agreement: the canonical parse read "
-            "an install line but the structural census found no executed "
-            "pip install, so the census no longer models the workflow. "
+        problems = []
+        governed_jobs = 0
+        for path in workflows:
+            doc = self._load_workflow_yaml(path)
+            rel = path.relative_to(root).as_posix()
+            for jid, job in ((doc or {}).get("jobs") or {}).items():
+                if not isinstance(job, dict):
+                    continue
+                steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
+                runs = [s.get("run") if isinstance(s.get("run"), str) else ""
+                        for s in steps]
+                if not any(self._GOVERNED_RE.search(r) for r in runs):
+                    continue
+                governed_jobs += 1
+                where = f"{rel} job {jid}"
+                last = steps[-1] if steps else {}
+                if runs[-1].strip() != self.VERIFY_CMD or str(
+                        last.get("if", "")).strip() not in (
+                        "always()", "${{ always() }}"):
+                    problems.append(
+                        f"{where}: the LAST step must run "
+                        f"`{self.VERIFY_CMD}` with `if: always()`")
+                for n, (step, run) in enumerate(zip(steps, runs)):
+                    is_verify = run.strip() == self.VERIFY_CMD
+                    is_test = bool(self._PYTEST_RE.search(run))
+                    if is_test and run.strip() != self.TEST_CMD:
+                        problems.append(
+                            f"{where} step {n}: a pytest step must run "
+                            f"exactly `{self.TEST_CMD}`, not {run.strip()!r}")
+                    if is_test and (n == 0 or runs[n - 1].strip() != self.VERIFY_CMD):
+                        problems.append(
+                            f"{where} step {n}: a pytest step must be "
+                            f"IMMEDIATELY preceded by `{self.VERIFY_CMD}`")
+                    if (is_test or is_verify) and (
+                            "env" in step or "shell" in step):
+                        problems.append(
+                            f"{where} step {n}: a verify or pytest step may "
+                            f"carry no `env:` or `shell:`")
+                    if is_verify and "working-directory" in step:
+                        problems.append(
+                            f"{where} step {n}: a verify step may carry no "
+                            f"`working-directory:`")
+        assert governed_jobs, (
+            "PARSE FAILURE, not placement drift: no workflow job names "
+            "pytest/python/pip/ruff, so the placement arm checks nothing. "
             "Re-point it; do not delete it."
         )
-        strays = [
-            (label, command) for label, command, parsed in census
-            if parsed != canonical_parse
-        ]
-        canonical_hits = len(census) - len(strays)
-        assert not strays and canonical_hits == 1, (
-            "INSTALL CENSUS DRIFT: executed pip installs exist beyond the "
-            "one canonical install step "
-            f"({canonical_hits} canonical, {len(strays)} other):\n"
-            + "\n".join(f"  {label}: {command!r}" for label, command in strays)
-            + "\nThe coverage / constraints / tripwire arms read only the "
-            "canonical line, so these installs resolve unpinned. Fold them "
-            "into the canonical install step, or reconcile the arms to read "
-            "them in the same change."
+        assert not problems, (
+            "VERIFY PLACEMENT DRIFT: the runtime environment check no longer "
+            "brackets every test run, so a green CI may have tested a "
+            "different environment than the one it checked:\n"
+            + "\n".join(f"  {p}" for p in problems)
+            + "\nPut a step running the verify command immediately before "
+            "each pytest step and as the job's last step with if: always(), "
+            "keep the pytest command exactly as pinned, and move env/shell "
+            "settings off those steps."
         )
 
-    def test_no_action_input_installs_packages(self):
-        """No step installs packages through an ACTION INPUT.
+    # C-LITE TRIPWIRE. Tools whose installs the runtime check cannot see
+    # (isolated environments), the uninstall verb, and the index-redirect
+    # belt. Read as WORDS over a fixed text set; no argv parsing.
+    _TRIPWIRE_PATTERNS = (
+        ("isolated-environment tool", re.compile(
+            r"\b(pipx|uvx|uv|conda|mamba|micromamba|poetry|pipenv|pdm|hatch"
+            r"|pixi|rye)\b")),
+        ("pip uninstall", re.compile(r"\bpip(3(\.\d+)?)?\s+uninstall\b")),
+        ("pip index env", re.compile(
+            r"\bPIP_(INDEX_URL|EXTRA_INDEX_URL|FIND_LINKS|NO_INDEX"
+            r"|TRUSTED_HOST)\b")),
+        ("pip index flag", re.compile(
+            r"--(index-url|extra-index-url|find-links|no-index|trusted-host"
+            r"|pypi-url)\b")),
+    )
+    # Exact line (stripped) -> the reason it is accepted. Empty today.
+    _ACCEPTED_TRIPWIRE_LINES = {}
+    _CANONICAL_INSTALL_LINE = "python -m pip install -r constraints-ci.txt"
 
-        `actions/setup-python` takes a `pip-install:` input that runs
-        `pip install` on its value inside the action, so its packages
-        resolve unpinned while no `run:` text in the workflow names pip —
-        every argv-reading arm stays green. Read structurally over the same
-        population as the census (`_population_steps`): any step whose
-        `with:` mapping carries a `pip-install` key reddens, whatever
-        action it is passed to.
+    @staticmethod
+    def _tracked_shell_and_make_files(root):
+        """Every git-tracked *.sh, *.bash, Makefile and Makefile.* file;
+        globbed from the root when git cannot list them (a rig copy)."""
+        patterns = ("*.sh", "*.bash", "Makefile", "Makefile.*")
+        try:
+            listed = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "-z", "--",
+                 *patterns, *(f"**/{p}" for p in patterns)],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            listed = None
+        if listed is not None and listed.returncode == 0 and listed.stdout:
+            names = [n for n in listed.stdout.split("\0") if n]
+            return sorted({root / n for n in names if (root / n).is_file()})
+        found = set()
+        for pattern in patterns:
+            found |= {p for p in root.rglob(pattern) if p.is_file()
+                      and ".git" not in p.relative_to(root).parts}
+        return sorted(found)
+
+    def _tripwire_hits(self, root):
+        texts, env_hits = [], []
+        for path in self._workflow_files(root) + self._action_files(root):
+            doc = self._load_workflow_yaml(path)
+            rel = path.relative_to(root).as_posix()
+            for n, step in enumerate(self._steps_of(doc)):
+                if isinstance(step.get("run"), str):
+                    texts.append((f"{rel} step {n}", step["run"]))
+            env_hits.extend(
+                f"{rel}: pip env key `{key}`" for key in self._pip_env_keys(doc))
+        files = set(self._tracked_shell_and_make_files(root))
+        install_sh = root / ".cursor" / "install.sh"
+        if install_sh.is_file():
+            files.add(install_sh)
+        for path in sorted(files):
+            texts.append((path.relative_to(root).as_posix(),
+                          path.read_text(encoding="utf-8", errors="replace")))
+        hits = list(env_hits)
+        for label, text in texts:
+            for number, line in enumerate(text.splitlines(), 1):
+                if line.strip() in self._ACCEPTED_TRIPWIRE_LINES:
+                    continue
+                for family, pattern in self._TRIPWIRE_PATTERNS:
+                    for match in pattern.finditer(line):
+                        hits.append(
+                            f"{label}:{number}: {family} `{match.group(0)}` "
+                            f"in {line.strip()!r}")
+        return hits
+
+    @staticmethod
+    def _pip_env_keys(doc):
+        """`PIP_*` keys of the workflow, job, container and step `env:`
+        mappings of one parsed workflow or action (service containers'
+        env never reaches the job's process and is not read)."""
+        keys = []
+
+        def harvest(env):
+            if isinstance(env, dict):
+                keys.extend(str(k) for k in env
+                            if str(k).upper().startswith("PIP_"))
+
+        if isinstance(doc, dict):
+            harvest(doc.get("env"))
+            for job in (doc.get("jobs") or {}).values():
+                if isinstance(job, dict):
+                    harvest(job.get("env"))
+                    if isinstance(job.get("container"), dict):
+                        harvest(job["container"].get("env"))
+            for step in TestDependencyDriftIsDetectable._steps_of(doc):
+                harvest(step.get("env"))
+        return keys
+
+    def test_no_isolated_environment_tool_or_index_redirect(self):
+        """A bounded WORD tripwire for what the runtime check cannot see.
+
+        The runtime check (scripts/verify_ci_environment.py) observes the
+        environment the tests import from; an isolated-environment tool
+        (pipx, uv, conda, ...) installs where it never looks, an uninstall
+        changes the set after the before-check, and an index redirect
+        serves a different build of a pinned version. TEXT SET, fixed:
+        every `run:` string in .github/workflows/*.y*ml and
+        .github/actions/**/action.y*ml (yaml.safe_load), every `PIP_*`
+        key of their env mappings, the full text of .cursor/install.sh, and
+        the full text of every git-tracked *.sh, *.bash, Makefile and
+        Makefile.* file. Matched as WORDS (`_TRIPWIRE_PATTERNS`); no argv
+        parsing and no following. A hit names file, line and token.
         """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. This skip is NO INFORMATION about action "
-                "inputs — never read it as a pass."
-            )
-        offenders = [
-            f"{label}: pip-install={step['with'][key]!r}"
-            for label, step in self._population_steps(root)
-            if isinstance(step.get("with"), dict)
-            for key in step["with"]
-            if str(key).lower() == "pip-install"
-        ]
-        assert not offenders, (
-            f"ACTION-INPUT INSTALL DRIFT: {offenders}. The action runs "
-            f"`pip install` on the input's value with no `-c "
-            f"constraints-ci.txt`, so those packages resolve to whatever "
-            f"the index serves, and no `run:` text names them. Move them "
-            f"to the canonical install line, where the coverage arms pin "
-            f"them."
+        root = self._require_root("the isolated-environment tripwire")
+        hits = self._tripwire_hits(root)
+        assert not hits, (
+            "TRIPWIRE: CI or a tracked script names a tool or option the "
+            "runtime environment check cannot see:\n"
+            + "\n".join(f"  {h}" for h in hits)
+            + f"\nInstall through the pinned set instead "
+            f"(`{self._CANONICAL_INSTALL_LINE}`), or, if the line is "
+            f"genuinely harmless (prose, a read-only use), add the exact "
+            f"line to _ACCEPTED_TRIPWIRE_LINES with a reason in the same "
+            f"change."
         )
 
     # Every THIRD-PARTY action the shipped workflows and actions use,
     # keyed on `owner/repo[/path]` with the `@ref` stripped (a SHA re-pin is
-    # not drift). Each was vetted as installing nothing unpinned. Local
-    # `./` actions are not listed: the census follows and reads them.
+    # not drift). Each was vetted as installing nothing unpinned.
     _ALLOWED_THIRD_PARTY_ACTIONS = frozenset({
         "actions/checkout",
         "actions/setup-python",
         "actions/cache/restore",
         "actions/cache/save",
     })
-    # Installer PROGRAMS other than pip: each resolves packages from its
-    # own index or channel — into the job's environment or an isolated
-    # tool environment — and none reads constraints-ci.txt. ALLOWLIST
-    # polarity: any invocation is refused unless it is read-only, so a verb
-    # this list never named (`poetry sync`, `uv pip sync`, `conda create`,
-    # `tox`) fails closed. `python -m <module>` spellings map to the
-    # program; `python setup.py <cmd>` counts as the program `setup.py`.
-    _INSTALLER_PROGRAMS = frozenset({
-        "uv", "uvx", "pipx", "poetry", "conda", "mamba", "micromamba",
-        "pipenv", "pdm", "hatch", "tox", "nox", "pre-commit", "pip-sync",
-        "piptools", "rye", "pixi", "easy_install", "flit", "setup.py",
-    })
-    _INSTALLER_MODULES = {
-        "uv": "uv", "pipx": "pipx", "poetry": "poetry", "pdm": "pdm",
-        "hatch": "hatch", "tox": "tox", "nox": "nox",
-        "pre_commit": "pre-commit", "piptools": "piptools",
-        "pipenv": "pipenv", "conda": "conda", "flit": "flit",
-        "easy_install": "easy_install",
-    }
-    # NO table of these programs' value-taking global options: an option
-    # word before the verb is skipped WITHOUT consuming a value, so a
-    # valued global's VALUE lands in the verb slot (`uv --directory proj
-    # sync` reads verb `proj`), which is never read-only — every such form
-    # fails CLOSED. The cost is over-block only on a read-only call that
-    # also passes a valued global (`uv --directory x pip list`), which a
-    # faithful edit writes as `--directory=x` or drops.
-    # The verbs that only READ. `uv pip <verb>` and `conda env <verb>`
-    # read a second-level verb.
-    _INSTALLER_READ_ONLY_VERBS = frozenset({
-        "list", "info", "show", "help", "version", "tree", "freeze", "check",
-    })
-    _INSTALLER_READ_ONLY_FLAGS = frozenset({"--version", "-V", "--help", "-h"})
-
-    @classmethod
-    def _installer_program(cls, words):
-        """(program, argv after it) for a simple command that invokes an
-        installer program, or None."""
-        i, program = cls._command_program(words)
-        if program is None:
-            return None
-        base = program.rsplit("/", 1)[-1]
-        if base in cls._INSTALLER_PROGRAMS:
-            return base, words[i + 1:]
-        if cls._PYTHON_PROGRAM_RE.search(program):
-            rest = words[i + 1:]
-            for j, tok in enumerate(rest):
-                module = tok[2:] if tok.startswith("-m") and len(tok) > 2 \
-                    else (rest[j + 1] if tok == "-m" and j + 1 < len(rest) else None)
-                if module is not None:
-                    mapped = cls._INSTALLER_MODULES.get(module)
-                    if mapped is None:
-                        return None
-                    return mapped, rest[j + (1 if tok != "-m" else 2):]
-                if tok.rsplit("/", 1)[-1] == "setup.py":
-                    return "setup.py", rest[j + 1:]
-                if not tok.startswith("-"):
-                    return None
-        return None
-
-    @classmethod
-    def _installer_is_read_only(cls, program, argv):
-        """True only when the invocation provably installs nothing."""
-        options, verbs = [], []
-        for tok in argv:
-            if tok.startswith("-"):
-                options.append(tok.split("=", 1)[0])
-                continue
-            verbs.append(tok)
-            if not (program == "uv" and tok == "pip") and not (
-                    program in ("conda", "mamba", "micromamba") and tok == "env"):
-                break
-        if not verbs:
-            return bool(options) and set(options) <= cls._INSTALLER_READ_ONLY_FLAGS
-        if program in ("uvx", "setup.py"):
-            return False
-        return verbs[-1] in cls._INSTALLER_READ_ONLY_VERBS
-
-    @classmethod
-    def _tool_runner_commands(cls, text):
-        """Simple commands in shell text that invoke an installer program
-        other than pip in any way that is not provably read-only."""
-        hits = []
-        for words in cls._simple_commands(text):
-            found = cls._installer_program(words)
-            if found is not None and not cls._installer_is_read_only(*found):
-                hits.append(" ".join(words))
-        return hits
-
-    def test_no_tool_runner_executes_unpinned_code(self):
-        """No Python installer but the constrained pip line, in CI or the
-        bootstrap — any other installer program may only be READ from.
-
-        Installer programs other than pip (`_INSTALLER_PROGRAMS`: uv, uvx,
-        pipx, poetry, conda, mamba, micromamba, pipenv, pdm, hatch, tox,
-        nox, pre-commit, pip-sync/piptools, rye, pixi, easy_install, flit,
-        and `python setup.py`), by name, path, wrapper or `python -m`,
-        resolve packages where no install-line arm looks and none reads
-        constraints-ci.txt. ALLOWLIST polarity: an invocation passes only
-        when it provably installs nothing — no verb and only
-        --version/--help, or a read-only verb (`_INSTALLER_READ_ONLY_VERBS`:
-        list, info, show, help, version, tree, freeze, check; `uv pip <v>`
-        and `conda env <v>` read the second verb). Every other verb, named
-        or not, reddens. `uv run` is refused in EVERY form: it syncs the
-        project environment and installs a script's PEP 723 inline
-        dependencies, so it has no read-only form. Read over every
-        shell text CI executes (`_population_texts`: `run:` strings and the
-        repo scripts they run) and over .cursor/install.sh. An ACTION that
-        installs or runs such a tool is held by the action allowlist
-        (test_every_third_party_action_is_allowlisted), not by name here.
-        A tool or package CI needs belongs on the canonical install line,
-        where it is pinned.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. This skip is NO INFORMATION about tool "
-                "runners — never read it as a pass."
-            )
-        offenders = []
-        for label, text in self._population_texts(root):
-            offenders += [
-                f"{label}: {cmd!r}" for cmd in self._tool_runner_commands(text)
-            ]
-        script = root / ".cursor" / "install.sh"
-        if script.exists():
-            offenders += [
-                f"{script.name}: {cmd!r}" for cmd in
-                self._tool_runner_commands(script.read_text(encoding="utf-8"))
-            ]
-        assert not offenders, (
-            f"TOOL-RUNNER DRIFT: {offenders}. Each invokes an installer "
-            f"other than the constrained pip line in a form that is not "
-            f"read-only, so it can resolve packages from an index or "
-            f"channel constraints-ci.txt never pins, with the checkout in "
-            f"reach. (`uv run` is refused in every form: it syncs the "
-            f"project environment and installs a script's PEP 723 inline "
-            f"dependencies.) A vetted tool or package goes on the canonical "
-            f"constrained pip install line instead, where every coverage "
-            f"arm reads and pins it; a read-only use (--version, list, "
-            f"show) passes as it is."
-        )
 
     def test_every_third_party_action_is_allowlisted(self):
         """Every third-party action CI uses is on a VETTED allowlist.
 
         An action is code CI runs that no `run:` text shows, and many
-        install packages internally (pre-commit/action pip-installs
-        pre-commit, setup-uv/ruff-action/setup-miniconda install their
-        tools) with nothing constraints-ci.txt can pin. A name DENY-list
-        only catches the installers someone thought of, so this is an
-        ALLOWLIST: every `uses:` reference to another repository — step
-        level, or a job-level reusable workflow — across every workflow and
-        followed local action (`_execution_population`) must be in
-        `_ALLOWED_THIRD_PARTY_ACTIONS`, keyed on `owner/repo[/path]` with
-        the `@ref` stripped. `docker://` images are never allowed. Local
-        `./` actions are not allowlisted: the census follows and reads
-        them. The setup-python `with.pip-install` input keeps its own arm,
-        because an allowlisted action can still be told to install.
+        install packages internally. ALLOWLIST: every `uses:` reference to
+        another repository — step level, or a job-level reusable workflow —
+        in every workflow under .github/workflows/, every action under
+        .github/actions/, and every local action a `uses: ./<path>` names
+        (followed recursively) must be in `_ALLOWED_THIRD_PARTY_ACTIONS`,
+        keyed on `owner/repo[/path]` with the `@ref` stripped. `docker://`
+        images are never allowed.
         """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. This skip is NO INFORMATION about the "
-                "action allowlist — never read it as a pass."
-            )
-        yaml_files, steps, _texts, _files = self._execution_population(root)
-        references = [(label, step.get("uses")) for label, step in steps]
-        for path in yaml_files:
+        root = self._require_root("the action allowlist")
+        queue = self._workflow_files(root) + self._action_files(root)
+        seen, references = set(), []
+        while queue:
+            path = queue.pop(0)
+            if path.resolve() in seen:
+                continue
+            seen.add(path.resolve())
             doc = self._load_workflow_yaml(path)
+            rel = path.relative_to(root).as_posix()
+            entries = [(f"{rel} step", s.get("uses")) for s in self._steps_of(doc)]
             for jid, job in ((doc or {}).get("jobs") or {}).items() \
                     if isinstance(doc, dict) else []:
                 if isinstance(job, dict):
-                    references.append(
-                        (f"{path.relative_to(root).as_posix()} job {jid}",
-                         job.get("uses")))
-        offenders = []
-        for label, uses in references:
-            if not isinstance(uses, str) or uses.startswith("./"):
-                continue
-            name = uses.split("@")[0].rstrip("/").lower()
-            if uses.startswith("docker://") \
-                    or name not in self._ALLOWED_THIRD_PARTY_ACTIONS:
-                offenders.append(f"{label}: uses {uses!r}")
+                    entries.append((f"{rel} job {jid}", job.get("uses")))
+            for label, uses in entries:
+                if not isinstance(uses, str):
+                    continue
+                if uses.startswith("./"):
+                    target = root / uses[2:].split("@")[0]
+                    if target.is_file():
+                        queue.append(target)
+                    for name in ("action.yml", "action.yaml"):
+                        if (target / name).is_file():
+                            queue.append(target / name)
+                    continue
+                references.append((label, uses))
+        offenders = [
+            f"{label}: uses {uses!r}" for label, uses in references
+            if uses.startswith("docker://")
+            or uses.split("@")[0].rstrip("/").lower()
+            not in self._ALLOWED_THIRD_PARTY_ACTIONS
+        ]
         assert not offenders, (
             f"ACTION ALLOWLIST DRIFT: {offenders} are not on the vetted "
             f"allowlist. An action runs code no `run:` text shows, and an "
             f"installing action resolves packages constraints-ci.txt cannot "
             f"pin. Confirm the action installs nothing unpinned (read its "
             f"action.yml and what it runs), then add `owner/repo[/path]` to "
-            f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change — or put what "
-            f"it installs on the canonical install line instead."
+            f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change."
         )
 
     def _repo_copy_carrying(self, tmp_path, workflow_text=None,
                             script_text=None, extra_files=None):
-        """A minimal repo copy over a POSITIVE marker, for the mutation arms.
-
-        The arms in this class find the repo root by marker
-        (`.claude-plugin/marketplace.json`); this rig plants that marker
-        over a scratch tree so a mutation lands on a COPY — never the
-        checkout — while constraints-ci.txt and pyproject.toml ship
-        verbatim, because every arm compares the mutated surface against
-        the REAL pins and floor. Every file the real execution walk reads
-        is copied (`_execution_population`: the workflows plus every local
-        action and repo script they run), with
-        tests.yml and the install script defaulting to their real bytes, so
-        a mutation is one targeted substitution on top of the shipped
-        state. `extra_files` maps a repo-relative path to text, for
-        mutations that ADD a file (a second workflow, a composite action)
-        or replace a non-default one (constraints-ci.txt).
-        """
+        """A minimal repo copy over a POSITIVE marker, for the mutation arms:
+        the workflows, .github/actions, constraints-ci.txt, pyproject.toml
+        and .cursor/install.sh, copied verbatim so a mutation is one
+        targeted substitution on the shipped state. `extra_files` maps a
+        repo-relative path to text, to add or replace a file."""
         root = self._real_repo_root()
         if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout and the mutation arms cannot copy the "
-                "real surfaces to mutate. This skip is NO INFORMATION "
-                "about the guards — never read it as a pass."
-            )
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; the "
+                        "mutation arms cannot copy the real surfaces.")
         (tmp_path / ".claude-plugin").mkdir(parents=True)
         (tmp_path / ".claude-plugin" / "marketplace.json").write_text(
             "{}", encoding="utf-8")
-        (tmp_path / ".github" / "workflows").mkdir(parents=True)
-        for path in self._execution_population(root)[3]:
+        for path in self._workflow_files(root) + self._action_files(root):
             target = tmp_path / path.relative_to(root)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -2135,8 +878,7 @@ class TestDependencyDriftIsDetectable:
                 (root / name).read_text(encoding="utf-8"), encoding="utf-8")
         (tmp_path / ".cursor").mkdir(parents=True)
         (tmp_path / ".cursor" / "install.sh").write_text(
-            script_text
-            if script_text is not None
+            script_text if script_text is not None
             else (root / ".cursor" / "install.sh").read_text(encoding="utf-8"),
             encoding="utf-8")
         for rel, text in (extra_files or {}).items():
@@ -2144,527 +886,6 @@ class TestDependencyDriftIsDetectable:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         return tmp_path
-
-    def test_pip3_spelling_cannot_sidestep_the_install_arms(
-            self, tmp_path, monkeypatch):
-        """MUTATION ARM (pip3): the runner-stock spelling must redden.
-
-        Probed at 74cc1d59 by the round-5 security lane: `pip3 install
-        evilpkg` evaded the census, exactly-one, coverage,
-        constraints-APPLIED AND the -r/-e tripwire simultaneously, because
-        every extractor defined 'an install' as the literal substring
-        `pip install`. pip3 is the stock spelling on GitHub's Ubuntu
-        runners — the most plausible one-word honest edit. Three shapes,
-        each a targeted substitution on a COPY of the real workflow, each
-        asserting the SHIPPED arm that kills it (never a reimplementation
-        beside it): a second inline install step reddens the exactly-one
-        parse; an install inside an existing `run: |` block reddens the
-        census equality; and the canonical spelling switched to pip3
-        while smuggling `-r` past the value-taking-flag tokenizer reddens
-        the tripwire — the arm that exists precisely for that flag, which
-        an install-line spelling change must not slip past.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        canonical = self._ci_install_line(workflow)
-
-        # Shape 1: a SECOND inline install step (key-form `run:` line), so
-        # the exactly-one parse is the arm that must fire.
-        inline_second = real_text.replace(
-            canonical,
-            canonical + "\n      - name: Rogue installer\n"
-                        "        run: pip3 install evilpkg",
-            1,
-        )
-        copy1 = self._repo_copy_carrying(
-            tmp_path / "inline", workflow_text=inline_second)
-        monkeypatch.setattr(
-            type(self), "_source_repo_root", lambda self: copy1)
-        with pytest.raises(AssertionError, match="PARSE AMBIGUITY"):
-            self.test_declared_packages_match_the_ci_install_line()
-
-        # Shape 2: an install inside an EXISTING run: | block body — the
-        # canonical parse still sees exactly one line, so only the census
-        # equality can fire.
-        block_second = real_text.replace(
-            "          ruff --version\n",
-            "          ruff --version\n          pip3 install evilpkg\n",
-            1,
-        )
-        copy2 = self._repo_copy_carrying(
-            tmp_path / "block", workflow_text=block_second)
-        monkeypatch.setattr(
-            type(self), "_source_repo_root", lambda self: copy2)
-        with pytest.raises(AssertionError, match="INSTALL CENSUS DRIFT"):
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-
-        # Shape 3: the canonical spelling switched to pip3 with `-r`
-        # smuggled aboard — every other arm stays green (the flag's VALUE
-        # is consumed by the tokenizer), so the tripwire must be the kill.
-        switched = real_text.replace(
-            canonical,
-            canonical.replace("python -m pip install", "pip3 install")
-            + " -r requirements-evil.txt",
-            1,
-        )
-        copy3 = self._repo_copy_carrying(
-            tmp_path / "tripwire", workflow_text=switched)
-        monkeypatch.setattr(
-            type(self), "_source_repo_root", lambda self: copy3)
-        with pytest.raises(AssertionError, match="REQUIREMENTS-FLAG DRIFT"):
-            self.test_install_lines_admit_no_requirements_or_editable_flags()
-
-    def test_plain_scalar_run_continuation_is_refused(
-            self, tmp_path, monkeypatch):
-        """MUTATION ARM (folded scalar): the shape is refused, not modelled.
-
-        Probed at 74cc1d59: YAML folds a deeper-indented bare line after a
-        plain `run: <command>` into ONE executed scalar (ground-truthed
-        with yaml.safe_load — the folded text IS the step's run string),
-        while every line-oriented arm reads the first line only. Both
-        probe directions must redden under the refusal: the fold carrying
-        a rogue OPERAND (every pinned operand stays on the first line, so
-        the pre-fix arms were green throughout), and the fold carrying a
-        whole `pip3 install` that no census line ever sees. The shipped
-        arms are invoked against the copy, so the kill is theirs, not a
-        beside-the-point reimplementation.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        canonical = self._ci_install_line(workflow)
-
-        # Probe 1: the fold carries a rogue OPERAND.
-        folded_operand = real_text.replace(
-            canonical, canonical + "\n          evilpkg", 1)
-        copy1 = self._repo_copy_carrying(
-            tmp_path / "operand", workflow_text=folded_operand)
-        monkeypatch.setattr(
-            type(self), "_source_repo_root", lambda self: copy1)
-        with pytest.raises(
-                AssertionError, match="PLAIN-SCALAR RUN CONTINUATION"):
-            self.test_constraints_pins_cover_the_install_line()
-
-        # Probe 2: the fold carries the INSTALL ITSELF — neither the run
-        # line nor any census line contains a pip command, so only the
-        # shape refusal can see it.
-        folded_install = real_text.replace(
-            canonical,
-            "        run: echo warming\n"
-            "          && pip3 install evilpkg",
-            1,
-        )
-        copy2 = self._repo_copy_carrying(
-            tmp_path / "install", workflow_text=folded_install)
-        monkeypatch.setattr(
-            type(self), "_source_repo_root", lambda self: copy2)
-        with pytest.raises(
-                AssertionError, match="PLAIN-SCALAR RUN CONTINUATION"):
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-
-    def test_script_pip3_install_is_enumerated(self, tmp_path, monkeypatch):
-        """MUTATION ARM (script surface): a script `pip3 install` reddens.
-
-        The script extractor shared the substring anchor, so a
-        `pip3 install evilpkg` line in .cursor/install.sh read as no
-        command at all — riding past the constraints-APPLIED all() and
-        the set parity while floating an unpinned package into the local
-        mirror. The shipped cursor-parity arm must redden naming the
-        constraint the command fails to apply.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        script = root / ".cursor" / "install.sh"
-        mutated = script.read_text(encoding="utf-8") \
-            + "\npip3 install evilpkg\n"
-        copy = self._repo_copy_carrying(
-            tmp_path / "script", script_text=mutated)
-        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
-        with pytest.raises(AssertionError, match="does not apply constraints"):
-            self.test_cursor_install_sh_matches_the_ci_install_line()
-
-    def test_joined_install_spells_are_censused(self, tmp_path, monkeypatch):
-        """MUTATION ARM (join class): every wrapped/widened install spell
-        reddens through a shipped arm.
-
-        Round-6 probes (architect A6-1, tester T6-1, security S6-1/S6-2)
-        shared one root cause: every extractor anchored on a LINE-LOCAL
-        literal `pip install` substring, so shapes that execute an install
-        read as no install at all. The normalization fixes the class —
-        backslash continuations joined in `|` bodies and script commands,
-        `>` bodies unfolded, the anchor's space widened to any whitespace
-        run — and this arm certifies each probed shape against the
-        SHIPPED arm that must kill it, never a reimplementation.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        canonical = self._ci_install_line(workflow)
-
-        def against(workflow_text, name):
-            copy = self._repo_copy_carrying(
-                tmp_path / name, workflow_text=workflow_text)
-            monkeypatch.setattr(
-                type(self), "_source_repo_root", lambda self: copy)
-
-        # P1 — double space on an inline second step: the shell collapses
-        # the run, so only the widened anchor can count the line, and the
-        # exactly-one parse must be the kill.
-        against(real_text.replace(
-            canonical,
-            canonical + "\n      - name: Rogue double-spaced installer\n"
-                        "        run: pip  install evilpkg",
-            1), "p1")
-        with pytest.raises(AssertionError, match="PARSE AMBIGUITY"):
-            self.test_declared_packages_match_the_ci_install_line()
-
-        # P2 — a folded (`>-`) body splitting pip and install across body
-        # lines: YAML folds them into one executed scalar, so only the
-        # unfold can see the install, and the census equality must kill.
-        against(real_text.replace(
-            canonical,
-            canonical + "\n      - name: Rogue folded installer\n"
-                        "        run: >-\n"
-                        "          pip\n"
-                        "          install evilpkg",
-            1), "p2")
-        with pytest.raises(AssertionError, match="INSTALL CENSUS DRIFT"):
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-
-        # P3 — backslash continuation inside a `|` body: bash joins
-        # `pip \` + `install evilpkg` into one argv, so the census must
-        # read the JOIN, not the lines.
-        against(real_text.replace(
-            "          ruff --version\n",
-            "          ruff --version\n          pip \\\n"
-            "          install evilpkg\n",
-            1), "p3")
-        with pytest.raises(AssertionError, match="INSTALL CENSUS DRIFT"):
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-
-        # P3b — the natural wrap of the 130-char canonical spelling:
-        # `python -m pip \` + `install evilpkg` joins the same way.
-        against(real_text.replace(
-            "          ruff --version\n",
-            "          ruff --version\n          python -m pip \\\n"
-            "          install evilpkg\n",
-            1), "p3b")
-        with pytest.raises(AssertionError, match="INSTALL CENSUS DRIFT"):
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-
-        # S6-2 — a TAB as the separator in a `|` body: tab is IFS to the
-        # shell, so the widened anchor must match what a literal space
-        # missed. Inline tabs are invalid YAML and die at parse; the
-        # block body is the live spelling.
-        against(real_text.replace(
-            "          ruff --version\n",
-            "          ruff --version\n          pip\tinstall evilpkg\n",
-            1), "tab")
-        with pytest.raises(AssertionError, match="INSTALL CENSUS DRIFT"):
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-
-        # S1 — the script twin: a wrapped `python -m pip \` + `install
-        # evilpkg` in .cursor/install.sh enumerates after the join, so the
-        # constraints-APPLIED all() reddens naming the constraint the
-        # rogue command fails to apply.
-        script = root / ".cursor" / "install.sh"
-        mutated = script.read_text(encoding="utf-8") \
-            + "\npython -m pip \\\ninstall evilpkg\n"
-        copy = self._repo_copy_carrying(
-            tmp_path / "s1", script_text=mutated)
-        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
-        with pytest.raises(AssertionError, match="does not apply constraints"):
-            self.test_cursor_install_sh_matches_the_ci_install_line()
-
-    @staticmethod
-    def _pip_environment_keys(workflow_text):
-        """PIP_* keys from every STATIC `env:` mapping in one workflow or
-        composite action, read STRUCTURALLY.
-
-        The mappings are enumerated from yaml.safe_load's parse, not from
-        line shapes: block form, trailing comment, single-line flow and
-        WRAPPED flow (`env: {` with keys on later lines) are one mapping
-        node to the parser, so no spelling arm chases the next spelling.
-        The STATIC channels walked are: workflow-level env, job-level env,
-        a job CONTAINER's env (it applies to every step in a containerized
-        job), each job step's env, and each composite action step's env.
-        SERVICE containers' env (`jobs.<id>.services.<id>.env`) is
-        deliberately NOT harvested: a service container runs a support
-        process the job talks TO over the network, and its environment
-        never reaches the job's own process. `environment:` is a different
-        key and is never consulted. Keys are compared case-insensitively
-        (over-catch: pip itself reads only uppercase, but a lowercase
-        `pip_*` key reads as intended-for-pip to every future reader even
-        if pip ignores it). This reads STATIC configuration only; pip
-        configuration a step WRITES at run time is read by
-        `_runtime_pip_config_writes`. A workflow that does not PARSE is a
-        PARSE FAILURE, not a clean read — an unparseable workflow cannot
-        run on GitHub, so a loud red is the honest outcome, never a green
-        line-scan over text no runner would accept.
-        """
-        try:
-            doc = yaml.safe_load(workflow_text)
-        except yaml.YAMLError as exc:
-            raise AssertionError(
-                f"PARSE FAILURE, not a clean env read: the workflow does "
-                f"not parse as YAML ({exc.__class__.__name__}), so its "
-                f"env: mappings cannot be enumerated. GitHub would refuse "
-                f"to run this workflow; fix the syntax."
-            ) from exc
-        offenders = []
-
-        def harvest(env):
-            if isinstance(env, dict):
-                offenders.extend(
-                    str(k) for k in env if str(k).upper().startswith("PIP_")
-                )
-
-        if isinstance(doc, dict):
-            harvest(doc.get("env"))
-            for job in (doc.get("jobs") or {}).values():
-                if not isinstance(job, dict):
-                    continue
-                harvest(job.get("env"))
-                container = job.get("container")
-                if isinstance(container, dict):
-                    harvest(container.get("env"))
-                for step in job.get("steps") or []:
-                    if isinstance(step, dict):
-                        harvest(step.get("env"))
-            runs = doc.get("runs")
-            if isinstance(runs, dict):
-                for step in runs.get("steps") or []:
-                    if isinstance(step, dict):
-                        harvest(step.get("env"))
-        return offenders
-
-    # A shell word that ASSIGNS a pip setting: `PIP_X=...` as an
-    # assignment, an `export` operand, or the text echoed/printed into
-    # $GITHUB_ENV (`echo "PIP_INDEX_URL=..." >> "$GITHUB_ENV"`, a heredoc
-    # body line, `printf 'PIP_X=%s\n'`) — the shell model has already
-    # removed the quotes, so every spelling is one word shape.
-    _PIP_ASSIGNMENT_RE = re.compile(r"(?i)^pip_[a-z0-9_]*=")
-
-    @classmethod
-    def _runtime_pip_config_writes(cls, text):
-        """pip configuration that shell text WRITES while it runs.
-
-        Three shapes, each read from the simple commands the text executes
-        (`_simple_commands`): a `PIP_*=` assignment word anywhere in a
-        command (a direct assignment, `export`, or a line written into
-        $GITHUB_ENV, which configures every LATER step's pip); a
-        `pip config set|unset|edit` (it writes the pip config file); and a
-        command naming a `pip.conf`/`pip.ini` file (writing one by hand).
-        Over-catch by design: an `echo` that merely prints a PIP_ line also
-        reddens, and a legitimate need is recorded in the env arm rather
-        than carved out here.
-        """
-        writes = []
-        for words in cls._simple_commands(text, keep_redirect_targets=True):
-            command = " ".join(words)
-            if any(cls._PIP_ASSIGNMENT_RE.match(w) for w in words):
-                writes.append(command)
-                continue
-            parsed = cls._parse_pip_words(words)
-            if parsed is not None and parsed[0] == "config" and parsed[2][:1] \
-                    and parsed[2][0] in ("set", "unset", "edit"):
-                writes.append(command)
-                continue
-            if any(w.rsplit("/", 1)[-1] in ("pip.conf", "pip.ini") for w in words):
-                writes.append(command)
-        return writes
-
-    def test_no_pip_environment_key_redirects_the_install(self):
-        """No pip configuration outside the install line's own arguments.
-
-        PIP_INDEX_URL redirects every resolve to an index of someone
-        else's choosing, PIP_CONSTRAINT re-points the constraint file,
-        and the constraints file's `==` pins carry no hashes — so a
-        redirected index can serve attacker builds of the pinned
-        versions. Such configuration touches none of the surfaces the
-        install-line arms read, so this arm reads it directly.
-
-        POPULATION, stated so a green is read at its true width:
-          - STATIC env: every `env:` mapping `_pip_environment_keys` walks,
-            in every workflow and followed local action of the execution
-            population (`_execution_population`).
-          - RUNTIME writes: every shell text CI executes (`run:` strings
-            and the repo scripts they run, `_population_texts`), and
-            .cursor/install.sh, read by `_runtime_pip_config_writes`
-            (`PIP_*=` assignments including $GITHUB_ENV lines,
-            `pip config set|unset|edit`, a named pip.conf/pip.ini).
-        NOT read: configuration an action sets internally (its code is not
-        in this tree), a pip config file present on the runner image, and
-        values computed at run time and assigned through an indirection
-        (`export "$NAME=..."`). A green is a statement about the population
-        above, not about every way pip can be configured.
-
-        TRIPWIRE, deliberately over-catch-only: any hit reddens naming
-        itself whether or not the use looks legitimate — a future
-        configuration with a real purpose is reconciled by justifying it
-        HERE and naming it in this docstring, never by deleting the arm.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
-                f"above {Path(__file__).resolve()}, so this is not a PACT "
-                "source checkout. The expected case is an INSTALLED PLUGIN "
-                "CACHE, which has no .github/ tree by design. This skip "
-                "is NO INFORMATION about PIP_* environment keys — never "
-                "read it as a pass."
-            )
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) "
-            f"but {workflow} is missing. The env tripwire cannot run. "
-            f"This is a FAILURE, not a skip: inside a checkout the "
-            f"workflow is required."
-        )
-        offenders = []
-        for path in self._execution_population(root)[0]:
-            rel = path.relative_to(root).as_posix()
-            offenders += [
-                f"{rel}: env {key}" for key in
-                self._pip_environment_keys(path.read_text(encoding="utf-8"))
-            ]
-        for label, text in self._population_texts(root):
-            offenders += [
-                f"{label}: {cmd!r}"
-                for cmd in self._runtime_pip_config_writes(text)
-            ]
-        script = root / ".cursor" / "install.sh"
-        if script.exists():
-            offenders += [
-                f"{script.name}: {cmd!r}" for cmd in
-                self._runtime_pip_config_writes(
-                    script.read_text(encoding="utf-8"))
-            ]
-        assert not offenders, (
-            f"PIP ENVIRONMENT DRIFT: {offenders} configure pip OUTSIDE "
-            f"every install-line arm — PIP_INDEX_URL redirects resolves "
-            f"to an index the constraints file never vetted, and the "
-            f"pins carry no hashes, so the redirect serves builds of the "
-            f"pinned versions. pip configuration needs a recorded decision "
-            f"in test_no_pip_environment_key_redirects_the_install, not a "
-            f"silent env: key, $GITHUB_ENV line, export or pip config."
-        )
-
-    def test_a_pip_env_key_reddens_naming_itself(self, tmp_path, monkeypatch):
-        """MUTATION ARM (env): every env: spelling of a PIP_ key reddens by
-        name.
-
-        PREDICTIONS (written before the probes run): each of the five
-        shapes below — step-level block, job-level block, trailing
-        comment on the `env:` line, single-line flow mapping, and the
-        WRAPPED flow mapping (`env: {` with keys on later lines, the
-        cycle-12 Bugbot shape) — reddens the shipped tripwire with
-        PIP_INDEX_URL named, because the detector reads the env
-        mappings STRUCTURALLY (yaml.safe_load), the way a runner does;
-        a workflow-level env: shape and a job CONTAINER's env (the
-        cycle-13 Bugbot channel — it applies to every step in a
-        containerized job, the install included) redden the same way;
-        a deployment `environment:` key is NOT an env: mapping and
-        stays unflagged, and so does a SERVICE container's env (its
-        variables never reach the job's own process); and an
-        unparseable workflow reddens as PARSE FAILURE rather than
-        line-scanning green over text no runner would accept.
-        The comment and flow spellings rode the cycle-10 line scanner
-        green (Bugbot, cycle 11), the wrapped flow rode the cycle-11
-        same-line scan green (Bugbot, cycle 12) — the structural read
-        retires the spelling class.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        canonical = self._ci_install_line(workflow)
-
-        def assert_reddens(name, mutated_text):
-            copy = self._repo_copy_carrying(
-                tmp_path / name, workflow_text=mutated_text)
-            monkeypatch.setattr(
-                type(self), "_source_repo_root", lambda self: copy)
-            with pytest.raises(
-                    AssertionError, match="PIP ENVIRONMENT DRIFT") as exc:
-                self.test_no_pip_environment_key_redirects_the_install()
-            assert "PIP_INDEX_URL" in str(exc.value), (
-                f"the red must name the offending key; got: {exc.value}"
-            )
-
-        assert_reddens("step-block", real_text.replace(
-            canonical,
-            canonical + "\n        env:\n"
-                        "          PIP_INDEX_URL: https://evil.example/simple",
-            1))
-        assert_reddens("job-block", real_text.replace(
-            "    steps:",
-            "    env:\n"
-            "      PIP_INDEX_URL: https://evil.example/simple\n"
-            "    steps:", 1))
-        assert_reddens("trailing-comment", real_text.replace(
-            canonical,
-            canonical + "\n        env: # point pip elsewhere\n"
-                        "          PIP_INDEX_URL: https://evil.example/simple",
-            1))
-        assert_reddens("flow-mapping", real_text.replace(
-            canonical,
-            canonical + "\n        env: "
-                        "{PIP_INDEX_URL: https://evil.example/simple}",
-            1))
-        assert_reddens("wrapped-flow", real_text.replace(
-            canonical,
-            canonical + "\n        env: {\n"
-                        "          PIP_INDEX_URL: https://evil.example/simple\n"
-                        "}",
-            1))
-        assert_reddens("workflow-level", real_text.replace(
-            "on:\n",
-            "env:\n  PIP_INDEX_URL: https://evil.example/simple\non:\n", 1))
-        assert_reddens("container-env", real_text.replace(
-            "    steps:",
-            "    container:\n"
-            "      image: ubuntu:24.04\n"
-            "      env:\n"
-            "        PIP_INDEX_URL: https://evil.example/simple\n"
-            "    steps:", 1))
-
-        # CONTROL: `environment:` (a deployment target) is a different
-        # key from `env` and stays unflagged.
-        assert self._pip_environment_keys(
-            "jobs:\n  release:\n    environment: production\n") == []
-
-        # BOUND: a SERVICE container's env never reaches the job's own
-        # process — deliberately unharvested, and pinned here so a
-        # future widening cannot silently change that decision.
-        assert self._pip_environment_keys(
-            "jobs:\n  x:\n    services:\n"
-            "      redis:\n        env:\n"
-            "          PIP_INDEX_URL: https://evil.example/simple\n") == []
-
-        # PARSE FAILURE: an unparseable workflow reddens rather than
-        # reading green over text GitHub would refuse to run.
-        broken = real_text.replace(
-            canonical, canonical + "\n        env: {unclosed", 1)
-        copy = self._repo_copy_carrying(
-            tmp_path / "unparseable", workflow_text=broken)
-        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
-        with pytest.raises(AssertionError, match="PARSE FAILURE"):
-            self.test_no_pip_environment_key_redirects_the_install()
 
     def test_the_floor_literals_agree(self):
         """Every statement of the Python floor must move together.
@@ -2862,636 +1083,6 @@ class TestDependencyDriftIsDetectable:
             f"is the reminder, not a bug."
         )
 
-    def _shape_reddens(self, tmp_path, monkeypatch, name, arm, match,
-                       workflow_text=None, script_text=None,
-                       extra_files=None):
-        """Run the SHIPPED arm `arm` against a rig copy carrying one shape
-        and require it to redden with `match` — the kill is the shipped
-        arm's, never a reimplementation beside it."""
-        copy = self._repo_copy_carrying(
-            tmp_path / name, workflow_text=workflow_text,
-            script_text=script_text, extra_files=extra_files)
-        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
-        with pytest.raises(AssertionError, match=match):
-            getattr(self, arm)()
-
-    def _shape_stays_green(self, tmp_path, monkeypatch, name, arm,
-                           workflow_text=None, script_text=None,
-                           extra_files=None):
-        """CONTROL: a faithful spelling the parse must ACCEPT."""
-        copy = self._repo_copy_carrying(
-            tmp_path / name, workflow_text=workflow_text,
-            script_text=script_text, extra_files=extra_files)
-        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
-        getattr(self, arm)()
-
-    def test_pip_argv_spellings_redden_at_their_arms(self, tmp_path, monkeypatch):
-        """MUTATION ARM (argv class): every spelling pip accepts is ONE
-        option to the arms.
-
-        Round-7 probes: the tripwire matched literal flag text, so pip's
-        attached short form (`-rreq.txt`, `-e./foo`) installed a
-        requirements file or editable path with every arm green; the
-        index/source flags were never read at all; and the census anchor
-        needed `install` right after a literal `pip`/`pip3`, so a global
-        option between them (`pip --quiet install`), `pip3.12` and
-        `python -mpip` hid an install. Each shape below was GREEN against
-        the literal anchors and must now redden at the named shipped arm;
-        the attached `-c` spelling is the CONTROL the parse must accept.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        real_script = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
-        canonical = self._ci_install_line(workflow)
-        lint_anchor = "          ruff --version\n"
-        tripwire = "test_install_lines_admit_no_requirements_or_editable_flags"
-        census = "test_every_executed_pip_install_is_the_canonical_install_line"
-
-        def on_line(extra):
-            return real_text.replace(canonical, canonical + extra, 1)
-
-        def in_block(command):
-            return real_text.replace(
-                lint_anchor, lint_anchor + f"          {command}\n", 1)
-
-        for name, text, match in [
-            ("attached-r", on_line(" -rreq.txt"), "REQUIREMENTS-FLAG DRIFT"),
-            ("bundled-Ur", on_line(" -Urreq.txt"), "REQUIREMENTS-FLAG DRIFT"),
-            ("eq-requirement", on_line(" --requirement=req.txt"),
-             "REQUIREMENTS-FLAG DRIFT"),
-            ("extra-index", on_line(" --extra-index-url https://x.example/simple"),
-             "INDEX-REDIRECT DRIFT"),
-            ("short-i", on_line(" -i https://x.example/simple"),
-             "INDEX-REDIRECT DRIFT"),
-            ("attached-i", on_line(" -ihttps://x.example/simple"),
-             "INDEX-REDIRECT DRIFT"),
-            ("find-links", on_line(" --find-links https://x.example/"),
-             "INDEX-REDIRECT DRIFT"),
-            ("trusted-host", on_line(" --trusted-host x.example"),
-             "INDEX-REDIRECT DRIFT"),
-            ("no-index", on_line(" --no-index"), "INDEX-REDIRECT DRIFT"),
-            ("abbreviated", on_line(" --extra-index https://x.example/simple"),
-             "INDEX-REDIRECT DRIFT"),
-            ("global-position", real_text.replace(
-                canonical,
-                canonical.replace("pip install",
-                                  "pip --index-url https://x.example/simple install"),
-                1), "INDEX-REDIRECT DRIFT"),
-            # Install-source flags pip added (PEP 735 groups, PEP 723
-            # scripts) and an index flag pip 26 gained.
-            ("group-eq", on_line(" --group=test"), "REQUIREMENTS-FLAG DRIFT"),
-            ("group-sep", on_line(" --group test"), "REQUIREMENTS-FLAG DRIFT"),
-            ("from-script", on_line(" --requirements-from-script=x.py"),
-             "REQUIREMENTS-FLAG DRIFT"),
-            ("pypi-url", on_line(" --pypi-url https://x.example/"),
-             "INDEX-REDIRECT DRIFT"),
-            # ALLOWLIST polarity: any option not vetted reddens naming
-            # itself, including resolver knobs and a foreign -c file.
-            ("prefer-binary", on_line(" --prefer-binary"),
-             "UNVETTED PIP FLAG DRIFT"),
-            ("upgrade-strategy", on_line(" --upgrade-strategy=eager"),
-             "UNVETTED PIP FLAG DRIFT"),
-            ("target-dir", on_line(" --target /tmp/site"),
-             "UNVETTED PIP FLAG DRIFT"),
-            ("unknown-flag", on_line(" --brand-new-flag"),
-             "UNVETTED PIP FLAG DRIFT"),
-            ("foreign-constraints", on_line(" -c extra-constraints.txt"),
-             "UNVETTED PIP FLAG DRIFT"),
-        ]:
-            self._shape_reddens(tmp_path, monkeypatch, name, tripwire, match,
-                                workflow_text=text)
-
-        # CONTROLS: vetted options and every shipped spelling of the
-        # constraints path pass the tripwire AND the constraints arm.
-        for name, text in [
-            ("vetted-flags", on_line(" -q --no-cache-dir --no-input")),
-            ("dot-constraints", real_text.replace(
-                canonical, canonical.replace(
-                    "-c constraints-ci.txt", "-c ./constraints-ci.txt"), 1)),
-            ("workspace-constraints", real_text.replace(
-                canonical, canonical.replace(
-                    "-c constraints-ci.txt",
-                    "--constraint=$GITHUB_WORKSPACE/constraints-ci.txt"), 1)),
-        ]:
-            self._shape_stays_green(tmp_path, monkeypatch, name, tripwire,
-                                    workflow_text=text)
-            self._shape_stays_green(
-                tmp_path, monkeypatch, name + "-cov",
-                "test_constraints_pins_cover_the_install_line",
-                workflow_text=text)
-
-        # The option tables follow pip's own parser: a value option's VALUE
-        # is consumed, never read as a package (`--upgrade-strategy` was
-        # once listed value-less, so `eager` read as an operand).
-        for words, operands in [
-            ("pip install --upgrade-strategy eager x", ["x"]),
-            ("pip install --root-user-action ignore x", ["x"]),
-            ("pip install --group test x", ["x"]),
-            ("pip install -C k=v x", ["x"]),
-            ("pip install --pre --no-deps x", ["x"]),
-        ]:
-            assert self._parse_pip_words(words.split())[2] == operands, words
-        assert not (self._PIP_FLAGS_WITH_VALUE & self._PIP_KNOWN_LONG_FLAGS), (
-            "an option is listed both as value-taking and value-less")
-
-        for name, command in [
-            ("global-quiet", "python -m pip --quiet install evilpkg"),
-            ("global-q", "pip -q install evilpkg"),
-            # A value-taking global option this parser does NOT list: its
-            # value must be skipped, not misread as the subcommand.
-            ("unknown-global-value", "pip --brand-new-global 5 install evilpkg"),
-            ("pip3-12", "pip3.12 install evilpkg"),
-            ("m-attached", "python -mpip install evilpkg"),
-            ("python-path", "/usr/bin/python3 -m pip install evilpkg"),
-            ("sudo", "sudo pip install evilpkg"),
-            ("and-list", "cd pact-plugin && pip install evilpkg"),
-            ("subshell", "echo $(pip install evilpkg)"),
-            ("uv-pip", "uv pip install evilpkg"),
-            # Program identity by BASENAME (Bugbot B1).
-            ("uv-pip-by-path", "/usr/bin/uv pip install evilpkg"),
-        ]:
-            self._shape_reddens(tmp_path, monkeypatch, name, census,
-                                "INSTALL CENSUS DRIFT",
-                                workflow_text=in_block(command))
-
-        package_line = "python -m pip install --upgrade -c constraints-ci.txt \\"
-        upgrade_line = "python -m pip install --upgrade -c constraints-ci.txt pip\n"
-        for name, script, arm, match in [
-            ("script-group-on-upgrade",
-             real_script.replace(
-                 upgrade_line, upgrade_line.replace(" pip\n", " --group=dev pip\n"), 1),
-             tripwire, "REQUIREMENTS-FLAG DRIFT"),
-            ("script-attached-e",
-             real_script.replace(package_line, package_line + "\n  -e./foo \\", 1),
-             tripwire, "REQUIREMENTS-FLAG DRIFT"),
-            ("script-extra-index",
-             real_script.replace(
-                 package_line,
-                 package_line.replace(
-                     "\\", "--extra-index-url https://x.example/simple \\"), 1),
-             tripwire, "INDEX-REDIRECT DRIFT"),
-            ("script-pip3-12",
-             real_script + "\npip3.12 install evilpkg\n",
-             "test_cursor_install_sh_matches_the_ci_install_line",
-             "does not apply constraints"),
-        ]:
-            self._shape_reddens(tmp_path, monkeypatch, name, arm, match,
-                                script_text=script)
-
-        # FAIL-CLOSED CONTRACT (`_PIP_FLAGS_WITH_VALUE`): a value-taking
-        # flag this parser does not know must leave its VALUE read as a
-        # package operand, so the coverage arm reddens naming it as
-        # unpinned — never skip the value silently.
-        self._shape_reddens(
-            tmp_path, monkeypatch, "unknown-flag-value",
-            "test_constraints_pins_cover_the_install_line",
-            r"CONSTRAINT COVERAGE DRIFT: \['some-value'\]",
-            workflow_text=on_line(" --brand-new-flag some-value"))
-
-        # CONTROL: pip reads `-cconstraints-ci.txt` exactly as
-        # `-c constraints-ci.txt`, so the attached spelling still APPLIES
-        # the constraints file — the parse must not over-block it.
-        self._shape_stays_green(
-            tmp_path, monkeypatch, "attached-c",
-            "test_constraints_pins_cover_the_install_line",
-            workflow_text=real_text.replace(
-                canonical,
-                canonical.replace("-c constraints-ci.txt",
-                                  "-cconstraints-ci.txt"),
-                1))
-
-    def test_the_census_reads_every_file_ci_executes(self, tmp_path, monkeypatch):
-        """MUTATION ARM (population class): installs outside tests.yml,
-        in a flow-style step, or through an action input redden.
-
-        Round-7 probes: the census read one file line by line, so a second
-        workflow file, a local composite action and a flow-style step each
-        ran `pip install` with every arm green, and `actions/setup-python`'s
-        `pip-install:` input installed with no `run:` text at all.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        census = "test_every_executed_pip_install_is_the_canonical_install_line"
-        install_step = "      - name: Install test dependencies\n"
-
-        self._shape_reddens(
-            tmp_path, monkeypatch, "second-workflow", census,
-            "INSTALL CENSUS DRIFT", extra_files={
-                ".github/workflows/lint.yml":
-                    "name: lint\non: [pull_request]\njobs:\n  lint:\n"
-                    "    runs-on: ubuntu-latest\n    steps:\n"
-                    "      - run: pip install ruff\n"})
-        self._shape_reddens(
-            tmp_path, monkeypatch, "composite-action", census,
-            "INSTALL CENSUS DRIFT", extra_files={
-                ".github/actions/setup/action.yml":
-                    "name: setup\nruns:\n  using: composite\n  steps:\n"
-                    "    - run: pip install pytest-xdist\n      shell: bash\n"})
-        self._shape_reddens(
-            tmp_path, monkeypatch, "flow-step", census,
-            "INSTALL CENSUS DRIFT", workflow_text=real_text.replace(
-                install_step,
-                "      - {name: extra, run: pip install evilpkg}\n"
-                + install_step, 1))
-        # BLANKET STILL: a line under `- run: x` at the KEY's column or
-        # between dash and key is not a fold (YAML rejects it — measured
-        # with yaml.safe_load: col key-1 ParserError, col key ScannerError;
-        # folds begin at key+1). The refusal no longer flags it, and the
-        # structural read reddens it as a PARSE FAILURE instead, so no
-        # shape the refusal used to catch now reads green.
-        self._shape_reddens(
-            tmp_path, monkeypatch, "list-item-key-column", census,
-            "PARSE FAILURE|PLAIN-SCALAR RUN CONTINUATION",
-            workflow_text=real_text.replace(
-                install_step,
-                "      - run: echo warming\n        evilpkg\n"
-                + install_step, 1))
-        self._shape_reddens(
-            tmp_path, monkeypatch, "list-item-real-fold", census,
-            "PLAIN-SCALAR RUN CONTINUATION",
-            workflow_text=real_text.replace(
-                install_step,
-                "      - run: echo warming\n          && pip install evilpkg\n"
-                + install_step, 1))
-        # CONTROL: a list-item step with a SIBLING key (`- run: x` +
-        # `shell: bash`) is a faithful shape, not a fold. The plain-scalar
-        # refusal measured its indent from the dash and refused it; it must
-        # now read the sibling as the end of the scalar.
-        self._shape_stays_green(
-            tmp_path, monkeypatch, "list-item-sibling", census,
-            workflow_text=real_text.replace(
-                install_step,
-                "      - run: echo warming\n        shell: bash\n"
-                + install_step, 1))
-        self._shape_reddens(
-            tmp_path, monkeypatch, "pip-install-input",
-            "test_no_action_input_installs_packages",
-            "ACTION-INPUT INSTALL DRIFT", workflow_text=real_text.replace(
-                '          python-version: "3.12"\n',
-                '          python-version: "3.12"\n'
-                '          pip-install: pytest-xdist\n', 1))
-
-    def test_inexact_constraint_pins_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (pin contract): `==` presence is not a pin.
-
-        Round-7 probe: a wildcard (`==0.17.*`) and an environment marker
-        inactive on the CI interpreter both passed a check that looked for
-        `==` anywhere in the line, while the direct dependency floated.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        pins = (root / "constraints-ci.txt").read_text(encoding="utf-8")
-        line = next(
-            ln for ln in pins.splitlines()
-            if ln.strip() and not ln.startswith("#"))
-        # The pin itself, without any trailing comment the shipped line may
-        # carry, so every shape below mutates the PIN, not its comment.
-        pin = re.split(r"(?:^|\s)#", line, maxsplit=1)[0].strip()
-        name, _, version = pin.partition("==")
-        major_minor = ".".join(version.split(".")[:2])
-        for shape, replacement in [
-            ("wildcard", f"{name}=={major_minor}.*"),
-            ("marker", f'{pin}; python_version < "3.11"'),
-            ("extra", f"{name}[dev]=={version}"),
-            # A comment is stripped first, so it cannot dress up a range.
-            ("commented-wildcard", f"{name}=={major_minor}.*  # floats"),
-        ]:
-            self._shape_reddens(
-                tmp_path, monkeypatch, shape,
-                "test_constraints_pins_cover_the_install_line",
-                "INEXACT PIN", extra_files={
-                    "constraints-ci.txt": pins.replace(line, replacement, 1)})
-
-        # CONTROL (over-block): pip ends a requirements line at whitespace
-        # + `#`, so an exact pin with a trailing comment IS an exact pin.
-        self._shape_stays_green(
-            tmp_path, monkeypatch, "trailing-comment",
-            "test_constraints_pins_cover_the_install_line", extra_files={
-                "constraints-ci.txt": pins.replace(
-                    line, f"{pin}  # pinned by the verified freeze", 1)})
-
-    def test_runtime_pip_config_reddens(self, tmp_path, monkeypatch):
-        """MUTATION ARM (runtime config): pip configured while CI RUNS.
-
-        Round-7 probes: `PIP_INDEX_URL` appended to $GITHUB_ENV and
-        `pip config set global.index-url` configured every later install
-        with every arm green, because the env arm read static `env:` only;
-        and an `export PIP_INDEX_URL` in .cursor/install.sh was never read.
-        Each must redden the env arm naming the command.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        real_script = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
-        install_step = "      - name: Install test dependencies\n"
-        env_arm = "test_no_pip_environment_key_redirects_the_install"
-
-        def before_install(run_block):
-            return real_text.replace(
-                install_step,
-                "      - name: mirror\n        run: |\n"
-                + "".join(f"          {ln}\n" for ln in run_block)
-                + install_step, 1)
-
-        for name, block in [
-            ("github-env-echo",
-             ['echo "PIP_INDEX_URL=https://x.example/simple" >> "$GITHUB_ENV"']),
-            ("github-env-printf",
-             ["printf 'PIP_INDEX_URL=%s\\n' https://x.example/simple >> $GITHUB_ENV"]),
-            ("github-env-heredoc",
-             ["cat >> \"$GITHUB_ENV\" <<'EOF'",
-              "PIP_EXTRA_INDEX_URL=https://x.example/simple", "EOF"]),
-            ("github-env-tee",
-             ["echo PIP_INDEX_URL=https://x.example/simple | tee -a $GITHUB_ENV"]),
-            ("pip-config-set",
-             ["python -m pip config set global.index-url https://x.example/simple"]),
-            ("pip-conf-file",
-             ["printf '[global]\\nindex-url=https://x.example\\n' > ~/.config/pip/pip.conf"]),
-        ]:
-            self._shape_reddens(tmp_path, monkeypatch, name, env_arm,
-                                "PIP ENVIRONMENT DRIFT",
-                                workflow_text=before_install(block))
-
-        self._shape_reddens(
-            tmp_path, monkeypatch, "composite-env", env_arm,
-            "PIP ENVIRONMENT DRIFT", extra_files={
-                ".github/actions/setup/action.yml":
-                    "name: setup\nruns:\n  using: composite\n  steps:\n"
-                    "    - run: echo hi\n      shell: bash\n      env:\n"
-                    "        PIP_INDEX_URL: https://x.example/simple\n"})
-        for name, line in [
-            ("script-export", "export PIP_INDEX_URL=https://x.example/simple"),
-            ("script-assign", "PIP_INDEX_URL=https://x.example/simple"),
-        ]:
-            self._shape_reddens(
-                tmp_path, monkeypatch, name, env_arm, "PIP ENVIRONMENT DRIFT",
-                script_text=real_script.replace(
-                    ". .venv/bin/activate\n",
-                    ". .venv/bin/activate\n" + line + "\n", 1))
-
-    def test_tool_runners_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (tool runners, installers, actions): each reddens
-        at its arm — commands at the tool-runner arm, actions at the
-        allowlist arm.
-
-        Round-7 probes: `pipx run`, `uvx` and a `uses:` of
-        astral-sh/ruff-action each executed an index-resolved tool with
-        every arm green, because none writes `pip install`.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        workflow = root / ".github" / "workflows" / "tests.yml"
-        real_text = workflow.read_text(encoding="utf-8")
-        real_script = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
-        lint_anchor = "          ruff --version\n"
-        lint_step = "      - name: Import-hygiene lint (F401/F821)\n"
-        arm = "test_no_tool_runner_executes_unpinned_code"
-        for name, command in [
-            ("pipx-run", "pipx run ruff check pact-plugin/"),
-            ("pipx-install", "pipx install ruff"),
-            ("uvx", "uvx ruff check pact-plugin/"),
-            ("uv-tool", "uv tool run ruff check pact-plugin/"),
-            ("uv-add", "uv add ruff"),
-            ("uv-sync", "uv sync"),
-            ("uv-run-with", "uv run --with ruff ruff check pact-plugin/"),
-            ("uv-run-with-eq", "uv run --with=ruff ruff check pact-plugin/"),
-            ("poetry-install", "poetry install"),
-            ("poetry-add", "poetry add ruff"),
-            ("conda-install", "conda install -y ruff"),
-            ("mamba-install", "mamba install -y ruff"),
-            ("micromamba-install", "micromamba install -y ruff"),
-            # ALLOWLIST polarity: verbs and programs no list named.
-            ("uv-pip-sync", "uv pip sync requirements.txt"),
-            ("pip-sync", "pip-sync requirements.txt"),
-            ("poetry-sync", "poetry sync"),
-            ("pipenv-install", "pipenv install"),
-            ("pdm-install", "pdm install"),
-            ("hatch-run", "hatch run test"),
-            ("tox", "tox"),
-            ("nox", "nox -s tests"),
-            ("conda-create", "conda create -n ci python=3.12 numpy"),
-            ("conda-env-create", "conda env create -f environment.yml"),
-            ("mamba-update", "mamba update numpy"),
-            ("uv-global-then-add", "uv --project pact-plugin add httpx"),
-            ("uv-run-script", "uv run scripts/check.py"),
-            ("uv-run-plain", "uv run ruff check pact-plugin/"),
-            ("pre-commit-run", "pre-commit run --all-files"),
-            ("python-m-tox", "python -m tox"),
-            ("python-m-pre-commit", "python -m pre_commit run"),
-            # Program identity by BASENAME (Bugbot B1).
-            ("uv-by-path-sync", "/opt/tools/uv sync"),
-            ("uvx-by-path", "$HOME/.local/bin/uvx ruff check pact-plugin/"),
-            # A valued global option's VALUE in the verb slot fails closed
-            # (Bugbot B2): no table of these tools' global options exists.
-            ("uv-directory-sync", "uv --directory proj sync"),
-            ("uv-C-add", "uv -C proj add ruff"),
-            ("pipx-python-install", "pipx --python python3.12 install ruff"),
-        ]:
-            self._shape_reddens(
-                tmp_path, monkeypatch, name, arm, "TOOL-RUNNER DRIFT",
-                workflow_text=real_text.replace(
-                    lint_anchor, lint_anchor + f"          {command}\n", 1))
-        for name, uses in [
-            ("ruff-action",
-             "astral-sh/ruff-action@0c50076f12c38c3d0115b7b519b54a91cb9cf0ad"),
-            ("setup-uv", "astral-sh/setup-uv@v6"),
-            ("setup-miniconda", "conda-incubator/setup-miniconda@v3"),
-            ("setup-micromamba", "mamba-org/setup-micromamba@v2"),
-            # The auditor's probe: an installer action no deny-list named.
-            ("pre-commit-action", "pre-commit/action@v3.0.1"),
-            ("docker-image", "docker://python:3.12-slim"),
-        ]:
-            self._shape_reddens(
-                tmp_path, monkeypatch, name,
-                "test_every_third_party_action_is_allowlisted",
-                "ACTION ALLOWLIST DRIFT",
-                workflow_text=real_text.replace(
-                    lint_step, f"      - uses: {uses}\n" + lint_step, 1))
-        # A third-party REUSABLE WORKFLOW called at job level is held too.
-        self._shape_reddens(
-            tmp_path, monkeypatch, "reusable-workflow",
-            "test_every_third_party_action_is_allowlisted",
-            "ACTION ALLOWLIST DRIFT", extra_files={
-                ".github/workflows/reuse.yml":
-                    "name: reuse\non: [pull_request]\njobs:\n  r:\n"
-                    "    uses: someorg/ci/.github/workflows/lint.yml@v1\n"})
-        # CONTROL: an allowlisted action re-pinned to another ref is not
-        # drift — the allowlist keys on the name, not the @ref.
-        self._shape_stays_green(
-            tmp_path, monkeypatch, "allowlisted-repin",
-            "test_every_third_party_action_is_allowlisted",
-            workflow_text=real_text.replace(
-                lint_step, "      - uses: actions/checkout@v5\n" + lint_step, 1))
-        # `python setup.py develop` installs the project and its declared
-        # requirements unpinned; the census also follows setup.py as a
-        # script, so the file exists in the shape.
-        self._shape_reddens(
-            tmp_path, monkeypatch, "setup-py-develop", arm, "TOOL-RUNNER DRIFT",
-            workflow_text=real_text.replace(
-                lint_anchor, lint_anchor + "          python setup.py develop\n", 1),
-            extra_files={"setup.py": "from setuptools import setup\nsetup()\n"})
-        self._shape_reddens(
-            tmp_path, monkeypatch, "script-pipx", arm, "TOOL-RUNNER DRIFT",
-            script_text=real_script + "\npipx install pre-commit\n")
-        self._shape_reddens(
-            tmp_path, monkeypatch, "script-uv-sync", arm, "TOOL-RUNNER DRIFT",
-            script_text=real_script + "\nuv sync\n")
-
-        # CONTROLS: read-only invocations of the same programs install
-        # nothing and stay green — the allowlist admits only those.
-        self._shape_stays_green(
-            tmp_path, monkeypatch, "read-only-verbs", arm,
-            workflow_text=real_text.replace(
-                lint_anchor,
-                lint_anchor
-                + "          uv --version\n          conda list\n"
-                + "          poetry --version\n          pipx list\n"
-                + "          uv pip list\n          conda env list\n"
-                + "          pre-commit --version\n          poetry show\n"
-                + "          uv --quiet pip list\n"
-                + "          uv --directory=pact-plugin pip list\n", 1))
-
-    def test_the_census_follows_what_ci_executes(self, tmp_path, monkeypatch):
-        """MUTATION ARM (execution-defined population): installs reached
-        through a local action anywhere in the repo, a repo script a step
-        runs, or a string a shell runs as code redden.
-
-        Auditor probes: `uses: ./tools/setup` (a composite action outside
-        .github/actions), a run step `./scripts/ci-extra.sh` whose script
-        runs `pip install`, and `bash -c 'pip install x'` were each GREEN
-        against the directory-keyed census. Each shape below is followed
-        to its install and must redden at the named shipped arm; the
-        controls name paths that are NOT repo scripts and must stay green.
-        """
-        root = self._source_repo_root()
-        if root is None:
-            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
-                        "_repo_copy_carrying for the full wording.")
-        real_text = (root / ".github" / "workflows" / "tests.yml").read_text(
-            encoding="utf-8")
-        lint_step = "      - name: Import-hygiene lint (F401/F821)\n"
-        census = "test_every_executed_pip_install_is_the_canonical_install_line"
-        env_arm = "test_no_pip_environment_key_redirects_the_install"
-        tool_arm = "test_no_tool_runner_executes_unpinned_code"
-        installs = "#!/usr/bin/env bash\nset -e\npip install evilpkg\n"
-        composite = ("name: setup\nruns:\n  using: composite\n  steps:\n"
-                     "    - run: pip install evilpkg\n      shell: bash\n")
-
-        def with_step(step_yaml):
-            return real_text.replace(lint_step, step_yaml + lint_step, 1)
-
-        def run_step(command, workdir=None):
-            step = f"      - run: {command}\n"
-            if workdir:
-                step += f"        working-directory: {workdir}\n"
-            return with_step(step)
-
-        for name, workflow, extra, arm, match in [
-            ("local-action-anywhere", with_step("      - uses: ./tools/setup\n"),
-             {"tools/setup/action.yml": composite}, census, "INSTALL CENSUS DRIFT"),
-            ("nested-composite", with_step("      - uses: ./tools/outer\n"),
-             {"tools/outer/action.yml":
-                  "name: outer\nruns:\n  using: composite\n  steps:\n"
-                  "    - uses: ./tools/inner\n",
-              "tools/inner/action.yml": composite},
-             census, "INSTALL CENSUS DRIFT"),
-            ("script-by-path", run_step("./scripts/ci-extra.sh"),
-             {"scripts/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
-            ("script-as-bash-operand", run_step("bash scripts/ci-extra.sh"),
-             {"scripts/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
-            ("script-workdir", run_step("./ci-extra.sh", "pact-plugin"),
-             {"pact-plugin/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
-            ("script-workspace-var",
-             run_step('bash "$GITHUB_WORKSPACE/scripts/ci-extra.sh"'),
-             {"scripts/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
-            ("script-calls-script", run_step("./scripts/outer.sh"),
-             {"scripts/outer.sh": "#!/bin/sh\nsh scripts/inner.sh\n",
-              "scripts/inner.sh": installs}, census, "INSTALL CENSUS DRIFT"),
-            ("python-script", run_step("python scripts/ci_extra.py"),
-             {"scripts/ci_extra.py":
-                  "import subprocess\n"
-                  "subprocess.run(['pip', 'install', 'evilpkg'], check=True)\n"},
-             census, "INSTALL CENSUS DRIFT"),
-            ("bash-c", run_step("bash -c 'pip install evilpkg'"), {},
-             census, "INSTALL CENSUS DRIFT"),
-            ("sh-ec", run_step('sh -ec "pip install evilpkg"'), {},
-             census, "INSTALL CENSUS DRIFT"),
-            ("eval", run_step("eval 'pip install evilpkg'"), {},
-             census, "INSTALL CENSUS DRIFT"),
-            ("python-c",
-             run_step("python -c \"import subprocess; "
-                      "subprocess.run(['pip', 'install', 'evilpkg'])\""),
-             {}, census, "INSTALL CENSUS DRIFT"),
-            ("script-env-write", run_step("./scripts/ci-extra.sh"),
-             {"scripts/ci-extra.sh": "#!/bin/sh\n"
-              "echo PIP_INDEX_URL=https://x.example/simple >> $GITHUB_ENV\n"},
-             env_arm, "PIP ENVIRONMENT DRIFT"),
-            ("script-tool-runner", run_step("./scripts/ci-extra.sh"),
-             {"scripts/ci-extra.sh": "#!/bin/sh\nuvx ruff check .\n"},
-             tool_arm, "TOOL-RUNNER DRIFT"),
-            ("non-composite-action", with_step("      - uses: ./tools/js\n"),
-             {"tools/js/action.yml":
-                  "name: js\nruns:\n  using: node20\n  main: index.js\n"},
-             census, "UNREADABLE LOCAL ACTION"),
-            ("missing-action", with_step("      - uses: ./tools/nothing\n"), {},
-             census, "UNRESOLVED LOCAL ACTION"),
-            ("missing-script", run_step("./scripts/missing.sh"), {},
-             census, "UNRESOLVED SCRIPT"),
-            ("unreadable-script", run_step("./scripts/ci-extra.rb"),
-             {"scripts/ci-extra.rb": "system('pip install evilpkg')\n"},
-             census, "UNREADABLE SCRIPT"),
-        ]:
-            self._shape_reddens(tmp_path, monkeypatch, name, arm, match,
-                                workflow_text=workflow, extra_files=extra)
-
-        # CONTROLS: not repo scripts, and a followed script whose only pip
-        # text is a quoted message — all must stay green.
-        for name, workflow, extra in [
-            ("runner-temp", run_step('bash "$RUNNER_TEMP/setup.sh"'), {}),
-            ("home-path", run_step("$HOME/bin/tool.sh"), {}),
-            ("python-module", run_step("python -m pip --version"), {}),
-            ("quoted-hint", run_step("./scripts/hint.sh"),
-             {"scripts/hint.sh":
-                  "#!/bin/sh\necho 'run: python3 -m pip install -c "
-                  "constraints-ci.txt ruff'\n"}),
-        ]:
-            copy = self._repo_copy_carrying(
-                tmp_path / name, workflow_text=workflow, extra_files=extra)
-            monkeypatch.setattr(
-                type(self), "_source_repo_root", lambda self: copy)
-            self.test_every_executed_pip_install_is_the_canonical_install_line()
-            self.test_no_tool_runner_executes_unpinned_code()
-            self.test_no_pip_environment_key_redirects_the_install()
-
-        # The walk's per-root cache must never serve a stale read: editing
-        # a FOLLOWED file in place (same root) changes what the census sees.
-        copy = self._repo_copy_carrying(
-            tmp_path / "cache-freshness",
-            workflow_text=run_step("./scripts/later.sh"),
-            extra_files={"scripts/later.sh": "#!/bin/sh\necho ok\n"})
-        assert len(self._population_installs(copy)) == 1
-        (copy / "scripts" / "later.sh").write_text(
-            "#!/bin/sh\necho ok\npip install evilpkg\n", encoding="utf-8")
-        assert len(self._population_installs(copy)) == 2, (
-            "STALE EXECUTION CACHE: a followed script gained an install "
-            "in place and the census did not see it."
-        )
-
     def test_ruff_target_version_is_bound_to_the_floor(self, tmp_path, monkeypatch):
         """MUTATION ARM (fourth floor statement): a lint leg's
         `--target-version` drifting from the declared floor reddens the
@@ -3577,6 +1168,471 @@ class TestDependencyDriftIsDetectable:
             f"default warning display writes to stderr, so in the CLI "
             f"subprocess this corrupts the same JSON contract."
         )
+
+    def _shape_reddens(self, tmp_path, monkeypatch, name, arm, match,
+                       workflow_text=None, script_text=None,
+                       extra_files=None):
+        """Run the SHIPPED arm `arm` against a rig copy carrying one shape
+        and require it to redden with `match` — the kill is the shipped
+        arm's, never a reimplementation beside it."""
+        copy = self._repo_copy_carrying(
+            tmp_path / name, workflow_text=workflow_text,
+            script_text=script_text, extra_files=extra_files)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        with pytest.raises(AssertionError, match=match):
+            getattr(self, arm)()
+
+    def _shape_stays_green(self, tmp_path, monkeypatch, name, arm,
+                           workflow_text=None, script_text=None,
+                           extra_files=None):
+        """CONTROL: a faithful shape the arm must ACCEPT."""
+        copy = self._repo_copy_carrying(
+            tmp_path / name, workflow_text=workflow_text,
+            script_text=script_text, extra_files=extra_files)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        getattr(self, arm)()
+
+    def test_unpinned_memory_init_package_reddens(self, tmp_path, monkeypatch):
+        """MUTATION ARM: a memory_init package missing from the pins reddens."""
+        root = self._require_root("memory_init's pins")
+        pins = (root / "constraints-ci.txt").read_text(encoding="utf-8")
+        line = next(ln for ln in pins.splitlines()
+                    if ln.lower().startswith("model2vec=="))
+        self._shape_reddens(
+            tmp_path, monkeypatch, "model2vec-unpinned",
+            "test_memory_init_packages_are_pinned", r"DEPENDENCY DRIFT: \['model2vec'\]",
+            extra_files={"constraints-ci.txt": pins.replace(line + "\n", "", 1)})
+
+    def test_verify_placement_mutations_redden(self, tmp_path, monkeypatch):
+        """MUTATION ARM (F1(a), F2): every way the verify steps can stop
+        bracketing a test run reddens the placement arm; release.yml's job
+        is measured NOT governed (it names none of the governed tools)."""
+        root = self._require_root("verify-step placement")
+        real = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        doc = self._load_workflow_yaml(root / ".github" / "workflows" / "tests.yml")
+        steps = self._steps_of(doc)
+        names = [s.get("name") for s in steps]
+        before = steps[names.index("Run test suite") - 1]
+        assert before.get("run") == self.VERIFY_CMD, (
+            "the shipped before-check moved; re-point this arm")
+        before_name = before["name"]
+        after_name = steps[-1]["name"]
+        before_block = (f"      - name: {before_name}\n"
+                        f"        run: {self.VERIFY_CMD}\n")
+        after_block = (f"      - name: {after_name}\n"
+                       f"        if: always()\n"
+                       f"        run: {self.VERIFY_CMD}\n")
+        assert before_block in real and real.endswith(after_block), (
+            "the shipped verify steps changed shape; re-point this arm")
+        test_line = f"        run: {self.TEST_CMD}\n"
+        assert real.count(test_line) == 1
+        arm = "test_ci_environment_is_verified_around_every_test_run"
+        install = "      - name: Install test dependencies\n"
+        for name, text in [
+            ("before-removed", real.replace(before_block, "", 1)),
+            ("before-earlier", real.replace(before_block, "", 1).replace(
+                install, before_block + install, 1)),
+            ("after-not-last", real + "      - name: tail\n        run: echo done\n"),
+            ("after-not-always", real.replace(
+                "        if: always()\n        run: " + self.VERIFY_CMD,
+                "        run: " + self.VERIFY_CMD, 1)),
+            ("pytest-command-changed", real.replace(
+                test_line, "        run: python -m pytest -ra -p no:cacheprovider\n", 1)),
+            ("env-on-test-step", real.replace(
+                test_line, test_line + "        env:\n          PYTHONPATH: extra\n", 1)),
+            ("shell-on-verify-step", real.replace(
+                before_block, before_block + "        shell: bash\n", 1)),
+            ("second-governed-job", real + (
+                "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: python -m pip --version\n")),
+            ("second-pytest-step", real.replace(
+                after_block,
+                "      - name: Again\n        working-directory: pact-plugin\n"
+                f"        run: {self.TEST_CMD}\n" + after_block, 1)),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm,
+                                "VERIFY PLACEMENT DRIFT", workflow_text=text)
+        # CONTROL: release.yml's job is not governed today, measured.
+        release = self._load_workflow_yaml(
+            root / ".github" / "workflows" / "release.yml")
+        release_runs = [s.get("run") or "" for s in self._steps_of(release)]
+        assert not any(self._GOVERNED_RE.search(r) for r in release_runs), (
+            "release.yml now names a governed tool: its job needs verify "
+            "steps, or the placement arm's governed set needs a decision")
+
+    def test_tripwire_families_redden(self, tmp_path, monkeypatch):
+        """MUTATION ARM (C-lite, F6/F7/F8): one shape per token family,
+        on each surface of the text set; faithful lines stay green."""
+        root = self._require_root("the isolated-environment tripwire")
+        real = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        real_sh = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
+        lint_anchor = "          ruff --version\n"
+        arm = "test_no_isolated_environment_tool_or_index_redirect"
+
+        def in_block(command):
+            return real.replace(lint_anchor, lint_anchor + f"          {command}\n", 1)
+
+        for name, kwargs, token in [
+            ("tool-uvx", dict(workflow_text=in_block("uvx ruff check .")), "uvx"),
+            ("tool-uv-sync", dict(workflow_text=in_block("timeout 10 uv sync")), "uv"),
+            ("tool-pipx-script", dict(script_text=real_sh + "\npipx install x\n"), "pipx"),
+            ("uninstall-pip3", dict(workflow_text=in_block("pip3 uninstall -y pyyaml")),
+             "uninstall"),
+            ("index-env-export", dict(
+                script_text=real_sh + "\nexport PIP_INDEX_URL=https://x.example/simple\n"),
+             "PIP_INDEX_URL"),
+            ("index-flag", dict(workflow_text=in_block(
+                "python -m pip install --extra-index-url https://x.example/simple x")),
+             "extra-index-url"),
+            ("index-env-key", dict(workflow_text=real.replace(
+                "    steps:", "    env:\n      PIP_CONSTRAINT: other.txt\n    steps:", 1)),
+             "PIP_CONSTRAINT"),
+            ("tracked-script", dict(extra_files={
+                "scripts/ci-extra.sh": "#!/bin/sh\nconda install -y numpy\n"}), "conda"),
+            ("makefile", dict(extra_files={
+                "Makefile": "deps:\n\tpoetry install\n"}), "poetry"),
+            ("composite-action", dict(extra_files={
+                ".github/actions/x/action.yml":
+                    "name: x\nruns:\n  using: composite\n  steps:\n"
+                    "    - run: mamba install -y numpy\n      shell: bash\n"}), "mamba"),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm,
+                                f"(?s)TRIPWIRE: .*{re.escape(token)}", **kwargs)
+        # CONTROLS: faithful lines, read-only pip, and the canonical install.
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "faithful", arm, workflow_text=in_block(
+                "pip list; python -m pip install -r constraints-ci.txt"))
+
+    def test_unvetted_actions_redden(self, tmp_path, monkeypatch):
+        """MUTATION ARM: an unvetted action at step level, a docker image,
+        a third-party reusable workflow, and an unvetted action inside a
+        local composite action all redden the allowlist; a re-pinned
+        allowlisted action stays green."""
+        root = self._require_root("the action allowlist")
+        real = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        install = "      - name: Install test dependencies\n"
+        arm = "test_every_third_party_action_is_allowlisted"
+        for name, kwargs in [
+            ("pre-commit-action", dict(workflow_text=real.replace(
+                install, "      - uses: pre-commit/action@v3.0.1\n" + install, 1))),
+            ("docker-image", dict(workflow_text=real.replace(
+                install, "      - uses: docker://python:3.12-slim\n" + install, 1))),
+            ("reusable-workflow", dict(extra_files={
+                ".github/workflows/reuse.yml":
+                    "name: reuse\non: [pull_request]\njobs:\n  r:\n"
+                    "    uses: someorg/ci/.github/workflows/lint.yml@v1\n"})),
+            ("inside-local-action", dict(
+                workflow_text=real.replace(
+                    install, "      - uses: ./tools/setup\n" + install, 1),
+                extra_files={"tools/setup/action.yml":
+                             "name: s\nruns:\n  using: composite\n  steps:\n"
+                             "    - uses: astral-sh/setup-uv@v6\n"})),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm,
+                                "ACTION ALLOWLIST DRIFT", **kwargs)
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "repinned", arm, workflow_text=real.replace(
+                install, "      - uses: actions/checkout@v5\n" + install, 1))
+
+
+class TestVerifyCiEnvironmentScript:
+    """Unit arms for scripts/verify_ci_environment.py, loaded by path, run
+    on FAKE environments: synthetic `*.dist-info` directories in tmp_path
+    passed as `path=`, with the interpreter check off unless a test is
+    about it. Each verdict field goes red exactly once in its own arm."""
+
+    @pytest.fixture
+    def verify(self):
+        return TestDependencyDriftIsDetectable._verify_script()
+
+    @staticmethod
+    def _dist(site, name, version, requires=()):
+        """Write one synthetic installed distribution into `site`."""
+        info = site / f"{name.replace('-', '_')}-{version}.dist-info"
+        info.mkdir(parents=True)
+        body = [f"Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+        body += [f"Requires-Dist: {req}" for req in requires]
+        (info / "METADATA").write_text("\n".join(body) + "\n", encoding="utf-8")
+        return info
+
+    def _check(self, verify, pins, *sites, baseline=None):
+        return verify.check_environment(
+            pins, path=[str(s) for s in sites],
+            baseline=baseline if baseline is not None else {},
+            check_interpreter=False)
+
+    def test_exact_match_is_green(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path)
+        assert verdict.ok, verdict.render()
+
+    def test_wrong_version_only(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "0.9")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path)
+        assert verdict.wrong_version == {"alpha": ("0.9", "1.0")}
+        assert not (verdict.missing or verdict.unexpected or verdict.shadowed)
+        assert "WRONG VERSION" in verdict.render()
+
+    def test_missing_only(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0", "beta": "2.0"}, tmp_path)
+        assert verdict.missing == ("beta",)
+        assert not (verdict.wrong_version or verdict.unexpected or verdict.shadowed)
+        assert "MISSING" in verdict.render()
+
+    def test_unexpected_only_and_the_runner_baseline_remedy(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        self._dist(tmp_path, "six", "1.16.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path)
+        assert verdict.unexpected == ("six",)
+        assert not (verdict.wrong_version or verdict.missing or verdict.shadowed)
+        rendered = verdict.render()
+        assert "UNEXPECTED" in rendered
+        # F9: the runner-image remedy names where the baseline lives.
+        assert "RUNNER_BASELINE" in rendered
+        assert "scripts/verify_ci_environment.py" in rendered
+
+    def test_shadowed_checks_the_first_copy(self, verify, tmp_path):
+        """F4: the copy Python imports (first on the path) is the one
+        checked, and any second copy is SHADOWED with every location."""
+        first, second = tmp_path / "first", tmp_path / "second"
+        self._dist(first, "alpha", "0.9")
+        self._dist(second, "alpha", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, first, second)
+        assert verdict.wrong_version == {"alpha": ("0.9", "1.0")}
+        assert list(verdict.shadowed) == ["alpha"]
+        assert len(verdict.shadowed["alpha"]) == 2
+        assert str(first.resolve()) in verdict.shadowed["alpha"][0]
+        assert "SHADOWED" in verdict.render()
+
+    def test_transitive_dependency_is_allowed(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0", requires=["gamma>=1"])
+        self._dist(tmp_path, "gamma", "3.0")
+        assert self._check(verify, {"alpha": "1.0"}, tmp_path).ok
+
+    def test_marker_false_requirement_is_not_pulled_in(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0",
+                   requires=['gamma; python_version < "3"'])
+        self._dist(tmp_path, "gamma", "3.0")
+        assert self._check(verify, {"alpha": "1.0"}, tmp_path).unexpected == ("gamma",)
+
+    def test_requested_extras_reach_their_dependencies(self, verify, tmp_path):
+        """F5: root -> child[fast] -> grand; extra == "fast" allows grand."""
+        self._dist(tmp_path, "root-pkg", "1.0", requires=["child[fast]"])
+        self._dist(tmp_path, "child", "1.0", requires=['grand; extra == "fast"'])
+        self._dist(tmp_path, "grand", "1.0")
+        assert self._check(verify, {"root-pkg": "1.0"}, tmp_path).ok
+
+    def test_unrequested_extra_is_not_pulled_in(self, verify, tmp_path):
+        self._dist(tmp_path, "root-pkg", "1.0", requires=["child"])
+        self._dist(tmp_path, "child", "1.0", requires=['grand; extra == "slow"'])
+        self._dist(tmp_path, "grand", "1.0")
+        assert self._check(verify, {"root-pkg": "1.0"}, tmp_path).unexpected == ("grand",)
+
+    def test_runner_baseline_roots_and_their_dependencies_are_allowed(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        self._dist(tmp_path, "image-tool", "5.0", requires=["image-dep"])
+        self._dist(tmp_path, "image-dep", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path,
+                              baseline={"Image_Tool": "ships with the runner"})
+        assert verdict.ok, verdict.render()
+
+    def test_names_are_normalised(self, verify, tmp_path):
+        self._dist(tmp_path, "Foo.Bar", "1.0")
+        constraints = tmp_path / "c.txt"
+        constraints.write_text("foo_bar==1.0\n", encoding="utf-8")
+        pins = verify.read_pins(constraints)
+        assert pins == {"foo-bar": "1.0"}
+        assert self._check(verify, pins, tmp_path).ok
+
+    def test_pip_is_exempt_from_the_version_check(self, verify, tmp_path):
+        self._dist(tmp_path, "pip", "99.0")
+        assert self._check(verify, {"pip": "1.0"}, tmp_path).ok
+
+    @pytest.mark.parametrize("line", [
+        "ruff==0.17.*",
+        'ruff==0.17.3; python_version < "3.11"',
+        "ruff[extra]==0.17.3",
+        "-r other.txt",
+        "-i https://x.example/simple",
+        "ruff @ https://x.example/ruff.whl",
+        "ruff>=0.17",
+    ])
+    def test_read_pins_refuses_a_line_that_is_not_an_exact_pin(self, verify, tmp_path, line):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(f"pytest==9.2.0\n{line}\n", encoding="utf-8")
+        with pytest.raises(verify.ConstraintsError, match=":2:"):
+            verify.read_pins(constraints)
+
+    def test_read_pins_refuses_a_duplicate_pin(self, verify, tmp_path):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text("ruff==0.17.3\nRuff==0.17.3\n", encoding="utf-8")
+        with pytest.raises(verify.ConstraintsError, match="pinned twice"):
+            verify.read_pins(constraints)
+
+    def test_read_pins_accepts_comments(self, verify, tmp_path):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(
+            "# header\n\nruff==0.17.3  # the linter\n", encoding="utf-8")
+        assert verify.read_pins(constraints) == {"ruff": "0.17.3"}
+
+    def test_interpreter_mismatch_reports_the_unresolved_pair(self, verify, tmp_path, monkeypatch):
+        """F3: a `python3` on PATH in another DIRECTORY than sys.executable
+        is a mismatch, reported unresolved; one in the same directory is
+        not; none at all is."""
+        elsewhere = tmp_path / "bin" / "python3"
+        monkeypatch.setattr(verify.shutil, "which", lambda name: str(elsewhere))
+        verdict = verify.check_environment({}, path=[], baseline={})
+        assert verdict.interpreter_mismatch == (
+            os.path.abspath(str(elsewhere)), os.path.abspath(sys.executable))
+        assert "INTERPRETER MISMATCH" in verdict.render()
+        # A venv's python symlinks to the base interpreter: a python3 in
+        # ANOTHER directory resolving to the SAME file is still a different
+        # environment, so the comparison is by directory, not by file.
+        other_dir = tmp_path / "venv-elsewhere" / "bin"
+        other_dir.mkdir(parents=True)
+        (other_dir / "python3").symlink_to(os.path.realpath(sys.executable))
+        monkeypatch.setattr(verify.shutil, "which",
+                            lambda name: str(other_dir / "python3"))
+        assert verify.check_environment(
+            {}, path=[], baseline={}).interpreter_mismatch is not None
+        beside = os.path.join(os.path.dirname(sys.executable), "python3")
+        monkeypatch.setattr(verify.shutil, "which", lambda name: beside)
+        assert verify.check_environment({}, path=[], baseline={}).interpreter_mismatch is None
+        monkeypatch.setattr(verify.shutil, "which", lambda name: None)
+        missing = verify.check_environment({}, path=[], baseline={})
+        assert missing.interpreter_mismatch is not None
+        assert missing.interpreter_mismatch[1] == os.path.abspath(sys.executable)
+
+    def test_main_exit_codes(self, verify, tmp_path, monkeypatch, capsys):
+        good = tmp_path / "good.txt"
+        good.write_text("alpha==1.0\n", encoding="utf-8")
+        bad = tmp_path / "bad.txt"
+        bad.write_text("alpha==1.*\n", encoding="utf-8")
+        passing = verify.Verdict({}, (), (), {}, None)
+        failing = verify.Verdict({}, ("alpha",), (), {}, None)
+        monkeypatch.setattr(verify, "check_environment", lambda pins: passing)
+        assert verify.main(["--constraints", str(good)]) == 0
+        monkeypatch.setattr(verify, "check_environment", lambda pins: failing)
+        assert verify.main(["--constraints", str(good)]) == 1
+        assert verify.main(["--constraints", str(good), "--report"]) == 0
+        assert verify.main(["--constraints", str(bad)]) == 2
+        assert verify.main(["--constraints", str(bad), "--report"]) == 2
+        assert verify.main(["--no-such-option"]) == 2
+        assert "MISSING" in capsys.readouterr().out
+
+
+class TestCIEnvironmentBinding:
+    """The session check (F1(b)) in tests/ci_environment_binding.py."""
+
+    @pytest.fixture
+    def binding(self):
+        import ci_environment_binding
+        return ci_environment_binding
+
+    def test_gate_off_loads_nothing(self, binding, monkeypatch):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("the verify script was loaded with the gate off")
+
+        monkeypatch.setattr(binding, "_load_verify_script", boom)
+        assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+        monkeypatch.setenv("GITHUB_ACTIONS", "false")
+        assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+
+    def _stub(self, verdict_ok):
+        verify = TestDependencyDriftIsDetectable._verify_script()
+        verdict = (verify.Verdict({}, (), (), {}, None) if verdict_ok
+                   else verify.Verdict({}, ("alpha",), (), {}, None))
+
+        class Stub:
+            ConstraintsError = verify.ConstraintsError
+            read_pins = staticmethod(lambda path: {"alpha": "1.0"})
+            check_environment = staticmethod(lambda pins: verdict)
+        return Stub
+
+    def test_gate_on_and_passing_proceeds(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(True))
+        assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+
+    def test_gate_on_and_failing_exits_3_with_the_heading(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        with pytest.raises(pytest.exit.Exception) as exc:
+            binding.CIEnvironmentBinding().pytest_sessionstart(None)
+        assert exc.value.returncode == 3
+        assert binding.HEADING in str(exc.value)
+        assert "MISSING" in str(exc.value)
+
+    def test_gate_on_and_bad_constraints_exits_3(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        stub = self._stub(True)
+
+        def refuse(path):
+            raise stub.ConstraintsError("c.txt:1: not an exact pin")
+
+        stub.read_pins = staticmethod(refuse)
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
+        with pytest.raises(pytest.exit.Exception) as exc:
+            binding.CIEnvironmentBinding().pytest_sessionstart(None)
+        assert exc.value.returncode == 3
+        assert "CONSTRAINTS ERROR" in str(exc.value)
+
+    def test_the_plugin_is_registered_for_every_run(self, request):
+        assert request.config.pluginmanager.has_plugin("ci-environment-binding")
+
+    def test_the_hook_fires_in_a_real_pytest_run(self, tmp_path):
+        """A REAL pytest process under GITHUB_ACTIONS=true, against a copy
+        of the binding, the verify script and a constraints file pinning a
+        WRONG pytest version, exits 3 with the heading before any test runs;
+        the same run with the right pin is not stopped by the binding."""
+        root = TestDependencyDriftIsDetectable._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout.")
+        rig = tmp_path / "rig"
+        (rig / ".claude-plugin").mkdir(parents=True)
+        (rig / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
+        (rig / "scripts").mkdir()
+        shutil.copy(root / "scripts" / "verify_ci_environment.py",
+                    rig / "scripts" / "verify_ci_environment.py")
+        (rig / "suite").mkdir()
+        shutil.copy(Path(__file__).parent / "ci_environment_binding.py",
+                    rig / "suite" / "ci_environment_binding.py")
+        (rig / "suite" / "conftest.py").write_text(
+            "from ci_environment_binding import CIEnvironmentBinding\n\n\n"
+            "def pytest_configure(config):\n"
+            "    config.pluginmanager.register(CIEnvironmentBinding(), 'ci-environment-binding')\n",
+            encoding="utf-8")
+        (rig / "suite" / "test_probe.py").write_text(
+            "def test_probe():\n    pass\n", encoding="utf-8")
+        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+
+        def run(pytest_pin):
+            (rig / "constraints-ci.txt").write_text(
+                f"pytest=={pytest_pin}\n", encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "suite"], cwd=rig, env=env, capture_output=True, text=True,
+                timeout=120)
+
+        wrong = run("0.0.1")
+        assert wrong.returncode == 3, wrong.stdout + wrong.stderr
+        assert "CI ENVIRONMENT DRIFT (pytest process)" in wrong.stdout + wrong.stderr
+        assert "WRONG VERSION" in wrong.stdout + wrong.stderr
+        # The right pin clears the WRONG VERSION heading. (Other installed
+        # packages are outside this one-pin rig's closure, so the session may
+        # still stop on UNEXPECTED; that half is environment-dependent and is
+        # not asserted here.)
+        right = run(pytest.__version__)
+        assert "WRONG VERSION" not in right.stdout + right.stderr, right.stdout
 
 
 class TestMaybeEmbedPending:

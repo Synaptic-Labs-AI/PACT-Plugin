@@ -58,9 +58,10 @@
 #   `working-directory: pact-plugin`.
 #
 # DEPENDENCY SET (empirically verified — see note below)
-#   The suite is stdlib + the third-party libraries listed below. Each bullet
-#   states what breaks without that library. Do not drop any of them to shorten
-#   the install line — the failure modes differ, and not all of them are loud.
+#   The suite is stdlib + the third-party libraries listed below, each pinned
+#   in constraints-ci.txt. Each bullet states what breaks without that library.
+#   Do not drop any of them from that file — the failure modes differ, and not
+#   all of them are loud.
 #     - pytest           : the runner (hard import everywhere).
 #     - httpx            : UNGUARDED top-level import in the local telegram
 #                          package (telegram/voice.py, telegram/telegram_client.py)
@@ -92,13 +93,13 @@
 #                          WARRANT below gives the measured results. The memory CLI
 #                          subprocess tests are NOT affected: their fixture falls
 #                          back to stdlib sqlite3, so do not "fix" them here.
-#                          Declared here so CI does not install
+#                          Pinned so CI does not install
 #                          them mid-run: a test-time install reaches the network
 #                          and lands AFTER collection-time availability checks
 #                          have skipped their tests, so the suite silently runs
 #                          fewer tests than it reports. memory_init.py refuses to
-#                          install when CI is set, so this list and the package
-#                          list in that module must stay in step.
+#                          install when CI is set, so every package it declares
+#                          must be pinned in constraints-ci.txt (a test checks it).
 #   `telegram` is the LOCAL package under pact-plugin/, NOT the pip library — it
 #   needs no install (it resolves via the working-directory on sys.path).
 #     - ruff             : the import-hygiene lint step ONLY (not a test dep).
@@ -109,23 +110,30 @@
 #                          which is what makes a deliberate ruff bump in the
 #                          constraints file low-risk rather than an audit.
 #
-#   CONSTRAINTS: the direct dependencies above are pinned in constraints-ci.txt
-#   at the repo root and applied by the install step's `pip install -c` — what
-#   CI runs is a reviewed commit, not whatever the index serves at merge time.
-#   Transitive dependencies are not listed; they float within their parents'
-#   specifiers, and `-c` binds any name this file DOES pin even when it
-#   arrives as a transitive. pip itself is unconstrained (pinned
-#   self-upgrades can deadlock the bootstrap). Refresh
-#   deliberately (quarterly, or on a red the pins explain): rebuild the
-#   environment from the package list above WITHOUT `-c` — a constrained
-#   rebuild reproduces the current pins exactly, so it can only re-confirm
-#   them and reads as nothing-to-do — freeze the result into
-#   constraints-ci.txt as the direct dependencies above ONLY, pip excepted
-#   (a whole-venv `pip freeze` would pin transitives too, which this file
-#   deliberately lets float; the dead-pin coverage arm reddens on the
-#   surplus), run the suite green under the new pins, and commit the
-#   version diff. A pin that blocks a needed fix is a reason to refresh,
-#   not to delete the file.
+#   CONSTRAINTS: constraints-ci.txt at the repo root is the CI requirement set.
+#   The install step installs it with `pip install -r`, so what CI runs is a
+#   reviewed commit, not whatever the index serves at merge time. Only the
+#   direct dependencies above are pinned; transitive dependencies float within
+#   their parents' specifiers. pip itself is not pinned (a pinned self-upgrade
+#   can deadlock the bootstrap).
+#   RUNTIME CHECK: scripts/verify_ci_environment.py runs immediately before the
+#   test step and again as the job's last step, and the suite runs the same
+#   check inside its own process. It compares the distributions the
+#   interpreter can import with constraints-ci.txt: every pin at its version,
+#   nothing outside the pins' dependency closure (plus pip and any
+#   RUNNER_BASELINE entry for what the runner image ships), no package
+#   installed twice, and `python3` on PATH being this interpreter. It reads
+#   the environment, not the install commands, so an install into the tested
+#   environment is caught whatever route made it. Tools that install into an
+#   isolated environment (pipx, uvx, conda) are outside its view; a word check
+#   in the test suite covers those.
+#   Refresh deliberately (quarterly, or on a red the pins explain): install
+#   the pinned names UNPINNED in a clean venv (a pinned install can only
+#   re-confirm the current versions), freeze the same names into
+#   constraints-ci.txt (not a whole-venv `pip freeze`, which would pin the
+#   transitives this file lets float), run the suite green under the new
+#   pins, and commit the version diff. A pin that blocks a needed fix is a
+#   reason to refresh, not to delete the file.
 #
 #   VERIFICATION: every entry was proven by RUNNING the suite in a clean venv,
 #   never by grepping imports. This heading vouches for every entry beneath it,
@@ -161,13 +169,12 @@
 #   the wider one — including the entries that derivation did cover, which is why
 #   the whole set was re-run above rather than only the newly added ones.
 #
-#   DRIFT ANCHOR (exact, so a check has two endpoints to compare): the
-#   pact-memory packages in the install line above must equal the pip names in
-#   the `packages` list of
-#   `pact-plugin/skills/pact-memory/scripts/memory_init.py` — exactly
-#   `pysqlite3`, `sqlite-vec`, `model2vec`. That module refuses to install when
-#   CI is set, so if the two lists diverge nothing installs the difference and
-#   CI shows the consequences listed above.
+#   DRIFT ANCHOR: the pip names in the `packages` list of
+#   `pact-plugin/skills/pact-memory/scripts/memory_init.py` — today exactly
+#   `pysqlite3`, `sqlite-vec`, `model2vec` — must all be pinned in
+#   constraints-ci.txt. That module refuses to install when CI is set, so a
+#   name missing from the pins installs nowhere and CI shows the consequences
+#   listed above.
 #
 #   Skip populations are NAMED above rather than counted: a name stays
 #   checkable, a number goes stale silently, and a stale figure under a
@@ -291,17 +298,14 @@ jobs:
 
       - name: Install test dependencies
         # See the "DEPENDENCY SET" header note for why each lib is required.
-        # pytest-asyncio is REQUIRED, not optional: the suite has a large
-        # @pytest.mark.asyncio cohort, and without this plugin that whole
-        # cohort is RED. Measured on pytest 9.2.0 (the pinned runner): one
-        # failure per async test, `async def functions are not natively
-        # supported.` Do NOT drop
-        # it to "shorten" the line — the async cohort simply stops passing, and
-        # it is a large fraction of the suite.
-        # -c constraints-ci.txt pins the install line's direct deps to the
-        # TEST-verified versions (CONSTRAINTS paragraph in the DEPENDENCY SET
-        # header): drift is a reviewed change, not merge-time weather.
-        run: python -m pip install --upgrade -c constraints-ci.txt pip pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
+        # The package list lives in constraints-ci.txt and nowhere else: this
+        # step installs exactly that file with `-r`, so adding or dropping a
+        # dependency is an edit there (CONSTRAINTS paragraph in the header).
+        # The pip self-upgrade keeps `-c constraints-ci.txt`: inert while pip
+        # is unpinned, and a pip pin added to that file then applies here too.
+        run: |
+          python -m pip install --upgrade -c constraints-ci.txt pip
+          python -m pip install -r constraints-ci.txt
 
       # WARM THE MODEL ONCE, HERE, WHERE NOTHING IS TIMING IT.
       #
@@ -391,7 +395,7 @@ jobs:
       #   never ran the tests written for it. That is not hypothetical — it
       #   already happened here. Test modules living inside the skill
       #   directories they guard went uncollected under a `tests/`-only
-      #   argument, and repairing it also forced pyyaml into the install line,
+      #   argument, and repairing it also forced pyyaml into the dependency set,
       #   because the scoped invocation had been blind to the `import yaml` in
       #   those modules by construction.
       #   A bare `pytest` from pact-plugin/ has no such blind spot: it collects
@@ -419,6 +423,23 @@ jobs:
       #   the anchored `^[0-9]+ passed` scan also returned 0, because a failing
       #   summary leads with its failures. Two misleading zeros on one red run.
       #   `-ra` is everything except passes, so failures and errors stay.
+      #
+      # ENVIRONMENT CHECK AROUND THE TESTS (header: RUNTIME CHECK). The check
+      # runs IMMEDIATELY before this step and as the job's LAST step, with
+      # `if: always()` so a red suite still reports what it ran against. A
+      # test in the suite pins this placement, this step's exact command, and
+      # the absence of `env:`/`shell:` on these steps, so the checked
+      # interpreter and environment are the ones the tests use.
+      # `--report` prints the verdict and every installed distribution but
+      # exits 0: the first CI run measures what the runner image adds, then
+      # `--report` is dropped and the check enforces.
+      - name: Verify the CI environment (before tests)
+        run: python scripts/verify_ci_environment.py --report
+
       - name: Run test suite
         working-directory: pact-plugin
         run: python -m pytest -ra
+
+      - name: Verify the CI environment (after tests)
+        if: always()
+        run: python scripts/verify_ci_environment.py --report

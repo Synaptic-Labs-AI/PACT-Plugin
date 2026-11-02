@@ -64,8 +64,9 @@ Every parse below asserts an anchor with ground truth INDEPENDENT of the parse,
 before the comparison it feeds, and with a distinct message. An absence-shaped
 assertion is satisfied trivially by a parser that read nothing — so "no path
 arguments found" from a workflow this module failed to parse would be a false
-green of exactly the genus the whole file is about. Convention followed from
-``test_memory_init.py``, which parses the same workflow for its install line.
+green of exactly the genus the whole file is about. ``test_memory_init.py``
+follows the same convention where it reads the same workflow, to check that a
+runtime environment check brackets every test run.
 """
 
 import re

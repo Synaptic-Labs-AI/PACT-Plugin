@@ -3,10 +3,10 @@
 #
 # Mirrors the CI dependency set in .github/workflows/tests.yml. CI runs the
 # floor interpreter with the pins in constraints-ci.txt; this script installs
-# the same pinned direct dependencies and refuses any interpreter below the
-# floor. A local green matches CI only on the floor version itself: a newer
-# interpreter is allowed but CI does not test it. Installs into a repo-local
-# venv (.venv) to keep the system interpreter clean. Safe to run repeatedly.
+# the same file with `-r` and refuses any interpreter below the floor. A local
+# green matches CI only on the floor version itself: a newer interpreter is
+# allowed but CI does not test it. Installs into a repo-local venv (.venv) to
+# keep the system interpreter clean. Safe to run repeatedly.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,28 +52,15 @@ require_floor .venv/bin/python "the existing .venv" \
 # shellcheck disable=SC1091
 . .venv/bin/activate
 
+# The same two commands as CI's install step (.github/workflows/tests.yml):
+# constraints-ci.txt is the requirement set, so the package list lives there
+# only. pip is not pinned; its upgrade keeps `-c` so a future pip pin applies.
 python -m pip install --upgrade -c constraints-ci.txt pip
+python -m pip install -r constraints-ci.txt
 
-# CI-parity install: the command below mirrors the install line in
-# .github/workflows/tests.yml — the authoritative copy; read it there rather
-# than here. The package-set parity arm in
-# pact-plugin/tests/test_memory_init.py reddens if the two surfaces drift.
-# constraints-ci.txt pins the direct deps to the TEST-verified versions, so a
-# local green and a CI green resolve the same direct-dependency set.
-# pip stays unconstrained (no pin in constraints-ci.txt; a pinned
-# self-upgrade can deadlock the bootstrap). Its upgrade line above carries
-# the same `-c` — inert for pip, uniform with the package line — so every
-# install command applies the constraints file.
-python -m pip install --upgrade -c constraints-ci.txt \
-  pytest \
-  hypothesis \
-  httpx \
-  pytest-asyncio \
-  pyyaml \
-  pysqlite3 \
-  sqlite-vec \
-  model2vec \
-  ruff
+# Report how this venv differs from the pinned set. A warning only, never a
+# failure: a local venv may legitimately hold extra tools.
+python scripts/verify_ci_environment.py --report
 
 # Claude Code CLI — enables the live end-to-end plugin smoke test
 # (.cursor/smoke-test.sh). Installed into a user-local npm prefix so no sudo is
