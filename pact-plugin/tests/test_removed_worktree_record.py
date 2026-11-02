@@ -143,7 +143,7 @@ def _enable_record_reading(monkeypatch) -> None:
     # Reset the discovery cache: it is module-level, and a parametrized arm
     # would otherwise read the PREVIOUS parameter's session record.
     monkeypatch.setattr(
-        pact_session, "_discovered_record", pact_session._DISCOVERY_UNSET
+        project_scope, "_discovered_record", project_scope._DISCOVERY_UNSET
     )
 
 

@@ -34,7 +34,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional, Set
+from typing import NamedTuple, Optional, Set
 
 from . import state_file
 from .git_helpers import run_git
@@ -624,7 +624,9 @@ def project_memory_root_and_cause(
     return root, (None if cause == ROOT_CAUSE_OK else cause)
 
 
-def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
+def unknown_root_reason(
+    cause: str, project_dir: Optional[str | os.PathLike[str]]
+) -> str:
     """The user-facing CLAUSE for a cause returned by `unknown_root_cause`.
 
     ONE SOURCE FOR EVERY CHANNEL THAT REPORTS THIS. Six surfaces compose their
@@ -647,10 +649,18 @@ def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
     The anchor path is part of the clause: several worktrees can be in play and
     the user needs to know which one.
 
+    A None anchor is the session whose cwd is gone with nothing naming it; it
+    has only the MISSING clause, which names no path.
+
     Raises:
-        ValueError: `cause` is not one of the three unknown causes. "ok", None
-            or an unexpected value is a caller bug, never a sentence.
+        ValueError: `cause` is not one of the three unknown causes ("ok", None
+            or an unexpected value is a caller bug, never a sentence), or the
+            anchor is None with a cause other than MISSING.
     """
+    if project_dir is None:
+        if cause == ROOT_CAUSE_MISSING:
+            return "the working directory no longer exists"
+        raise ValueError(f"no anchor for cause {cause!r}")
     anchor = f"{project_dir}"
     if cause == ROOT_CAUSE_MISSING:
         return f"the project directory {anchor} no longer exists"
@@ -667,7 +677,7 @@ def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
 def unknown_root_status(
     subject: str,
     cause: str,
-    anchor: str | os.PathLike[str],
+    anchor: Optional[str | os.PathLike[str]],
     consequence: str,
 ) -> str:
     """THE ONE TEMPLATE for a writer's skip line on an unknown root.
@@ -1203,3 +1213,197 @@ def _record_worktree_identity(session_id: str, project_dir: str) -> None:
         )
     except Exception:
         return
+
+
+# ---------------------------------------------------------------------------
+# The session's anchor and project-memory root: ONE rule for every site.
+# ---------------------------------------------------------------------------
+
+_CONTEXT_FILE = "pact-session-context.json"
+_DISCOVERY_UNSET = object()
+# Cached RESULT OF THE FILESYSTEM LOOKUP only, keyed on the session id it was
+# resolved for. The guards in `_discover_context_record` run on every call, so
+# a cached answer never outlives the conditions that permitted it.
+_discovered_record: object = _DISCOVERY_UNSET
+_discovered_record_for_env: Optional[str] = None
+
+
+def _discover_context_record() -> dict:
+    """Return this session's parsed context record, discovered from the env id.
+
+    A test process is refused before any read, and no env id means no answer;
+    both guards run on every call. Only the filesystem lookup is cached.
+    Returns {} whenever the answer is not unambiguous.
+    """
+    # Same guard pair as pact_session._discover_session_id -- keep in sync.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return {}
+    env_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not env_session:
+        return {}
+    global _discovered_record, _discovered_record_for_env
+    if (
+        _discovered_record is _DISCOVERY_UNSET
+        or _discovered_record_for_env != env_session
+    ):
+        _discovered_record = _session_record_on_disk(env_session, _CONTEXT_FILE)
+        _discovered_record_for_env = env_session
+    record = _discovered_record
+    return record if isinstance(record, dict) else {}
+
+
+def recorded_project_dir() -> str:
+    """This session's recorded project_dir, or "" when unavailable.
+
+    The session-record rung of the anchor: below CLAUDE_PROJECT_DIR (a present
+    declaration wins), above the process cwd (in a multi-repo workspace the
+    cwd's git root can be the wrong scope; the record is the session's own
+    identity, written by session_init at SessionStart).
+
+    Existence is NOT checked: the value is an anchor, and a recorded directory
+    deleted since is the classifier's MISSING case. A non-absolute value is
+    rejected (an old "." record would alias the reader's cwd). The record's
+    session_id must equal the env id that located it; an ABSENT field is
+    accepted, because legacy records predate it and the locating glob already
+    matched the id's directory.
+
+    Returns "" on every failure. Never raises.
+    """
+    record = _discover_context_record()
+    found = record.get("project_dir", "")
+    if not isinstance(found, str) or not os.path.isabs(found):
+        return ""
+    record_session = record.get("session_id")
+    if record_session is not None and (
+        not isinstance(record_session, str)
+        or record_session != os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    ):
+        return ""
+    return found
+
+
+class SessionRoot(NamedTuple):
+    """One observation of where this session's project memory lives.
+
+    `anchor` is the directory the session resolved from (never resolved here;
+    None when the cwd is gone and nothing names it), `declared` says it came
+    from CLAUDE_PROJECT_DIR, and `root` is the
+    project-memory root, None exactly when `cause` names why it is unknown
+    (ROOT_CAUSE_MISSING, ROOT_CAUSE_UNVERIFIED or ROOT_CAUSE_UNANSWERABLE).
+    """
+
+    anchor: Optional[Path]
+    declared: bool
+    root: Optional[Path]
+    cause: Optional[str]
+
+
+def session_anchor() -> tuple[Optional[Path], bool]:
+    """The session's anchor directory and whether it was declared.
+
+    CLAUDE_PROJECT_DIR when non-empty, else the session record's project_dir,
+    else the process cwd. A deleted cwd cannot be read: the shell's PWD names
+    it when PWD is absolute AND gone, and the classifier answers MISSING.
+    Otherwise (no PWD, or a PWD naming a directory that still exists, which is
+    then not this process's cwd) the anchor is None, which
+    `session_memory_root` reports as MISSING without classifying anything.
+    """
+    declared = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if declared:
+        return Path(declared), True
+    recorded = recorded_project_dir()
+    if recorded:
+        return Path(recorded), False
+    try:
+        return Path.cwd(), False
+    except OSError:
+        pwd = os.environ.get("PWD", "")
+        if os.path.isabs(pwd) and not os.path.isdir(pwd):
+            return Path(pwd), False
+        return None, False
+
+
+def memory_root_of(
+    directory: str | os.PathLike[str],
+) -> tuple[Optional[Path], Optional[str]]:
+    """The pure classifier: `(root, None)` for a known root, `(None, cause)`.
+
+    It never consults the session record, which belongs to a session and not
+    to a directory; `session_memory_root` adds the record's recovery.
+    """
+    root, cause = _project_memory_root_cause(directory)
+    if cause == ROOT_CAUSE_OK:
+        return root, None
+    return None, cause
+
+
+def session_memory_root() -> SessionRoot:
+    """This session's anchor, project-memory root and unknown cause.
+
+    The anchor follows `session_anchor`. When the root is unknown because the
+    anchor is MISSING or git is UNANSWERABLE, the session's worktree record
+    may recover it, but ONLY when it verifies and its checkout CONTAINS the
+    anchor. An UNVERIFIED root is never recovered: there the present answer
+    contradicts the record, and a CORRUPT or UNRELATED record keeps the cause.
+    """
+    anchor, declared = session_anchor()
+    if anchor is None:
+        # The cwd is gone and nothing names it: no directory to classify, and
+        # no record can be for it.
+        return SessionRoot(None, declared, None, ROOT_CAUSE_MISSING)
+    root, cause = memory_root_of(anchor)
+    if cause in (ROOT_CAUSE_MISSING, ROOT_CAUSE_UNANSWERABLE):
+        status, recovered = record_resolution(
+            anchor, get_worktree_identity_from_session_record()
+        )
+        if status == RECORD_CONTAINED and recovered is not None:
+            return SessionRoot(anchor, declared, recovered, None)
+    return SessionRoot(anchor, declared, root, cause)
+
+
+def _names_the_user_global_document(checkout: Path) -> bool:
+    """Whether either canonical document path under `checkout` is the
+    user-global `<config>/CLAUDE.md`. Unable to tell reads as True."""
+    try:
+        user_global = os.path.realpath(get_claude_config_dir() / "CLAUDE.md")
+        return any(
+            os.path.realpath(candidate) == user_global
+            for candidate in (checkout / ".claude" / "CLAUDE.md", checkout / "CLAUDE.md")
+        )
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
+def enclosing_main_checkout(root: Path) -> Optional[Path]:
+    """The main checkout that strictly contains a KNOWN root, or None.
+
+    Applies only when `root` is a subdirectory of a main checkout (not a
+    linked worktree): its toplevel T differs from it, its git dir equals its
+    common dir, T reports the SAME common dir (a `core.worktree` redirect
+    fails this), and T classifies as its own known root. Never returns a
+    directory whose canonical document is the user-global CLAUDE.md (a
+    dotfiles-git home). Any git failure gives None.
+    """
+    toplevel, ran = _raw_rev_parse(Path(root), "--show-toplevel")
+    if not ran or toplevel is None:
+        return None
+    try:
+        root_real = Path(root).resolve()
+    except (OSError, RuntimeError):
+        return None
+    if toplevel == root_real or toplevel not in root_real.parents:
+        return None
+    git_dir, ran = _raw_rev_parse(Path(root), "--git-dir")
+    if not ran or git_dir is None:
+        return None
+    common_dir, ran = _raw_rev_parse(Path(root), "--git-common-dir")
+    if not ran or common_dir is None or git_dir != common_dir:
+        return None
+    toplevel_common, ran = _raw_rev_parse(toplevel, "--git-common-dir")
+    if not ran or toplevel_common != common_dir:
+        return None
+    if memory_root_of(toplevel) != (toplevel, None):
+        return None
+    if _names_the_user_global_document(toplevel):
+        return None
+    return toplevel

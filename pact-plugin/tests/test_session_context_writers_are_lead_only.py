@@ -147,6 +147,7 @@ KNOWN_NAME_SITES = Counter({
     ("hooks/shared/session_resume.py", "_saved_team_of"): 1,         # read
     ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 1,       # read
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
+    ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
 })
 
 # (file, function, call): count of relocations in a function that derives a

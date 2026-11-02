@@ -45,6 +45,11 @@ from shared.pact_context import (  # noqa: E402  # requires the sys.path bootstr
 from shared.project_scope import _session_record_on_disk  # noqa: E402  # requires the sys.path bootstrap above
 # Re-exported, never wrapped: the working-memory guard and archive_pin must hold one reader.
 from shared.project_scope import get_worktree_identity_from_session_record  # noqa: E402, F401  # re-export
+# The session-record rung lives in project_scope, so the anchor every CLAUDE.md
+# site uses and this module's readers are one function; re-exported, never wrapped.
+from shared.project_scope import (  # noqa: E402  # requires the sys.path bootstrap above
+    recorded_project_dir as get_project_dir_from_session_record,
+)
 
 
 def _context_file_path(session_id: str, project_dir: str) -> Path | None:
@@ -137,79 +142,6 @@ def _discover_session_id() -> str:
         _discovered_session_id = _resolve_context_on_disk(env_session)
         _discovered_for_env = env_session
     return _discovered_session_id
-
-
-_discovered_record = _DISCOVERY_UNSET
-_discovered_record_for_env = None
-
-
-def _discover_context_record() -> dict:
-    """Return this session's parsed context record, discovered from the env id.
-
-    The record route of the same discovery `_discover_session_id` performs,
-    with the SAME two guards (a test process is refused before any read; no
-    env id means no answer) and the same cache discipline: the filesystem
-    lookup is cached, the guards are re-run on every call. The guards are
-    duplicated here rather than shared through `_discover_session_id` because
-    that function's cache is pinned by tests that count its calls to
-    `_resolve_context_on_disk` — routing id discovery through this record
-    cache would let a warm record cache starve that call count.
-
-    Returns {} whenever the answer is not unambiguous.
-    """
-    # Twin guard pair of _discover_session_id's — keep in sync.
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return {}
-    env_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-    if not env_session:
-        return {}
-
-    global _discovered_record, _discovered_record_for_env
-    if _discovered_record is _DISCOVERY_UNSET or _discovered_record_for_env != env_session:
-        _discovered_record = _context_record_on_disk(env_session)
-        _discovered_record_for_env = env_session
-    return _discovered_record
-
-
-def get_project_dir_from_session_record() -> str:
-    """Return this session's recorded project_dir, or "" when unavailable.
-
-    The session-record rung of the project-scope read contract: below
-    CLAUDE_PROJECT_DIR (a present declaration wins), ABOVE any git/cwd
-    derivation (in a multi-repo workspace the cwd's git root can be the WRONG
-    scope; the record is the session's own resolved identity, written by
-    session_init at SessionStart).
-
-    Existence is deliberately NOT checked: the value is a scope ANCHOR, and a
-    recorded directory deleted between sessions is the caller-resolver's
-    fall-through case, not a discovery failure.
-
-    A NON-ABSOLUTE recorded value is rejected. Records written before the
-    resolve-once fix could hold "." — resolving that HERE would alias this
-    rung to the reader's cwd ABOVE the git rung, inverting the precedence the
-    rung exists to establish.
-
-    The record's session_id field is cross-checked against the env id that
-    LOCATED the file: a MISMATCH means the globbed record is not this
-    session's own (a misfiled or planted record), so it reads as no record.
-    An ABSENT field is accepted — legacy records predate the always-written
-    field, and the locating glob already matched the env id's directory.
-
-    Returns "" on every failure: no env id, no unique context file, corrupt
-    JSON, non-mapping payload, non-string/non-absolute field, session_id
-    mismatch. Never raises.
-    """
-    record = _discover_context_record()
-    found = record.get("project_dir", "")
-    if not isinstance(found, str) or not os.path.isabs(found):
-        return ""
-    record_session = record.get("session_id")
-    if record_session is not None and (
-        not isinstance(record_session, str)
-        or record_session != os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-    ):
-        return ""
-    return found
 
 
 class ProjectScopeDisagreementError(RuntimeError):

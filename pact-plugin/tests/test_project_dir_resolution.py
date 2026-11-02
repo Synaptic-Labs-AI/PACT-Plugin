@@ -158,14 +158,18 @@ class TestSessionRecordReader:
         umbrella = make_umbrella(tmp_path)
         _arm_record(monkeypatch, tmp_path, umbrella.project)
 
+        # The record reader lives in project_scope; its disk lookup is the
+        # call that must run once.
+        from shared import project_scope
+
         calls = []
-        real = pact_session._context_record_on_disk
+        real = project_scope._session_record_on_disk
 
-        def counting(env_session):
-            calls.append(1)
-            return real(env_session)
+        def counting(env_session, filename):
+            calls.append(filename)
+            return real(env_session, filename)
 
-        monkeypatch.setattr(pact_session, "_context_record_on_disk", counting)
+        monkeypatch.setattr(project_scope, "_session_record_on_disk", counting)
         first = pact_session.get_project_dir_from_session_record()
         second = pact_session.get_project_dir_from_session_record()
         assert first == second == str(umbrella.project)
