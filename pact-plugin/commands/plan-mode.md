@@ -242,13 +242,16 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
    - Task B's `description` is "PLANNING CONSULTATION ONLY — No implementation.\n\nFIRST claim this task (`TaskUpdate` status=in_progress) before beginning the consultation — pre-assigned to you but still pending; you flip it, not the lead.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read the upstream task file first — `TaskGet` does NOT surface metadata."
 3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
-5. **Journal event**: write one `variety_assessed` event per dispatched Task B before spawning, mirroring that task's `metadata.variety` stamp — the four dimension scores and the total, `*_rationale` strings omitted, and the top-level `"scope": "dispatch"` discriminator present (the feature-level assessment event carries no `scope` field; journal readers key on that difference):
+5. **Journal event**: write one `variety_assessed` event per dispatched Task B before spawning, mirroring that task's `metadata.variety` stamp — the four dimension scores and the total, `*_rationale` strings omitted, and the top-level `"scope": "dispatch"` discriminator present (the feature-level assessment event carries no `scope` field; journal readers key on that difference). If a journal block fails at a write or its read-back, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] plan-mode.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] plan-mode.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
 6. Spawn the consultant with the canonical dispatch form:
@@ -374,8 +377,11 @@ Save the synthesized plan to `docs/plans/{feature-slug}-plan.md`.
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] plan-mode.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"workflow": "plan-mode", "feature": "{feature-slug}", "paths": ["{absolute_plan_doc_path}"]}
+JSON
+python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] plan-mode.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"plan-mode","feature":"{feature-slug}"}}
 JSON
 ```
 
