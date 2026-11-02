@@ -410,12 +410,17 @@ def test_the_write_back_reports_nothing_when_no_cause_is_identified(
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
     _patch_bootstrap_context(monkeypatch, writer, forged, session_dir)
-    monkeypatch.setattr(
-        writer, "project_memory_root_and_cause", lambda pd: (Path(str(pd)), None)
-    )
+    calls = []
+
+    def known_root(pd):
+        calls.append(pd)
+        return (Path(str(pd)), None)
+
+    monkeypatch.setattr(writer, "project_memory_root_and_cause", known_root)
 
     status = writer._write_back_aligned_team_name({"agent_type": LEAD})
 
+    assert len(calls) == 1, calls
     assert status is None, status
 
 
@@ -510,14 +515,18 @@ def test_realign_reports_nothing_when_no_cause_is_identified(
     session_dir = _session_with_session_start(repo)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    monkeypatch.setattr(
-        project_scope, "project_memory_root_and_cause",
-        lambda pd: (Path(str(pd)), None),
-    )
+    calls = []
+
+    def known_root(pd):
+        calls.append(pd)
+        return (Path(str(pd)), None)
+
+    monkeypatch.setattr(project_scope, "project_memory_root_and_cause", known_root)
 
     _write_team_line("sid", "session-new", str(session_dir), "/plugin")
 
     err = capsys.readouterr().err
+    assert len(calls) == 1, calls
     assert err == "", err
 
 
@@ -798,16 +807,22 @@ def test_the_prompt_gate_reports_nothing_when_no_cause_is_identified(
     _seed_session_blocks(monkeypatch, writer, repo, forged, session_dir)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    # ROOT None WITH NO CAUSE is the disagreement in its strongest form: the
-    # old guard (root is None) would emit a fallback here, while a cause-driven
-    # guard emits nothing. A root-bearing stub could not see that.
-    monkeypatch.setattr(
-        project_scope, "project_memory_root_and_cause",
-        lambda pd: (None, None),
-    )
+    # FAULT INJECTION, NOT A PRODUCTION SHAPE. `project_memory_root_and_cause`
+    # returns (given, cause) with a real Path on every path, so (None, None)
+    # cannot occur; this stub exists only to distinguish a cause-driven guard
+    # from a root-driven one. The call count below proves the stub is REACHED;
+    # it says nothing about a fallback placed inside the guarded branch.
+    calls = []
+
+    def no_cause(pd):
+        calls.append(pd)
+        return (None, None)
+
+    monkeypatch.setattr(project_scope, "project_memory_root_and_cause", no_cause)
 
     out = writer._record_unrecorded_lead(_prompt_gate_frame(), str(session_dir))
 
+    assert len(calls) == 1, calls
     assert "Project CLAUDE.md skipped" not in out, out[-300:]
     assert "no longer exists" not in out, out[-300:]
     assert "could not be verified as a checkout" not in out, out[-300:]
@@ -834,11 +849,17 @@ def test_the_archive_reports_no_unknown_cause_when_none_is_identified(
     forged = _forged_gitfile(repo, tmp_path, "no-cause-archive")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    # (None, None): the root observation says unknown while the cause says
-    # known -- the disagreement a reintroduced default text would fire on.
-    monkeypatch.setattr(
-        project_scope, "project_memory_root_and_cause", lambda pd: (None, None)
-    )
+    # FAULT INJECTION, NOT A PRODUCTION SHAPE -- see the sibling above: the
+    # helper returns a real Path on every path, so (None, None) cannot occur.
+    # The call count proves the stub is reached; it says nothing about a
+    # fallback placed inside a guarded branch.
+    calls = []
+
+    def no_cause(pd):
+        calls.append(pd)
+        return (None, None)
+
+    monkeypatch.setattr(project_scope, "project_memory_root_and_cause", no_cause)
 
     try:
         archive_pin.resolve_claude_md()
@@ -847,6 +868,7 @@ def test_the_archive_reports_no_unknown_cause_when_none_is_identified(
     else:
         reason = ""
 
+    assert len(calls) == 1, calls
     assert "no longer exists" not in reason, reason
     assert "could not be verified as a checkout" not in reason, reason
     assert "git could not answer" not in reason, reason
@@ -1334,12 +1356,17 @@ def test_the_session_start_reports_nothing_when_no_cause_is_identified(
     import session_init as gate
 
     forged = _forged_gitfile(repo, tmp_path, "no-cause-session")
-    monkeypatch.setattr(
-        gate, "project_memory_root_and_cause", lambda pd: (Path(str(pd)), None)
-    )
+    calls = []
+
+    def known_root(pd):
+        calls.append(pd)
+        return (Path(str(pd)), None)
+
+    monkeypatch.setattr(gate, "project_memory_root_and_cause", known_root)
 
     _context, system_message = _run(monkeypatch, forged)
 
+    assert len(calls) == 1, calls
     assert "Project CLAUDE.md skipped" not in system_message, system_message[:300]
     assert "no longer exists" not in system_message, system_message[:300]
     assert (
