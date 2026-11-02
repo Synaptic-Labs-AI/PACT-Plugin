@@ -436,8 +436,13 @@ def test_an_unresolved_ceiling_after_an_empty_entry_reaches_a_broken_gitfile(
 # directory (or runs inside it) exactly as git refuses a repository it does
 # not trust: "fatal: detected dubious ownership" on stderr and exit 128. That
 # makes the ownership rows deterministic on any git. git's own
-# GIT_TEST_ASSUME_DIFFERENT_OWNER switch drives two further rows, run only
-# where the git under test honours it (a CI runner's git did not).
+# GIT_TEST_ASSUME_DIFFERENT_OWNER switch drives two further rows. Every
+# ownership row runs with git's configuration ISOLATED (an empty global file,
+# no system file, HOME and XDG_CONFIG_HOME under tmp_path): an inherited
+# `safe.directory = *`, as a CI runner carries, makes git trust every
+# repository and answer despite the switch. A precondition then asserts that
+# a plain rev-parse under that environment refuses, so an environment that
+# still answers fails as a fixture error, not as a product failure.
 #
 # Revert check for every row: without the metadata rule in `_raw_rev_parse`
 # the cause is "ok" and the root is the directory itself, so the classifier
@@ -503,17 +508,32 @@ def _dubious_git_on_path(tmp_path, monkeypatch, protected):
     assert answered.returncode == 0 and answered.stdout.startswith("git version")
 
 
-def _git_honours_the_ownership_switch(tmp_path) -> bool:
-    probe = tmp_path / "ownership-probe"
-    probe.mkdir()
-    _git("init", "-q", ".", cwd=probe)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+def _isolate_git_config(tmp_path, monkeypatch):
+    """No inherited git configuration: an empty global file, no system file,
+    and HOME / XDG_CONFIG_HOME under tmp_path."""
+    config = tmp_path / "git-config"
+    config.mkdir()
+    (config / "global").write_text("", encoding="utf-8")
+    (config / "home").mkdir()
+    (config / "xdg").mkdir()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config / "global"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("HOME", str(config / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config / "xdg"))
+
+
+def _assert_git_refuses(directory):
+    """The fixture's own precondition, under the arm's environment."""
     refused = subprocess.run(
-        ["git", "-C", str(probe), "rev-parse", "--git-dir"],
-        env=env, capture_output=True, text=True, timeout=30,
+        ["git", "-C", str(directory), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, timeout=30,
     )
-    return refused.returncode != 0 and "dubious ownership" in refused.stderr
+    if refused.returncode == 0 or "dubious ownership" not in refused.stderr:
+        pytest.fail(
+            f"fixture error: git still answers at {directory} under the "
+            f"ownership row's environment (rc {refused.returncode}, stderr "
+            f"{refused.stderr.strip()!r}); the row cannot be built here"
+        )
 
 
 def _broken(tmp_path, monkeypatch, row):
@@ -532,19 +552,18 @@ def _broken(tmp_path, monkeypatch, row):
     if row == "deleted_admin":
         shutil.rmtree(main / ".git" / "worktrees" / "wt")
         return worktree, main
-    if row == "dubious_worktree":
-        _dubious_git_on_path(tmp_path, monkeypatch, worktree)
-        return worktree, main
-    if row == "dubious_main":
-        _dubious_git_on_path(tmp_path, monkeypatch, main)
-        return main, main
+    if row in ("dubious_worktree", "dubious_main"):
+        start = worktree if row.endswith("worktree") else main
+        _isolate_git_config(tmp_path, monkeypatch)
+        _dubious_git_on_path(tmp_path, monkeypatch, start)
+        _assert_git_refuses(start)
+        return start, main
     if row in ("switch_dubious_worktree", "switch_dubious_main"):
-        if not _git_honours_the_ownership_switch(tmp_path):
-            pytest.skip(
-                "the git under test does not honour GIT_TEST_ASSUME_DIFFERENT_OWNER"
-            )
+        start = worktree if row.endswith("worktree") else main
+        _isolate_git_config(tmp_path, monkeypatch)
         monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
-        return (worktree if row.endswith("worktree") else main), main
+        _assert_git_refuses(start)
+        return start, main
     raise AssertionError(row)
 
 
