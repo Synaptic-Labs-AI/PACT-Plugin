@@ -404,17 +404,17 @@ def test_f1_e_git_output_preserves_an_undecodable_path(repo):
 
 
 def test_d2_a_relative_admin_gitdir_record_resolves(repo, monkeypatch):
-    """The `worktree.useRelativePaths` shape: the admin `gitdir` file holds a
-    path RELATIVE to the main checkout, not an absolute one. The fallback
-    resolves it against the common dir's parent. This is COVERAGE, not a
-    discriminating arm -- the branch is pre-existing and this test passes on
-    the same tree; no test wrote such a record before it."""
+    """The `worktree.useRelativePaths` shape: the admin `gitdir` file holds
+    the worktree's `.git` path RELATIVE to the admin dir that holds it. The
+    fallback resolves it there; resolving it against the main root instead
+    names a path that is not the worktree, and the classifier then refuses a
+    legitimate worktree. `tests/test_admin_gitdir_relative_record.py` pins
+    the same rule for a worktree outside the main checkout."""
     worktree = _worktree(repo, "d2-relative")
     admin = repo / ".git" / "worktrees" / "d2-relative"
     assert admin.is_dir(), "the admin record for the new worktree is missing"
-    # Exactly the record git writes with worktree.useRelativePaths: the
-    # worktree's .git file, relative to the main worktree root.
-    (admin / "gitdir").write_text(".worktrees/d2-relative/.git\n", encoding="utf-8")
+    record = os.path.relpath(worktree / ".git", admin)
+    (admin / "gitdir").write_text(record + "\n", encoding="utf-8")
 
     real_run_git = project_scope.run_git
 

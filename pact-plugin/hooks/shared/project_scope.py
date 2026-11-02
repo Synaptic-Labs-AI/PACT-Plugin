@@ -700,8 +700,8 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
 
     Returns None when git cannot answer at all (the caller keeps the line
     parser as the last resort). An empty repository returns its own root.
-    LIMIT: a relative recorded path (`worktree.useRelativePaths`) is resolved
-    against the main root, unmeasured on the git available here (2.43).
+    A relative recorded path (`worktree.useRelativePaths`) is resolved against
+    the admin dir that holds it, which is where git writes it relative to.
     """
     common_dir, ran = _raw_rev_parse(checkout, "--git-common-dir")
     if not ran:
@@ -737,7 +737,9 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
             continue
         gitfile = Path(content)
         if not gitfile.is_absolute():
-            gitfile = common_dir.parent / gitfile
+            # git writes a relative record (`worktree.useRelativePaths`)
+            # relative to the admin dir that holds it, so it resolves there.
+            gitfile = admin / gitfile
         paths.append(str(gitfile.parent))
     return paths
 
