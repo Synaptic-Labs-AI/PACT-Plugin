@@ -70,6 +70,7 @@ runtime environment check brackets every test run.
 """
 
 import ast
+import dataclasses
 import importlib.util
 import json
 import re
@@ -1210,10 +1211,7 @@ def _select_real(changed, value_inert=()):
     repo_root, core, manifest, index = _shipped_manifest()
     facts = core.gather_facts(repo_root, manifest, changed, None, index=index)
     if value_inert:
-        facts = core.ChangeFacts(
-            views=facts.views, value_inert=frozenset(value_inert),
-            conftest_verdicts=facts.conftest_verdicts,
-            conftest_imported=facts.conftest_imported)
+        facts = dataclasses.replace(facts, value_inert=frozenset(value_inert))
     return core.select(core.discover(repo_root), manifest, changed, "ok",
                        facts)
 
@@ -1393,7 +1391,9 @@ class TestScanningExclusionsAreAddedBackForTheirTrees:
         clock-shift guard, so any hooks/*.py change must bring them back."""
         selection = _select_real(["pact-plugin/hooks/names_the_exemption.py"])
         reasons = {entry.path: entry.reason for entry in selection.added_back}
-        assert reasons.get(scanner) == "scanned_tree", reasons
+        # A broad exclusion comes back as unproven_reach before the scanner
+        # rule is consulted; either reason brings it back.
+        assert reasons.get(scanner) in ("scanned_tree", "unproven_reach"), reasons
 
     def test_an_unmapped_hook_reaches_the_census_through_the_scanner(self):
         """track_files.py is in no census seam list: only the scanner rule
@@ -1411,16 +1411,22 @@ class TestScanningExclusionsAreAddedBackForTheirTrees:
         assert reasons.get(
             "tests/test_merge_guard_refused_is_mintable.py") == "scanned_tree"
 
-    def test_the_readme_adds_nothing_back_except_whole_plugin_scanners(self):
-        """The README is read by no excluded test. Only scanners of the
-        whole plugin (root '.') can see it."""
+    def test_the_plugin_readme_adds_back_only_broad_and_whole_tree_scanners(
+            self):
+        """No excluded test reads pact-plugin/README.md by name. Only broad
+        exclusions (back on any non-trio change) and confined scanners of the
+        whole plugin can see it."""
+        repo_root, core, manifest, index = _shipped_manifest()
         selection = _select_real(["pact-plugin/README.md"])
         assert selection.select_all_reason is None
+        facts = core.gather_facts(repo_root, manifest, [], None, index=index)
+        broad = {exclusion.path for exclusion in manifest.exclusions
+                 if core.broad_reasons(index.view(exclusion.path), facts)}
         whole = {path for path, roots in self._scanners().items()
                  if "." in roots}
-        assert {entry.path for entry in selection.added_back} == whole
-        assert all(entry.reason == "scanned_tree"
-                   for entry in selection.added_back)
+        reasons = {entry.path: entry.reason for entry in selection.added_back}
+        assert set(reasons) == broad | whole
+        assert all(reasons[path] == "unproven_reach" for path in broad)
 
 
 class TestProcessGlobalConftestFixturesSelectEverything:
@@ -1461,47 +1467,152 @@ class TestProcessGlobalConftestFixturesSelectEverything:
             f"conftest:tests/conftest.py:autouse-unscoped:{fixture}")
 
 
-class TestRepoReadersAreAddedBackByOutsideChanges:
-    """An excluded test that reads repository files outside pact-plugin/ is
-    detected from its closure (a repository path literal in test code, an
-    anchor that climbs above the plugin, or a climb of unknown depth) and
-    comes back on any change outside the plugin. Detected, never listed."""
+class TestClosedByDefaultReach:
+    """Contracts for the confined/broad split over the real exclusions."""
 
-    def test_every_detected_repo_reader_is_added_back(self):
-        _, _, manifest, index = _shipped_manifest()
-        readers = {exclusion.path: index.view(exclusion.path).repo_reach
-                   for exclusion in manifest.exclusions
-                   if index.view(exclusion.path).repo_reach}
-        selection = _select_real([".github/zz_probe.yml"])
+    def _split(self):
+        repo_root, core, manifest, index = _shipped_manifest()
+        facts = core.gather_facts(repo_root, manifest, [], None, index=index)
+        return core, manifest, index, {
+            exclusion.path: core.broad_reasons(index.view(exclusion.path),
+                                               facts)
+            for exclusion in manifest.exclusions}
+
+    def test_the_split_is_not_vacuous(self):
+        """C9: computed, not listed: some exclusion of each kind exists."""
+        _, _, _, split = self._split()
+        assert any(split.values()) and not all(split.values()), split
+
+    def test_the_bump_trio_carve_out_holds_for_every_exclusion(self):
+        """C4: the trio is ignored for an exclusion only while no literal in
+        its test-side closure names a trio file. Pinned to hold today."""
+        _, manifest, index, _ = self._split()
+        named = [exclusion.path for exclusion in manifest.exclusions
+                 if index.view(exclusion.path).trio_named]
+        assert named == [], named
+
+    def test_a_trio_only_change_adds_no_exclusion_back(self):
+        _, _, _, split = self._split()
+        selection = _select_real(["CHANGELOG.md", "README.md",
+                                  ".claude-plugin/marketplace.json"])
         assert selection.select_all_reason is None
-        added = {entry.path for entry in selection.added_back}
-        assert added == set(readers), (
-            f"repo readers {sorted(readers)} but an outside change added "
-            f"back {sorted(added)}")
+        assert selection.added_back == (), selection.added_back
+
+    def test_an_outside_change_adds_back_exactly_the_broad_exclusions(self):
+        _, _, _, split = self._split()
+        selection = _select_real([".github/zz_probe.yml"])
+        assert {entry.path for entry in selection.added_back} == {
+            path for path, reasons in split.items() if reasons}
+
+    def test_every_review_is_current_and_used(self):
+        """Reports stale and unused reviews. Safety does not depend on it:
+        a stale review is already ignored at runtime."""
+        repo_root, core, manifest, index = _shipped_manifest()
+        reviewed, _ = core.current_reviews(index.plugin_root, manifest)
+        stale = sorted(module for module, *_ in manifest.reach_reviews
+                       if module not in reviewed)
+        unproven_anywhere = {
+            module for exclusion in manifest.exclusions
+            for module, _ in index.view(exclusion.path).unproven}
+        unproven_anywhere |= {key.split("::", 1)[0] for key in unproven_anywhere}
+        unused = sorted(key for key, *_ in manifest.reach_reviews
+                        if key not in unproven_anywhere)
+        assert not stale, f"reviews whose module changed since review: {stale}"
+        assert not unused, f"reviews of modules nothing flags: {unused}"
+
+    PINNED_ISOLATION = (
+        "_isolate_config_root_to_tmp", "_scrub_claude_project_dir_env",
+        "_scrub_claude_code_remote_env", "_scrub_claude_plugin_root_env",
+        "_scrub_claude_env_file_env", "_scrub_session_id_from_test_env",
+        "_isolate_claude_md_target", "_isolate_merge_token_dir_to_tmp",
+        "_refuse_claude_md_writes_outside_tmp", "_isolate_memory_store_to_tmp",
+        "_confine_agent_definition_scan")
+
+    def test_the_conftest_isolation_fixtures_stay_autouse(self):
+        """C5: confinement trusts these to redirect HOME, the config root,
+        CLAUDE_PROJECT_DIR and the session env to tmp for every test. Their
+        CHANGE already selects everything as process-global; this pins that
+        they exist and stay autouse."""
+        repo_root, core, _, _ = _shipped_manifest()
+        conftest = repo_root / "pact-plugin" / "tests" / "conftest.py"
+        spans = core._fixture_spans(ast.parse(conftest.read_text(
+            encoding="utf-8")))
+        required = self.PINNED_ISOLATION
+        missing = [name for name in required if name not in spans]
+        not_autouse = [name for name in required
+                       if name in spans and not spans[name][2]]
+        assert not missing and not not_autouse, (missing, not_autouse)
+        # The session-wide HOME redirect at import time.
+        assert 'os.environ["HOME"] = _SESSION_HOME_DIR' in conftest.read_text(
+            encoding="utf-8")
+
+    def test_the_repository_root_finder_is_unproven(self):
+        """The repo's own marker walk (for base in Path(__file__).parents)
+        cannot be proven confined."""
+        _, _, index, _ = self._split()
+        sites = index.scan("tests/test_local_lint_parity.py").unproven
+        assert sites, "the marker walk in test_local_lint_parity passed"
 
     def test_conftest_sys_path_entries_are_import_roots(self):
-        """Every directory a conftest inserts on sys.path is resolved, so a
-        test importing from it has that module in its closure."""
         repo_root, core, _, index = _shipped_manifest()
         plugin_root = repo_root / "pact-plugin"
         entries = core._conftest_path_entries(plugin_root.resolve())
         assert "scripts" in entries, entries
         assert {(plugin_root / entry).resolve() for entry in entries} <= set(
             index.roots)
-        closure = index.closure(["tests/test_archive_pin.py"])
-        assert "scripts/archive_pin.py" in closure
+        assert "scripts/archive_pin.py" in index.closure(
+            ["tests/test_archive_pin.py"])
 
-    def test_archive_pins_imported_module_path_resolves_inside_the_plugin(self):
-        """Path(archive_pin.__file__).resolve().parent.parent is placed through
-        the import of archive_pin: the plugin root, so not a repo read."""
-        _, _, _, index = _shipped_manifest()
-        scan = index.scan("tests/test_archive_pin.py")
-        assert scan.repo_reach == (), scan.repo_reach
-        assert index.view("tests/test_archive_pin.py").repo_reach == ()
+    def test_every_autouse_fixture_is_pinned_or_confined(self):
+        """Autouse fixtures are exempt from the four rules only because the
+        isolation set is pinned by name. Every other autouse fixture must
+        come out confined under the rules."""
+        repo_root, core, _, index = _shipped_manifest()
+        pinned = set(self.PINNED_ISOLATION)
+        unpinned_unproven = []
+        for conftest in ("conftest.py", "tests/conftest.py"):
+            path = repo_root / "pact-plugin" / conftest
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            reasons = core._confinement_reasons(
+                tree, conftest, index.roots, index.plugin_root,
+                core._docstring_nodes(tree))
+            for name, (first, last, autouse) in core._fixture_spans(
+                    tree).items():
+                if not autouse or name in pinned:
+                    continue
+                sites = [reason for reason in reasons
+                         if first <= int(reason.split(":", 1)[0]) <= last]
+                if sites:
+                    unpinned_unproven.append(f"{conftest}::{name}: {sites[:2]}")
+        assert not unpinned_unproven, unpinned_unproven
 
-    def test_the_repository_root_finder_is_detected(self):
-        """The repo's own marker walk (for base in Path(__file__).parents)
-        must read as a repository reach wherever it appears."""
-        _, _, _, index = _shipped_manifest()
-        reach = index.scan("tests/test_local_lint_parity.py").repo_reach
-        assert any("walks every ancestor" in entry for entry in reach), reach
+    def test_every_memory_store_call_passes_a_bare_file_name(self):
+        """The memory_store review's premise: every caller passes a literal
+        file name with no '/', no '..' and no leading '/', so the store stays
+        inside tmp_path."""
+        repo_root, _, _, _ = _shipped_manifest()
+        calls, bad = 0, []
+        for path in sorted((repo_root / "pact-plugin").rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "memory_store"):
+                    continue
+                calls += 1
+                arguments = node.args + [keyword.value
+                                         for keyword in node.keywords]
+                if not all(isinstance(argument, ast.Constant)
+                           and isinstance(argument.value, str)
+                           and argument.value and "/" not in argument.value
+                           and ".." not in argument.value
+                           for argument in arguments):
+                    bad.append(f"{path.name}:{node.lineno}")
+        assert calls, "no memory_store call found: the scan read nothing"
+        assert not bad, f"memory_store called with a non-bare name: {bad}"
+

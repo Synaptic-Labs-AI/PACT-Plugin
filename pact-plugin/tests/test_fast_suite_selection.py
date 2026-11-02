@@ -108,16 +108,18 @@ def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None,
 
 
 def _view(core, closure=(), targets=(), literals=(), names=(),
-          path_literals=(), scan_roots=(), repo_reach=()):
+          path_literals=(), scan_roots=(), repo_reach=(), unproven=(),
+          trio_named=False):
     return core.ExclusionView(
         closure=frozenset(closure), import_targets=frozenset(targets),
         literals=frozenset(literals), test_names=frozenset(names),
         path_literals=frozenset(path_literals),
-        scan_roots=frozenset(scan_roots), repo_reach=tuple(repo_reach))
+        scan_roots=frozenset(scan_roots), repo_reach=tuple(repo_reach),
+        unproven=tuple(unproven), trio_named=trio_named)
 
 
 def _facts(core, manifest, views=None, value_inert=(), verdicts=None,
-           conftest_imported=()):
+           conftest_imported=(), reviewed=(), review_reads=()):
     views = views or {}
     return core.ChangeFacts(
         views={exclusion.path: views.get(
@@ -126,6 +128,8 @@ def _facts(core, manifest, views=None, value_inert=(), verdicts=None,
         value_inert=frozenset(value_inert),
         conftest_verdicts=dict(verdicts or {}),
         conftest_imported=frozenset(conftest_imported),
+        reviewed=frozenset(reviewed),
+        review_reads=tuple(review_reads),
     )
 
 
@@ -387,37 +391,6 @@ class TestScannedTrees:
                              core, closure=("tests/test_slow.py",),
                              path_literals=("hooks",))}})
         assert result.added_back == ()
-
-
-class TestRepoReaders:
-    """An exclusion whose closure reads repository files outside the plugin
-    comes back on any change outside the plugin; others ignore those."""
-
-    def test_an_outside_change_adds_back_a_repo_reader(self, core):
-        result = _select(core, changed=[".github/workflows/tests.yml"],
-                         facts={"views": {"tests/test_slow.py": _view(
-                             core, closure=("tests/test_slow.py",),
-                             repo_reach=("tests/test_slow.py:3:names x",))}})
-        assert _reasons(result) == [("tests/test_slow.py", "repo_reader")]
-        assert result.added_back[0].matched_changed == (
-            ".github/workflows/tests.yml")
-
-    def test_an_outside_change_leaves_a_non_reader_excluded(self, core):
-        result = _select(core, changed=[".github/workflows/tests.yml"])
-        assert result.select_all_reason is None
-        assert result.excluded == frozenset({"tests/test_slow.py"})
-
-    def test_a_plugin_change_does_not_wake_a_repo_reader(self, core):
-        result = _select(core, changed=["pact-plugin/hooks/unmapped.py"],
-                         facts={"views": {"tests/test_slow.py": _view(
-                             core, closure=("tests/test_slow.py",),
-                             repo_reach=("tests/test_slow.py:3:names x",))}})
-        assert result.added_back == ()
-
-    def test_an_outside_change_without_facts_selects_all(self, core):
-        result = core.select(DISCOVERED, _manifest(core), ["CHANGELOG.md"],
-                             "ok", None)
-        assert result.select_all_reason == "change-facts-unavailable"
 
 
 class TestConftestVerdicts:
@@ -700,6 +673,7 @@ def _build_rig(tmp_path):
         },
         "selection_machinery": list(SELECTION_MACHINERY),
         "value_inert_keys": {},
+        "reach_reviews": {},
         "guard_files": guards,
         "exclusions": exclusion_entries,
     }
@@ -1305,108 +1279,6 @@ class TestScanIndex:
             ("tests/docs/test_reads_docs.py", "scanned_tree")]
         assert miss.added_back == ()
 
-    @pytest.mark.parametrize("source,why", [
-        ('from pathlib import Path\n'
-         'def test_x():\n'
-         '    (Path(__file__).parents[2] / ".github" / "x.yml").read_text()\n',
-         "climbs above the plugin"),
-        ('from pathlib import Path\n'
-         'def test_x():\n'
-         '    (Path(__file__).parent / ".." / ".." / ".github").exists()\n',
-         "climbs above the plugin"),
-        ('from pathlib import Path\nDEPTH = 2\n'
-         'def test_x():\n'
-         '    Path(__file__).parents[DEPTH].exists()\n',
-         "unresolved climb"),
-        ('def test_x():\n    assert "../.github/x.yml"\n', "names ../.github/x.yml"),
-        ('def test_x():\n    assert "CHANGELOG.md"\n', "names CHANGELOG.md"),
-    ])
-    def test_a_read_outside_the_plugin_is_detected(
-            self, core, tmp_path, source, why):
-        repo = tmp_path / "repo"
-        _write(repo / ".github" / "x.yml", "on: push\n")
-        _write(repo / "CHANGELOG.md", "# changes\n")
-        plugin = repo / "pact-plugin"
-        _write(plugin / "tests" / "test_reader.py", source)
-        scan = core.ScanIndex(plugin).scan("tests/test_reader.py")
-        assert any(why in entry for entry in scan.repo_reach), scan.repo_reach
-
-    @pytest.mark.parametrize("walk", [
-        # The repository's own root-finder shape (test_local_lint_parity).
-        "    for base in Path(__file__).resolve().parents:\n"
-        "        if (base / '.claude-plugin' / 'marketplace.json').exists():\n"
-        "            return base / '.github' / 'workflows' / 'tests.yml'\n",
-        "    return [p for p in list(Path(__file__).parents)]\n",
-        "    return Path('/x') in Path(__file__).resolve().parents\n",
-        "    return sorted(Path(__file__).parents)\n",
-        "    return next(iter(HERE.parents))\n",
-    ])
-    def test_a_walk_over_every_ancestor_is_a_repo_read(
-            self, core, tmp_path, walk):
-        plugin = tmp_path / "repo" / "pact-plugin"
-        _write(plugin / "tests" / "test_walker.py",
-               "from pathlib import Path\nHERE = Path(__file__)\n"
-               "def find():\n" + walk)
-        scan = core.ScanIndex(plugin).scan("tests/test_walker.py")
-        assert any("walks every ancestor" in entry
-                   for entry in scan.repo_reach), scan.repo_reach
-
-    @pytest.mark.parametrize("call", [
-        "Path.cwd() / '.github' / 'workflows'",
-        "os.path.join(os.getcwd(), 'CHANGELOG.md')",
-        "pathlib.Path.cwd().parent",
-        "getcwd()",
-    ])
-    def test_a_cwd_relative_read_is_a_repo_read(self, core, tmp_path, call):
-        plugin = tmp_path / "repo" / "pact-plugin"
-        _write(plugin / "tests" / "test_cwd.py",
-               "import os\nimport pathlib\nfrom os import getcwd\n"
-               "from pathlib import Path\n"
-               f"def test_x():\n    return {call}\n")
-        scan = core.ScanIndex(plugin).scan("tests/test_cwd.py")
-        assert any("relative to the cwd" in entry
-                   for entry in scan.repo_reach), scan.repo_reach
-
-    @pytest.mark.parametrize("source,rel", [
-        # A string naming the call (fixture text for a matcher) is not one.
-        ('CMD = "cd $(pwd) && python -c \'import os; os.getcwd()\'"\n'
-         'PROBE = "Path.cwd()"\n', "tests/test_cwd.py"),
-        # Shipped code resolves the consumer's cwd, not this repository.
-        ("import os\ndef f():\n    return os.getcwd()\n", "hooks/cwd_user.py"),
-    ])
-    def test_a_cwd_mention_or_shipped_cwd_is_not_a_repo_read(
-            self, core, tmp_path, source, rel):
-        plugin = tmp_path / "repo" / "pact-plugin"
-        _write(plugin / rel, source)
-        assert core.ScanIndex(plugin).scan(rel).repo_reach == ()
-
-    def test_an_indexed_parents_is_not_a_walk(self, core, tmp_path):
-        plugin = tmp_path / "repo" / "pact-plugin"
-        _write(plugin / "tests" / "test_walker.py",
-               "from pathlib import Path\n"
-               "def find():\n    return Path(__file__).parents[1]\n")
-        assert core.ScanIndex(plugin).scan(
-            "tests/test_walker.py").repo_reach == ()
-
-    @pytest.mark.parametrize("source", [
-        # Inside the plugin: the module's directory and the plugin root.
-        'from pathlib import Path\n'
-        'def test_x():\n    Path(__file__).parents[1].exists()\n',
-        # A home-relative name, not a repository path.
-        'def test_x():\n    assert "~/.claude/teams"\n',
-        # A plugin path that also exists at the repository root.
-        'def test_x():\n    assert "hooks/x.py"\n',
-    ])
-    def test_a_read_inside_the_plugin_is_not_a_repo_read(
-            self, core, tmp_path, source):
-        repo = tmp_path / "repo"
-        _write(repo / "hooks" / "x.py", "")
-        plugin = repo / "pact-plugin"
-        _write(plugin / "hooks" / "x.py", "")
-        _write(plugin / "tests" / "test_reader.py", source)
-        assert core.ScanIndex(plugin).scan(
-            "tests/test_reader.py").repo_reach == ()
-
     def test_shipped_code_literals_are_not_repo_reads(self, core, tmp_path):
         """'.github/x.yml' in a hook names the consumer's project."""
         repo = tmp_path / "repo"
@@ -1414,42 +1286,6 @@ class TestScanIndex:
         plugin = repo / "pact-plugin"
         _write(plugin / "hooks" / "reader.py", 'PATH = ".github/x.yml"\n')
         assert core.ScanIndex(plugin).scan("hooks/reader.py").repo_reach == ()
-
-    def test_another_modules_file_is_placed_through_its_import(
-            self, core, tmp_path):
-        """Path(mod.__file__).parent.parent is the plugin root, not unknown."""
-        plugin = tmp_path / "repo" / "pact-plugin"
-        _write(plugin / "hooks" / "mod.py", "")
-        _write(plugin / "tests" / "test_reader.py",
-               'import mod\nfrom pathlib import Path\n'
-               'def test_x():\n'
-               '    Path(mod.__file__).resolve().parent.parent.exists()\n')
-        scan = core.ScanIndex(plugin).scan("tests/test_reader.py")
-        assert scan.repo_reach == ()
-
-    def test_a_seeded_repo_reader_is_added_back_by_a_github_change(
-            self, core, tmp_path):
-        repo = tmp_path / "repo"
-        _write(repo / ".github" / "x.yml", "on: push\n")
-        plugin = repo / "pact-plugin"
-        _write(plugin / "tests" / "test_reader.py",
-               'from pathlib import Path\n'
-               'def test_x():\n'
-               '    assert (Path(__file__).parents[2] / ".github" / "x.yml"'
-               ').is_file()\n')
-        _write(plugin / "tests" / "test_other.py", "def test_ok():\n    pass\n")
-        paths = ("tests/test_reader.py", "tests/test_other.py")
-        manifest = _manifest(core, exclusion_paths=paths,
-                             seams={path: () for path in paths})
-        index = core.ScanIndex(plugin)
-        facts = core.ChangeFacts(
-            views={path: index.view(path) for path in paths},
-            value_inert=frozenset(), conftest_verdicts={},
-            conftest_imported=frozenset())
-        result = core.select(frozenset(paths), manifest,
-                             [".github/x.yml"], "ok", facts)
-        assert _reasons(result) == [("tests/test_reader.py", "repo_reader")]
-        assert result.excluded == frozenset({"tests/test_other.py"})
 
     def test_computed_imports_and_fixtures_are_recorded(self, core, tmp_path):
         scan = self._scan(core, tmp_path, "tests/test_g.py",
@@ -1618,3 +1454,441 @@ class TestRunnerArtifactDestinations:
         assert (out / "canary.json").is_file()
         assert not (out / "summary.json").exists()
         assert list(workspace.iterdir()) == []
+
+
+
+# ---------------------------------------------------------------------------
+# Closed-by-default reach: CONFINED is proven, everything else is BROAD.
+# ---------------------------------------------------------------------------
+
+def _classify(core, tmp_path, source, rel="tests/test_probe.py", extra=None):
+    """Unproven sites of one rig module (empty means confined)."""
+    repo = tmp_path / "repo"
+    _write(repo / "CHANGELOG.md", "# changes\n")
+    _write(repo / ".github" / "workflows" / "tests.yml", "on: push\n")
+    plugin = repo / "pact-plugin"
+    (plugin / "hooks").mkdir(parents=True, exist_ok=True)
+    _write(plugin / "hooks" / "plugin_mod.py", "VALUE = 1\n")
+    for path, text in (extra or {}).items():
+        _write(plugin / path, text)
+    _write(plugin / rel, source)
+    return core.ScanIndex(plugin).scan(rel).unproven
+
+
+class TestNewKindsDefaultBroad:
+    """C1: an access the rules do not know is unproven, never cleared."""
+
+    @pytest.mark.parametrize("source,kind", [
+        ("import fcntl\n", "unclassified import fcntl"),
+        ("import os\ndef test_x(p):\n    os.statvfs(p)\n", "unproven os.statvfs()"),
+        ("def test_x(repo_root):\n    repo_root.read_text()\n",
+         "path method on an unproven receiver .read_text()"),
+        ("import subprocess\ndef test_x(tmp_path):\n"
+         "    subprocess.run(['git', 'status'])\n",
+         "program without a rig cwd"),
+        ("import os\ndef test_x():\n    os.system('ls')\n", "shell or exec launch"),
+        ("import os\ndef test_x():\n    os.getpid()\n",
+         "unproven zero-argument os.getpid()"),
+        ("import os\ndef test_x():\n    return os.environ['HOME']\n",
+         "reads os.environ[]"),
+    ])
+    def test_an_unknown_access_is_unproven(self, core, tmp_path, source, kind):
+        sites = _classify(core, tmp_path, source)
+        assert any(kind in site for site in sites), sites
+
+
+class TestAuditorShapesAreUnproven:
+    """The shapes an audit found cleared by mistake: each is unproven."""
+
+    @pytest.mark.parametrize("source,kind", [
+        # io is an I/O module: a path through it needs a confined argument.
+        ("import io\ndef test_x(p):\n    io.open(p)\n", "unproven io.open()"),
+        ("import io\ndef test_x(p):\n    io.FileIO(p)\n", "unproven io.FileIO()"),
+        # Inline python code is unchecked code.
+        ("import subprocess\nimport sys\ndef test_x(tmp_path):\n"
+         "    subprocess.run([sys.executable, '-c', 'print(1)'], cwd=tmp_path)\n",
+         "inline python code"),
+        # A dynamic attribute of an I/O module, and code-running builtins.
+        ("import os\ndef test_x(tmp_path):\n"
+         "    getattr(os, 'listdir')(tmp_path)\n", "dynamic attribute"),
+        ("def test_x():\n    exec('x = 1')\n", "runs code or reads input exec()"),
+        ("def test_x():\n    eval('1')\n", "runs code or reads input eval()"),
+        # Changing directory to anything not tmp-rooted.
+        ("def test_x(monkeypatch, p):\n    monkeypatch.chdir(p)\n",
+         "changes directory"),
+        ("import os\ndef test_x(p):\n    os.chdir(p)\n", "changes directory"),
+        # A python script run with no rig cwd reads relative to the checkout.
+        ("import subprocess\nimport sys\nfrom pathlib import Path\n"
+         "HOOK = Path(__file__).parent / 'h.py'\n"
+         "def test_x():\n    subprocess.run([sys.executable, str(HOOK)])\n",
+         "program without a rig cwd"),
+        ("import subprocess\nimport sys\ndef test_x():\n"
+         "    subprocess.run([sys.executable, '-m', 'pytest'])\n",
+         "program without a rig cwd"),
+    ])
+    def test_the_shape_is_unproven(self, core, tmp_path, source, kind):
+        sites = _classify(core, tmp_path, source)
+        assert any(kind in site for site in sites), sites
+
+    @pytest.mark.parametrize("source", [
+        # The argument of an in-memory stream is data, even when unproven.
+        "import io\ndef test_x(text):\n    return io.StringIO(text)\n",
+        "def test_x(monkeypatch, tmp_path):\n    monkeypatch.chdir(tmp_path)\n",
+        "import subprocess\nimport sys\ndef test_x():\n"
+        "    subprocess.run([sys.executable, '--version'])\n",
+    ])
+    def test_the_safe_counterpart_is_confined(self, core, tmp_path, source):
+        assert _classify(core, tmp_path, source) == ()
+
+
+class TestTheTwoN7ProbesAreBroad:
+    """C2: the two shapes that escaped the shape-specific rules."""
+
+    def test_a_git_toplevel_root_joined_to_a_workflow_is_broad(
+            self, core, tmp_path):
+        sites = _classify(core, tmp_path,
+                          "import subprocess\nfrom pathlib import Path\n"
+                          "def test_x():\n"
+                          "    root = Path(subprocess.check_output(\n"
+                          "        ['git', 'rev-parse', '--show-toplevel'],\n"
+                          "        text=True).strip())\n"
+                          "    return (root / '.github' / 'workflows'"
+                          " / 'tests.yml').read_text()\n")
+        assert sites, "a git --show-toplevel join passed as confined"
+
+    def test_a_rev_colon_path_literal_is_broad(self, core, tmp_path):
+        sites = _classify(core, tmp_path,
+                          "import subprocess\ndef test_x(tmp_path):\n"
+                          "    return subprocess.run(['git', 'show',"
+                          " 'HEAD:CHANGELOG.md'], cwd=tmp_path)\n")
+        assert any("names a repository path 'HEAD:CHANGELOG.md'" in site
+                   for site in sites), sites
+
+
+class TestKnownSafeAccessIsConfined:
+    """C3: the rules must not over-tighten silently."""
+
+    @pytest.mark.parametrize("source", [
+        "def test_x(tmp_path):\n    (tmp_path / 'a.txt').write_text('x')\n",
+        "from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+        "def test_x():\n    return (HERE.parent / 'hooks' / 'plugin_mod.py')"
+        ".read_text()\n",
+        "import subprocess\nimport sys\nfrom pathlib import Path\n"
+        "HOOK = Path(__file__).resolve().parents[1] / 'hooks' / 'plugin_mod.py'\n"
+        "def test_x(tmp_path):\n"
+        "    subprocess.run([sys.executable, str(HOOK)], cwd=tmp_path)\n",
+        "import subprocess\ndef test_x(tmp_path):\n"
+        "    subprocess.run(['git', '-C', str(tmp_path), 'init'])\n",
+        "import tempfile\nfrom pathlib import Path\ndef test_x():\n"
+        "    with tempfile.TemporaryDirectory() as d:\n"
+        "        (Path(d) / 'x').write_text('y')\n",
+        "import re\ndef test_x():\n    return re.match('a', 'a').group(0)\n",
+        # A literal that names a plugin path which ALSO exists at the
+        # repository root is a plugin path.
+        "def test_x():\n    assert 'hooks/plugin_mod.py'\n",
+    ])
+    def test_a_known_safe_access_is_confined(self, core, tmp_path, source):
+        assert _classify(core, tmp_path, source, extra={
+            "../hooks/plugin_mod.py": ""}) == ()
+
+    def test_another_modules_file_is_placed_through_its_import(
+            self, core, tmp_path):
+        """Path(mod.__file__).parent is the module's directory, so a scan
+        from it has that root, not the whole plugin."""
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "mod.py", "")
+        _write(plugin / "tests" / "test_reader.py",
+               "import mod\nfrom pathlib import Path\n"
+               "ROOT = Path(mod.__file__).resolve().parent\n"
+               "def test_x():\n    return list(ROOT.rglob('*.py'))\n")
+        scan = core.ScanIndex(plugin).scan("tests/test_reader.py")
+        assert scan.scanner_roots == frozenset({"hooks"})
+
+    def test_a_climb_above_the_plugin_is_not_confined(self, core, tmp_path):
+        sites = _classify(core, tmp_path,
+                          "from pathlib import Path\ndef test_x():\n"
+                          "    return (Path(__file__).parents[2] / 'CHANGELOG.md')"
+                          ".read_text()\n")
+        assert sites
+
+    @pytest.mark.parametrize("walk", [
+        "for base in Path(__file__).resolve().parents:\n"
+        "        if (base / '.claude-plugin').exists():\n            return base",
+        "return Path('/x') in Path(__file__).parents",
+    ])
+    def test_a_walk_over_every_ancestor_is_not_confined(
+            self, core, tmp_path, walk):
+        sites = _classify(core, tmp_path,
+                          f"from pathlib import Path\ndef test_x():\n    {walk}\n")
+        assert sites
+
+
+class TestProductionClimbsStayBroad:
+    """C6: production code that climbs out of the plugin keeps an exclusion
+    broad; the test-side rules do not judge shipped modules."""
+
+    @pytest.mark.parametrize("climb,why", [
+        ("ROOT = Path(__file__).resolve().parents[2]\n",
+         "climbs above the plugin"),
+        ("ROOT = Path(__file__).parent / '..' / '..'\n",
+         "climbs above the plugin"),
+        ("DEPTH = 2\nROOT = Path(__file__).parents[DEPTH]\n",
+         "unresolved climb"),
+        ("ROOT = [p for p in Path(__file__).parents]\n",
+         "walks every ancestor"),
+    ])
+    def test_a_production_climb_is_a_broad_reason(
+            self, core, tmp_path, climb, why):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "climber.py",
+               "from pathlib import Path\n" + climb)
+        _write(plugin / "tests" / "test_uses.py", "import climber\n")
+        index = core.ScanIndex(plugin)
+        view = index.view("tests/test_uses.py")
+        facts = core.ChangeFacts(views={}, value_inert=frozenset(),
+                                 conftest_verdicts={},
+                                 conftest_imported=frozenset())
+        reasons = core.broad_reasons(view, facts)
+        assert any("production climb" in reason and why in reason
+                   for reason in reasons), reasons
+
+    def test_a_production_climb_inside_the_plugin_is_not_one(
+            self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "climber.py",
+               "from pathlib import Path\n"
+               "ROOT = Path(__file__).resolve().parents[0] / 'shared'\n")
+        assert core.ScanIndex(plugin).scan("hooks/climber.py").repo_reach == ()
+
+    def test_a_reviewed_test_side_climb_is_not_a_production_climb(
+            self, core, tmp_path):
+        """A climb in TEST code is a confinement site a review can clear;
+        only production climbs are unreviewable broad reasons."""
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "tests" / "test_climbs.py",
+               "from pathlib import Path\n"
+               "ROOT = Path(__file__).resolve().parents[2]\n"
+               "def test_x():\n    assert (ROOT / 'x').exists() or True\n")
+        view = core.ScanIndex(plugin).view("tests/test_climbs.py")
+        facts = core.ChangeFacts(views={}, value_inert=frozenset(),
+                                 conftest_verdicts={},
+                                 conftest_imported=frozenset(),
+                                 reviewed=frozenset({"tests/test_climbs.py"}))
+        assert view.unproven, "the climb was not flagged at all"
+        assert core.broad_reasons(view, facts) == ()
+
+    def test_shipped_code_is_not_judged_by_the_test_side_rules(
+            self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "reader.py",
+               'import os\nPATH = ".github/x.yml"\n'
+               "def f():\n    return os.getcwd()\n")
+        scan = core.ScanIndex(plugin).scan("hooks/reader.py")
+        assert scan.unproven == () and scan.repo_reach == ()
+
+
+class TestBroadSelection:
+    """C7: a broad exclusion comes back on any change except value-inert
+    keys and the bump trio; a confined one keeps the closure rules."""
+
+    BROAD = ("tests/test_slow.py", ("3:unclassified import fcntl",))
+
+    def _views(self, core, trio_named=False):
+        return {"tests/test_slow.py": _view(
+            core, closure=("tests/test_slow.py",), unproven=(self.BROAD,),
+            trio_named=trio_named)}
+
+    @pytest.mark.parametrize("changed", [
+        "pact-plugin/hooks/unrelated.py", ".github/workflows/x.yml",
+        "pact-plugin/commands/x.md",
+    ])
+    def test_any_non_trio_change_adds_a_broad_exclusion_back(
+            self, core, changed):
+        result = _select(core, changed=[changed],
+                         facts={"views": self._views(core)})
+        assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
+        assert result.added_back[0].evidence.startswith("tests/test_slow.py")
+
+    def test_a_trio_only_change_adds_nothing_back(self, core):
+        result = _select(core, changed=list(core.BUMP_TRIO),
+                         facts={"views": self._views(core)})
+        assert result.added_back == ()
+
+    def test_the_trio_counts_when_the_test_names_a_trio_file(self, core):
+        result = _select(core, changed=["CHANGELOG.md"],
+                         facts={"views": self._views(core, trio_named=True)})
+        assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
+
+    def test_a_value_inert_bump_adds_nothing_back(self, core):
+        path = "pact-plugin/.claude-plugin/plugin.json"
+        result = _select(core, changed=[path], facts={
+            "views": self._views(core), "value_inert": (path,)})
+        assert result.added_back == ()
+
+    def test_a_confined_exclusion_ignores_an_outside_change(self, core):
+        result = _select(core, changed=[".github/workflows/x.yml"])
+        assert result.added_back == ()
+
+    def test_a_matching_review_makes_the_module_confined(self, core):
+        result = _select(core, changed=[".github/workflows/x.yml"], facts={
+            "views": self._views(core), "reviewed": ("tests/test_slow.py",)})
+        assert result.added_back == ()
+
+    def test_extra_reads_add_a_reviewed_exclusion_back(self, core):
+        result = _select(core, changed=["pact-plugin/tests/data/x.bin"], facts={
+            "views": self._views(core), "reviewed": ("tests/test_slow.py",),
+            "review_reads": (("tests/test_slow.py",
+                              ("pact-plugin/tests/data/**",)),)})
+        assert _reasons(result) == [("tests/test_slow.py",
+                                     "review_extra_read")]
+
+
+class TestReachReviews:
+    """C8: a review is bound to its module's bytes at runtime."""
+
+    def _rig(self, tmp_path, sha=None, extra_keys=None):
+        root, plugin, document = _build_rig(tmp_path)
+        module = plugin / "tests" / "test_slow_0.py"
+        digest = __import__("hashlib").sha256(module.read_bytes()).hexdigest()
+        review = {"sha256": sha or digest, "reason": "reads only tmp_path",
+                  "extra_reads": []}
+        review.update(extra_keys or {})
+        document["reach_reviews"] = {"tests/test_slow_0.py": review}
+        return root, plugin, _write_manifest(root, document)
+
+    def test_a_matching_review_counts(self, core, tmp_path):
+        root, plugin, path = self._rig(tmp_path)
+        manifest = core.load_manifest(path)
+        reviewed, _ = core.current_reviews(plugin, manifest)
+        assert reviewed == frozenset({"tests/test_slow_0.py"})
+
+    def test_an_edited_module_is_unproven_again(self, core, tmp_path):
+        root, plugin, path = self._rig(tmp_path)
+        manifest = core.load_manifest(path)
+        (plugin / "tests" / "test_slow_0.py").write_text(
+            "def test_ok():\n    assert 1\n", encoding="utf-8")
+        reviewed, _ = core.current_reviews(plugin, manifest)
+        assert reviewed == frozenset()
+
+    def test_an_unknown_review_key_is_a_manifest_error(self, core, tmp_path):
+        root, plugin, path = self._rig(tmp_path, extra_keys={"surprise": 1})
+        with pytest.raises(core.ManifestError) as excinfo:
+            core.load_manifest(path)
+        assert "unknown key 'surprise'" in "\n".join(excinfo.value.errors)
+
+    @pytest.mark.parametrize("sha", ["abc", "G" * 64])
+    def test_a_malformed_sha_is_a_manifest_error(self, core, tmp_path, sha):
+        root, plugin, path = self._rig(tmp_path, sha=sha)
+        with pytest.raises(core.ManifestError):
+            core.load_manifest(path)
+
+
+class TestFixtureReviews:
+    """C8 at fixture grain: a 'module::function' review is bound to the
+    function's source and every same-file name it uses, not the file."""
+
+    CONFTEST = (
+        "import pytest\n"
+        "HELPER_ROOT = 'store'\n"
+        "def _helper(base):\n    return base / HELPER_ROOT\n"
+        "@pytest.fixture\n"
+        "def store(tmp_path):\n    return _helper(tmp_path)\n"
+        "@pytest.fixture\n"
+        "def unrelated():\n    return 1\n"
+    )
+
+    def test_an_unrelated_edit_keeps_the_review(self, core):
+        before = core.fixture_digest(self.CONFTEST, "store")
+        after = core.fixture_digest(
+            self.CONFTEST.replace("return 1", "return 2"), "store")
+        assert before is not None and before == after
+
+    @pytest.mark.parametrize("edit", [
+        ("return _helper(tmp_path)", "return _helper(tmp_path) or 0"),  # body
+        ("return base / HELPER_ROOT", "return base"),                    # helper
+        ("HELPER_ROOT = 'store'", "HELPER_ROOT = '..'"),                 # constant
+        ("@pytest.fixture\ndef store", "@pytest.fixture(scope='session')\ndef store"),
+    ])
+    def test_an_edit_the_fixture_depends_on_voids_the_review(self, core, edit):
+        before = core.fixture_digest(self.CONFTEST, "store")
+        changed = self.CONFTEST.replace(*edit, 1)
+        assert changed != self.CONFTEST
+        assert core.fixture_digest(changed, "store") != before
+
+    def test_retargeting_an_import_the_fixture_uses_voids_the_review(
+            self, core):
+        source = ("import pytest\nfrom shared.paths import get_root as root\n"
+                  "@pytest.fixture\ndef where():\n    return root()\n")
+        before = core.fixture_digest(source, "where")
+        retargeted = source.replace("get_root as root", "get_home as root")
+        assert core.fixture_digest(retargeted, "where") != before
+
+    def test_a_missing_function_has_no_digest(self, core):
+        assert core.fixture_digest(self.CONFTEST, "absent") is None
+
+    def test_the_loader_requires_the_function(self, core, tmp_path):
+        root, plugin, document = _build_rig(tmp_path)
+        _write(plugin / "tests" / "conftest.py", self.CONFTEST)
+        digest = core.fixture_digest(self.CONFTEST, "store")
+        document["reach_reviews"] = {
+            "tests/conftest.py::store": {"sha256": digest, "reason": "tmp only",
+                                         "extra_reads": []},
+            "tests/conftest.py::absent": {"sha256": digest, "reason": "x",
+                                          "extra_reads": []}}
+        with pytest.raises(core.ManifestError) as excinfo:
+            core.load_manifest(_write_manifest(root, document))
+        rendered = "\n".join(excinfo.value.errors)
+        assert "no module-level function 'absent'" in rendered
+        assert "'store'" not in rendered
+
+    def test_a_current_fixture_review_clears_only_that_fixture(
+            self, core, tmp_path):
+        root, plugin, document = _build_rig(tmp_path)
+        _write(plugin / "tests" / "conftest.py", self.CONFTEST)
+        document["reach_reviews"] = {"tests/conftest.py::store": {
+            "sha256": core.fixture_digest(self.CONFTEST, "store"),
+            "reason": "tmp only", "extra_reads": []}}
+        manifest = core.load_manifest(_write_manifest(root, document))
+        reviewed, _ = core.current_reviews(plugin, manifest)
+        assert reviewed == frozenset({"tests/conftest.py::store"})
+        view = _view(core, closure=("tests/test_slow.py",), unproven=(
+            ("tests/conftest.py::store", ("6:x",)),
+            ("tests/conftest.py::unrelated", ("9:y",))))
+        facts = core.ChangeFacts(views={}, value_inert=frozenset(),
+                                 conftest_verdicts={},
+                                 conftest_imported=frozenset(),
+                                 reviewed=reviewed)
+        assert core.broad_reasons(view, facts) == (
+            "tests/conftest.py::unrelated:9:y",)
+        (plugin / "tests" / "conftest.py").write_text(
+            self.CONFTEST.replace("return _helper(tmp_path)",
+                                  "return tmp_path"), encoding="utf-8")
+        reviewed_after, _ = core.current_reviews(plugin, manifest)
+        assert reviewed_after == frozenset()
+
+
+class TestRequestedConftestFixtures:
+    """A requested (non-autouse) conftest fixture is judged with the test;
+    autouse fixtures are the pinned isolation layer."""
+
+    def test_a_requested_fixture_with_an_unproven_site_makes_it_broad(
+            self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "tests" / "conftest.py",
+               "import pytest\n@pytest.fixture\n"
+               "def home_reader():\n    import os\n"
+               "    return os.environ['HOME']\n"
+               "@pytest.fixture(autouse=True)\n"
+               "def _isolate(monkeypatch):\n    import os\n"
+               "    return os.environ['HOME']\n")
+        _write(plugin / "tests" / "test_a.py",
+               "def test_x(home_reader):\n    assert home_reader\n")
+        # Naming the autouse fixture (usefixtures) does not pull it in: the
+        # autouse isolation layer is pinned separately.
+        _write(plugin / "tests" / "test_b.py",
+               "import pytest\n@pytest.mark.usefixtures('_isolate')\n"
+               "def test_x():\n    pass\n")
+        index = core.ScanIndex(plugin)
+        assert [module for module, _ in index.view("tests/test_a.py").unproven] == [
+            "tests/conftest.py::home_reader"]
+        assert index.view("tests/test_b.py").unproven == ()

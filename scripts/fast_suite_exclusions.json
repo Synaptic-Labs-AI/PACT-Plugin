@@ -29,6 +29,65 @@
       "version"
     ]
   },
+  "reach_reviews": {
+    "tests/claude_md_fence_oracle.py": {
+      "sha256": "b71e95b8a640eb736f3b3e07609d9598d0d7c4a637c6371bf145c9b95552b2ea",
+      "reason": "All flagged sites are re.Match.group() calls on regex matches over in-memory strings. The name collides with Path.group; no file is read.",
+      "extra_reads": []
+    },
+    "tests/conftest.py::memory_store": {
+      "sha256": "fe91d542256e884f90b0c11e10380d9712bcb0f845a2e6b0339af5de3c90669f",
+      "reason": "Creates a memory store at tmp_path / name by running the plugin CLI (_MEMORY_CLI, skills/pact-memory/scripts/cli.py, in the closure) through sys.executable with `setup --db-path`. Every one of the 43 call sites in tests/ passes a bare literal file name with no '/' or '..' (checked by AST at review time), so the path stays inside tmp_path. HOME is the session tmp home from conftest. It reads nothing in the checkout.",
+      "extra_reads": []
+    },
+    "tests/conftest.py::pact_context": {
+      "sha256": "04458199da7505768c521863d4602f3b9a9eb4b0d7d2aa9e559c0ecd664b5a07",
+      "reason": "Writes the session context file at tmp_path / 'pact-session-context.json' and patches the plugin's context module to read it. Its flagged sites (276-277) mkdir tasks/{team} and teams/{team} under get_claude_config_dir(); the autouse _isolate_config_root_to_tmp fixture, pinned by the conftest isolation contract, redirects that root to tmp_path for every test, and team_name passes the plugin's safe-component check first. It reads nothing in the checkout.",
+      "extra_reads": []
+    },
+    "tests/fixtures/pin_growth/replay.py": {
+      "sha256": "e76c7506f85d618e599b0180b3701a06659cce65890b594eea0ca05b32f12102",
+      "reason": "All flagged sites are re.Match.group() calls on in-memory text. No file is read.",
+      "extra_reads": []
+    },
+    "tests/merge_guard_baseline_loader.py": {
+      "sha256": "e5eb9a16c31a878f230bf1fef38b00978e092dff610f82a3c00a2c4c6ffee7e5",
+      "reason": "Loads committed vendored copies of merge_guard_common.py from tests/fixtures/merge_guard_baseline/ through importlib, after a git-blob pin check. Those files have no import edge, so they are declared as extra_reads. The vendored modules import .paths through the shared package; hooks/shared/paths.py and shared/__init__.py are already in the closure.",
+      "extra_reads": [
+        "pact-plugin/tests/fixtures/merge_guard_baseline/**"
+      ]
+    },
+    "tests/test_claude_md_locator_census.py": {
+      "sha256": "b3b3aad9428e5ba3bdd7cdf902e0e168b973d44afa85d2406fca3e557f243a58",
+      "reason": "Reads every shipped .py under PLUGIN/{hooks,skills,scripts,bin,telegram}, plus the *.sh files, from the real checkout, through a __file__ anchor. Those trees are the scanner roots the selector already adds this exclusion back for (roots include '.' because of the *.sh scan), so every file it reads is covered by the scanned-tree rule.",
+      "extra_reads": []
+    },
+    "tests/test_merge_guard_1140_carrier5_cert.py": {
+      "sha256": "71bde42242afd11e6fd06eae077c7b83d781c73094b2b6aa96b1d85150fd7183",
+      "reason": "Path(mgc.__file__).read_text() reads hooks/shared/merge_guard_common.py, a closure member that is also a seam. exec(compile(...)) runs that mutated source in a fresh module namespace and reads no file. The vendored baselines come from merge_guard_baseline_loader (reviewed separately), whose fixture directory is declared in that review's extra_reads. The flagged exec() at 227 is that in-memory mutant run.",
+      "extra_reads": []
+    },
+    "tests/test_merge_guard_review_fixes.py": {
+      "sha256": "46074301211258cd7e6fdb7467b0bc2d782c5ed2bf1352b5620fb8f4f407386a",
+      "reason": "1943: forwards PATH and runs the plugin post hook with HOME, CLAUDE_CONFIG_DIR and cwd in tmp_path. 2931 and 3120: git init and git -C on repos under tmp_path, inside the alias_repos fixture, which also points GIT_CONFIG_GLOBAL at tmp_path and sets GIT_CONFIG_NOSYSTEM. VERIFIER, please check 3350: bash -c runs a test row's command, with guarded commands replaced by touch and programs by cat, cwd=tmp_path and HOME=tmp_path. Any relative path it names resolves inside tmp_path. I believe it reads nothing in the checkout, but the command text is data, so this is the site to re-read. 2931 (git init with no cwd) writes only to the tmp_path target it is given; global and system git config are redirected or disabled by the fixture.",
+      "extra_reads": []
+    },
+    "tests/test_merge_guard_substitution_mint.py": {
+      "sha256": "1b58021a0647c14c690bd2b10100c09f98b4eefd0928bd2eb2ba3b20830d28b6",
+      "reason": "Flagged sites 259-266 are the _hook/_approve rig: it runs plugin hooks (hooks/merge_guard_*.py, in the closure) with sys.executable, cwd and HOME set to the caller's root, and every caller passes tmp_path. os.environ.get('PATH') only forwards the search path. It reads and writes nothing outside tmp_path and the plugin hooks.",
+      "extra_reads": []
+    },
+    "tests/test_pin_growth_populations.py": {
+      "sha256": "191aaf7cab7db018a707210f3b7647de03a79c69405d08e2030967a8aa6c0312",
+      "reason": "os.environ.get('CI') chooses the slice or the full sweep; it reads no file. PACT_PIN_GROWTH_REAL_FILES and TRIM_DIFFERENTIAL are opt-in, operator-named inputs that are skipped when unset, which they are in both CI lanes. The real-files arm reads the CLAUDE.md files the operator names, never checkout files (it asserts none are test fixtures). Everything else is the population generators in fixtures/pin_growth (closure). Line 333 runs `python -c` with cwd=TESTS (the plugin's tests dir). The code only imports fixtures.pin_growth.generators (closure) and prints digests under a fixed PYTHONHASHSEED; it reads no file.",
+      "extra_reads": []
+    },
+    "tests/test_telegram_tools.py": {
+      "sha256": "22a35ea4392134b2140db2d0b854d24a20a69520ee1b01b3beaadeae40fed48f",
+      "reason": "loop.close() and ctx.close() close asyncio loops and the reply context, not files. expanduser('~') builds a string that is then patched in as HOME and os.getcwd, so the plugin's project-name logic sees a fake home. Nothing is read from disk.",
+      "extra_reads": []
+    }
+  },
   "guard_files": [
     "tests/test_ci_collection_scope.py",
     "tests/test_import_hygiene.py",

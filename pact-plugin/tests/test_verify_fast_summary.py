@@ -101,6 +101,7 @@ def rig(tmp_path):
         "baseline": BASELINE,
         "selection_machinery": list(SELECTION_MACHINERY),
         "value_inert_keys": {},
+        "reach_reviews": {},
         "guard_files": guards,
         "exclusions": entries,
     }

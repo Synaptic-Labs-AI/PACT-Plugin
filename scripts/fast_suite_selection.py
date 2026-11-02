@@ -33,6 +33,8 @@ PATH DOMAINS (the single easiest thing to get wrong)
 from __future__ import annotations
 
 import ast
+import fnmatch
+import hashlib
 import json
 import re
 import subprocess
@@ -54,6 +56,7 @@ _GLOB_CHARS = ("*", "?", "[", "]")
 _TOP_LEVEL_KEYS = frozenset({
     "schema_version", "path_base", "baseline",
     "selection_machinery", "value_inert_keys", "guard_files", "exclusions",
+    "reach_reviews",
 })
 _BASELINE_KEYS = frozenset({
     "measured_at_commit", "interpreter", "pytest", "platform",
@@ -90,6 +93,12 @@ EXPECTED_GUARD_FILES = frozenset({
 EXPECTED_EXCLUSION_COUNT = 24
 
 _DEPENDENCY_PINS = ("constraints-ci.txt", "pyproject.toml")
+# The files every PR's version bump touches. A broad exclusion ignores a
+# change to them unless its own test-side code names one.
+BUMP_TRIO = ("CHANGELOG.md", "README.md", ".claude-plugin/marketplace.json")
+_TRIO_NAMES = ("CHANGELOG.md", "README.md", "marketplace.json")
+_REVIEW_KEYS = frozenset({"sha256", "reason", "extra_reads"})
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 _TEST_FILE_RE = re.compile(r"(?:^|/)test_[^/]*\.py$")
 _FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
@@ -121,6 +130,11 @@ class Manifest:
     # Repo-relative JSON files whose change is ignored when only the named
     # top-level keys differ (the version bump every PR carries).
     value_inert_keys: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Reviewed test-side modules or fixtures ('module::function'):
+    # (key, sha256, reason, repo-relative extra_reads globs). A review counts
+    # only while the module's bytes, or the fixture's source with every
+    # same-file name it uses, still hash to sha256.
+    reach_reviews: tuple[tuple[str, str, str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -321,6 +335,62 @@ def _validate_value_inert_keys(entries: object, repo_root: Path,
     return tuple(validated)
 
 
+def _validate_reach_reviews(entries: object, plugin_root: Path,
+                            errors: list[str]
+                            ) -> tuple[tuple[str, str, str, tuple[str, ...]], ...]:
+    """{test-side module: {sha256, reason, extra_reads}}, every field
+    checked; an unknown key is an error."""
+    if not isinstance(entries, dict):
+        errors.append("reach_reviews: expected an object")
+        return ()
+    validated: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for raw, review in sorted(entries.items()):
+        field = f"reach_reviews[{raw!r}]"
+        path_part, separator, function = (raw.partition("::")
+                                          if isinstance(raw, str)
+                                          else (raw, "", ""))
+        rel = _validate_data_path(path_part, field, plugin_root, errors)
+        if rel is None:
+            continue
+        if separator:
+            try:
+                source = (plugin_root / rel).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                source = ""
+            if not function or fixture_digest(source, function) is None:
+                errors.append(f"{field}: {rel!r} has no module-level "
+                              f"function {function!r}")
+                continue
+            rel = f"{rel}::{function}"
+        if not (rel.startswith("tests/") or _is_test_file(rel.split("::")[0])):
+            errors.append(f"{field}: {rel!r} is not test-side code")
+            continue
+        if not isinstance(review, dict):
+            errors.append(f"{field}: expected an object")
+            continue
+        for key in sorted(set(review) - _REVIEW_KEYS):
+            errors.append(f"{field}: unknown key {key!r}")
+        for key in sorted(_REVIEW_KEYS - set(review)):
+            errors.append(f"{field}: missing required key {key!r}")
+        sha = review.get("sha256")
+        reason = review.get("reason")
+        reads = review.get("extra_reads")
+        if not isinstance(sha, str) or not _SHA256_RE.fullmatch(sha):
+            errors.append(f"{field}.sha256: expected 64 lowercase hex digits")
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"{field}.reason: expected a non-empty string")
+            continue
+        if not isinstance(reads, list) or not all(
+                isinstance(glob, str) and glob and not glob.startswith("/")
+                and ".." not in glob.split("/") for glob in reads):
+            errors.append(f"{field}.extra_reads: expected a list of "
+                          f"repo-relative globs")
+            continue
+        validated.append((rel, sha, reason, tuple(reads)))
+    return tuple(validated)
+
+
 def _validate_guard_files(entries: object, plugin_root: Path,
                           errors: list[str]) -> tuple[str, ...]:
     if not isinstance(entries, list):
@@ -507,6 +577,8 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
         data.get("value_inert_keys"), repo_root, selection_machinery, errors)
     guard_files = _validate_guard_files(
         data.get("guard_files"), plugin_root, errors)
+    reach_reviews = _validate_reach_reviews(
+        data.get("reach_reviews"), plugin_root, errors)
     exclusions = _validate_exclusions(
         data.get("exclusions"), plugin_root, errors)
 
@@ -526,6 +598,7 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
         guard_files=guard_files,
         exclusions=exclusions,
         value_inert_keys=value_inert_keys,
+        reach_reviews=reach_reviews,
     )
 
 
@@ -643,8 +716,10 @@ class FileScan:
     # Plugin directories this module scans from the real checkout, or None
     # when it scans none. "." is the whole plugin.
     scanner_roots: frozenset[str] | None
-    # 'line:why' evidence that the module reads files outside the plugin.
+    # 'line:why' evidence that a production module climbs out of the plugin.
     repo_reach: tuple[str, ...]
+    # 'line:why' for every site that keeps a TEST-SIDE module unproven.
+    unproven: tuple[str, ...]
     dynamic_imports: tuple[str, ...]
     dynamic_fixtures: tuple[str, ...]
 
@@ -658,12 +733,19 @@ class ExclusionView:
     test_names: frozenset[str]
     path_literals: frozenset[str]
     scan_roots: frozenset[str] = frozenset()
-    # Closure evidence of reads outside the plugin ('module:line:why').
+    # Production climbs out of the plugin ('module:line:why').
     repo_reach: tuple[str, ...] = ()
+    # (module, reasons) for each unproven test-side module or requested
+    # conftest fixture ('tests/conftest.py::name'). An exclusion with any
+    # entry not covered by a matching review is BROAD.
+    unproven: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Whether a test-side literal names a bump-trio file; if so the trio is
+    # not carved out for this exclusion.
+    trio_named: bool = False
 
 
 _EMPTY_SCAN = FileScan((), frozenset(), frozenset(), frozenset(), frozenset(),
-                       None, (), (), ())
+                       None, (), (), (), ())
 
 # The sys.path entries the two conftests insert, plugin-relative. A test's
 # bare `import x` resolves against these, so the closure does too.
@@ -994,23 +1076,18 @@ def _module_anchors(tree: ast.Module, rel: str,
 def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
                 module_files: dict[str, str],
                 docstrings: set[int]) -> tuple[str, ...]:
-    """Evidence that this module reads files OUTSIDE the plugin.
+    """Evidence that this PRODUCTION module climbs out of the plugin.
 
-    Three forms, each recorded as 'line:why':
-      a literal naming an existing repository path that is not also a
-      plugin path ('.github/workflows/tests.yml', 'CHANGELOG.md');
-      an anchored path that climbs above the plugin
-      (Path(__file__).parents[2] from tests/);
-      an anchored climb (.parent, .parents[n], dirname) whose depth cannot
-      be resolved, or an anchored `.parents` used other than with a literal
-      index (a walk up to a marker), either of which may climb anywhere;
-      a test-side Path.cwd() or os.getcwd() call, which may be anywhere.
+    Recorded as 'line:why': an anchored path that climbs above the plugin;
+    an anchored climb (.parent, .parents[n], dirname) whose depth cannot be
+    resolved; an anchored `.parents` used other than with a literal index
+    (a walk up to a marker). Any of these makes an exclusion broad.
     """
-    repo_root = plugin_root.parent
-    # Literal evidence counts only in test-side code. Shipped modules run in
-    # a consumer's project, where '.claude' or '.git' names that project or
-    # HOME, never this repository; a test reading a repository file names it.
     test_side = rel.startswith("tests/") or _is_test_file(rel)
+    if test_side:
+        # Test-side reach is judged by the confinement rules, which prove
+        # every access instead of listing the shapes of a bad one.
+        return ()
     _, anchors, resolved = _module_anchors(tree, rel, module_files)
     depth = len(Path(rel).parts)
     evidence: list[str] = []
@@ -1022,38 +1099,12 @@ def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
                and isinstance(node.slice, ast.Constant)
                and isinstance(node.slice.value, int)}
     for node in ast.walk(tree):
-        if (test_side and isinstance(node, ast.Call)
-                and (_call_name(node) == "getcwd"
-                     or (_call_name(node) == "cwd"
-                         and isinstance(node.func, ast.Attribute)))):
-            # A path relative to the working directory may be anywhere in
-            # the checkout. Only a CALL counts; a string naming it does not.
-            evidence.append(f"{node.lineno}:reads relative to the cwd")
-            continue
         if (isinstance(node, ast.Attribute) and node.attr == "parents"
                 and id(node) not in indexed
                 and (_uses_file(node) or any(
                     isinstance(inner, ast.Name) and inner.id in anchors
                     for inner in ast.walk(node)))):
             evidence.append(f"{node.lineno}:walks every ancestor")
-            continue
-        text = _str_constant(node)
-        if (text is not None and test_side and id(node) not in docstrings
-                and 0 < len(text) <= _MAX_LITERAL
-                and not any(ch.isspace() for ch in text)
-                and "*" not in text):
-            candidate = text
-            while candidate.startswith("../"):
-                candidate = candidate[3:]
-            candidate = candidate.strip("/")
-            first = candidate.split("/", 1)[0]
-            target = repo_root / candidate
-            if (candidate and first not in ("", ".", "..", PLUGIN_DIRNAME)
-                    and ("/" in candidate or target.is_file())
-                    and target.exists()
-                    and not (plugin_root / candidate).exists()):
-                evidence.append(f"{node.lineno}:names {text}")
-        if text is not None:
             continue
         climb = (
             (isinstance(node, ast.Attribute) and node.attr == "parent")
@@ -1215,6 +1266,482 @@ def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
     return frozenset(roots) if found else None
 
 
+# --------------------------------------------------------------------------
+# Confinement: is a test-side module PROVEN to touch only safe locations?
+# --------------------------------------------------------------------------
+#
+# CLOSED BY DEFAULT. Every rule below is an ALLOWLIST: an import, a call or a
+# value the rules do not know is UNPROVEN, and one unproven site makes the
+# whole exclusion BROAD. A new kind of access therefore defaults to broad
+# instead of slipping past a list of known shapes.
+
+# Imports that touch no file, process or environment.
+_COMPUTE_MODULES = frozenset({
+    "__future__", "abc", "array", "ast", "asyncio", "base64", "binascii",
+    "bisect", "calendar", "codecs", "collections", "concurrent", "contextlib",
+    "copy", "csv", "dataclasses", "datetime", "decimal", "difflib", "dis",
+    "email", "enum", "errno", "fnmatch", "fractions", "functools", "hashlib",
+    "heapq", "hmac", "html", "hypothesis", "inspect", "itertools",
+    "json", "keyword", "locale", "math", "numbers", "operator", "posixpath",
+    "pprint", "pytest", "queue", "random", "re", "secrets", "shlex",
+    "signal", "stat", "statistics", "string", "struct", "textwrap",
+    "threading", "time", "traceback", "types", "typing",
+    "typing_extensions", "unicodedata", "unittest", "uuid", "warnings",
+    "weakref", "zlib",
+})
+# Imports that can touch files, processes or the environment. Allowed, but
+# every call rooted at one of their names must pass confined values.
+_IO_MODULES = frozenset({
+    "glob", "importlib", "io", "os", "pathlib", "runpy", "shutil", "sqlite3",
+    "subprocess", "sys", "tempfile",
+})
+# In-memory stream constructors: their argument is data, not a location.
+_IN_MEMORY_STREAMS = frozenset({
+    "io.StringIO", "io.BytesIO", "StringIO", "BytesIO",
+})
+# Builtins that run code or read input: unproven whatever their arguments.
+_ALWAYS_UNPROVEN_BUILTINS = frozenset({
+    "exec", "eval", "__import__", "breakpoint", "input",
+})
+_IO_BUILTINS = frozenset({
+    "open", "exec", "eval", "compile", "__import__", "breakpoint", "input",
+})
+_TMP_FIXTURES = frozenset({
+    "tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory",
+})
+# Attribute reads and calls on I/O modules that pass no location.
+_ZERO_ARG_CONFINED = frozenset({
+    "os.sep", "os.pathsep", "os.linesep", "os.name", "os.environ.copy",
+    "sys.executable", "sys.platform", "sys.version_info", "sys.modules",
+    "sys.maxsize", "sys.stdout", "sys.stderr", "sys.stdin",
+    "tempfile.mkdtemp", "tempfile.mkstemp", "tempfile.TemporaryDirectory",
+    "tempfile.NamedTemporaryFile", "tempfile.TemporaryFile",
+    "tempfile.gettempdir", "io.StringIO", "io.BytesIO", "StringIO", "BytesIO",
+})
+_TEMPFILE_RESULTS = frozenset({
+    "mkdtemp", "mkstemp", "TemporaryDirectory", "NamedTemporaryFile",
+    "TemporaryFile", "gettempdir",
+})
+_LOCATION_SOURCES = frozenset({
+    "Path.cwd", "Path.home", "os.getcwd", "os.path.expanduser", "os.getenv",
+    "os.environ.get",
+})
+_SUBPROCESS_CALLS = frozenset({
+    "run", "check_output", "Popen", "check_call", "call",
+})
+# Process launches with no argv/cwd discipline: always unproven.
+_SHELL_CALL_PREFIXES = ("os.system", "os.popen", "os.exec", "os.spawn",
+                        "os.startfile", "os.posix_spawn")
+# Keyword arguments of a subprocess call that carry data, not a location.
+_SUBPROCESS_DATA_KEYWORDS = frozenset({
+    "input", "capture_output", "text", "timeout", "check", "encoding",
+    "errors", "stdout", "stderr", "universal_newlines", "env", "stdin",
+    "shell",
+})
+# Builtins and constructors a confined value may pass through.
+_PASSTHROUGH_NAMES = frozenset({
+    "str", "Path", "PurePath", "len", "sorted", "list", "tuple", "dict",
+    "set", "int", "bool", "repr", "range", "bytes", "frozenset", "enumerate",
+    "zip", "min", "max", "any", "all", "isinstance", "True", "False", "None",
+})
+
+
+def _path_methods() -> frozenset[str]:
+    """pathlib.Path and io.IOBase method names, computed rather than listed,
+    minus pure attributes that read no file."""
+    import io as _io
+    import pathlib as _pathlib
+    names = {name for name in dir(_pathlib.Path) if not name.startswith("_")}
+    names |= {name for name in dir(_io.IOBase) if not name.startswith("_")}
+    pure = {"name", "parts", "suffix", "stem", "parent", "parents", "anchor",
+            "drive", "root", "suffixes", "with_name", "with_suffix",
+            "with_stem", "joinpath", "relative_to", "is_relative_to",
+            "as_posix", "match", "full_match", "with_segments",
+            "is_absolute", "is_reserved", "as_uri", "parser"}
+    return frozenset(names - pure)
+
+
+_PATH_METHODS = _path_methods()
+# String methods that share a name with a Path method; on a literal or a
+# str they read nothing.
+_PURE_STRING_METHODS = frozenset({
+    "split", "join", "strip", "replace", "format", "startswith", "endswith",
+    "count", "index", "find", "lower", "upper", "encode", "decode", "sort",
+})
+# Receivers whose methods are never file reads.
+_NON_FILE_RECEIVERS = frozenset({
+    "monkeypatch", "self", "cls", "mock", "pytest", "re", "json", "capsys",
+    "caplog", "request",
+})
+
+
+def _dotted(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node)
+    except (AttributeError, ValueError, TypeError):
+        return ""
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    """A string built only from literals: a constant, '/' or '+' of
+    literals, os.path.join / joinpath of literals, or an f-string with no
+    expressions."""
+    text = _str_constant(node)
+    if text is not None:
+        return text
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+        left, right = _literal_string(node.left), _literal_string(node.right)
+        if left is None or right is None:
+            return None
+        return (left.rstrip("/") + "/" + right.lstrip("/")
+                if isinstance(node.op, ast.Div) else left + right)
+    if isinstance(node, ast.JoinedStr):
+        parts = [_str_constant(value) for value in node.values]
+        return None if any(part is None for part in parts) else "".join(parts)
+    if isinstance(node, ast.Call) and _call_name(node) in ("join", "joinpath",
+                                                           "Path", "PurePath"):
+        pieces = [_literal_string(arg) for arg in node.args]
+        if not pieces or any(piece is None for piece in pieces):
+            return None
+        if (_call_name(node) == "joinpath"
+                and isinstance(node.func, ast.Attribute)):
+            head = _literal_string(node.func.value)
+            if head is None:
+                return None
+            pieces = [head, *pieces]
+        return "/".join(piece.strip("/") for piece in pieces if piece)
+    return None
+
+
+def _names_repo_path(text: str, repo_root: Path, plugin_root: Path) -> bool:
+    """True when `text` names an existing repository path outside the
+    plugin (and not the same relative path inside it)."""
+    if not text or len(text) > _MAX_LITERAL or any(ch.isspace() for ch in text):
+        return False
+    candidate = text
+    while candidate.startswith("../"):
+        candidate = candidate[3:]
+    candidate = candidate.strip("/")
+    first = candidate.split("/", 1)[0]
+    if not candidate or first in ("", ".", "..", PLUGIN_DIRNAME) or "*" in candidate:
+        return False
+    target = repo_root / candidate
+    try:
+        return (("/" in candidate or target.is_file()) and target.exists()
+                and not (plugin_root / candidate).exists())
+    except (OSError, ValueError):
+        return False
+
+
+def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
+                         plugin_root: Path,
+                         docstrings: set[int]) -> tuple[str, ...]:
+    """'line:why' for every site that keeps this test-side module unproven.
+
+    (1) every import is COMPUTE, I/O or a plugin module;
+    (2) every call rooted at an I/O name passes only confined values; a
+        subprocess call needs a confined argv AND (a confined cwd= OR argv[0]
+        is sys.executable);
+    (3) every Path or file method has a confined receiver;
+    (4) no literal, literal concatenation or '<rev>:<path>' names a
+        repository path outside the plugin.
+    Confined values: tmp fixtures and tempfile results, __file__ anchors
+    inside the plugin, relative literals with no '..', '~', ':' or leading
+    '/', sys.executable, and values built only from those.
+    """
+    repo_root = plugin_root.parent
+    reasons: list[str] = []
+    io_names = set(_IO_BUILTINS)
+    subprocess_names: set[str] = set()
+    other_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                bound = (alias.asname or alias.name).split(".")[0]
+                if top in _COMPUTE_MODULES:
+                    other_modules.add(bound)
+                elif top in _IO_MODULES:
+                    io_names.add(bound)
+                    if top == "subprocess":
+                        subprocess_names.add(bound)
+                elif _resolve_module(alias.name, roots):
+                    other_modules.add(bound)
+                else:
+                    reasons.append(
+                        f"{node.lineno}:unclassified import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue  # a relative import is a plugin module
+            module = node.module or ""
+            top = module.split(".")[0]
+            if top in _COMPUTE_MODULES:
+                other_modules.update(alias.asname or alias.name
+                                     for alias in node.names)
+            elif top in _IO_MODULES:
+                io_names.update(alias.asname or alias.name
+                                for alias in node.names)
+                if top == "subprocess":
+                    subprocess_names.update(alias.asname or alias.name
+                                            for alias in node.names)
+            elif _resolve_module(module, roots):
+                other_modules.update(alias.asname or alias.name
+                                     for alias in node.names)
+            else:
+                reasons.append(f"{node.lineno}:unclassified import {module}")
+
+    _, _, resolved = _module_anchors(tree, rel, {})
+    depth = len(Path(rel).parts)
+    anchored_inside = {name for name, (level, _parts) in resolved.items()
+                       if "." not in name and level <= depth}
+
+    def climbs_out(expr: ast.AST) -> bool:
+        """An anchored climb in `expr` that leaves, or may leave, the plugin."""
+        for sub in ast.walk(expr):
+            is_climb = (
+                (isinstance(sub, ast.Attribute) and sub.attr in ("parent",
+                                                                 "parents"))
+                or (isinstance(sub, ast.Subscript)
+                    and isinstance(sub.value, ast.Attribute)
+                    and sub.value.attr == "parents")
+                or (isinstance(sub, ast.Call) and _call_name(sub) == "dirname")
+                or (isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Div)))
+            if not is_climb or not (_uses_file(sub) or any(
+                    isinstance(name, ast.Name) and name.id in resolved
+                    for name in ast.walk(sub))):
+                continue
+            if (isinstance(sub, ast.Attribute) and sub.attr == "parents"
+                    and not any(isinstance(parent, ast.Subscript)
+                                and parent.value is sub
+                                for parent in ast.walk(expr))):
+                return True  # a walk over every ancestor
+            if isinstance(sub, ast.Attribute) and sub.attr == "parents":
+                continue  # judged as its subscript
+            found = _anchor_of(sub, resolved)
+            if found is None:
+                if not isinstance(sub, ast.BinOp):
+                    return True  # an unresolvable climb
+                continue
+            if found[0] > depth:
+                return True
+        return False
+
+    def confined(expr: ast.AST, local: set[str]) -> bool:
+        if climbs_out(expr):
+            return False
+        for sub in ast.walk(expr):
+            if isinstance(sub, ast.Name):
+                if (sub.id in local
+                        or sub.id in anchored_inside or sub.id == "__file__"
+                        or sub.id in _PASSTHROUGH_NAMES):
+                    continue
+                if sub.id in io_names:
+                    continue  # judged where it is called
+                return False
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                value = sub.value
+                if (value.startswith("/") or value.startswith("~")
+                        or ".." in value.split("/") or ":" in value):
+                    return False
+            if isinstance(sub, ast.Attribute) and sub.attr == "__file__":
+                return False
+        return True
+
+    scopes: list[ast.AST] = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    module_body = [statement for statement in tree.body
+                   if not isinstance(statement, (ast.FunctionDef,
+                                                 ast.AsyncFunctionDef,
+                                                 ast.ClassDef))]
+    scopes.append(ast.Module(body=module_body, type_ignores=[]))
+    # A nested function sees its enclosing function's confined names.
+    enclosing: dict[int, ast.AST] = {}
+    for outer in scopes[:-1]:
+        for inner in ast.walk(outer):
+            if inner is not outer and isinstance(
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                enclosing.setdefault(id(inner), outer)
+    final_locals: dict[int, set[str]] = {}
+    for scope in scopes:
+        nodes = list(ast.walk(scope))
+        local: set[str] = set()
+        parent = enclosing.get(id(scope))
+        while parent is not None and id(parent) not in final_locals:
+            parent = enclosing.get(id(parent))
+        if parent is not None:
+            local |= final_locals[id(parent)]
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local |= {arg.arg for arg in scope.args.args
+                      if arg.arg in _TMP_FIXTURES}
+        for _ in range(3):  # bindings built from confined values
+            for node in nodes:
+                targets: list[ast.AST] = []
+                if isinstance(node, (ast.Assign, ast.AnnAssign)) and getattr(
+                        node, "value", None) is not None and confined(
+                            node.value, local):
+                    targets = (node.targets if isinstance(node, ast.Assign)
+                               else [node.target])
+                elif isinstance(node, (ast.For, ast.comprehension)) and confined(
+                        node.iter, local):
+                    targets = [node.target]
+                elif isinstance(node, (ast.With, ast.AsyncWith)):
+                    targets = [item.optional_vars for item in node.items
+                               if item.optional_vars is not None
+                               and confined(item.context_expr, local)]
+                elif (isinstance(node, ast.Call)
+                        and _call_name(node) in _TEMPFILE_RESULTS):
+                    continue
+                for target in targets:
+                    local.update(name.id for name in ast.walk(target)
+                                 if isinstance(name, ast.Name))
+        final_locals[id(scope)] = local
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            root = func
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            dotted = _dotted(func)
+            if isinstance(func, ast.Name) and func.id in _ALWAYS_UNPROVEN_BUILTINS:
+                reasons.append(f"{node.lineno}:runs code or reads input "
+                               f"{func.id}()")
+                continue
+            if (isinstance(func, ast.Name) and func.id == "getattr"
+                    and node.args and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id in io_names):
+                # getattr(os, 'listdir') reaches an I/O call no rule sees.
+                reasons.append(f"{node.lineno}:dynamic attribute of an I/O "
+                               f"module getattr({node.args[0].id}, ...)")
+                continue
+            if (isinstance(func, ast.Attribute) and func.attr == "chdir"
+                    and not (node.args and all(confined(argument, local)
+                                               for argument in node.args))):
+                reasons.append(f"{node.lineno}:changes directory to an "
+                               f"unproven location {dotted}()")
+                continue
+            if dotted in _IN_MEMORY_STREAMS:
+                continue  # StringIO(text) / BytesIO(data): no location
+            if isinstance(root, ast.Name) and root.id in io_names:
+                if dotted in _LOCATION_SOURCES or dotted.startswith(
+                        "os.environ"):
+                    if dotted not in _ZERO_ARG_CONFINED:
+                        reasons.append(f"{node.lineno}:location source "
+                                       f"{dotted}()")
+                        continue
+                name = _call_name(node)
+                if dotted.startswith(_SHELL_CALL_PREFIXES):
+                    reasons.append(f"{node.lineno}:shell or exec launch "
+                                   f"{dotted}()")
+                    continue
+                if root.id in subprocess_names and name not in _SUBPROCESS_CALLS:
+                    if dotted not in _ZERO_ARG_CONFINED:
+                        reasons.append(f"{node.lineno}:unproven subprocess "
+                                       f"{dotted}()")
+                    continue
+                if root.id in subprocess_names:
+                    argv = node.args[0] if node.args else None
+                    elements = (argv.elts if isinstance(argv, (ast.List,
+                                                               ast.Tuple))
+                                else None)
+                    argv_ok = (argv is not None and (
+                        all(confined(item, local) for item in elements)
+                        if elements is not None else confined(argv, local)))
+                    python = bool(elements) and _dotted(
+                        elements[0]) == "sys.executable"
+                    if python and len(elements) > 1 and _str_constant(
+                            elements[1]) == "-c":
+                        reasons.append(f"{node.lineno}:inline python code "
+                                       f"{dotted}()")
+                        continue
+                    # A python run with no script or module operand (only
+                    # options such as --version) reads nothing relative to
+                    # the cwd; any other python run needs a rig cwd too.
+                    python_without_operand = python and all(
+                        (_str_constant(item) or "").startswith("-")
+                        for item in elements[1:])
+                    cwd = [keyword.value for keyword in node.keywords
+                           if keyword.arg == "cwd"]
+                    cwd_ok = bool(cwd) and confined(cwd[0], local)
+                    if elements and not cwd_ok:
+                        # `git -C <rig>` runs in the rig just like cwd=.
+                        for flag, value in zip(elements, elements[1:]):
+                            if (_str_constant(flag) == "-C"
+                                    and _str_constant(value) is None
+                                    and confined(value, local)):
+                                cwd_ok = True
+                    if not argv_ok:
+                        reasons.append(f"{node.lineno}:unproven argv "
+                                       f"{dotted}()")
+                    elif not (cwd_ok or python_without_operand):
+                        reasons.append(f"{node.lineno}:program without a rig "
+                                       f"cwd {dotted}()")
+                    continue
+                arguments = list(node.args) + [keyword.value
+                                               for keyword in node.keywords]
+                if not arguments:
+                    if dotted not in _ZERO_ARG_CONFINED:
+                        reasons.append(f"{node.lineno}:unproven zero-argument "
+                                       f"{dotted}()")
+                    continue
+                if not all(confined(argument, local) for argument in arguments):
+                    reasons.append(f"{node.lineno}:unproven {dotted}()")
+                continue
+            # (3) a Path or file method needs a confined receiver.
+            if (isinstance(func, ast.Attribute) and func.attr in _PATH_METHODS
+                    and func.attr not in _PURE_STRING_METHODS):
+                receiver = func.value
+                base = receiver
+                while isinstance(base, (ast.Attribute, ast.Subscript,
+                                        ast.Call)):
+                    base = base.func if isinstance(base, ast.Call) else base.value
+                if isinstance(base, ast.Name) and (
+                        base.id in other_modules
+                        or base.id in _NON_FILE_RECEIVERS):
+                    continue
+                if isinstance(base, ast.Constant):
+                    continue  # a literal string's method
+                if not confined(receiver, local):
+                    reasons.append(f"{node.lineno}:path method on an unproven "
+                                   f"receiver .{func.attr}()")
+        for node in nodes:
+            if (isinstance(node, ast.Subscript)
+                    and _dotted(node.value) == "os.environ"
+                    and isinstance(node.ctx, ast.Load)):
+                reasons.append(f"{node.lineno}:reads os.environ[]")
+    # (4) literals naming repository paths outside the plugin.
+    for node in ast.walk(tree):
+        if id(node) in docstrings:
+            continue
+        text = _literal_string(node) if isinstance(
+            node, (ast.Constant, ast.BinOp, ast.JoinedStr, ast.Call)) else None
+        if text is None:
+            continue
+        candidates = [text]
+        if ":" in text and not text.startswith("/"):
+            candidates.append(text.split(":", 1)[1])  # "<rev>:<path>"
+        if any(_names_repo_path(candidate, repo_root, plugin_root)
+               for candidate in candidates):
+            reasons.append(f"{node.lineno}:names a repository path {text!r}")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _fixture_spans(tree: ast.Module) -> dict[str, tuple[int, int, bool]]:
+    """Fixture functions in a conftest: name -> (first line, last line,
+    autouse)."""
+    spans: dict[str, tuple[int, int, bool]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if _call_name(ast.Call(func=target, args=[], keywords=[])) == "fixture":
+                spans[node.name] = (node.lineno, node.end_lineno or node.lineno,
+                                    _is_autouse(node))
+    return spans
+
+
 def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                is_tracked_dir) -> FileScan:
     try:
@@ -1349,6 +1876,10 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                                      module_files),
         repo_reach=_repo_reach(tree, module_rel, root, module_files,
                                docstrings),
+        unproven=(_confinement_reasons(tree, module_rel, roots, root,
+                                       docstrings)
+                  if module_rel.startswith("tests/") or _is_test_file(module_rel)
+                  else ()),
         dynamic_imports=tuple(dynamic_imports),
         dynamic_fixtures=tuple(dynamic_fixtures),
     )
@@ -1384,6 +1915,7 @@ class ScanIndex:
         self.roots = [root.resolve() for root in _import_roots(self.plugin_root)]
         self._scans: dict[str, FileScan] = {}
         self._views: dict[str, ExclusionView] = {}
+        self._fixtures: dict[str, dict[str, tuple[str, ...]]] | None = None
         tracked = _tracked_directories(self.plugin_root)
         if tracked:
             self.is_tracked_dir = tracked.__contains__
@@ -1401,6 +1933,31 @@ class ScanIndex:
                            self.is_tracked_dir)
                 if path.is_file() else _EMPTY_SCAN)
         return self._scans[rel]
+
+    def fixture_reasons(self) -> dict[str, dict[str, tuple[str, ...]]]:
+        """Unproven sites inside each requestable (non-autouse) conftest
+        fixture. Autouse fixtures are the isolation layer, pinned by name in
+        a contract; a change to them selects everything."""
+        if self._fixtures is None:
+            self._fixtures = {}
+            for conftest in _CONFTEST_NAMES:
+                path = self.plugin_root / conftest
+                try:
+                    tree = ast.parse(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+                    continue
+                reasons = _confinement_reasons(
+                    tree, conftest, self.roots, self.plugin_root,
+                    _docstring_nodes(tree))
+                found: dict[str, tuple[str, ...]] = {}
+                for name, (first, last, autouse) in _fixture_spans(tree).items():
+                    if autouse:
+                        continue
+                    found[name] = tuple(
+                        reason for reason in reasons
+                        if first <= int(reason.split(":", 1)[0]) <= last)
+                self._fixtures[conftest] = found
+        return self._fixtures
 
     def closure(self, start: list[str]) -> frozenset[str]:
         seen: set[str] = set()
@@ -1422,6 +1979,8 @@ class ScanIndex:
             path_literals: set[str] = set()
             scan_roots: set[str] = set()
             repo_reach: list[str] = []
+            unproven: list[tuple[str, tuple[str, ...]]] = []
+            trio_named = False
             for rel in sorted(closure):
                 scan = self.scan(rel)
                 targets |= scan.import_targets
@@ -1429,10 +1988,20 @@ class ScanIndex:
                 path_literals |= scan.path_literals
                 scan_roots |= scan.scanner_roots or set()
                 repo_reach.extend(f"{rel}:{where}" for where in scan.repo_reach)
+                if scan.unproven:
+                    unproven.append((rel, scan.unproven))
+                if (rel.startswith("tests/") or _is_test_file(rel)) and any(
+                        name in literal for literal in scan.literals
+                        for name in _TRIO_NAMES):
+                    trio_named = True
                 if rel.startswith("tests/"):
                     # Test-side code is what requests fixtures: by parameter
                     # name, attribute or a usefixtures string.
                     test_names |= scan.names | scan.literals
+            for conftest, fixtures in self.fixture_reasons().items():
+                for name, reasons in sorted(fixtures.items()):
+                    if name in test_names and reasons:
+                        unproven.append((f"{conftest}::{name}", reasons))
             self._views[exclusion_path] = ExclusionView(
                 closure=closure,
                 import_targets=frozenset(targets),
@@ -1441,6 +2010,8 @@ class ScanIndex:
                 path_literals=frozenset(path_literals),
                 scan_roots=frozenset(scan_roots),
                 repo_reach=tuple(repo_reach),
+                unproven=tuple(unproven),
+                trio_named=trio_named,
             )
         return self._views[exclusion_path]
 
@@ -1645,6 +2216,10 @@ class ChangeFacts:
     value_inert: frozenset[str]
     conftest_verdicts: dict[str, ConftestVerdict]
     conftest_imported: frozenset[str]
+    # Reviewed modules whose bytes still match their review, and the
+    # extra_reads globs those reviews declare.
+    reviewed: frozenset[str] = frozenset()
+    review_reads: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _git_blob(repo_root: Path, rev: str, path: str) -> str | None:
@@ -1735,12 +2310,95 @@ def gather_facts(repo_root: Path, manifest: Manifest, changed: list[str],
             _git_blob(repo_root, head, repo_path), is_conftest,
             resolve=lambda dotted: _production_files(dotted, index))
         verdicts[rel] = verdict
+    reviewed, review_reads = current_reviews(index.plugin_root, manifest)
     return ChangeFacts(
         views=views,
         value_inert=frozenset(value_inert),
         conftest_verdicts=verdicts,
         conftest_imported=frozenset(conftest_imported),
+        reviewed=reviewed,
+        review_reads=review_reads,
     )
+
+
+def fixture_digest(source: str, name: str) -> str | None:
+    """sha256 of a module-level function's source (decorators included)
+    plus every same-file top-level function, class, assignment or import
+    it reads, transitively. None when the function does not exist.
+
+    So an edit to the fixture, or to a helper or constant it uses, voids a
+    review of it, while an unrelated edit elsewhere in the file does not.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    top: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            top[node.name] = node
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target])
+            for target in targets:
+                for bound in ast.walk(target):
+                    if isinstance(bound, ast.Name):
+                        top[bound.id] = node
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                top[(alias.asname or alias.name).split(".")[0]] = node
+    target = top.get(name)
+    if not isinstance(target, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    lines = source.splitlines(keepends=True)
+
+    def segment(node: ast.AST) -> str:
+        first = min([node.lineno] + [decorator.lineno for decorator in
+                                     getattr(node, "decorator_list", [])])
+        return "".join(lines[first - 1:node.end_lineno or node.lineno])
+
+    seen: dict[int, ast.AST] = {}
+    queue = [target]
+    while queue:
+        node = queue.pop()
+        if id(node) in seen:
+            continue
+        seen[id(node)] = node
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Name) and inner.id in top:
+                queue.append(top[inner.id])
+    parts = sorted(segment(node) for node in seen.values())
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+def current_reviews(plugin_root: Path, manifest: Manifest
+                    ) -> tuple[frozenset[str],
+                               tuple[tuple[str, tuple[str, ...]], ...]]:
+    """Reviews whose module still hashes to the reviewed sha256.
+
+    Hashed at RUNTIME from the bytes the selector reads, so an edit to a
+    reviewed module makes it unproven again without any contract running.
+    """
+    reviewed: set[str] = set()
+    reads: list[tuple[str, tuple[str, ...]]] = []
+    for module, sha, _reason, extra in manifest.reach_reviews:
+        path_part, _, function = module.partition("::")
+        try:
+            raw = (Path(plugin_root) / path_part).read_bytes()
+        except OSError:
+            continue
+        if function:
+            try:
+                digest = fixture_digest(raw.decode("utf-8"), function)
+            except UnicodeDecodeError:
+                continue
+        else:
+            digest = hashlib.sha256(raw).hexdigest()
+        if digest == sha:
+            reviewed.add(module)
+            reads.append((module, extra))
+    return frozenset(reviewed), tuple(reads)
 
 
 def select_for_change(repo_root: Path, manifest: Manifest,
@@ -1772,6 +2430,19 @@ def _select_all(discovered: frozenset[str], status: str,
 
 def _is_test_file(plugin_relative: str) -> bool:
     return bool(_TEST_FILE_RE.search(plugin_relative))
+
+
+def broad_reasons(view: ExclusionView, facts: ChangeFacts) -> tuple[str, ...]:
+    """Why an exclusion is BROAD: each unreviewed unproven test-side module
+    or requested fixture, and each production climb out of the plugin.
+    Empty means CONFINED."""
+    reasons: list[str] = []
+    for module, sites in view.unproven:
+        if module in facts.reviewed or module.split("::", 1)[0] in facts.reviewed:
+            continue
+        reasons.extend(f"{module}:{site}" for site in sites)
+    reasons.extend(f"production climb {where}" for where in view.repo_reach)
+    return tuple(reasons)
 
 
 def _ancestors(rel: str) -> set[str]:
@@ -1875,8 +2546,7 @@ def select(discovered: frozenset[str], manifest: Manifest,
 
     changed_set = set(plugin_changed)
     # Changed paths outside the plugin (machinery and pins already selected
-    # everything above). They reach only exclusions whose closure reads
-    # repository files.
+    # everything above). Only a BROAD exclusion can see them.
     outside = [path for path in changed if repo_to_plugin(path) is None]
     if outside and facts is None:
         return _select_all(discovered, status, "change-facts-unavailable")
@@ -1905,6 +2575,30 @@ def select(discovered: frozenset[str], manifest: Manifest,
                 return _select_all(discovered, status,
                                    f"no-closure-view:{exclusion.path}")
             continue
+        broad = broad_reasons(view, facts)
+        if broad:
+            # Not proven confined: back on ANY change, except value-inert
+            # keys (already dropped above) and the bump trio, unless its own
+            # test-side code names a trio file.
+            trigger = next(
+                (path for path in changed
+                 if view.trio_named or path not in BUMP_TRIO), None)
+            if trigger is not None:
+                added[exclusion.path] = AddBack(
+                    path=exclusion.path, reason="unproven_reach",
+                    matched_changed=trigger, matched_seam=None,
+                    evidence=broad[0])
+            continue
+        extra = next(
+            ((module, path) for module, globs in facts.review_reads
+             if module in view.closure for path in changed
+             for glob in globs if fnmatch.fnmatchcase(path, glob)), None)
+        if extra is not None:
+            added[exclusion.path] = AddBack(
+                path=exclusion.path, reason="review_extra_read",
+                matched_changed=extra[1], matched_seam=None,
+                evidence=f"{extra[0]} declares this read")
+            continue
         for rel in plugin_changed:
             hit = _content_evidence(rel, view, facts)
             if hit is not None:
@@ -1913,12 +2607,6 @@ def select(discovered: frozenset[str], manifest: Manifest,
                     matched_changed=repo_spelling.get(rel, rel),
                     matched_seam=None, evidence=hit[1])
                 break
-        else:
-            if outside and view.repo_reach:
-                added[exclusion.path] = AddBack(
-                    path=exclusion.path, reason="repo_reader",
-                    matched_changed=outside[0], matched_seam=None,
-                    evidence=view.repo_reach[0])
 
     excluded_paths = {exclusion.path for exclusion in manifest.exclusions}
     applied = frozenset(excluded_paths - set(added))
