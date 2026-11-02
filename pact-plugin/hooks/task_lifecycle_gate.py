@@ -1993,8 +1993,9 @@ def evaluate_lifecycle(
             # here. It read inboxes/{owner}.json, but that store is
             # platform-written ASYNC on delivery (file mtime == embedded msg
             # ts) — AFTER this synchronous PostToolUse(TaskUpdate-completed)
-            # read — and SendMessage is not in the Pre/PostToolUse-hookable
-            # tool set, so there is no send event to key on. The check was
+            # read. SendMessage does reach PreToolUse, but that fires before
+            # delivery, and PostToolUse on it is unmeasured, so no send-side
+            # hook can observe the wake landing. The check was
             # ~100% false-positive by construction (the from-field was already
             # literal "team-lead", so it was never a from-field bug). Do NOT
             # restore it pointed at the same store. The genuine missed-wake gap

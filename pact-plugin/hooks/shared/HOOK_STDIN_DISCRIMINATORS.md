@@ -204,7 +204,9 @@ later platform change that writes meta.json earlier shows up in the field.
 ### UserPromptSubmit has no teammate fire path
 
 An `Agent`-spawned team teammate never fires `UserPromptSubmit`: it wakes via
-inbox / `SendMessage` (a context injection, not a hookable tool). So the
+inbox delivery, a context injection that fires no `UserPromptSubmit` in the
+recipient. (The sender's `SendMessage` call does reach `PreToolUse`; its
+`PostToolUse` is unmeasured, not refuted. Neither runs in the recipient.) So the
 `if not is_lead: return` guard in the bootstrap hooks
 (`bootstrap_marker_writer.py`, `bootstrap_prompt_gate.py`) is a **plain /
 non-PACT primary-session** guard — it is NOT discriminating teammates. (A

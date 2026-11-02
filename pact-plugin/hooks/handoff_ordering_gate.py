@@ -24,8 +24,7 @@ NOT block — a completing TaskUpdate always proceeds.
 
 WHY THE #956 BRANCH WARNS AND NEVER DENIES (architect D2), and this reasoning
 does NOT carry to the dispatch-variety branch: actor attribution is unreliable
-on PreToolUse stdin (no agentId; CLAUDE.md "SendMessage is unhookable"
-corollary), so a deny on a misjudged completion would strand it → livelock on
+on PreToolUse stdin (no agentId), so a deny on a misjudged completion would strand it → livelock on
 the completion-authority path, which is worse than the data-loss bug. The
 backstop already recovers prevention's full value. The dispatch-variety branch
 is not exposed to that: it keys on a STRUCTURAL shape and a task read rather

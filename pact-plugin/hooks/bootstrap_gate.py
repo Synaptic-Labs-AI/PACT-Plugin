@@ -42,8 +42,9 @@ Tool classification rationale:
     compaction.
   - MCP tools are always allowed — they're external integrations that may
     be needed for context gathering.
-  - Hookability: only `SendMessage` is verified-unhookable (#897 audit).
-    Skill, ToolSearch, and the Task tools HAVE been observed reaching
+  - Hookability: `SendMessage` DOES reach PreToolUse (measured: this gate
+    ran once per `SendMessage` call); PostToolUse on it is unmeasured, not
+    refuted. Skill, ToolSearch, and the Task tools HAVE been observed reaching
     PreToolUse (incident evidence #942; HOOK_STDIN_DISCRIMINATORS.md) —
     assume ANY tool name can reach this hook. The degraded-mode
     allowlist (_READ_ONLY_TOOLS) is membership-based precisely so the
