@@ -546,3 +546,65 @@ def test_home_unknown_refuses_the_config_roots_global_file(tmp_path, monkeypatch
     verdict = world.judge(config / "gone", config, config / "CLAUDE.md")
 
     assert verdict is False
+
+
+# ---------------------------------------------------------------------------
+# The case-variant rule, on ANY volume. The arm above needs a case-insensitive
+# tmp volume, so it skips on Linux CI. Here the volume's answer is supplied:
+# `_case_insensitive` reports the config root's directory as case-insensitive,
+# and the global file does not exist yet, so the comparison takes the
+# create-target route (same existing ancestor, names equal case-folded).
+# Red if that route stops folding case.
+# ---------------------------------------------------------------------------
+
+
+def _config_root_without_a_document(tmp_path, monkeypatch):
+    config = tmp_path / "cfg"
+    config.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    assert not (config / "CLAUDE.md").exists()
+    assert not (Path.home() / ".claude" / "CLAUDE.md").exists()
+    return config
+
+
+def _report_case_insensitive_at(monkeypatch, folding_dir):
+    seen = []
+
+    def case_insensitive(directory):
+        seen.append(directory)
+        return os.path.samefile(directory, folding_dir)
+
+    monkeypatch.setattr(project_scope, "_case_insensitive", case_insensitive)
+    return seen
+
+
+def test_a_case_variant_of_the_global_file_counts_as_user_global_on_any_volume(
+    tmp_path, monkeypatch
+):
+    config = _config_root_without_a_document(tmp_path, monkeypatch)
+    seen = _report_case_insensitive_at(monkeypatch, config)
+
+    assert project_scope.is_user_global_document(config / "claude.md") is True
+    assert seen, "the case-folding route was never consulted"
+
+
+def test_a_different_name_beside_the_global_file_is_not_user_global(
+    tmp_path, monkeypatch
+):
+    """No over-block: on the same case-insensitive volume, a name that is not
+    the global file's under case folding stays a different file."""
+    config = _config_root_without_a_document(tmp_path, monkeypatch)
+    _report_case_insensitive_at(monkeypatch, config)
+
+    assert project_scope.is_user_global_document(config / "AGENTS.md") is False
+
+
+def test_a_case_variant_is_not_user_global_where_the_volume_matches_case(
+    tmp_path, monkeypatch
+):
+    """Control: with the volume reported case-sensitive, the same spelling
+    names another file, so the arm above is decided by the case answer."""
+    config = _config_root_without_a_document(tmp_path, monkeypatch)
+    monkeypatch.setattr(project_scope, "_case_insensitive", lambda _directory: False)
+
+    assert project_scope.is_user_global_document(config / "claude.md") is False
