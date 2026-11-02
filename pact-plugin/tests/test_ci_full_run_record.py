@@ -11,6 +11,7 @@ a record that exists only on success cannot evidence a failure, so the
 failing-session scenario asserts the file still exists.
 """
 
+import importlib.util
 import json
 import os
 import shutil
@@ -19,10 +20,9 @@ import sys
 from pathlib import Path
 
 import ci_contract
-from ci_full_run_record import OWNER_ENV
+from ci_full_run_record import OWNER_ENV, RECORD_NAME
 
 PLUGIN = Path(__file__).with_name("ci_full_run_record.py")
-RECORD_NAME = ".full-run-record.json"
 COLLECTION_RECORD_NAME = ".full-collection-record.json"
 
 PASSING_SUITE = '''\
@@ -72,7 +72,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-RECORD = Path(os.environ["GITHUB_WORKSPACE"]) / ".full-run-record.json"
+RECORD = Path(os.environ["GITHUB_WORKSPACE"]) / "{record_name}"
 
 
 def test_a_nested_session_runs_while_the_outer_one_is_open():
@@ -89,7 +89,7 @@ def test_a_nested_session_runs_while_the_outer_one_is_open():
     expect_written = os.environ.get("RIG_NESTED_UNCLAIMED") == "1"
     assert RECORD.exists() is expect_written, (
         "nested session record state was not the expected one")
-'''.replace("{owner}", OWNER_ENV)
+'''.replace("{owner}", OWNER_ENV).replace("{record_name}", RECORD_NAME)
 
 INNER_CASE = '''\
 def test_inner_one():
@@ -394,3 +394,26 @@ def test_a_module_level_skip_is_recorded_as_a_site(tmp_path):
     assert record["skipped_at_collection"] == 1, record
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 0, verdict.stderr
+
+
+def test_the_verifier_and_the_recorder_name_the_same_record_file():
+    """One file name, two homes: scripts/ cannot import from tests/.
+
+    The recorder's constant is the source of truth; the verifier's copy is
+    pinned to it here, so changing one without the other reddens.
+    """
+    verifier = ci_contract.require_root("the full-run verifier") / "scripts" / "verify_full_run.py"
+    spec = importlib.util.spec_from_file_location("verify_full_run", verifier)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.RECORD_NAME == RECORD_NAME, (module.RECORD_NAME, RECORD_NAME)
+
+
+def test_the_gitignore_lists_the_record_file():
+    """A run record must never be committed, so .gitignore names it exactly."""
+    root = ci_contract.require_root("the gitignore record entry")
+    lines = [line.strip() for line in
+             (root / ".gitignore").read_text(encoding="utf-8").splitlines()]
+    assert RECORD_NAME in lines, (
+        f".gitignore has no line {RECORD_NAME!r}; a renamed record would be "
+        f"committable")

@@ -47,9 +47,6 @@ RECORD_NAME = ".full-run-record.json"
 # skip adds its entry in the SAME commit; the file's "about" field says how.
 SKIP_ALLOWLIST = Path(__file__).resolve().with_name(
     "full_suite_skip_allowlist.json")
-# Entries with no count limit are reserved for generated-input sites. This
-# bound keeps that escape hatch from growing without a visible decision.
-MAX_UNBOUNDED_ENTRIES = 1
 
 _REQUIRED_KEYS = (
     "collected", "passed", "skipped", "failed", "errors", "deselected",
@@ -162,21 +159,12 @@ def load_skip_allowlist(path: Path) -> list[dict]:
         if entry.get("match") not in ("exact", "prefix"):
             raise invalid(f"{where} match must be 'exact' or 'prefix'")
         allowed = entry.get("allowed")
-        if allowed is None:
-            why = entry.get("why_unbounded")
-            if not (isinstance(why, str) and why.strip()):
-                raise invalid(f"{where} is unbounded without why_unbounded")
-        elif (not isinstance(allowed, int) or isinstance(allowed, bool)
-              or allowed < 1):
-            raise invalid(f"{where} allowed must be an integer >= 1 or null")
+        if (not isinstance(allowed, int) or isinstance(allowed, bool)
+                or allowed < 1):
+            raise invalid(f"{where} allowed must be an integer >= 1")
         if (file, reason) in seen:
             raise invalid(f"{where} duplicates ({file!r}, {reason!r})")
         seen.add((file, reason))
-    unbounded = sum(1 for entry in entries if entry.get("allowed") is None)
-    if unbounded > MAX_UNBOUNDED_ENTRIES:
-        raise invalid(
-            f"{unbounded} unbounded entries; at most {MAX_UNBOUNDED_ENTRIES} "
-            f"is allowed")
     return entries
 
 
@@ -211,9 +199,9 @@ def skip_site_problems(sites: list[dict], entries: list[dict]
             continue
         per_entry[id(entry)] = per_entry.get(id(entry), 0) + site["count"]
     for entry in entries:
-        allowed = entry.get("allowed")
+        allowed = entry["allowed"]
         count = per_entry.get(id(entry), 0)
-        if allowed is not None and count > allowed:
+        if count > allowed:
             problems.append((
                 "SKIP-OVER-ALLOWANCE",
                 f"{entry['file']}: {entry['reason']!r} skipped {count} "

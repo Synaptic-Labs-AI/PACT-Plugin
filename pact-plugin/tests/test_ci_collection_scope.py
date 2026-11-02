@@ -909,6 +909,7 @@ EXPECTED_EXCLUSIONS = (
       'hooks/shared/stale_session.py',
       'hooks/staleness.py',
       'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
       'skills/pact-memory/scripts/config.py',
       'skills/pact-memory/scripts/database.py',
       'skills/pact-memory/scripts/embeddings.py',
@@ -990,7 +991,15 @@ EXPECTED_EXCLUSIONS = (
       'hooks/shared/session_resume.py',
       'hooks/shared/stale_session.py',
       'hooks/staleness.py',
-      'hooks/track_files.py'),
+      'hooks/track_files.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
      'clock-shift subprocess matrix over the drift writers'),
     ('tests/test_embedding_model_load_is_cache_first.py',
      ('hooks/pin_caps.py',
@@ -1075,7 +1084,15 @@ EXPECTED_EXCLUSIONS = (
       'hooks/shared/session_resume.py',
       'hooks/shared/stale_session.py',
       'hooks/staleness.py',
-      'hooks/track_files.py'),
+      'hooks/track_files.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
      'pin-caps credit matrix'),
     ('tests/test_merge_guard_nested_compound.py',
      ('hooks/merge_guard_post.py',
@@ -1442,3 +1459,49 @@ class TestProcessGlobalConftestFixturesSelectEverything:
                                 ["pact-plugin/tests/conftest.py"], "ok", facts)
         assert selection.select_all_reason == (
             f"conftest:tests/conftest.py:autouse-unscoped:{fixture}")
+
+
+class TestRepoReadersAreAddedBackByOutsideChanges:
+    """An excluded test that reads repository files outside pact-plugin/ is
+    detected from its closure (a repository path literal in test code, an
+    anchor that climbs above the plugin, or a climb of unknown depth) and
+    comes back on any change outside the plugin. Detected, never listed."""
+
+    def test_every_detected_repo_reader_is_added_back(self):
+        _, _, manifest, index = _shipped_manifest()
+        readers = {exclusion.path: index.view(exclusion.path).repo_reach
+                   for exclusion in manifest.exclusions
+                   if index.view(exclusion.path).repo_reach}
+        selection = _select_real([".github/zz_probe.yml"])
+        assert selection.select_all_reason is None
+        added = {entry.path for entry in selection.added_back}
+        assert added == set(readers), (
+            f"repo readers {sorted(readers)} but an outside change added "
+            f"back {sorted(added)}")
+
+    def test_conftest_sys_path_entries_are_import_roots(self):
+        """Every directory a conftest inserts on sys.path is resolved, so a
+        test importing from it has that module in its closure."""
+        repo_root, core, _, index = _shipped_manifest()
+        plugin_root = repo_root / "pact-plugin"
+        entries = core._conftest_path_entries(plugin_root.resolve())
+        assert "scripts" in entries, entries
+        assert {(plugin_root / entry).resolve() for entry in entries} <= set(
+            index.roots)
+        closure = index.closure(["tests/test_archive_pin.py"])
+        assert "scripts/archive_pin.py" in closure
+
+    def test_archive_pins_imported_module_path_resolves_inside_the_plugin(self):
+        """Path(archive_pin.__file__).resolve().parent.parent is placed through
+        the import of archive_pin: the plugin root, so not a repo read."""
+        _, _, _, index = _shipped_manifest()
+        scan = index.scan("tests/test_archive_pin.py")
+        assert scan.repo_reach == (), scan.repo_reach
+        assert index.view("tests/test_archive_pin.py").repo_reach == ()
+
+    def test_the_repository_root_finder_is_detected(self):
+        """The repo's own marker walk (for base in Path(__file__).parents)
+        must read as a repository reach wherever it appears."""
+        _, _, _, index = _shipped_manifest()
+        reach = index.scan("tests/test_local_lint_parity.py").repo_reach
+        assert any("walks every ancestor" in entry for entry in reach), reach

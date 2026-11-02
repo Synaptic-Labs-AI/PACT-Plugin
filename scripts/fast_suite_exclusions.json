@@ -359,6 +359,7 @@
         "hooks/shared/stale_session.py",
         "hooks/staleness.py",
         "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/cli.py",
         "skills/pact-memory/scripts/config.py",
         "skills/pact-memory/scripts/database.py",
         "skills/pact-memory/scripts/embeddings.py",
@@ -470,7 +471,15 @@
         "hooks/shared/session_resume.py",
         "hooks/shared/stale_session.py",
         "hooks/staleness.py",
-        "hooks/track_files.py"
+        "hooks/track_files.py",
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
+        "skills/pact-memory/scripts/working_memory.py"
       ]
     },
     {
@@ -583,7 +592,15 @@
         "hooks/shared/session_resume.py",
         "hooks/shared/stale_session.py",
         "hooks/staleness.py",
-        "hooks/track_files.py"
+        "hooks/track_files.py",
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
+        "skills/pact-memory/scripts/working_memory.py"
       ]
     },
     {

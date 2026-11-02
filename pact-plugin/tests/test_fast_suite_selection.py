@@ -108,12 +108,12 @@ def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None,
 
 
 def _view(core, closure=(), targets=(), literals=(), names=(),
-          path_literals=(), scan_roots=()):
+          path_literals=(), scan_roots=(), repo_reach=()):
     return core.ExclusionView(
         closure=frozenset(closure), import_targets=frozenset(targets),
         literals=frozenset(literals), test_names=frozenset(names),
         path_literals=frozenset(path_literals),
-        scan_roots=frozenset(scan_roots))
+        scan_roots=frozenset(scan_roots), repo_reach=tuple(repo_reach))
 
 
 def _facts(core, manifest, views=None, value_inert=(), verdicts=None,
@@ -387,6 +387,37 @@ class TestScannedTrees:
                              core, closure=("tests/test_slow.py",),
                              path_literals=("hooks",))}})
         assert result.added_back == ()
+
+
+class TestRepoReaders:
+    """An exclusion whose closure reads repository files outside the plugin
+    comes back on any change outside the plugin; others ignore those."""
+
+    def test_an_outside_change_adds_back_a_repo_reader(self, core):
+        result = _select(core, changed=[".github/workflows/tests.yml"],
+                         facts={"views": {"tests/test_slow.py": _view(
+                             core, closure=("tests/test_slow.py",),
+                             repo_reach=("tests/test_slow.py:3:names x",))}})
+        assert _reasons(result) == [("tests/test_slow.py", "repo_reader")]
+        assert result.added_back[0].matched_changed == (
+            ".github/workflows/tests.yml")
+
+    def test_an_outside_change_leaves_a_non_reader_excluded(self, core):
+        result = _select(core, changed=[".github/workflows/tests.yml"])
+        assert result.select_all_reason is None
+        assert result.excluded == frozenset({"tests/test_slow.py"})
+
+    def test_a_plugin_change_does_not_wake_a_repo_reader(self, core):
+        result = _select(core, changed=["pact-plugin/hooks/unmapped.py"],
+                         facts={"views": {"tests/test_slow.py": _view(
+                             core, closure=("tests/test_slow.py",),
+                             repo_reach=("tests/test_slow.py:3:names x",))}})
+        assert result.added_back == ()
+
+    def test_an_outside_change_without_facts_selects_all(self, core):
+        result = core.select(DISCOVERED, _manifest(core), ["CHANGELOG.md"],
+                             "ok", None)
+        assert result.select_all_reason == "change-facts-unavailable"
 
 
 class TestConftestVerdicts:
@@ -1273,6 +1304,152 @@ class TestScanIndex:
         assert _reasons(hit) == [
             ("tests/docs/test_reads_docs.py", "scanned_tree")]
         assert miss.added_back == ()
+
+    @pytest.mark.parametrize("source,why", [
+        ('from pathlib import Path\n'
+         'def test_x():\n'
+         '    (Path(__file__).parents[2] / ".github" / "x.yml").read_text()\n',
+         "climbs above the plugin"),
+        ('from pathlib import Path\n'
+         'def test_x():\n'
+         '    (Path(__file__).parent / ".." / ".." / ".github").exists()\n',
+         "climbs above the plugin"),
+        ('from pathlib import Path\nDEPTH = 2\n'
+         'def test_x():\n'
+         '    Path(__file__).parents[DEPTH].exists()\n',
+         "unresolved climb"),
+        ('def test_x():\n    assert "../.github/x.yml"\n', "names ../.github/x.yml"),
+        ('def test_x():\n    assert "CHANGELOG.md"\n', "names CHANGELOG.md"),
+    ])
+    def test_a_read_outside_the_plugin_is_detected(
+            self, core, tmp_path, source, why):
+        repo = tmp_path / "repo"
+        _write(repo / ".github" / "x.yml", "on: push\n")
+        _write(repo / "CHANGELOG.md", "# changes\n")
+        plugin = repo / "pact-plugin"
+        _write(plugin / "tests" / "test_reader.py", source)
+        scan = core.ScanIndex(plugin).scan("tests/test_reader.py")
+        assert any(why in entry for entry in scan.repo_reach), scan.repo_reach
+
+    @pytest.mark.parametrize("walk", [
+        # The repository's own root-finder shape (test_local_lint_parity).
+        "    for base in Path(__file__).resolve().parents:\n"
+        "        if (base / '.claude-plugin' / 'marketplace.json').exists():\n"
+        "            return base / '.github' / 'workflows' / 'tests.yml'\n",
+        "    return [p for p in list(Path(__file__).parents)]\n",
+        "    return Path('/x') in Path(__file__).resolve().parents\n",
+        "    return sorted(Path(__file__).parents)\n",
+        "    return next(iter(HERE.parents))\n",
+    ])
+    def test_a_walk_over_every_ancestor_is_a_repo_read(
+            self, core, tmp_path, walk):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "tests" / "test_walker.py",
+               "from pathlib import Path\nHERE = Path(__file__)\n"
+               "def find():\n" + walk)
+        scan = core.ScanIndex(plugin).scan("tests/test_walker.py")
+        assert any("walks every ancestor" in entry
+                   for entry in scan.repo_reach), scan.repo_reach
+
+    @pytest.mark.parametrize("call", [
+        "Path.cwd() / '.github' / 'workflows'",
+        "os.path.join(os.getcwd(), 'CHANGELOG.md')",
+        "pathlib.Path.cwd().parent",
+        "getcwd()",
+    ])
+    def test_a_cwd_relative_read_is_a_repo_read(self, core, tmp_path, call):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "tests" / "test_cwd.py",
+               "import os\nimport pathlib\nfrom os import getcwd\n"
+               "from pathlib import Path\n"
+               f"def test_x():\n    return {call}\n")
+        scan = core.ScanIndex(plugin).scan("tests/test_cwd.py")
+        assert any("relative to the cwd" in entry
+                   for entry in scan.repo_reach), scan.repo_reach
+
+    @pytest.mark.parametrize("source,rel", [
+        # A string naming the call (fixture text for a matcher) is not one.
+        ('CMD = "cd $(pwd) && python -c \'import os; os.getcwd()\'"\n'
+         'PROBE = "Path.cwd()"\n', "tests/test_cwd.py"),
+        # Shipped code resolves the consumer's cwd, not this repository.
+        ("import os\ndef f():\n    return os.getcwd()\n", "hooks/cwd_user.py"),
+    ])
+    def test_a_cwd_mention_or_shipped_cwd_is_not_a_repo_read(
+            self, core, tmp_path, source, rel):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / rel, source)
+        assert core.ScanIndex(plugin).scan(rel).repo_reach == ()
+
+    def test_an_indexed_parents_is_not_a_walk(self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "tests" / "test_walker.py",
+               "from pathlib import Path\n"
+               "def find():\n    return Path(__file__).parents[1]\n")
+        assert core.ScanIndex(plugin).scan(
+            "tests/test_walker.py").repo_reach == ()
+
+    @pytest.mark.parametrize("source", [
+        # Inside the plugin: the module's directory and the plugin root.
+        'from pathlib import Path\n'
+        'def test_x():\n    Path(__file__).parents[1].exists()\n',
+        # A home-relative name, not a repository path.
+        'def test_x():\n    assert "~/.claude/teams"\n',
+        # A plugin path that also exists at the repository root.
+        'def test_x():\n    assert "hooks/x.py"\n',
+    ])
+    def test_a_read_inside_the_plugin_is_not_a_repo_read(
+            self, core, tmp_path, source):
+        repo = tmp_path / "repo"
+        _write(repo / "hooks" / "x.py", "")
+        plugin = repo / "pact-plugin"
+        _write(plugin / "hooks" / "x.py", "")
+        _write(plugin / "tests" / "test_reader.py", source)
+        assert core.ScanIndex(plugin).scan(
+            "tests/test_reader.py").repo_reach == ()
+
+    def test_shipped_code_literals_are_not_repo_reads(self, core, tmp_path):
+        """'.github/x.yml' in a hook names the consumer's project."""
+        repo = tmp_path / "repo"
+        _write(repo / ".github" / "x.yml", "on: push\n")
+        plugin = repo / "pact-plugin"
+        _write(plugin / "hooks" / "reader.py", 'PATH = ".github/x.yml"\n')
+        assert core.ScanIndex(plugin).scan("hooks/reader.py").repo_reach == ()
+
+    def test_another_modules_file_is_placed_through_its_import(
+            self, core, tmp_path):
+        """Path(mod.__file__).parent.parent is the plugin root, not unknown."""
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "mod.py", "")
+        _write(plugin / "tests" / "test_reader.py",
+               'import mod\nfrom pathlib import Path\n'
+               'def test_x():\n'
+               '    Path(mod.__file__).resolve().parent.parent.exists()\n')
+        scan = core.ScanIndex(plugin).scan("tests/test_reader.py")
+        assert scan.repo_reach == ()
+
+    def test_a_seeded_repo_reader_is_added_back_by_a_github_change(
+            self, core, tmp_path):
+        repo = tmp_path / "repo"
+        _write(repo / ".github" / "x.yml", "on: push\n")
+        plugin = repo / "pact-plugin"
+        _write(plugin / "tests" / "test_reader.py",
+               'from pathlib import Path\n'
+               'def test_x():\n'
+               '    assert (Path(__file__).parents[2] / ".github" / "x.yml"'
+               ').is_file()\n')
+        _write(plugin / "tests" / "test_other.py", "def test_ok():\n    pass\n")
+        paths = ("tests/test_reader.py", "tests/test_other.py")
+        manifest = _manifest(core, exclusion_paths=paths,
+                             seams={path: () for path in paths})
+        index = core.ScanIndex(plugin)
+        facts = core.ChangeFacts(
+            views={path: index.view(path) for path in paths},
+            value_inert=frozenset(), conftest_verdicts={},
+            conftest_imported=frozenset())
+        result = core.select(frozenset(paths), manifest,
+                             [".github/x.yml"], "ok", facts)
+        assert _reasons(result) == [("tests/test_reader.py", "repo_reader")]
+        assert result.excluded == frozenset({"tests/test_other.py"})
 
     def test_computed_imports_and_fixtures_are_recorded(self, core, tmp_path):
         scan = self._scan(core, tmp_path, "tests/test_g.py",

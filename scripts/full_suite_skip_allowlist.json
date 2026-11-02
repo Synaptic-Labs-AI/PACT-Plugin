@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "about": "Every skip the certifying full-suite run may report, keyed on the file and the verbatim reason the -ra summary prints (never on a line number). scripts/verify_full_run.py fails on a skip site missing from this list or on more skips at a site than 'allowed'; scripts/verify_fast_summary.py reports the same comparison for the fast lane as a warning. To admit a new legitimate skip, add its entry in the SAME commit that adds the skip. 'match' is 'exact', or 'prefix' when the reason embeds variable text (key on the stable leading part and say so in the entry). 'allowed' is the most skips at the site; null means unbounded and is reserved for generated-input sites, with 'why_unbounded' stating the reason.",
+  "about": "Every skip the certifying full-suite run may report, keyed on the file and the verbatim reason the -ra summary prints (never on a line number). scripts/verify_full_run.py fails on a skip site missing from this list or on more skips at a site than 'allowed'; scripts/verify_fast_summary.py reports the same comparison for the fast lane as a warning. To admit a new legitimate skip, add its entry in the SAME commit that adds the skip. 'match' is 'exact', or 'prefix' when the reason embeds variable text (key on the stable leading part and say so in the entry). 'allowed' is the most skips at the site, an integer of at least 1.",
   "entries": [
     {
       "file": "tests/test_conftest_config_root_isolation.py",
@@ -84,8 +84,7 @@
       "file": "tests/test_variety_scorer_fuzz.py",
       "reason": "Already at max dimension",
       "match": "exact",
-      "allowed": null,
-      "why_unbounded": "A property test skips whenever hypothesis draws a profile already at the maximum dimension, so how many times it fires depends on the generated inputs, not on the code under test."
+      "allowed": 2
     }
   ]
 }

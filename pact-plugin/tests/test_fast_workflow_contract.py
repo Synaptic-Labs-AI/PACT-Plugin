@@ -20,7 +20,11 @@ import sys
 from pathlib import Path
 
 import ci_contract
+import ci_full_run_record
 
+# The run record's file name comes from the recorder that writes it, so a
+# rename there that misses the workflow fails the step pins below.
+_RUN_RECORD = ci_full_run_record.RECORD_NAME
 _ARTIFACT_ARGS = (
     '--summary "$GITHUB_WORKSPACE/.fast-suite-summary.json" '
     '--canary "$GITHUB_WORKSPACE/.fast-suite-canary.json"'
@@ -36,7 +40,7 @@ COLLECT_FORM = (
 FAST_EVIDENCE_CMD = (
     'python scripts/verify_fast_summary.py --base-sha "$BASE_SHA" '
     + _ARTIFACT_ARGS
-    + ' --run-record "$GITHUB_WORKSPACE/.full-run-record.json"'
+    + f' --run-record "$GITHUB_WORKSPACE/{_RUN_RECORD}"'
 )
 FULL_COLLECTION_CMD = (
     'python scripts/verify_full_collection.py '
@@ -44,7 +48,7 @@ FULL_COLLECTION_CMD = (
 )
 FULL_EVIDENCE_CMD = (
     'python scripts/verify_full_run.py '
-    '--record "$GITHUB_WORKSPACE/.full-run-record.json" '
+    f'--record "$GITHUB_WORKSPACE/{_RUN_RECORD}" '
     '--collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"'
 )
 FAST_RUNNER_PREFIX = "python ../scripts/run_fast_suite.py"

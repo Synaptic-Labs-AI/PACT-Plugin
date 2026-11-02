@@ -643,6 +643,8 @@ class FileScan:
     # Plugin directories this module scans from the real checkout, or None
     # when it scans none. "." is the whole plugin.
     scanner_roots: frozenset[str] | None
+    # 'line:why' evidence that the module reads files outside the plugin.
+    repo_reach: tuple[str, ...]
     dynamic_imports: tuple[str, ...]
     dynamic_fixtures: tuple[str, ...]
 
@@ -656,10 +658,12 @@ class ExclusionView:
     test_names: frozenset[str]
     path_literals: frozenset[str]
     scan_roots: frozenset[str] = frozenset()
+    # Closure evidence of reads outside the plugin ('module:line:why').
+    repo_reach: tuple[str, ...] = ()
 
 
 _EMPTY_SCAN = FileScan((), frozenset(), frozenset(), frozenset(), frozenset(),
-                       None, (), ())
+                       None, (), (), ())
 
 # The sys.path entries the two conftests insert, plugin-relative. A test's
 # bare `import x` resolves against these, so the closure does too.
@@ -673,8 +677,50 @@ _IMPORT_ROOTS = (
 )
 
 
+def _conftest_path_entries(plugin_root: Path) -> list[str]:
+    """Plugin directories the conftests put on sys.path, read from their
+    sys.path.insert / append calls, so a new entry cannot be missed by a
+    hand-kept list. Entries whose location cannot be resolved are skipped;
+    _IMPORT_ROOTS and the skills/*/scripts glob cover the known ones."""
+    entries: list[str] = []
+    for rel in ("conftest.py", "tests/conftest.py"):
+        try:
+            tree = ast.parse((plugin_root / rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+            continue
+        _, _, resolved = _module_anchors(tree, rel, {})
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("insert", "append")
+                    and isinstance(node.func.value, ast.Attribute)
+                    and node.func.value.attr == "path"
+                    and node.args):
+                continue
+            anchor = _anchor_of(node.args[-1], resolved)
+            if anchor is not None:
+                directory = _anchor_directory(anchor, Path(rel).parts)
+                if directory is not None:
+                    entries.append("" if directory == "." else directory)
+    return entries
+
+
+def _anchor_directory(anchor: tuple[int, tuple[str, ...]],
+                      module_parts: tuple[str, ...]) -> str | None:
+    """The plugin directory a resolved anchor names, or None above it."""
+    level, parts = anchor
+    if level > len(module_parts):
+        return None
+    kept = module_parts[:len(module_parts) - max(level, 1)]
+    directory = "/".join((*kept, *parts)) if level else "/".join(
+        (*module_parts[:-1], *parts))
+    return directory or "."
+
+
 def _import_roots(plugin_root: Path) -> list[Path]:
     roots = [plugin_root / rel for rel in _IMPORT_ROOTS]
+    roots.extend(plugin_root / rel for rel in _conftest_path_entries(
+        plugin_root))
     roots.extend(sorted(plugin_root.glob("skills/*/scripts")))
     return [root for root in dict.fromkeys(roots) if root.is_dir()]
 
@@ -843,25 +889,28 @@ def _anchor_of(node: ast.AST,
         return anchors.get(node.id)
     if isinstance(node, ast.Attribute) and node.attr == "parent":
         inner = _anchor_of(node.value, anchors)
-        if inner is None:
-            return None
-        level, parts = inner
-        return (level + 1, ()) if not parts else (level, parts[:-1])
+        return None if inner is None else _up(*inner)
+    if (isinstance(node, ast.Attribute) and node.attr == "__file__"
+            and isinstance(node.value, ast.Name)):
+        # Another module's file, placed through this module's imports.
+        return anchors.get(f"{node.value.id}.__file__")
     if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
             and node.value.attr == "parents"
             and isinstance(node.slice, ast.Constant)
             and isinstance(node.slice.value, int)):
         inner = _anchor_of(node.value.value, anchors)
-        if inner is None or inner[1]:
+        if inner is None:
             return None
-        return inner[0] + node.slice.value + 1, ()
+        level, parts = inner
+        for _ in range(node.slice.value + 1):
+            level, parts = _up(level, parts)
+        return level, parts
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         inner = _anchor_of(node.left, anchors)
         text = _str_constant(node.right)
         if inner is None or text is None:
             return None
-        return inner[0], inner[1] + tuple(part for part in text.split("/")
-                                           if part)
+        return _join(inner, text.split("/"))
     if isinstance(node, ast.Call):
         name = _call_name(node)
         if name in ("resolve", "absolute") and isinstance(node.func,
@@ -872,10 +921,7 @@ def _anchor_of(node: ast.AST,
             return _anchor_of(node.args[0], anchors)
         if name == "dirname" and len(node.args) == 1:
             inner = _anchor_of(node.args[0], anchors)
-            if inner is None:
-                return None
-            level, parts = inner
-            return (level + 1, ()) if not parts else (level, parts[:-1])
+            return None if inner is None else _up(*inner)
         if name in ("joinpath", "join") and node.args:
             if name == "joinpath" and isinstance(node.func, ast.Attribute):
                 head, rest = _anchor_of(node.func.value, anchors), node.args
@@ -884,23 +930,39 @@ def _anchor_of(node: ast.AST,
             texts = [_str_constant(part) for part in rest]
             if head is None or any(text is None for text in texts):
                 return None
-            return head[0], head[1] + tuple(
-                piece for text in texts for piece in text.split("/") if piece)
+            return _join(head, [piece for text in texts
+                                for piece in text.split("/")])
     return None
 
 
-def _scanner_roots(tree: ast.Module, rel: str,
-                   is_tracked_dir) -> frozenset[str] | None:
-    """Plugin directories this module scans from the real checkout.
+def _up(level: int, parts: tuple[str, ...]) -> tuple[int, tuple[str, ...]]:
+    """One directory up: drop a joined part, else climb a level."""
+    return (level, parts[:-1]) if parts else (level + 1, ())
 
-    A scope is each function, or the module body. It is a scanner scope when
-    it calls a directory scan AND is anchored to the real checkout: it uses
-    __file__, or a module-level name assigned (transitively) from __file__.
-    Its roots are the tracked plugin directories named by string literals in
-    the scope or in the module-level constants it uses, from the plugin root
-    or joined after the anchor. An anchored scope naming none scans from its
-    anchor's directory, at the anchor's depth; a depth that cannot be
-    resolved is the plugin root. None when no scope scans.
+
+def _join(anchor: tuple[int, tuple[str, ...]],
+          pieces) -> tuple[int, tuple[str, ...]]:
+    """Append path pieces; '..' climbs and '.' or '' is skipped."""
+    level, parts = anchor
+    for piece in pieces:
+        if piece in ("", "."):
+            continue
+        if piece == "..":
+            level, parts = _up(level, parts)
+        else:
+            parts = parts + (piece,)
+    return level, parts
+
+
+def _module_anchors(tree: ast.Module, rel: str,
+                    module_files: dict[str, str]):
+    """(constants, anchor names, resolved anchors) for one module.
+
+    Anchors are module-level names bound, transitively, from __file__ or
+    another module's __file__. An imported plugin module's file is placed
+    through `module_files` ({bound name: plugin-relative file}), so
+    `Path(archive_pin.__file__).parent.parent` is the plugin root rather
+    than an unknown.
     """
     constants = _module_rows(tree)
     anchors: set[str] = set()
@@ -915,10 +977,10 @@ def _scanner_roots(tree: ast.Module, rel: str,
                     for inner in ast.walk(statement)):
                 anchors.add(name)
                 changed = True
-    # Where each anchor points. One resolver serves every spelling:
-    # .parent chains, .parents[N] with a literal N, nested
-    # os.path.dirname(__file__), and literal joins after them.
-    resolved: dict[str, tuple[int, tuple[str, ...]]] = {}
+    depth = len(Path(rel).parts)
+    resolved: dict[str, tuple[int, tuple[str, ...]]] = {
+        f"{name}.__file__": (depth, tuple(Path(target).parts))
+        for name, target in module_files.items()}
     for _ in range(len(constants)):
         for name in anchors:
             value = getattr(constants[name], "value", None)
@@ -926,19 +988,120 @@ def _scanner_roots(tree: ast.Module, rel: str,
                 found_anchor = _anchor_of(value, resolved)
                 if found_anchor is not None:
                     resolved[name] = found_anchor
+    return constants, anchors, resolved
+
+
+def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
+                module_files: dict[str, str],
+                docstrings: set[int]) -> tuple[str, ...]:
+    """Evidence that this module reads files OUTSIDE the plugin.
+
+    Three forms, each recorded as 'line:why':
+      a literal naming an existing repository path that is not also a
+      plugin path ('.github/workflows/tests.yml', 'CHANGELOG.md');
+      an anchored path that climbs above the plugin
+      (Path(__file__).parents[2] from tests/);
+      an anchored climb (.parent, .parents[n], dirname) whose depth cannot
+      be resolved, or an anchored `.parents` used other than with a literal
+      index (a walk up to a marker), either of which may climb anywhere;
+      a test-side Path.cwd() or os.getcwd() call, which may be anywhere.
+    """
+    repo_root = plugin_root.parent
+    # Literal evidence counts only in test-side code. Shipped modules run in
+    # a consumer's project, where '.claude' or '.git' names that project or
+    # HOME, never this repository; a test reading a repository file names it.
+    test_side = rel.startswith("tests/") or _is_test_file(rel)
+    _, anchors, resolved = _module_anchors(tree, rel, module_files)
+    depth = len(Path(rel).parts)
+    evidence: list[str] = []
+    # `.parents` with a literal index is a fixed climb, resolved below. Any
+    # other use (iteration, `in`, list(...), an argument) walks every
+    # ancestor, which is how a test finds the repository root by marker.
+    indexed = {id(node.value) for node in ast.walk(tree)
+               if isinstance(node, ast.Subscript)
+               and isinstance(node.slice, ast.Constant)
+               and isinstance(node.slice.value, int)}
+    for node in ast.walk(tree):
+        if (test_side and isinstance(node, ast.Call)
+                and (_call_name(node) == "getcwd"
+                     or (_call_name(node) == "cwd"
+                         and isinstance(node.func, ast.Attribute)))):
+            # A path relative to the working directory may be anywhere in
+            # the checkout. Only a CALL counts; a string naming it does not.
+            evidence.append(f"{node.lineno}:reads relative to the cwd")
+            continue
+        if (isinstance(node, ast.Attribute) and node.attr == "parents"
+                and id(node) not in indexed
+                and (_uses_file(node) or any(
+                    isinstance(inner, ast.Name) and inner.id in anchors
+                    for inner in ast.walk(node)))):
+            evidence.append(f"{node.lineno}:walks every ancestor")
+            continue
+        text = _str_constant(node)
+        if (text is not None and test_side and id(node) not in docstrings
+                and 0 < len(text) <= _MAX_LITERAL
+                and not any(ch.isspace() for ch in text)
+                and "*" not in text):
+            candidate = text
+            while candidate.startswith("../"):
+                candidate = candidate[3:]
+            candidate = candidate.strip("/")
+            first = candidate.split("/", 1)[0]
+            target = repo_root / candidate
+            if (candidate and first not in ("", ".", "..", PLUGIN_DIRNAME)
+                    and ("/" in candidate or target.is_file())
+                    and target.exists()
+                    and not (plugin_root / candidate).exists()):
+                evidence.append(f"{node.lineno}:names {text}")
+        if text is not None:
+            continue
+        climb = (
+            (isinstance(node, ast.Attribute) and node.attr == "parent")
+            or (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "parents")
+            or (isinstance(node, ast.Call) and _call_name(node) == "dirname"))
+        joined = isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+        if not (climb or joined):
+            continue
+        mentions = _uses_file(node) or any(
+            isinstance(inner, ast.Name) and inner.id in anchors
+            for inner in ast.walk(node))
+        if not mentions:
+            continue
+        found = _anchor_of(node, resolved)
+        if found is None:
+            if climb:
+                evidence.append(f"{node.lineno}:unresolved climb")
+            continue
+        if found[0] > depth:
+            evidence.append(f"{node.lineno}:climbs above the plugin")
+    return tuple(dict.fromkeys(evidence))
+
+
+def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
+                   module_files: dict[str, str] | None = None
+                   ) -> frozenset[str] | None:
+    """Plugin directories this module scans from the real checkout.
+
+    A scope is each function, or the module body. It is a scanner scope when
+    it calls a directory scan AND is anchored to the real checkout: it uses
+    __file__, or a module-level name assigned (transitively) from __file__.
+    Its roots are the tracked plugin directories named by string literals in
+    the scope or in the module-level constants it uses, from the plugin root
+    or joined after the anchor. An anchored scope naming none scans from its
+    anchor's directory, at the anchor's depth; a depth that cannot be
+    resolved is the plugin root. None when no scope scans.
+    """
+    constants, anchors, resolved = _module_anchors(
+        tree, rel, module_files or {})
     module_parts = Path(rel).parts
 
     def directory_at(anchor: tuple[int, tuple[str, ...]]) -> str:
         """The plugin directory a resolved anchor names. One that climbs
         above the plugin is the PLUGIN ROOT: scanning wider costs time,
         scanning narrower drops a test."""
-        level, parts = anchor
-        if level > len(module_parts):
-            return "."
-        kept = module_parts[:len(module_parts) - max(level, 1)]
-        directory = "/".join((*kept, *parts)) if level else "/".join(
-            (*module_parts[:-1], *parts))
-        return directory or "."
+        return _anchor_directory(anchor, module_parts) or "."
 
     scopes = [node for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -1151,13 +1314,41 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         module_rel = path.resolve().relative_to(root).as_posix()
     except ValueError:
         module_rel = path.name
+    # Bound names of imported plugin modules -> their one file, so another
+    # module's __file__ can be placed. Ambiguous names are left out.
+    module_files: dict[str, str] = {}
+    for node in ast.walk(tree):
+        pairs: list[tuple[str, str]] = []
+        if isinstance(node, ast.Import):
+            pairs = [(alias.asname or alias.name, alias.name)
+                     for alias in node.names
+                     if alias.asname or "." not in alias.name]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            pairs = [(alias.asname or alias.name, f"{node.module}.{alias.name}")
+                     for alias in node.names]
+        for bound, dotted in pairs:
+            leaves = {found.resolve() for found in _resolve_module(dotted, roots)
+                      if found.name != "__init__.py"
+                      or found.parent.name == dotted.rsplit(".", 1)[-1]}
+            leaves = {leaf for leaf in leaves
+                      if leaf.stem == dotted.rsplit(".", 1)[-1]
+                      or leaf.name == "__init__.py"}
+            if len(leaves) == 1:
+                try:
+                    module_files[bound] = next(iter(leaves)).relative_to(
+                        root).as_posix()
+                except ValueError:
+                    pass
     return FileScan(
         edges=tuple(dict.fromkeys(to_rel(edges))),
         import_targets=frozenset(to_rel(targets)),
         literals=frozenset(literals),
         names=frozenset(names),
         path_literals=frozenset(path_literals),
-        scanner_roots=_scanner_roots(tree, module_rel, is_tracked_dir),
+        scanner_roots=_scanner_roots(tree, module_rel, is_tracked_dir,
+                                     module_files),
+        repo_reach=_repo_reach(tree, module_rel, root, module_files,
+                               docstrings),
         dynamic_imports=tuple(dynamic_imports),
         dynamic_fixtures=tuple(dynamic_fixtures),
     )
@@ -1230,12 +1421,14 @@ class ScanIndex:
             test_names: set[str] = set()
             path_literals: set[str] = set()
             scan_roots: set[str] = set()
+            repo_reach: list[str] = []
             for rel in sorted(closure):
                 scan = self.scan(rel)
                 targets |= scan.import_targets
                 literals |= scan.literals
                 path_literals |= scan.path_literals
                 scan_roots |= scan.scanner_roots or set()
+                repo_reach.extend(f"{rel}:{where}" for where in scan.repo_reach)
                 if rel.startswith("tests/"):
                     # Test-side code is what requests fixtures: by parameter
                     # name, attribute or a usefixtures string.
@@ -1247,6 +1440,7 @@ class ScanIndex:
                 test_names=frozenset(test_names),
                 path_literals=frozenset(path_literals),
                 scan_roots=frozenset(scan_roots),
+                repo_reach=tuple(repo_reach),
             )
         return self._views[exclusion_path]
 
@@ -1680,6 +1874,12 @@ def select(discovered: frozenset[str], manifest: Manifest,
                                    f"conftest:{rel}:{verdict.select_all}")
 
     changed_set = set(plugin_changed)
+    # Changed paths outside the plugin (machinery and pins already selected
+    # everything above). They reach only exclusions whose closure reads
+    # repository files.
+    outside = [path for path in changed if repo_to_plugin(path) is None]
+    if outside and facts is None:
+        return _select_all(discovered, status, "change-facts-unavailable")
     added: dict[str, AddBack] = {}
     for exclusion in manifest.exclusions:
         if exclusion.path in changed_set:
@@ -1700,7 +1900,7 @@ def select(discovered: frozenset[str], manifest: Manifest,
             continue
         view = facts.views.get(exclusion.path) if facts else None
         if view is None:
-            if plugin_changed:
+            if plugin_changed or outside:
                 # An exclusion with no view cannot be cleared for any change.
                 return _select_all(discovered, status,
                                    f"no-closure-view:{exclusion.path}")
@@ -1713,6 +1913,12 @@ def select(discovered: frozenset[str], manifest: Manifest,
                     matched_changed=repo_spelling.get(rel, rel),
                     matched_seam=None, evidence=hit[1])
                 break
+        else:
+            if outside and view.repo_reach:
+                added[exclusion.path] = AddBack(
+                    path=exclusion.path, reason="repo_reader",
+                    matched_changed=outside[0], matched_seam=None,
+                    evidence=view.repo_reach[0])
 
     excluded_paths = {exclusion.path for exclusion in manifest.exclusions}
     applied = frozenset(excluded_paths - set(added))

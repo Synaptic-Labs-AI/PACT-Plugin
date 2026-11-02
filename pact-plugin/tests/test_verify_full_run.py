@@ -73,12 +73,9 @@ def _good_collection():
 
 
 def _entry(file=_SITE["file"], reason=_SITE["reason"], match="exact",
-           allowed=1, why=None):
-    entry = {"file": file, "reason": reason, "match": match,
-             "allowed": allowed}
-    if why is not None:
-        entry["why_unbounded"] = why
-    return entry
+           allowed=1):
+    return {"file": file, "reason": reason, "match": match,
+            "allowed": allowed}
 
 
 def _allowlist(*entries):
@@ -257,14 +254,6 @@ def test_skips_up_to_the_allowance_certify(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
 
-def test_an_unbounded_entry_admits_any_count(tmp_path):
-    record = _good_record()
-    record.update(passed=1, skipped=4, skip_sites=[dict(_SITE, count=4)])
-    allowlist = _allowlist(_entry(allowed=None, why="generated inputs"))
-    proc = _verify(tmp_path, record, allowlist=allowlist)
-    assert proc.returncode == 0, proc.stderr
-
-
 def test_a_prefix_entry_admits_a_variable_suffix(tmp_path):
     record = _good_record()
     record["skip_sites"] = [dict(_SITE, reason="needs a live tmux (pid 81)")]
@@ -281,10 +270,7 @@ def test_an_exact_entry_does_not_admit_a_longer_reason(tmp_path):
 
 
 @pytest.mark.parametrize("case_id,allowlist", [
-    ("too-many-unbounded", {"schema_version": 1, "entries": [
-        _entry(reason="a", allowed=None, why="w"),
-        _entry(reason="b", allowed=None, why="w")]}),
-    ("unbounded-without-why", {"schema_version": 1, "entries": [
+    ("null-allowed", {"schema_version": 1, "entries": [
         _entry(allowed=None)]}),
     ("zero-allowed", {"schema_version": 1, "entries": [_entry(allowed=0)]}),
     ("bad-match", {"schema_version": 1, "entries": [_entry(match="regex")]}),
@@ -297,15 +283,11 @@ def test_an_invalid_allowlist_fails(tmp_path, case_id, allowlist):
              "ALLOWLIST-INVALID")
 
 
-def test_the_committed_allowlist_is_valid_and_bounds_its_escape_hatch():
+def test_the_committed_allowlist_is_valid_and_every_entry_is_counted():
     module = _verifier_module()
     entries = module.load_skip_allowlist(COMMITTED_ALLOWLIST)
-    unbounded = [entry for entry in entries if entry["allowed"] is None]
-    assert len(unbounded) <= module.MAX_UNBOUNDED_ENTRIES
-    assert module.MAX_UNBOUNDED_ENTRIES == 1, (
-        "raising the unbounded-entry bound is a decision, not a fix; "
-        "change this pin in the same commit and say why")
-    assert all(entry["why_unbounded"].strip() for entry in unbounded)
+    assert all(isinstance(entry["allowed"], int) and entry["allowed"] >= 1
+               for entry in entries)
     assert module.SKIP_ALLOWLIST == COMMITTED_ALLOWLIST
 
 
@@ -333,7 +315,7 @@ def test_no_record_argument_is_a_failure_even_with_a_workspace_record(
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    _write(workspace / ".full-run-record.json", _good_record())
+    _write(workspace / _verifier_module().RECORD_NAME, _good_record())
     collection = _write(tmp_path / "collection.json", _good_collection())
     allowlist = _write(tmp_path / "allowlist.json", _allowlist())
     proc = _run(None, collection, {"GITHUB_WORKSPACE": str(workspace)},
