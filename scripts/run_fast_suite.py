@@ -17,12 +17,12 @@ WHY THIS EXISTS AT ALL
   verify-bracketing rules bind to it.
 
 ARTIFACTS
-  <summary path>          .fast-suite-summary.json   (run mode)
-  <summary path> sibling  .fast-suite-canary.json   (collect-only mode)
-  The default summary path is ${GITHUB_WORKSPACE}/.fast-suite-summary.json
-  when GITHUB_WORKSPACE is set, else <repo-root>/.fast-suite-summary.json.
-  Deliberately NOT an `env:` key on the workflow step: the governed-step
-  contract forbids `env:` on a test step, and GITHUB_WORKSPACE is inherited.
+  --summary PATH   the run artifact       (written in run mode)
+  --canary PATH    the canary artifact    (written in collect-only mode)
+  Both are REQUIRED in both modes and have no default. An artifact written
+  to an ambient location (the workspace, the repo root) can be overwritten
+  by the suite's own tests or read in place of the real one, so the
+  workflow names both destinations on every runner step.
 
 INVARIANTS
   No PYTEST_ADDOPTS, no env overrides, no shell: a direct subprocess.run.
@@ -94,16 +94,6 @@ def _git_head(repo_root: Path) -> str | None:
         return None
     head = completed.stdout.strip()
     return head or None
-
-
-def _default_summary_path(repo_root: Path) -> Path:
-    workspace = os.environ.get("GITHUB_WORKSPACE")
-    base = Path(workspace) if workspace else repo_root
-    return base / ".fast-suite-summary.json"
-
-
-def _canary_path(summary_path: Path) -> Path:
-    return summary_path.with_name(".fast-suite-canary.json")
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -243,7 +233,7 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
         "extra": extra,
         "unresolvable_node_id_bases": sorted(set(unresolvable)),
     }
-    _write_json(_canary_path(Path(args.summary)), payload)
+    _write_json(Path(args.canary), payload)
 
     failures: list[str] = []
     if rc != 0:
@@ -323,9 +313,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", default=None,
                         help="manifest path (default: <repo-root>/scripts/"
                              "fast_suite_exclusions.json)")
-    parser.add_argument("--summary", default=None,
-                        help="summary artifact path (default: "
-                             "${GITHUB_WORKSPACE}/.fast-suite-summary.json)")
+    parser.add_argument("--summary", required=True,
+                        help="run artifact path (written in run mode)")
+    parser.add_argument("--canary", required=True,
+                        help="canary artifact path (written in collect-only "
+                             "mode)")
     args = parser.parse_args(argv)
 
     # Inherited pytest options can change what runs without appearing in the
@@ -346,8 +338,6 @@ def main(argv: list[str] | None = None) -> int:
     plugin_root = repo_root / "pact-plugin"
     manifest_path = (Path(args.manifest) if args.manifest
                      else repo_root / "scripts" / "fast_suite_exclusions.json")
-    args.summary = str(Path(args.summary) if args.summary
-                       else _default_summary_path(repo_root))
 
     try:
         manifest = load_manifest(manifest_path, plugin_root=plugin_root)

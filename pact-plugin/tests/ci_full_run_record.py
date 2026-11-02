@@ -4,7 +4,7 @@ Location: pact-plugin/tests/ci_full_run_record.py
 
 Summary: A pytest plugin object that writes the counts, summary line, terminal
 node IDs, collection-hook item counts and run identity of THIS run to
-``${GITHUB_WORKSPACE}/.pytest-run-record.json``, so
+``${GITHUB_WORKSPACE}/.full-run-record.json``, so
 ``scripts/verify_full_run.py`` can check the run that certifies a merge rather
 than a separate collection of it. There is no other location: with
 GITHUB_WORKSPACE unset nothing is written.
@@ -41,6 +41,14 @@ two cannot see it. The outermost wrapper records the item count before and
 after every other implementation, and the verifier requires
 ``after + deselected == before``.
 
+WHY EACH SKIP IS RECORDED BY SITE. The verifier admits only skips listed in
+a committed allowlist keyed on (file, reason), so the record carries every
+skip as the file and verbatim reason the `-ra` summary prints for it: the
+path relative to the invocation directory and the reason without pytest's
+``Skipped: `` prefix. An xfail is not a skip and is not recorded here. A
+module-level skip is counted in ``skipped`` but collects no item, so it is
+also counted in ``skipped_at_collection`` for the verifier's accounting.
+
 WRITTEN EVEN WHEN THE SESSION FAILED. A record that exists only on success
 cannot evidence a failure. The write is atomic (temp + ``os.replace``) so the
 verifier never reads a partial JSON document.
@@ -54,8 +62,8 @@ from pathlib import Path
 
 import pytest
 
-SCHEMA_VERSION = 2
-RECORD_NAME = ".pytest-run-record.json"
+SCHEMA_VERSION = 3
+RECORD_NAME = ".full-run-record.json"
 OWNER_ENV = "PACT_FULL_RUN_RECORD_OWNER"
 
 
@@ -108,6 +116,8 @@ class FullRunRecord:
         self._seen_node_ids = set()
         self._items_before = None
         self._items_after = None
+        self._skips = []
+        self._collection_skips = 0
 
     @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_collection_modifyitems(self, session, config, items):
@@ -132,6 +142,36 @@ class FullRunRecord:
         if node_id not in self._seen_node_ids:
             self._seen_node_ids.add(node_id)
             self._terminal_node_ids.append(node_id)
+        self._note_skip(report)
+
+    def pytest_collectreport(self, report):
+        """A module-level skip is a collection report, not a test report."""
+        if self._root is not None and self._note_skip(report):
+            self._collection_skips += 1
+
+    def _note_skip(self, report):
+        if not report.skipped or hasattr(report, "wasxfail"):
+            return False
+        longrepr = report.longrepr
+        if isinstance(longrepr, tuple) and len(longrepr) == 3:
+            path, _, reason = longrepr
+        else:
+            path, reason = report.nodeid.split("::", 1)[0], str(longrepr)
+        self._skips.append((str(path), str(reason).removeprefix("Skipped: ")))
+        return True
+
+    @staticmethod
+    def _skip_sites(skips, start):
+        """(file, reason) -> count, with the path as the -ra summary shows it."""
+        counts = {}
+        for path, reason in skips:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                path = os.path.relpath(candidate, start)
+            key = (Path(path).as_posix(), reason)
+            counts[key] = counts.get(key, 0) + 1
+        return [{"file": file, "reason": reason, "count": count}
+                for (file, reason), count in sorted(counts.items())]
 
     @staticmethod
     def _summary_line(terminalreporter):
@@ -187,6 +227,9 @@ class FullRunRecord:
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "owner_pid": os.getpid(),
+            "skipped_at_collection": self._collection_skips,
+            "skip_sites": self._skip_sites(
+                self._skips, session.config.invocation_params.dir),
         }
         temp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
         try:

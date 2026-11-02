@@ -473,9 +473,13 @@ class TestDependencyDriftIsDetectable:
         ],
         (".github/workflows/fast-tests.yml", "fast-suite"): [
             (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
-             r'"\$BASE_SHA"$', 1),
+             r'"\$BASE_SHA" --summary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-summary\.json" --canary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-canary\.json"$', 1),
             (r'^python \.\./scripts/run_fast_suite\.py --collect-only '
-             r'--base-sha "\$BASE_SHA"$', 1),
+             r'--base-sha "\$BASE_SHA" --summary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-summary\.json" --canary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-canary\.json"$', 1),
         ],
     }
 

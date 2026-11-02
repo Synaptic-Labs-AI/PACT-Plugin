@@ -497,11 +497,12 @@ jobs:
       # inspects a separate --collect-only run; this reads the in-band record
       # of the run that actually certifies, so a session that deselects or
       # silently drops items at run time cannot leave this job green. A
-      # missing run record or collection record fails. The run: text carries
+      # missing run record or collection record fails, and both paths are
+      # explicit, never derived from the environment. The run: text carries
       # no pytest token, so the one-bare-pytest-invocation rule above still
       # holds.
       - name: Verify the certifying run
-        run: python scripts/verify_full_run.py --collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"
+        run: python scripts/verify_full_run.py --record "$GITHUB_WORKSPACE/.full-run-record.json" --collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"
 
       - name: Verify the CI environment (after tests)
         if: always()

@@ -22,7 +22,7 @@ import ci_contract
 from ci_full_run_record import OWNER_ENV
 
 PLUGIN = Path(__file__).with_name("ci_full_run_record.py")
-RECORD_NAME = ".pytest-run-record.json"
+RECORD_NAME = ".full-run-record.json"
 COLLECTION_RECORD_NAME = ".full-collection-record.json"
 
 PASSING_SUITE = '''\
@@ -72,7 +72,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-RECORD = Path(os.environ["GITHUB_WORKSPACE"]) / ".pytest-run-record.json"
+RECORD = Path(os.environ["GITHUB_WORKSPACE"]) / ".full-run-record.json"
 
 
 def test_a_nested_session_runs_while_the_outer_one_is_open():
@@ -149,14 +149,28 @@ def _record(workspace):
     return json.loads((workspace / RECORD_NAME).read_text(encoding="utf-8"))
 
 
-def _verify(root, record_path, collection_count=None):
+def _allowlist_for(record):
+    """An allowlist admitting exactly the record's own skip sites."""
+    return {"schema_version": 1, "about": "rig allowlist", "entries": [
+        {"file": site["file"], "reason": site["reason"], "match": "exact",
+         "allowed": site["count"]} for site in record["skip_sites"]]
+        or [{"file": "tests/none.py", "reason": "none", "match": "exact",
+             "allowed": 1}]}
+
+
+def _verify(root, record_path, collection_count=None, allowlist=None):
     """Run the real verifier against the record and a matching collection record.
 
     The collection record is written beside the run record with the run's
-    own collected count (or `collection_count`), so each scenario reaches the
-    condition it is about rather than a collection mismatch.
+    own collected count (or `collection_count`), and the allowlist admits
+    the record's own skips (or is `allowlist`), so each scenario reaches the
+    condition it is about rather than a collection or skip mismatch.
     """
     record = json.loads(Path(record_path).read_text(encoding="utf-8"))
+    allowlist_path = Path(record_path).with_name("skip-allowlist.json")
+    allowlist_path.write_text(json.dumps(
+        allowlist if allowlist is not None else _allowlist_for(record)),
+        encoding="utf-8")
     collection = Path(record_path).with_name(COLLECTION_RECORD_NAME)
     collection.write_text(json.dumps({
         "schema_version": 1,
@@ -168,7 +182,8 @@ def _verify(root, record_path, collection_count=None):
     verifier = ci_contract.require_root("the full-run verifier") / "scripts" / "verify_full_run.py"
     proc = subprocess.run(
         [sys.executable, str(verifier), "--record", str(record_path),
-         "--collection-record", str(collection)],
+         "--collection-record", str(collection),
+         "--skip-allowlist", str(allowlist_path)],
         capture_output=True, text=True, timeout=120)
     return proc
 
@@ -180,7 +195,12 @@ def test_a_passing_session_records_skips_and_xfail_xpass(tmp_path):
     record = _record(workspace)
     assert not (root / RECORD_NAME).exists(), (
         "the record must land under GITHUB_WORKSPACE, never the repo root")
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
+    # The skip is recorded as the -ra summary prints it: plugin-relative
+    # path, verbatim reason, no "Skipped: " prefix. The xfail is not a skip.
+    assert record["skip_sites"] == [{
+        "file": "tests/test_sample.py", "reason": "legitimate skip",
+        "count": 1}], record["skip_sites"]
     assert record["items_before_modifyitems"] == 4
     assert record["items_after_modifyitems"] == 4
     assert record["run_id"] == os.environ.get("GITHUB_RUN_ID")
@@ -310,3 +330,67 @@ def test_an_unreported_item_removal_fails_the_verifier(tmp_path):
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 1, verdict.stdout + verdict.stderr
     assert "RUN-VERIFY-FAILURE COLLECTION-HOOK-NARROWING:" in verdict.stderr
+
+
+MODULE_SKIP_SUITE = '''\
+import pytest
+
+pytest.skip("module unavailable here", allow_module_level=True)
+
+
+def test_never():
+    assert True
+'''
+
+
+def _shifted(suite_text, lines):
+    """The same suite with blank lines above it, so every skip moves."""
+    return "\n" * lines + suite_text
+
+
+def test_a_moved_skip_records_the_same_site_and_still_verifies(tmp_path):
+    """The allowlist key carries no line number, so moving code is harmless."""
+    root, plugin_root, workspace = _rig(tmp_path / "a", PASSING_SUITE)
+    assert _run(plugin_root, workspace).returncode == 0
+    before = _record(workspace)
+    allowlist = _allowlist_for(before)
+    root2, plugin_root2, workspace2 = _rig(
+        tmp_path / "b", _shifted(PASSING_SUITE, 40))
+    proc = _run(plugin_root2, workspace2)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    after = _record(workspace2)
+    assert after["skip_sites"] == before["skip_sites"]
+    verdict = _verify(root2, workspace2 / RECORD_NAME, allowlist=allowlist)
+    assert verdict.returncode == 0, verdict.stderr
+
+
+def test_an_unlisted_skip_fails_the_verifier_by_name(tmp_path):
+    root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
+    assert _run(plugin_root, workspace).returncode == 0
+    allowlist = {"schema_version": 1, "entries": [{
+        "file": "tests/test_sample.py", "reason": "some other reason",
+        "match": "exact", "allowed": 1}]}
+    verdict = _verify(root, workspace / RECORD_NAME, allowlist=allowlist)
+    assert verdict.returncode == 1
+    assert "RUN-VERIFY-FAILURE SKIP-UNLISTED:" in verdict.stderr
+    assert "legitimate skip" in verdict.stderr
+
+
+def test_a_module_level_skip_is_recorded_as_a_site(tmp_path):
+    root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
+    (plugin_root / "tests" / "test_module_skip.py").write_text(
+        MODULE_SKIP_SUITE, encoding="utf-8")
+    proc = _run(plugin_root, workspace, ["-ra"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = _record(workspace)
+    assert {"file": "tests/test_module_skip.py",
+            "reason": "module unavailable here",
+            "count": 1} in record["skip_sites"], record["skip_sites"]
+    assert sum(site["count"] for site in record["skip_sites"]) == (
+        record["skipped"]), record
+    # The recorded site is the one -ra prints.
+    assert "tests/test_module_skip.py:3: module unavailable here" in (
+        proc.stdout), proc.stdout
+    assert record["skipped_at_collection"] == 1, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 0, verdict.stderr

@@ -194,7 +194,8 @@ def _artifacts(root, plugin, manifest, *, summary_line=None,
     return summary_path, canary_path, base_sha
 
 
-def _run(summary_path, canary_path, base_sha, root, manifest):
+def _run(summary_path, canary_path, base_sha, root, manifest,
+         run_record=None):
     command = [
         sys.executable, str(VERIFIER),
         "--summary", str(summary_path),
@@ -204,6 +205,8 @@ def _run(summary_path, canary_path, base_sha, root, manifest):
     ]
     if base_sha is not None:
         command += ["--base-sha", base_sha]
+    if run_record is not None:
+        command += ["--run-record", str(run_record)]
     env = os.environ.copy()
     env.pop("BASE_SHA", None)
     return subprocess.run(
@@ -458,7 +461,8 @@ def test_the_runner_canary_rejects_a_deselected_summary(tmp_path, rig):
     proc = subprocess.run(
         [sys.executable, str(runner), "--collect-only",
          "--base-sha", base_sha, "--repo-root", str(root),
-         "--manifest", str(manifest), "--summary", str(summary)],
+         "--manifest", str(manifest), "--summary", str(summary),
+         "--canary", str(summary.with_name(".fast-suite-canary.json"))],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "CANARY FAILURE" in proc.stderr
@@ -487,7 +491,8 @@ def _run_canary(root, manifest, summary, base_sha, env=None):
     return subprocess.run(
         [sys.executable, str(runner), "--collect-only",
          "--base-sha", base_sha, "--repo-root", str(root),
-         "--manifest", str(manifest), "--summary", str(summary)],
+         "--manifest", str(manifest), "--summary", str(summary),
+         "--canary", str(summary.with_name(".fast-suite-canary.json"))],
         capture_output=True, text=True, timeout=120, env=env)
 
 
@@ -520,3 +525,79 @@ def test_the_runner_refuses_an_inherited_pytest_addopts(tmp_path, rig):
     assert proc.returncode == 3, proc.stdout + proc.stderr
     assert "PYTEST_ADDOPTS" in proc.stderr
     assert not (tmp_path / ".fast-suite-canary.json").exists()
+
+
+# ---- the skip advisory ---------------------------------------------------
+
+_LISTED_SITE = {"file": "tests/test_plugin_root_allowlist.py",
+                "reason": "the environment cannot hold a NUL", "count": 1}
+
+
+def _record(tmp_path, sites):
+    path = tmp_path / ".full-run-record.json"
+    path.write_text(json.dumps({"skip_sites": sites}), encoding="utf-8")
+    return path
+
+
+def test_a_listed_skip_site_is_reported_as_admitted(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest,
+                run_record=_record(tmp_path, [_LISTED_SITE]))
+    assert proc.returncode == 0, proc.stderr
+    assert "SKIP-ADVISORY-OK" in proc.stdout, proc.stdout
+
+
+def test_an_unlisted_skip_site_warns_without_failing(tmp_path, rig):
+    """The fast lane surfaces what the required gate will refuse, as advice."""
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    unlisted = {"file": "tests/test_new.py", "reason": "brand new skip",
+                "count": 1}
+    proc = _run(summary, canary, base_sha, root, manifest,
+                run_record=_record(tmp_path, [unlisted]))
+    assert proc.returncode == 0, proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+    assert "SKIP-ADVISORY SKIP-UNLISTED" in proc.stderr, proc.stderr
+    assert "tests/test_new.py" in proc.stderr
+
+
+def test_an_over_allowance_skip_site_warns_without_failing(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest,
+                run_record=_record(tmp_path, [dict(_LISTED_SITE, count=9)]))
+    assert proc.returncode == 0, proc.stderr
+    assert "SKIP-ADVISORY SKIP-OVER-ALLOWANCE" in proc.stderr, proc.stderr
+
+
+def test_an_absent_run_record_is_reported_and_never_fails(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest,
+                run_record=tmp_path / "missing.json")
+    assert proc.returncode == 0, proc.stderr
+    assert "skip sites not compared" in proc.stderr, proc.stderr
+
+
+def test_the_advisory_does_not_mask_a_real_failure(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    canary.unlink()
+    proc = _run(summary, canary, base_sha, root, manifest,
+                run_record=_record(tmp_path, [_LISTED_SITE]))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "VERIFY-FAILURE" in proc.stderr
+
+
+def test_the_artifact_paths_have_no_environment_default(tmp_path, rig):
+    """Without --summary and --canary the verifier refuses to guess a path."""
+    root, plugin, manifest = rig
+    env = os.environ.copy()
+    env["GITHUB_WORKSPACE"] = str(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(VERIFIER), "--repo-root", str(root),
+         "--manifest", str(manifest), "--base-sha", "0" * 40],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--summary" in proc.stderr and "--canary" in proc.stderr

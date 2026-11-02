@@ -615,7 +615,8 @@ def changed_paths(base_sha: str | None,
 # Calls whose string arguments name a filesystem path. A literal in one of
 # these positions, or an operand of `/`, is a PATH-CONSTRUCTION literal: only
 # those can name a directory a test reads. A bare word elsewhere ('commands'
-# as a dict key) is not a path, and matching it re-created A6.
+# as a dict key) is not a path; matching it adds back most exclusions on
+# every instruction-file change.
 _PATH_CALLS = frozenset({
     "join", "joinpath", "Path", "PurePath", "glob", "rglob", "iglob", "open",
     "iterdir", "listdir", "walk", "scandir", "exists", "is_file", "is_dir",
@@ -927,14 +928,12 @@ def _scanner_roots(tree: ast.Module, rel: str,
                     resolved[name] = found_anchor
     module_parts = Path(rel).parts
 
-    def directory_at(anchor: tuple[int, tuple[str, ...]] | None) -> str:
-        """The plugin directory an anchor names. One that cannot be
-        resolved, or that climbs above the plugin, is the PLUGIN ROOT:
-        scanning wider costs time, scanning narrower drops a test."""
-        if anchor is None:
-            return "."
+    def directory_at(anchor: tuple[int, tuple[str, ...]]) -> str:
+        """The plugin directory a resolved anchor names. One that climbs
+        above the plugin is the PLUGIN ROOT: scanning wider costs time,
+        scanning narrower drops a test."""
         level, parts = anchor
-        if level > len(module_parts) - 1:
+        if level > len(module_parts):
             return "."
         kept = module_parts[:len(module_parts) - max(level, 1)]
         directory = "/".join((*kept, *parts)) if level else "/".join(
@@ -1028,6 +1027,13 @@ def _scanner_roots(tree: ast.Module, rel: str,
                 else:
                     break
                 base = _anchor_of(prefix, scope_anchors)
+            if base is None or base[0] > len(module_parts):
+                # No anchor resolves (an unknown depth, or one above the
+                # plugin): the scan may start anywhere, so it is the whole
+                # plugin. A literal in the scope must not narrow a root it
+                # cannot be placed under.
+                starts.add(".")
+                continue
             start = directory_at(base)
             narrowed = set()
             for literal in literals:

@@ -11,7 +11,9 @@ the full-workflow contract. A guard that depends on the lane it guards is
 not a guard.
 """
 
+import ast
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,14 +21,22 @@ from pathlib import Path
 
 import ci_contract
 
+_ARTIFACT_ARGS = (
+    '--summary "$GITHUB_WORKSPACE/.fast-suite-summary.json" '
+    '--canary "$GITHUB_WORKSPACE/.fast-suite-canary.json"'
+)
 RUN_FORM = (
-    'python ../scripts/run_fast_suite.py --base-sha "$BASE_SHA"'
+    'python ../scripts/run_fast_suite.py --base-sha "$BASE_SHA" '
+    + _ARTIFACT_ARGS
 )
 COLLECT_FORM = (
-    'python ../scripts/run_fast_suite.py --collect-only --base-sha "$BASE_SHA"'
+    'python ../scripts/run_fast_suite.py --collect-only --base-sha "$BASE_SHA" '
+    + _ARTIFACT_ARGS
 )
 FAST_EVIDENCE_CMD = (
-    'python scripts/verify_fast_summary.py --base-sha "$BASE_SHA"'
+    'python scripts/verify_fast_summary.py --base-sha "$BASE_SHA" '
+    + _ARTIFACT_ARGS
+    + ' --run-record "$GITHUB_WORKSPACE/.full-run-record.json"'
 )
 FULL_COLLECTION_CMD = (
     'python scripts/verify_full_collection.py '
@@ -34,8 +44,10 @@ FULL_COLLECTION_CMD = (
 )
 FULL_EVIDENCE_CMD = (
     'python scripts/verify_full_run.py '
+    '--record "$GITHUB_WORKSPACE/.full-run-record.json" '
     '--collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"'
 )
+FAST_RUNNER_PREFIX = "python ../scripts/run_fast_suite.py"
 FAST_JOB = "fast-suite"
 FULL_JOB = "full-suite"
 FULL_IF = (
@@ -93,6 +105,32 @@ def _assert_step_cannot_be_silenced(steps, run_text, where):
             f"made non-fatal certifies nothing.")
 
 
+def _required_flags(root, script):
+    """Every option `scripts/<script>` declares with `required=True`.
+
+    Read from the script's own argparse calls, so a flag the script gains
+    is pinned here without editing this file.
+    """
+    source = (root / "scripts" / script).read_text(encoding="utf-8")
+    flags = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            continue
+        required = any(
+            keyword.arg == "required"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords)
+        if required:
+            flags.update(
+                arg.value for arg in node.args
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                and arg.value.startswith("--"))
+    return frozenset(flags)
+
+
 def _fast_doc(root):
     return ci_contract.load_workflow(root, ci_contract.FAST_WORKFLOW)
 
@@ -148,6 +186,37 @@ class TestFastWorkflowShape:
             f"expected exactly one collect-only form {COLLECT_FORM!r}; "
             f"found {runs.count(COLLECT_FORM)}"
         )
+
+    def test_every_artifact_step_passes_every_required_flag(self):
+        """The two runner steps and the evidence step each pass every option
+        their script declares required, so a dropped artifact path fails here
+        by name rather than at run time on a pull request."""
+        root = ci_contract.require_root("the artifact steps' required flags")
+        steps = ci_contract.steps_of(
+            ci_contract.jobs_of(_fast_doc(root))[FAST_JOB])
+        runs = [run.strip() for run in ci_contract.run_texts(steps)]
+        problems = []
+        for script, prefix, expected_steps in (
+                ("run_fast_suite.py", FAST_RUNNER_PREFIX, 2),
+                ("verify_fast_summary.py",
+                 "python scripts/verify_fast_summary.py", 1)):
+            required = _required_flags(root, script)
+            assert required, (
+                f"PARSE FAILURE: no `required=True` option was found in "
+                f"scripts/{script}, so this arm would check nothing.")
+            matched = [run for run in runs if run.startswith(prefix)]
+            assert len(matched) == expected_steps, (
+                f"expected {expected_steps} step(s) running {prefix!r}; "
+                f"found {matched!r}")
+            for run in matched:
+                passed = {token.split("=", 1)[0] for token in shlex.split(run)
+                          if token.startswith("--")}
+                missing = sorted(required - passed)
+                if missing:
+                    problems.append(f"{run!r} does not pass {missing}")
+        assert not problems, (
+            "a fast-workflow step omits a flag its script requires:\n  "
+            + "\n  ".join(problems))
 
     def test_no_run_line_names_pytest(self):
         root = ci_contract.require_root("the fast runner indirection")

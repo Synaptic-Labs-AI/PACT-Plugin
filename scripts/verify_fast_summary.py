@@ -144,15 +144,49 @@ def _set_difference(expected: list[str], actual: list[str],
         )
 
 
+def _skip_advisory(record_path: str | None) -> None:
+    """Report the fast run's skips against the full-suite allowlist. Never fails.
+
+    The fast lane is advisory, so a skip the required gate would refuse is
+    surfaced here early, as a warning, and the exit code is unaffected.
+    """
+    if not record_path:
+        print("SKIP-ADVISORY: no --run-record given; skip sites not compared",
+              file=sys.stderr)
+        return
+    try:
+        from verify_full_run import (
+            RunFailure, SKIP_ALLOWLIST, load_skip_allowlist,
+            skip_site_problems)
+        record = json.loads(Path(record_path).read_text(encoding="utf-8"))
+        sites = record.get("skip_sites") if isinstance(record, dict) else None
+        if not isinstance(sites, list):
+            raise ValueError("the record carries no skip_sites list")
+        problems = skip_site_problems(sites, load_skip_allowlist(SKIP_ALLOWLIST))
+    except (OSError, ValueError, KeyError, TypeError, RunFailure) as exc:
+        print(f"SKIP-ADVISORY: skip sites not compared ({exc})",
+              file=sys.stderr)
+        return
+    for condition, detail in problems:
+        print(f"SKIP-ADVISORY {condition}: {detail}. The required full-suite "
+              f"gate will refuse this; add the allowlist entry in the commit "
+              f"that adds the skip.", file=sys.stderr)
+    if not problems:
+        print("SKIP-ADVISORY-OK every skip site is in the allowlist")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify the fast-suite canary and run artifacts.")
-    parser.add_argument("--summary", default=None,
-                        help="run artifact path (default: "
-                             "${GITHUB_WORKSPACE}/.fast-suite-summary.json)")
-    parser.add_argument("--canary", default=None,
-                        help="canary artifact path (default: sibling "
-                             ".fast-suite-canary.json)")
+    parser.add_argument("--summary", required=True,
+                        help="run artifact path, as passed to the runner")
+    parser.add_argument("--canary", required=True,
+                        help="canary artifact path, as passed to the runner")
+    parser.add_argument(
+        "--run-record", default=None,
+        help="the in-band run record the fast run wrote. Its skip sites are "
+             "compared with the full-suite skip allowlist as an ADVISORY: a "
+             "mismatch is printed and never changes the exit code.")
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--manifest", default=None)
     parser.add_argument(
@@ -168,15 +202,10 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = (Path(args.repo_root).resolve() if args.repo_root
                  else Path(__file__).resolve().parent.parent)
-    # Same default rule as the runner: ${GITHUB_WORKSPACE} when set, else the
-    # repository root. The two must agree or the verifier reads a path the
-    # runner never wrote and reports a missing artifact for the wrong reason.
-    summary_path = Path(args.summary) if args.summary else (
-        Path(os.environ.get("GITHUB_WORKSPACE")
-             or Path(__file__).resolve().parent.parent)
-        / ".fast-suite-summary.json")
-    canary_path = (Path(args.canary) if args.canary
-                   else summary_path.with_name(".fast-suite-canary.json"))
+    # Both paths are explicit, never derived from the environment: the
+    # suite's own tests run the runner in rigs that inherit the workspace.
+    summary_path = Path(args.summary)
+    canary_path = Path(args.canary)
     manifest_path = (Path(args.manifest) if args.manifest
                      else repo_root / "scripts" / "fast_suite_exclusions.json")
 
@@ -354,8 +383,10 @@ def main(argv: list[str] | None = None) -> int:
     except VerificationFailure as failure:
         print(f"VERIFY-FAILURE {failure.condition}: {failure.detail}",
               file=sys.stderr)
+        _skip_advisory(args.run_record)
         return 1
 
+    _skip_advisory(args.run_record)
     print(f"VERIFY-OK expected={len(expected)} "
           f"collected={len(collected_files)} "
           f"status={recomputed.status} "

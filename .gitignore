@@ -30,5 +30,5 @@ CLAUDE.md
 # record writers. They belong to one run and must never be committed.
 .fast-suite-summary.json
 .fast-suite-canary.json
-.pytest-run-record.json
+.full-run-record.json
 .full-collection-record.json

@@ -18,6 +18,7 @@ Rows fall into three groups:
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1182,6 +1183,37 @@ class TestScanIndex:
                           '    return sorted(Path(ROOT).rglob("*"))\n')
         assert scan.scanner_roots == frozenset({expected})
 
+    @pytest.mark.parametrize("anchor", [
+        "Path(__file__).parents[DEPTH]",        # a variable depth
+        "Path(__file__).parents[6]",            # above the plugin
+        "locate(__file__)",                     # a helper call
+    ])
+    def test_an_unresolved_anchor_is_not_narrowed_by_literals(
+            self, core, tmp_path, anchor):
+        """With no resolvable start, a 'hooks' literal in the scope cannot be
+        placed under it, so the root is the whole plugin."""
+        (tmp_path / "pact-plugin" / "hooks").mkdir(parents=True)
+        scan = self._scan(core, tmp_path, "tests/test_unresolved.py",
+                          'from pathlib import Path\nDEPTH = 1\n'
+                          'def locate(path):\n    return Path(path)\n'
+                          f'BASE = {anchor}\n'
+                          'def test_x():\n'
+                          '    for top in ("hooks",):\n'
+                          '        list((BASE / top).rglob("*.py"))\n')
+        assert scan.scanner_roots == frozenset({"."})
+
+    def test_a_resolved_anchor_is_still_narrowed_by_literals(
+            self, core, tmp_path):
+        """Control: from a resolved plugin-root anchor, 'hooks' narrows."""
+        (tmp_path / "pact-plugin" / "hooks").mkdir(parents=True)
+        scan = self._scan(core, tmp_path, "tests/test_resolved.py",
+                          'from pathlib import Path\n'
+                          'BASE = Path(__file__).parents[1]\n'
+                          'def test_x():\n'
+                          '    for top in ("hooks",):\n'
+                          '        list((BASE / top).rglob("*.py"))\n')
+        assert scan.scanner_roots == frozenset({"hooks"})
+
     def test_an_anchored_scope_that_scans_no_checkout_path_is_no_scanner(
             self, core, tmp_path):
         """ast.walk and a tmp_path listing next to a __file__ read."""
@@ -1344,3 +1376,68 @@ class TestGatherFacts:
                              facts)
         assert result.select_all_reason == (
             "conftest:tests/conftest.py:hook:pytest_configure")
+
+
+class TestRunnerArtifactDestinations:
+    """The runner writes only where its flags say, never to an ambient
+    location such as $GITHUB_WORKSPACE."""
+
+    def _runner(self):
+        root = ci_contract.require_root("the fast-suite runner")
+        return root / "scripts" / "run_fast_suite.py"
+
+    def _env(self, workspace):
+        env = {key: value for key, value in os.environ.items()
+               if key != "PYTEST_ADDOPTS"}
+        env["GITHUB_WORKSPACE"] = str(workspace)
+        return env
+
+    @pytest.mark.parametrize("mode", [[], ["--collect-only"]])
+    def test_a_missing_destination_flag_fails_and_writes_nothing(
+            self, tmp_path, mode):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        proc = subprocess.run(
+            [sys.executable, str(self._runner()), *mode,
+             "--base-sha", "0" * 40],
+            capture_output=True, text=True, timeout=120,
+            env=self._env(workspace), cwd=str(tmp_path))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        required = [line for line in proc.stderr.splitlines()
+                    if "the following arguments are required" in line]
+        assert required, proc.stderr
+        assert "--summary" in required[0] and "--canary" in required[0]
+        assert list(workspace.iterdir()) == []
+
+    def test_the_canary_goes_to_its_flag_not_the_workspace(
+            self, core, tmp_path):
+        root, plugin, document = _build_rig(tmp_path)
+        _write_manifest(root, document)
+        _git(root, "init", "-q")
+        _git(root, "config", "user.email", "test@example.com")
+        _git(root, "config", "user.name", "Test")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "rig")
+        base = _git(root, "rev-parse", "HEAD")
+        discovered = sorted(core.discover(root))
+        # A stand-in pytest in the runner's working directory.
+        (plugin / "pytest.py").write_text(
+            "\n".join(f'print("{rel}::test_ok")' for rel in discovered)
+            + f'\nprint("{len(discovered)} tests collected in 0.01s")\n',
+            encoding="utf-8")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        proc = subprocess.run(
+            [sys.executable, str(self._runner()), "--collect-only",
+             "--base-sha", base, "--repo-root", str(root),
+             "--manifest", str(root / "scripts" / "fast_suite_exclusions.json"),
+             "--summary", str(out / "summary.json"),
+             "--canary", str(out / "canary.json")],
+            capture_output=True, text=True, timeout=120,
+            env=self._env(workspace), cwd=str(plugin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (out / "canary.json").is_file()
+        assert not (out / "summary.json").exists()
+        assert list(workspace.iterdir()) == []
