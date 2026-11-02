@@ -462,62 +462,88 @@ class TestDependencyDriftIsDetectable:
                 return base
         return None
 
-    # pip flags whose VALUE is a separate argv word (`-c constraints-ci.txt`):
-    # the value names a file, URL or option target — not a package — so the
-    # tokeniser must consume it. `--flag=value` forms carry the value inline
-    # and need no entry here. shortcut: a future value-taking flag unknown to
-    # this set leaves its value counted as a package operand. That is
-    # harmless for the declared-missing direction (extra tokens create no
-    # false drift) but the coverage arm turns it into a TRIPWIRE: it reports
-    # the value as an UNPINNED package and reddens naming it — the value's
-    # name in the message is the tell. So adding such a flag to the install
-    # line requires extending this set in the same change; the red is the
-    # reminder, not a bug.
+    # pip's option tables, MEASURED from pip's own parser (pip 26.2.2, the
+    # version CI's unconstrained pip upgrade resolved when measured:
+    # `create_command("install").parser`, every option group, `takes_value()`),
+    # plus three legacy value options older pips still accept
+    # (`--install-option`, `--global-option`, `--build-option`) and `--hash`.
+    # A newer pip's option missing here fails CLOSED: an unknown long flag
+    # is refused by the flag allowlist (`_PIP_ALLOWED_INSTALL_FLAGS`), and
+    # an unknown value-taking flag leaves its value read as a package
+    # operand, which the coverage arm reports as UNPINNED naming it.
     _PIP_FLAGS_WITH_VALUE = frozenset({
-        "-c", "--constraint", "-r", "--requirement", "-e", "--editable",
-        "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
-        "-t", "--target", "--prefix", "--src", "--platform",
-        "--python-version", "--implementation", "--abi", "--root",
-        "--cert", "--client-cert", "--proxy", "--cache-dir",
-        "--no-binary", "--only-binary", "--config-settings",
-        "--global-option", "--install-option", "--build-option",
-        "--progress-bar", "--retries", "--timeout", "--exists-action",
-        "--hash",
+        "--abi", "--all-releases", "--build-constraint", "--cache-dir",
+        "--cert", "--client-cert", "--config-settings", "--constraint",
+        "--default-timeout", "--editable", "--exists-action",
+        "--extra-index-url", "--find-links", "--group", "--implementation",
+        "--index-url", "--keyring-provider", "--local-log", "--log",
+        "--log-file", "--no-binary", "--only-binary", "--only-final",
+        "--platform", "--prefix", "--progress-bar", "--proxy", "--pypi-url",
+        "--python", "--python-version", "--refresh-package", "--report",
+        "--requirement", "--requirements-from-script", "--resume-retries",
+        "--retries", "--root", "--root-user-action", "--source",
+        "--source-dir", "--source-directory", "--src", "--target",
+        "--timeout", "--trusted-host", "--upgrade-strategy",
+        "--uploaded-prior-to", "--use-deprecated", "--use-feature",
+        "--install-option", "--global-option", "--build-option", "--hash",
     })
 
-    # pip GLOBAL options whose VALUE is a separate argv word. pip reads
-    # global options before AND after the subcommand, so the parser below
-    # consumes these wherever they appear. `--trusted-host` is one of them
-    # and is also refused by the tripwire wherever it appears.
+    # The GLOBAL subset of the value options (pip reads them before AND
+    # after the subcommand; the parser consumes them wherever they appear).
     _PIP_GLOBAL_FLAGS_WITH_VALUE = frozenset({
         "--python", "--log", "--log-file", "--local-log", "--proxy",
-        "--retries", "--timeout", "--exists-action", "--trusted-host",
-        "--cert", "--client-cert", "--cache-dir", "--use-feature",
-        "--use-deprecated", "--keyring-provider",
+        "--retries", "--timeout", "--default-timeout", "--exists-action",
+        "--trusted-host", "--cert", "--client-cert", "--cache-dir",
+        "--use-feature", "--use-deprecated", "--keyring-provider",
+        "--resume-retries",
     })
 
-    # Value-less long flags the parser knows, so an ABBREVIATED long option
-    # (pip's optparse accepts any unique prefix: `--extra-index` IS
-    # `--extra-index-url`) resolves to its full name before any comparison.
+    # pip's value-LESS long options, measured the same way. Listed so an
+    # ABBREVIATED long option (pip's optparse accepts any unique prefix:
+    # `--extra-index` IS `--extra-index-url`) resolves to its full name
+    # against the whole option set before any comparison.
     _PIP_KNOWN_LONG_FLAGS = frozenset({
-        "--upgrade", "--no-index", "--user", "--quiet", "--verbose",
-        "--no-deps", "--pre", "--force-reinstall", "--ignore-installed",
-        "--no-cache-dir", "--disable-pip-version-check", "--isolated",
-        "--require-hashes", "--dry-run", "--break-system-packages",
-        "--no-build-isolation", "--no-input", "--no-color", "--version",
-        "--help", "--require-virtualenv", "--no-python-version-warning",
-        "--ignore-requires-python", "--no-warn-script-location",
-        "--upgrade-strategy", "--compile", "--no-compile",
+        "--break-system-packages", "--check-build-dependencies", "--compile",
+        "--debug", "--disable-pip-version-check", "--dry-run",
+        "--force-reinstall", "--help", "--ignore-installed",
+        "--ignore-requires-python", "--isolated", "--no-build-isolation",
+        "--no-cache-dir", "--no-clean", "--no-color", "--no-compile",
+        "--no-dependencies", "--no-deps", "--no-index", "--no-input",
+        "--no-proxy-env", "--no-python-version-warning",
+        "--no-require-hashes", "--no-user", "--no-warn-conflicts",
+        "--no-warn-script-location", "--only-dependencies", "--only-deps",
+        "--pre", "--prefer-binary", "--quiet", "--require-hashes",
+        "--require-venv", "--require-virtualenv", "--upgrade",
+        "--use-pep517", "--user", "--verbose", "--version",
     })
 
-    # pip's short options that take a VALUE. optparse reads the value
-    # either attached (`-rreq.txt`) or as the next word (`-r req.txt`), and
-    # a short-flag bundle (`-Ur req.txt`) ends at the first value-taking
-    # letter. Mapped to the long name so every comparison reads ONE name.
+    # pip's short options, measured: those that take a VALUE (read attached,
+    # `-rreq.txt`, or as the next word; a bundle `-Ur req.txt` ends at the
+    # first value-taking letter) and those that do not. Both map to the
+    # long name, so every comparison reads ONE name. An unknown short
+    # letter stays `-X` and is refused by the flag allowlist.
     _PIP_SHORT_WITH_VALUE = {
         "c": "--constraint", "r": "--requirement", "e": "--editable",
         "i": "--index-url", "f": "--find-links", "t": "--target",
+        "C": "--config-settings",
     }
+    _PIP_SHORT_FLAGS = {
+        "U": "--upgrade", "I": "--ignore-installed", "V": "--version",
+        "h": "--help", "q": "--quiet", "v": "--verbose",
+    }
+
+    # The ONLY options a pip install in CI or the bootstrap may carry: the
+    # ones the canonical line and .cursor/install.sh use (`--upgrade`,
+    # `--constraint constraints-ci.txt`), plus value-less options that
+    # change logging or caching, never WHAT is resolved or from where.
+    # Everything else — a new install source (`--group`,
+    # `--requirements-from-script`), a resolver knob, a target directory —
+    # is refused naming itself; vet it and add it here in the same change.
+    _PIP_ALLOWED_INSTALL_FLAGS = frozenset({
+        "--upgrade", "--constraint", "--quiet", "--verbose",
+        "--no-cache-dir", "--disable-pip-version-check", "--no-input",
+        "--no-color", "--no-python-version-warning",
+    })
 
     # pip's subcommands. The subcommand is the first non-option word that
     # names one, so the VALUE of a global option this parser does not know
@@ -531,19 +557,25 @@ class TestDependencyDriftIsDetectable:
     # The PROGRAM, not a substring of the command: `pip`, `pip3` and
     # `pip3.N` (setup-python and venvs ship all three), by bare name or by
     # path. `python -m pip`, `python -mpip` and `uv pip` are recognised in
-    # `_pip_argv_start`. `pipx` is a different program and does NOT match
-    # here — the tool-runner tripwire owns it.
+    # `_pip_argv_start` — a path-qualified `/usr/bin/uv pip` is caught by the
+    # bare `pip` word itself, which this regex matches. `pipx` is a different program and does NOT match
+    # here — the installer-program allowlist owns it.
     _PIP_PROGRAM_RE = re.compile(r"(?:^|/)pip(?:3(?:\.\d+)?)?$")
     _PYTHON_PROGRAM_RE = re.compile(r"(?:^|/)python(?:3(?:\.\d+)?)?$")
 
-    # Install-line flags no arm can follow: -r/-e add packages from a file
-    # or path the coverage arms never read, and the index/source flags
+    # Install-line flags named with their own message (every other flag
+    # not on `_PIP_ALLOWED_INSTALL_FLAGS` is refused too, generically):
+    # the install-SOURCE flags (-r/-e, `--group`, `--requirements-from-script`)
+    # add packages from a file, path or dependency group the coverage arms
+    # never read, and the index/source flags
     # resolve the pinned names from a source constraints-ci.txt never
     # vetted (its `==` pins carry no hashes).
-    _PIP_REQUIREMENT_FLAGS = frozenset({"--requirement", "--editable"})
+    _PIP_REQUIREMENT_FLAGS = frozenset({
+        "--requirement", "--editable", "--group", "--requirements-from-script",
+    })
     _PIP_REDIRECT_FLAGS = frozenset({
         "--index-url", "--extra-index-url", "--find-links",
-        "--trusted-host", "--no-index",
+        "--trusted-host", "--no-index", "--pypi-url",
     })
 
     # One constraints-ci.txt line: a PEP 508 name, `==`, one literal
@@ -741,7 +773,8 @@ class TestDependencyDriftIsDetectable:
                             i += 1
                         options.append((cls._PIP_SHORT_WITH_VALUE[letter], value))
                         break
-                    options.append(("-" + letter, None))
+                    options.append(
+                        (cls._PIP_SHORT_FLAGS.get(letter, "-" + letter), None))
             elif subcommand is None:
                 if tok in cls._PIP_SUBCOMMANDS:
                     subcommand = tok
@@ -795,16 +828,35 @@ class TestDependencyDriftIsDetectable:
         Read from the parse, so every spelling pip accepts counts —
         `-c constraints-ci.txt`, `-cconstraints-ci.txt`,
         `--constraint constraints-ci.txt`, `--constraint=constraints-ci.txt`,
-        an abbreviated `--constr` — and anything naming another file is a
+        an abbreviated `--constr` — and the repo-root path spellings
+        `_is_repo_constraints` accepts; anything naming another file is a
         re-point, not a pass.
         """
         parsed = cls._install_parse(command)
         if parsed is None:
             return False
         return any(
-            name == "--constraint" and value == "constraints-ci.txt"
+            name == "--constraint" and cls._is_repo_constraints(value)
             for name, value in parsed[1]
         )
+
+    # The constraints file as the shipped install commands name it, run
+    # from the repo root (tests.yml's install step has no working-directory;
+    # install.sh cd's to the repo root first): `constraints-ci.txt`, plus
+    # the equivalent `./` and workspace-rooted spellings.
+    _REPO_CONSTRAINTS_SPELLINGS = frozenset({
+        "constraints-ci.txt", "./constraints-ci.txt",
+        "$GITHUB_WORKSPACE/constraints-ci.txt",
+        "${GITHUB_WORKSPACE}/constraints-ci.txt",
+        "${{ github.workspace }}/constraints-ci.txt",
+    })
+
+    @classmethod
+    def _is_repo_constraints(cls, value):
+        """Does a `--constraint` value name the repo's constraints-ci.txt?"""
+        return value is not None and re.sub(
+            r"\$\{\{\s*github\.workspace\s*\}\}", "${{ github.workspace }}",
+            value) in cls._REPO_CONSTRAINTS_SPELLINGS
 
     def _ci_install_line(self, workflow):
         """The workflow's single `run:` line carrying a pip install.
@@ -817,8 +869,8 @@ class TestDependencyDriftIsDetectable:
         `python -mpip`, `uv pip`) and global options before the subcommand
         count. Exactly-one is asserted here so every consumer (tokens,
         coverage, application) shares one parse contract; the census arm
-        then holds every OTHER executed install in the workflow population
-        to this one. Folded plain scalars are REFUSED before the filter
+        then holds every OTHER executed install in the execution population
+        (`_execution_population`) to this one. Folded plain scalars are REFUSED before the filter
         runs — see `_refuse_plain_scalar_run_continuations`.
         """
         text = workflow.read_text(encoding="utf-8")
@@ -1433,8 +1485,11 @@ class TestDependencyDriftIsDetectable:
 
         pins = {}
         for raw in constraints.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
+            # pip's requirements format ends a line at whitespace + `#`:
+            # `ruff==0.17.3  # lint` IS the exact pin `ruff==0.17.3`, so the
+            # comment is stripped before any check reads the line.
+            line = re.split(r"(?:^|\s)#", raw, maxsplit=1)[0].strip()
+            if not line:
                 continue
             assert "==" in line, (
                 f"PARSE FAILURE, not coverage drift: {constraints} carries "
@@ -1599,14 +1654,24 @@ class TestDependencyDriftIsDetectable:
         )
 
     def test_install_lines_admit_no_requirements_or_editable_flags(self):
-        """`-r`/`-e` and index/source redirects on either install surface.
+        """Only VETTED options on either install surface (flag allowlist).
 
-        `-r`/`-e` take a VALUE the parse consumes, so a requirements file or
-        editable path adds packages that the declared-match, coverage and
+        ALLOWLIST polarity: every option on every pip install in CI and the
+        bootstrap must be in `_PIP_ALLOWED_INSTALL_FLAGS` (the options the
+        shipped lines use plus value-less logging/caching options), and a
+        `--constraint` must name constraints-ci.txt; anything else reddens
+        UNVETTED PIP FLAG DRIFT naming it, so an option pip adds later fails
+        closed. Two families keep their own, more specific message:
+
+        The install-SOURCE flags (`-r`/`-e`, `--group`,
+        `--requirements-from-script`) take a VALUE the parse consumes, so a
+        requirements file, editable path, dependency group or script's
+        inline dependencies add packages that the declared-match, coverage and
         constraints-APPLIED arms never see, while constraints-ci.txt pins
         none of them (it mirrors the install line's direct names only). The
         index/source flags (`--index-url`/`-i`, `--extra-index-url`,
-        `--find-links`/`-f`, `--trusted-host`, `--no-index`) keep every
+        `--find-links`/`-f`, `--trusted-host`, `--no-index`, `--pypi-url`)
+        keep every
         package NAME intact — so every name arm stays green — while the
         pinned versions resolve from a source the constraints file never
         vetted, and its `==` pins carry no hashes. The same redirect through
@@ -1630,7 +1695,7 @@ class TestDependencyDriftIsDetectable:
                 f"above {Path(__file__).resolve()}, so this is not a PACT "
                 "source checkout. The expected case is an INSTALLED PLUGIN "
                 "CACHE, which has no .github/ or .cursor/ tree by design. "
-                "This skip is NO INFORMATION about the -r/-e tripwire — "
+                "This skip is NO INFORMATION about the install-flag allowlist — "
                 "never read it as a pass."
             )
 
@@ -1682,6 +1747,30 @@ class TestDependencyDriftIsDetectable:
                     f"the flag, or record the source as a reviewed decision "
                     f"in this arm in the same change."
                 )
+                # ALLOWLIST POLARITY: every other option must be on the
+                # vetted set, and a constraints option must name the
+                # repo's own file — a second or re-pointed constraints
+                # file loosens the pins the coverage arm checks.
+                unvetted = sorted(
+                    names - self._PIP_ALLOWED_INSTALL_FLAGS
+                    - self._PIP_REQUIREMENT_FLAGS - self._PIP_REDIRECT_FLAGS)
+                foreign_constraints = sorted(
+                    value for name, value in parsed[1]
+                    if name == "--constraint"
+                    and not self._is_repo_constraints(value))
+                assert not unvetted and not foreign_constraints, (
+                    f"UNVETTED PIP FLAG DRIFT: {where} carries "
+                    f"{unvetted + [f'--constraint {v}' for v in foreign_constraints]} "
+                    f"({cmd.strip()!r}). A pip install in CI or the "
+                    f"bootstrap may carry only the vetted options "
+                    f"{sorted(self._PIP_ALLOWED_INSTALL_FLAGS)} (and "
+                    f"--constraint naming constraints-ci.txt): any other "
+                    f"option can change WHAT resolves or from WHERE — a new "
+                    f"install source, a resolver strategy, a target "
+                    f"directory — where no coverage arm looks. Confirm the "
+                    f"option changes neither, then add it to "
+                    f"_PIP_ALLOWED_INSTALL_FLAGS in the same change."
+                )
 
     def test_every_executed_pip_install_is_the_canonical_install_line(self):
         """Census: no executed pip install anywhere in CI but the canonical one.
@@ -1702,6 +1791,9 @@ class TestDependencyDriftIsDetectable:
         option before `install` cannot hide one. A followed local action
         that is not composite, a followed script in another language, and
         a script path that does not exist are REFUSED, not skipped.
+        SCOPE: the guard covers the PYTHON dependency set constraints-ci.txt
+        pins; system and other-language package managers (apt-get, npm,
+        brew) are separate supply chains outside it, by design.
         Not read here: third-party actions and reusable workflows (their
         code is not in this tree — the allowlist arm holds them), paths
         outside the checkout (absolute, or on runner variables such as
@@ -1793,14 +1885,6 @@ class TestDependencyDriftIsDetectable:
             f"them."
         )
 
-    # Isolated-environment runners: each fetches and EXECUTES a package
-    # from the index with the job's checkout and token in reach, and none
-    # honours constraints-ci.txt. Matched as the PROGRAM word of a simple
-    # command (any position, so `sudo`/`env` wrappers do not hide it).
-    _PIPX_EXECUTING_SUBCOMMANDS = frozenset({
-        "run", "install", "inject", "upgrade", "upgrade-all", "reinstall",
-        "reinstall-all",
-    })
     # Every THIRD-PARTY action the shipped workflows and actions use,
     # keyed on `owner/repo[/path]` with the `@ref` stripped (a SHA re-pin is
     # not drift). Each was vetted as installing nothing unpinned. Local
@@ -1811,57 +1895,111 @@ class TestDependencyDriftIsDetectable:
         "actions/cache/restore",
         "actions/cache/save",
     })
-    # Other package managers' INSTALLING verbs. Each resolves packages from
-    # its own index or channel into the job's environment and none reads
-    # constraints-ci.txt, so a good-faith switch of installer would float
-    # every pin while no pip install is ever written.
-    _UV_INSTALLING_SUBCOMMANDS = frozenset({"tool", "add", "sync"})
-    _POETRY_INSTALLING_SUBCOMMANDS = frozenset({"install", "add"})
-    _CONDA_PROGRAMS = frozenset({"conda", "mamba", "micromamba"})
+    # Installer PROGRAMS other than pip: each resolves packages from its
+    # own index or channel — into the job's environment or an isolated
+    # tool environment — and none reads constraints-ci.txt. ALLOWLIST
+    # polarity: any invocation is refused unless it is read-only, so a verb
+    # this list never named (`poetry sync`, `uv pip sync`, `conda create`,
+    # `tox`) fails closed. `python -m <module>` spellings map to the
+    # program; `python setup.py <cmd>` counts as the program `setup.py`.
+    _INSTALLER_PROGRAMS = frozenset({
+        "uv", "uvx", "pipx", "poetry", "conda", "mamba", "micromamba",
+        "pipenv", "pdm", "hatch", "tox", "nox", "pre-commit", "pip-sync",
+        "piptools", "rye", "pixi", "easy_install", "flit", "setup.py",
+    })
+    _INSTALLER_MODULES = {
+        "uv": "uv", "pipx": "pipx", "poetry": "poetry", "pdm": "pdm",
+        "hatch": "hatch", "tox": "tox", "nox": "nox",
+        "pre_commit": "pre-commit", "piptools": "piptools",
+        "pipenv": "pipenv", "conda": "conda", "flit": "flit",
+        "easy_install": "easy_install",
+    }
+    # NO table of these programs' value-taking global options: an option
+    # word before the verb is skipped WITHOUT consuming a value, so a
+    # valued global's VALUE lands in the verb slot (`uv --directory proj
+    # sync` reads verb `proj`), which is never read-only — every such form
+    # fails CLOSED. The cost is over-block only on a read-only call that
+    # also passes a valued global (`uv --directory x pip list`), which a
+    # faithful edit writes as `--directory=x` or drops.
+    # The verbs that only READ. `uv pip <verb>` and `conda env <verb>`
+    # read a second-level verb.
+    _INSTALLER_READ_ONLY_VERBS = frozenset({
+        "list", "info", "show", "help", "version", "tree", "freeze", "check",
+    })
+    _INSTALLER_READ_ONLY_FLAGS = frozenset({"--version", "-V", "--help", "-h"})
+
+    @classmethod
+    def _installer_program(cls, words):
+        """(program, argv after it) for a simple command that invokes an
+        installer program, or None."""
+        i, program = cls._command_program(words)
+        if program is None:
+            return None
+        base = program.rsplit("/", 1)[-1]
+        if base in cls._INSTALLER_PROGRAMS:
+            return base, words[i + 1:]
+        if cls._PYTHON_PROGRAM_RE.search(program):
+            rest = words[i + 1:]
+            for j, tok in enumerate(rest):
+                module = tok[2:] if tok.startswith("-m") and len(tok) > 2 \
+                    else (rest[j + 1] if tok == "-m" and j + 1 < len(rest) else None)
+                if module is not None:
+                    mapped = cls._INSTALLER_MODULES.get(module)
+                    if mapped is None:
+                        return None
+                    return mapped, rest[j + (1 if tok != "-m" else 2):]
+                if tok.rsplit("/", 1)[-1] == "setup.py":
+                    return "setup.py", rest[j + 1:]
+                if not tok.startswith("-"):
+                    return None
+        return None
+
+    @classmethod
+    def _installer_is_read_only(cls, program, argv):
+        """True only when the invocation provably installs nothing."""
+        options, verbs = [], []
+        for tok in argv:
+            if tok.startswith("-"):
+                options.append(tok.split("=", 1)[0])
+                continue
+            verbs.append(tok)
+            if not (program == "uv" and tok == "pip") and not (
+                    program in ("conda", "mamba", "micromamba") and tok == "env"):
+                break
+        if not verbs:
+            return bool(options) and set(options) <= cls._INSTALLER_READ_ONLY_FLAGS
+        if program in ("uvx", "setup.py"):
+            return False
+        return verbs[-1] in cls._INSTALLER_READ_ONLY_VERBS
 
     @classmethod
     def _tool_runner_commands(cls, text):
-        """Simple commands in shell text that run an isolated-env tool or
-        install through a package manager other than pip."""
+        """Simple commands in shell text that invoke an installer program
+        other than pip in any way that is not provably read-only."""
         hits = []
         for words in cls._simple_commands(text):
-            for i, word in enumerate(words):
-                base = word.rsplit("/", 1)[-1]
-                rest = [w for w in words[i + 1:] if not w.startswith("-")]
-                if base == "uvx":
-                    hits.append(" ".join(words))
-                    break
-                if base == "uv" and rest[:1] and (
-                        rest[0] in cls._UV_INSTALLING_SUBCOMMANDS
-                        or (rest[0] == "run" and any(
-                            w == "--with" or w.startswith("--with=")
-                            or w.startswith("--with-")
-                            for w in words[i + 1:]))):
-                    hits.append(" ".join(words))
-                    break
-                if base == "poetry" and rest[:1] and \
-                        rest[0] in cls._POETRY_INSTALLING_SUBCOMMANDS:
-                    hits.append(" ".join(words))
-                    break
-                if base in cls._CONDA_PROGRAMS and rest[:1] == ["install"]:
-                    hits.append(" ".join(words))
-                    break
-                if base == "pipx" and rest[:1] and \
-                        rest[0] in cls._PIPX_EXECUTING_SUBCOMMANDS:
-                    hits.append(" ".join(words))
-                    break
+            found = cls._installer_program(words)
+            if found is not None and not cls._installer_is_read_only(*found):
+                hits.append(" ".join(words))
         return hits
 
     def test_no_tool_runner_executes_unpinned_code(self):
-        """No tool runner and no non-pip installer, in CI or the bootstrap.
+        """No Python installer but the constrained pip line, in CI or the
+        bootstrap — any other installer program may only be READ from.
 
-        Two kinds of command resolve packages outside every install-line
-        arm, because no `pip install` is ever written: isolated-environment
-        tool runners (`pipx run|install|...`, `uvx`, `uv tool`) and other
-        package managers' installing verbs (`uv add`, `uv sync`,
-        `uv run --with`, `poetry install|add`,
-        `conda|mamba|micromamba install`). None reads constraints-ci.txt,
-        and the job's checkout and token are in reach. Read over every
+        Installer programs other than pip (`_INSTALLER_PROGRAMS`: uv, uvx,
+        pipx, poetry, conda, mamba, micromamba, pipenv, pdm, hatch, tox,
+        nox, pre-commit, pip-sync/piptools, rye, pixi, easy_install, flit,
+        and `python setup.py`), by name, path, wrapper or `python -m`,
+        resolve packages where no install-line arm looks and none reads
+        constraints-ci.txt. ALLOWLIST polarity: an invocation passes only
+        when it provably installs nothing — no verb and only
+        --version/--help, or a read-only verb (`_INSTALLER_READ_ONLY_VERBS`:
+        list, info, show, help, version, tree, freeze, check; `uv pip <v>`
+        and `conda env <v>` read the second verb). Every other verb, named
+        or not, reddens. `uv run` is refused in EVERY form: it syncs the
+        project environment and installs a script's PEP 723 inline
+        dependencies, so it has no read-only form. Read over every
         shell text CI executes (`_population_texts`: `run:` strings and the
         repo scripts they run) and over .cursor/install.sh. An ACTION that
         installs or runs such a tool is held by the action allowlist
@@ -1889,12 +2027,16 @@ class TestDependencyDriftIsDetectable:
                 self._tool_runner_commands(script.read_text(encoding="utf-8"))
             ]
         assert not offenders, (
-            f"TOOL-RUNNER DRIFT: {offenders}. Each resolves packages from "
-            f"an index or channel constraints-ci.txt cannot reach — into "
-            f"an isolated tool environment or through a non-pip installer "
-            f"— with the checkout in reach. Put the tool or package on the "
-            f"canonical install line, where it is pinned and every "
-            f"coverage arm reads it."
+            f"TOOL-RUNNER DRIFT: {offenders}. Each invokes an installer "
+            f"other than the constrained pip line in a form that is not "
+            f"read-only, so it can resolve packages from an index or "
+            f"channel constraints-ci.txt never pins, with the checkout in "
+            f"reach. (`uv run` is refused in every form: it syncs the "
+            f"project environment and installs a script's PEP 723 inline "
+            f"dependencies.) A vetted tool or package goes on the canonical "
+            f"constrained pip install line instead, where every coverage "
+            f"arm reads and pins it; a read-only use (--version, list, "
+            f"show) passes as it is."
         )
 
     def test_every_third_party_action_is_allowlisted(self):
@@ -1959,8 +2101,9 @@ class TestDependencyDriftIsDetectable:
         over a scratch tree so a mutation lands on a COPY — never the
         checkout — while constraints-ci.txt and pyproject.toml ship
         verbatim, because every arm compares the mutated surface against
-        the REAL pins and floor. Every real workflow file is copied (the
-        census reads the whole `.github/workflows/` population), with
+        the REAL pins and floor. Every file the real execution walk reads
+        is copied (`_execution_population`: the workflows plus every local
+        action and repo script they run), with
         tests.yml and the install script defaulting to their real bytes, so
         a mutation is one targeted substitution on top of the shipped
         state. `extra_files` maps a repo-relative path to text, for
@@ -2526,20 +2669,26 @@ class TestDependencyDriftIsDetectable:
     def test_the_floor_literals_agree(self):
         """Every statement of the Python floor must move together.
 
-        Three surfaces state the Python floor: `requires-python` in
-        pyproject.toml (the SUPPORT BOUNDARY), `python-version` in the
-        workflow (the tested set), and the `feature_version=(3, N)`
-        literal the syntax-floor guard parses at
-        (test_py312_syntax_floor.py). A FOURTH statement rides with them:
-        the lint legs' `--target-version pyXY`, read from the executed
-        `run:` strings, must equal the declared floor (the local lint
-        script's byte-parity test moves WITH the workflow, so it cannot
-        bind the value). A FIFTH: .cursor/install.sh's interpreter check
-        states the floor once as `PYTHON_FLOOR_MINOR=N`. Before this arm
-        nothing bound them:
-        the alignment was claimed in COMMENTS only, so editing any one
-        literal reddened nothing while the declared and enforced floors
-        diverged silently. All three are read as TEXT and compared.
+        FIVE statements of the Python floor, each read where it is STATED:
+          1. pyproject.toml `requires-python = ">=X.Y"` (the SUPPORT
+             BOUNDARY) — regex over the file text, exactly one.
+          2. tests.yml `python-version: "X.Y"` (the TESTED SET) — regex
+             over the file text, exactly one.
+          3. test_py312_syntax_floor.py's detector call
+             `ast.parse(source, feature_version=(X, Y))` (the SCAN
+             DIALECT), plus its violation-message echo of the same value —
+             regex over the guard's text, exactly one of each.
+          4. tests.yml's lint legs `--target-version pyXY` (the LINT
+             DIALECT) — read from the EXECUTED `run:` strings via
+             yaml.safe_load, never the comment prose that quotes the flag;
+             every leg must agree (the local lint script's byte-parity test
+             moves WITH the workflow, so it cannot bind the value).
+          5. .cursor/install.sh `PYTHON_FLOOR_MINOR=N` (the LOCAL
+             BOOTSTRAP's refusal), compared as (3, N) — regex for one
+             column-0 line, exactly one.
+        Before this arm nothing bound them: the alignment was claimed in
+        COMMENTS only, so editing any one literal reddened nothing while
+        the declared and enforced floors diverged silently.
 
         The guard file MENTIONS several feature_version values by design —
         its own boundary arm parses a PEP 695 sample at (3, 11) to prove
@@ -2679,20 +2828,7 @@ class TestDependencyDriftIsDetectable:
             f"shape — re-point this arm; do not weaken it to a skip."
         )
         script_pair = (3, int(script_floor[0]))
-        assert script_pair == declared_pair, (
-            f"FLOOR-LITERAL DRIFT: {script} refuses interpreters below "
-            f"{'.'.join(map(str, script_pair))} but the declared floor is "
-            f"{'.'.join(map(str, declared_pair))}. The bootstrap's check is "
-            f"the fifth floor statement; move it with the others."
-        )
         ruff_pairs = sorted({tuple(int(p) for p in t) for t in ruff_targets})
-        assert ruff_pairs == [declared_pair], (
-            f"FLOOR-LITERAL DRIFT: the lint legs' --target-version "
-            f"{['py' + ''.join(map(str, p)) for p in ruff_pairs]} does not "
-            f"equal the declared floor {'.'.join(map(str, declared_pair))}. "
-            f"The lint dialect is the fourth floor statement; move it with "
-            f"the other three."
-        )
         guard_pair = tuple(int(part) for part in enforced[0])
         echo_pair = tuple(int(part) for part in echo[0])
         assert echo_pair == guard_pair, (
@@ -2702,16 +2838,28 @@ class TestDependencyDriftIsDetectable:
             f"the old floor misreports every violation it prints; move "
             f"both in the same change."
         )
-        assert declared_pair == cell_pair == guard_pair, (
-            f"FLOOR-LITERAL DRIFT: the three floor surfaces disagree.\n"
-            f"  pyproject requires-python: {'.'.join(map(str, declared_pair))}\n"
-            f"  workflow python-version:  {'.'.join(map(str, cell_pair))}\n"
-            f"  syntax-floor guard:       {'.'.join(map(str, guard_pair))}\n"
+        def dotted(pair):
+            return ".".join(map(str, pair))
+
+        assert (declared_pair == cell_pair == guard_pair == script_pair
+                and ruff_pairs == [declared_pair]), (
+            f"FLOOR-LITERAL DRIFT: the five floor statements disagree. "
+            f"Move ALL FIVE together, in one change:\n"
+            f"  1. pyproject.toml requires-python (text):       "
+            f"{dotted(declared_pair)}\n"
+            f"  2. tests.yml python-version (text):             "
+            f"{dotted(cell_pair)}\n"
+            f"  3. syntax-floor guard feature_version + echo:   "
+            f"{dotted(guard_pair)}\n"
+            f"  4. tests.yml ruff --target-version (executed run: strings): "
+            f"{['py' + ''.join(map(str, p)) for p in ruff_pairs]}\n"
+            f"  5. .cursor/install.sh PYTHON_FLOOR_MINOR (text): "
+            f"{dotted(script_pair)}\n"
             f"Each is a different QUESTION (support boundary, tested set, "
-            f"scan dialect) that happens to share one value today; moving "
-            f"any one of them takes its own run on the new target, and "
-            f"then all three move in the same change — this red is the "
-            f"reminder, not a bug."
+            f"scan dialect, lint dialect, local bootstrap) that shares one "
+            f"value today; moving any one takes its own run on the new "
+            f"target, and then all five move in the same change — this red "
+            f"is the reminder, not a bug."
         )
 
     def _shape_reddens(self, tmp_path, monkeypatch, name, arm, match,
@@ -2728,11 +2876,12 @@ class TestDependencyDriftIsDetectable:
             getattr(self, arm)()
 
     def _shape_stays_green(self, tmp_path, monkeypatch, name, arm,
-                           workflow_text=None, script_text=None):
+                           workflow_text=None, script_text=None,
+                           extra_files=None):
         """CONTROL: a faithful spelling the parse must ACCEPT."""
         copy = self._repo_copy_carrying(
             tmp_path / name, workflow_text=workflow_text,
-            script_text=script_text)
+            script_text=script_text, extra_files=extra_files)
         monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
         getattr(self, arm)()
 
@@ -2792,16 +2941,69 @@ class TestDependencyDriftIsDetectable:
                 canonical.replace("pip install",
                                   "pip --index-url https://x.example/simple install"),
                 1), "INDEX-REDIRECT DRIFT"),
+            # Install-source flags pip added (PEP 735 groups, PEP 723
+            # scripts) and an index flag pip 26 gained.
+            ("group-eq", on_line(" --group=test"), "REQUIREMENTS-FLAG DRIFT"),
+            ("group-sep", on_line(" --group test"), "REQUIREMENTS-FLAG DRIFT"),
+            ("from-script", on_line(" --requirements-from-script=x.py"),
+             "REQUIREMENTS-FLAG DRIFT"),
+            ("pypi-url", on_line(" --pypi-url https://x.example/"),
+             "INDEX-REDIRECT DRIFT"),
+            # ALLOWLIST polarity: any option not vetted reddens naming
+            # itself, including resolver knobs and a foreign -c file.
+            ("prefer-binary", on_line(" --prefer-binary"),
+             "UNVETTED PIP FLAG DRIFT"),
+            ("upgrade-strategy", on_line(" --upgrade-strategy=eager"),
+             "UNVETTED PIP FLAG DRIFT"),
+            ("target-dir", on_line(" --target /tmp/site"),
+             "UNVETTED PIP FLAG DRIFT"),
+            ("unknown-flag", on_line(" --brand-new-flag"),
+             "UNVETTED PIP FLAG DRIFT"),
+            ("foreign-constraints", on_line(" -c extra-constraints.txt"),
+             "UNVETTED PIP FLAG DRIFT"),
         ]:
             self._shape_reddens(tmp_path, monkeypatch, name, tripwire, match,
                                 workflow_text=text)
+
+        # CONTROLS: vetted options and every shipped spelling of the
+        # constraints path pass the tripwire AND the constraints arm.
+        for name, text in [
+            ("vetted-flags", on_line(" -q --no-cache-dir --no-input")),
+            ("dot-constraints", real_text.replace(
+                canonical, canonical.replace(
+                    "-c constraints-ci.txt", "-c ./constraints-ci.txt"), 1)),
+            ("workspace-constraints", real_text.replace(
+                canonical, canonical.replace(
+                    "-c constraints-ci.txt",
+                    "--constraint=$GITHUB_WORKSPACE/constraints-ci.txt"), 1)),
+        ]:
+            self._shape_stays_green(tmp_path, monkeypatch, name, tripwire,
+                                    workflow_text=text)
+            self._shape_stays_green(
+                tmp_path, monkeypatch, name + "-cov",
+                "test_constraints_pins_cover_the_install_line",
+                workflow_text=text)
+
+        # The option tables follow pip's own parser: a value option's VALUE
+        # is consumed, never read as a package (`--upgrade-strategy` was
+        # once listed value-less, so `eager` read as an operand).
+        for words, operands in [
+            ("pip install --upgrade-strategy eager x", ["x"]),
+            ("pip install --root-user-action ignore x", ["x"]),
+            ("pip install --group test x", ["x"]),
+            ("pip install -C k=v x", ["x"]),
+            ("pip install --pre --no-deps x", ["x"]),
+        ]:
+            assert self._parse_pip_words(words.split())[2] == operands, words
+        assert not (self._PIP_FLAGS_WITH_VALUE & self._PIP_KNOWN_LONG_FLAGS), (
+            "an option is listed both as value-taking and value-less")
 
         for name, command in [
             ("global-quiet", "python -m pip --quiet install evilpkg"),
             ("global-q", "pip -q install evilpkg"),
             # A value-taking global option this parser does NOT list: its
             # value must be skipped, not misread as the subcommand.
-            ("unknown-global-value", "pip --resume-retries 5 install evilpkg"),
+            ("unknown-global-value", "pip --brand-new-global 5 install evilpkg"),
             ("pip3-12", "pip3.12 install evilpkg"),
             ("m-attached", "python -mpip install evilpkg"),
             ("python-path", "/usr/bin/python3 -m pip install evilpkg"),
@@ -2809,13 +3011,20 @@ class TestDependencyDriftIsDetectable:
             ("and-list", "cd pact-plugin && pip install evilpkg"),
             ("subshell", "echo $(pip install evilpkg)"),
             ("uv-pip", "uv pip install evilpkg"),
+            # Program identity by BASENAME (Bugbot B1).
+            ("uv-pip-by-path", "/usr/bin/uv pip install evilpkg"),
         ]:
             self._shape_reddens(tmp_path, monkeypatch, name, census,
                                 "INSTALL CENSUS DRIFT",
                                 workflow_text=in_block(command))
 
         package_line = "python -m pip install --upgrade -c constraints-ci.txt \\"
+        upgrade_line = "python -m pip install --upgrade -c constraints-ci.txt pip\n"
         for name, script, arm, match in [
+            ("script-group-on-upgrade",
+             real_script.replace(
+                 upgrade_line, upgrade_line.replace(" pip\n", " --group=dev pip\n"), 1),
+             tripwire, "REQUIREMENTS-FLAG DRIFT"),
             ("script-attached-e",
              real_script.replace(package_line, package_line + "\n  -e./foo \\", 1),
              tripwire, "REQUIREMENTS-FLAG DRIFT"),
@@ -2945,18 +3154,31 @@ class TestDependencyDriftIsDetectable:
         line = next(
             ln for ln in pins.splitlines()
             if ln.strip() and not ln.startswith("#"))
-        name, _, version = line.partition("==")
+        # The pin itself, without any trailing comment the shipped line may
+        # carry, so every shape below mutates the PIN, not its comment.
+        pin = re.split(r"(?:^|\s)#", line, maxsplit=1)[0].strip()
+        name, _, version = pin.partition("==")
         major_minor = ".".join(version.split(".")[:2])
         for shape, replacement in [
             ("wildcard", f"{name}=={major_minor}.*"),
-            ("marker", f'{line}; python_version < "3.11"'),
+            ("marker", f'{pin}; python_version < "3.11"'),
             ("extra", f"{name}[dev]=={version}"),
+            # A comment is stripped first, so it cannot dress up a range.
+            ("commented-wildcard", f"{name}=={major_minor}.*  # floats"),
         ]:
             self._shape_reddens(
                 tmp_path, monkeypatch, shape,
                 "test_constraints_pins_cover_the_install_line",
                 "INEXACT PIN", extra_files={
                     "constraints-ci.txt": pins.replace(line, replacement, 1)})
+
+        # CONTROL (over-block): pip ends a requirements line at whitespace
+        # + `#`, so an exact pin with a trailing comment IS an exact pin.
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "trailing-comment",
+            "test_constraints_pins_cover_the_install_line", extra_files={
+                "constraints-ci.txt": pins.replace(
+                    line, f"{pin}  # pinned by the verified freeze", 1)})
 
     def test_runtime_pip_config_reddens(self, tmp_path, monkeypatch):
         """MUTATION ARM (runtime config): pip configured while CI RUNS.
@@ -3053,6 +3275,32 @@ class TestDependencyDriftIsDetectable:
             ("conda-install", "conda install -y ruff"),
             ("mamba-install", "mamba install -y ruff"),
             ("micromamba-install", "micromamba install -y ruff"),
+            # ALLOWLIST polarity: verbs and programs no list named.
+            ("uv-pip-sync", "uv pip sync requirements.txt"),
+            ("pip-sync", "pip-sync requirements.txt"),
+            ("poetry-sync", "poetry sync"),
+            ("pipenv-install", "pipenv install"),
+            ("pdm-install", "pdm install"),
+            ("hatch-run", "hatch run test"),
+            ("tox", "tox"),
+            ("nox", "nox -s tests"),
+            ("conda-create", "conda create -n ci python=3.12 numpy"),
+            ("conda-env-create", "conda env create -f environment.yml"),
+            ("mamba-update", "mamba update numpy"),
+            ("uv-global-then-add", "uv --project pact-plugin add httpx"),
+            ("uv-run-script", "uv run scripts/check.py"),
+            ("uv-run-plain", "uv run ruff check pact-plugin/"),
+            ("pre-commit-run", "pre-commit run --all-files"),
+            ("python-m-tox", "python -m tox"),
+            ("python-m-pre-commit", "python -m pre_commit run"),
+            # Program identity by BASENAME (Bugbot B1).
+            ("uv-by-path-sync", "/opt/tools/uv sync"),
+            ("uvx-by-path", "$HOME/.local/bin/uvx ruff check pact-plugin/"),
+            # A valued global option's VALUE in the verb slot fails closed
+            # (Bugbot B2): no table of these tools' global options exists.
+            ("uv-directory-sync", "uv --directory proj sync"),
+            ("uv-C-add", "uv -C proj add ruff"),
+            ("pipx-python-install", "pipx --python python3.12 install ruff"),
         ]:
             self._shape_reddens(
                 tmp_path, monkeypatch, name, arm, "TOOL-RUNNER DRIFT",
@@ -3089,6 +3337,14 @@ class TestDependencyDriftIsDetectable:
             "test_every_third_party_action_is_allowlisted",
             workflow_text=real_text.replace(
                 lint_step, "      - uses: actions/checkout@v5\n" + lint_step, 1))
+        # `python setup.py develop` installs the project and its declared
+        # requirements unpinned; the census also follows setup.py as a
+        # script, so the file exists in the shape.
+        self._shape_reddens(
+            tmp_path, monkeypatch, "setup-py-develop", arm, "TOOL-RUNNER DRIFT",
+            workflow_text=real_text.replace(
+                lint_anchor, lint_anchor + "          python setup.py develop\n", 1),
+            extra_files={"setup.py": "from setuptools import setup\nsetup()\n"})
         self._shape_reddens(
             tmp_path, monkeypatch, "script-pipx", arm, "TOOL-RUNNER DRIFT",
             script_text=real_script + "\npipx install pre-commit\n")
@@ -3096,15 +3352,19 @@ class TestDependencyDriftIsDetectable:
             tmp_path, monkeypatch, "script-uv-sync", arm, "TOOL-RUNNER DRIFT",
             script_text=real_script + "\nuv sync\n")
 
-        # CONTROLS: read-only verbs of the same programs install nothing
-        # and stay green — the tripwire keys on the installing verbs.
+        # CONTROLS: read-only invocations of the same programs install
+        # nothing and stay green — the allowlist admits only those.
         self._shape_stays_green(
             tmp_path, monkeypatch, "read-only-verbs", arm,
             workflow_text=real_text.replace(
                 lint_anchor,
                 lint_anchor
                 + "          uv --version\n          conda list\n"
-                + "          poetry --version\n          pipx list\n", 1))
+                + "          poetry --version\n          pipx list\n"
+                + "          uv pip list\n          conda env list\n"
+                + "          pre-commit --version\n          poetry show\n"
+                + "          uv --quiet pip list\n"
+                + "          uv --directory=pact-plugin pip list\n", 1))
 
     def test_the_census_follows_what_ci_executes(self, tmp_path, monkeypatch):
         """MUTATION ARM (execution-defined population): installs reached
