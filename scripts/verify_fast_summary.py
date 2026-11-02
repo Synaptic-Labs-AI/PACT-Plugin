@@ -47,7 +47,7 @@ _SELECTION_KEYS = (
 )
 _CANARY_KEYS = (
     "command", "ignore_paths", "rc", "summary_line", "expected_files",
-    "collected_files", "missing", "extra",
+    "collected_files", "collected_items", "missing", "extra",
 )
 _RUN_KEYS = (
     "command", "rc", "summary_line", "collected", "passed", "failed",
@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
         _require_summary_line(canary["canary"], "canary")
         _require_summary_line(summary["run"], "run")
 
-        # M5: the canary must have exercised the SAME selection the run used,
+        # The canary must have exercised the SAME selection the run used,
         # and both artifacts must describe the same commit. Without this the
         # canary could prove a selection nobody ran.
         canary_ignores = canary["canary"].get("ignore_paths")
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             raise VerificationFailure(
                 "CANARY-RC", f"canary rc is {canary['canary']['rc']}")
 
-        # F3: the comparison target comes from an INDEPENDENT source. Taking
+        # The comparison target comes from an INDEPENDENT source. Taking
         # it from the artifact let a self-consistent forged artifact pick the
         # commit it is compared against, which makes the comparison vacuous.
         if not independent_base:
@@ -310,6 +310,24 @@ def main(argv: list[str] | None = None) -> int:
             raise VerificationFailure(
                 "RUN-COLLECTED",
                 f"run collected {collected_value!r}; expected an integer > 0",
+            )
+        # The run must collect exactly the items the canary collected. A
+        # narrowing that only the run sees (an option or plugin that drops
+        # items without reporting them as deselected) changes this count
+        # and nothing else.
+        canary_items = canary["canary"]["collected_items"]
+        if (not isinstance(canary_items, int)
+                or isinstance(canary_items, bool) or canary_items <= 0):
+            raise VerificationFailure(
+                "CANARY-COLLECTED",
+                f"canary collected_items {canary_items!r}; expected an "
+                f"integer > 0",
+            )
+        if collected_value != canary_items:
+            raise VerificationFailure(
+                "COLLECTED-COUNT-MISMATCH",
+                f"run collected {collected_value} items but the canary "
+                f"collected {canary_items}",
             )
         for key in ("failed", "errors", "deselected"):
             value = summary["run"].get(key)

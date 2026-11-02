@@ -100,6 +100,7 @@ def rig(tmp_path):
         "path_base": "plugin_root",
         "baseline": BASELINE,
         "selection_machinery": list(SELECTION_MACHINERY),
+        "inert_paths": [],
         "guard_files": guards,
         "exclusions": entries,
     }
@@ -161,6 +162,7 @@ def _artifacts(root, plugin, manifest, *, summary_line=None,
             "summary_line": f"{len(expected_files)} tests collected in 0.01s",
             "expected_files": expected_files,
             "collected_files": expected_files,
+            "collected_items": len(expected_files),
             "missing": [],
             "extra": [],
         },
@@ -250,7 +252,7 @@ def test_an_add_back_selection_is_accepted(tmp_path, rig):
 
 
 def test_the_ordinary_selection_is_accepted(tmp_path, rig):
-    """Third B2 arm: the everyday path — exclusions applied, no add-backs.
+    """The everyday path — exclusions applied, no add-backs.
 
     The other controls are SELECT_ALL (no exclusions applied) and an
     add-back (>0). This pins the shape between them: a changed path with no
@@ -327,6 +329,14 @@ def _set(path, value):
         ("run-errors", _set(("run", "errors"), 1), None, "RUN-ERRORS"),
         ("run-deselected", _set(("run", "deselected"), 1), None,
          "RUN-DESELECTED"),
+        ("canary-collected", None, _set(("canary", "collected_items"), 0),
+         "CANARY-COLLECTED"),
+        # A narrowing only the run sees: the canary collected one more item
+        # than the run, with no deselection reported anywhere.
+        ("collected-count-mismatch", None,
+         lambda d: d["canary"].update(
+             collected_items=d["canary"]["collected_items"] + 1),
+         "COLLECTED-COUNT-MISMATCH"),
         ("ignore-mismatch", None,
          _set(("canary", "ignore_paths"), ["/tmp/x.py"]),
          "IGNORE-ARGS-MISMATCH"),
@@ -413,3 +423,49 @@ def test_no_summary_line_uses_the_no_summary_condition(tmp_path, rig):
     assert proc.returncode == 1
     assert "NO-SUMMARY-RUN" in proc.stderr
     assert "RUN-COLLECTED" not in proc.stderr
+
+def _fake_collect(plugin, discovered, summary):
+    """A stand-in `pytest` module in the runner's working directory."""
+    fake = "\n".join(f'print("{rel}::test_ok")' for rel in discovered)
+    fake += f'\nprint("{summary}")\n'
+    (plugin / "pytest.py").write_text(fake, encoding="utf-8")
+
+
+def _run_canary(root, manifest, summary, base_sha, env=None):
+    runner = ROOT / "scripts" / "run_fast_suite.py"
+    return subprocess.run(
+        [sys.executable, str(runner), "--collect-only",
+         "--base-sha", base_sha, "--repo-root", str(root),
+         "--manifest", str(manifest), "--summary", str(summary)],
+        capture_output=True, text=True, timeout=120, env=env)
+
+
+def test_the_canary_records_its_collected_item_count(tmp_path, rig):
+    """The verifier compares the run against this number, so it must exist."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    _fake_collect(plugin, discovered,
+                  f"{len(discovered) + 5} tests collected in 0.01s")
+    summary = tmp_path / "summary.json"
+    proc = _run_canary(root, manifest, summary, base_sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    canary = json.loads(
+        (tmp_path / ".fast-suite-canary.json").read_text(encoding="utf-8"))
+    assert canary["canary"]["collected_items"] == len(discovered) + 5
+
+
+def test_the_runner_refuses_an_inherited_pytest_addopts(tmp_path, rig):
+    """Inherited options can narrow the run where no artifact records it."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    _fake_collect(plugin, discovered,
+                  f"{len(discovered)} tests collected in 0.01s")
+    summary = tmp_path / "summary.json"
+    env = os.environ.copy()
+    env["PYTEST_ADDOPTS"] = "-k nothing"
+    proc = _run_canary(root, manifest, summary, base_sha, env=env)
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "PYTEST_ADDOPTS" in proc.stderr
+    assert not (tmp_path / ".fast-suite-canary.json").exists()

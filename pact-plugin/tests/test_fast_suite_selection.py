@@ -84,7 +84,8 @@ def core():
     return module
 
 
-def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None):
+def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None,
+              machinery=SELECTION_MACHINERY, inert=()):
     seams = seams or {}
     exclusions = tuple(
         core.Exclusion(
@@ -99,9 +100,10 @@ def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None):
     )
     return core.Manifest(
         path_base="plugin_root",
-        selection_machinery=SELECTION_MACHINERY,
+        selection_machinery=tuple(machinery),
         guard_files=GUARD_FILES,
         exclusions=exclusions,
+        inert_paths=tuple(inert),
     )
 
 
@@ -151,7 +153,7 @@ class TestAddBacks:
         add_back = result.added_back[0]
         assert add_back.path == "tests/test_slow.py"
         assert add_back.reason == "changed_test"
-        # matched_changed is REPO-relative (spec §3.1): exactly the path
+        # matched_changed is REPO-relative: exactly the path
         # changed_paths returned, prefix present.
         assert add_back.matched_changed == "pact-plugin/tests/test_slow.py"
 
@@ -287,6 +289,77 @@ def test_mapped_and_unmapped_production_in_one_change_selects_all(core):
     assert result.select_all_reason == "unmapped-production:hooks/unmapped.py"
 
 
+@pytest.mark.parametrize("pin", ["constraints-ci.txt", "pyproject.toml"])
+def test_the_dependency_pins_select_all_without_a_machinery_entry(core, pin):
+    """The hard-coded pin rule fires on its own, not via the manifest list."""
+    machinery = tuple(path for path in SELECTION_MACHINERY
+                      if path not in ("constraints-ci.txt", "pyproject.toml"))
+    result = _select(core, changed=[pin], machinery=machinery)
+    assert result.select_all_reason == "selection-machinery"
+    _assert_select_all(result)
+
+
+VERSION_BUMP = (
+    ".claude-plugin/marketplace.json",
+    "CHANGELOG.md",
+    "README.md",
+    "pact-plugin/.claude-plugin/plugin.json",
+    "pact-plugin/README.md",
+)
+
+
+class TestInertPaths:
+    """The version bump every PR carries must not widen the fast lane."""
+
+    @pytest.mark.parametrize("path,reason", [
+        ("pact-plugin/README.md", "plugin-root-file"),
+        ("pact-plugin/.claude-plugin/plugin.json",
+         "unmapped-production:.claude-plugin/plugin.json"),
+    ])
+    def test_a_bump_file_selects_all_when_not_inert(self, core, path, reason):
+        """Control: without the inert list these paths widen the lane."""
+        assert _select(core, changed=[path]).select_all_reason == reason
+
+    def test_the_whole_bump_applies_every_exclusion(self, core):
+        result = _select(core, changed=VERSION_BUMP, inert=VERSION_BUMP)
+        assert result.select_all_reason is None
+        assert result.excluded == frozenset({"tests/test_slow.py"})
+        assert result.added_back == ()
+
+    def test_an_inert_path_does_not_hide_a_seam_change(self, core):
+        result = _select(
+            core,
+            changed=[*VERSION_BUMP, "pact-plugin/hooks/merge_guard_pre.py"],
+            seams={"tests/test_slow.py": ("hooks/merge_guard_pre.py",)},
+            inert=VERSION_BUMP,
+        )
+        assert result.select_all_reason is None
+        assert [entry.path for entry in result.added_back] == [
+            "tests/test_slow.py"]
+
+    def test_an_inert_path_does_not_hide_an_unmapped_change(self, core):
+        result = _select(
+            core, changed=[*VERSION_BUMP, "pact-plugin/hooks/unmapped.py"],
+            inert=VERSION_BUMP)
+        assert result.select_all_reason == "unmapped-production:hooks/unmapped.py"
+
+
+class TestEmptySeams:
+    """An exclusion whose closure reaches no production module."""
+
+    def test_it_is_added_back_when_its_own_module_changes(self, core):
+        result = _select(core, changed=["pact-plugin/tests/test_slow.py"],
+                         seams={"tests/test_slow.py": ()})
+        assert result.select_all_reason is None
+        assert [(entry.path, entry.reason) for entry in result.added_back] == [
+            ("tests/test_slow.py", "changed_test")]
+
+    def test_it_stays_excluded_on_a_test_only_change(self, core):
+        result = _select(core, changed=["pact-plugin/tests/test_fast.py"],
+                         seams={"tests/test_slow.py": ()})
+        assert result.excluded == frozenset({"tests/test_slow.py"})
+
+
 # ---------------------------------------------------------------------------
 # Manifest loading: a rejection rig that otherwise loads cleanly.
 # ---------------------------------------------------------------------------
@@ -341,6 +414,7 @@ def _build_rig(tmp_path):
             "wall_seconds_total": 11.0,
         },
         "selection_machinery": list(SELECTION_MACHINERY),
+        "inert_paths": [],
         "guard_files": guards,
         "exclusions": exclusion_entries,
     }
@@ -359,6 +433,15 @@ def test_valid_rig_loads(core, tmp_path):
     manifest = core.load_manifest(_write_manifest(root, document))
     assert len(manifest.exclusions) == 24
     assert len(manifest.guard_files) == 10
+
+
+def test_inert_paths_and_empty_seams_load(core, tmp_path):
+    root, _, document = _build_rig(tmp_path)
+    document["inert_paths"] = [".claude-plugin/marketplace.json"]
+    document["exclusions"][0]["production_seams"] = []
+    manifest = core.load_manifest(_write_manifest(root, document))
+    assert manifest.inert_paths == (".claude-plugin/marketplace.json",)
+    assert manifest.exclusions[0].production_seams == ()
 
 
 def _mutate_exclusion(document, index, **changes):
@@ -444,6 +527,44 @@ def _swap_a_guard_for_a_real_but_wrong_path(document, root):
             # Rule-unique fragment: the nonexistence error also names this
             # path, so the path alone would not prove the .py rule fired.
             "must end in .py",
+        ),
+        (
+            "seam-under-tests",
+            lambda doc, root: (
+                _write(root / "pact-plugin" / "tests" / "support" / "census.py"),
+                doc["exclusions"][0].update(
+                    {"production_seams": ["tests/support/census.py"]}),
+            ),
+            "is under tests/",
+        ),
+        (
+            "inert-key-missing",
+            lambda doc, root: doc.pop("inert_paths"),
+            "missing required key 'inert_paths'",
+        ),
+        (
+            "inert-python-file",
+            lambda doc, root: doc.update(
+                {"inert_paths": ["pact-plugin/hooks/seam_0.py"]}),
+            "is a Python file and cannot be inert",
+        ),
+        (
+            "inert-missing-on-disk",
+            lambda doc, root: doc.update({"inert_paths": ["NOT-THERE.md"]}),
+            "Inert paths are repo-relative",
+        ),
+        (
+            "inert-is-machinery",
+            lambda doc, root: doc.update(
+                {"inert_paths": ["scripts/fast_suite_exclusions.json"]}),
+            "is selection machinery",
+        ),
+        (
+            "inert-duplicate",
+            lambda doc, root: doc.update({"inert_paths": [
+                ".claude-plugin/marketplace.json",
+                ".claude-plugin/marketplace.json"]}),
+            "duplicate inert path",
         ),
         (
             "seam-is-directory",
@@ -583,7 +704,7 @@ def _git_repo(tmp_path):
 
 
 class TestChangedPathsStatuses:
-    """F2: the four statuses, including the all-zeros regression.
+    """The four statuses, including the all-zeros regression.
 
     The fail-closed chain depends on these labels: a git failure mislabelled
     `ok` would fire no add-backs and narrow the fast lane silently.
@@ -624,13 +745,105 @@ class TestChangedPathsStatuses:
         assert status == "ok"
         assert paths == ["b.txt"]
 
+    def test_a_rename_reports_both_paths(self, core, tmp_path):
+        """--no-renames: the deleted old path must reach the selector too."""
+        repo = _git_repo(tmp_path)
+        base = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "mv", "a.txt", "renamed.txt")
+        _git(repo, "commit", "-q", "-m", "rename")
+        paths, status = core.changed_paths(base, repo)
+        assert status == "ok"
+        assert sorted(paths) == ["a.txt", "renamed.txt"]
+
+    def test_a_non_ascii_path_comes_back_verbatim(self, core, tmp_path):
+        """Without -z and quotePath=false git C-quotes it and it is dropped."""
+        repo = _git_repo(tmp_path)
+        base = _git(repo, "rev-parse", "HEAD")
+        target = repo / "pact-plugin" / "hooks" / "caf\u00e9.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "non-ascii")
+        paths, status = core.changed_paths(base, repo)
+        assert status == "ok"
+        assert paths == ["pact-plugin/hooks/caf\u00e9.py"]
+
+    def test_the_diff_is_against_the_merge_base(self, core, tmp_path):
+        """Three-dot: a commit on the base branch after the fork is not ours."""
+        repo = _git_repo(tmp_path)
+        fork = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "feature.txt").write_text("f", encoding="utf-8")
+        _git(repo, "add", "feature.txt")
+        _git(repo, "commit", "-q", "-m", "feature")
+        _git(repo, "checkout", "-q", "--detach", fork)
+        (repo / "base_only.txt").write_text("m", encoding="utf-8")
+        _git(repo, "add", "base_only.txt")
+        _git(repo, "commit", "-q", "-m", "base moved")
+        base_tip = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "feature")
+        paths, status = core.changed_paths(base_tip, repo)
+        assert status == "ok"
+        # A two-dot diff would also report base_only.txt (as a deletion).
+        assert paths == ["feature.txt"]
+
 
 def test_discover_excludes_a_nested_worktree_on_the_relative_path(core, tmp_path):
-    root, _, _ = _build_rig(tmp_path)
+    """The rig itself lives under a `.worktrees` directory, as CI never does
+    but every local worktree checkout does: a check on the ABSOLUTE path
+    would discover nothing here."""
+    root, _, _ = _build_rig(tmp_path / ".worktrees" / "feat")
+    assert ".worktrees" in root.parts
     plugin = root / "pact-plugin"
     nested = plugin / ".worktrees" / "feat" / "pact-plugin" / "tests" / "test_nested.py"
     _write(nested)
     discovered = core.discover(root)
+    assert discovered, "discovery found nothing under a .worktrees checkout"
     assert "tests/test_slow_0.py" in discovered
     assert not any(".worktrees" in path for path in discovered)
     assert all(not Path(path).is_absolute() for path in discovered)
+
+
+def test_a_no_tests_ran_summary_parses_as_zero_collected(core):
+    parsed = core.parse_pytest_summary("no tests ran in 0.01s")
+    assert parsed is not None
+    assert parsed["collected"] == 0
+    assert parsed["summary_line"] == "no tests ran in 0.01s"
+
+
+class TestImportClosure:
+    """The static closure the seam-completeness contract is built on."""
+
+    def _rig(self, tmp_path):
+        plugin = tmp_path / "pact-plugin"
+        _write(plugin / "hooks" / "shared" / "__init__.py",
+               "from .eager import thing\n")
+        _write(plugin / "hooks" / "shared" / "eager.py", "thing = 1\n")
+        _write(plugin / "hooks" / "shared" / "direct.py", "value = 1\n")
+        _write(plugin / "hooks" / "shared" / "unrelated.py", "")
+        _write(plugin / "hooks" / "runme.py", "import shared.direct\n")
+        _write(plugin / "tests" / "helper.py", "")
+        _write(plugin / "conftest.py", "import shared.unrelated\n")
+        return plugin
+
+    def test_a_package_import_follows_its_eager_init(self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_a.py",
+               "from shared.direct import value\n")
+        closure = core.import_closure(plugin, ["tests/test_a.py"])
+        assert {"hooks/shared/__init__.py", "hooks/shared/eager.py",
+                "hooks/shared/direct.py"} <= closure
+        assert "hooks/shared/unrelated.py" not in closure
+
+    def test_a_hook_named_as_a_string_is_followed(self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_b.py",
+               'HOOK = "runme.py"\nOTHER = "conftest.py"\n'
+               'FIXTURE = "tests/helper.py"\n')
+        closure = core.import_closure(plugin, ["tests/test_b.py"])
+        assert {"hooks/runme.py", "hooks/shared/direct.py",
+                "hooks/shared/eager.py"} <= closure
+        # A fixture file name is not a dependency edge.
+        assert "conftest.py" not in closure
+        assert "hooks/shared/unrelated.py" not in closure
+        assert "tests/helper.py" not in closure

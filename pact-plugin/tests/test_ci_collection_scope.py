@@ -69,6 +69,8 @@ follows the same convention where it reads the same workflow, to check that a
 runtime environment check brackets every test run.
 """
 
+import ast
+import importlib.util
 import json
 import re
 import subprocess
@@ -666,108 +668,437 @@ class TestTheFastManifestNamesRealCorpusFiles:
 # and the manifest in the same commit, so review remains the real control.
 EXPECTED_EXCLUSIONS = (
     ('tests/test_merge_guard_refused_is_mintable.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'mint matrix over nested refusal shapes'),
     ('tests/test_snapshot_provenance_semantics.py',
-     ('hooks/shared/session_journal.py',
-      'hooks/shared/task_metadata_snapshot.py'),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/shared/task_metadata_snapshot.py',
+      'hooks/staleness.py'),
      'deep-pressure totality over lookalike provenance values'),
     ('tests/test_merge_guard_substitution_mint.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/gh_helpers.py', 'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'large substitution-mint matrix'),
     ('tests/test_task_metadata_snapshot.py',
-     ('hooks/shared/task_metadata_snapshot.py',),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/shared/task_metadata_snapshot.py',
+      'hooks/staleness.py'),
      'deep-pressure totality over metadata payloads'),
     ('tests/test_snapshot_key_count_discriminator.py',
-     ('hooks/shared/task_metadata_snapshot.py',),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/shared/task_metadata_snapshot.py',
+      'hooks/staleness.py'),
      'key-count discriminator totality matrix'),
     ('tests/test_merge_guard_review_fixes.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'large review-fix regression matrix'),
     ('tests/test_memory_cli.py',
-     ('skills/pact-memory/scripts/cli.py',
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/config.py',
       'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
       'skills/pact-memory/scripts/memory_api.py',
       'skills/pact-memory/scripts/search.py',
       'skills/pact-memory/scripts/working_memory.py'),
      'real CLI subprocess and database work'),
     ('tests/test_pin_growth_populations.py',
-     ('hooks/pin_caps_gate.py', 'hooks/shared/claude_md_markers.py',
-      'hooks/shared/pin_growth.py'),
+     ('hooks/pin_caps.py',
+      'hooks/pin_caps_gate.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_drift.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/pin_growth.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'pin-growth population matrices'),
     ('tests/test_merge_guard_1140_carrier5_cert.py',
-     ('hooks/shared/merge_guard_common.py',),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'carrier certification matrix over nested compounds'),
     ('tests/test_claude_md_locator_census.py',
-     ('hooks/shared/claude_md_markers.py', 'hooks/shared/pin_growth.py'),
-     'whole-tree AST census of shipped CLAUDE.md parse sites; its true '
-     'subject is every production module, so an unmapped production change '
-     'forces SELECT_ALL'),
+     ('hooks/bootstrap_prompt_gate.py',
+      'hooks/pin_caps.py',
+      'hooks/pin_caps_gate.py',
+      'hooks/session_init.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_drift.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/pin_growth.py',
+      'hooks/shared/pin_markers.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
+     'whole-tree AST census of shipped CLAUDE.md parse sites; its '
+     'true subject is every production module, so an unmapped '
+     'production change forces SELECT_ALL'),
     ('tests/test_working_memory_fidelity.py',
-     ('skills/pact-memory/scripts/working_memory.py',),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
      'working-memory fidelity over many project populations'),
     ('tests/test_merge_guard_perf.py',
-     ('hooks/merge_guard_pre.py', 'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'parser performance and deep tokenization cases'),
     ('tests/test_claude_md_corpus_writers.py',
-     ('hooks/pin_caps.py', 'hooks/session_init.py',
+     ('hooks/pin_caps.py',
+      'hooks/session_init.py',
+      'hooks/shared/background_work.py',
       'hooks/shared/claude_md_manager.py',
-      'hooks/shared/claude_md_markers.py', 'hooks/shared/pin_markers.py',
-      'hooks/shared/session_resume.py', 'hooks/shared/stale_session.py',
-      'hooks/staleness.py', 'skills/pact-memory/scripts/__init__.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/pin_markers.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
       'skills/pact-memory/scripts/working_memory.py'),
      'large corpus-writer matrix'),
     ('tests/test_bootstrap_prompt_gate_unrecorded_lead.py',
-     ('hooks/bootstrap_marker_writer.py', 'hooks/bootstrap_prompt_gate.py',
-      'hooks/session_init.py'),
+     ('hooks/bootstrap_marker_writer.py',
+      'hooks/bootstrap_prompt_gate.py',
+      'hooks/pin_caps.py',
+      'hooks/session_init.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'subprocess hook runs per case'),
     ('tests/test_merge_guard_fan_out.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'merge-guard fan-out matrix'),
     ('tests/test_merge_guard_retirement_gaps.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'retirement-gap regression matrix'),
     ('tests/test_telegram_tools.py',
-     ('telegram/telegram_client.py', 'telegram/tools.py'),
+     ('telegram/telegram_client.py',
+      'telegram/tools.py'),
      'telegram tool rate-limit and reply-queue timing arms'),
     ('tests/test_claude_md_drift.py',
-     ('hooks/missed_wake_scan.py', 'hooks/shared/background_work.py',
+     ('hooks/missed_wake_scan.py',
+      'hooks/pin_caps.py',
+      'hooks/pin_caps_gate.py',
+      'hooks/shared/background_work.py',
       'hooks/shared/claude_md_drift.py',
-      'hooks/shared/claude_md_manager.py', 'hooks/shared/constants.py',
-      'hooks/shared/pact_context.py', 'hooks/track_files.py'),
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/pin_growth.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'hooks/track_files.py'),
      'clock-shift subprocess matrix over the drift writers'),
     ('tests/test_embedding_model_load_is_cache_first.py',
-     ('skills/pact-memory/scripts/embeddings.py',),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
      'embedding model load and cache arms'),
     ('tests/test_merge_guard_pr_state_retirement.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'PR-state retirement regression matrix'),
     ('tests/test_archive_pin.py',
-     ('hooks/pin_caps.py', 'hooks/shared/claude_md_markers.py',
-      'hooks/shared/project_scope.py', 'hooks/staleness.py',
-      'skills/pact-memory/scripts/config.py'),
+     ('hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/config.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/embeddings.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
      'archive-pin corpus census over CLAUDE.md fixtures'),
     ('tests/test_clock_shift_instrument.py',
-     ('tests/clock_shift/clock_shift_census.py',),
+     (),
      'clock-shift instrument subprocess probes'),
     ('tests/test_pin_caps_gate_credit.py',
-     ('hooks/shared/claude_md_drift.py',),
+     ('hooks/missed_wake_scan.py',
+      'hooks/pin_caps.py',
+      'hooks/pin_caps_gate.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_drift.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/pin_growth.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py',
+      'hooks/track_files.py'),
      'pin-caps credit matrix'),
     ('tests/test_merge_guard_nested_compound.py',
-     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
-      'hooks/shared/merge_guard_common.py'),
+     ('hooks/merge_guard_post.py',
+      'hooks/merge_guard_pre.py',
+      'hooks/pin_caps.py',
+      'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py',
+      'hooks/shared/constants.py',
+      'hooks/shared/gh_helpers.py',
+      'hooks/shared/merge_guard_common.py',
+      'hooks/shared/pact_context.py',
+      'hooks/shared/project_scope.py',
+      'hooks/shared/session_journal.py',
+      'hooks/shared/session_resume.py',
+      'hooks/shared/stale_session.py',
+      'hooks/staleness.py'),
      'nested compound detection matrix'),
 )
 
 
 class TestTheShippedManifestIsTheReviewedManifest:
-    """F5: WHICH 24 exclusions, their seams, and their named reasons.
+    """WHICH 24 exclusions, their seams, and their named reasons.
 
     A drift guard, not an adversarial barrier: a PR edits this table and the
     manifest in the same commit, so review remains the real control. Impact
@@ -816,3 +1147,145 @@ class TestTheShippedManifestIsTheReviewedManifest:
             "mechanism are reviewed data. If the change is intended, update "
             "EXPECTED_EXCLUSIONS in the same commit and say why."
         )
+
+
+def _load_selector(repo_root):
+    """The selection core, loaded by path from the checkout under test."""
+    path = repo_root / "scripts" / "fast_suite_selection.py"
+    assert path.is_file(), f"{path} is missing; the fast lane is partial"
+    spec = importlib.util.spec_from_file_location(
+        "_pact_fast_suite_selection_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec: dataclass annotations resolve through
+    # sys.modules[cls.__module__].
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    return module
+
+
+def _shipped_manifest():
+    repo_root, _ = _require_checkout()
+    _require_fast_lane(repo_root)
+    core = _load_selector(repo_root)
+    manifest = core.load_manifest(
+        repo_root / "scripts" / "fast_suite_exclusions.json")
+    return repo_root, core, manifest
+
+
+class TestTheSeamListsCoverEveryExclusionsImportClosure:
+    """A changed seam must add back EVERY exclusion that depends on it.
+
+    The seam lists are hand-written data; the import closure is computed. A
+    known seam that an exclusion reaches but does not list is a change that
+    leaves a dependent test excluded. Reddens when a test or a production
+    module gains an import of another exclusion's seam.
+    """
+
+    def test_every_known_seam_an_exclusion_reaches_is_one_of_its_seams(self):
+        repo_root, core, manifest = _shipped_manifest()
+        plugin_root = repo_root / "pact-plugin"
+        known = {seam for exclusion in manifest.exclusions
+                 for seam in exclusion.production_seams}
+        assert known, "the manifest maps no seams; the check would be vacuous"
+        gaps = []
+        reached_any = False
+        for exclusion in manifest.exclusions:
+            closure = core.import_closure(plugin_root, [exclusion.path])
+            # Non-vacuity: the closure starts at the module itself.
+            assert exclusion.path in closure, (
+                f"CLOSURE FAILURE, not a manifest regression: "
+                f"{exclusion.path} is absent from its own closure.")
+            reached = closure & known
+            reached_any = reached_any or bool(reached)
+            missing = sorted(reached - set(exclusion.production_seams))
+            if missing:
+                gaps.append(f"{exclusion.path}: {missing}")
+        assert reached_any, (
+            "CLOSURE FAILURE: no exclusion reaches any known seam, so the "
+            "import resolution found nothing.")
+        assert not gaps, (
+            "These exclusions reach a known seam they do not list, so a "
+            "change to that seam leaves them excluded:\n  "
+            + "\n  ".join(gaps)
+            + "\nAdd each seam to that exclusion's production_seams and to "
+            "EXPECTED_EXCLUSIONS."
+        )
+
+    def test_a_gh_helpers_change_adds_back_the_retirement_gaps_test(self):
+        """Behavioural proof: a gh_helpers mutant fails this excluded test."""
+        repo_root, core, manifest = _shipped_manifest()
+        selection = core.select(
+            core.discover(repo_root), manifest,
+            ["pact-plugin/hooks/shared/gh_helpers.py"], "ok")
+        assert selection.select_all_reason is None, selection.select_all_reason
+        added = {entry.path for entry in selection.added_back}
+        assert "tests/test_merge_guard_retirement_gaps.py" in added, added
+
+
+def _string_literals(path):
+    """Every string constant in a module, f-string fragments included."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    return [node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+
+
+class TestNoExcludedTestReadsAnInertPath:
+    """An inert path neither selects everything nor adds anything back.
+
+    That is safe only while no excluded test can read it, so this scans every
+    module in every exclusion's import closure for a string naming an inert
+    path, by repo path, plugin path or bare filename. Reddens when an
+    excluded test, or a module it imports, starts naming one.
+    """
+
+    def test_no_closure_module_names_an_inert_path(self):
+        repo_root, core, manifest = _shipped_manifest()
+        plugin_root = repo_root / "pact-plugin"
+        assert manifest.inert_paths, (
+            "the manifest lists no inert paths; this contract has no subject")
+        tokens = {}
+        for inert in manifest.inert_paths:
+            names = {inert, Path(inert).name}
+            plugin_relative = core.repo_to_plugin(inert)
+            if plugin_relative:
+                names.add(plugin_relative)
+            tokens[inert] = names
+        hits = []
+        scanned = 0
+        for exclusion in manifest.exclusions:
+            for rel in sorted(core.import_closure(plugin_root, [exclusion.path])):
+                literals = _string_literals(plugin_root / rel)
+                assert literals is not None, (
+                    f"SCAN FAILURE: {rel} in the closure of {exclusion.path} "
+                    f"did not parse, so it was not scanned.")
+                scanned += 1
+                for inert, names in tokens.items():
+                    for literal in literals:
+                        if any(name in literal for name in names):
+                            hits.append(
+                                f"{exclusion.path} -> {rel}: "
+                                f"{literal[:80]!r} names {inert}")
+        assert scanned >= len(manifest.exclusions), (
+            "SCAN FAILURE: fewer modules scanned than there are exclusions.")
+        assert not hits, (
+            "An excluded test can read an inert path, so a change to it must "
+            "not leave that test excluded:\n  " + "\n  ".join(sorted(set(hits)))
+            + "\nRemove the path from inert_paths."
+        )
+
+    def test_the_scan_sees_a_literal_naming_an_inert_path(self, tmp_path):
+        """Non-vacuity: the token match fires on the spelling it looks for."""
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            'MANIFEST = Path(root) / ".claude-plugin" / "plugin.json"\n'
+            'DOC = f"{root}/README.md"\n', encoding="utf-8")
+        literals = _string_literals(probe)
+        assert any("plugin.json" in literal for literal in literals)
+        assert any("README.md" in literal for literal in literals)

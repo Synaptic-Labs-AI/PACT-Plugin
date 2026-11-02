@@ -11,20 +11,21 @@ WHAT THIS MUST NEVER DO
   base, a changed production file nobody mapped -- resolves to SELECT_ALL.
   The fast lane may run slow; it may never run narrow.
 
-  No module-level I/O. Only discover(), load_manifest() and changed_paths()
-  touch the filesystem or git. select(), to_pytest_args(), build_argv() and
-  parse_pytest_summary() are pure.
+  No module-level I/O. Only discover(), load_manifest(), changed_paths() and
+  import_closure() touch the filesystem or git. select(), to_pytest_args(),
+  build_argv() and parse_pytest_summary() are pure.
 
 PATH DOMAINS (the single easiest thing to get wrong)
   Manifest paths, discovered corpus paths, and Selection members are
   PLUGIN-RELATIVE (relative to pact-plugin/).
-  selection_machinery, constraints-ci.txt and pyproject.toml are
-  REPO-RELATIVE, because git reports repo-relative paths.
+  selection_machinery, inert_paths, constraints-ci.txt and pyproject.toml
+  are REPO-RELATIVE, because git reports repo-relative paths.
   repo_to_plugin() is the only conversion, and it is table-tested.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -45,7 +46,7 @@ _GLOB_CHARS = ("*", "?", "[", "]")
 # a silently ignored field.
 _TOP_LEVEL_KEYS = frozenset({
     "schema_version", "path_base", "baseline",
-    "selection_machinery", "guard_files", "exclusions",
+    "selection_machinery", "inert_paths", "guard_files", "exclusions",
 })
 _BASELINE_KEYS = frozenset({
     "measured_at_commit", "interpreter", "pytest", "platform",
@@ -108,6 +109,10 @@ class Manifest:
     selection_machinery: tuple[str, ...]
     guard_files: tuple[str, ...]
     exclusions: tuple[Exclusion, ...]
+    # Repo-relative paths a change to which affects no excluded test, so they
+    # neither select everything nor add anything back. The property is held
+    # true by a contract test over every excluded test's import closure.
+    inert_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,6 +268,45 @@ def _validate_selection_machinery(entries: object, repo_root: Path,
     return tuple(validated)
 
 
+def _validate_inert_paths(entries: object, repo_root: Path,
+                          machinery: tuple[str, ...],
+                          errors: list[str]) -> tuple[str, ...]:
+    """Inert paths are existing, repo-relative, non-Python data files.
+
+    A Python file is never inert: importing it is how a test depends on it,
+    and the import-closure contract maps those through production_seams.
+    """
+    if not isinstance(entries, list):
+        errors.append("inert_paths: expected a list")
+        return ()
+    validated: list[str] = []
+    for index, raw in enumerate(entries):
+        field = f"inert_paths[{index}]"
+        rel = _check_relative(raw, field, errors)
+        if rel is None:
+            continue
+        if rel.endswith(".py") or Path(rel).name == "conftest.py":
+            errors.append(f"{field}: {rel!r} is a Python file and cannot be inert")
+            continue
+        if rel in machinery or rel in ("constraints-ci.txt", "pyproject.toml"):
+            errors.append(f"{field}: {rel!r} is selection machinery")
+            continue
+        if rel in validated:
+            errors.append(f"{field}: duplicate inert path {rel!r}")
+            continue
+        resolved = _check_under(rel, field, repo_root, errors)
+        if resolved is None:
+            continue
+        if not resolved.is_file():
+            errors.append(
+                f"{field}: {rel!r} resolves to {resolved}, which does not "
+                f"exist. Inert paths are repo-relative."
+            )
+            continue
+        validated.append(rel)
+    return tuple(validated)
+
+
 def _validate_guard_files(entries: object, plugin_root: Path,
                           errors: list[str]) -> tuple[str, ...]:
     if not isinstance(entries, list):
@@ -353,13 +397,27 @@ def _validate_exclusions(entries: object, plugin_root: Path,
         if not isinstance(mechanism, str) or not mechanism.strip():
             errors.append(f"{field}.mechanism: expected a non-empty string")
 
+        # An EMPTY list is legal: an exclusion whose import closure reaches no
+        # production module comes back only when its own module changes. The
+        # import-closure contract test, not this loader, decides whether a
+        # list is complete.
         seams_raw = entry.get("production_seams")
         seams: list[str] = []
-        if not isinstance(seams_raw, list) or not seams_raw:
-            errors.append(f"{field}.production_seams: expected a non-empty list")
+        if not isinstance(seams_raw, list):
+            errors.append(f"{field}.production_seams: expected a list")
         else:
             for seam_index, seam in enumerate(seams_raw):
                 seam_field = f"{field}.production_seams[{seam_index}]"
+                if isinstance(seam, str) and seam.startswith("tests/"):
+                    # A changed path under tests/ is a test module or a
+                    # test-support file; both are decided before seams are
+                    # consulted, so a seam here could never fire.
+                    errors.append(
+                        f"{seam_field}: {seam!r} is under tests/. A seam "
+                        f"there can never fire: a changed test-support file "
+                        f"already selects everything."
+                    )
+                    continue
                 seam_rel = _validate_data_path(seam, seam_field, plugin_root,
                                                errors)
                 if seam_rel is not None:
@@ -431,6 +489,8 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
     _validate_baseline(data.get("baseline"), errors)
     selection_machinery = _validate_selection_machinery(
         data.get("selection_machinery"), repo_root, errors)
+    inert_paths = _validate_inert_paths(
+        data.get("inert_paths"), repo_root, selection_machinery, errors)
     guard_files = _validate_guard_files(
         data.get("guard_files"), plugin_root, errors)
     exclusions = _validate_exclusions(
@@ -451,6 +511,7 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
         selection_machinery=selection_machinery,
         guard_files=guard_files,
         exclusions=exclusions,
+        inert_paths=inert_paths,
     )
 
 
@@ -492,12 +553,147 @@ def repo_to_plugin(path: str) -> str | None:
     return None
 
 
+# The sys.path entries the two conftests insert, plugin-relative. A test's
+# bare `import x` resolves against these, so the closure does too.
+_IMPORT_ROOTS = (
+    "",
+    "tests",
+    "hooks",
+    "skills/pact-memory",
+    "skills/pact-memory/scripts",
+    "skills/pact-coding-standards/scripts",
+)
+
+
+def _import_roots(plugin_root: Path) -> list[Path]:
+    roots = [plugin_root / rel for rel in _IMPORT_ROOTS]
+    roots.extend(sorted(plugin_root.glob("skills/*/scripts")))
+    return [root for root in dict.fromkeys(roots) if root.is_dir()]
+
+
+def _resolve_module(name: str, roots: list[Path]) -> list[Path]:
+    """Every file `import name` can load under any root: its packages too.
+
+    Resolution is a UNION over roots, not first-match: an over-approximated
+    closure costs an extra add-back; an under-approximated one drops a test.
+    """
+    parts = name.split(".")
+    found: list[Path] = []
+    for root in roots:
+        target = root.joinpath(*parts)
+        if (target / "__init__.py").is_file():
+            leaf = target / "__init__.py"
+        elif target.with_suffix(".py").is_file():
+            leaf = target.with_suffix(".py")
+        else:
+            continue
+        for depth in range(1, len(parts)):
+            init = root.joinpath(*parts[:depth], "__init__.py")
+            if init.is_file():
+                found.append(init)
+        found.append(leaf)
+    return found
+
+
+def _literal_script(value: str, plugin_root: Path,
+                    roots: list[Path]) -> list[Path]:
+    """A string literal naming a production .py file, e.g. a hook run by path.
+
+    Tests that run a hook as a subprocess name it as a string, which no
+    import edge sees. Test-tree files and conftests are skipped: a literal
+    there is a fixture file name, not a dependency.
+    """
+    if not value.endswith(".py") or "\n" in value or len(value) > 200:
+        return []
+    hits: list[Path] = []
+    for base in (plugin_root, *roots):
+        candidate = base / value
+        if not candidate.is_file() or candidate.name == "conftest.py":
+            continue
+        try:
+            relative = candidate.resolve().relative_to(plugin_root.resolve())
+        except ValueError:
+            continue
+        if relative.parts and relative.parts[0] == "tests":
+            continue
+        hits.append(candidate)
+    return hits
+
+
+def _module_edges(path: Path, plugin_root: Path,
+                  roots: list[Path]) -> list[Path]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return []
+    edges: list[Path] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                edges.extend(_resolve_module(alias.name, roots))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = path.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                package = (base.joinpath(*node.module.split("."))
+                           if node.module else base)
+                candidates = [base / "__init__.py",
+                              package / "__init__.py",
+                              package.with_suffix(".py")]
+                for alias in node.names:
+                    candidates.append(package / f"{alias.name}.py")
+                    candidates.append(package / alias.name / "__init__.py")
+                edges.extend(c for c in candidates if c.is_file())
+            elif node.module:
+                edges.extend(_resolve_module(node.module, roots))
+                # `from pkg import submodule` loads pkg/submodule.py.
+                for alias in node.names:
+                    edges.extend(_resolve_module(
+                        f"{node.module}.{alias.name}", roots))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            edges.extend(_literal_script(node.value, plugin_root, roots))
+    return edges
+
+
+def import_closure(plugin_root: Path, start: list[str]) -> frozenset[str]:
+    """Plugin-relative files statically reachable from `start` (plugin-relative).
+
+    Follows every import statement (module level and function local, so a
+    package's eager `__init__` imports are followed too), relative imports,
+    and string literals naming a production .py file. Over-approximates by
+    design: it is the floor a manifest's seam lists must cover.
+    """
+    root = Path(plugin_root).resolve()
+    roots = [r.resolve() for r in _import_roots(root)]
+    seen: set[Path] = set()
+    stack = [(root / rel).resolve() for rel in start]
+    while stack:
+        current = stack.pop()
+        if current in seen or not current.is_file():
+            continue
+        seen.add(current)
+        stack.extend(edge.resolve()
+                     for edge in _module_edges(current, root, roots))
+    closure: set[str] = set()
+    for path in seen:
+        try:
+            closure.add(path.relative_to(root).as_posix())
+        except ValueError:
+            continue
+    return frozenset(closure)
+
+
 def changed_paths(base_sha: str | None,
                   repo_root: Path) -> tuple[list[str], str]:
     """Changed repo-relative paths against `base_sha`; never raises.
 
     Statuses: ok | invalid-base | git-error | empty-diff. `--no-renames` is
     required so a rename shows both the old (deleted) and new (added) path.
+    `-z` is required so a non-ASCII path comes back verbatim: without it git
+    C-quotes the path, the quoted spelling matches no plugin prefix, and the
+    change is silently dropped. `core.quotePath=false` changes nothing while
+    `-z` is present; it is a second guard on the same property.
     """
     # An all-zeros SHA is a sentinel, not a commit: git would answer
     # "unknown revision" and the caller would read `git-error`, which says the
@@ -510,16 +706,20 @@ def changed_paths(base_sha: str | None,
         return [], "invalid-base"
     try:
         completed = subprocess.run(
-            ["git", "diff", "--name-only", "--no-renames",
-             f"{stripped}...HEAD"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=120,
+            ["git", "-c", "core.quotePath=false", "diff", "--name-only",
+             "-z", "--no-renames", f"{stripped}...HEAD"],
+            cwd=str(repo_root), capture_output=True, timeout=120,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return [], "git-error"
     if completed.returncode != 0:
         return [], "git-error"
-    paths = [line for line in completed.stdout.splitlines() if line.strip()]
+    try:
+        stdout = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return [], "git-error"
+    paths = [entry for entry in stdout.split("\0") if entry]
     if not paths:
         return [], "empty-diff"
     return paths, "ok"
@@ -551,6 +751,11 @@ def select(discovered: frozenset[str], manifest: Manifest,
     """Apply the ten precedence rules; the first match decides."""
     if status != "ok":
         return _select_all(discovered, status, f"changed-paths:{status}")
+
+    # Inert paths are removed before any rule sees them, so they neither
+    # select everything nor add anything back.
+    inert = set(manifest.inert_paths)
+    changed = [path for path in changed if path not in inert]
 
     machinery = set(manifest.selection_machinery)
     for changed_path in changed:
@@ -732,10 +937,10 @@ _NO_TESTS_RE = re.compile(r"\bno tests ran\b")
 def _undecorate(line: str) -> str:
     """Strip pytest's `=====` decoration and surrounding whitespace.
 
-    The decoration is not cosmetic to a parser: the SAME message is bare
-    under `-q` and `=`-decorated without it, so a pattern pinned to one form
-    matches nothing under the other and reads identically to a run that never
-    produced a summary.
+    This normalises the RECORDED summary line, so the same run records the
+    same `summary_line` with or without `-q`. Finding the line does not
+    depend on it: _TIMING_RE and _OUTCOME_RE are unanchored and match the
+    decorated form too.
     """
     return line.strip().strip("=").strip()
 

@@ -24,6 +24,9 @@
     "constraints-ci.txt",
     "pyproject.toml"
   ],
+  "inert_paths": [
+    "pact-plugin/README.md"
+  ],
   "guard_files": [
     "tests/test_ci_collection_scope.py",
     "tests/test_import_hygiene.py",
@@ -45,7 +48,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -54,8 +69,20 @@
       "tests": 11,
       "mechanism": "deep-pressure totality over lookalike provenance values",
       "production_seams": [
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
         "hooks/shared/session_journal.py",
-        "hooks/shared/task_metadata_snapshot.py"
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/shared/task_metadata_snapshot.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -66,8 +93,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
         "hooks/shared/gh_helpers.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -76,7 +114,20 @@
       "tests": 31,
       "mechanism": "deep-pressure totality over metadata payloads",
       "production_seams": [
-        "hooks/shared/task_metadata_snapshot.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/shared/task_metadata_snapshot.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -85,7 +136,20 @@
       "tests": 15,
       "mechanism": "key-count discriminator totality matrix",
       "production_seams": [
-        "hooks/shared/task_metadata_snapshot.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/shared/task_metadata_snapshot.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -96,7 +160,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -105,8 +181,24 @@
       "tests": 186,
       "mechanism": "real CLI subprocess and database work",
       "production_seams": [
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
+        "skills/pact-memory/scripts/__init__.py",
         "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/config.py",
         "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
         "skills/pact-memory/scripts/memory_api.py",
         "skills/pact-memory/scripts/search.py",
         "skills/pact-memory/scripts/working_memory.py"
@@ -118,9 +210,22 @@
       "tests": 58,
       "mechanism": "pin-growth population matrices",
       "production_seams": [
+        "hooks/pin_caps.py",
         "hooks/pin_caps_gate.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_drift.py",
+        "hooks/shared/claude_md_manager.py",
         "hooks/shared/claude_md_markers.py",
-        "hooks/shared/pin_growth.py"
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/pin_growth.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -129,7 +234,19 @@
       "tests": 297,
       "mechanism": "carrier certification matrix over nested compounds",
       "production_seams": [
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -138,8 +255,33 @@
       "tests": 95,
       "mechanism": "whole-tree AST census of shipped CLAUDE.md parse sites; its true subject is every production module, so an unmapped production change forces SELECT_ALL",
       "production_seams": [
+        "hooks/bootstrap_prompt_gate.py",
+        "hooks/pin_caps.py",
+        "hooks/pin_caps_gate.py",
+        "hooks/session_init.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_drift.py",
+        "hooks/shared/claude_md_manager.py",
         "hooks/shared/claude_md_markers.py",
-        "hooks/shared/pin_growth.py"
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/pin_growth.py",
+        "hooks/shared/pin_markers.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
+        "skills/pact-memory/scripts/working_memory.py"
       ]
     },
     {
@@ -148,6 +290,26 @@
       "tests": 17,
       "mechanism": "working-memory fidelity over many project populations",
       "production_seams": [
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
         "skills/pact-memory/scripts/working_memory.py"
       ]
     },
@@ -158,7 +320,19 @@
       "mechanism": "parser performance and deep tokenization cases",
       "production_seams": [
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -169,13 +343,25 @@
       "production_seams": [
         "hooks/pin_caps.py",
         "hooks/session_init.py",
+        "hooks/shared/background_work.py",
         "hooks/shared/claude_md_manager.py",
         "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
         "hooks/shared/pin_markers.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
         "hooks/shared/session_resume.py",
         "hooks/shared/stale_session.py",
         "hooks/staleness.py",
         "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
         "skills/pact-memory/scripts/working_memory.py"
       ]
     },
@@ -187,7 +373,20 @@
       "production_seams": [
         "hooks/bootstrap_marker_writer.py",
         "hooks/bootstrap_prompt_gate.py",
-        "hooks/session_init.py"
+        "hooks/pin_caps.py",
+        "hooks/session_init.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -198,7 +397,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -209,7 +420,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -229,11 +452,22 @@
       "mechanism": "clock-shift subprocess matrix over the drift writers",
       "production_seams": [
         "hooks/missed_wake_scan.py",
+        "hooks/pin_caps.py",
+        "hooks/pin_caps_gate.py",
         "hooks/shared/background_work.py",
         "hooks/shared/claude_md_drift.py",
         "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
         "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
         "hooks/shared/pact_context.py",
+        "hooks/shared/pin_growth.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
         "hooks/track_files.py"
       ]
     },
@@ -243,7 +477,26 @@
       "tests": 9,
       "mechanism": "embedding model load and cache arms",
       "production_seams": [
-        "skills/pact-memory/scripts/embeddings.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
+        "skills/pact-memory/scripts/working_memory.py"
       ]
     },
     {
@@ -254,7 +507,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     },
     {
@@ -264,10 +529,26 @@
       "mechanism": "archive-pin corpus census over CLAUDE.md fixtures",
       "production_seams": [
         "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
         "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
         "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
         "hooks/staleness.py",
-        "skills/pact-memory/scripts/config.py"
+        "skills/pact-memory/scripts/__init__.py",
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/config.py",
+        "skills/pact-memory/scripts/database.py",
+        "skills/pact-memory/scripts/embeddings.py",
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/search.py",
+        "skills/pact-memory/scripts/working_memory.py"
       ]
     },
     {
@@ -275,9 +556,7 @@
       "displayed_seconds": 12.26,
       "tests": 17,
       "mechanism": "clock-shift instrument subprocess probes",
-      "production_seams": [
-        "tests/clock_shift/clock_shift_census.py"
-      ]
+      "production_seams": []
     },
     {
       "path": "tests/test_pin_caps_gate_credit.py",
@@ -285,7 +564,24 @@
       "tests": 18,
       "mechanism": "pin-caps credit matrix",
       "production_seams": [
-        "hooks/shared/claude_md_drift.py"
+        "hooks/missed_wake_scan.py",
+        "hooks/pin_caps.py",
+        "hooks/pin_caps_gate.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_drift.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/pin_growth.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py",
+        "hooks/track_files.py"
       ]
     },
     {
@@ -296,7 +592,19 @@
       "production_seams": [
         "hooks/merge_guard_post.py",
         "hooks/merge_guard_pre.py",
-        "hooks/shared/merge_guard_common.py"
+        "hooks/pin_caps.py",
+        "hooks/shared/background_work.py",
+        "hooks/shared/claude_md_manager.py",
+        "hooks/shared/claude_md_markers.py",
+        "hooks/shared/constants.py",
+        "hooks/shared/gh_helpers.py",
+        "hooks/shared/merge_guard_common.py",
+        "hooks/shared/pact_context.py",
+        "hooks/shared/project_scope.py",
+        "hooks/shared/session_journal.py",
+        "hooks/shared/session_resume.py",
+        "hooks/shared/stale_session.py",
+        "hooks/staleness.py"
       ]
     }
   ]
