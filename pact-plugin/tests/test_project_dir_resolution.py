@@ -497,7 +497,6 @@ class TestWorkingMemoryRecordRung:
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
 
-        assert wm._get_claude_md_path() == claude_md
         path, base = wm._resolve_display_claude_md_with_base()
         assert path == claude_md
         assert base == umbrella.project, (
@@ -505,10 +504,12 @@ class TestWorkingMemoryRecordRung:
             "recorded dir — not a re-derivation"
         )
 
-    def test_record_without_a_claude_md_falls_through_to_git(self, tmp_path, monkeypatch):
-        """The existence coupling is preserved: a record naming a dir with no
-        CLAUDE.md does NOT end resolution (this resolver never creates the
-        file); the git anchor answers as before."""
+    def test_record_without_a_claude_md_does_not_fall_through_to_the_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """The record names the session's root: a record naming a dir with no
+        CLAUDE.md resolves nothing, and the cwd checkout's document is never
+        named (this resolver never creates the file, and has no cwd rung)."""
         umbrella = make_umbrella(tmp_path)  # has ./CLAUDE.md at the root...
         (umbrella.project / "CLAUDE.md").unlink()  # ...remove it: record probe must miss
         _arm_record(monkeypatch, tmp_path, umbrella.project)
@@ -517,7 +518,8 @@ class TestWorkingMemoryRecordRung:
         git_file = seed_claude_md(repo)
         monkeypatch.chdir(repo)
 
-        assert wm._get_claude_md_path() == git_file
+        assert git_file.exists(), "FIXTURE INVALID: the cwd checkout has no document"
+        assert wm._resolve_display_claude_md_path() is None
 
 
 class TestWorkingMemoryDisagreementGuard:
@@ -778,7 +780,7 @@ class TestR2SubRepoCwd:
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(umbrella.subrepo)
-        assert wm._get_claude_md_path() == umbrella_md
+        assert wm._resolve_display_claude_md_path() == umbrella_md
 
     def test_r2_subprocess_save_from_the_subrepo_scopes_the_umbrella(self, tmp_path):
         umbrella = make_umbrella(tmp_path)

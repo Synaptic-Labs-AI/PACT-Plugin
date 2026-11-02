@@ -929,7 +929,7 @@ class TestDisplayTargetResolver:
         prev = Path.cwd()
         os.chdir(str(plain))
         try:
-            with patch("scripts.working_memory.subprocess.run",
+            with patch("subprocess.run",
                        side_effect=FileNotFoundError("git missing")):
                 resolved = _resolve_display_claude_md_path()
         finally:

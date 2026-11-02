@@ -8,8 +8,8 @@ path it used to die on early. Each arm drives a READER (not
 
   - `staleness._resolve_project_claude_md_with_base`'s `--git-common-dir`
     launcher (via `get_project_claude_md_path`);
-  - `working_memory._resolve_display_claude_md_with_base`'s `--show-toplevel`
-    launcher and `_get_claude_md_path`'s `--git-common-dir` launcher;
+  - `working_memory._resolve_display_claude_md_with_base`, which now reaches
+    git only through `project_scope`;
   - `memory_api.main_repo_root`'s `--git-common-dir` launcher.
 
 The fixture's MAIN checkout directory name contains a byte that is not valid
@@ -17,9 +17,6 @@ UTF-8, so every one of those git outputs carries it. The worktree name is
 plain ASCII, so the bad byte reaches the output only through the main path --
 which is why the assertion is "resolves to MAIN", not "returns anything".
 
-NOT ARMED: `working_memory`'s branch-3 `--git-common-dir` launcher gets the
-same treatment, but the branch-2 arm above raises first on the pre-fix code,
-so branch 3 has no independent red. Stated rather than implied.
 """
 from __future__ import annotations
 
@@ -73,10 +70,8 @@ def test_the_staleness_reader_resolves_main(bad_main_repo):
 
 
 def test_the_working_memory_readers_resolve_main(bad_main_repo, monkeypatch):
-    """Launchers: `--show-toplevel` in
-    `_resolve_display_claude_md_with_base` and `--git-common-dir` in
-    `_get_claude_md_path` (session-record rung stubbed to a miss so the git
-    rungs run)."""
+    """The display resolver reaches MAIN through `project_scope`'s git
+    readers (session-record rung stubbed to a miss)."""
     from scripts import working_memory as wm
 
     main, _worktree, main_md = bad_main_repo
@@ -85,7 +80,6 @@ def test_the_working_memory_readers_resolve_main(bad_main_repo, monkeypatch):
     found, base = wm._resolve_display_claude_md_with_base()
     assert found == main_md
     assert base == main
-    assert wm._get_claude_md_path() == main_md
 
 
 def test_the_memory_api_root_reader_resolves_main(bad_main_repo):

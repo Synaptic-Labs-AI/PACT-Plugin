@@ -19,7 +19,6 @@ import fcntl
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -973,115 +972,6 @@ def _resolve_write_scope(doc: Document) -> tuple[int, int] | None:
 
     # STEP 3.
     return None
-
-
-def _find_existing_claude_md(base: Path) -> Optional[Path]:
-    """
-    Return the first existing CLAUDE.md under `base`, checking both
-    supported locations in priority order.
-
-    Claude Code accepts project memory at either `.claude/CLAUDE.md` (new
-    default) or `./CLAUDE.md` (legacy). This helper checks `.claude/CLAUDE.md`
-    first, then falls back to `./CLAUDE.md`, returning the first match or
-    None if neither exists.
-
-    Args:
-        base: Directory to probe for CLAUDE.md.
-
-    Returns:
-        Path to the existing CLAUDE.md, or None if neither location exists.
-    """
-    dot_claude = base / ".claude" / "CLAUDE.md"
-    if dot_claude.exists():
-        return dot_claude
-    legacy = base / "CLAUDE.md"
-    if legacy.exists():
-        return legacy
-    return None
-
-
-def _get_claude_md_path() -> Optional[Path]:
-    """
-    Get the path to CLAUDE.md in the project root.
-
-    Uses CLAUDE_PROJECT_DIR environment variable if set, then the session
-    record's project_dir, then git worktree/repo root detection, then the
-    current working directory. At each level, checks both `.claude/CLAUDE.md`
-    (new default) and `./CLAUDE.md` (legacy) in priority order.
-
-    Note: This mirrors the resolution strategy in hooks/staleness.py
-    (get_project_claude_md_path). Kept as a local copy: importing staleness
-    would require the sys.path bootstrap pact_session.py in this directory
-    carries, and the drift-noted twin remains the chosen mechanism here.
-
-    Returns:
-        Path to CLAUDE.md if it exists, None otherwise.
-    """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            return found
-
-    # Session-record rung: the directory session_init recorded at SessionStart,
-    # discovered via the CLAUDE_CODE_SESSION_ID glob in pact_session. Below env
-    # (a present declaration wins), ABOVE the git/cwd derivations — in a
-    # multi-repo workspace the cwd's git root can be the WRONG scope. The
-    # existence coupling is preserved: the record supplies the base to PROBE,
-    # and a miss falls through exactly like an env miss (this resolver never
-    # creates CLAUDE.md).
-    record_dir = get_project_dir_from_session_record()
-    if record_dir:
-        found = _find_existing_claude_md(Path(record_dir))
-        if found is not None:
-            return found
-
-    # Fallback: detect git root (worktree-safe)
-    # Uses --git-common-dir instead of --show-toplevel because the latter
-    # returns the worktree path when run inside a worktree, which may not
-    # contain CLAUDE.md. --git-common-dir always points to the shared .git
-    # directory; its parent is the main repo root where CLAUDE.md lives.
-    # git returns this path relative to the invoking directory when run at a
-    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
-    # result against the cwd before taking its parent.
-    # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
-    #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
-    # Function-level: the shared package is importable only after
-    # pact_session's sys.path bootstrap has run at module import.
-    from shared.project_scope import git_env_without_location
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=False,
-            timeout=5,
-            env=git_env_without_location(),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(_decode_git_line(result.stdout))
-            if not common_dir.is_absolute():
-                common_dir = Path.cwd() / common_dir
-            repo_root = common_dir.resolve().parent
-            found = _find_existing_claude_md(repo_root)
-            if found is not None:
-                return found
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-        pass
-
-    # Last resort: current working directory
-    return _find_existing_claude_md(Path.cwd())
-
-
-def _decode_git_line(raw: bytes) -> str:
-    """git's stdout as one path, dropping ONLY its terminating newline.
-
-    A path may end in whitespace and may contain a carriage return; a
-    strip() would truncate it, and the checkout-root verification would then
-    reject a legitimate checkout whose name ends in a space.
-    """
-    text = os.fsdecode(raw)
-    return text[:-1] if text.endswith("\n") else text
 
 
 def _resolve_display_claude_md_with_base(
@@ -2153,8 +2043,8 @@ def _target_is_inside_the_declared_project_dir(resolved_target: Path) -> bool:
     to a git anchor that pointed at a checkout nobody had named.
 
     THE CHECK IS CONTAINMENT, NEVER THE PRESENCE OF THE VARIABLE. A set variable
-    is a PROXY and a wrong one: `_find_existing_claude_md` probes that directory
-    and CONTINUES when it finds nothing, so resolution can begin at a declared
+    is a PROXY and a wrong one: a resolver can probe that directory and
+    CONTINUE when it finds nothing, so resolution can begin at a declared
     root and finish somewhere else entirely. Presence would exempt exactly that
     escape. Comparing the RESOLVED path against the declared root reports what
     resolution did rather than what the caller intended.
