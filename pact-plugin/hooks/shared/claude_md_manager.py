@@ -41,6 +41,7 @@ from .paths import get_claude_config_dir
 # imports this module, so a module-level import would load it in every hook.
 if TYPE_CHECKING:
     from .claude_md_markers import Document, Line, Located
+    from .project_scope import SessionRoot
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
@@ -1154,6 +1155,86 @@ def resolve_project_claude_md_path(
     if legacy.exists():
         return legacy, "legacy"
     return dot_claude, "new_default"
+
+
+class ManagedDocument(NamedTuple):
+    """The session's managed project document.
+
+    `path` is the existing document, or the create target when `exists` is
+    False; `base` is the directory `path` lives under, the containment anchor
+    for every write to it.
+    """
+
+    path: Path
+    base: Path
+    exists: bool
+
+
+def _first_document_under(
+    base: Path, assume_present: Path | None
+) -> Path | None:
+    """The first canonical document under `base` that exists, or that is the
+    same file as `assume_present` (a Write about to create it)."""
+    for candidate in managed_document_paths(base):
+        if candidate.exists():
+            return candidate
+        if assume_present is not None:
+            # Late import: staleness imports this module at its top.
+            from staleness import same_path
+
+            if same_path(candidate, assume_present):
+                return candidate
+    return None
+
+
+def resolve_managed_document(
+    root: str | os.PathLike[str],
+    assume_present: Path | None = None,
+) -> ManagedDocument:
+    """THE ONE DOCUMENT RULE for a KNOWN project-memory root.
+
+    1. The canonical documents at `root` (`.claude/CLAUDE.md`, then
+       `CLAUDE.md`): the first that exists, or is `assume_present`, wins.
+    2. When `root` holds none, the same probe at the main checkout that
+       strictly encloses it (`project_scope.enclosing_main_checkout`): a
+       subdirectory session uses its checkout's document. That function never
+       yields a checkout whose canonical document is the user-global
+       CLAUDE.md.
+    3. Otherwise the create target `<root>/.claude/CLAUDE.md`, never the
+       enclosing checkout's.
+
+    Nothing else is probed: no git toplevel, no common-dir parent and no
+    cwd. The caller passes a root it obtained from `session_memory_root` or
+    `memory_root_of`; an unknown root has no document.
+    """
+    from .project_scope import enclosing_main_checkout
+
+    base = Path(root)
+    found = _first_document_under(base, assume_present)
+    if found is not None:
+        return ManagedDocument(found, base, True)
+    enclosing = enclosing_main_checkout(base)
+    if enclosing is not None:
+        found = _first_document_under(enclosing, assume_present)
+        if found is not None:
+            return ManagedDocument(found, enclosing, True)
+    return ManagedDocument(managed_document_paths(base)[0], base, False)
+
+
+def session_document(
+    assume_present: Path | None = None,
+) -> tuple[SessionRoot, ManagedDocument | None]:
+    """This session's root and its managed document, from ONE observation.
+
+    The document is None exactly when the root is unknown; the SessionRoot
+    then carries the cause. Every ambient reader calls this and nothing else.
+    """
+    from .project_scope import session_memory_root
+
+    session = session_memory_root()
+    if session.root is None:
+        return session, None
+    return session, resolve_managed_document(session.root, assume_present)
 
 
 def ensure_dot_claude_parent(path: Path) -> None:
