@@ -714,6 +714,27 @@ class TestHarvestRuleProse:
         assert else_block.count("report(outcome.report)") == 1
         assert "task_id, e.get(\"agent\", \"\")" in SKILL_TEXT
 
+    def test_empty_membership_rule_is_stated(self):
+        """The rule text must define EMPTY as membership, not falsiness: 0 and
+        False being content is the property the whole branch depends on, and
+        prose is its only carrier."""
+        assert "`EMPTY` MEANS MEMBERSHIP IN" in SKILL_TEXT
+
+    def test_output_spelling_rule_is_stated(self):
+        """The rule text must say that no journal spelling of a task-file-won
+        field survives; the code drops every alias spelling and the arms
+        assert it, but without this sentence a reader cannot know."""
+        assert "NO JOURNAL SPELLING OF IT SURVIVES" in SKILL_TEXT
+
+    def test_old_format_candidate_ordering_is_stated(self):
+        """The rule text must say an identity match in ANY candidate beats an
+        earlier content-only match; otherwise a reader can short-circuit at
+        the first mixed result."""
+        assert (
+            "CHECK EVERY NAMED CANDIDATE BEFORE REPORTING A MIXED EVENT"
+            in SKILL_TEXT
+        )
+
     def test_old_format_candidates_are_read_only_when_needed(self):
         """Architecture performance note: new-format events take no extra
         read. An unguarded candidate build reads the stores for every task,
