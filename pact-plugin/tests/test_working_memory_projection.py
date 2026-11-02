@@ -468,15 +468,11 @@ _GUARDED_RESOLVERS = (
     ),
     (
         "scripts/archive_pin.py",
-        # The census follows the call the code makes, and that call moved
-        # again with the parity repair: the archive now probes the
-        # PROJECT-MEMORY root first (resolve_project_claude_md_path) and only
-        # falls through to the same-project resolver when that root holds no
-        # document. The escape guard still follows EITHER route, which is what
-        # this entry holds the caller to; pinning the primary call keeps
+        # The census follows the call the code makes: the archive resolves
+        # the session document. Pinning that call keeps
         # `_KNOWN_GUARDED_CALLERS` loud if `resolve_claude_md` ever stops
-        # resolving at all.
-        "resolve_project_claude_md_path",
+        # resolving through it.
+        "session_document",
         "_stays_in_declared_project",
         frozenset(),
     ),

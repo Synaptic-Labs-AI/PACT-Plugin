@@ -441,17 +441,9 @@ def _verdict(raw, index):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "CLAUDE.md"
         path.write_bytes(raw)
-        # Pin BOTH calls `resolve_claude_md` makes after the parity repair: the
-        # project-memory probe (primary) and the same-project fall-through used
-        # only when that probe has no document. "legacy" keeps the primary
-        # answer authoritative; the fall-through pin keeps the test in control
-        # if the primary ever reports new_default.
-        with mock.patch.object(
-                archive_pin, "resolve_project_claude_md_path",
-                lambda *a, **k: (path, "legacy")), \
-                mock.patch.object(
-                    archive_pin, "get_project_claude_md_path",
-                    lambda *a, **k: path), \
+        # Declare the temporary directory as the session's project: the
+        # archive's resolver (the session document) then names `path`.
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": directory}), \
                 mock.patch.object(archive_pin, "_run_memory_cli", memory_cli):
             return archive_pin.build_verdict(index, db_path=None)
 
@@ -558,13 +550,8 @@ def test_the_archive_refuses_the_exposed_corpus_file_through_the_real_memory_cli
     raw = (_CORPUS / "hidden_declaration_closed_by_prose_ending_gt.md").read_bytes()
     path = tmp_path / "CLAUDE.md"
     path.write_bytes(raw)
-    monkeypatch.setattr(
-        archive_pin, "resolve_project_claude_md_path",
-        lambda *a, **k: (path, "legacy"),
-    )
-    monkeypatch.setattr(
-        archive_pin, "get_project_claude_md_path", lambda *a, **k: path
-    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     for key, value in hf_cache_env().items():
         monkeypatch.setenv(key, value)
     verdict = archive_pin.build_verdict(0, db_path=str(memory_store("archive.db")))

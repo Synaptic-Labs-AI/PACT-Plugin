@@ -847,24 +847,28 @@ def test_the_archive_reports_no_unknown_cause_when_none_is_identified(
     forged = _forged_gitfile(repo, tmp_path, "no-cause-archive")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    # FAULT INJECTION, NOT A PRODUCTION SHAPE -- see the sibling above: the
-    # helper returns a real Path on every path, so (None, None) cannot occur.
-    # The call count proves the stub is reached; it says nothing about a
-    # fallback placed inside a guarded branch.
+    # FAULT INJECTION, NOT A PRODUCTION SHAPE: `session_memory_root` never
+    # returns an unknown root without a cause. The call count proves the stub
+    # is reached; it says nothing about a fallback placed inside a guarded
+    # branch. A None cause must raise (`unknown_root_reason` refuses it as a
+    # caller bug) or refuse without a cause, and never resolve a document.
     calls = []
 
-    def no_cause(pd):
-        calls.append(pd)
-        return (None, None)
+    def no_cause():
+        calls.append(True)
+        return project_scope.SessionRoot(forged, True, None, None)
 
-    monkeypatch.setattr(project_scope, "project_memory_root_and_cause", no_cause)
+    monkeypatch.setattr(project_scope, "session_memory_root", no_cause)
 
+    reason = ""
     try:
-        archive_pin.resolve_claude_md()
+        resolved = archive_pin.resolve_claude_md()
     except archive_pin._Unevaluable as exc:
         reason = str(exc.reason)
+    except ValueError:
+        pass
     else:
-        reason = ""
+        raise AssertionError(f"an unknown root resolved a document: {resolved}")
 
     assert len(calls) == 1, calls
     assert "no longer exists" not in reason, reason

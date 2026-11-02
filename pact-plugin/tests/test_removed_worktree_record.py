@@ -506,8 +506,10 @@ class TestArchivePinReadsTheRecordToo:
     def test_archive_pin_never_resolves_a_record_naming_another_repository(
         self, layout_root, monkeypatch
     ):
-        """Never B. The record is not trusted, the cwd rung resolves the
-        declaration's own checkout, and the scope guard admits that one."""
+        """Never B. The record is not trusted and there is no cwd rung, so
+        the archive refuses with the missing cause rather than resolving any
+        document -- neither the other repository's nor, through the cwd,
+        main's."""
         import archive_pin
 
         main, worktree, identity = _worktree_under_main_removed(layout_root)
@@ -517,12 +519,12 @@ class TestArchivePinReadsTheRecordToo:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
         monkeypatch.chdir(main)
 
-        path, _base = archive_pin.resolve_claude_md()
+        with pytest.raises(archive_pin._Unevaluable) as excinfo:
+            archive_pin.resolve_claude_md()
 
-        assert Path(path).resolve() == (main / ".claude" / "CLAUDE.md").resolve()
-        assert Path(path).resolve() != (
-            other / ".claude" / "CLAUDE.md"
-        ).resolve()
+        reason = excinfo.value.reason
+        assert "no longer exists" in reason, reason
+        assert str(other) not in reason, reason
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +631,8 @@ class TestTheRecordCannotBeTrusted:
 
     def test_a_forged_record_refuses_and_never_redirects(self, tmp_path, monkeypatch):
         """A record naming this declaration whose common dir is not a checkout
-        is an integrity failure, not a fall-through."""
+        verifies nothing: the archive refuses with the missing cause and
+        names the record, never falling through to the cwd's checkout."""
         import archive_pin
 
         main, removed, identity = _pruned_worktree(tmp_path / "layout")
@@ -646,7 +649,7 @@ class TestTheRecordCannotBeTrusted:
         with pytest.raises(archive_pin._Unevaluable) as excinfo:
             archive_pin.resolve_claude_md()
 
-        assert "does not verify" in excinfo.value.reason, excinfo.value.reason
+        assert "did not verify" in excinfo.value.reason, excinfo.value.reason
 
     def test_the_pin_gate_advisory_names_the_removed_worktree(
         self, tmp_path, monkeypatch

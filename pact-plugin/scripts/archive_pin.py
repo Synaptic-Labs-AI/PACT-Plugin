@@ -375,24 +375,7 @@ _PIN_HEADING_ROW = _pin_caps._PIN_HEADING_ROW
 _date_comment_row = _pin_caps._date_comment_row
 locate_pinned = _staleness.locate_pinned
 _pinned_body = _staleness._pinned_body
-get_project_claude_md_path = _staleness.get_project_claude_md_path
-# #1653: the session's project-memory file (MAIN's for a linked worktree).
-# archive_pin ARCHIVES A PIN, which writes the document through the memory
-# CLI -- so this is a writer, and it must follow the same root as every other
-# writer or it reopens the split the PR exists to close.
-resolve_project_claude_md_path = _staleness.resolve_project_claude_md_path
-# The (path, base) form. `base` is the directory the resolver ACTUALLY found
-# the file under, captured before descending into `.claude` -- a trusted
-# pre-resolve anchor rather than a re-derivation from the returned path.
-_resolve_project_claude_md_with_base = (
-    _staleness._resolve_project_claude_md_with_base
-)
 _find_existing_claude_md = _staleness._find_existing_claude_md
-# Lexical inverse of the resolver's base/CLAUDE.md construction. Purely
-# lexical (pathlib .parent never follows symlinks), and already locked to
-# the resolver's own shape by TestStalenessLexicalBaseParity -- so it is
-# the right primitive for project attribution, not a second derivation.
-_lexical_base_of = _staleness._lexical_base_of
 
 
 class _Unevaluable(Exception):
@@ -529,175 +512,43 @@ from shared.project_scope import (  # noqa: E402
 
 
 def resolve_claude_md():
-    """Resolve the CLAUDE.md to operate on, refusing a cross-project fallback.
+    """Resolve the CLAUDE.md to operate on: this session's managed document.
 
-    Returns (path, base). RAISES `_Unevaluable` rather than silently operating
-    on a file the invocation never named.
+    Returns (path, base). RAISES `_Unevaluable` rather than operating on a
+    file the invocation never named.
 
-    THE DEFECT THIS CLOSES. Resolution order is CLAUDE_PROJECT_DIR -> git
-    common-dir parent -> CWD, and a miss at any step falls through SILENTLY.
-    So CLAUDE_PROJECT_DIR naming a directory with no CLAUDE.md does not fail --
-    it resolves to a DIFFERENT project's file and reports a confident success.
-    Reproduced deliberately: with the env var naming project_b and the CWD in
-    project_a, the resolver returns project_a's CLAUDE.md.
+    ONE RESOLVER, ONE OBSERVATION. `claude_md_manager.session_document()`
+    gives the session's root (CLAUDE_PROJECT_DIR, else the session record,
+    else the cwd, with record recovery for a missing or unanswerable root)
+    and its managed document: the canonical file at the root, else at the
+    main checkout that strictly encloses it. For a linked worktree that is
+    the MAIN checkout's document, never the worktree's own copy. Archiving
+    WRITES (through the memory CLI), so an unknown root refuses with its
+    cause, and a document that does not exist is not created.
 
-    Step 3's heading cross-check cannot see this. `check_pin_caps.py` uses the
-    SAME resolver, so the listing step and the archival step agree on the same
-    wrong file and every heading matches. That check catches an index shift
-    WITHIN a file; nothing catches a wrong FILE.
-
-    TWO REFUSALS, NEITHER NARROW BY CONSTRUCTION. (1) An UNKNOWN or
-    unverified memory root refuses whether or not CLAUDE_PROJECT_DIR is set:
-    the anchor is the declaration, or the CWD when it is absent. (2) A
-    resolution whose base is a LINKED WORKTREE refuses even when the scope
-    guard would admit it -- `stays_in_declared_project` admits the root of
-    ANY checkout of the repository, another worktree included, so the guard
-    alone let the shadow copy through. A same-project fall-through still
-    resolves (the project-memory root is probed FIRST, then the guarded
-    fall-through), and a main checkout's own document is admitted.
+    The scope guard below stays as defence in depth: a declaration holding no
+    document must not resolve into a different project.
     """
-    # PARITY WITH THE SYNC SITES, NOT THE STRICT READER RULE (#1653/D2). The
-    # archive belongs to the population that resolves through the git/cwd
-    # fall-through and then judges scope with `stays_in_declared_project`; the
-    # GUARD is this site's safety property, and it refuses a worktree copy
-    # (`same_repository(declared, worktree)` is False) before anything is
-    # archived. The strict probe-the-memory-root-only rule belongs to the
-    # UNGUARDED writer (session_init step 4); applying it here made
-    # archive_pin refuse same-project resolutions its siblings admit, which is
-    # the disagreement TestEverySiteJudgesProjectScopeAlike pins.
-    # Derive the base LEXICALLY from the result, rather than taking the
-    # with-base form directly. Tests that redirect the archive patch
-    # `get_project_claude_md_path` on THIS module.
-    # AN UNKNOWN memory root means the archive cannot identify the project's
-    # document. `project_memory_root` fails OPEN to its input, so resolution
-    # would land on a worktree's own CLAUDE.md and the archive would edit the
-    # copy this rule keeps out of project memory. ARCHIVING WRITES (through
-    # the memory CLI), so this is a writer and takes the writer's rule:
-    # refuse rather than operate on a guess.
-    #
-    # #1653/D3: the rule holds on the NO-DECLARED-DIR route too -- the cwd is
-    # the anchor the resolver falls back to, so an unknown root there would
-    # archive the worktree copy just the same.
-    from shared.project_scope import (
-        RECORD_CONTAINED,
-        RECORD_CORRUPT,
-        ROOT_CAUSE_MISSING,
-        anchor_directory_is_missing,
-        cwd_checkout_memory_root,
-        project_memory_root_and_cause,
-        project_memory_root_or_none,
-        record_resolution,
-        unknown_root_reason,
-    )
+    from shared.claude_md_manager import session_document
+    from shared.project_scope import ROOT_CAUSE_MISSING, unknown_root_reason
 
-    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    anchor = Path(env_dir) if env_dir else Path.cwd()
-    # ONE RESOLUTION DECIDES BOTH THE BRANCH AND THE TEXT. The cause is not
-    # re-derived for the message, so the refusal cannot describe a state the
-    # branch did not see. A MISSING anchor is the only cause that continues:
-    # it has its own record/fall-through rung below. An existing base that
-    # cannot be identified still refuses -- probing on could archive another
-    # repository's document.
-    # ONE RESOLUTION: the root and the cause come from the same call, so a
-    # state change between a guard and a separate root lookup cannot let the
-    # archive proceed on a fail-safe input path.
-    resolved_root, cause = project_memory_root_and_cause(anchor)
-    if cause is not None and cause != ROOT_CAUSE_MISSING:
+    session, doc = session_document()
+    if doc is None:
+        clause = unknown_root_reason(session.cause, session.anchor)
+        if session.cause == ROOT_CAUSE_MISSING:
+            # Record recovery already ran for a missing anchor and did not
+            # verify a main checkout, which is the only reason the cause
+            # survived. Same wording as the pin-cap gate's advisory.
+            clause += " and the session record did not verify a main checkout for it"
         raise _Unevaluable(
-            f"project memory root unknown: "
-            f"{unknown_root_reason(cause, anchor)}, so the project CLAUDE.md "
+            f"project memory root unknown: {clause}, so the project CLAUDE.md "
             "cannot be identified; nothing was archived"
         )
-    memory_root = None if cause is not None else resolved_root
-    # THE SYNC SITES' MODEL, in two steps. (1) The PROJECT-MEMORY root first:
-    # a worktree session archives MAIN's document even when the worktree
-    # carries its own copy (#1653). (2) When the root holds no document, the
-    # same git/cwd fall-through the sync sites use, because some same-project
-    # layouts put the document beside the declared dir (a declared main
-    # subdirectory, a moved worktree).
-    #
-    # THE GUARD BELOW IS NOT ENOUGH FOR STEP 2, and this was measured, not
-    # reasoned: `stays_in_declared_project` deliberately admits the root of
-    # ANY checkout of the declaration's repository -- another worktree
-    # included (project_scope.py, "ADMITTED, and nothing else", rule 3). With
-    # declared MAIN empty and cwd in a worktree that carries a document, the
-    # fall-through returns the WORKTREE copy and the guard admits it. The
-    # memory-root check right after `base` is what keeps the shadow copy out;
-    # the sync sites never reach this shape because their resolver retargets
-    # every base through `project_memory_root` before probing.
-    # Inside this branch the declaration is MISSING: an existing-but-
-    # unanswerable anchor raised above.
-    anchor_is_missing = memory_root is None and anchor_directory_is_missing(anchor)
-    if memory_root is None:
-        # A MISSING DECLARATION: nothing exists to plant or archive at the
-        # vanished path. THE SESSION RECORD IS THE FIRST ANSWER, and the only
-        # one that works when the cwd is not in the enclosing checkout; it is
-        # verified against the candidate MAIN root, never the dead worktree,
-        # so `git worktree prune` -- the normal cleanup path -- cannot reject
-        # it.
-        #
-        # THE RECORD IS TRUSTED ONLY WHEN THE RECORDED CHECKOUT CONTAINS THE
-        # DECLARATION. A record naming a real checkout that does not contain it
-        # is NOT trusted -- a genuine out-of-tree worktree and a forged
-        # redirect are identical after prune -- so this falls through to the
-        # guarded git/cwd rungs like an absent record. A record for this
-        # declaration that names no checkout at all is corrupt and refuses.
-        identity = _get_worktree_identity_from_session_record()
-        status, recorded = (
-            record_resolution(anchor, identity) if anchor_is_missing
-            else ("absent", None)
-        )
-        if status == RECORD_CORRUPT:
-            raise _Unevaluable(
-                "the declared project directory no longer exists and its "
-                "session record does not verify against any checkout, so the "
-                "project CLAUDE.md cannot be identified; nothing was archived"
-            )
-        retarget = recorded if status == RECORD_CONTAINED else None
-        if retarget is None:
-            # NEXT, the CWD's checkout memory root -- the same retargeting rung
-            # the sync sites use -- so a cwd inside a SIBLING WORKTREE probes
-            # MAIN rather than that sibling's own copy. A raw resolver here
-            # measured exactly that wrong answer: it returned
-            # `<main>/.worktrees/sibling/.claude/CLAUDE.md`.
-            retarget = cwd_checkout_memory_root()
-        if retarget is not None:
-            path, source = resolve_project_claude_md_path(retarget)
-            if source == "new_default":
-                path = get_project_claude_md_path()
-        else:
-            path = get_project_claude_md_path()
-    else:
-        path, source = resolve_project_claude_md_path(memory_root)
-        if source == "new_default":
-            path = get_project_claude_md_path()
-    if path is None:
-        if anchor_is_missing:
-            raise _Unevaluable(
-                "the declared project directory no longer exists and no "
-                "session record or working directory identified a main "
-                "checkout holding CLAUDE.md; nothing was archived"
-            )
+    if not doc.exists:
         raise _Unevaluable("CLAUDE.md not found")
-    base = _lexical_base_of(path)
+    path, base = doc.path, doc.base
 
-    # A WORKTREE COPY IS NEVER THE PROJECT-MEMORY DOCUMENT. A checkout whose
-    # memory root is not itself is a linked worktree (or a path inside one);
-    # project memory lives at the root it retargets to. Unknown here means
-    # git could not classify the base, and a writer refuses rather than
-    # guesses.
-    root_of_base = project_memory_root_or_none(base)
-    if root_of_base is None:
-        raise _Unevaluable(
-            f"project memory root unknown: git could not classify {base}, so "
-            "the resolved document cannot be verified; nothing was archived"
-        )
-    if Path(root_of_base) != base:
-        raise _Unevaluable(
-            f"resolution landed on a linked worktree copy ({path}); project "
-            "memory belongs to the main checkout, so nothing was archived"
-        )
-
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if env_dir:
         env_path = Path(env_dir)
         if (_find_existing_claude_md(env_path) is None
@@ -705,15 +556,9 @@ def resolve_claude_md():
                     env_path, base, path,
                     worktree_identity=_get_worktree_identity_from_session_record(),
                 )):
-            removed_note = (
-                f"The declared directory no longer exists, so only a session "
-                f"record could have identified its main checkout. "
-                if anchor_is_missing else ""
-            )
             raise _Unevaluable(
                 f"CLAUDE_PROJECT_DIR={env_dir} contains no CLAUDE.md, and "
                 f"resolution fell through to {path} in a different project. "
-                f"{removed_note}"
                 f"Refusing rather than archiving a pin the invocation never "
                 f"named. Set CLAUDE_PROJECT_DIR to the project that owns the "
                 f"pin, or unset it to resolve from the working directory."
@@ -838,9 +683,9 @@ def _run_memory_cli(args, db_path=None, stdin_data=None, cwd=None):
     #
     # That is a PRODUCTION defect, not a test concern. `project_dir_for` exists
     # so the archive's project derives from the CLAUDE.md actually read, and
-    # `resolve_claude_md` deliberately PERMITS a worktree fall-through: the env
-    # dir is a worktree carrying no CLAUDE.md, so resolution lands on the main
-    # repo's file. Under `setdefault` that filed the archive under the WORKTREE
+    # `resolve_claude_md` resolves a linked worktree to the main checkout's
+    # document, so for a worktree session the CLAUDE.md read lives in the
+    # main repo. Under `setdefault` that filed the archive under the WORKTREE
     # while the pin lived in the MAIN repo -- exactly the pin/archive
     # disagreement `project_dir_for` is there to prevent.
     #

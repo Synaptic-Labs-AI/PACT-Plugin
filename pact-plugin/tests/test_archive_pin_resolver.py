@@ -124,8 +124,9 @@ class TestResolutionIsDriven:
 
 
 class TestCrossProjectFallthroughIsRefused:
-    """THE F-B GUARD. Fails on the pre-fix code, which returned project_a's
-    file for an invocation that named project_b."""
+    """THE F-B GUARD. The pre-fix code returned project_a's file (the cwd's)
+    for an invocation that named project_b. The session document has no cwd
+    rung, so a declared project holding no document is refused outright."""
 
     def test_cross_project_fallthrough_raises(self, isolated, monkeypatch):
         a = _make_project(isolated / "project_a", "PIN A")
@@ -141,36 +142,25 @@ class TestCrossProjectFallthroughIsRefused:
         with pytest.raises(archive_pin._Unevaluable) as exc:
             archive_pin.resolve_claude_md()
         reason = exc.value.reason
-        assert str(b) in reason, "refusal must name the directory that was set"
-        assert "different project" in reason
-        assert "project_a" in reason, (
-            "refusal must name the file it would otherwise have used, or the "
-            "curator cannot tell what was about to happen"
-        )
+        assert reason == "CLAUDE.md not found", reason
+        assert "project_a" not in reason
 
-    def test_the_fallthrough_target_really_was_reachable(
+    def test_the_other_project_really_was_resolvable(
         self, isolated, monkeypatch
     ):
         """NON-VACUITY CONTROL for the test above.
 
-        The refusal is only meaningful if resolution WOULD have succeeded on
-        the wrong file. Drive the underlying resolver directly — the one
-        `resolve_claude_md` wraps — and confirm it happily returns project_a
-        while the environment names project_b. If this ever stops returning a
-        path, the test above would pass because nothing resolved at all,
-        which is a different and much safer world.
+        The refusal is only meaningful if the fixture CAN resolve a document:
+        declaring project_a resolves its file. If this stopped returning a
+        path, the test above would pass because nothing resolves at all.
         """
         a = _make_project(isolated / "project_a", "PIN A")
-        b = _make_project(isolated / "project_b", None)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(b))
-        monkeypatch.chdir(a)
+        _make_project(isolated / "project_b", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(a))
+        monkeypatch.chdir(isolated / "project_b")
 
-        path, _base = archive_pin._resolve_project_claude_md_with_base()
-        assert path is not None, "no fall-through occurred — refusal is moot"
-        assert "PIN A" in path.read_text(encoding="utf-8"), (
-            "the unguarded resolver did NOT return the other project's file, "
-            "so this suite is no longer testing the defect it was written for"
-        )
+        path, _base = archive_pin.resolve_claude_md()
+        assert "PIN A" in path.read_text(encoding="utf-8")
 
 
 class TestSameRepositoryFallthroughIsAllowed:

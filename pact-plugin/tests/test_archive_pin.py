@@ -109,13 +109,13 @@ PIN_FORMATS = {
 
 @pytest.fixture
 def claude_md(tmp_path, monkeypatch):
-    """Write a CLAUDE.md and point the script's resolver at it."""
+    """Write a CLAUDE.md and declare its directory as the session's project,
+    so the script's resolver (the session document) names it."""
     def _write(content):
         path = tmp_path / "CLAUDE.md"
         path.write_text(content, encoding="utf-8")
-        monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: path
-        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         return path
     return _write
 
@@ -698,23 +698,21 @@ class TestEnvPropagation_ExplicitCwdBeatsAmbient:
         main, worktree = self._init_repo_with_worktree(tmp_path)
         claude_md_path = main / "CLAUDE.md"
         claude_md_path.write_text(_two_pin_file(), encoding="utf-8")
-        monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: claude_md_path
-        )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(tmp_path)
 
         # PRECONDITIONS, asserted separately and FIRST. A fixture that drifts
         # out of the regime under test then fails with its own message,
         # instead of presenting as a regression in the one load-bearing
         # assertion below and inviting someone to "fix" that instead.
         assert not (worktree / "CLAUDE.md").exists(), (
-            "fixture drift: the worktree must carry NO CLAUDE.md, or the "
-            "fall-through this test depends on never happens"
+            "fixture drift: the worktree must carry NO CLAUDE.md, so the "
+            "only document in play is main's"
         )
         assert same_repository(worktree, main), (
             "fixture drift: git does not consider the worktree part of the "
-            "main repo, so resolve_claude_md would REFUSE rather than fall "
-            "through, and this test would measure the refusal path"
+            "main repo, so the session would not resolve to main's document "
+            "and this test would measure a refusal path"
         )
 
         calls = self._spy_memory_cli_spawns(
@@ -2062,10 +2060,10 @@ class TestArchivePin_FailureMatrix:
 class TestArchivePin_Unevaluable:
     """Every path where the pin's state cannot be established."""
 
-    def test_missing_claude_md(self, monkeypatch):
-        monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: None
-        )
+    def test_missing_claude_md(self, tmp_path, monkeypatch):
+        """A declared project holding no document: nothing to archive."""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         verdict = archive_pin.build_verdict(0, db_path=None)
         assert verdict["outcome"] == "UNEVALUABLE"
         assert verdict["heading"] is None
