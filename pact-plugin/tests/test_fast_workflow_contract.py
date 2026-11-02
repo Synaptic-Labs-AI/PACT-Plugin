@@ -371,7 +371,27 @@ def _assert_full_workflow_contract(root):
     assert "pytest" not in runs[position + 1], (
         "the evidence step's run text names pytest; test_ci_collection_scope "
         "permits exactly one pytest invocation in this file")
-    assert steps[position + 1].get("continue-on-error", False) is False, (
+    # `runs` DROPS every step without a `run:` key (all `uses:` steps), so a
+    # position derived from `runs` does NOT address the same step in
+    # `steps`. Reusing it would pin continue-on-error on an unrelated step
+    # and let a silenced evidence step pass. Index `steps` independently,
+    # then assert the two indices agree so the coupling is explicit.
+    evidence_indices = [
+        index for index, step in enumerate(steps)
+        if step.get("run") == evidence_cmd
+    ]
+    assert len(evidence_indices) == 1, (
+        f"expected exactly one step running {evidence_cmd!r}; found "
+        f"{len(evidence_indices)}")
+    evidence_index = evidence_indices[0]
+    step_run_positions = [
+        index for index, step in enumerate(steps)
+        if isinstance(step.get("run"), str)
+    ]
+    assert step_run_positions[position + 1] == evidence_index, (
+        "the runs list and the steps list disagree about which step follows "
+        "the test step; the continue-on-error pin would check the wrong step")
+    assert steps[evidence_index].get("continue-on-error", False) is False, (
         "the run-evidence step may not carry continue-on-error; a silenced "
         "evidence check cannot certify anything")
 

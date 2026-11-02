@@ -331,8 +331,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"set equality is primary; this redundancy check failed: "
                 f"included {len(recomputed.included)} != discovered "
                 f"{len(recomputed.discovered)} - excluded "
-                f"{len(recomputed.excluded)} + added_back "
-                f"{len(recomputed.added_back)}",
+                f"{len(recomputed.excluded)} (= {identity}). 'excluded' is "
+                f"the APPLIED set, so added_back is already accounted for "
+                f"and must not appear in this identity.",
             )
     except VerificationFailure as failure:
         print(f"VERIFY-FAILURE {failure.condition}: {failure.detail}",
