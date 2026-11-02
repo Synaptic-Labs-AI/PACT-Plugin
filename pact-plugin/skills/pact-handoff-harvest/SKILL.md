@@ -102,7 +102,27 @@ For each discovered task, read the HANDOFF from the two copies and combine them.
 
 1. **Session journal** (GC-proof): If the task was discovered through `agent_handoff` journal events, the event's `handoff` field contains the full HANDOFF content inline. **The journal carries the HANDOFF as it stood at the LAST EMITTING WRITE.** Do not read it as the accepted HANDOFF. A revision that lands before completion reaches the journal. A revision that lands after completion can reach no journal event, so the journal copy can be the superseded one.
 2. **Task file** (freshest, and the task-store drain removes it): `task_utils.read_task_json(task_id, team_name)`, the raw task JSON, which carries `owner`, `subject` and `metadata`. The HANDOFF is `metadata.handoff` (`TaskGet` is metadata-blind). ⚠️ **THAT READER RETURNS AN EMPTY DICT ON A MISSING FILE, NOT `None`.** It is fail-open by design, so a drained task file, a malformed JSON file and an IO error all give `{}`. Test the drained case as EMPTINESS (`if not task:`), and do NOT test `task is None`, which is False for every one of those states.
-3. **Take the UNION of the two copies, and PREFER THE TASK FILE on a conflict, with ONE narrow exception.** Do not choose one copy. Content moves in the two directions between them, so a union is the safe operation and a choice is not. Keep each field that is in one copy alone. When the two hold different content for one field, keep the task-file content. **THE EXCEPTION HAS THREE STATES, NOT TWO.** When the task-file field is PRESENT AND EMPTY and the journal field holds content, keep the JOURNAL content. When the task-file field is ABSENT, or PRESENT AND NON-EMPTY, keep the task-file preference. A `TaskUpdate` metadata merge REPLACES a nested sub-object, so a partial re-write that carries an empty field makes the present-and-empty state, and an unconditional task-file preference then ERASES the journal content in silence. 🔴 **DO NOT restate this as a blanket prefer-the-non-empty-side rule.** The exception is per-field and applies to the present-and-empty state alone. A blanket rule makes the journal the default winner and the task file is the freshest copy, which INVERTS the precedence this step is built on.
+3. **Take the UNION of the two copies, and PREFER THE TASK FILE on a conflict, apart from the two states below. Both states are decided by the two copies' REQUIRED key sets, both are reported, and neither is decided by an empty or missing value alone.** Keep each field that is in one copy alone, except a REQUIRED field the task file lacks in the incomparable state, which is dropped and reported. When the two hold different content for one field, keep the task-file content.
+
+**SCOPE THE COMPARISON TO THE REQUIRED FIELD SET.** `reasoning_chain` is recommended, so a legal revision may omit it, and a journal copy may carry keys the task file never had; a comparison over every key calls a complete revision partial and restores the cleared field. **NORMALIZE LEGACY SPELLINGS IN BOTH COPIES BEFORE THE COMPARISON** — map `key_decisions`, `areas_of_uncertainty` and `integration_points` to their canonical names with the shared `resolve_handoff_field` — because a field renamed to a legacy spelling would otherwise leave the required set entirely. Normalize both sides, never one: the journal is append-only and carries legacy spellings, and the task file is mostly canonical but not guaranteed. **EQUALITY COUNTS AS COVERING:** a task-file required set equal to the journal's is a complete revision.
+
+Let `J` be the journal copy's required key set and `D` the task file's.
+
+**A FIELD PRESENT AND EMPTY ON THE TASK FILE, with content in the journal:**
+- `D` covers `J` (equality included): keep the EMPTY value; report `handoff field kept empty for task N: field <name> present and empty; the task-file required key set covers the journal copy`.
+- `D` is a proper subset of `J`: keep the JOURNAL value; report `handoff field restored from the journal for task N: field <name> present and empty; the task-file required key set is a proper subset of the journal copy`.
+- Neither set contains the other: keep the EMPTY value; report `handoff field undecidable for task N: field <name> present and empty; the required key sets are incomparable`.
+
+**A FIELD PRESENT IN THE JOURNAL AND ABSENT FROM THE TASK FILE:**
+- A REQUIRED field, `D` a proper subset of `J`: keep the JOURNAL value; report `handoff field restored from the journal for task N: required field <name> absent from the task file; the task-file required key set is a proper subset of the journal copy`.
+- A REQUIRED field, incomparable sets: DROP the field; report `handoff field undecidable for task N: required field <name> absent from the task file; the required key sets are incomparable`.
+- NOT a required field (recommended or non-canonical): keep it; report `handoff field kept from the journal for task N: field <name> absent from the task file and not a required field; the required key sets do not decide it`.
+
+**THE RESIDUAL:** a deliberate complete removal of a REQUIRED key and an accidental partial re-write both leave a proper subset, so the proper-subset branch restores in both and reports that it did. A `TaskUpdate` metadata merge REPLACES a nested sub-object, which is why a partial re-write leaves a present-and-empty or missing field; the required-key-set test separates a partial copy from a complete one.
+
+**A CONDITION UNDER WHICH THIS RULE DOES NOT FIX THE MEASURED CASE, STATED AS A FAILURE AND NOT AS AN UNDECIDABLE BRANCH.** If the task file lacks any REQUIRED field the journal copy carries, `D` is a proper subset of `J`, the proper-subset branch restores the journal value, and the revival persists. The rule carries no exception for the case it was written to fix; do not code one, and do not file this condition under "undecidable".
+
+🔴 **DO NOT restate this as a blanket prefer-the-non-empty-side rule.** The rule is per-field and per-state, and a blanket rule makes the journal the default winner while the task file is the freshest copy, which inverts the precedence this step is built on.
 4. **When the task file is ABSENT, report `handoff divergence check unavailable for task N: task file absent`** and use the journal copy alone. Do not skip in silence. A drained task file is a reportable gap and not a clean single-source read.
 5. **Report gap**: If no source resolves, report the gap to the lead. Record the task_id, the agent name and the timestamp so that the team-lead has context.
 
@@ -173,28 +193,9 @@ def emit_side_subject(subject):
     return subject if (subject and str(subject).strip()) else "(no subject)"
 
 
-# The values that count as EMPTY for the exception below. Test MEMBERSHIP,
-# not truthiness: `not disk_value` is also TRUE for `0` and for `False`, so a
-# task-file field that deliberately holds one of those would keep the journal
-# value and discard the disk value.
-# KEEP `None` IN THIS SET. Drop it and the narrowing itself opens the erasure
-# it was written to close: a field explicitly holding null would count as
-# CONTENT and overwrite the journal copy with null.
-_EMPTY_VALUES = (None, "", [], {})
-
-
-def union_preferring_task_file(journal_handoff, disk_handoff):
-    """Task file wins each conflict, apart from present-and-empty. Three states."""
-    merged = {**journal_handoff}
-    for field, disk_value in disk_handoff.items():
-        # PRESENT AND EMPTY on the task file, with content in the journal:
-        # keep the journal value. Each other state: the task file wins.
-        # A field ABSENT from the task file does not reach this loop, so the
-        # journal value survives by construction.
-        if disk_value in _EMPTY_VALUES and journal_handoff.get(field):
-            continue
-        merged[field] = disk_value
-    return merged
+# The union predicate is NOT restated here. It is the shipped
+# shared.agent_handoff_marker.union_preferring_task_file, called below, so
+# this file cannot carry a stale second copy of its branches.
 
 
 # The harvest's own team: the LAST PATH COMPONENT of the `Task list:`
@@ -250,19 +251,24 @@ for task_id in unprocessed:
     # an OWNED event's owner, and leaves the rest UNMATCHED (this team's by
     # identity). ROUTE on the outcome: a realigned earlier team's work unit
     # belongs under ITS section and store, never here.
-    candidates = named_store_candidates(task_id, this_team, from_teams)
-    for e in old_format:
-        outcome = mixed_old_format_event(
-            e.get("agent", ""), e.get("task_subject", ""),
-            e.get("handoff") or {}, candidates,
-        )
-        destination = old_format_destination(outcome, this_team)
-        if destination == "mixed":
-            report(outcome.report)          # discard: another store's content
-        elif destination == "from":
-            from_events.setdefault(outcome.team, []).append(e)
-        else:
-            this_team_events.append(e)
+    if old_format:
+        candidates = named_store_candidates(task_id, this_team, from_teams)
+        for e in old_format:
+            outcome = mixed_old_format_event(
+                task_id, e.get("agent", ""), e.get("task_subject", ""),
+                e.get("handoff") or {}, candidates,
+            )
+            destination = old_format_destination(outcome, this_team)
+            if destination == "mixed":
+                report(outcome.report)      # discard: another store's content
+            elif destination == "from":
+                from_events.setdefault(outcome.team, []).append(e)
+            else:
+                # OWNED_BY(this_team) carries no report; UNMATCHED carries
+                # the unavailable-check line. Never choose silently.
+                if outcome.report:
+                    report(outcome.report)
+                this_team_events.append(e)
 
     for team, events in from_events.items():
         # THAT team's work unit: its own section and store, and NEVER unioned
@@ -317,8 +323,13 @@ for task_id in unprocessed:
         journal_event = latest_by_ts_then_journal_order(events)
         handoff = journal_event.handoff  # content at the last emitting write
         if identity == disk_identity:
-            # UNION, task file first, apart from present-and-empty.
-            handoff = union_preferring_task_file(handoff, disk_handoff)
+            # UNION via the shared predicate; every branch reports.
+            merged, reports = union_preferring_task_file(
+                handoff, disk_handoff, task_id
+            )
+            for line in reports:
+                report(line)
+            handoff = merged
         elif not task:
             report(f"handoff divergence check unavailable for task "
                    f"{task_id}: task file absent")

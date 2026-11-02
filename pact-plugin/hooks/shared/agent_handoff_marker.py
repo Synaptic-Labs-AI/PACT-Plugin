@@ -78,6 +78,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .canonical_json import canonical_bytes
+from .handoff_schema import (
+    HANDOFF_LEGACY_ALIASES,
+    HANDOFF_REQUIRED_FIELDS,
+    resolve_handoff_field,
+)
 from .paths import get_claude_config_dir
 
 # Hex chars of the SHA-256 digest retained for the occupant component of the
@@ -330,44 +335,166 @@ def disk_identity(owner: str, subject: object) -> str:
 # copy with null.
 _EMPTY_VALUES = (None, "", [], {})
 
+_REQUIRED = frozenset(HANDOFF_REQUIRED_FIELDS)
+
+
+def _identity(raw_key: str) -> str:
+    """Canonical identity of one raw key.
+
+    NORMALIZATION RUNS BEFORE ANY SET MATH. `key_decisions` is the legacy
+    spelling of `decisions`; a required-set comparison over RAW keys would
+    leave a renamed field outside the required set and classify a complete
+    revision as a partial one, reviving the field the revision cleared.
+    Measured: the rename/add fixture routes correctly only in this order.
+    """
+    return HANDOFF_LEGACY_ALIASES.get(raw_key, raw_key)
+
+
+def _field_map(handoff: dict) -> dict:
+    """canonical identity -> (raw key, value) for one copy.
+
+    If a copy carries BOTH spellings of a field, the canonical spelling wins,
+    matching resolve_handoff_field's canonical-first, alias-fallback order.
+    """
+    fields: dict[str, tuple[str, object]] = {}
+    for raw_key, value in handoff.items():
+        identity = _identity(raw_key)
+        current = fields.get(identity)
+        if current is None or raw_key == identity:
+            fields[identity] = (raw_key, value)
+    return fields
+
+
+def _required_set(fields: dict) -> set:
+    """The REQUIRED canonical fields one copy carries.
+
+    Scoped to HANDOFF_REQUIRED_FIELDS, never to every key: `reasoning_chain`
+    is recommended, so a legal revision may omit it, and journal copies carry
+    non-canonical extras. A full-key comparison calls both cases partial and
+    restores the cleared field.
+    """
+    return {identity for identity in fields if identity in _REQUIRED}
+
 
 def union_preferring_task_file(
     journal_handoff: dict, disk_handoff: dict, task_id: str
 ) -> tuple[dict, list[str]]:
-    """Merge the two HANDOFF copies: the task file wins each conflict, apart
-    from a task-file field that is PRESENT AND EMPTY while the journal holds
-    content.
+    """Merge the two HANDOFF copies by their REQUIRED key sets.
 
-    THIS IS THE CURRENT RULE, IMPLEMENTED VERBATIM from the pseudocode in
-    skills/pact-handoff-harvest/SKILL.md Step 3, so the rule has one
-    executable copy a test can reach. Preserve these properties; each is
-    behaviour, not style:
-      - emptiness is EQUALITY MEMBERSHIP in _EMPTY_VALUES, so `0` and `False`
-        are CONTENT and a task file carrying one wins;
-      - the exception tests the JOURNAL value's TRUTHINESS, not membership,
-        so a journal value of `0`, `False`, `[]` or `{}` does NOT trigger it
-        and the task-file value wins;
-      - a field absent from the task file never enters the loop, so the
-        journal value survives by construction;
-      - keys are compared RAW. There is no alias normalization here (a later
-        form of this rule normalizes legacy spellings), so an alias spelling
-        and its canonical name are two distinct keys;
-      - both inputs are left unmutated.
+    The task file wins each conflict, apart from the two states below. Both
+    states are decided by the two copies' REQUIRED key sets, both are
+    reported with one line per field, and neither is decided by an empty or
+    missing value alone. Keep each field that is in one copy alone, except a
+    REQUIRED field the task file lacks in the incomparable state, which is
+    dropped and reported.
 
-    `task_id` is accepted but unused: it is the task name the report-bearing
-    form of this rule needs, and keeping it in the signature now means that
-    form does not churn every caller. `reports` is empty for this rule.
+    Let `J` be the journal copy's required key set and `D` the task file's.
+    EQUALITY COUNTS AS COVERING: 130 of 130 observed local pairs are equal,
+    and a strict-superset test misroutes every one.
 
-    Pure; no I/O; returns a fresh dict.
+    State A — field PRESENT AND EMPTY on the task file, content in the
+    journal:
+      - D covers J (equality included) -> keep the EMPTY value.
+      - D is a proper subset of J     -> keep the JOURNAL value.
+      - incomparable                  -> keep the EMPTY value.
+
+    State B — field PRESENT IN THE JOURNAL and ABSENT from the task file:
+      - REQUIRED, D a proper subset of J -> keep the journal value.
+      - REQUIRED, incomparable           -> DROP it (the only branch that
+                                            drops journal content).
+      - NOT required                     -> keep it (union default).
+
+    THE RESIDUAL: a deliberate complete removal of a REQUIRED key and an
+    accidental partial re-write both leave a proper subset, so the
+    proper-subset branch restores in both and reports that it did. Key sets
+    cannot separate them; the report is what makes the restore auditable.
+
+    Pure; no I/O; returns a fresh dict and one report line per divergent
+    field. Both inputs are left unmutated.
     """
-    merged = {**journal_handoff}
-    for field, disk_value in disk_handoff.items():
-        # PRESENT AND EMPTY on the task file, with content in the journal:
-        # keep the journal value. Each other state: the task file wins.
-        if disk_value in _EMPTY_VALUES and journal_handoff.get(field):
+    merged = dict(journal_handoff)
+    reports: list[str] = []
+
+    journal_fields = _field_map(journal_handoff)
+    disk_fields = _field_map(disk_handoff)
+    j_req = _required_set(journal_fields)
+    d_req = _required_set(disk_fields)
+
+    def _take_disk(identity: str, disk_value: object) -> None:
+        disk_key, _ = disk_fields[identity]
+        merged[disk_key] = disk_value
+        journal_key = journal_fields.get(identity, (None, None))[0]
+        # No duplicate spellings in the output: when the disk wins under a
+        # different spelling, drop the journal's spelling of the same field.
+        if journal_key is not None and journal_key != disk_key:
+            merged.pop(journal_key, None)
+
+    # State A: every field the task file carries.
+    for identity, (disk_key, disk_value) in disk_fields.items():
+        journal_present = identity in journal_fields
+        journal_value = (
+            resolve_handoff_field(journal_handoff, identity)
+            if journal_present else None
+        )
+        if (
+            disk_value in _EMPTY_VALUES
+            and journal_present
+            and journal_value
+        ):
+            if d_req >= j_req:  # covering, EQUALITY INCLUDED
+                reports.append(
+                    f"handoff field kept empty for task {task_id}: field "
+                    f"{identity} present and empty; the task-file required "
+                    f"key set covers the journal copy"
+                )
+                _take_disk(identity, disk_value)
+            elif d_req < j_req:  # proper subset
+                reports.append(
+                    f"handoff field restored from the journal for task "
+                    f"{task_id}: field {identity} present and empty; the "
+                    f"task-file required key set is a proper subset of the "
+                    f"journal copy"
+                )
+                # keep the journal value: merged already holds it
+            else:  # incomparable
+                reports.append(
+                    f"handoff field undecidable for task {task_id}: field "
+                    f"{identity} present and empty; the required key sets "
+                    f"are incomparable"
+                )
+                _take_disk(identity, disk_value)
+        else:
+            _take_disk(identity, disk_value)
+
+    # State B: fields only the journal carries.
+    for identity, (journal_key, journal_value) in journal_fields.items():
+        if identity in disk_fields:
             continue
-        merged[field] = disk_value
-    return merged, []
+        if identity in _REQUIRED:
+            if d_req < j_req:
+                reports.append(
+                    f"handoff field restored from the journal for task "
+                    f"{task_id}: required field {identity} absent from the "
+                    f"task file; the task-file required key set is a proper "
+                    f"subset of the journal copy"
+                )
+                # keep it
+            else:  # incomparable; covering is impossible here
+                reports.append(
+                    f"handoff field undecidable for task {task_id}: required "
+                    f"field {identity} absent from the task file; the "
+                    f"required key sets are incomparable"
+                )
+                merged.pop(journal_key, None)
+        else:
+            reports.append(
+                f"handoff field kept from the journal for task {task_id}: "
+                f"field {identity} absent from the task file and not a "
+                f"required field; the required key sets do not decide it"
+            )
+            # keep it: the union default for a non-required field
+
+    return merged, reports
 
 
 OLD_FORMAT_MIXED = "mixed"          # content is another store's; discard + report
@@ -397,6 +524,8 @@ def old_format_destination(outcome: OldFormatOutcome, this_team: str) -> str:
                `## team={team}` section against that team's store, never
                unioned with this team's task file.
     "this"   — this team's work unit (OWNED_BY this team, or UNMATCHED).
+               UNMATCHED carries `outcome.report`, the unavailable-check line
+               the caller MUST emit; OWNED_BY(this_team) carries none.
 
     A caller that routes every non-MIXED outcome to this team misroutes a
     realigned earlier team's HANDOFF, which is the population the old-format
@@ -410,6 +539,7 @@ def old_format_destination(outcome: OldFormatOutcome, this_team: str) -> str:
 
 
 def mixed_old_format_event(
+    task_id: str,
     event_agent: object,
     event_subject: object,
     event_handoff: object,
@@ -423,6 +553,8 @@ def mixed_old_format_event(
     prove it belongs to this team. `candidate_tasks` are the PARSED task files
     of the stores whose names the harvest holds — this team's store and each
     `team_realigned` `from` store — as `{"team": <store name>, "task": <dict>}`.
+    `task_id` is the id being resolved; it names the task in EVERY report, so
+    the caller never has to compose one.
 
     Three outcomes, because the caller must ROUTE the event, not merely decide
     whether to discard it:
@@ -436,14 +568,23 @@ def mixed_old_format_event(
         does not. The content came from a store whose identity the event does
         not carry; discard it and report `report`.
       - OLD_FORMAT_UNMATCHED: no named store carries the content. Keep the
-        identity match as this team's, and report the unavailable check — a
-        store no realignment event names is out of reach, and guessing is
-        worse than reporting the bound.
+        identity match as this team's, and report the unavailable check —
+        a store no realignment event names is out of reach, and guessing is
+        worse than reporting the bound. The report travels ON THE OUTCOME
+        because this state is the COMMON path (every pre-field event whose
+        content matches no named store), and a caller that had to invent the
+        line would be free to choose silently instead.
 
     A non-dict / empty event handoff is UNMATCHED: there is no content to
     compare. Pure; no I/O; never raises.
     """
-    unmatched = OldFormatOutcome(OLD_FORMAT_UNMATCHED)
+    unmatched = OldFormatOutcome(
+        OLD_FORMAT_UNMATCHED,
+        report=(
+            f"handoff cross-team check unavailable for task {task_id}: no "
+            f"other named store carries the identity"
+        ),
+    )
     if not isinstance(event_handoff, dict) or not event_handoff:
         return unmatched
     event_content = handoff_content_key(event_handoff)
@@ -475,8 +616,7 @@ def mixed_old_format_event(
         content_matches.append((team, task))
     if not content_matches:
         return unmatched
-    team, task = content_matches[0]
-    task_id = task.get("id", "?")
+    team, _ = content_matches[0]
     return OldFormatOutcome(
         OLD_FORMAT_MIXED,
         team=team,

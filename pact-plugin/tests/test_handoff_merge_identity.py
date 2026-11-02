@@ -4,9 +4,11 @@ shared/agent_handoff_marker.py: the emit-side subject sentinel, the disk
 identity, and the task-file-preferred HANDOFF union.
 
 The rule is AUTHORED in skills/pact-handoff-harvest/SKILL.md Step 3; these
-tests pin the executable copy so the two cannot drift. They also pin the
-current union behaviour: the shape of the extraction is that it changes
-nothing, so every row here is a regression net for a "cleanup" that would.
+tests pin the executable copy so the two cannot drift. The union arms are the
+REQUIRED-key-set gate: fixtures A-F from the preparation census, the three
+journal-only arms, and the alias-ordering case. The earlier extraction arms
+that pinned the superseded rule are deliberately replaced here — commit 4's
+whole point is that their expectations changed.
 
 Not covered elsewhere: no existing test reaches the union — it lived only as
 pseudocode before this module.
@@ -65,35 +67,174 @@ class TestDiskIdentity:
 
 
 class TestUnionPreferringTaskFile:
-    # ---- the extraction's stated arms --------------------------------
-    def test_present_and_empty_keeps_the_journal_value(self):
+    # ---- fixtures A-F: the required-key-set gate ----------------------
+    # Canonical required set: produced, decisions, uncertainty, integration,
+    # open_questions. reasoning_chain is recommended, and a legal revision may
+    # omit it — that is why the comparison is scoped to the required set.
+    JOURNAL = {
+        "produced": "p",
+        "decisions": ["d"],
+        "reasoning_chain": ["r"],
+        "uncertainty": ["u"],
+        "integration": "i",
+        "open_questions": ["q"],
+    }
+
+    def test_fixture_a_accidental_partial_restores_the_cleared_field(self):
+        """D = {produced, open_questions}, a proper subset of J's five -> the
+        present-and-empty field is restored from the journal, and reported."""
+        disk = {"produced": "p2", "open_questions": []}
         merged, reports = union_preferring_task_file(
-            {"open_questions": ["resolved question"]},
-            {"open_questions": []},
-            "61",
+            dict(self.JOURNAL), disk, "61"
         )
-        assert merged == {"open_questions": ["resolved question"]}
+        assert merged["open_questions"] == ["q"]
+        assert merged["produced"] == "p2"
+        assert any(
+            "restored from the journal" in line and "open_questions" in line
+            for line in reports
+        )
+
+    def test_fixture_b_complete_revision_keeps_the_cleared_field(self):
+        disk = {
+            "produced": "p2",
+            "decisions": ["d2"],
+            "reasoning_chain": ["r2"],
+            "uncertainty": ["u2"],
+            "integration": "i2",
+            "open_questions": [],
+        }
+        merged, reports = union_preferring_task_file(
+            dict(self.JOURNAL), disk, "61"
+        )
+        assert merged["open_questions"] == []
+        assert any("kept empty" in line and "covers" in line for line in reports)
+
+    def test_fixture_c_journal_extras_do_not_make_a_complete_revision_partial(self):
+        """DISCRIMINATING against a FULL-KEY comparison: the journal's extra
+        key would make a full-key task file look like a proper subset."""
+        journal = {**self.JOURNAL, "notes": "an extra"}
+        disk = {
+            "produced": "p2",
+            "decisions": ["d2"],
+            "uncertainty": ["u2"],
+            "integration": "i2",
+            "open_questions": [],
+        }
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged["open_questions"] == []
+        assert any("kept empty" in line for line in reports)
+        assert merged["notes"] == "an extra"
+        assert any(
+            "not a required field" in line and "notes" in line
+            for line in reports
+        )
+
+    def test_fixture_d_revision_omitting_reasoning_chain_keeps_the_field(self):
+        """DISCRIMINATING against a FULL-KEY comparison: a legal revision may
+        omit the recommended field."""
+        journal = dict(self.JOURNAL)
+        disk = {
+            "produced": "p2",
+            "decisions": ["d2"],
+            "uncertainty": ["u2"],
+            "integration": "i2",
+            "open_questions": [],
+        }
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged["open_questions"] == []
+        assert any("kept empty" in line for line in reports)
+        assert merged["reasoning_chain"] == ["r"]
+        assert any(
+            "not a required field" in line and "reasoning_chain" in line
+            for line in reports
+        )
+
+    def test_fixture_e_partial_plus_unknown_key_restores(self):
+        """DISCRIMINATING against a FULL-KEY comparison: the unknown key makes
+        the sets incomparable there, so the restore never fires."""
+        disk = {"produced": "p2", "open_questions": [], "weird_key": 1}
+        merged, reports = union_preferring_task_file(
+            dict(self.JOURNAL), disk, "61"
+        )
+        assert merged["open_questions"] == ["q"]
+        assert merged["weird_key"] == 1
+        assert any("restored from the journal" in line for line in reports)
+
+    def test_fixture_f_rename_and_add_keeps_the_field_after_normalization(self):
+        """DISCRIMINATING FOR THE ORDERING. Normalization runs BEFORE the set
+        math. Reversed, `key_decisions` is not a required key, so D's required
+        set is 4 against J's 5 -> proper subset -> restore, and this arm
+        fails with open_questions == ["q"]."""
+        disk = {
+            "produced": "p2",
+            "key_decisions": ["d2"],
+            "uncertainty": ["u2"],
+            "integration": "i2",
+            "open_questions": [],
+            "notes": "n",
+        }
+        merged, _ = union_preferring_task_file(dict(self.JOURNAL), disk, "61")
+        assert merged["open_questions"] == []
+        assert merged["key_decisions"] == ["d2"]
+        assert "decisions" not in merged
+
+    # ---- P10: journal-only fields, three arms --------------------------
+    def test_p10_required_journal_only_under_a_proper_subset_is_kept(self):
+        journal = {"produced": "p", "decisions": ["d"], "uncertainty": ["u"]}
+        disk = {"produced": "p2", "decisions": ["d2"]}
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged["uncertainty"] == ["u"]
+        assert any(
+            "restored from the journal" in line and "uncertainty" in line
+            for line in reports
+        )
+
+    def test_p10_required_journal_only_under_incomparable_sets_is_dropped(self):
+        journal = {"produced": "p", "decisions": ["d"]}
+        disk = {"produced": "p2", "uncertainty": ["u2"]}
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert "decisions" not in merged
+        assert any(
+            "undecidable" in line and "decisions" in line for line in reports
+        )
+
+    def test_p10_non_required_journal_only_alongside_an_equal_required_set_is_kept(self):
+        """The keep-positive is written as a journal-only OPTIONAL field with
+        EQUAL required sets. 'A covering set keeps a journal-only field' is
+        vacuous: a required journal-only key cannot exist under covering."""
+        journal = {"produced": "p", "decisions": ["d"], "reasoning_chain": ["r"]}
+        disk = {"produced": "p2", "decisions": ["d2"]}
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged["reasoning_chain"] == ["r"]
+        assert any(
+            "not a required field" in line and "reasoning_chain" in line
+            for line in reports
+        )
+
+    def test_p10b_legacy_spelling_is_not_swallowed_by_the_incomparable_branch(self):
+        """`key_decisions` normalizes to `decisions`, so the sets are EQUAL,
+        not incomparable, and nothing is dropped."""
+        journal = {"produced": "p", "key_decisions": ["d-journal"]}
+        disk = {"produced": "p2", "decisions": ["d-disk"]}
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged == {"produced": "p2", "decisions": ["d-disk"]}
         assert reports == []
 
+    # ---- retained behaviour pins --------------------------------------
     def test_present_and_non_empty_disk_value_wins(self):
         merged, _ = union_preferring_task_file(
             {"decisions": ["old"]}, {"decisions": ["new"]}, "61"
         )
         assert merged == {"decisions": ["new"]}
 
-    def test_field_absent_from_the_task_file_survives(self):
-        merged, _ = union_preferring_task_file(
-            {"produced": "x", "uncertainty": ["u"]}, {"produced": "y"}, "61"
-        )
-        assert merged == {"produced": "y", "uncertainty": ["u"]}
-
-    # ---- current-behaviour pins a rewrite could silently break --------
     @pytest.mark.parametrize("empty", [None, "", [], {}])
-    def test_each_empty_spelling_keeps_journal_content(self, empty):
+    def test_each_empty_spelling_yields_to_a_covering_task_file(self, empty):
+        """Emptiness is EQUALITY MEMBERSHIP. Under a covering (here equal)
+        required set the empty value stands."""
         merged, _ = union_preferring_task_file(
             {"decisions": ["journal"]}, {"decisions": empty}, "61"
         )
-        assert merged == {"decisions": ["journal"]}
+        assert merged == {"decisions": empty}
 
     def test_zero_is_content_and_wins(self):
         """DISCRIMINATING: emptiness is equality membership in
@@ -113,17 +254,16 @@ class TestUnionPreferringTaskFile:
         )
         assert merged == {"decisions": False}
 
-    def test_empty_string_journal_value_does_not_trigger_the_exception(self):
-        """DISCRIMINATING: the exception tests the JOURNAL value's TRUTHINESS,
-        not membership. "" is a member of _EMPTY_VALUES, so a membership test
-        on the journal side would trigger the exception and keep ""; the
-        current rule lets the task file's [] win."""
+    def test_empty_string_journal_value_does_not_trigger_the_rule(self):
+        """DISCRIMINATING: the rule tests the JOURNAL value's TRUTHINESS, not
+        membership. "" is a member of _EMPTY_VALUES, so a membership test on
+        the journal side would keep ""; the rule lets the task file's [] win."""
         merged, _ = union_preferring_task_file(
             {"decisions": ""}, {"decisions": []}, "61"
         )
         assert merged == {"decisions": []}
 
-    def test_zero_and_false_journal_values_do_not_trigger_the_exception(self):
+    def test_falsy_journal_values_let_the_task_file_win(self):
         """DISCRIMINATING against a JOURNAL-SIDE MEMBERSHIP rewrite: 0 and
         False are falsy but NOT in _EMPTY_VALUES, so a rule testing
         `journal_value not in _EMPTY_VALUES` would call them content and keep
@@ -138,15 +278,6 @@ class TestUnionPreferringTaskFile:
             )
             assert merged == {"decisions": []}
 
-    def test_keys_are_compared_raw_with_no_alias_normalization(self):
-        """An alias spelling and its canonical name are two distinct keys in
-        the current rule. Alias normalization is a behaviour change, so it
-        must show up as a changed expectation rather than slip in."""
-        merged, _ = union_preferring_task_file(
-            {"key_decisions": ["journal"]}, {"decisions": ["disk"]}, "61"
-        )
-        assert merged == {"key_decisions": ["journal"], "decisions": ["disk"]}
-
     def test_inputs_are_not_mutated(self):
         journal = {"decisions": ["old"], "open_questions": ["q"]}
         disk = {"decisions": ["new"], "open_questions": []}
@@ -160,14 +291,23 @@ class TestUnionPreferringTaskFile:
 
 class TestPresentAndEmptyControl:
     """P4 control: the field must be GENUINELY present-and-empty and the
-    journal must hold content, or the arm goes green for the wrong reason."""
+    journal must hold content. Under the required-key-set gate the restore
+    branch serves the ACCIDENTAL PARTIAL rewrite (the task file is a proper
+    subset), so the control is built in that shape — not in the covering
+    shape, which correctly keeps the empty value."""
 
-    def test_own_team_present_and_empty_uses_the_journal_content(self):
-        journal = {"open_questions": ["was the question resolved?"], "produced": "x"}
+    def test_present_and_empty_with_a_partial_task_file_restores(self):
+        journal = {
+            "open_questions": ["was the question resolved?"],
+            "produced": "x",
+            "decisions": ["d"],
+        }
         disk = {"open_questions": [], "produced": "x"}
         assert disk["open_questions"] == [] and "open_questions" in disk
-        merged, _ = union_preferring_task_file(journal, disk, "61")
+        assert "decisions" not in disk  # proper subset: the partial-rewrite shape
+        merged, reports = union_preferring_task_file(journal, disk, "61")
         assert merged["open_questions"] == ["was the question resolved?"]
+        assert any("restored from the journal" in line for line in reports)
 
 
 # =============================================================================
@@ -192,7 +332,7 @@ class TestMixedOldFormatEvent:
 
     def _classify(self, agent, subject, candidates):
         return mixed_old_format_event(
-            agent, subject, dict(self.EVENT_HANDOFF), candidates
+            "57", agent, subject, dict(self.EVENT_HANDOFF), candidates
         )
 
     def test_content_match_with_a_different_identity_is_mixed(self):
@@ -220,7 +360,11 @@ class TestMixedOldFormatEvent:
         assert outcome.team == "session-old"
         assert outcome.report is None
 
-    def test_content_matching_no_named_store_is_unmatched(self):
+    def test_content_matching_no_named_store_is_unmatched_and_reports(self):
+        """The UNMATCHED state is the COMMON old-format path, and it carries
+        the unavailable-check line ON THE OUTCOME so the caller cannot choose
+        silently. An outcome without a report here would be the silent-branch
+        defect the arc exists to fix."""
         other = {**self.EVENT_HANDOFF, "produced": "something else"}
         outcome = self._classify(
             "review-backend",
@@ -229,6 +373,10 @@ class TestMixedOldFormatEvent:
         )
         assert outcome.state == OLD_FORMAT_UNMATCHED
         assert outcome.team is None
+        assert outcome.report == (
+            "handoff cross-team check unavailable for task 57: no other "
+            "named store carries the identity"
+        )
 
     def test_an_identity_match_wins_over_a_later_content_match(self):
         """The two-pass scan: a coincidental content match in a second store
@@ -257,12 +405,14 @@ class TestMixedOldFormatEvent:
 
     def test_non_dict_event_handoff_is_unmatched(self):
         outcome = mixed_old_format_event(
+            "57",
             "review-backend",
             "NEW subject",
             "not a mapping",
             [{"team": "session-old", "task": self._task("review-backend", "OLD")}],
         )
         assert outcome.state == OLD_FORMAT_UNMATCHED
+        assert "cross-team check unavailable" in outcome.report
 
     def test_no_candidates_is_unmatched(self):
         assert (
@@ -305,7 +455,7 @@ class TestOldFormatDestination:
             "metadata": {"handoff": dict(handoff)},
         }
         outcome = mixed_old_format_event(
-            "coder-a", "old team subject", handoff,
+            "57", "coder-a", "old team subject", handoff,
             [{"team": "session-old", "task": task}],
         )
         assert outcome.state == OLD_FORMAT_OWNED
@@ -410,6 +560,19 @@ class TestHarvestRuleProse:
         assert "from_events.setdefault(outcome.team, []).append(e)" in SKILL_TEXT
         assert 'if destination == "mixed":' in SKILL_TEXT
         assert 'elif destination == "from":' in SKILL_TEXT
+
+    def test_old_format_section_reports_both_non_this_branches(self):
+        """The MIXED branch and the UNMATCHED branch both emit their report.
+        A zero here is the silent-choice defect on the COMMON old-format
+        path, so the count is pinned at two."""
+        assert SKILL_TEXT.count("report(outcome.report)") == 2
+        assert "task_id, e.get(\"agent\", \"\")" in SKILL_TEXT
+
+    def test_old_format_candidates_are_read_only_when_needed(self):
+        """Architecture performance note: new-format events take no extra
+        read. An unguarded candidate build reads the stores for every task,
+        then reads this team's file AGAIN for the union."""
+        assert "if old_format:" in SKILL_TEXT
 
     def test_snapshot_section_join_present(self):
         assert "handoff snapshot identity mismatch for task N" in SKILL_TEXT
