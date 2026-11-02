@@ -443,7 +443,7 @@ class TestDependencyDriftIsDetectable:
 
     Not covered:
     - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
-    - removal by any route other than `pip uninstall`;
+    - an unpinned package installed and then removed between two checks, by a route other than `pip uninstall` (removing a pinned package, or a package the pins require, is reported as MISSING);
     - integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
     - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
     - vendored code without distribution metadata;
@@ -1482,6 +1482,23 @@ class TestVerifyCiEnvironmentScript:
         self._dist(tmp_path, "alpha", "1.0", requires=["gamma>=1"])
         self._dist(tmp_path, "gamma", "3.0")
         assert self._check(verify, {"alpha": "1.0"}, tmp_path).ok
+
+    def test_absent_transitive_dependency_is_reported(self, verify, tmp_path):
+        """A REQUIRED closure member that is not installed (anyio under
+        httpx, removed after the install) makes the environment not the one
+        the pins resolve to: not ok, with the missing name reported."""
+        self._dist(tmp_path, "httpx", "0.28.1", requires=["anyio"])
+        verdict = self._check(verify, {"httpx": "0.28.1"}, tmp_path)
+        assert not verdict.ok, verdict.render()
+        assert "anyio" in verdict.missing, verdict.render()
+        assert "anyio" in verdict.render()
+
+    def test_absent_marker_false_requirement_is_fine(self, verify, tmp_path):
+        """A requirement whose marker is false for this interpreter is not
+        required, so its absence is fine."""
+        self._dist(tmp_path, "httpx", "0.28.1",
+                   requires=['anyio; python_version < "3"'])
+        assert self._check(verify, {"httpx": "0.28.1"}, tmp_path).ok
 
     def test_marker_false_requirement_is_not_pulled_in(self, verify, tmp_path):
         self._dist(tmp_path, "alpha", "1.0",

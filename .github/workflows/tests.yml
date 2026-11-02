@@ -119,7 +119,8 @@
 #   RUNTIME CHECK: scripts/verify_ci_environment.py runs immediately before the
 #   test step and again as the job's last step, and the suite runs the same
 #   check inside its own process. It compares the distributions the
-#   interpreter can import with constraints-ci.txt: every pin at its version,
+#   interpreter can import with constraints-ci.txt: every pin at its version
+#   and everything the pins require installed,
 #   nothing outside the pins' dependency closure (plus pip and any
 #   RUNNER_BASELINE entry for what the runner image ships; measured empty),
 #   no package installed twice, and `python3` on PATH being this interpreter.

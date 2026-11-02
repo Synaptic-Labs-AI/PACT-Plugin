@@ -4,7 +4,8 @@
 Compares the distributions this interpreter can import (along its own
 sys.path) with constraints-ci.txt at the repository root:
 
-- every pinned name is installed at its pinned version (pip exempt);
+- every pinned name is installed at its pinned version (pip exempt), and
+  every package the pins require is installed;
 - nothing is installed outside the pins' Requires-Dist closure, plus pip
   and RUNNER_BASELINE;
 - no distribution is installed twice along the path (the first copy is the
@@ -19,7 +20,7 @@ the plugin.
 
 Not covered:
 - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
-- removal by any route other than `pip uninstall`;
+- an unpinned package installed and then removed between two checks, by a route other than `pip uninstall` (removing a pinned package, or a package the pins require, is reported as MISSING);
 - integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
 - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
 - vendored code without distribution metadata;
@@ -100,7 +101,7 @@ def read_pins(path: pathlib.Path) -> dict[str, str]:
 @dataclasses.dataclass(frozen=True)
 class Verdict:
     wrong_version: dict[str, tuple[str, str]]   # name -> (installed effective, pinned)
-    missing: tuple[str, ...]                    # pinned names not installed
+    missing: tuple[str, ...]                    # pinned or pin-required names not installed
     unexpected: tuple[str, ...]                 # installed, outside the closure
     shadowed: dict[str, tuple[str, ...]]        # name -> every location, sys.path order
     interpreter_mismatch: tuple[str, str] | None  # (which python3, sys.executable), unresolved
@@ -120,7 +121,7 @@ class Verdict:
             out += [f"  {n}: {got} != {want}"
                     for n, (got, want) in sorted(self.wrong_version.items())]
         if self.missing:
-            out.append("MISSING (pinned, not installed):")
+            out.append("MISSING (pinned or required by a pin, not installed):")
             out += [f"  {n}" for n in self.missing]
         if self.wrong_version or self.missing:
             remedies.append(
@@ -200,9 +201,10 @@ def _effective_distributions(path: Sequence[str]):
     return effective, locations
 
 
-def _closure(roots: Sequence[str], effective) -> set[str]:
+def _closure(roots: Sequence[str], effective, required: set[str] | None = None) -> set[str]:
     """Names reachable from `roots` through Requires-Dist, honouring the
-    extras each requirement requests."""
+    extras each requirement requests. When `required` is given, every name
+    reached through a Requires-Dist edge is added to it, installed or not."""
     Requirement = _requirement_class()
     done: dict[str, frozenset[str]] = {}
     work = [(name, frozenset()) for name in roots]
@@ -224,6 +226,8 @@ def _closure(roots: Sequence[str], effective) -> set[str]:
                     req.marker.evaluate({"extra": e}) for e in {""} | extras):
                 continue
             work.append((normalize(req.name), frozenset(req.extras)))
+            if required is not None:
+                required.add(normalize(req.name))
     return set(done)
 
 
@@ -237,14 +241,18 @@ def check_environment(
     effective, locations = _effective_distributions(sys.path if path is None else path)
     roots = list(pins) + ["pip"] + [normalize(n) for n in baseline]
     closure = _closure(roots, effective)
+    # Names the PINNED set requires (pip and baseline roots excluded): each
+    # must be installed, so a removed transitive is reported, not ignored.
+    required: set[str] = set()
+    _closure(list(pins), effective, required)
     wrong_version: dict[str, tuple[str, str]] = {}
-    missing: list[str] = []
+    missing = {n for n in required if n not in effective}
     for name, pinned in sorted(pins.items()):
         if name == "pip":
             continue
         dist = effective.get(name)
         if dist is None:
-            missing.append(name)
+            missing.add(name)
         elif not _same_version(dist.version, pinned):
             wrong_version[name] = (dist.version, pinned)
     mismatch = None
@@ -255,7 +263,7 @@ def check_environment(
                         os.path.abspath(sys.executable))
     return Verdict(
         wrong_version=wrong_version,
-        missing=tuple(missing),
+        missing=tuple(sorted(missing)),
         unexpected=tuple(sorted(set(effective) - closure)),
         shadowed={n: tuple(locs) for n, locs in sorted(locations.items()) if len(locs) > 1},
         interpreter_mismatch=mismatch,
