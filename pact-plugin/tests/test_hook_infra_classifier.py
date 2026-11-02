@@ -727,7 +727,9 @@ class TestOracleStaticImportBoundBackstop:
         session is promised.
 
         Stdlib membership is read from where each module is found, not from
-        sys.stdlib_module_names, which Python 3.9 in the CI matrix lacks.
+        sys.stdlib_module_names: location-derived membership is identical on
+        every interpreter and does not depend on the attribute (3.10+; the
+        check originated as a 3.9 workaround and is kept deliberately).
         """
         import ast
         import importlib.util

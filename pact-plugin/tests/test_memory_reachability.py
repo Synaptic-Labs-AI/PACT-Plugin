@@ -5,10 +5,6 @@ the reachability rule, and every fixture is synthetic — the repo
 holds no agent-memory-shaped material and a test against a real tree would
 assert a number that moves between sessions.
 """
-import subprocess
-import sys
-from pathlib import Path
-
 import pytest
 
 import memory_reachability as mr  # noqa: E402
@@ -490,70 +486,6 @@ def test_a_conforming_satellite_named_without_its_extension_is_still_a_root(tmp_
         result = mr.scan(root)
         assert "MEMORY-topics.md" in [p.name for p in result.roots], reference
         assert result.unreachable == (), reference
-
-
-def _older_interpreter():
-    """The FIRST candidate older than the one running the suite, or None.
-
-    First, not oldest and not the declared floor: the walk returns as soon as a
-    candidate is below the running version, so which interpreter a caller gets
-    depends on what the host has installed.
-    """
-    for candidate in ("/usr/bin/python3", "python3.9", "python3.10", "python3.11"):
-        try:
-            out = subprocess.run(
-                [candidate, "-c", "import sys; print(sys.version_info[0], sys.version_info[1])"],
-                capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if out.returncode == 0:
-            found = tuple(int(n) for n in out.stdout.split())
-            if found < sys.version_info[:2]:
-                return candidate, found
-    return None, None
-
-
-def test_the_checker_imports_and_scans_under_an_older_interpreter(tmp_path):
-    """A syntax parse cannot see a keyword argument that only exists in a newer runtime.
-
-    `Path.read_text(newline=...)` is 3.13+. It is valid 3.9 SYNTAX, so the
-    annotation-compat gate -- which parses at feature_version 3.9 -- stayed green
-    while every scan would have raised TypeError on the first file it read. This
-    arm RUNS the module instead of parsing it, which is the only way to see that
-    class of defect.
-
-    WHAT A GREEN HERE COVERS. The probe runs under the first interpreter older
-    than the running one, which is not the oldest available and not the declared
-    floor, so the version actually exercised depends on the host's interpreter
-    inventory. Read it off the failure message, which names the interpreter and
-    the version it found; do not infer it from this arm passing.
-
-    This arm is inert wherever the running interpreter is the oldest available,
-    including a run AT the declared floor, where no candidate can be older. The
-    skip is the correct outcome there.
-    """
-    interpreter, found = _older_interpreter()
-    if interpreter is None:
-        pytest.skip("no interpreter older than {0} available".format(sys.version_info[:2]))
-
-    root = tmp_path / "agent"
-    root.mkdir(parents=True)
-    (root / "MEMORY.md").write_bytes(b"# I\r\n- [a](feedback_a.md)\r\n")
-    (root / "feedback_a.md").write_text("x", encoding="utf-8")
-    (root / "feedback_orphan.md").write_text("x", encoding="utf-8")
-
-    scripts = str(Path(__file__).resolve().parent.parent / "scripts")
-    probe = (
-        "import sys, pathlib; sys.path.insert(0, {0!r})\n"
-        "import memory_reachability as mr\n"
-        "root = pathlib.Path({1!r})\n"
-        "r = mr.scan(root)\n"
-        "assert [p.name for p in r.unreachable] == ['feedback_orphan.md'], r.unreachable\n"
-        "assert '\\r' in mr._read(root / 'MEMORY.md'), 'line endings were translated'\n"
-        "mr.emit_edit(r); mr.render(r); mr.as_dict(r)\n"
-    ).format(scripts, str(root))
-    done = subprocess.run([interpreter, "-c", probe], capture_output=True, text=True, timeout=60)
-    assert done.returncode == 0, "under {0} {1}:\n{2}".format(interpreter, found, done.stderr)
 
 
 def test_the_one_root_warning_fires_only_when_nothing_was_followed(tmp_path):

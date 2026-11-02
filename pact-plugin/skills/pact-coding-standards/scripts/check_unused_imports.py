@@ -110,36 +110,6 @@ def _line_has_noqa_f401(line: str) -> bool:
     )
 
 
-def _alias_lines(source: str, node: ast.stmt) -> list[int]:
-    """The physical line each name of a multi-line import starts on, in
-    `node.names` order.
-
-    `ast.alias` carries no position before Python 3.10, so the lines are read
-    from the statement's own tokens on every interpreter: each name starts at
-    the first NAME token after the `import` keyword or after a comma. When the
-    tokens do not line up with `node.names`, every name gets the statement's
-    first line, which leaves only first-line suppression in force.
-    """
-    fallback = [node.lineno] * len(node.names)
-    segment = ast.get_source_segment(source, node)
-    if segment is None:
-        return fallback
-    starts: list[int] = []
-    expecting = False
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(segment).readline):
-            if tok.type == tokenize.NAME and expecting:
-                starts.append(node.lineno + tok.start[0] - 1)
-                expecting = False
-            elif tok.type == tokenize.NAME and tok.string == "import" and not starts:
-                expecting = True
-            elif tok.type == tokenize.OP and tok.string == "," and starts:
-                expecting = True
-    except (tokenize.TokenError, SyntaxError):
-        return fallback
-    return starts if len(starts) == len(node.names) else fallback
-
-
 def _backslash_join_ends(source: str) -> dict[int, int]:
     """Map each physical line a backslash continues to the last line of its
     joined run, the line a noqa for any of them must sit on.
@@ -229,7 +199,7 @@ class _ScopedImportCollector(ast.NodeVisitor):
         self._try_depth -= 1
 
     # `try/except*` (ast.TryStar, PEP 654) is try-scoped exactly like plain
-    # `try` — the alias is inert on interpreters whose ast lacks TryStar.
+    # `try`.
     visit_TryStar = visit_Try
 
     def visit_If(self, node: ast.If) -> None:
@@ -294,15 +264,11 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
             continue  # carve-out: compiler directive, never "used"
         if _line_has_noqa_f401(lines[noqa_line(node.lineno) - 1]):
             continue  # suppression: first physical line of the statement
-        name_lines = (
-            _alias_lines(source, node)
-            if node.end_lineno != node.lineno
-            else [node.lineno] * len(node.names)
-        )
-        for alias, name_line in zip(node.names, name_lines):
+        for alias in node.names:
             if alias.name == "*":
                 continue  # carve-out: star imports are not tracked
-            if _line_has_noqa_f401(lines[noqa_line(name_line) - 1]):
+            # alias.lineno is the physical line the name starts on.
+            if _line_has_noqa_f401(lines[noqa_line(alias.lineno) - 1]):
                 continue  # suppression: the name's own physical line
             if isinstance(node, ast.Import):
                 bound = (alias.asname or alias.name).split(".")[0]

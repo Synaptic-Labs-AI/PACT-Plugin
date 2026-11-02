@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 
 class TestEnsureMemoryReady:
@@ -430,9 +431,35 @@ class TestDependencyDriftIsDetectable:
     Visibility does not cross the process boundary regardless: pytest's warnings
     summary only collects warnings raised in the pytest process.
 
-    Hence drift is caught STATICALLY, below. A failing test is louder than any
-    log line and is immune to capture, to the process boundary and to `-r`.
+    Hence drift is caught by TESTS, not log lines. What CI actually installs
+    is no longer inferred from CI text: scripts/verify_ci_environment.py
+    compares the INSTALLED environment with constraints-ci.txt in CI (a step
+    before every test run and as each job's last step) and inside the pytest
+    process itself (tests/ci_environment_binding.py). This class keeps the
+    bounded STATIC checks that complement it: memory_init's packages are
+    pinned, the verify steps sit around every test run, a word tripwire for
+    tools the runtime check cannot see, the third-party action allowlist,
+    and the floor-literal bind.
+
+    Not covered:
+    - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
+    - an unpinned package installed and then removed between two checks, by a route other than `pip uninstall` (removing a pinned package, or a package the pins require, is reported as MISSING);
+    - integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
+    - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
+    - vendored code without distribution metadata;
+    - transitive versions, which float by design (only pinned names are version-checked).
     """
+
+    # The verify step's command as tests.yml runs it: ENFORCING (no
+    # `--report`), so a drifted environment fails the step. A report-only
+    # form would print the verdict and exit 0, and is refused here.
+    VERIFY_CMD = "python scripts/verify_ci_environment.py"
+    # The test step's command, exactly: the placement arm pins it so the
+    # tested process is the process the verify steps checked.
+    TEST_CMD = "python -m pytest -ra"
+    # A job is GOVERNED when any step's run text names one of these.
+    _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
+    _PYTEST_RE = re.compile(r"\bpytest\b")
 
     def _source_repo_root(self):
         """Repo root by a POSITIVE marker, or None when this is not a checkout.
@@ -444,25 +471,106 @@ class TestDependencyDriftIsDetectable:
         workflow's own absence is then free to be a FAILURE.
 
         Marker matches the convention already used by test_packaging_boundary.py.
+        The mutation arms monkeypatch THIS method to point the shipped arms
+        at a rig copy; the rig builder reads the real tree through
+        `_real_repo_root`, which they never patch, so a second copy built in
+        the same arm cannot inherit the first copy's mutation.
         """
+        return self._real_repo_root()
+
+    @staticmethod
+    def _real_repo_root():
+        """The checkout this file lives in, by marker — never monkeypatched."""
         for base in Path(__file__).resolve().parents:
             if (base / ".claude-plugin" / "marketplace.json").exists():
                 return base
         return None
 
-    def test_declared_packages_match_the_ci_install_line(self):
-        """Every package memory_init would install must be declared by CI.
+    def _require_root(self, what):
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ tree by design. This skip is "
+                f"NO INFORMATION about {what} — never read it as a pass."
+            )
+        return root
 
-        WHAT THIS PROVES: the two lists cannot silently diverge. If a package is
-        added here and not to the workflow, this goes RED with the name in the
-        message — which is the drift signal the silent branch cannot emit.
+    @staticmethod
+    def _load_workflow_yaml(path, text=None):
+        """yaml.safe_load of one workflow or action; unparseable is a FAILURE."""
+        try:
+            return yaml.safe_load(
+                text if text is not None else path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise AssertionError(
+                f"PARSE FAILURE, not a clean read: {path} does not parse as "
+                f"YAML ({exc.__class__.__name__}), so its steps cannot be "
+                f"enumerated. GitHub would refuse to run it; fix the syntax."
+            ) from exc
 
-        WHAT IT DOES NOT PROVE: that any runtime message is visible in a CI log.
-        Nothing asserts that, because nothing safely can — see the class
-        docstring. It also does not prove the reverse direction: CI may install
-        packages this module does not know about, which is harmless.
+    @staticmethod
+    def _steps_of(doc):
+        """Every step mapping in one parsed workflow or composite action."""
+        steps = []
+        if not isinstance(doc, dict):
+            return steps
+        for job in (doc.get("jobs") or {}).values():
+            if isinstance(job, dict):
+                steps += [s for s in job.get("steps") or [] if isinstance(s, dict)]
+        runs = doc.get("runs")
+        if isinstance(runs, dict):
+            steps += [s for s in runs.get("steps") or [] if isinstance(s, dict)]
+        return steps
+
+    @staticmethod
+    def _workflow_files(root):
+        """Every `.yml`/`.yaml` under `.github/workflows/`."""
+        workflows = root / ".github" / "workflows"
+        if not workflows.is_dir():
+            return []
+        return sorted(p for p in workflows.iterdir()
+                      if p.is_file() and p.suffix in (".yml", ".yaml"))
+
+    @staticmethod
+    def _action_files(root):
+        """Every `action.yml`/`action.yaml` under `.github/actions/`."""
+        actions = root / ".github" / "actions"
+        if not actions.is_dir():
+            return []
+        return sorted(p for p in actions.rglob("*")
+                      if p.is_file() and p.name in ("action.yml", "action.yaml"))
+
+    @staticmethod
+    def _verify_script(root=None):
+        """scripts/verify_ci_environment.py, loaded by path (it is dev
+        tooling at the repo root, not an importable package)."""
+        import importlib.util
+        root = root or TestDependencyDriftIsDetectable._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout, so "
+                        "scripts/verify_ci_environment.py is absent.")
+        script = root / "scripts" / "verify_ci_environment.py"
+        assert script.is_file(), (
+            f"source checkout detected at {root} but {script} is missing: "
+            f"the runtime environment check cannot run. FAILURE, not skip."
+        )
+        spec = importlib.util.spec_from_file_location(
+            "_pact_verify_ci_environment_under_test", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_memory_init_packages_are_pinned(self):
+        """Every package memory_init would install is a CI pin.
+
+        Under CI memory_init's install path is skipped (silently, see the
+        class docstring), so a package it needs must reach the environment
+        through constraints-ci.txt, the one CI requirement set. Names are
+        compared after PEP 503 normalisation.
         """
-        from scripts.memory_init import check_and_install_dependencies  # noqa: F401
         import inspect
 
         from scripts import memory_init
@@ -472,108 +580,582 @@ class TestDependencyDriftIsDetectable:
         assert declared, (
             "could not read the package list out of "
             "check_and_install_dependencies — the list changed shape and this "
-            "parity test is now vacuous. Re-point it; do not delete it."
+            "check is now vacuous. Re-point it; do not delete it."
+        )
+        root = self._require_root("memory_init's pins")
+        verify = self._verify_script(self._real_repo_root())
+        pins = verify.read_pins(root / "constraints-ci.txt")
+        missing = sorted(
+            verify.normalize(name) for name in declared
+            if verify.normalize(name) not in pins)
+        assert not missing, (
+            f"DEPENDENCY DRIFT: {missing} are installed by "
+            f"memory_init.check_and_install_dependencies but are NOT pinned "
+            f"in constraints-ci.txt. Under CI the install path is skipped, so "
+            f"these would be absent at runtime and the branch reports it "
+            f"NOWHERE (it is deliberately silent — the CLI's stderr is a JSON "
+            f"contract). Pin them in constraints-ci.txt, or remove them here."
         )
 
+    def test_ci_environment_is_verified_around_every_test_run(self):
+        """The runtime check runs in the SAME place as the tests (F1(a), F2).
+
+        For every GOVERNED job (any step whose `run` names pytest, python,
+        pip or ruff) in every workflow under .github/workflows/:
+          (i) its LAST step runs VERIFY_CMD with `if: always()`;
+          (ii) every step whose `run` names pytest is EXACTLY TEST_CMD and is
+               IMMEDIATELY preceded by a step running VERIFY_CMD;
+          (iii) no verify step and no pytest step carries `env:` or
+               `shell:`, and no verify step carries `working-directory:`
+               (VERIFY_CMD names the script relative to the repo root).
+        Together these make the process pytest runs in the process the
+        verify step just checked, and the after-check sees whatever the
+        tests or later steps installed.
+        """
+        root = self._require_root("verify-step placement")
+        workflows = self._workflow_files(root)
+        assert workflows, (
+            f"source checkout detected at {root} but no workflow under "
+            f".github/workflows/: the placement arm cannot run. FAILURE."
+        )
+        problems = []
+        governed_jobs = 0
+        for path in workflows:
+            doc = self._load_workflow_yaml(path)
+            rel = path.relative_to(root).as_posix()
+            for jid, job in ((doc or {}).get("jobs") or {}).items():
+                if not isinstance(job, dict):
+                    continue
+                steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
+                runs = [s.get("run") if isinstance(s.get("run"), str) else ""
+                        for s in steps]
+                if not any(self._GOVERNED_RE.search(r) for r in runs):
+                    continue
+                governed_jobs += 1
+                where = f"{rel} job {jid}"
+                last = steps[-1] if steps else {}
+                if runs[-1].strip() != self.VERIFY_CMD or str(
+                        last.get("if", "")).strip() not in (
+                        "always()", "${{ always() }}"):
+                    problems.append(
+                        f"{where}: the LAST step must run "
+                        f"`{self.VERIFY_CMD}` with `if: always()`")
+                for n, (step, run) in enumerate(zip(steps, runs)):
+                    is_verify = run.strip() == self.VERIFY_CMD
+                    is_test = bool(self._PYTEST_RE.search(run))
+                    if is_test and run.strip() != self.TEST_CMD:
+                        problems.append(
+                            f"{where} step {n}: a pytest step must run "
+                            f"exactly `{self.TEST_CMD}`, not {run.strip()!r}")
+                    if is_test and (n == 0 or runs[n - 1].strip() != self.VERIFY_CMD):
+                        problems.append(
+                            f"{where} step {n}: a pytest step must be "
+                            f"IMMEDIATELY preceded by `{self.VERIFY_CMD}`")
+                    if (is_test or is_verify) and (
+                            "env" in step or "shell" in step):
+                        problems.append(
+                            f"{where} step {n}: a verify or pytest step may "
+                            f"carry no `env:` or `shell:`")
+                    if is_verify and "working-directory" in step:
+                        problems.append(
+                            f"{where} step {n}: a verify step may carry no "
+                            f"`working-directory:`")
+                    # A failure the job is told to IGNORE is no gate: a
+                    # verify or pytest step marked continue-on-error goes
+                    # red and the job still passes.
+                    if (is_test or is_verify) and step.get(
+                            "continue-on-error", False) is not False:
+                        problems.append(
+                            f"{where} step {n}: a verify or pytest step may "
+                            f"not carry `continue-on-error` (its failure "
+                            f"would not fail the job)")
+                    # The before-check runs unconditionally: an `if:` on it
+                    # can skip the check while the tests still run.
+                    if is_verify and n + 1 < len(runs) and \
+                            self._PYTEST_RE.search(runs[n + 1]) and "if" in step:
+                        problems.append(
+                            f"{where} step {n}: the before-check may carry no "
+                            f"`if:` (it must run before every test run)")
+                if job.get("continue-on-error", False) is not False:
+                    problems.append(
+                        f"{where}: a governed job may not carry "
+                        f"`continue-on-error` (its verify failures would not "
+                        f"fail the workflow)")
+        assert governed_jobs, (
+            "PARSE FAILURE, not placement drift: no workflow job names "
+            "pytest/python/pip/ruff, so the placement arm checks nothing. "
+            "Re-point it; do not delete it."
+        )
+        assert not problems, (
+            "VERIFY PLACEMENT DRIFT: the runtime environment check no longer "
+            "brackets every test run, so a green CI may have tested a "
+            "different environment than the one it checked:\n"
+            + "\n".join(f"  {p}" for p in problems)
+            + "\nPut a step running the verify command immediately before "
+            "each pytest step and as the job's last step with if: always(), "
+            "keep the pytest command exactly as pinned, and move env/shell "
+            "settings off those steps."
+        )
+
+    # C-LITE TRIPWIRE. Tools whose installs the runtime check cannot see
+    # (isolated environments), the uninstall verb, and the index-redirect
+    # belt. Read as WORDS over a fixed text set; no argv parsing.
+    _TRIPWIRE_PATTERNS = (
+        ("isolated-environment tool", re.compile(
+            r"\b(pipx|uvx|uv|conda|mamba|micromamba|poetry|pipenv|pdm|hatch"
+            r"|pixi|rye)\b")),
+        ("pip uninstall", re.compile(r"\bpip(3(\.\d+)?)?\s+uninstall\b")),
+        ("pip index env", re.compile(
+            r"\bPIP_(INDEX_URL|EXTRA_INDEX_URL|FIND_LINKS|NO_INDEX"
+            r"|TRUSTED_HOST)\b")),
+        ("pip index flag", re.compile(
+            r"--(index-url|extra-index-url|find-links|no-index|trusted-host"
+            r"|pypi-url)\b")),
+        # `--target DIR` installs into a directory outside site-packages that
+        # a later sys.path insert can import from. An exact option word:
+        # ruff's `--target-version` must not match.
+        ("pip target dir", re.compile(r"--target(?![-\w])")),
+    )
+    # Exact line (stripped) -> the reason it is accepted. Empty today.
+    _ACCEPTED_TRIPWIRE_LINES = {}
+    _CANONICAL_INSTALL_LINE = "python -m pip install -r constraints-ci.txt"
+
+    @staticmethod
+    def _tracked_shell_and_make_files(root):
+        """Every git-tracked *.sh, *.bash, Makefile and Makefile.* file;
+        globbed from the root when git cannot list them (a rig copy)."""
+        patterns = ("*.sh", "*.bash", "Makefile", "Makefile.*")
+        try:
+            listed = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "-z", "--",
+                 *patterns, *(f"**/{p}" for p in patterns)],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            listed = None
+        if listed is not None and listed.returncode == 0 and listed.stdout:
+            names = [n for n in listed.stdout.split("\0") if n]
+            return sorted({root / n for n in names if (root / n).is_file()})
+        found = set()
+        for pattern in patterns:
+            found |= {p for p in root.rglob(pattern) if p.is_file()
+                      and ".git" not in p.relative_to(root).parts}
+        return sorted(found)
+
+    def _tripwire_hits(self, root):
+        texts, env_hits = [], []
+        for path in self._workflow_files(root) + self._action_files(root):
+            doc = self._load_workflow_yaml(path)
+            rel = path.relative_to(root).as_posix()
+            for n, step in enumerate(self._steps_of(doc)):
+                if isinstance(step.get("run"), str):
+                    texts.append((f"{rel} step {n}", step["run"]))
+            env_hits.extend(
+                f"{rel}: pip env key `{key}`" for key in self._pip_env_keys(doc))
+        files = set(self._tracked_shell_and_make_files(root))
+        install_sh = root / ".cursor" / "install.sh"
+        if install_sh.is_file():
+            files.add(install_sh)
+        for path in sorted(files):
+            texts.append((path.relative_to(root).as_posix(),
+                          path.read_text(encoding="utf-8", errors="replace")))
+        hits = list(env_hits)
+        for label, text in texts:
+            for number, line in enumerate(text.splitlines(), 1):
+                if line.strip() in self._ACCEPTED_TRIPWIRE_LINES:
+                    continue
+                for family, pattern in self._TRIPWIRE_PATTERNS:
+                    for match in pattern.finditer(line):
+                        hits.append(
+                            f"{label}:{number}: {family} `{match.group(0)}` "
+                            f"in {line.strip()!r}")
+        return hits
+
+    @staticmethod
+    def _pip_env_keys(doc):
+        """`PIP_*` keys of the workflow, job, container and step `env:`
+        mappings of one parsed workflow or action (service containers'
+        env never reaches the job's process and is not read)."""
+        keys = []
+
+        def harvest(env):
+            if isinstance(env, dict):
+                keys.extend(str(k) for k in env
+                            if str(k).upper().startswith("PIP_"))
+
+        if isinstance(doc, dict):
+            harvest(doc.get("env"))
+            for job in (doc.get("jobs") or {}).values():
+                if isinstance(job, dict):
+                    harvest(job.get("env"))
+                    if isinstance(job.get("container"), dict):
+                        harvest(job["container"].get("env"))
+            for step in TestDependencyDriftIsDetectable._steps_of(doc):
+                harvest(step.get("env"))
+        return keys
+
+    def test_no_isolated_environment_tool_or_index_redirect(self):
+        """A bounded WORD tripwire for what the runtime check cannot see.
+
+        The runtime check (scripts/verify_ci_environment.py) observes the
+        environment the tests import from; an isolated-environment tool
+        (pipx, uv, conda, ...) installs where it never looks, an uninstall
+        changes the set after the before-check, and an index redirect
+        serves a different build of a pinned version. TEXT SET, fixed:
+        every `run:` string in .github/workflows/*.y*ml and
+        .github/actions/**/action.y*ml (yaml.safe_load), every `PIP_*`
+        key of their env mappings, the full text of .cursor/install.sh, and
+        the full text of every git-tracked *.sh, *.bash, Makefile and
+        Makefile.* file. Matched as WORDS (`_TRIPWIRE_PATTERNS`); no argv
+        parsing and no following. A hit names file, line and token.
+        """
+        root = self._require_root("the isolated-environment tripwire")
+        hits = self._tripwire_hits(root)
+        assert not hits, (
+            "TRIPWIRE: CI or a tracked script names a tool or option the "
+            "runtime environment check cannot see:\n"
+            + "\n".join(f"  {h}" for h in hits)
+            + f"\nInstall through the pinned set instead "
+            f"(`{self._CANONICAL_INSTALL_LINE}`), or, if the line is "
+            f"genuinely harmless (prose, a read-only use), add the exact "
+            f"line to _ACCEPTED_TRIPWIRE_LINES with a reason in the same "
+            f"change."
+        )
+
+    # Every THIRD-PARTY action the shipped workflows and actions use,
+    # keyed on `owner/repo[/path]` with the `@ref` stripped (a SHA re-pin is
+    # not drift). Each was vetted as installing nothing unpinned.
+    _ALLOWED_THIRD_PARTY_ACTIONS = frozenset({
+        "actions/checkout",
+        "actions/setup-python",
+        "actions/cache/restore",
+        "actions/cache/save",
+    })
+
+    def test_every_third_party_action_is_allowlisted(self):
+        """Every third-party action CI uses is on a VETTED allowlist.
+
+        An action is code CI runs that no `run:` text shows, and many
+        install packages internally. ALLOWLIST: every `uses:` reference to
+        another repository — step level, or a job-level reusable workflow —
+        in every workflow under .github/workflows/, every action under
+        .github/actions/, and every local action a `uses: ./<path>` names
+        (followed recursively) must be in `_ALLOWED_THIRD_PARTY_ACTIONS`,
+        keyed on `owner/repo[/path]` with the `@ref` stripped. `docker://`
+        images are never allowed.
+        """
+        root = self._require_root("the action allowlist")
+        queue = self._workflow_files(root) + self._action_files(root)
+        seen, references = set(), []
+        while queue:
+            path = queue.pop(0)
+            if path.resolve() in seen:
+                continue
+            seen.add(path.resolve())
+            doc = self._load_workflow_yaml(path)
+            rel = path.relative_to(root).as_posix()
+            entries = [(f"{rel} step", s.get("uses")) for s in self._steps_of(doc)]
+            for jid, job in ((doc or {}).get("jobs") or {}).items() \
+                    if isinstance(doc, dict) else []:
+                if isinstance(job, dict):
+                    entries.append((f"{rel} job {jid}", job.get("uses")))
+            for label, uses in entries:
+                if not isinstance(uses, str):
+                    continue
+                if uses.startswith("./"):
+                    target = root / uses[2:].split("@")[0]
+                    if target.is_file():
+                        queue.append(target)
+                    for name in ("action.yml", "action.yaml"):
+                        if (target / name).is_file():
+                            queue.append(target / name)
+                    continue
+                references.append((label, uses))
+        offenders = [
+            f"{label}: uses {uses!r}" for label, uses in references
+            if uses.startswith("docker://")
+            or uses.split("@")[0].rstrip("/").lower()
+            not in self._ALLOWED_THIRD_PARTY_ACTIONS
+        ]
+        assert not offenders, (
+            f"ACTION ALLOWLIST DRIFT: {offenders} are not on the vetted "
+            f"allowlist. An action runs code no `run:` text shows, and an "
+            f"installing action resolves packages constraints-ci.txt cannot "
+            f"pin. Confirm the action installs nothing unpinned (read its "
+            f"action.yml and what it runs), then add `owner/repo[/path]` to "
+            f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change."
+        )
+
+    def _repo_copy_carrying(self, tmp_path, workflow_text=None,
+                            script_text=None, extra_files=None):
+        """A minimal repo copy over a POSITIVE marker, for the mutation arms:
+        the workflows, .github/actions, constraints-ci.txt, pyproject.toml
+        and .cursor/install.sh, copied verbatim so a mutation is one
+        targeted substitution on the shipped state. `extra_files` maps a
+        repo-relative path to text, to add or replace a file."""
+        root = self._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; the "
+                        "mutation arms cannot copy the real surfaces.")
+        (tmp_path / ".claude-plugin").mkdir(parents=True)
+        (tmp_path / ".claude-plugin" / "marketplace.json").write_text(
+            "{}", encoding="utf-8")
+        for path in self._workflow_files(root) + self._action_files(root):
+            target = tmp_path / path.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        if workflow_text is not None:
+            (tmp_path / ".github" / "workflows" / "tests.yml").write_text(
+                workflow_text, encoding="utf-8")
+        for name in ("constraints-ci.txt", "pyproject.toml"):
+            (tmp_path / name).write_text(
+                (root / name).read_text(encoding="utf-8"), encoding="utf-8")
+        (tmp_path / ".cursor").mkdir(parents=True)
+        (tmp_path / ".cursor" / "install.sh").write_text(
+            script_text if script_text is not None
+            else (root / ".cursor" / "install.sh").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        for rel, text in (extra_files or {}).items():
+            target = tmp_path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        return tmp_path
+
+    def test_the_floor_literals_agree(self):
+        """Every statement of the Python floor must move together.
+
+        FIVE statements of the Python floor, each read where it is STATED:
+          1. pyproject.toml `requires-python = ">=X.Y"` (the SUPPORT
+             BOUNDARY) — regex over the file text, exactly one.
+          2. tests.yml `python-version: "X.Y"` (the TESTED SET) — regex
+             over the file text, exactly one.
+          3. test_py312_syntax_floor.py's detector call
+             `ast.parse(source, feature_version=(X, Y))` (the SCAN
+             DIALECT), plus its violation-message echo of the same value —
+             regex over the guard's text, exactly one of each.
+          4. tests.yml's lint legs `--target-version pyXY` (the LINT
+             DIALECT) — read from the EXECUTED `run:` strings via
+             yaml.safe_load, never the comment prose that quotes the flag;
+             every leg must agree (the local lint script's byte-parity test
+             moves WITH the workflow, so it cannot bind the value).
+          5. .cursor/install.sh `PYTHON_FLOOR_MINOR=N` (the LOCAL
+             BOOTSTRAP's refusal), compared as (3, N) — regex for one
+             column-0 line, exactly one.
+        Before this arm nothing bound them: the alignment was claimed in
+        COMMENTS only, so editing any one literal reddened nothing while
+        the declared and enforced floors diverged silently.
+
+        The guard file MENTIONS several feature_version values by design —
+        its own boundary arm parses a PEP 695 sample at (3, 11) to prove
+        the detector discriminates — so this arm cannot compare every
+        mention. It anchors on the two occurrences that STATE the enforced
+        floor: the detector's `ast.parse(source, feature_version=(X, Y))`
+        call, and the violation-message echo of the same value. A message
+        left at the old floor when the call moves is exactly the silent
+        divergence this arm exists to catch.
+        """
         root = self._source_repo_root()
         if root is None:
             pytest.skip(
-                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json above "
-                f"{Path(__file__).resolve()}, so this is not a PACT source "
-                "checkout. The expected case is an INSTALLED PLUGIN CACHE, "
-                "which has no .github/ tree by design. This skip is NO "
-                "INFORMATION about dependency drift — never read it as a pass."
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which ships no pyproject/workflow pair by design. "
+                "This skip is NO INFORMATION about floor-literal alignment "
+                "— never read it as a pass."
             )
-
-        # INSIDE a checkout, absence is a FAILURE. Reaching here means the
-        # marker was found, so the workflow is expected to exist and parse; if
-        # it does not, the drift detector is broken and must say so loudly
-        # rather than skip and read as green.
+        pyproject = root / "pyproject.toml"
+        assert pyproject.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {pyproject} is missing. The floor alignment arm cannot "
+            f"run. This is a FAILURE, not a skip: inside a checkout the "
+            f"declaration is required."
+        )
         workflow = root / ".github" / "workflows" / "tests.yml"
         assert workflow.exists(), (
-            f"source checkout detected at {root} (marketplace.json present) but "
-            f"{workflow} is missing. The drift detector cannot run. This is a "
-            f"FAILURE, not a skip: inside a checkout the workflow is required."
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The floor alignment arm cannot "
+            f"run. This is a FAILURE, not a skip: inside a checkout the "
+            f"workflow is required."
         )
-        install_line = next(
-            (ln for ln in workflow.read_text(encoding="utf-8").splitlines()
-             if "pip install" in ln),
-            None,
-        )
-        assert install_line is not None, (
-            f"PARSE FAILURE, not dependency drift: {workflow} contains no "
-            f"'pip install' line, so the CI dependency declaration cannot be "
-            f"read. The workflow changed shape — re-point this parity test at "
-            f"the new shape; do not weaken it to a skip."
+        guard = Path(__file__).resolve().parent / "test_py312_syntax_floor.py"
+        assert guard.exists(), (
+            f"the syntax-floor guard {guard} is missing beside this file. "
+            f"The floor alignment arm cannot run — this is a FAILURE, not "
+            f"a skip."
         )
 
-        # Compare against TOKENS of the install line, never substrings of it.
-        # A substring test fails OPEN on the most plausible next edit: this
-        # module does `import pysqlite3 as sqlite3`, so an editor adding
-        # 'sqlite3' to the package list above would find it inside 'pysqlite3',
-        # pass, and assert a package is installed that is not. Measured against
-        # the real install line, 'sqlite3', 'sqlite', 'vec', 'yaml' and
-        # 'asyncio' are ALL substrings of it and none is declared by CI.
-        #
-        # Names are normalised per PEP 503 (lowercase, [-_.] runs collapse to
-        # '-') on BOTH sides, so a legitimate 'sqlite_vec'/'sqlite-vec' spelling
-        # difference does not read as drift. Version specifiers and extras are
-        # stripped so 'pytest>=8' still matches 'pytest'.
-        def _normalise(name):
-            head = re.split(r"[=<>!~;\[]", name)[0]
-            return re.sub(r"[-_.]+", "-", head).strip().lower()
-
-        # Model how pip itself reads argv: the package operands are the
-        # non-flag words AFTER the `install` verb. Everything before it is the
-        # invocation (`run:`, `python`, `-m`, `pip`) and is not an operand.
-        # Deriving the boundary structurally beats filtering a hand-maintained
-        # list of command words, which would need updating and would turn a
-        # package legitimately named after a command into false drift.
-        words = install_line.split()
-        operands = words[words.index("install") + 1:] if "install" in words else []
-        install_tokens = {
-            _normalise(tok) for tok in operands
-            if tok and not tok.startswith("-")
-        }
-
-        # PARSE NON-VACUITY — asserted BEFORE the drift comparison, and with a
-        # DISTINCT message, because "I could not read the line" and "a package
-        # is missing" must never produce the same outcome. If a workflow
-        # refactor defeats this parser, `install_tokens` silently empties and
-        # the set difference below passes VACUOUSLY: the guard would be dead
-        # while green, which is the exact failure it exists to prevent.
-        #
-        # The anchor has GROUND TRUTH INDEPENDENT OF THE PARSE: this code is
-        # executing under pytest, so CI demonstrably installs pytest. If a
-        # correct parse of the CI install line does not contain it, the parse
-        # is wrong — not the dependency set. That is what makes this a real
-        # non-vacuity check rather than a restatement of the thing being tested.
-        _PARSE_ANCHOR = "pytest"
-        assert install_tokens, (
-            f"PARSE FAILURE, not dependency drift: no package operands could be "
-            f"read from the CI install line. The line is {install_line.strip()!r}. "
-            f"The tokeniser models `pip install <flags> <packages>`; a refactor "
-            f"to a requirements file or a multi-line form defeats it. Re-point "
-            f"the parser — do NOT relax the assertion below, which would pass "
-            f"vacuously over an empty token set."
+        declared = re.findall(
+            r'requires-python\s*=\s*">=(\d+)\.(\d+)"',
+            pyproject.read_text(encoding="utf-8"),
         )
-        assert _PARSE_ANCHOR in install_tokens, (
-            f"PARSE FAILURE, not dependency drift: the parsed operands "
-            f"{sorted(install_tokens)} do not contain {_PARSE_ANCHOR!r}, but "
-            f"this test is RUNNING under pytest, so CI installs it. The parse "
-            f"is therefore wrong, not the dependency set. Re-point the parser."
+        assert declared, (
+            f"PARSE FAILURE, not floor drift: no `requires-python = "
+            f"\">=X.Y\"` literal found in {pyproject}. The declaration "
+            f"changed shape — re-point this arm; do not weaken it to a "
+            f"skip."
+        )
+        assert len(declared) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(declared)} "
+            f"`requires-python` declarations found in {pyproject}. "
+            f"Reconcile them before this arm can compare."
+        )
+        cell = re.findall(
+            r'python-version:\s*"(\d+)\.(\d+)"',
+            workflow.read_text(encoding="utf-8"),
+        )
+        assert cell, (
+            f"PARSE FAILURE, not floor drift: no `python-version: \"X.Y\"` "
+            f"literal found in {workflow}. The CI cell changed shape — "
+            f"re-point this arm; do not weaken it to a skip."
+        )
+        assert len(cell) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(cell)} "
+            f"`python-version: \"X.Y\"` literals found in {workflow}. "
+            f"Reconcile them before this arm can compare."
+        )
+        # The enforced constant: the detector's parse of the scanned
+        # corpus. Anchored on `ast.parse(source,` so the boundary arm's
+        # deliberate (3, 11) sample parse cannot masquerade as the floor.
+        enforced = re.findall(
+            r"ast\.parse\(\s*source,\s*feature_version=\((\d+),\s*(\d+)\)",
+            guard.read_text(encoding="utf-8"),
+        )
+        assert enforced, (
+            f"PARSE FAILURE, not floor drift: no "
+            f"`ast.parse(source, feature_version=(X, Y))` call found in "
+            f"{guard}. The detector changed shape — re-point this arm; do "
+            f"not weaken it to a skip."
+        )
+        assert len(enforced) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(enforced)} "
+            f"`ast.parse(source, ...)` calls found in {guard}. The "
+            f"detector must state ONE floor; reconcile the copies."
+        )
+        echo = re.findall(
+            r"not parseable at feature_version=\((\d+),\s*(\d+)\)",
+            guard.read_text(encoding="utf-8"),
+        )
+        assert len(echo) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(echo)} "
+            f"violation-message floor echoes found in {guard}; expected "
+            f"exactly one. Re-point this arm."
         )
 
-        declared_tokens = {_normalise(p) for p in declared}
-        missing = sorted(declared_tokens - install_tokens)
-        assert not missing, (
-            f"DEPENDENCY DRIFT: {missing} are installed by "
-            f"memory_init.check_and_install_dependencies but are NOT in the CI "
-            f"workflow's install line. Under CI the install path is skipped, so "
-            f"these would be absent at runtime and the branch reports it "
-            f"NOWHERE (it is deliberately silent — the CLI's stderr is a JSON "
-            f"contract). Add them to the workflow, or remove them here."
+        # The fourth floor statement: the lint legs' `--target-version
+        # pyXY`, read from the EXECUTED `run:` strings (yaml.safe_load), not
+        # the file text — the workflow's comment prose quotes the flag, and
+        # prose is not a declaration. Every leg must state the floor.
+        lint_runs = "\n".join(
+            step["run"] for step in self._steps_of(
+                self._load_workflow_yaml(workflow))
+            if isinstance(step.get("run"), str)
         )
+        ruff_targets = re.findall(
+            r"--target-version(?:=|\s+)py(\d)(\d+)\b", lint_runs)
+        assert ruff_targets, (
+            f"PARSE FAILURE, not floor drift: no executed `ruff ... "
+            f"--target-version pyXY` found in {workflow}. The lint step "
+            f"changed shape — re-point this arm; do not weaken it to a "
+            f"skip."
+        )
+
+        declared_pair = tuple(int(part) for part in declared[0])
+        cell_pair = tuple(int(part) for part in cell[0])
+        # The fifth floor statement: the local bootstrap's interpreter
+        # check, which states the floor ONCE as `PYTHON_FLOOR_MINOR=N` and
+        # derives every comparison and message from it.
+        script = root / ".cursor" / "install.sh"
+        assert script.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {script} is missing. The floor alignment arm cannot run. "
+            f"This is a FAILURE, not a skip: inside a checkout the "
+            f"bootstrap script is required."
+        )
+        script_floor = re.findall(
+            r"(?m)^PYTHON_FLOOR_MINOR=(\d+)[ \t]*$",
+            script.read_text(encoding="utf-8"),
+        )
+        assert len(script_floor) == 1, (
+            f"PARSE FAILURE, not floor drift: expected exactly one "
+            f"`PYTHON_FLOOR_MINOR=N` line in {script}, found "
+            f"{len(script_floor)}. The script's interpreter check changed "
+            f"shape — re-point this arm; do not weaken it to a skip."
+        )
+        script_pair = (3, int(script_floor[0]))
+        ruff_pairs = sorted({tuple(int(p) for p in t) for t in ruff_targets})
+        guard_pair = tuple(int(part) for part in enforced[0])
+        echo_pair = tuple(int(part) for part in echo[0])
+        assert echo_pair == guard_pair, (
+            f"GUARD-INTERNAL DRIFT: the detector enforces "
+            f"{'.'.join(map(str, guard_pair))} but its violation message "
+            f"reports {'.'.join(map(str, echo_pair))}. A message left at "
+            f"the old floor misreports every violation it prints; move "
+            f"both in the same change."
+        )
+        def dotted(pair):
+            return ".".join(map(str, pair))
+
+        assert (declared_pair == cell_pair == guard_pair == script_pair
+                and ruff_pairs == [declared_pair]), (
+            f"FLOOR-LITERAL DRIFT: the five floor statements disagree. "
+            f"Move ALL FIVE together, in one change:\n"
+            f"  1. pyproject.toml requires-python (text):       "
+            f"{dotted(declared_pair)}\n"
+            f"  2. tests.yml python-version (text):             "
+            f"{dotted(cell_pair)}\n"
+            f"  3. syntax-floor guard feature_version + echo:   "
+            f"{dotted(guard_pair)}\n"
+            f"  4. tests.yml ruff --target-version (executed run: strings): "
+            f"{['py' + ''.join(map(str, p)) for p in ruff_pairs]}\n"
+            f"  5. .cursor/install.sh PYTHON_FLOOR_MINOR (text): "
+            f"{dotted(script_pair)}\n"
+            f"Each is a different QUESTION (support boundary, tested set, "
+            f"scan dialect, lint dialect, local bootstrap) that shares one "
+            f"value today; moving any one takes its own run on the new "
+            f"target, and then all five move in the same change — this red "
+            f"is the reminder, not a bug."
+        )
+
+    def test_ruff_target_version_is_bound_to_the_floor(self, tmp_path, monkeypatch):
+        """MUTATION ARM (fourth floor statement): a lint leg's
+        `--target-version` drifting from the declared floor reddens the
+        floor-literal arm. Before round 7 it was bound to nothing but the
+        local lint script's byte parity, which moves WITH it. The same arm
+        certifies the fifth statement: .cursor/install.sh's
+        `PYTHON_FLOOR_MINOR` moved alone reddens it too."""
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        real_text = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        leg = "ruff check --select F821 --target-version py312 pact-plugin/"
+        assert leg in real_text, "the F821 leg changed shape; re-point this arm"
+        self._shape_reddens(
+            tmp_path, monkeypatch, "ruff-py311",
+            "test_the_floor_literals_agree", "FLOOR-LITERAL DRIFT",
+            workflow_text=real_text.replace(
+                leg, leg.replace("py312", "py311"), 1))
+
+        # The bootstrap's interpreter floor moving alone reddens too.
+        real_script = (root / ".cursor" / "install.sh").read_text(
+            encoding="utf-8")
+        floor_line = re.search(r"(?m)^PYTHON_FLOOR_MINOR=(\d+)[ \t]*$",
+                               real_script)
+        assert floor_line, "install.sh floor line changed shape; re-point"
+        moved = int(floor_line.group(1)) + 1
+        self._shape_reddens(
+            tmp_path, monkeypatch, "install-sh-floor",
+            "test_the_floor_literals_agree", "FLOOR-LITERAL DRIFT",
+            script_text=real_script.replace(
+                floor_line.group(0), f"PYTHON_FLOOR_MINOR={moved}", 1))
+        # The line removed (or reshaped) is a PARSE FAILURE, never a pass.
+        self._shape_reddens(
+            tmp_path, monkeypatch, "install-sh-floor-missing",
+            "test_the_floor_literals_agree",
+            "PARSE FAILURE, not floor drift: expected exactly one "
+            "`PYTHON_FLOOR_MINOR=N`",
+            script_text=real_script.replace(floor_line.group(0), "", 1))
 
     def test_ci_branch_emits_nothing_to_stderr(self):
         """The silence is the CONTRACT, so pin it — a log line here breaks 15
@@ -619,6 +1201,684 @@ class TestDependencyDriftIsDetectable:
             f"default warning display writes to stderr, so in the CLI "
             f"subprocess this corrupts the same JSON contract."
         )
+
+    def _shape_reddens(self, tmp_path, monkeypatch, name, arm, match,
+                       workflow_text=None, script_text=None,
+                       extra_files=None):
+        """Run the SHIPPED arm `arm` against a rig copy carrying one shape
+        and require it to redden with `match` — the kill is the shipped
+        arm's, never a reimplementation beside it."""
+        copy = self._repo_copy_carrying(
+            tmp_path / name, workflow_text=workflow_text,
+            script_text=script_text, extra_files=extra_files)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        with pytest.raises(AssertionError, match=match):
+            getattr(self, arm)()
+
+    def _shape_stays_green(self, tmp_path, monkeypatch, name, arm,
+                           workflow_text=None, script_text=None,
+                           extra_files=None):
+        """CONTROL: a faithful shape the arm must ACCEPT."""
+        copy = self._repo_copy_carrying(
+            tmp_path / name, workflow_text=workflow_text,
+            script_text=script_text, extra_files=extra_files)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        getattr(self, arm)()
+
+    def test_unpinned_memory_init_package_reddens(self, tmp_path, monkeypatch):
+        """MUTATION ARM: a memory_init package missing from the pins reddens."""
+        root = self._require_root("memory_init's pins")
+        pins = (root / "constraints-ci.txt").read_text(encoding="utf-8")
+        line = next(ln for ln in pins.splitlines()
+                    if ln.lower().startswith("model2vec=="))
+        self._shape_reddens(
+            tmp_path, monkeypatch, "model2vec-unpinned",
+            "test_memory_init_packages_are_pinned", r"DEPENDENCY DRIFT: \['model2vec'\]",
+            extra_files={"constraints-ci.txt": pins.replace(line + "\n", "", 1)})
+
+    def test_verify_placement_mutations_redden(self, tmp_path, monkeypatch):
+        """MUTATION ARM (F1(a), F2): every way the verify steps can stop
+        bracketing a test run reddens the placement arm; release.yml's job
+        is measured NOT governed (it names none of the governed tools)."""
+        root = self._require_root("verify-step placement")
+        real = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        doc = self._load_workflow_yaml(root / ".github" / "workflows" / "tests.yml")
+        steps = self._steps_of(doc)
+        names = [s.get("name") for s in steps]
+        before = steps[names.index("Run test suite") - 1]
+        assert before.get("run") == self.VERIFY_CMD, (
+            f"the shipped step before 'Run test suite' runs "
+            f"{before.get('run')!r}, not {self.VERIFY_CMD!r}: the shipped "
+            f"workflow itself breaks the placement rule (see "
+            f"test_ci_environment_is_verified_around_every_test_run), so "
+            f"these mutations would start from a red tree")
+        before_name = before["name"]
+        after_name = steps[-1]["name"]
+        before_block = (f"      - name: {before_name}\n"
+                        f"        run: {self.VERIFY_CMD}\n")
+        after_block = (f"      - name: {after_name}\n"
+                       f"        if: always()\n"
+                       f"        run: {self.VERIFY_CMD}\n")
+        assert before_block in real and real.endswith(after_block), (
+            f"the shipped verify steps are no longer written as the exact "
+            f"blocks these mutations edit (before-check: {before_block!r}; "
+            f"after-check, which must END tests.yml: {after_block!r}), so a "
+            f"mutation would not land; rebuild the blocks from the new "
+            f"spelling in this arm")
+        test_line = f"        run: {self.TEST_CMD}\n"
+        assert real.count(test_line) == 1, (
+            f"tests.yml runs {self.TEST_CMD!r} {real.count(test_line)} times, "
+            f"not once, so the test-step mutations below are ambiguous")
+        arm = "test_ci_environment_is_verified_around_every_test_run"
+        install = "      - name: Install test dependencies\n"
+        for name, text in [
+            ("before-removed", real.replace(before_block, "", 1)),
+            ("before-earlier", real.replace(before_block, "", 1).replace(
+                install, before_block + install, 1)),
+            ("after-not-last", real + "      - name: tail\n        run: echo done\n"),
+            ("after-not-always", real.replace(
+                "        if: always()\n        run: " + self.VERIFY_CMD,
+                "        run: " + self.VERIFY_CMD, 1)),
+            ("pytest-command-changed", real.replace(
+                test_line, "        run: python -m pytest -ra -p no:cacheprovider\n", 1)),
+            ("env-on-test-step", real.replace(
+                test_line, test_line + "        env:\n          PYTHONPATH: extra\n", 1)),
+            ("shell-on-verify-step", real.replace(
+                before_block, before_block + "        shell: bash\n", 1)),
+            ("second-governed-job", real + (
+                "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: python -m pip --version\n")),
+            ("after-continue-on-error", real.replace(
+                after_block, after_block.replace(
+                    "        if: always()\n",
+                    "        if: always()\n        continue-on-error: true\n"), 1)),
+            ("before-continue-on-error", real.replace(
+                before_block, before_block + "        continue-on-error: true\n", 1)),
+            ("pytest-continue-on-error", real.replace(
+                test_line, test_line + "        continue-on-error: true\n", 1)),
+            ("job-continue-on-error", real.replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n    continue-on-error: true\n", 1)),
+            ("before-check-if", real.replace(
+                before_block, before_block.replace(
+                    "        run: ", "        if: github.event_name == 'push'\n"
+                    "        run: "), 1)),
+            ("second-pytest-step", real.replace(
+                after_block,
+                "      - name: Again\n        working-directory: pact-plugin\n"
+                f"        run: {self.TEST_CMD}\n" + after_block, 1)),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm,
+                                "VERIFY PLACEMENT DRIFT", workflow_text=text)
+        # CONTROL: `continue-on-error: false` is the default spelled out and
+        # changes nothing, so it is accepted.
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "continue-on-error-false", arm,
+            workflow_text=real.replace(
+                test_line, test_line + "        continue-on-error: false\n", 1))
+        # CONTROL: release.yml's job is not governed today, measured.
+        release = self._load_workflow_yaml(
+            root / ".github" / "workflows" / "release.yml")
+        release_runs = [s.get("run") or "" for s in self._steps_of(release)]
+        assert not any(self._GOVERNED_RE.search(r) for r in release_runs), (
+            "release.yml now names a governed tool: its job needs verify "
+            "steps, or the placement arm's governed set needs a decision")
+
+    def test_tripwire_families_redden(self, tmp_path, monkeypatch):
+        """MUTATION ARM (C-lite, F6/F7/F8): one shape per token family,
+        on each surface of the text set; faithful lines stay green."""
+        root = self._require_root("the isolated-environment tripwire")
+        real = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        real_sh = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
+        lint_anchor = "          ruff --version\n"
+        arm = "test_no_isolated_environment_tool_or_index_redirect"
+
+        def in_block(command):
+            return real.replace(lint_anchor, lint_anchor + f"          {command}\n", 1)
+
+        for name, kwargs, token in [
+            ("tool-uvx", dict(workflow_text=in_block("uvx ruff check .")), "uvx"),
+            ("tool-uv-sync", dict(workflow_text=in_block("timeout 10 uv sync")), "uv"),
+            ("tool-pipx-script", dict(script_text=real_sh + "\npipx install x\n"), "pipx"),
+            ("uninstall-pip3", dict(workflow_text=in_block("pip3 uninstall -y pyyaml")),
+             "uninstall"),
+            ("index-env-export", dict(
+                script_text=real_sh + "\nexport PIP_INDEX_URL=https://x.example/simple\n"),
+             "PIP_INDEX_URL"),
+            ("index-flag", dict(workflow_text=in_block(
+                "python -m pip install --extra-index-url https://x.example/simple x")),
+             "extra-index-url"),
+            ("index-env-key", dict(workflow_text=real.replace(
+                "    steps:", "    env:\n      PIP_CONSTRAINT: other.txt\n    steps:", 1)),
+             "PIP_CONSTRAINT"),
+            ("tracked-script", dict(extra_files={
+                "scripts/ci-extra.sh": "#!/bin/sh\nconda install -y numpy\n"}), "conda"),
+            ("makefile", dict(extra_files={
+                "Makefile": "deps:\n\tpoetry install\n"}), "poetry"),
+            ("pip-target", dict(workflow_text=in_block(
+                "python -m pip install --target /tmp/site evilpkg")), "--target"),
+            ("pip-target-eq", dict(workflow_text=in_block(
+                "python -m pip install --target=/tmp/site evilpkg")), "--target"),
+            ("composite-action", dict(extra_files={
+                ".github/actions/x/action.yml":
+                    "name: x\nruns:\n  using: composite\n  steps:\n"
+                    "    - run: mamba install -y numpy\n      shell: bash\n"}), "mamba"),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm,
+                                f"(?s)TRIPWIRE: .*{re.escape(token)}", **kwargs)
+        # CONTROLS: faithful lines, read-only pip, the canonical install, and
+        # ruff's --target-version (the shipped lint legs use it too).
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "faithful", arm, workflow_text=in_block(
+                "pip list; python -m pip install -r constraints-ci.txt; "
+                "ruff check --target-version py312 pact-plugin/"))
+
+    def test_unvetted_actions_redden(self, tmp_path, monkeypatch):
+        """MUTATION ARM: an unvetted action at step level, a docker image,
+        a third-party reusable workflow, and an unvetted action inside a
+        local composite action all redden the allowlist; a re-pinned
+        allowlisted action stays green."""
+        root = self._require_root("the action allowlist")
+        real = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        install = "      - name: Install test dependencies\n"
+        arm = "test_every_third_party_action_is_allowlisted"
+        for name, kwargs in [
+            ("pre-commit-action", dict(workflow_text=real.replace(
+                install, "      - uses: pre-commit/action@v3.0.1\n" + install, 1))),
+            ("docker-image", dict(workflow_text=real.replace(
+                install, "      - uses: docker://python:3.12-slim\n" + install, 1))),
+            ("reusable-workflow", dict(extra_files={
+                ".github/workflows/reuse.yml":
+                    "name: reuse\non: [pull_request]\njobs:\n  r:\n"
+                    "    uses: someorg/ci/.github/workflows/lint.yml@v1\n"})),
+            ("inside-local-action", dict(
+                workflow_text=real.replace(
+                    install, "      - uses: ./tools/setup\n" + install, 1),
+                extra_files={"tools/setup/action.yml":
+                             "name: s\nruns:\n  using: composite\n  steps:\n"
+                             "    - uses: astral-sh/setup-uv@v6\n"})),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm,
+                                "ACTION ALLOWLIST DRIFT", **kwargs)
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "repinned", arm, workflow_text=real.replace(
+                install, "      - uses: actions/checkout@v5\n" + install, 1))
+
+
+class TestVerifyCiEnvironmentScript:
+    """Unit arms for scripts/verify_ci_environment.py, loaded by path, run
+    on FAKE environments: synthetic `*.dist-info` directories in tmp_path
+    passed as `path=`, with the interpreter check off unless a test is
+    about it. Each verdict field goes red exactly once in its own arm."""
+
+    @pytest.fixture
+    def verify(self):
+        return TestDependencyDriftIsDetectable._verify_script()
+
+    @staticmethod
+    def _dist(site, name, version, requires=()):
+        """Write one synthetic installed distribution into `site`."""
+        info = site / f"{name.replace('-', '_')}-{version}.dist-info"
+        info.mkdir(parents=True)
+        body = [f"Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+        body += [f"Requires-Dist: {req}" for req in requires]
+        (info / "METADATA").write_text("\n".join(body) + "\n", encoding="utf-8")
+        return info
+
+    def _check(self, verify, pins, *sites, baseline=None):
+        return verify.check_environment(
+            pins, path=[str(s) for s in sites],
+            baseline=baseline if baseline is not None else {},
+            check_interpreter=False)
+
+    def test_exact_match_is_green(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path)
+        assert verdict.ok, verdict.render()
+
+    def test_wrong_version_only(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "0.9")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path)
+        assert verdict.wrong_version == {"alpha": ("0.9", "1.0")}
+        assert not (verdict.missing or verdict.unexpected or verdict.shadowed)
+        assert "WRONG VERSION" in verdict.render()
+
+    def test_missing_only(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0", "beta": "2.0"}, tmp_path)
+        assert verdict.missing == ("beta",)
+        assert not (verdict.wrong_version or verdict.unexpected or verdict.shadowed)
+        assert "MISSING" in verdict.render()
+
+    def test_unexpected_only_and_the_runner_baseline_remedy(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        self._dist(tmp_path, "six", "1.16.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path)
+        assert verdict.unexpected == ("six",)
+        assert not (verdict.wrong_version or verdict.missing or verdict.shadowed)
+        rendered = verdict.render()
+        assert "UNEXPECTED" in rendered
+        # F9: the runner-image remedy names where the baseline lives.
+        assert "RUNNER_BASELINE" in rendered
+        assert "scripts/verify_ci_environment.py" in rendered
+
+    def test_shadowed_checks_the_first_copy(self, verify, tmp_path):
+        """F4: the copy Python imports (first on the path) is the one
+        checked, and any second copy is SHADOWED with every location."""
+        first, second = tmp_path / "first", tmp_path / "second"
+        self._dist(first, "alpha", "0.9")
+        self._dist(second, "alpha", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, first, second)
+        assert verdict.wrong_version == {"alpha": ("0.9", "1.0")}
+        assert list(verdict.shadowed) == ["alpha"]
+        assert len(verdict.shadowed["alpha"]) == 2
+        assert str(first.resolve()) in verdict.shadowed["alpha"][0]
+        assert "SHADOWED" in verdict.render()
+
+    def test_transitive_dependency_is_allowed(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0", requires=["gamma>=1"])
+        self._dist(tmp_path, "gamma", "3.0")
+        assert self._check(verify, {"alpha": "1.0"}, tmp_path).ok
+
+    def test_absent_transitive_dependency_is_reported(self, verify, tmp_path):
+        """A REQUIRED closure member that is not installed (anyio under
+        httpx, removed after the install) makes the environment not the one
+        the pins resolve to: not ok, with the missing name reported."""
+        self._dist(tmp_path, "httpx", "0.28.1", requires=["anyio"])
+        verdict = self._check(verify, {"httpx": "0.28.1"}, tmp_path)
+        assert not verdict.ok, verdict.render()
+        assert "anyio" in verdict.missing, verdict.render()
+        assert "anyio" in verdict.render()
+
+    def test_absent_marker_false_requirement_is_fine(self, verify, tmp_path):
+        """A requirement whose marker is false for this interpreter is not
+        required, so its absence is fine."""
+        self._dist(tmp_path, "httpx", "0.28.1",
+                   requires=['anyio; python_version < "3"'])
+        assert self._check(verify, {"httpx": "0.28.1"}, tmp_path).ok
+
+    def test_marker_false_requirement_is_not_pulled_in(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0",
+                   requires=['gamma; python_version < "3"'])
+        self._dist(tmp_path, "gamma", "3.0")
+        assert self._check(verify, {"alpha": "1.0"}, tmp_path).unexpected == ("gamma",)
+
+    def test_requested_extras_reach_their_dependencies(self, verify, tmp_path):
+        """F5: root -> child[fast] -> grand; extra == "fast" allows grand."""
+        self._dist(tmp_path, "root-pkg", "1.0", requires=["child[fast]"])
+        self._dist(tmp_path, "child", "1.0", requires=['grand; extra == "fast"'])
+        self._dist(tmp_path, "grand", "1.0")
+        assert self._check(verify, {"root-pkg": "1.0"}, tmp_path).ok
+
+    def test_unrequested_extra_is_not_pulled_in(self, verify, tmp_path):
+        self._dist(tmp_path, "root-pkg", "1.0", requires=["child"])
+        self._dist(tmp_path, "child", "1.0", requires=['grand; extra == "slow"'])
+        self._dist(tmp_path, "grand", "1.0")
+        assert self._check(verify, {"root-pkg": "1.0"}, tmp_path).unexpected == ("grand",)
+
+    def test_runner_baseline_roots_and_their_dependencies_are_allowed(self, verify, tmp_path):
+        self._dist(tmp_path, "alpha", "1.0")
+        self._dist(tmp_path, "image-tool", "5.0", requires=["image-dep"])
+        self._dist(tmp_path, "image-dep", "1.0")
+        verdict = self._check(verify, {"alpha": "1.0"}, tmp_path,
+                              baseline={"Image_Tool": "ships with the runner"})
+        assert verdict.ok, verdict.render()
+
+    def test_names_are_normalised(self, verify, tmp_path):
+        self._dist(tmp_path, "Foo.Bar", "1.0")
+        constraints = tmp_path / "c.txt"
+        constraints.write_text("foo_bar==1.0\n", encoding="utf-8")
+        pins = verify.read_pins(constraints)
+        assert pins == {"foo-bar": "1.0"}
+        assert self._check(verify, pins, tmp_path).ok
+
+    def test_pip_is_exempt_from_the_version_check(self, verify, tmp_path):
+        self._dist(tmp_path, "pip", "99.0")
+        assert self._check(verify, {"pip": "1.0"}, tmp_path).ok
+
+    @pytest.mark.parametrize("line", [
+        "ruff==0.17.*",
+        'ruff==0.17.3; python_version < "3.11"',
+        "ruff[extra]==0.17.3",
+        "-r other.txt",
+        "-i https://x.example/simple",
+        "ruff @ https://x.example/ruff.whl",
+        "ruff>=0.17",
+    ])
+    def test_read_pins_refuses_a_line_that_is_not_an_exact_pin(self, verify, tmp_path, line):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(f"pytest==9.2.0\n{line}\n", encoding="utf-8")
+        with pytest.raises(verify.ConstraintsError, match=":2:"):
+            verify.read_pins(constraints)
+
+    def test_read_pins_refuses_a_duplicate_pin(self, verify, tmp_path):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text("ruff==0.17.3\nRuff==0.17.3\n", encoding="utf-8")
+        with pytest.raises(verify.ConstraintsError, match="pinned twice"):
+            verify.read_pins(constraints)
+
+    def test_read_pins_accepts_comments(self, verify, tmp_path):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(
+            "# header\n\nruff==0.17.3  # the linter\n", encoding="utf-8")
+        assert verify.read_pins(constraints) == {"ruff": "0.17.3"}
+
+    def test_interpreter_mismatch_reports_the_unresolved_pair(self, verify, tmp_path, monkeypatch):
+        """F3: a `python3` on PATH in another DIRECTORY than sys.executable
+        is a mismatch, reported unresolved; one in the same directory is
+        not; none at all is."""
+        elsewhere = tmp_path / "bin" / "python3"
+        monkeypatch.setattr(verify.shutil, "which", lambda name: str(elsewhere))
+        verdict = verify.check_environment({}, path=[], baseline={})
+        assert verdict.interpreter_mismatch == (
+            os.path.abspath(str(elsewhere)), os.path.abspath(sys.executable))
+        assert "INTERPRETER MISMATCH" in verdict.render()
+        # A venv's python symlinks to the base interpreter: a python3 in
+        # ANOTHER directory resolving to the SAME file is still a different
+        # environment, so the comparison is by directory, not by file.
+        other_dir = tmp_path / "venv-elsewhere" / "bin"
+        other_dir.mkdir(parents=True)
+        (other_dir / "python3").symlink_to(os.path.realpath(sys.executable))
+        monkeypatch.setattr(verify.shutil, "which",
+                            lambda name: str(other_dir / "python3"))
+        assert verify.check_environment(
+            {}, path=[], baseline={}).interpreter_mismatch is not None
+        beside = os.path.join(os.path.dirname(sys.executable), "python3")
+        monkeypatch.setattr(verify.shutil, "which", lambda name: beside)
+        assert verify.check_environment({}, path=[], baseline={}).interpreter_mismatch is None
+        monkeypatch.setattr(verify.shutil, "which", lambda name: None)
+        missing = verify.check_environment({}, path=[], baseline={})
+        assert missing.interpreter_mismatch is not None
+        assert missing.interpreter_mismatch[1] == os.path.abspath(sys.executable)
+
+    def test_main_exit_codes(self, verify, tmp_path, monkeypatch, capsys):
+        good = tmp_path / "good.txt"
+        good.write_text("alpha==1.0\n", encoding="utf-8")
+        bad = tmp_path / "bad.txt"
+        bad.write_text("alpha==1.*\n", encoding="utf-8")
+        passing = verify.Verdict({}, (), (), {}, None)
+        failing = verify.Verdict({}, ("alpha",), (), {}, None)
+        monkeypatch.setattr(verify, "check_environment", lambda pins: passing)
+        assert verify.main(["--constraints", str(good)]) == 0
+        monkeypatch.setattr(verify, "check_environment", lambda pins: failing)
+        assert verify.main(["--constraints", str(good)]) == 1
+        assert verify.main(["--constraints", str(good), "--report"]) == 0
+        assert verify.main(["--constraints", str(bad)]) == 2
+        assert verify.main(["--constraints", str(bad), "--report"]) == 2
+        assert verify.main(["--no-such-option"]) == 2
+        assert "MISSING" in capsys.readouterr().out
+
+
+class TestCIEnvironmentBinding:
+    """The session check (F1(b)) in tests/ci_environment_binding.py."""
+
+    @pytest.fixture
+    def binding(self):
+        import ci_environment_binding
+        return ci_environment_binding
+
+    def test_gate_off_loads_nothing(self, binding, monkeypatch):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("the verify script was loaded with the gate off")
+
+        monkeypatch.setattr(binding, "_load_verify_script", boom)
+        assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+        monkeypatch.setenv("GITHUB_ACTIONS", "false")
+        assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+
+    # The CLI's first-line fields, which the binding's status line must carry.
+    _STATUS_FIELDS_RE = re.compile(
+        r"^ci-environment-binding: sys\.executable=\S+ which python3=\S+ "
+        r"effective distributions=\d+ closure=\d+ ok=(True|False)$", re.M)
+
+    def _stub(self, verdict_ok, verdict=None):
+        verify = TestDependencyDriftIsDetectable._verify_script()
+        if verdict is None:
+            verdict = (verify.Verdict({}, (), (), {}, None) if verdict_ok
+                       else verify.Verdict({}, ("alpha",), (), {}, None))
+
+        class Stub:
+            ConstraintsError = verify.ConstraintsError
+            read_pins = staticmethod(lambda path: {"alpha": "1.0"})
+            check_environment = staticmethod(lambda pins: verdict)
+            measurement = staticmethod(lambda pins: (
+                "sys.executable=/x/bin/python which python3=/x/bin/python3 "
+                "effective distributions=3 closure=3"))
+        return Stub
+
+    def test_gate_on_and_passing_proceeds(self, binding, monkeypatch, capsys):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(True))
+        assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+        # The status line carries the CLI's first-line fields (spec section 8).
+        assert self._STATUS_FIELDS_RE.search(capsys.readouterr().out)
+
+    def test_unexpected_distribution_exit_names_the_runner_baseline(
+            self, binding, monkeypatch):
+        """A runner-image extra fails LOUD by design; the exit-3 message
+        names RUNNER_BASELINE as the remedy (Bugbot's 'aborts on empty
+        baseline' concern is the intended behaviour, with this remedy)."""
+        verify = TestDependencyDriftIsDetectable._verify_script()
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        stub = self._stub(False, verify.Verdict({}, (), ("image-extra",), {}, None))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
+        with pytest.raises(pytest.exit.Exception) as exc:
+            binding.CIEnvironmentBinding().pytest_sessionstart(None)
+        assert exc.value.returncode == 3
+        assert "UNEXPECTED" in str(exc.value)
+        assert "RUNNER_BASELINE" in str(exc.value)
+        assert "scripts/verify_ci_environment.py" in str(exc.value)
+
+    def test_gate_on_and_failing_exits_3_with_the_heading(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        with pytest.raises(pytest.exit.Exception) as exc:
+            binding.CIEnvironmentBinding().pytest_sessionstart(None)
+        assert exc.value.returncode == 3
+        assert binding.HEADING in str(exc.value)
+        assert "MISSING" in str(exc.value)
+
+    def test_gate_on_and_bad_constraints_exits_3(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        stub = self._stub(True)
+
+        def refuse(path):
+            raise stub.ConstraintsError("c.txt:1: not an exact pin")
+
+        stub.read_pins = staticmethod(refuse)
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
+        with pytest.raises(pytest.exit.Exception) as exc:
+            binding.CIEnvironmentBinding().pytest_sessionstart(None)
+        assert exc.value.returncode == 3
+        assert "CONSTRAINTS ERROR" in str(exc.value)
+
+    def test_the_plugin_is_registered_for_every_run(self, request):
+        assert request.config.pluginmanager.has_plugin("ci-environment-binding")
+
+    def test_the_hook_fires_in_a_real_pytest_run(self, tmp_path):
+        """A REAL pytest process under GITHUB_ACTIONS=true, against a copy
+        of the binding, the verify script and a constraints file pinning a
+        WRONG pytest version, exits 3 with the heading before any test runs;
+        the same run with the right pin is not stopped by the binding."""
+        root = TestDependencyDriftIsDetectable._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout.")
+        rig = tmp_path / "rig"
+        (rig / ".claude-plugin").mkdir(parents=True)
+        (rig / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
+        (rig / "scripts").mkdir()
+        shutil.copy(root / "scripts" / "verify_ci_environment.py",
+                    rig / "scripts" / "verify_ci_environment.py")
+        (rig / "suite").mkdir()
+        shutil.copy(Path(__file__).parent / "ci_environment_binding.py",
+                    rig / "suite" / "ci_environment_binding.py")
+        (rig / "suite" / "conftest.py").write_text(
+            "from ci_environment_binding import CIEnvironmentBinding\n\n\n"
+            "def pytest_configure(config):\n"
+            "    config.pluginmanager.register(CIEnvironmentBinding(), 'ci-environment-binding')\n",
+            encoding="utf-8")
+        (rig / "suite" / "test_probe.py").write_text(
+            "def test_probe():\n    pass\n", encoding="utf-8")
+        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+
+        def run(pytest_pin):
+            (rig / "constraints-ci.txt").write_text(
+                f"pytest=={pytest_pin}\n", encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "suite"], cwd=rig, env=env, capture_output=True, text=True,
+                timeout=120)
+
+        wrong = run("0.0.1")
+        assert wrong.returncode == 3, wrong.stdout + wrong.stderr
+        assert self._STATUS_FIELDS_RE.search(wrong.stdout + wrong.stderr), (
+            "the binding's status line lacks the CLI's first-line fields")
+        assert "CI ENVIRONMENT DRIFT (pytest process)" in wrong.stdout + wrong.stderr
+        assert "WRONG VERSION" in wrong.stdout + wrong.stderr
+        # The right pin clears the WRONG VERSION heading. (Other installed
+        # packages are outside this one-pin rig's closure, so the session may
+        # still stop on UNEXPECTED; that half is environment-dependent and is
+        # not asserted here.)
+        right = run(pytest.__version__)
+        assert "WRONG VERSION" not in right.stdout + right.stderr, right.stdout
+
+    class _Session:
+        """The two attributes pytest_sessionfinish touches."""
+        def __init__(self, exitstatus=0):
+            self.exitstatus = exitstatus
+
+    def test_session_end_gate_off_does_nothing(self, binding, monkeypatch):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        session = self._Session(0)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(session, 0)
+        assert session.exitstatus == 0
+
+    def test_session_end_passing_keeps_the_status(self, binding, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(True))
+        for prior in (0, 1):
+            session = self._Session(prior)
+            binding.CIEnvironmentBinding().pytest_sessionfinish(session, prior)
+            assert session.exitstatus == prior
+
+    def test_session_end_drift_forces_3_and_names_a_prior_failure(
+            self, binding, monkeypatch, capsys):
+        """N10-1: drift found at session END sets exit status 3 with the
+        end heading and the full report, even over a run that already
+        failed, and then says so, so test failures are not hidden."""
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        clean = self._Session(0)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(clean, 0)
+        assert clean.exitstatus == 3
+        err = capsys.readouterr().err
+        assert binding.END_HEADING in err and "MISSING" in err
+        assert "ALREADY ended" not in err
+        failed = self._Session(1)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(failed, 1)
+        assert failed.exitstatus == 3
+        assert "ALREADY ended with exit status 1" in capsys.readouterr().err
+
+    def _real_rig(self, tmp_path, verify_patch=None):
+        """A runnable copy: the binding, the verify script (optionally
+        patched), a conftest registering the binding, and a constraints file
+        pinning EVERY distribution this interpreter has, so the session-start
+        check passes in whatever environment runs this test."""
+        import importlib.metadata
+        root = TestDependencyDriftIsDetectable._real_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout.")
+        rig = tmp_path / "rig"
+        (rig / ".claude-plugin").mkdir(parents=True)
+        (rig / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
+        (rig / "scripts").mkdir()
+        verify_text = (root / "scripts" / "verify_ci_environment.py").read_text(
+            encoding="utf-8")
+        if verify_patch is not None:
+            verify_text = verify_patch(verify_text)
+        (rig / "scripts" / "verify_ci_environment.py").write_text(
+            verify_text, encoding="utf-8")
+        (rig / "suite").mkdir()
+        shutil.copy(Path(__file__).parent / "ci_environment_binding.py",
+                    rig / "suite" / "ci_environment_binding.py")
+        (rig / "suite" / "conftest.py").write_text(
+            "from ci_environment_binding import CIEnvironmentBinding\n\n\n"
+            "def pytest_configure(config):\n"
+            "    config.pluginmanager.register(CIEnvironmentBinding(), 'ci-environment-binding')\n",
+            encoding="utf-8")
+        seen, pins = set(), []
+        for entry in sys.path:
+            for dist in importlib.metadata.distributions(path=[entry]):
+                name = dist.metadata["Name"]
+                key = re.sub(r"[-_.]+", "-", name or "").lower()
+                if name and key not in seen:
+                    seen.add(key)
+                    pins.append(f"{name}=={dist.version}")
+        (rig / "constraints-ci.txt").write_text("\n".join(pins) + "\n", encoding="utf-8")
+        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+        env.pop("PYTHONPATH", None)
+
+        def run():
+            return subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "suite"], cwd=rig, env=env, capture_output=True, text=True,
+                timeout=180)
+        return rig, run
+
+    def test_a_path_added_during_collection_is_caught_at_session_end(self, tmp_path):
+        """N10-1 reproduction (pr7-security's probe): a test MODULE that
+        inserts a directory holding an unpinned distribution into sys.path
+        at import time passes the session-START check (the path does not
+        exist yet) and must be caught at session END, exit 3, with the end
+        heading naming the distribution, and no internal error."""
+        rig, run = self._real_rig(tmp_path)
+        vendored = rig / "vendored"
+        info = vendored / "evilpkg-1.0.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: evilpkg\nVersion: 1.0\n", encoding="utf-8")
+        (rig / "suite" / "test_zz_probe.py").write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(vendored)!r})\n\n\n"
+            "def test_probe():\n    pass\n", encoding="utf-8")
+        result = run()
+        out = result.stdout + result.stderr
+        assert result.returncode == 3, out
+        assert "ci-environment-binding: " in out and " ok=True" in out, (
+            "the session-START check should pass: the path is added later")
+        assert "CI ENVIRONMENT DRIFT (pytest process, at session end)" in out
+        assert "evilpkg" in out and "UNEXPECTED" in out
+        assert "1 passed" in out
+        assert "INTERNALERROR" not in out and "Traceback" not in out
+
+    def test_a_crash_in_the_hook_is_distinguishable_from_drift(self, tmp_path):
+        """Exit code 3 is ALSO pytest's internal-error code. A crash inside
+        the check (here, check_environment raising) must look like a crash
+        (INTERNALERROR, a traceback, no drift heading), never like drift."""
+        rig, run = self._real_rig(tmp_path, verify_patch=lambda text: text.replace(
+            "def check_environment(", "def _unused_check(", 1)
+            + "\n\ndef check_environment(pins, **kwargs):\n"
+              "    raise RuntimeError('verify crashed')\n")
+        (rig / "suite" / "test_probe.py").write_text(
+            "def test_probe():\n    pass\n", encoding="utf-8")
+        result = run()
+        out = result.stdout + result.stderr
+        assert "verify crashed" in out
+        assert "INTERNALERROR" in out or "Traceback" in out, out
+        assert "CI ENVIRONMENT DRIFT" not in out, out
 
 
 class TestMaybeEmbedPending:
