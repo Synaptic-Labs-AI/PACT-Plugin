@@ -2091,9 +2091,9 @@ def _refuse_ambient_sync_from_a_redirected_store(
 
     THE CROSSING IS THE DEFECT, NOT THE RESOLUTION. Do NOT read this as a rule
     against the main-repo resolution branch. That branch is deliberate: a
-    worktree session reads the MAIN checkout's file -- since #1653 every
-    display-resolver base is retargeted through project_memory_root, so this
-    branch and the session-start writers agree -- and it is how an ordinary
+    worktree session reads the MAIN checkout's file -- the display resolver
+    and the session-start writers both resolve the session document, so they
+    agree -- and it is how an ordinary
     save reaches the file the session displays. Refusing it would lose every
     worktree save projection, which is the over-block this guard is shaped to
     avoid.
