@@ -352,7 +352,7 @@ def test_the_previous_session_dir_is_read_only_from_the_found_block(project, tmp
     from shared.session_resume import _extract_prev_session_dir
 
     # The directory exists, so a fenced line that were read would be returned.
-    session_dir = tmp_path / ".claude" / "pact-sessions" / "proj" / OLD_SID
+    session_dir = pathlib.Path.home() / ".claude" / "pact-sessions" / "proj" / OLD_SID
     session_dir.mkdir(parents=True)
     block = _session_block_text(OLD_SID, TEAM, str(session_dir), None, STARTED)
     _write(project, block + "\n")

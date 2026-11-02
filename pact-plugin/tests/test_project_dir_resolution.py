@@ -887,8 +887,10 @@ class TestR4BimodalGit:
         parent_answer = PACTMemory._detect_project_id()
 
         store = tmp_path / "memory.db"
+        # The child reads the record `_arm_record` wrote in-process, under the
+        # autouse fixture's home.
         env = child_env(
-            umbrella.config_root, home=tmp_path, session_id=SID,
+            Path.home() / ".claude", home=Path.home(), session_id=SID,
             memory_dir=tmp_path / "memdir",
         )
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"

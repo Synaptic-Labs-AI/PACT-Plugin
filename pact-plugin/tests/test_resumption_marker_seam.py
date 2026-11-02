@@ -196,7 +196,7 @@ class TestTheMarkerSurvivesTheTripFromHookToReader:
         write_dir = _run_hook(
             monkeypatch, resume_msg="Paused work detected: feat/login."
         )
-        read_dir = _documented_read_dir(write_dir, tmp_path)
+        read_dir = _documented_read_dir(write_dir, Path.home())
 
         assert read_dir == write_dir, (
             f"the hook wrote the marker into {write_dir} and the secretary's "
@@ -205,7 +205,7 @@ class TestTheMarkerSurvivesTheTripFromHookToReader:
             "nothing, so the rebuild runs."
         )
 
-        event = _read_last(read_dir, event_type, tmp_path)
+        event = _read_last(read_dir, event_type, Path.home())
 
         assert event is not None, (
             f"the hook wrote {event_type!r} but read-last returned null for it "
@@ -226,9 +226,9 @@ class TestTheMarkerSurvivesTheTripFromHookToReader:
         can be read back.
         """
         write_dir = _run_hook(monkeypatch, resume_msg=None)
-        read_dir = _documented_read_dir(write_dir, tmp_path)
+        read_dir = _documented_read_dir(write_dir, Path.home())
 
-        assert _read_last(read_dir, event_type, tmp_path) is None
+        assert _read_last(read_dir, event_type, Path.home()) is None
 
     def test_the_driver_does_not_stub_the_write(self):
         """Detects: a later edit adding the writer to this module's patch table.

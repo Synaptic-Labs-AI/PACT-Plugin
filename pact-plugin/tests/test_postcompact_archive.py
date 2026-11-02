@@ -448,7 +448,7 @@ class TestPostcompactLeadGateRealDisk:
         assert summary_path.read_text(encoding="utf-8") == self._SENTINEL, (
             "an identified lead PostCompact must not touch the root singleton"
         )
-        session_dir = tmp_path / ".claude" / "pact-sessions" / "project" / self._SID
+        session_dir = Path.home() / ".claude" / "pact-sessions" / "project" / self._SID
         [pending] = session_dir.glob("compact-summary.pending-*.json")
         assert json.loads(pending.read_text(encoding="utf-8"))["summary"] == "NEW LEAD SUMMARY"
         assert not (session_dir / "compact-summary.txt").exists(), (

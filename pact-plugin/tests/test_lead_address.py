@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -421,7 +422,7 @@ def _run_main_seam(tmp_path, monkeypatch):
     journal session_start event, additionalContext, resolver results)."""
     import session_init
 
-    config_root = tmp_path / ".claude"  # autouse fixture: home -> tmp_path
+    config_root = Path.home() / ".claude"  # the autouse fixture's home
     (config_root / "teams" / SESSION_ID / "inboxes").mkdir(parents=True)
     project = tmp_path / "project"
     project.mkdir()

@@ -687,7 +687,7 @@ class TestPathSanitization:
             occ = occupant_hash("probe-agent", "path-traversal probe")
             content = handoff_content_key(VALID_HANDOFF)
             expected_marker = (
-                tmp_path / ".claude" / "teams" / "pact-test"
+                Path.home() / ".claude" / "teams" / "pact-test"
                 / ".agent_handoff_emitted"
                 / f"{expected_sanitized}-{occ}-{content}"
             )
@@ -810,7 +810,7 @@ class TestPostRebindMarkerKeyInvariants:
         occ = occupant_hash("probe-agent", "stdin-inert probe")
         content = handoff_content_key(VALID_HANDOFF)
         safe_marker = (
-            tmp_path / ".claude" / "teams" / safe_context_team
+            Path.home() / ".claude" / "teams" / safe_context_team
             / ".agent_handoff_emitted" / f"42-{occ}-{content}"
         )
         assert safe_marker.exists(), (
@@ -828,13 +828,13 @@ class TestPostRebindMarkerKeyInvariants:
         sanitized_stdin_token = sanitize_path_component(
             str(hostile_stdin_team).lower()
         )  # what the OLD code would have keyed the marker on
-        teams_dir = tmp_path / ".claude" / "teams"
+        teams_dir = Path.home() / ".claude" / "teams"
         assert not (teams_dir / sanitized_stdin_token).exists(), (
             f"a team dir keyed on the (sanitized) stdin token "
             f"{sanitized_stdin_token!r} was created — the hostile stdin "
             f"team_name reached the marker key. Post-rebind it MUST be inert."
         )
-        assert not (tmp_path / ".claude" / "etc").exists(), (
+        assert not (Path.home() / ".claude" / "etc").exists(), (
             "hostile stdin team_name created an etc/ path under .claude — "
             "the stdin value leaked into a filesystem join."
         )

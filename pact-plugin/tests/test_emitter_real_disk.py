@@ -10,6 +10,7 @@ shape, these are the canaries."
 """
 import io
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -71,6 +72,8 @@ class TestRealDiskRead:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
+        # The in-process home too: this test's config root is tmp_path/.claude.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         # Write a real task.json at the team-scoped path that
         # read_task_json checks first (the team-scoped branch in
         # task_utils.read_task_json's `for task_dir in task_dirs:` loop).
@@ -162,6 +165,8 @@ class TestRealDiskRead:
         write succeeds. This is the most direct production-fidelity
         regression guard."""
         monkeypatch.setenv("HOME", str(tmp_path))
+        # The in-process home too: this test's config root is tmp_path/.claude.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         _write_task_json(
             tmp_path, "pact-test", "real-disk-race",
             {
@@ -247,6 +252,8 @@ class TestStdinShapePin:
         the realistic-shape equivalent of TestRaceShapeRegression's
         synthetic minimal payload — same Option B path, real fields."""
         monkeypatch.setenv("HOME", str(tmp_path))
+        # The in-process home too: this test's config root is tmp_path/.claude.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         calls: list[dict] = []
         # Use the verbatim shape but ensure task_data shows in_progress
         # (the empirical race) so we prove the primary signal works on
@@ -277,6 +284,8 @@ class TestStdinShapePin:
         about unknown stdin fields, this test catches it before
         production."""
         monkeypatch.setenv("HOME", str(tmp_path))
+        # The in-process home too: this test's config root is tmp_path/.claude.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         calls: list[dict] = []
         # All 9 fields present, including the ones the emitter ignores.
         _run_main(

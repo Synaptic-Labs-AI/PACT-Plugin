@@ -31,8 +31,10 @@ SUPPRESS = {"suppressOutput": True}
 
 
 def _write_team_config(tmp_path, team, members, **extra):
-    """Write teams/<team>/config.json under tmp_path/.claude, the config root the
-    autouse fixture points Path.home at."""
+    """Write teams/<team>/config.json under `<tmp_path>/.claude`. An in-process
+    caller passes `Path.home()` (the autouse fixture's config root is
+    `Path.home() / ".claude"`); a subprocess caller passes the directory its
+    child's config root names."""
     team_dir = tmp_path / ".claude" / "teams" / team
     team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
@@ -337,7 +339,7 @@ class TestMainEntryPoint:
         from peer_inject import main
 
         pact_context(team_name="pact-test")
-        _write_team_config(tmp_path, "pact-test", [
+        _write_team_config(Path.home(), "pact-test", [
             {"name": "backend-coder", "agentType": "pact-backend-coder"},
         ])
 
@@ -391,7 +393,7 @@ class TestMainEntryPoint:
         from peer_inject import main
 
         pact_context(team_name="pact-test")
-        _write_team_config(tmp_path, "pact-test", [
+        _write_team_config(Path.home(), "pact-test", [
             {"name": "backend-coder", "agentType": "pact-backend-coder"},
         ])
 
@@ -417,7 +419,7 @@ class TestMainEntryPoint:
         from peer_inject import main
 
         pact_context(team_name="pact-test")
-        _write_team_config(tmp_path, "pact-test", [
+        _write_team_config(Path.home(), "pact-test", [
             {"name": "backend-coder", "agentType": "pact-backend-coder"},
         ])
 
@@ -1403,7 +1405,7 @@ class TestMemberOnlyInjection:
         own peer list. Before member-only injection the role read "(unknown)" and
         the member listed itself."""
         pact_context(team_name="pact-test")
-        _write_team_config(tmp_path, "pact-test", self.MEMBERS)
+        _write_team_config(Path.home(), "pact-test", self.MEMBERS)
 
         out = self._main(capsys, {"agent_type": "architect",
                                   "agent_id": "aarchitect-0123456789abcdef"})

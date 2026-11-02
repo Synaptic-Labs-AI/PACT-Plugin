@@ -7660,7 +7660,7 @@ class TestCompactionSeats:
         session_dir = self._session_dir(tmp_path)
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / "compact-summary.txt").write_text("A STALE SUMMARY", encoding="utf-8")
-        transcripts = tmp_path / ".claude" / "projects" / "-cmp-lead"
+        transcripts = Path.home() / ".claude" / "projects" / "-cmp-lead"
         transcripts.mkdir(parents=True)
         lead = transcripts / f"{self.SID}.jsonl"
         lead.write_text("", encoding="utf-8")
