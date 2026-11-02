@@ -158,6 +158,7 @@ from shared.session_resume import (
     _same_dir,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
     existing_document,
+    format_project_memory_line,
     format_session_substitutions,
     update_session_info,
     restore_last_session,
@@ -1861,6 +1862,13 @@ def main():
             # Step 3 may have created the document: re-probe the SAME root
             # (no second classification) so every later step sees it.
             doc = resolve_managed_document(session.root)
+
+        # Name the project memory file in the lead's context, after step 3 so
+        # a file it created is the one named. Every instruction that refers
+        # to the project CLAUDE.md reads this line; on every source,
+        # compaction included, because compaction drops earlier context.
+        if frame_is_lead:
+            context_parts.append(format_project_memory_line(session, doc))
 
         # Step 3c retired in v4.2.15 — orphan-stripper sunset; see git log for context.
 

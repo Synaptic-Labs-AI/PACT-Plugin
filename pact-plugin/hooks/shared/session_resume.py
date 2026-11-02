@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,6 +49,7 @@ from shared.claude_md_manager import (
     resolve_project_claude_md_path,
 )
 from shared.failure_cause import failure_cause
+from shared.project_scope import SessionRoot, unknown_root_reason
 from shared.handoff_schema import resolve_handoff_field
 from shared.pact_context import (
     LEAD_ADDRESS_LOCAL,
@@ -820,6 +822,53 @@ def _is_set(value: object) -> bool:
     an empty string. Separates "not set" from "set but failed the check" in
     the unavailable wording of format_session_substitutions."""
     return value is not None and value != ""
+
+
+# Unicode categories refused in the project memory line: control (Cc, line
+# feeds included), format (Cf: bidi overrides, zero-width), line and
+# paragraph separators (Zl, Zp) and lone surrogates (Cs: undecodable bytes).
+_UNSAFE_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp", "Cs"))
+_PROJECT_MEMORY_FILE_UNAVAILABLE = (
+    "Project memory file unavailable ({}). Do not create or edit a project "
+    "CLAUDE.md this session."
+)
+
+
+def _safe_for_line(text: str) -> bool:
+    """True when `text` can sit in a backtick span on one context line: no
+    backtick and no character in _UNSAFE_LINE_CATEGORIES."""
+    return "`" not in text and not any(
+        unicodedata.category(char) in _UNSAFE_LINE_CATEGORIES for char in text
+    )
+
+
+def format_project_memory_line(
+    session: SessionRoot, doc: ManagedDocument | None
+) -> str:
+    """The SessionStart context line naming this session's project memory
+    file, the one every instruction that refers to the project CLAUDE.md
+    reads.
+
+    Known root: the document's absolute path, whether or not it exists yet.
+    Unknown root: the unavailable form with the cause. A path, or a cause
+    that carries the anchor path, holding a backtick, a control or format
+    character or a line break is reported as "not a safe path" and never
+    interpolated.
+    """
+    if session.cause is not None:
+        reason = unknown_root_reason(session.cause, session.anchor)
+        if not _safe_for_line(reason):
+            reason = "not a safe path"
+        return _PROJECT_MEMORY_FILE_UNAVAILABLE.format(reason)
+    if doc is None:
+        raise ValueError("a known root needs its document")
+    path = str(doc.path)
+    if not _safe_for_line(path):
+        return _PROJECT_MEMORY_FILE_UNAVAILABLE.format("not a safe path")
+    return (
+        f"Project memory file: `{path}`. Use this file wherever a command "
+        "refers to the project CLAUDE.md."
+    )
 
 
 def format_session_substitutions(

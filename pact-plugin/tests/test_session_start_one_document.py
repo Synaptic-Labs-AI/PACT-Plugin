@@ -20,6 +20,8 @@ import io
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -191,3 +193,125 @@ def test_a_subdirectory_with_its_own_document_keeps_it(repo, monkeypatch):
         encoding="utf-8"
     )
     assert toplevel_doc.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# The "Project memory file:" line in the lead's SessionStart context. Revert
+# check for every arm: without the emission in session_init, or with the
+# safety check removed from format_project_memory_line, the arm goes red.
+# ---------------------------------------------------------------------------
+
+_KNOWN = "Project memory file: `{}`. Use this file wherever a command refers to the project CLAUDE.md."
+_UNSAFE = (
+    "Project memory file unavailable (not a safe path). Do not create or edit "
+    "a project CLAUDE.md this session."
+)
+
+
+def test_a_worktree_lead_is_told_the_main_document_over_the_real_seam(
+    repo, tmp_path
+):
+    """The hook as the platform runs it: a subprocess with stdin JSON and
+    CLAUDE_PROJECT_DIR naming a linked worktree."""
+    worktree = repo / ".worktrees" / "seam"
+    _git("worktree", "add", "-q", str(worktree), "-b", "seam", cwd=repo)
+    hook = Path(session_init.__file__)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith(("GIT_", "CLAUDE_", "PYTEST_"))
+    }
+    env.update(
+        HOME=str(home),
+        CLAUDE_CONFIG_DIR=str(home / ".claude"),
+        CLAUDE_PROJECT_DIR=str(worktree),
+    )
+    stdin = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    result = subprocess.run(
+        [sys.executable, str(hook)], input=stdin, cwd=str(worktree), env=env,
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert _KNOWN.format(repo / ".claude" / "CLAUDE.md") in context, context[-600:]
+    assert not (worktree / ".claude" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("source", ["startup", "compact"])
+def test_the_line_names_the_document_on_every_source(repo, monkeypatch, source):
+    context, _system_message = _start(monkeypatch, repo, source=source)
+
+    assert _KNOWN.format(repo / ".claude" / "CLAUDE.md") in context
+
+
+def test_an_unknown_root_names_the_cause_not_a_path(repo, monkeypatch):
+    worktree = repo / ".worktrees" / "unknown-line"
+    _git("worktree", "add", "-q", str(worktree), "-b", "unknown-line", cwd=repo)
+    monkeypatch.setenv("PATH", "")  # git unavailable: the root is unknown
+
+    context, _system_message = _start(monkeypatch, worktree)
+
+    assert (
+        "Project memory file unavailable (git could not answer). Do not create "
+        "or edit a project CLAUDE.md this session."
+    ) in context
+    assert "Project memory file: `" not in context
+
+
+def test_a_teammate_is_not_told_a_project_memory_file(repo, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    monkeypatch.chdir(repo)
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup",
+         "agent_type": "PACT:pact-backend-coder"}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit):
+            session_init.main()
+
+    assert "Project memory file" not in mock_stdout.getvalue()
+
+
+def test_a_backtick_in_the_path_is_never_interpolated(tmp_path, monkeypatch):
+    project = tmp_path / "we`ird"
+    project.mkdir()
+    _git("init", "-q", ".", cwd=project)
+
+    context, _system_message = _start(monkeypatch, project)
+
+    assert _UNSAFE in context
+    assert "we`ird" not in context.split("Project memory file", 1)[1][:200]
+
+
+@pytest.mark.parametrize(
+    "name", ["line\nbreak", "bidi‮override", "para sep", "tab\there"]
+)
+def test_an_unsafe_character_in_the_path_is_refused(tmp_path, name):
+    from shared.claude_md_manager import ManagedDocument
+    from shared.project_scope import SessionRoot
+    from shared.session_resume import format_project_memory_line
+
+    root = tmp_path / name
+    doc = ManagedDocument(root / ".claude" / "CLAUDE.md", root, False)
+
+    line = format_project_memory_line(SessionRoot(root, True, root, None), doc)
+
+    assert line == _UNSAFE
+
+
+def test_an_unsafe_anchor_in_the_cause_is_refused(tmp_path):
+    from shared.project_scope import ROOT_CAUSE_MISSING, SessionRoot
+    from shared.session_resume import format_project_memory_line
+
+    anchor = tmp_path / "gone`\nnow"
+
+    line = format_project_memory_line(
+        SessionRoot(anchor, True, None, ROOT_CAUSE_MISSING), None
+    )
+
+    assert line == _UNSAFE
