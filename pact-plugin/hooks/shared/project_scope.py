@@ -953,8 +953,9 @@ def stays_in_declared_project(
     removed submodule leaves a record under the enclosing repository's
     .git/modules, which this check does not read.) The ancestor stands in for a
     directory git can no longer see, so it NEVER admits a resolution at the
-    home directory or into the config root's own CLAUDE.md: every project under
-    the user loads those files, and a deleted project under a git-versioned
+    home directory or into a user-global CLAUDE.md (the config root's, or the
+    default profile's, compared by file identity): every project under the
+    user loads those files, and a deleted project under a git-versioned
     home would otherwise project into them. A live declaration that resolves
     there is not affected.
 
@@ -998,8 +999,7 @@ def stays_in_declared_project(
                 )
             if resolved == Path.home().resolve():
                 return False
-            config_claude_md = (get_claude_config_dir() / "CLAUDE.md").resolve()
-            if Path(claude_md).resolve() == config_claude_md:
+            if is_user_global_document(Path(claude_md)):
                 return False
         except (OSError, RuntimeError):
             # RuntimeError: Path.home() when no home directory can be found.

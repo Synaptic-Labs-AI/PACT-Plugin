@@ -38,6 +38,7 @@ from shared.project_scope import (
     ROOT_CAUSE_USER_GLOBAL,
     memory_root_of,
     session_memory_root,
+    stays_in_declared_project,
     unknown_root_reason,
 )
 
@@ -379,3 +380,54 @@ def test_a_session_start_in_home_leaves_the_default_profile_file_alone(
     world.session_start()
 
     assert world.default_global.read_bytes() == before
+
+
+def _removed_declaration_in_a_repo(tmp_path, monkeypatch, dot_claude_is_home):
+    """A removed declaration <repo>/gone resolving to <repo>, whose document
+    is <repo>/.claude/CLAUDE.md. The config root is <t>/cfg, so the default
+    profile's ~/.claude/CLAUDE.md is global only by the default-profile rule.
+    With `dot_claude_is_home`, <repo>/.claude is a symlink to ~/.claude, so
+    the document IS that global file under another path."""
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                "GIT_CEILING_DIRECTORIES"):
+        monkeypatch.delenv(key, raising=False)
+    home = Path.home()
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "CLAUDE.md").write_text(_global_text(), encoding="utf-8")
+    config = tmp_path / "cfg"
+    config.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", ".", cwd=repo)
+    _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=repo)
+    if dot_claude_is_home:
+        (repo / ".claude").symlink_to(home / ".claude", target_is_directory=True)
+    else:
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "CLAUDE.md").write_text("# p\n", encoding="utf-8")
+    return repo / "gone", repo, repo / ".claude" / "CLAUDE.md"
+
+
+def test_a_removed_declaration_never_resolves_into_the_default_profile_file(
+    tmp_path, monkeypatch
+):
+    """The containment guard refuses a resolution whose document is the
+    default profile's global file, even with CLAUDE_CONFIG_DIR elsewhere.
+    Red when the guard compares only against the active config root."""
+    declared, resolved, document = _removed_declaration_in_a_repo(
+        tmp_path, monkeypatch, dot_claude_is_home=True
+    )
+
+    assert stays_in_declared_project(declared, resolved, document) is False
+
+
+def test_a_removed_declaration_still_resolves_into_its_own_repository(
+    tmp_path, monkeypatch
+):
+    """Control: the same layout with a project-owned .claude is admitted."""
+    declared, resolved, document = _removed_declaration_in_a_repo(
+        tmp_path, monkeypatch, dot_claude_is_home=False
+    )
+
+    assert stays_in_declared_project(declared, resolved, document) is True
