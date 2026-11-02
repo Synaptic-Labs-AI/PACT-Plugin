@@ -442,10 +442,10 @@ class TestDependencyDriftIsDetectable:
     and the floor-literal bind.
     """
 
-    # The verify step's command as tests.yml runs it. It carries `--report`
-    # until the runner baseline is measured; dropping `--report` from the
-    # workflow is the one-constant flip here.
-    VERIFY_CMD = "python scripts/verify_ci_environment.py --report"
+    # The verify step's command as tests.yml runs it: ENFORCING (no
+    # `--report`), so a drifted environment fails the step. A report-only
+    # form would print the verdict and exit 0, and is refused here.
+    VERIFY_CMD = "python scripts/verify_ci_environment.py"
     # The test step's command, exactly: the placement arm pins it so the
     # tested process is the process the verify steps checked.
     TEST_CMD = "python -m pytest -ra"
@@ -1544,22 +1544,49 @@ class TestCIEnvironmentBinding:
         monkeypatch.setenv("GITHUB_ACTIONS", "false")
         assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
 
-    def _stub(self, verdict_ok):
+    # The CLI's first-line fields, which the binding's status line must carry.
+    _STATUS_FIELDS_RE = re.compile(
+        r"^ci-environment-binding: sys\.executable=\S+ which python3=\S+ "
+        r"effective distributions=\d+ closure=\d+ ok=(True|False)$", re.M)
+
+    def _stub(self, verdict_ok, verdict=None):
         verify = TestDependencyDriftIsDetectable._verify_script()
-        verdict = (verify.Verdict({}, (), (), {}, None) if verdict_ok
-                   else verify.Verdict({}, ("alpha",), (), {}, None))
+        if verdict is None:
+            verdict = (verify.Verdict({}, (), (), {}, None) if verdict_ok
+                       else verify.Verdict({}, ("alpha",), (), {}, None))
 
         class Stub:
             ConstraintsError = verify.ConstraintsError
             read_pins = staticmethod(lambda path: {"alpha": "1.0"})
             check_environment = staticmethod(lambda pins: verdict)
+            measurement = staticmethod(lambda pins: (
+                "sys.executable=/x/bin/python which python3=/x/bin/python3 "
+                "effective distributions=3 closure=3"))
         return Stub
 
-    def test_gate_on_and_passing_proceeds(self, binding, monkeypatch):
+    def test_gate_on_and_passing_proceeds(self, binding, monkeypatch, capsys):
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
         monkeypatch.setattr(binding, "_load_verify_script",
                             lambda script: self._stub(True))
         assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
+        # The status line carries the CLI's first-line fields (spec section 8).
+        assert self._STATUS_FIELDS_RE.search(capsys.readouterr().out)
+
+    def test_unexpected_distribution_exit_names_the_runner_baseline(
+            self, binding, monkeypatch):
+        """A runner-image extra fails LOUD by design; the exit-3 message
+        names RUNNER_BASELINE as the remedy (Bugbot's 'aborts on empty
+        baseline' concern is the intended behaviour, with this remedy)."""
+        verify = TestDependencyDriftIsDetectable._verify_script()
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        stub = self._stub(False, verify.Verdict({}, (), ("image-extra",), {}, None))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
+        with pytest.raises(pytest.exit.Exception) as exc:
+            binding.CIEnvironmentBinding().pytest_sessionstart(None)
+        assert exc.value.returncode == 3
+        assert "UNEXPECTED" in str(exc.value)
+        assert "RUNNER_BASELINE" in str(exc.value)
+        assert "scripts/verify_ci_environment.py" in str(exc.value)
 
     def test_gate_on_and_failing_exits_3_with_the_heading(self, binding, monkeypatch):
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
@@ -1625,6 +1652,8 @@ class TestCIEnvironmentBinding:
 
         wrong = run("0.0.1")
         assert wrong.returncode == 3, wrong.stdout + wrong.stderr
+        assert self._STATUS_FIELDS_RE.search(wrong.stdout + wrong.stderr), (
+            "the binding's status line lacks the CLI's first-line fields")
         assert "CI ENVIRONMENT DRIFT (pytest process)" in wrong.stdout + wrong.stderr
         assert "WRONG VERSION" in wrong.stdout + wrong.stderr
         # The right pin clears the WRONG VERSION heading. (Other installed

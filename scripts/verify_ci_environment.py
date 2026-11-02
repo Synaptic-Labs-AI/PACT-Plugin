@@ -39,8 +39,12 @@ import sys
 from collections.abc import Mapping, Sequence
 
 # Normalized distribution name -> reason. Distributions the CI runner image
-# ships with, measured by a --report run. They are closure ROOTS, so their
-# own dependencies are allowed too.
+# ships with. They are closure ROOTS, so their own dependencies are allowed
+# too. Measured EMPTY on the CI runner (Python 3.12.15, ubuntu-latest): the
+# image adds nothing outside the pins' closure. If a runner-image update adds
+# a package, CI goes red with it under UNEXPECTED; confirm with a --report run
+# that it comes from the image, not from an install, then add it here with
+# the reason.
 RUNNER_BASELINE: dict[str, str] = {}
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -249,6 +253,21 @@ def check_environment(
     )
 
 
+def measurement(
+    pins: dict[str, str],
+    *,
+    path: Sequence[str] | None = None,
+    baseline: Mapping[str, str] = RUNNER_BASELINE,
+) -> str:
+    """The one-line measurement the CLI prints first: the interpreter, the
+    python3 on PATH, and how many distributions are effective and allowed.
+    The test session prints the same string, so the two lines always match."""
+    effective, _ = _effective_distributions(sys.path if path is None else path)
+    closure = _closure(list(pins) + ["pip"] + [normalize(n) for n in baseline], effective)
+    return (f"sys.executable={sys.executable} which python3={shutil.which('python3')} "
+            f"effective distributions={len(effective)} closure={len(closure)}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Check this interpreter's environment against constraints-ci.txt.")
@@ -266,11 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"CONSTRAINTS ERROR: {exc}", file=sys.stderr)
         return 2
     effective, _ = _effective_distributions(sys.path)
-    closure = _closure(list(pins) + ["pip"] + [normalize(n) for n in RUNNER_BASELINE],
-                       effective)
-    print(f"sys.executable={sys.executable} which python3={shutil.which('python3')} "
-          f"effective distributions={len(effective)} closure={len(closure)}"
-          f"{' (report only)' if args.report else ''}")
+    print(measurement(pins) + (" (report only)" if args.report else ""))
     verdict = check_environment(pins)
     if args.report:
         for name in sorted(effective):

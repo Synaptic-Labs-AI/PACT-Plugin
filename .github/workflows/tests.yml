@@ -121,12 +121,13 @@
 #   check inside its own process. It compares the distributions the
 #   interpreter can import with constraints-ci.txt: every pin at its version,
 #   nothing outside the pins' dependency closure (plus pip and any
-#   RUNNER_BASELINE entry for what the runner image ships), no package
-#   installed twice, and `python3` on PATH being this interpreter. It reads
-#   the environment, not the install commands, so an install into the tested
-#   environment is caught whatever route made it. Tools that install into an
-#   isolated environment (pipx, uvx, conda) are outside its view; a word check
-#   in the test suite covers those.
+#   RUNNER_BASELINE entry for what the runner image ships; measured empty),
+#   no package installed twice, and `python3` on PATH being this interpreter.
+#   It reads the environment, not the install commands, so an install into
+#   the tested environment is caught whatever route made it. Tools that
+#   install into an isolated environment (pipx, uvx, conda) are outside its
+#   view; a word check in the test suite covers those. Both CI steps enforce:
+#   drift fails the job.
 #   Refresh deliberately (quarterly, or on a red the pins explain): install
 #   the pinned names UNPINNED in a clean venv (a pinned install can only
 #   re-confirm the current versions), freeze the same names into
@@ -430,11 +431,14 @@ jobs:
       # test in the suite pins this placement, this step's exact command, and
       # the absence of `env:`/`shell:` on these steps, so the checked
       # interpreter and environment are the ones the tests use.
-      # `--report` prints the verdict and every installed distribution but
-      # exits 0: the first CI run measures what the runner image adds, then
-      # `--report` is dropped and the check enforces.
+      # Both steps ENFORCE: drift fails the job. The runner image was
+      # measured to add nothing outside the pins' closure (Python 3.12.15 on
+      # ubuntu-latest), so RUNNER_BASELINE is empty. If a runner-image update
+      # adds a package, it shows as UNEXPECTED: add it to RUNNER_BASELINE in
+      # the script with a reason. `--report` (print everything, exit 0) is
+      # for local diagnosis only.
       - name: Verify the CI environment (before tests)
-        run: python scripts/verify_ci_environment.py --report
+        run: python scripts/verify_ci_environment.py
 
       - name: Run test suite
         working-directory: pact-plugin
@@ -442,4 +446,4 @@ jobs:
 
       - name: Verify the CI environment (after tests)
         if: always()
-        run: python scripts/verify_ci_environment.py --report
+        run: python scripts/verify_ci_environment.py

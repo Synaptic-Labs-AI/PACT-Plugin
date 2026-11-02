@@ -22,8 +22,6 @@ under the gate.
 import importlib.util
 import os
 import pathlib
-import shutil
-import sys
 
 HEADING = "CI ENVIRONMENT DRIFT (pytest process)"
 
@@ -64,7 +62,10 @@ class CIEnvironmentBinding:
         except (verify.ConstraintsError, OSError) as exc:
             pytest.exit(f"{HEADING}\nCONSTRAINTS ERROR: {exc}", returncode=3)
         verdict = verify.check_environment(pins)
-        print(f"ci-environment-binding: sys.executable={sys.executable} "
-              f"which python3={shutil.which('python3')} ok={verdict.ok}")
+        # The CLI's own first line (sys.executable, which python3, the
+        # effective-distribution and closure counts), from the shared
+        # interface, so one CI log line names the process the tests ran in.
+        print(f"ci-environment-binding: {verify.measurement(pins)} "
+              f"ok={verdict.ok}")
         if not verdict.ok:
             pytest.exit(f"{HEADING}\n{verdict.render()}", returncode=3)
