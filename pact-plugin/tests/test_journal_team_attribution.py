@@ -165,11 +165,20 @@ class TestSnapshotTeamField:
 
     @pytest.mark.parametrize("subject", ["", "   "])
     def test_whitespace_subject_emits_the_sentinel(self, subject):
-        """M-6 (snapshot site): if this branch loses `.strip()`, the snapshot
-        hashes the raw whitespace while the harvest hashes the sentinel —
-        identity mismatch, union skipped. The writer still carries its own
-        branch; commit 14 wired the two emit paths, not this one."""
+        """M-6 (snapshot site): the writer CALLS the shared helper — its own
+        branch is gone — so this arm reddens when the HELPER loses `.strip()`,
+        which was measured across all three sites. Without the strip the
+        snapshot hashes raw whitespace while the harvest hashes the sentinel:
+        identity mismatch, union skipped."""
         calls = self._emit("session-abc", subject=subject)
+        assert len(calls) == 1
+        assert calls[0]["subject"] == "(no subject)"
+
+    def test_non_str_subject_emits_the_sentinel(self):
+        """Pre-existing gap closed: b1 and b2 each had a non-str arm and the
+        snapshot site did not. Wired to the strict helper, a non-str must
+        become the sentinel rather than reaching the journal schema."""
+        calls = self._emit("session-abc", subject=42)
         assert len(calls) == 1
         assert calls[0]["subject"] == "(no subject)"
 
@@ -493,23 +502,27 @@ class TestEmitPathsUseTheSharedSentinel:
     detector — which is how four copies of the rule shipped."""
 
     def test_task_completed_emit_path_calls_the_shared_helper(self):
+        """PIN THE CALL EXPRESSION, not the name: the guard also calls the
+        helper, so a bare-name assertion stayed green when the SUBSTITUTION
+        was un-wired back to the inline form. The absent literal is what the
+        un-wiring reintroduces."""
         src = (HOOKS_DIR / "agent_handoff_emitter.py").read_text(encoding="utf-8")
-        assert "emit_side_subject" in src
-        assert "emit_side_subject(" in src
+        assert "task_subject = emit_side_subject(raw_task_subject)" in src
         assert "def emit_side_subject" not in src
+        assert '"(no subject)"' not in src
 
     def test_lead_side_emit_path_calls_the_shared_helper(self):
         src = (HOOKS_DIR / "task_lifecycle_gate.py").read_text(encoding="utf-8")
-        assert "emit_side_subject" in src
-        assert "emit_side_subject(" in src
+        assert "subject = emit_side_subject(subject)" in src
         assert "def emit_side_subject" not in src
+        assert '"(no subject)"' not in src
 
     def test_snapshot_writer_calls_the_shared_helper(self):
         src = (
             HOOKS_DIR / "shared" / "task_metadata_snapshot.py"
         ).read_text(encoding="utf-8")
-        assert "emit_side_subject" in src
-        assert "emit_side_subject(" in src
+        assert "subject = emit_side_subject(subject)" in src
         assert "def emit_side_subject" not in src
+        assert '"(no subject)"' not in src
         # The local branch is GONE, not merely unused.
         assert "if not isinstance(subject, str) or not subject.strip():" not in src
