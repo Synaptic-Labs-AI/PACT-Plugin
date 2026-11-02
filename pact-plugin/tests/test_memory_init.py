@@ -8,6 +8,7 @@ Tests cover:
 4. Edge cases - graceful degradation, already-installed dependencies
 """
 
+import ast
 import os
 import re
 import shlex
@@ -562,8 +563,8 @@ class TestDependencyDriftIsDetectable:
         head = re.split(r"[=<>!~;\[]", name)[0]
         return re.sub(r"[-_.]+", "-", head).strip().lower()
 
-    @staticmethod
-    def _simple_commands(text, keep_redirect_targets=False):
+    @classmethod
+    def _simple_commands(cls, text, keep_redirect_targets=False):
         """Shell text -> one word list per SIMPLE COMMAND it executes.
 
         The unit every install arm reasons about is the command the shell
@@ -577,7 +578,11 @@ class TestDependencyDriftIsDetectable:
         never words; their TARGETS are dropped too unless
         `keep_redirect_targets` (the runtime-config scan needs `> pip.conf`
         and `>> $GITHUB_ENV`; argv parsing must not read them as operands).
-        A line shlex cannot split
+        A command that runs a STRING as code is read into, recursively:
+        `bash|sh|dash|zsh|ksh -c '<string>'` (bundled `-ec`/`-lc` too) and
+        `eval <words>` re-enter this model, and `python -c '<code>'` goes
+        through `_python_shell_texts`, so an install inside the string is a
+        command like any other. A line shlex cannot split
         (an unbalanced quote that continues on a later line) falls back to
         whitespace splitting — it is still read, never skipped.
         """
@@ -626,7 +631,30 @@ class TestDependencyDriftIsDetectable:
                 current.append(tok)
             if current:
                 commands.append(current)
-        return commands
+        expanded = []
+        for words in commands:
+            expanded.append(words)
+            i, program = cls._command_program(words)
+            if program is None:
+                continue
+            rest = words[i + 1:]
+            if program == "eval" and rest:
+                expanded += cls._simple_commands(
+                    " ".join(rest), keep_redirect_targets)
+            elif program.rsplit("/", 1)[-1] in cls._SHELLS:
+                for k, tok in enumerate(rest):
+                    if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", tok):
+                        if k + 1 < len(rest):
+                            expanded += cls._simple_commands(
+                                rest[k + 1], keep_redirect_targets)
+                        break
+            elif cls._PYTHON_PROGRAM_RE.search(program) and "-c" in rest:
+                k = rest.index("-c")
+                if k + 1 < len(rest):
+                    for chunk in cls._python_shell_texts(rest[k + 1]):
+                        expanded += cls._simple_commands(
+                            chunk, keep_redirect_targets)
+        return expanded
 
     @classmethod
     def _pip_argv_start(cls, words):
@@ -818,15 +846,12 @@ class TestDependencyDriftIsDetectable:
 
     @staticmethod
     def _workflow_population(root):
-        """Every file CI can execute steps from, by FILE, not by name.
-
-        Every `.yml`/`.yaml` under `.github/workflows/` (a second workflow
-        runs with the same checkout and token as tests.yml) and every
-        `action.yml`/`action.yaml` under `.github/actions/` (a local
-        composite action's `runs.steps` execute inside the calling job).
-        Not read: reusable workflows and actions fetched from OTHER
-        repositories (their text is not in this tree) — a `uses:` of one
-        is a reference this population cannot follow.
+        """The ENTRY files CI starts from: every `.yml`/`.yaml` under
+        `.github/workflows/` (a second workflow runs with the same checkout
+        and token as tests.yml), plus every `action.yml`/`action.yaml`
+        under `.github/actions/` (read even when unused — over-catch).
+        What those files go on to EXECUTE is followed by
+        `_execution_population`; this list is only where the walk starts.
         """
         files = []
         workflows = root / ".github" / "workflows"
@@ -859,20 +884,315 @@ class TestDependencyDriftIsDetectable:
     @classmethod
     def _steps_of(cls, doc):
         """Every step mapping in one parsed workflow or composite action."""
-        steps = []
+        return [step for _wd, step in cls._steps_with_workdir(doc)]
+
+    @staticmethod
+    def _steps_with_workdir(doc):
+        """(working-directory or None, step) for every step in one parsed
+        workflow or composite action; a step's own `working-directory`
+        wins over its job's `defaults.run.working-directory`."""
+        out = []
         if not isinstance(doc, dict):
-            return steps
+            return out
         for job in (doc.get("jobs") or {}).values():
-            if isinstance(job, dict):
-                steps += [s for s in job.get("steps") or [] if isinstance(s, dict)]
+            if not isinstance(job, dict):
+                continue
+            defaults = ((job.get("defaults") or {}).get("run") or {}) \
+                if isinstance(job.get("defaults"), dict) else {}
+            job_wd = defaults.get("working-directory") \
+                if isinstance(defaults, dict) else None
+            for step in job.get("steps") or []:
+                if isinstance(step, dict):
+                    out.append((step.get("working-directory") or job_wd, step))
         runs = doc.get("runs")
         if isinstance(runs, dict):
-            steps += [s for s in runs.get("steps") or [] if isinstance(s, dict)]
-        return steps
+            for step in runs.get("steps") or []:
+                if isinstance(step, dict):
+                    out.append((step.get("working-directory"), step))
+        return out
+
+    # Script files the follower can READ: shell through the shell model,
+    # Python through `_python_shell_texts`. A followed repo script in any
+    # other language is refused, never skipped.
+    _SHELL_SCRIPT_SUFFIXES = (".sh", ".bash")
+    _PYTHON_SCRIPT_SUFFIXES = (".py",)
+    _SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
+    _COMMAND_WRAPPERS = frozenset({"sudo", "env", "exec", "time", "command", "nohup"})
+
+    # `$GITHUB_WORKSPACE` and `${{ github.workspace }}` ARE the checkout:
+    # a path built on them names a repo file. Every other variable (the
+    # runner's $RUNNER_TEMP, $HOME, ...) names a path outside the repo.
+    _WORKSPACE_PREFIX_RE = re.compile(
+        r"^(?:\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}"
+        r"|\$\{\{\s*github\.workspace\s*\}\})/")
+
+    @classmethod
+    def _command_program(cls, words):
+        """(index, word) of a simple command's PROGRAM, past leading
+        `VAR=value` assignments and wrappers (`sudo`, `env`, ...)."""
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word) \
+                    or word.rsplit("/", 1)[-1] in cls._COMMAND_WRAPPERS \
+                    or (i > 0 and words[i - 1].rsplit("/", 1)[-1]
+                        in cls._COMMAND_WRAPPERS and word.startswith("-")):
+                i += 1
+                continue
+            return i, word
+        return None, None
+
+    @classmethod
+    def _script_operand(cls, words):
+        """The repo-script token a simple command EXECUTES, or None.
+
+        Either the program word itself when it is a path (`./x.sh`,
+        `scripts/x.sh`, `$GITHUB_WORKSPACE/x.sh`), or the first operand of
+        a shell (`bash x.sh`, `sh x.sh`, `source x.sh`, `. x.sh`) or of a
+        python interpreter (`python x.py`). `-c` strings are not scripts
+        (`_simple_commands` reads them as commands), and neither are
+        `python -`/`python -m <module>` (stdin and an installed module).
+        """
+        i, program = cls._command_program(words)
+        if program is None:
+            return None
+        base = program.rsplit("/", 1)[-1]
+        is_shell = base in cls._SHELLS or program in ("source", ".")
+        is_python = bool(cls._PYTHON_PROGRAM_RE.search(program))
+        if not (is_shell or is_python):
+            return program if ("/" in program or program.endswith(
+                cls._SHELL_SCRIPT_SUFFIXES + cls._PYTHON_SCRIPT_SUFFIXES)) \
+                else None
+        rest = words[i + 1:]
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok in ("-c", "-m", "-") or (
+                    is_shell and re.match(r"^-[A-Za-z]*c[A-Za-z]*$", tok)):
+                return None
+            if tok in ("-o", "+o", "-W", "-X"):
+                j += 2
+                continue
+            if tok.startswith(("-", "+")) and tok != "--":
+                j += 1
+                continue
+            if tok == "--":
+                j += 1
+                continue
+            return tok
+        return None
+
+    @classmethod
+    def _resolve_repo_script(cls, token, root, workdir):
+        """A script token -> (path or None, reason).
+
+        Returns the repo file it names, or None with a reason: `external`
+        for a path outside the checkout (absolute, or built on a runner
+        variable other than the workspace), and `missing` for a token that
+        clearly names a repo file (a relative path or a script suffix)
+        that does not exist — which the follower refuses rather than skips.
+        """
+        token = cls._WORKSPACE_PREFIX_RE.sub("", token)
+        if "$" in token or token.startswith(("/", "~")):
+            candidate = Path(token) if token.startswith("/") else None
+            if candidate is not None:
+                try:
+                    candidate.resolve().relative_to(root.resolve())
+                    return candidate, "ok" if candidate.is_file() else "missing"
+                except ValueError:
+                    pass
+            return None, "external"
+        bases = [root / workdir, root] if workdir else [root]
+        for base in bases:
+            candidate = base / token
+            if candidate.is_file():
+                return candidate, "ok"
+        # Fail closed only on a token that CLEARLY names a repo file — an
+        # explicit relative path or a script suffix. A bare `a/b` word (an
+        # awk or sed pattern inside a followed script) is not a script.
+        if token.startswith(("./", "../")) or token.endswith(
+                cls._SHELL_SCRIPT_SUFFIXES + cls._PYTHON_SCRIPT_SUFFIXES):
+            return None, "missing"
+        return None, "external"
+
+    @classmethod
+    def _python_shell_texts(cls, code):
+        """Shell texts a piece of Python could execute, read via ast.
+
+        Every str constant is offered to the shell model as a command line
+        (`subprocess.run("pip install x", shell=True)`), and every
+        list/tuple of str constants as an argv (`["pip", "install", "x"]`).
+        Over-catch by design: a docstring that reads like a pip command
+        reads as one. Code that does not parse is returned whole, as text.
+        """
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return [code]
+        texts = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                texts.append(node.value)
+            elif isinstance(node, (ast.List, ast.Tuple)) and node.elts and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    for e in node.elts):
+                texts.append(" ".join(shlex.quote(e.value) for e in node.elts))
+        return texts
+
+    @classmethod
+    def _execution_population(cls, root):
+        """Everything CI EXECUTES, followed from the entry files.
+
+        Returns (yaml_files, steps, texts, files): every workflow / action
+        file read, every (label, step) in them, every (label, shell text)
+        CI runs, and every file the walk read (the rig copies exactly
+        these) — each step's `run:` string plus the text of every repo
+        script a run step executes, recursively. Followed:
+          - `uses: ./<path>` at step level (a local action anywhere in
+            the repo; its composite `runs.steps` are walked in turn) and at
+            job level (a local reusable workflow);
+          - every repo script a command executes (`_script_operand`),
+            resolved against the step's working-directory then the repo
+            root; shell scripts are read as shell, Python through ast.
+        Refused (fail closed, never skipped): a followed local action
+        whose `runs.using` is not `composite` (its code is JS or a
+        container this reader cannot parse), a `uses: ./` path with no
+        action file, a script token that names a repo file that does not
+        exist, and a followed script in another language. Not followed:
+        paths outside the checkout (absolute, or on runner variables such
+        as $RUNNER_TEMP), `python -`/`-m`, and third-party actions — those
+        are held by the action allowlist instead.
+        """
+        cached = cls._EXECUTION_CACHE.get(root.resolve())
+        if cached is not None and cached[0] == cls._read_signature(
+                root, cached[1][3]):
+            return cached[1]
+        yaml_files, steps, texts, files = [], [], [], []
+        seen = set()
+
+        def rel(path):
+            try:
+                return path.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                return str(path)
+
+        def follow_texts(label, text, workdir):
+            texts.append((label, text))
+            for words in cls._simple_commands(text):
+                token = cls._script_operand(words)
+                if token is None:
+                    continue
+                path, why = cls._resolve_repo_script(token, root, workdir)
+                if why == "external":
+                    continue
+                assert why == "ok", (
+                    f"UNRESOLVED SCRIPT, not a clean read: {label} executes "
+                    f"{token!r}, which names a repo file that does not exist "
+                    f"(looked under working-directory {workdir!r} and the "
+                    f"repo root). The census cannot read what it would run; "
+                    f"fix the path."
+                )
+                visit_script(path, workdir)
+
+        def visit_script(path, workdir):
+            key = path.resolve()
+            if key in seen:
+                return
+            seen.add(key)
+            files.append(path)
+            text = path.read_text(encoding="utf-8")
+            first = text.splitlines()[0] if text else ""
+            if path.suffix in cls._PYTHON_SCRIPT_SUFFIXES or (
+                    not path.suffix and "python" in first and first.startswith("#!")):
+                for n, chunk in enumerate(cls._python_shell_texts(text)):
+                    follow_texts(f"{rel(path)} (python text {n})", chunk, workdir)
+                return
+            assert path.suffix in cls._SHELL_SCRIPT_SUFFIXES or (
+                not path.suffix and first.startswith("#!")
+                and re.search(r"\b(ba|z|k|da)?sh\b", first)), (
+                f"UNREADABLE SCRIPT: CI executes {rel(path)}, a script this "
+                f"census cannot read (not shell, not Python). It would run "
+                f"unread; extend the census to read it in the same change, "
+                f"or run it through a readable script."
+            )
+            follow_texts(rel(path), text, workdir)
+
+        def visit_yaml(path, followed_action=False):
+            key = path.resolve()
+            if key in seen:
+                return
+            seen.add(key)
+            files.append(path)
+            text = path.read_text(encoding="utf-8")
+            cls._refuse_plain_scalar_run_continuations(text)
+            doc = cls._load_workflow_yaml(path, text)
+            yaml_files.append(path)
+            if isinstance(doc, dict):
+                runs = doc.get("runs")
+                if followed_action and isinstance(runs, dict):
+                    assert str(runs.get("using", "")).lower() == "composite", (
+                        f"UNREADABLE LOCAL ACTION: {rel(path)} is used by CI "
+                        f"but runs as {runs.get('using')!r}, whose code (JS "
+                        f"or a container) this census cannot read. It would "
+                        f"run unread; make it a composite action, or extend "
+                        f"the census in the same change."
+                    )
+                for job in (doc.get("jobs") or {}).values():
+                    uses = job.get("uses") if isinstance(job, dict) else None
+                    if isinstance(uses, str) and uses.startswith("./"):
+                        target = root / uses[2:].split("@")[0]
+                        assert target.is_file(), (
+                            f"UNRESOLVED LOCAL WORKFLOW: {rel(path)} calls "
+                            f"{uses!r}, which is not a file in this checkout."
+                        )
+                        visit_yaml(target)
+            for n, (workdir, step) in enumerate(cls._steps_with_workdir(doc)):
+                label = (f"{rel(path)} step {n} "
+                         f"({step.get('name', step.get('uses', 'run'))})")
+                steps.append((label, step))
+                uses = step.get("uses")
+                if isinstance(uses, str) and uses.startswith("./"):
+                    action_dir = root / uses[2:].split("@")[0]
+                    action = next((action_dir / name for name in
+                                   ("action.yml", "action.yaml")
+                                   if (action_dir / name).is_file()), None)
+                    assert action is not None, (
+                        f"UNRESOLVED LOCAL ACTION: {label} uses {uses!r}, but "
+                        f"{rel(action_dir)} holds no action.yml/action.yaml."
+                    )
+                    visit_yaml(action, followed_action=True)
+                run = step.get("run")
+                if isinstance(run, str):
+                    follow_texts(label, run, workdir)
+
+        for entry in cls._workflow_population(root):
+            visit_yaml(entry)
+        result = (yaml_files, steps, texts, files)
+        cls._EXECUTION_CACHE[root.resolve()] = (
+            cls._read_signature(root, files), result)
+        return result
+
+    # The walk re-parses every followed file, and every arm asks for it, so
+    # one result is reused per root — but ONLY while every file it read and
+    # the entry set are byte-for-byte unchanged (path, size, mtime_ns): a
+    # mutation to any read file, or a new entry file, forces a fresh walk.
+    _EXECUTION_CACHE = {}
+
+    @classmethod
+    def _read_signature(cls, root, files):
+        paths = sorted(set(files) | set(cls._workflow_population(root)))
+        signature = []
+        for path in paths:
+            try:
+                st = path.stat()
+                signature.append((str(path), st.st_size, st.st_mtime_ns))
+            except FileNotFoundError:
+                signature.append((str(path), None, None))
+        return tuple(signature)
 
     @classmethod
     def _population_steps(cls, root):
-        """(label, step) for every step in the workflow population.
+        """(label, step) for every step CI executes (`_execution_population`).
 
         Read STRUCTURALLY: a block-style step, a flow-style step
         (`- {name: x, run: ...}`), a folded scalar and a block scalar are
@@ -881,25 +1201,21 @@ class TestDependencyDriftIsDetectable:
         line-wise (`_refuse_plain_scalar_run_continuations`) as an
         over-catch belt.
         """
-        out = []
-        for path in cls._workflow_population(root):
-            text = path.read_text(encoding="utf-8")
-            cls._refuse_plain_scalar_run_continuations(text)
-            doc = cls._load_workflow_yaml(path, text)
-            rel = path.relative_to(root).as_posix()
-            for n, step in enumerate(cls._steps_of(doc)):
-                out.append((f"{rel} step {n} ({step.get('name', step.get('uses', 'run'))})", step))
-        return out
+        return cls._execution_population(root)[1]
+
+    @classmethod
+    def _population_texts(cls, root):
+        """(label, shell text) for every `run:` string and every followed
+        repo script CI executes."""
+        return cls._execution_population(root)[2]
 
     @classmethod
     def _population_installs(cls, root):
         """Every executed pip install across the population, labelled."""
         installs = []
-        for label, step in cls._population_steps(root):
-            run = step.get("run")
-            if isinstance(run, str):
-                for command, parsed in cls._pip_installs_in(run):
-                    installs.append((label, command, parsed))
+        for label, text in cls._population_texts(root):
+            for command, parsed in cls._pip_installs_in(text):
+                installs.append((label, command, parsed))
         return installs
 
     @staticmethod
@@ -1370,21 +1686,29 @@ class TestDependencyDriftIsDetectable:
     def test_every_executed_pip_install_is_the_canonical_install_line(self):
         """Census: no executed pip install anywhere in CI but the canonical one.
 
-        POPULATION, stated so a green is read at its true width: every
-        step of every `.yml`/`.yaml` under `.github/workflows/` and every
-        `runs.steps` of an `action.yml`/`action.yaml` under
-        `.github/actions/` (`_workflow_population`), read with
-        yaml.safe_load. A second workflow, a local composite action, a
-        flow-style step, a folded or block scalar and a backslash-wrapped
-        command are therefore all read as the runner reads them. Each
-        step's `run:` string is cut into simple commands and parsed as pip
-        argv (`_pip_installs_in`), so a program spelling (`pip3.12`,
-        `python -mpip`, `uv pip`) or a global option before `install`
-        cannot hide one. Not read: actions and reusable workflows fetched
-        from other repositories, and installs a step performs WITHOUT a pip
-        program in its `run:` text (an action input — see
-        test_no_action_input_installs_packages — or a tool runner — see
-        test_no_tool_runner_executes_unpinned_code).
+        POPULATION, stated so a green is read at its true width: what CI
+        EXECUTES, followed from its entry files (`_execution_population`):
+        every step of every workflow under `.github/workflows/`, every
+        local action a `uses: ./<path>` names wherever it lives (its
+        composite `runs.steps` walked recursively), every local reusable
+        workflow a job calls, and every repo script a command executes —
+        by path or as the operand of a shell or python — resolved against
+        the step's working-directory, read as shell (Python through ast),
+        recursively. Steps are read with yaml.safe_load, so flow-style
+        steps and folded or block scalars read as the runner reads them;
+        each text is cut into simple commands, `-c` strings and `eval`
+        included, and parsed as pip argv (`_pip_installs_in`), so a
+        program spelling (`pip3.12`, `python -mpip`, `uv pip`) or a global
+        option before `install` cannot hide one. A followed local action
+        that is not composite, a followed script in another language, and
+        a script path that does not exist are REFUSED, not skipped.
+        Not read here: third-party actions and reusable workflows (their
+        code is not in this tree — the allowlist arm holds them), paths
+        outside the checkout (absolute, or on runner variables such as
+        $RUNNER_TEMP), `python -`/`python -m <module>`, and installs done
+        WITHOUT a pip program (an action input — see
+        test_no_action_input_installs_packages — or another installer —
+        see test_no_tool_runner_executes_unpinned_code).
 
         Exactly ONE install may exist across that population, and it must
         be the canonical install line every coverage / constraints /
@@ -1477,10 +1801,16 @@ class TestDependencyDriftIsDetectable:
         "run", "install", "inject", "upgrade", "upgrade-all", "reinstall",
         "reinstall-all",
     })
-    _TOOL_RUNNER_ACTIONS = (
-        "astral-sh/ruff-action", "astral-sh/setup-uv",
-        "conda-incubator/setup-miniconda", "mamba-org/setup-micromamba",
-    )
+    # Every THIRD-PARTY action the shipped workflows and actions use,
+    # keyed on `owner/repo[/path]` with the `@ref` stripped (a SHA re-pin is
+    # not drift). Each was vetted as installing nothing unpinned. Local
+    # `./` actions are not listed: the census follows and reads them.
+    _ALLOWED_THIRD_PARTY_ACTIONS = frozenset({
+        "actions/checkout",
+        "actions/setup-python",
+        "actions/cache/restore",
+        "actions/cache/save",
+    })
     # Other package managers' INSTALLING verbs. Each resolves packages from
     # its own index or channel into the job's environment and none reads
     # constraints-ci.txt, so a good-faith switch of installer would float
@@ -1530,14 +1860,14 @@ class TestDependencyDriftIsDetectable:
         tool runners (`pipx run|install|...`, `uvx`, `uv tool`) and other
         package managers' installing verbs (`uv add`, `uv sync`,
         `uv run --with`, `poetry install|add`,
-        `conda|mamba|micromamba install`), plus the setup actions that
-        install those tools or run them (astral-sh/ruff-action,
-        astral-sh/setup-uv, conda-incubator/setup-miniconda,
-        mamba-org/setup-micromamba). None reads constraints-ci.txt, and the
-        job's checkout and token are in reach. Read over the workflow
-        population (`run:` strings and `uses:`) and over
-        .cursor/install.sh. A tool or package CI needs belongs on the
-        canonical install line, where it is pinned.
+        `conda|mamba|micromamba install`). None reads constraints-ci.txt,
+        and the job's checkout and token are in reach. Read over every
+        shell text CI executes (`_population_texts`: `run:` strings and the
+        repo scripts they run) and over .cursor/install.sh. An ACTION that
+        installs or runs such a tool is held by the action allowlist
+        (test_every_third_party_action_is_allowlisted), not by name here.
+        A tool or package CI needs belongs on the canonical install line,
+        where it is pinned.
         """
         root = self._source_repo_root()
         if root is None:
@@ -1548,16 +1878,10 @@ class TestDependencyDriftIsDetectable:
                 "runners — never read it as a pass."
             )
         offenders = []
-        for label, step in self._population_steps(root):
-            run = step.get("run")
-            if isinstance(run, str):
-                offenders += [
-                    f"{label}: {cmd!r}" for cmd in self._tool_runner_commands(run)
-                ]
-            uses = step.get("uses")
-            if isinstance(uses, str) and uses.lower().split("@")[0].rstrip("/") \
-                    in self._TOOL_RUNNER_ACTIONS:
-                offenders.append(f"{label}: uses {uses!r}")
+        for label, text in self._population_texts(root):
+            offenders += [
+                f"{label}: {cmd!r}" for cmd in self._tool_runner_commands(text)
+            ]
         script = root / ".cursor" / "install.sh"
         if script.exists():
             offenders += [
@@ -1571,6 +1895,59 @@ class TestDependencyDriftIsDetectable:
             f"— with the checkout in reach. Put the tool or package on the "
             f"canonical install line, where it is pinned and every "
             f"coverage arm reads it."
+        )
+
+    def test_every_third_party_action_is_allowlisted(self):
+        """Every third-party action CI uses is on a VETTED allowlist.
+
+        An action is code CI runs that no `run:` text shows, and many
+        install packages internally (pre-commit/action pip-installs
+        pre-commit, setup-uv/ruff-action/setup-miniconda install their
+        tools) with nothing constraints-ci.txt can pin. A name DENY-list
+        only catches the installers someone thought of, so this is an
+        ALLOWLIST: every `uses:` reference to another repository — step
+        level, or a job-level reusable workflow — across every workflow and
+        followed local action (`_execution_population`) must be in
+        `_ALLOWED_THIRD_PARTY_ACTIONS`, keyed on `owner/repo[/path]` with
+        the `@ref` stripped. `docker://` images are never allowed. Local
+        `./` actions are not allowlisted: the census follows and reads
+        them. The setup-python `with.pip-install` input keeps its own arm,
+        because an allowlisted action can still be told to install.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. This skip is NO INFORMATION about the "
+                "action allowlist — never read it as a pass."
+            )
+        yaml_files, steps, _texts, _files = self._execution_population(root)
+        references = [(label, step.get("uses")) for label, step in steps]
+        for path in yaml_files:
+            doc = self._load_workflow_yaml(path)
+            for jid, job in ((doc or {}).get("jobs") or {}).items() \
+                    if isinstance(doc, dict) else []:
+                if isinstance(job, dict):
+                    references.append(
+                        (f"{path.relative_to(root).as_posix()} job {jid}",
+                         job.get("uses")))
+        offenders = []
+        for label, uses in references:
+            if not isinstance(uses, str) or uses.startswith("./"):
+                continue
+            name = uses.split("@")[0].rstrip("/").lower()
+            if uses.startswith("docker://") \
+                    or name not in self._ALLOWED_THIRD_PARTY_ACTIONS:
+                offenders.append(f"{label}: uses {uses!r}")
+        assert not offenders, (
+            f"ACTION ALLOWLIST DRIFT: {offenders} are not on the vetted "
+            f"allowlist. An action runs code no `run:` text shows, and an "
+            f"installing action resolves packages constraints-ci.txt cannot "
+            f"pin. Confirm the action installs nothing unpinned (read its "
+            f"action.yml and what it runs), then add `owner/repo[/path]` to "
+            f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change — or put what "
+            f"it installs on the canonical install line instead."
         )
 
     def _repo_copy_carrying(self, tmp_path, workflow_text=None,
@@ -1603,7 +1980,7 @@ class TestDependencyDriftIsDetectable:
         (tmp_path / ".claude-plugin" / "marketplace.json").write_text(
             "{}", encoding="utf-8")
         (tmp_path / ".github" / "workflows").mkdir(parents=True)
-        for path in self._workflow_population(root):
+        for path in self._execution_population(root)[3]:
             target = tmp_path / path.relative_to(root)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1978,8 +2355,10 @@ class TestDependencyDriftIsDetectable:
 
         POPULATION, stated so a green is read at its true width:
           - STATIC env: every `env:` mapping `_pip_environment_keys` walks,
-            in every file of the workflow population (`_workflow_population`).
-          - RUNTIME writes: every `run:` string in that population, and
+            in every workflow and followed local action of the execution
+            population (`_execution_population`).
+          - RUNTIME writes: every shell text CI executes (`run:` strings
+            and the repo scripts they run, `_population_texts`), and
             .cursor/install.sh, read by `_runtime_pip_config_writes`
             (`PIP_*=` assignments including $GITHUB_ENV lines,
             `pip config set|unset|edit`, a named pip.conf/pip.ini).
@@ -2012,19 +2391,17 @@ class TestDependencyDriftIsDetectable:
             f"workflow is required."
         )
         offenders = []
-        for path in self._workflow_population(root):
+        for path in self._execution_population(root)[0]:
             rel = path.relative_to(root).as_posix()
             offenders += [
                 f"{rel}: env {key}" for key in
                 self._pip_environment_keys(path.read_text(encoding="utf-8"))
             ]
-        for label, step in self._population_steps(root):
-            run = step.get("run")
-            if isinstance(run, str):
-                offenders += [
-                    f"{label}: {cmd!r}"
-                    for cmd in self._runtime_pip_config_writes(run)
-                ]
+        for label, text in self._population_texts(root):
+            offenders += [
+                f"{label}: {cmd!r}"
+                for cmd in self._runtime_pip_config_writes(text)
+            ]
         script = root / ".cursor" / "install.sh"
         if script.exists():
             offenders += [
@@ -2644,7 +3021,9 @@ class TestDependencyDriftIsDetectable:
                     ". .venv/bin/activate\n" + line + "\n", 1))
 
     def test_tool_runners_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (tool runners): isolated-env runners redden.
+        """MUTATION ARM (tool runners, installers, actions): each reddens
+        at its arm — commands at the tool-runner arm, actions at the
+        allowlist arm.
 
         Round-7 probes: `pipx run`, `uvx` and a `uses:` of
         astral-sh/ruff-action each executed an index-resolved tool with
@@ -2685,11 +3064,31 @@ class TestDependencyDriftIsDetectable:
             ("setup-uv", "astral-sh/setup-uv@v6"),
             ("setup-miniconda", "conda-incubator/setup-miniconda@v3"),
             ("setup-micromamba", "mamba-org/setup-micromamba@v2"),
+            # The auditor's probe: an installer action no deny-list named.
+            ("pre-commit-action", "pre-commit/action@v3.0.1"),
+            ("docker-image", "docker://python:3.12-slim"),
         ]:
             self._shape_reddens(
-                tmp_path, monkeypatch, name, arm, "TOOL-RUNNER DRIFT",
+                tmp_path, monkeypatch, name,
+                "test_every_third_party_action_is_allowlisted",
+                "ACTION ALLOWLIST DRIFT",
                 workflow_text=real_text.replace(
                     lint_step, f"      - uses: {uses}\n" + lint_step, 1))
+        # A third-party REUSABLE WORKFLOW called at job level is held too.
+        self._shape_reddens(
+            tmp_path, monkeypatch, "reusable-workflow",
+            "test_every_third_party_action_is_allowlisted",
+            "ACTION ALLOWLIST DRIFT", extra_files={
+                ".github/workflows/reuse.yml":
+                    "name: reuse\non: [pull_request]\njobs:\n  r:\n"
+                    "    uses: someorg/ci/.github/workflows/lint.yml@v1\n"})
+        # CONTROL: an allowlisted action re-pinned to another ref is not
+        # drift — the allowlist keys on the name, not the @ref.
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "allowlisted-repin",
+            "test_every_third_party_action_is_allowlisted",
+            workflow_text=real_text.replace(
+                lint_step, "      - uses: actions/checkout@v5\n" + lint_step, 1))
         self._shape_reddens(
             tmp_path, monkeypatch, "script-pipx", arm, "TOOL-RUNNER DRIFT",
             script_text=real_script + "\npipx install pre-commit\n")
@@ -2706,6 +3105,132 @@ class TestDependencyDriftIsDetectable:
                 lint_anchor
                 + "          uv --version\n          conda list\n"
                 + "          poetry --version\n          pipx list\n", 1))
+
+    def test_the_census_follows_what_ci_executes(self, tmp_path, monkeypatch):
+        """MUTATION ARM (execution-defined population): installs reached
+        through a local action anywhere in the repo, a repo script a step
+        runs, or a string a shell runs as code redden.
+
+        Auditor probes: `uses: ./tools/setup` (a composite action outside
+        .github/actions), a run step `./scripts/ci-extra.sh` whose script
+        runs `pip install`, and `bash -c 'pip install x'` were each GREEN
+        against the directory-keyed census. Each shape below is followed
+        to its install and must redden at the named shipped arm; the
+        controls name paths that are NOT repo scripts and must stay green.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        real_text = (root / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8")
+        lint_step = "      - name: Import-hygiene lint (F401/F821)\n"
+        census = "test_every_executed_pip_install_is_the_canonical_install_line"
+        env_arm = "test_no_pip_environment_key_redirects_the_install"
+        tool_arm = "test_no_tool_runner_executes_unpinned_code"
+        installs = "#!/usr/bin/env bash\nset -e\npip install evilpkg\n"
+        composite = ("name: setup\nruns:\n  using: composite\n  steps:\n"
+                     "    - run: pip install evilpkg\n      shell: bash\n")
+
+        def with_step(step_yaml):
+            return real_text.replace(lint_step, step_yaml + lint_step, 1)
+
+        def run_step(command, workdir=None):
+            step = f"      - run: {command}\n"
+            if workdir:
+                step += f"        working-directory: {workdir}\n"
+            return with_step(step)
+
+        for name, workflow, extra, arm, match in [
+            ("local-action-anywhere", with_step("      - uses: ./tools/setup\n"),
+             {"tools/setup/action.yml": composite}, census, "INSTALL CENSUS DRIFT"),
+            ("nested-composite", with_step("      - uses: ./tools/outer\n"),
+             {"tools/outer/action.yml":
+                  "name: outer\nruns:\n  using: composite\n  steps:\n"
+                  "    - uses: ./tools/inner\n",
+              "tools/inner/action.yml": composite},
+             census, "INSTALL CENSUS DRIFT"),
+            ("script-by-path", run_step("./scripts/ci-extra.sh"),
+             {"scripts/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
+            ("script-as-bash-operand", run_step("bash scripts/ci-extra.sh"),
+             {"scripts/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
+            ("script-workdir", run_step("./ci-extra.sh", "pact-plugin"),
+             {"pact-plugin/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
+            ("script-workspace-var",
+             run_step('bash "$GITHUB_WORKSPACE/scripts/ci-extra.sh"'),
+             {"scripts/ci-extra.sh": installs}, census, "INSTALL CENSUS DRIFT"),
+            ("script-calls-script", run_step("./scripts/outer.sh"),
+             {"scripts/outer.sh": "#!/bin/sh\nsh scripts/inner.sh\n",
+              "scripts/inner.sh": installs}, census, "INSTALL CENSUS DRIFT"),
+            ("python-script", run_step("python scripts/ci_extra.py"),
+             {"scripts/ci_extra.py":
+                  "import subprocess\n"
+                  "subprocess.run(['pip', 'install', 'evilpkg'], check=True)\n"},
+             census, "INSTALL CENSUS DRIFT"),
+            ("bash-c", run_step("bash -c 'pip install evilpkg'"), {},
+             census, "INSTALL CENSUS DRIFT"),
+            ("sh-ec", run_step('sh -ec "pip install evilpkg"'), {},
+             census, "INSTALL CENSUS DRIFT"),
+            ("eval", run_step("eval 'pip install evilpkg'"), {},
+             census, "INSTALL CENSUS DRIFT"),
+            ("python-c",
+             run_step("python -c \"import subprocess; "
+                      "subprocess.run(['pip', 'install', 'evilpkg'])\""),
+             {}, census, "INSTALL CENSUS DRIFT"),
+            ("script-env-write", run_step("./scripts/ci-extra.sh"),
+             {"scripts/ci-extra.sh": "#!/bin/sh\n"
+              "echo PIP_INDEX_URL=https://x.example/simple >> $GITHUB_ENV\n"},
+             env_arm, "PIP ENVIRONMENT DRIFT"),
+            ("script-tool-runner", run_step("./scripts/ci-extra.sh"),
+             {"scripts/ci-extra.sh": "#!/bin/sh\nuvx ruff check .\n"},
+             tool_arm, "TOOL-RUNNER DRIFT"),
+            ("non-composite-action", with_step("      - uses: ./tools/js\n"),
+             {"tools/js/action.yml":
+                  "name: js\nruns:\n  using: node20\n  main: index.js\n"},
+             census, "UNREADABLE LOCAL ACTION"),
+            ("missing-action", with_step("      - uses: ./tools/nothing\n"), {},
+             census, "UNRESOLVED LOCAL ACTION"),
+            ("missing-script", run_step("./scripts/missing.sh"), {},
+             census, "UNRESOLVED SCRIPT"),
+            ("unreadable-script", run_step("./scripts/ci-extra.rb"),
+             {"scripts/ci-extra.rb": "system('pip install evilpkg')\n"},
+             census, "UNREADABLE SCRIPT"),
+        ]:
+            self._shape_reddens(tmp_path, monkeypatch, name, arm, match,
+                                workflow_text=workflow, extra_files=extra)
+
+        # CONTROLS: not repo scripts, and a followed script whose only pip
+        # text is a quoted message — all must stay green.
+        for name, workflow, extra in [
+            ("runner-temp", run_step('bash "$RUNNER_TEMP/setup.sh"'), {}),
+            ("home-path", run_step("$HOME/bin/tool.sh"), {}),
+            ("python-module", run_step("python -m pip --version"), {}),
+            ("quoted-hint", run_step("./scripts/hint.sh"),
+             {"scripts/hint.sh":
+                  "#!/bin/sh\necho 'run: python3 -m pip install -c "
+                  "constraints-ci.txt ruff'\n"}),
+        ]:
+            copy = self._repo_copy_carrying(
+                tmp_path / name, workflow_text=workflow, extra_files=extra)
+            monkeypatch.setattr(
+                type(self), "_source_repo_root", lambda self: copy)
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+            self.test_no_tool_runner_executes_unpinned_code()
+            self.test_no_pip_environment_key_redirects_the_install()
+
+        # The walk's per-root cache must never serve a stale read: editing
+        # a FOLLOWED file in place (same root) changes what the census sees.
+        copy = self._repo_copy_carrying(
+            tmp_path / "cache-freshness",
+            workflow_text=run_step("./scripts/later.sh"),
+            extra_files={"scripts/later.sh": "#!/bin/sh\necho ok\n"})
+        assert len(self._population_installs(copy)) == 1
+        (copy / "scripts" / "later.sh").write_text(
+            "#!/bin/sh\necho ok\npip install evilpkg\n", encoding="utf-8")
+        assert len(self._population_installs(copy)) == 2, (
+            "STALE EXECUTION CACHE: a followed script gained an install "
+            "in place and the census did not see it."
+        )
 
     def test_ruff_target_version_is_bound_to_the_floor(self, tmp_path, monkeypatch):
         """MUTATION ARM (fourth floor statement): a lint leg's
