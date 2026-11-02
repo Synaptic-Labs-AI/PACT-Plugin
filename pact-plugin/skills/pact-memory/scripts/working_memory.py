@@ -1378,7 +1378,7 @@ def _display_root_unknown_reason() -> Optional[str]:
     user needs to know which one); one that exists but whose answer FAILED
     verification, where git did run; and one git could not run or enumerate.
     A bool could make none of those distinctions. The three are decided by
-    `unknown_root_cause`, so this function only renders them.
+    `project_memory_root_and_cause`, so this function only renders them.
 
     The display resolver skips an unknown base instead of probing it (its
     fail-open answer is the base itself, which for a worktree is the copy the
@@ -1394,7 +1394,10 @@ def _display_root_unknown_reason() -> Optional[str]:
     the file is"); without the record case a forged record would resolve to
     nothing yet report the wrong cause.
     """
-    from shared.project_scope import unknown_root_cause, unknown_root_reason
+    from shared.project_scope import (
+        project_memory_root_and_cause,
+        unknown_root_reason,
+    )
 
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
     if declared:
@@ -1402,7 +1405,7 @@ def _display_root_unknown_reason() -> Optional[str]:
     else:
         record = get_project_dir_from_session_record()
         anchor = Path(record) if record else Path.cwd()
-    cause = unknown_root_cause(anchor)
+    _root, cause = project_memory_root_and_cause(anchor)
     return unknown_root_reason(cause, anchor) if cause is not None else None
 
 

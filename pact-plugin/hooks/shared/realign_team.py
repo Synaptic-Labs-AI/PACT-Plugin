@@ -119,17 +119,19 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     # `project_memory_root` fails SAFE TO ITS INPUT, which for a writer means
     # planting in the worktree. stderr is this command's problem surface (the
     # exit contract stays 0 -- a skip is not a refusal).
-    memory_root = project_scope.project_memory_root_or_none(project_dir)
-    if memory_root is None:
-        cause = project_scope.unknown_root_cause(project_dir)
-        if cause is not None:
-            print(
-                f"realign_team: project CLAUDE.md skipped: "
-                f"{project_scope.unknown_root_reason(cause, project_dir)}, so "
-                "the project memory target is unknown; nothing was written to "
-                "either checkout.",
-                file=sys.stderr,
-            )
+    # ONE OBSERVATION DECIDES BOTH THE GUARD AND THE TEXT (see
+    # `project_memory_root_and_cause`).
+    memory_root, root_cause = project_scope.project_memory_root_and_cause(
+        project_dir
+    )
+    if root_cause is not None:
+        print(
+            f"realign_team: project CLAUDE.md skipped: "
+            f"{project_scope.unknown_root_reason(root_cause, project_dir)}, so "
+            "the project memory target is unknown; nothing was written to "
+            "either checkout.",
+            file=sys.stderr,
+        )
         return
     target_file, _source = claude_md_manager.resolve_project_claude_md_path(
         memory_root

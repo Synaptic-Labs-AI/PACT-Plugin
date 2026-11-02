@@ -177,8 +177,7 @@ try:
     from shared import BOOTSTRAP_MARKER_NAME
     from shared.claude_md_manager import resolve_project_claude_md_path
     from shared.project_scope import (
-        project_memory_root_or_none,
-        unknown_root_cause,
+        project_memory_root_and_cause,
         unknown_root_reason,
     )
     from shared.marker_schema import (
@@ -503,16 +502,15 @@ def _write_back_aligned_team_name(input_data: dict) -> str | None:
         # writer means planting in the worktree. The skip is RETURNED so the
         # caller emits it as additionalContext, the same user-visible channel
         # session_init uses for its step 3/3b skip.
-        memory_root = project_memory_root_or_none(project_dir)
-        if memory_root is None:
-            cause = unknown_root_cause(project_dir)
-            if cause is None:
-                return None
+        # ONE OBSERVATION DECIDES BOTH THE GUARD AND THE TEXT (see
+        # `project_memory_root_and_cause`).
+        memory_root, root_cause = project_memory_root_and_cause(project_dir)
+        if root_cause is not None:
             return (
                 f"Project CLAUDE.md skipped: "
-                f"{unknown_root_reason(cause, project_dir)}, so the project "
-                "memory target is unknown; this prompt wrote nothing to either "
-                "checkout."
+                f"{unknown_root_reason(root_cause, project_dir)}, so the "
+                "project memory target is unknown; this prompt wrote nothing to "
+                "either checkout."
             )
         target_file, _source = resolve_project_claude_md_path(memory_root)
         if not target_file.exists():

@@ -127,8 +127,7 @@ from shared.paths import get_claude_config_dir
 from shared.project_scope import (
     _record_worktree_identity,
     project_memory_root,
-    project_memory_root_or_none,
-    unknown_root_cause,
+    project_memory_root_and_cause,
     unknown_root_reason,
 )
 from shared import backlog_store
@@ -1780,19 +1779,22 @@ def main():
         # skip the writers instead; the reads keep the fail-safe. A non-git
         # directory is a known answer (the directory), so it is not skipped.
         declared_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        memory_unknown = False
         # D3 (#1653): the unknown-root rule holds on the NO-DECLARED-DIR
         # route too. Before this, an env-absent session whose cwd was a
         # worktree took the fail-open root and step 4 wrote a STALE marker
         # into the worktree copy. The cwd is the anchor session_init already
         # records when the platform declares nothing.
-        if declared_project_dir:
-            memory_root = project_memory_root_or_none(declared_project_dir)
-        else:
-            memory_root = project_memory_root_or_none(project_dir)
-        if memory_root is None:
-            memory_unknown = True
-            memory_root = project_memory_root(project_dir)
+        #
+        # ONE OBSERVATION DECIDES BOTH THE SKIP AND ITS TEXT. The guard is the
+        # cause from this call, and the message below renders that same value:
+        # a second resolution between the guard and the message could disagree
+        # and turn the skip into a silent one.
+        anchor = declared_project_dir or project_dir
+        resolved_root, root_cause = project_memory_root_and_cause(anchor)
+        memory_unknown = root_cause is not None
+        memory_root = (
+            project_memory_root(project_dir) if memory_unknown else resolved_root
+        )
 
         # THE CREATING WRITERS keep their own "no project dir declared" guard.
         # Passing `memory_root` to them unconditionally would bypass that
@@ -1818,21 +1820,14 @@ def main():
         # did not run or could not enumerate is the third. The anchor is the
         # declaration, else the cwd (the same one resolved above); "project",
         # not "declared", because "declared" is false on the no-declared-dir
-        # route. `unknown_root_cause` decides all three in one place.
+        # route. The cause rendered here is the one the guard above used.
         if frame_is_lead and memory_unknown:
-            anchor = declared_project_dir or project_dir
-            # ONE RESOLUTION, ONE RENDERER. The cause decided here is the one
-            # rendered, so the text cannot describe a state the branch did not
-            # see. A KNOWN root has no cause to report: a disagreement emits
-            # nothing rather than a guessed sentence.
-            cause = unknown_root_cause(anchor)
-            if cause is not None:
-                system_messages.append(
-                    f"Project CLAUDE.md skipped: "
-                    f"{unknown_root_reason(cause, anchor)}, so the project "
-                    "memory target is unknown; this start wrote nothing to "
-                    "either checkout."
-                )
+            system_messages.append(
+                f"Project CLAUDE.md skipped: "
+                f"{unknown_root_reason(root_cause, anchor)}, so the project "
+                "memory target is unknown; this start wrote nothing to either "
+                "checkout."
+            )
 
         # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
         # does. A teammate whose project dir is a worktree would otherwise plant

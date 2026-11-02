@@ -52,6 +52,7 @@ import logging
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -403,7 +404,9 @@ def test_the_write_back_reports_nothing_when_no_cause_is_identified(
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
     _patch_bootstrap_context(monkeypatch, writer, forged, session_dir)
-    monkeypatch.setattr(writer, "unknown_root_cause", lambda pd: None)
+    monkeypatch.setattr(
+        writer, "project_memory_root_and_cause", lambda pd: (Path(str(pd)), None)
+    )
 
     status = writer._write_back_aligned_team_name({"agent_type": LEAD})
 
@@ -495,7 +498,10 @@ def test_realign_reports_nothing_when_no_cause_is_identified(
     session_dir = _session_with_session_start(repo)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    monkeypatch.setattr(project_scope, "unknown_root_cause", lambda pd: None)
+    monkeypatch.setattr(
+        project_scope, "project_memory_root_and_cause",
+        lambda pd: (Path(str(pd)), None),
+    )
 
     _write_team_line("sid", "session-new", str(session_dir), "/plugin")
 
@@ -774,7 +780,13 @@ def test_the_prompt_gate_reports_nothing_when_no_cause_is_identified(
     _seed_session_blocks(monkeypatch, writer, repo, forged, session_dir)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    monkeypatch.setattr(project_scope, "unknown_root_cause", lambda pd: None)
+    # ROOT None WITH NO CAUSE is the disagreement in its strongest form: the
+    # old guard (root is None) would emit a fallback here, while a cause-driven
+    # guard emits nothing. A root-bearing stub could not see that.
+    monkeypatch.setattr(
+        project_scope, "project_memory_root_and_cause",
+        lambda pd: (None, None),
+    )
 
     out = writer._record_unrecorded_lead(_prompt_gate_frame(), str(session_dir))
 
@@ -1290,7 +1302,9 @@ def test_the_session_start_reports_nothing_when_no_cause_is_identified(
     import session_init as gate
 
     forged = _forged_gitfile(repo, tmp_path, "no-cause-session")
-    monkeypatch.setattr(gate, "unknown_root_cause", lambda pd: None)
+    monkeypatch.setattr(
+        gate, "project_memory_root_and_cause", lambda pd: (Path(str(pd)), None)
+    )
 
     _context, system_message = _run(monkeypatch, forged)
 

@@ -473,6 +473,25 @@ def unknown_root_cause(
     return None if cause == ROOT_CAUSE_OK else cause
 
 
+def project_memory_root_and_cause(
+    project_dir: str | os.PathLike[str],
+) -> tuple[Path, Optional[str]]:
+    """The memory root AND the cause when it is unknown (None when known).
+
+    ONE OBSERVATION FOR THE CHANNELS THAT REPORT THIS. A caller takes its
+    guard and its message from this single resolution, so a state change
+    between a separate guard call and a separate cause call cannot turn a
+    skip into a silent one. `archive_pin` has always had this shape; this
+    function is what lets the other channels use it.
+
+    The root is the fail-safe answer (the input) even when the cause is set,
+    which is what `project_memory_root` returns; callers that must not use it
+    in that case guard on the cause, never on the root being None.
+    """
+    root, cause = _project_memory_root_cause(project_dir)
+    return root, (None if cause == ROOT_CAUSE_OK else cause)
+
+
 def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
     """The user-facing CLAUSE for a cause returned by `unknown_root_cause`.
 
@@ -484,11 +503,14 @@ def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
     each site is what stops the cause text from reaching one channel and not
     its siblings, which is how the wrong wording survived four rounds.
 
-    THE CAUSE IS A PARAMETER, NOT A SECOND LOOKUP. A caller that resolved the
-    cause once renders from that same decision, so the text cannot describe a
-    different state than the branch that emitted it. There is deliberately no
-    None return and no default text: a KNOWN root has no cause to report, and
-    a caller in that state emits nothing rather than guessing a sentence.
+    THE CAUSE IS A PARAMETER, NOT A SECOND LOOKUP. Every channel guards on a
+    cause obtained from `project_memory_root_and_cause` and renders from that
+    SAME value, so the branch that decided to report and the text it reports
+    describe one observation. A caller that guards on the root being None and
+    then calls this separately has reintroduced the seam the helper exists to
+    remove. There is deliberately no None return and no default text: a KNOWN
+    root has no cause to report, and a caller in that state emits nothing
+    rather than guessing a sentence.
 
     The anchor path is part of the clause: several worktrees can be in play and
     the user needs to know which one.

@@ -393,8 +393,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         )
         from shared.project_scope import (
             _record_worktree_identity,
-            project_memory_root_or_none,
-            unknown_root_cause,
+            project_memory_root_and_cause,
             unknown_root_reason,
         )
         from shared.session_journal import append_event, make_event
@@ -431,23 +430,27 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         # worktree CLAUDE.md while returning "Session info updated" -- a
         # success message about the wrong file. The journal recording below
         # still runs; it is not project memory.
-        memory_root = (
-            project_memory_root_or_none(env_project_dir)
-            if env_project_dir else None
-        )
+        # ONE OBSERVATION DECIDES BOTH THE GUARD AND THE TEXT (see
+        # `project_memory_root_and_cause`): a second resolution between them
+        # could disagree and turn the skip into a silent one.
+        memory_root = None
+        root_cause = None
+        if env_project_dir:
+            resolved_root, root_cause = project_memory_root_and_cause(
+                env_project_dir
+            )
+            memory_root = resolved_root if root_cause is None else None
 
         claim = None
         prev_session_dir = None
         block_status = None
-        if env_project_dir and memory_root is None:
-            cause = unknown_root_cause(env_project_dir)
-            if cause is not None:
-                block_status = (
-                    f"Project CLAUDE.md skipped: "
-                    f"{unknown_root_reason(cause, env_project_dir)}, so the "
-                    "project memory target is unknown; the session block was "
-                    "not rewritten."
-                )
+        if root_cause is not None:
+            block_status = (
+                f"Project CLAUDE.md skipped: "
+                f"{unknown_root_reason(root_cause, env_project_dir)}, so the "
+                "project memory target is unknown; the session block was not "
+                "rewritten."
+            )
         try:
             if env_project_dir and memory_root is not None:
                 claude_md, source = resolve_project_claude_md_path(memory_root)
