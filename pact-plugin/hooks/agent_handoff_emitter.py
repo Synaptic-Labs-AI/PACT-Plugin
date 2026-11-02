@@ -353,11 +353,20 @@ def main() -> None:
             )
 
         # Journal-write — the sole purpose of this hook.
-        # DO NOT forward additional stdin fields beyond these 4 — the
-        # journal event payload contract is intentionally minimal, and
+        # DO NOT forward additional CALLER-SUPPLIED stdin fields beyond these
+        # 4 — the journal event payload contract is intentionally minimal, and
         # TestStdinShapePin asserts no leakage of session_id /
         # transcript_path / cwd / hook_event_name / team_name /
         # teammate_name / task_description into the event.
+        #
+        # `team` is NOT one of those stdin fields. It is `team_name` above —
+        # the RESOLVER-derived task-store directory name, i.e. the store this
+        # hook READ its task file from, which is the attribution the harvest
+        # needs to tell two teams' same-numbered tasks apart. It is OMITTED
+        # entirely when the resolver fails closed: a registered optional `str`
+        # rejects a present empty value, append_event then returns False, and
+        # the compensating unclaim turns that into a LOST event rather than a
+        # missing attribution.
         #
         # #917 R1 (compensating-unclaim): we OWN the marker here (already_emitted
         # returned False = a fresh O_EXCL claim). If the write returns False
@@ -367,16 +376,17 @@ def main() -> None:
         # permanently suppressed by the poisoned marker. Best-effort + fail-safe:
         # worst case the marker persists (today's pre-R1 behavior). F3 twin:
         # mirror this in task_lifecycle_gate._emit_lead_side_agent_handoff.
+        fields = {
+            "agent": teammate_name,
+            "task_id": task_id,
+            "task_subject": task_subject,
+            "handoff": handoff,
+        }
+        # Omit, never write "": see the omit-when-empty rationale above.
+        if isinstance(team_name, str) and team_name.strip():
+            fields["team"] = team_name
         try:
-            written = append_event(
-                make_event(
-                    "agent_handoff",
-                    agent=teammate_name,
-                    task_id=task_id,
-                    task_subject=task_subject,
-                    handoff=handoff,
-                ),
-            )
+            written = append_event(make_event("agent_handoff", **fields))
         except Exception:
             written = False
         if not written:

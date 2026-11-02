@@ -1067,16 +1067,23 @@ def _emit_lead_side_agent_handoff(
         # fire can re-emit instead of being permanently suppressed by the
         # poisoned marker. Best-effort + fail-safe (worst case reverts to
         # today's behavior). F3 twin of agent_handoff_emitter.main.
+        # `team` is the RESOLVED task-store name this emit read its task from
+        # (the `team_name` parameter, derived by the same resolver as b1). It
+        # is OMITTED entirely when the resolver fails closed: a registered
+        # optional `str` rejects a present empty value, append_event then
+        # returns False, and the compensating unclaim turns that into a LOST
+        # event rather than a missing attribution. Twin shape: the b1 emit in
+        # agent_handoff_emitter.main.
+        fields = {
+            "agent": owner,
+            "task_id": task_id,
+            "task_subject": subject,
+            "handoff": handoff,
+        }
+        if isinstance(team_name, str) and team_name.strip():
+            fields["team"] = team_name
         try:
-            written = append_event(
-                make_event(
-                    "agent_handoff",
-                    agent=owner,
-                    task_id=task_id,
-                    task_subject=subject,
-                    handoff=handoff,
-                )
-            )
+            written = append_event(make_event("agent_handoff", **fields))
         except Exception:
             written = False
         if not written:

@@ -470,6 +470,18 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
 # happy-path + wrong-type case to TestValidateOptionalFieldTypes in
 # test_session_journal.py.
 _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
+    # `team` on agent_handoff: the RESOLVED task-store directory name the
+    # writer READ its task file from (agent_handoff_emitter.main,
+    # task_lifecycle_gate._emit_lead_side_agent_handoff). It lets a journal
+    # that outlives a team realignment attribute each event to the store its
+    # content came from. Writers OMIT the key entirely when the resolver
+    # fails closed: the optional-str contract below REJECTS a present empty
+    # value, append_event then returns False, and the compensating unclaim
+    # turns that into a LOST event rather than a missing attribution.
+    # The sibling family's `team` is registered at ITS existing entry below —
+    # a second "task_metadata_snapshot" key here is silently overwritten by
+    # that later dict literal.
+    "agent_handoff": {"team": str},
     # session_start's optional `source`: hooks/session_init.py writes the
     # stdin source when it is one of startup, resume, compact, clear or fork
     # ("startup" when stdin has none) and "unknown" for any other value,
@@ -677,6 +689,11 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_type": str,
         "truncated": bool,
         "occupant": str,
+        # `team`: the RESOLVED task-store name this snapshot's task file was
+        # read from. Same omit-when-empty rule as agent_handoff — a present
+        # empty value is rejected here, and the rejected append would lose
+        # the snapshot rather than only its attribution.
+        "team": str,
     },
     # commands/peer-review.md writes remediation with an optional task_id —
     # the fixer's Task-B task id. It is no longer a Q5 term: Q5's population is

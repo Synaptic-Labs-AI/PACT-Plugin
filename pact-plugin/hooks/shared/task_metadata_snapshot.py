@@ -509,6 +509,12 @@ def emit_task_metadata_snapshot(
             optional["task_type"] = task_type
         if truncated:
             optional["truncated"] = True
+        # The RESOLVED task-store name this snapshot's task file was read
+        # from. Omitted, never written empty: the journal's optional-str
+        # contract rejects a present empty value, and a rejected
+        # append_event would lose the snapshot rather than its attribution.
+        if isinstance(team_name, str) and team_name.strip():
+            optional["team"] = team_name
 
         try:
             written = append_event(
