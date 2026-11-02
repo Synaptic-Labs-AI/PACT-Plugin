@@ -757,7 +757,8 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
     line parser remains only as the last resort, for a git that cannot answer
     either; on it a newline-containing path is still truncated. That residue
     is stated, not hidden: it needs a pre-2.36 git AND an unreadable admin
-    enumeration.
+    enumeration. A timeout or a missing git on the first call answers None at
+    once: the fallbacks would only wait on the same git again.
     """
     try:
         result = run_git(
@@ -766,7 +767,12 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
             text=False,
             env=git_env_without_location(),
         )
-        if result is not None and result.returncode == 0:
+        if result is None:
+            # `run_git` returns None only on a timeout or a missing git. Both
+            # would repeat on the two sources below (two more rev-parse /
+            # listing calls, 5 s each on a hang), so stop here.
+            return None
+        if result.returncode == 0:
             return [
                 field[len("worktree "):]
                 for field in _fsdecode(result.stdout or b"").split("\0")
