@@ -53,6 +53,7 @@ from collections.abc import Mapping
 
 from .agent_handoff_marker import (
     already_emitted,
+    emit_side_subject,
     occupant_hash,
     sanitize_path_component,
     unclaim,
@@ -461,7 +462,9 @@ def emit_task_metadata_snapshot(
     Sequence (each early return is a clean no-emit):
       1. metadata guard — None → {}; non-mapping → return.
       2. build payload; empty post-exclude payload → return.
-      3. validate-before-claim: sentinel-substitute a degenerate subject,
+      3. validate-before-claim: sentinel-substitute a degenerate subject
+         through the SHARED emit_side_subject (one implementation, also used
+         by both agent_handoff emit paths and the harvest's disk identity),
          normalize a degenerate owner to None — every emitted field is
          schema-valid BEFORE any marker claim (a claim-then-schema-reject
          would poison the marker for later valid fires).
@@ -483,8 +486,12 @@ def emit_task_metadata_snapshot(
         if not snapshot_eligible(payload):
             return
 
-        if not isinstance(subject, str) or not subject.strip():
-            subject = "(no subject)"
+        # THE SHARED HELPER, not a local branch. It is strict: any value that
+        # is not a non-empty stripped string becomes the sentinel, exactly as
+        # this branch did — but now the rule has ONE implementation shared by
+        # both agent_handoff emit paths, this snapshot writer and the harvest's
+        # disk identity.
+        subject = emit_side_subject(subject)
         if not isinstance(owner, str) or not owner.strip():
             owner = None
 

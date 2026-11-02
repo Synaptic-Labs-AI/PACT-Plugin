@@ -503,3 +503,13 @@ class TestEmitPathsUseTheSharedSentinel:
         assert "emit_side_subject" in src
         assert "emit_side_subject(" in src
         assert "def emit_side_subject" not in src
+
+    def test_snapshot_writer_calls_the_shared_helper(self):
+        src = (
+            HOOKS_DIR / "shared" / "task_metadata_snapshot.py"
+        ).read_text(encoding="utf-8")
+        assert "emit_side_subject" in src
+        assert "emit_side_subject(" in src
+        assert "def emit_side_subject" not in src
+        # The local branch is GONE, not merely unused.
+        assert "if not isinstance(subject, str) or not subject.strip():" not in src
