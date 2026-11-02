@@ -76,7 +76,6 @@ from staleness import (  # noqa: F401
     _get_project_claude_md_path,
     _estimate_tokens,
     locate_pinned,
-    resolve_session_claude_md_path,
 )
 from pin_caps import (  # noqa: F401
     PIN_COUNT_CAP,
@@ -126,7 +125,6 @@ from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
 from shared.project_scope import (
     _record_worktree_identity,
-    project_memory_root,
     session_memory_root,
     unknown_root_status,
 )
@@ -145,7 +143,6 @@ from shared.claude_md_manager import (
     ensure_project_memory_md,
     migrate_to_managed_structure,
     resolve_managed_document,
-    resolve_project_claude_md_path,
     strip_orphan_kernel_block,
 )
 from shared.merge_guard_common import (
@@ -315,106 +312,18 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
     return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
 
-def check_pinned_staleness(
-    project_dir: str | os.PathLike[str] | None = None,
-    memory_root: Path | None = None,
-    *,
-    doc: ManagedDocument | None = None,
-):
+def check_pinned_staleness(doc: ManagedDocument):
     """
     Thin wrapper around staleness.check_pinned_staleness().
 
-    `doc`, when given, is the session's one resolved document: the check
-    marks `doc.path` when it exists and returns None otherwise, and the two
-    positional parameters are ignored.
-
-    Resolves the CLAUDE.md path via the module-level _get_project_claude_md_path
-    (which tests can patch on session_init) and passes it to the core function.
-
-    WORKTREE LEAD (#1653). When project memory belongs to the main checkout,
-    the worktree path is wrong: staleness would mark a file that dies with the
-    worktree. THE BRANCH CONDITION IS TRUTHINESS -- both `project_dir` and a
-    known `memory_root` -- NOT `memory_root != project_dir`. The inequality IS
-    the pre-fix behaviour and restoring it reopens the defect: on
-    declared-MAIN / cwd-in-worktree / MAIN-empty it takes the alias route and
-    falls through to the worktree copy. On the known-base route this probes
-    the memory root and never consults the raw fall-through; when the root
-    holds no document it returns None instead of using another resolver's
-    answer.
-
-    THE CALLER PASSES THE BASE IT ALREADY COMPUTED (main() derives
-    `project_dir` as env-or-cwd and `memory_root` from it). Re-deriving the
-    root here from the environment would agree only while the two call sites
-    happen to read the same value; a no-argument call falls back to today's
-    environment read for direct and test callers. A non-worktree session's
-    output is unchanged ONLY while its declared base holds a document; when
-    it holds none, this answers None rather than reading another repository's
-    file.
-
-    THE WORKTREE BRANCH BYPASSES `_get_project_claude_md_path`. An arm that
-    patches that alias drives only the non-worktree route; to exercise the
-    retarget it must pass a base pair, or set the environment and call this
-    with no arguments (which derives the pair from the environment).
-
-    THE NO-MAIN-FILE BRANCH RETURNS None AND DOES NOT CALL THE CORE. Passing
-    `claude_md_path=None` does NOT mean "nothing to mark": the core re-enters
-    `_resolve_project_claude_md_with_base()` when its path is None, and that
-    resolver is env-first -- so a None delegation resolves straight back to
-    the worktree file and marks it, defeating the retarget on exactly the
-    "main has no CLAUDE.md yet" path. This check marks an existing file; it
-    never creates one, and with no main file there is nothing to mark.
-
-    PASSING None IS A HAZARD, NOT AN OPTION. It re-derives the project dir
-    from the environment and, when that yields no file, the resolver's git and
-    cwd rungs can return a linked worktree's own CLAUDE.md -- a file that
-    belongs to the worktree, not to project memory. Callers resolve project
-    memory and pass it.
+    Marks `doc.path`, the session's one resolved document, when it exists,
+    and returns None otherwise: this check marks an existing file and never
+    creates one.
     """
-    if doc is not None:
-        return _staleness_check(claude_md_path=doc.path) if doc.exists else None
-    if project_dir is None:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        memory_root = project_memory_root(project_dir) if project_dir else None
-    if project_dir and memory_root is not None:
-        # THE WRITE-SAFE RULE (#1653/D2) BELONGS HERE, not in the shared
-        # helper: step 4 has NO scope guard, so it must probe the memory root
-        # and never consult the resolver's git/cwd fall-through, which returns
-        # the WORKTREE copy on the declared-MAIN / cwd-in-worktree /
-        # MAIN-empty shape and made this step write a STALE marker there.
-        # `new_default` means the memory root has no file: return without
-        # calling the core, whose None delegation re-resolves env-first.
-        # The SHARED helper keeps the fall-through for the sites that pair it
-        # with `stays_in_declared_project` (archive_pin and the sync writers),
-        # because there the guard, not the resolver, is the safety property.
-        target, source = resolve_project_claude_md_path(memory_root)
-        if source == "new_default":
-            return None
-        return _staleness_check(claude_md_path=target)
-    path = _get_project_claude_md_path()
-    return _staleness_check(claude_md_path=path)
+    return _staleness_check(claude_md_path=doc.path) if doc.exists else None
 
 
-def _session_document_path(
-    doc: ManagedDocument | None,
-    project_dir: str | os.PathLike[str] | None,
-    memory_root: Path | None,
-) -> Optional[Path]:
-    """The existing document an advisory reader reads, or None.
-
-    `doc.path` when the caller passed the session's document and it exists;
-    without one, the legacy `resolve_session_claude_md_path` route.
-    """
-    if doc is not None:
-        return doc.path if doc.exists else None
-    return resolve_session_claude_md_path(project_dir, memory_root)
-
-
-def check_pin_slot_status(
-    project_dir: str | os.PathLike[str] | None = None,
-    memory_root: Path | None = None,
-    *,
-    doc: ManagedDocument | None = None,
-) -> Optional[str]:
+def check_pin_slot_status(doc: ManagedDocument) -> Optional[str]:
     """Return a Tier-0 slot-status line for additionalContext, or None.
 
     Builds "Pin slots: N/12 used, K chars remaining on largest pin" via
@@ -429,14 +338,13 @@ def check_pin_slot_status(
     Wrap the full body in a blanket try/except — mirrors the sibling
     check_pin_stale_block_directive pattern above.
 
-    FOLLOWS THE PROJECT-MEMORY ROOT (#1653): a worktree session's slots are
-    counted from the MAIN checkout's file, because that is the document every
-    writer targets. A non-worktree caller gets today's resolver unchanged.
+    Counts `doc.path`, the session's managed document (MAIN's for a linked
+    worktree), when it exists.
     """
     try:
-        path = _session_document_path(doc, project_dir, memory_root)
-        if path is None:
+        if not doc.exists:
             return None
+        path = doc.path
 
         try:
             # Read-only: a byte that is not UTF-8 decodes to U+FFFD and the
@@ -449,8 +357,8 @@ def check_pin_slot_status(
         # start that never reaches this line does not load it.
         from shared.claude_md_markers import State, parse
 
-        doc = parse(content)
-        located = locate_pinned(doc)
+        parsed = parse(content)
+        located = locate_pinned(parsed)
         if located.state is State.ABSENT:
             # Missing Pinned Context section — surface 0-used state so the
             # orchestrator sees pin headroom from session start.
@@ -461,7 +369,7 @@ def check_pin_slot_status(
             return None
 
         try:
-            pins = section_pins(doc, located)
+            pins = section_pins(parsed, located)
         except Exception:  # noqa: BLE001 — fail-open by construction
             return None
 
@@ -482,12 +390,7 @@ _SYNC_HEADINGS = (
 _REASON_LINE = re.compile(r"\blines? (\d+)")
 
 
-def check_claude_md_refusals(
-    project_dir: str | os.PathLike[str] | None = None,
-    memory_root: Path | None = None,
-    *,
-    doc: ManagedDocument | None = None,
-) -> Optional[str]:
+def check_claude_md_refusals(doc: ManagedDocument) -> Optional[str]:
     """Return the per-launch line for a project CLAUDE.md that PACT will not
     update, or None.
 
@@ -502,13 +405,13 @@ def check_claude_md_refusals(
     file gives None: the writers report those themselves. Read-only, and
     fail-open on the SessionStart hot path.
 
-    FOLLOWS THE PROJECT-MEMORY ROOT (#1653): the file named here is the one
-    PACT writes, so a worktree session names the MAIN checkout's file.
+    Reads `doc.path`, the session's managed document (the file PACT writes,
+    MAIN's for a linked worktree), when it exists.
     """
     try:
-        path = _session_document_path(doc, project_dir, memory_root)
-        if path is None:
+        if not doc.exists:
             return None
+        path = doc.path
         try:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -519,21 +422,21 @@ def check_claude_md_refusals(
         from shared.claude_md_markers import State, parse
 
         refused_states = (State.DUPLICATE, State.MALFORMED, State.UNKNOWN)
-        doc = parse(content)
+        parsed = parse(content)
         # Each lookup, and the names it stands for when it is refused.
-        lookups = [doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER),
-                   doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)]
+        lookups = [parsed.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER),
+                   parsed.find_block(SESSION_START_MARKER, SESSION_END_MARKER)]
         labels: list[tuple[str, ...]] = [("the PACT managed block",), ("Current Session",)]
-        memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+        memory = parsed.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
         # The gate's own Pinned lookup. Outside a found memory block it is the
         # memory block's result, so it is refused exactly when that block is.
-        pinned = locate_pinned(doc, unique=True)
+        pinned = locate_pinned(parsed, unique=True)
         if memory.state is State.FOUND:
             first, last = memory.spans[0]
             interior = (first + 1, last - 1)
             (retrieved_name, retrieved_heading), (working_name, working_heading) = _SYNC_HEADINGS
-            lookups += [doc.find_section(retrieved_heading, None, interior), pinned,
-                        doc.find_section(working_heading, None, interior)]
+            lookups += [parsed.find_section(retrieved_heading, None, interior), pinned,
+                        parsed.find_section(working_heading, None, interior)]
             labels += [(retrieved_name,), ("Pinned Context",), (working_name,)]
         else:
             lookups.append(memory)
@@ -547,7 +450,7 @@ def check_claude_md_refusals(
 
         def line_of(index: int) -> int:
             found = _REASON_LINE.search(lookups[index].reason)
-            return int(found.group(1)) if found else len(doc.lines) + 1
+            return int(found.group(1)) if found else len(parsed.lines) + 1
 
         earliest = lookups[min(refused, key=line_of)]
         names = ", ".join(name for index in refused for name in labels[index])
@@ -564,12 +467,7 @@ def check_claude_md_refusals(
         return None
 
 
-def check_pin_stale_block_directive(
-    project_dir: str | os.PathLike[str] | None = None,
-    memory_root: Path | None = None,
-    *,
-    doc: ManagedDocument | None = None,
-) -> Optional[str]:
+def check_pin_stale_block_directive(doc: ManagedDocument) -> Optional[str]:
     """Return an unconditional stale-block directive for additionalContext, or None.
 
     Fires only when check_pinned_block_signal reports positive detection.
@@ -588,25 +486,12 @@ def check_pin_stale_block_directive(
     # its own contract, but session_init is on the SessionStart hot path —
     # a regression inside the callee should not propagate out of this
     # surfacing helper. Wrap in fail-open try/except.
-    #
-    # FOLLOWS THE PROJECT-MEMORY ROOT (#1653). In the worktree branch a None
-    # path means the main checkout has no file: return None HERE, because the
-    # callee re-resolves env-first when its path is None and would read the
-    # worktree copy (the step-4 lesson). The non-worktree route keeps today's
-    # delegation to the callee unchanged.
-    if doc is None and project_dir is None:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        memory_root = project_memory_root(project_dir) if project_dir else None
-    # A KNOWN root with no file means "nothing to read". None delegated to the
-    # callee re-resolves env-first and would read the worktree copy, so it is
-    # stopped here on EVERY known route, not only a retargeted one (#1653/D2).
-    # A passed document is a known root.
-    known_root = doc is not None or bool(project_dir and memory_root is not None)
+    # Reads `doc.path`, the session's managed document, when it exists; with
+    # no document there is nothing to read.
+    if not doc.exists:
+        return None
     try:
-        path = _session_document_path(doc, project_dir, memory_root)
-        if known_root and path is None:
-            return None
-        signal = _staleness_block_check(claude_md_path=path)
+        signal = _staleness_block_check(claude_md_path=doc.path)
     except Exception:  # noqa: BLE001 — fail-open
         return None
 
@@ -741,11 +626,7 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def _extract_session_started(
-    project_dir: str | os.PathLike[str] | None = None,
-    *,
-    doc: ManagedDocument | None = None,
-) -> str | None:
+def _extract_session_started(doc: ManagedDocument) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     None when there is no CLAUDE.md, it cannot be read, or the line is not in
@@ -753,11 +634,10 @@ def _extract_session_started(
     not read). Only the exact shape update_session_info writes is returned, so
     no other text from the file can reach the block it rewrites. Read without
     the sidecar lock: every writer replaces the file whole, so the read sees
-    the old file or the new one. `doc`, when given, names the document and
-    `project_dir` is ignored.
+    the old file or the new one. `doc` is the session's managed document.
     """
     try:
-        found = existing_document(doc, project_dir)
+        found = existing_document(doc)
         if found is None:
             return None
         claude_md, _base = found
@@ -1839,7 +1719,7 @@ def main():
             # 3. Ensure project has CLAUDE.md with memory sections. `doc.base`
             # holds the document when it exists (no create) and is the root
             # when it does not (create at `doc.path`).
-            project_md_msg = ensure_project_memory_md(doc.base)
+            project_md_msg = ensure_project_memory_md(doc)
             if project_md_msg:
                 if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
                     system_messages.append(project_md_msg)
@@ -1852,7 +1732,7 @@ def main():
             # already have the new structure, and before staleness checks
             # so the staleness parser sees the migrated layout.
             # Idempotent no-op when PACT_MANAGED_START marker is already present.
-            migration_msg = migrate_to_managed_structure(doc.base)
+            migration_msg = migrate_to_managed_structure(doc)
             if migration_msg:
                 if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
                     system_messages.append(migration_msg)

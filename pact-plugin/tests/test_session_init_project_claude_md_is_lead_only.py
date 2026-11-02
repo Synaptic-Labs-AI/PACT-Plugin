@@ -28,6 +28,8 @@ import pytest
 
 import session_init  # noqa: E402
 from session_init import _UNKNOWN_ROLE_NOTICE, _should_warn_unknown_role  # noqa: E402
+from helpers import doc_at  # noqa: E402
+from helpers import session_doc  # noqa: E402
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 _SESSION_ID = "cccccccc-dddd-eeee-ffff-000000000000"
@@ -143,8 +145,8 @@ class TestTeammateWritesNothing:
         reads = []
         real = session_resume.existing_document
 
-        def spy(doc, project_dir):
-            found = real(doc, project_dir)
+        def spy(doc):
+            found = real(doc)
             reads.append(found)
             return found
 
@@ -322,7 +324,7 @@ class TestWorktreeTeammateWritesNothing:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
         monkeypatch.chdir(worktree)
-        session_init.check_pinned_staleness()
+        session_init.check_pinned_staleness(session_doc())
 
         assert STALE in (main / "CLAUDE.md").read_text(), (
             "step 4 did not mark the MAIN checkout's CLAUDE.md"
@@ -349,7 +351,7 @@ class TestWorktreeTeammateWritesNothing:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
         monkeypatch.chdir(worktree)
-        assert session_init.check_pinned_staleness() is None
+        assert session_init.check_pinned_staleness(session_doc()) is None
         assert (worktree / "CLAUDE.md").read_text() == USER_MD
         assert STALE not in (worktree / "CLAUDE.md").read_text()
 
@@ -410,10 +412,7 @@ class TestWorktreeTeammateWritesNothing:
         old_started = "2026-10-19 07:00:00 UTC"
         prev_dir = Path.home() / ".claude" / "pact-sessions" / "proj" / "f1"
         prev_dir.mkdir(parents=True)
-        assert update_session_info(
-            "prev-session", "pact-old", str(prev_dir), started=old_started,
-            project_dir=str(main),
-        ) is not None
+        assert update_session_info("prev-session", "pact-old", str(prev_dir), started=old_started, doc=doc_at(str(main))) is not None
         main_before = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
         assert f"- Started: {old_started}" in main_before
         assert _SESSION_ID not in main_before

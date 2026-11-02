@@ -78,7 +78,6 @@ def test_an_unanswerable_root_names_no_document(main, monkeypatch):
     monkeypatch.chdir(worktree)
 
     assert resolve_session_claude_md_path() is None
-    assert resolve_session_claude_md_path(project_dir=str(worktree)) is None
     assert match_project_claude_md(str(worktree_doc)) is None
     assert match_project_claude_md(str(main_doc)) is None
     assert gate_target(str(worktree_doc)) is None

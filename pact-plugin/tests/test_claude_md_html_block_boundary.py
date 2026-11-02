@@ -26,6 +26,8 @@ from shared import claude_md_markers
 from shared.claude_md_markers import Cause, State, parse
 from shared.session_resume import update_session_info
 from staleness import locate_pinned
+from helpers import doc_at  # noqa: E402
+from helpers import session_doc  # noqa: E402
 
 # --- the boundary row and cause --------------------------------------------
 
@@ -242,7 +244,7 @@ UNCERTAIN_LINE = 2
 def test_the_session_writer_refuses_naming_the_line_and_cause(project):
     target = project / ".claude" / "CLAUDE.md"
     target.write_bytes(UNCERTAIN_FILE.encode("utf-8"))
-    status = update_session_info("s1", "team", started="2026-10-01 00:00:00 UTC")
+    status = update_session_info("s1", "team", started="2026-10-01 00:00:00 UTC", doc=doc_at())
     assert status is not None
     assert f"line {UNCERTAIN_LINE} starts an uncertain region: an HTML block is never closed" in status
     assert target.read_bytes().decode("utf-8") == UNCERTAIN_FILE
@@ -250,7 +252,7 @@ def test_the_session_writer_refuses_naming_the_line_and_cause(project):
 
 def test_the_per_launch_report_names_the_line_and_cause(project):
     (project / ".claude" / "CLAUDE.md").write_text(UNCERTAIN_FILE, encoding="utf-8")
-    report = session_init.check_claude_md_refusals()
+    report = session_init.check_claude_md_refusals(session_doc())
     assert report is not None
     assert f"line {UNCERTAIN_LINE} starts an uncertain region: an HTML block is never closed" in report
 
@@ -265,7 +267,7 @@ def test_the_session_writer_writes_above_the_boundary_only_without_a_copy(projec
     target = project / ".claude" / "CLAUDE.md"
     text = _doc(_pins(2)) + tail
     target.write_bytes(text.encode("utf-8"))
-    status = update_session_info("s1", "team", started="2026-10-01 00:00:00 UTC")
+    status = update_session_info("s1", "team", started="2026-10-01 00:00:00 UTC", doc=doc_at())
     after = target.read_bytes().decode("utf-8")
     assert (after != text) is writes and after.endswith(tail)
     if not writes:

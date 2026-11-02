@@ -1271,9 +1271,7 @@ def ensure_dot_claude_parent(path: Path) -> None:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
-def ensure_project_memory_md(
-    project_dir: str | os.PathLike[str] | None = None,
-) -> str | None:
+def ensure_project_memory_md(doc: ManagedDocument) -> str | None:
     """
     Ensure project has a CLAUDE.md with memory sections.
 
@@ -1283,33 +1281,21 @@ def ensure_project_memory_md(
     Pinned Context, Working Memory) if one doesn't exist. These sections
     are project-specific and managed by the pact-memory skill.
 
-    Honors both supported project CLAUDE.md locations:
-      - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md  (preferred / new default)
-      - $CLAUDE_PROJECT_DIR/CLAUDE.md          (legacy)
-    If either exists, no action is taken (preserves existing project
-    configuration). When neither exists, creates the file at the preferred
-    `.claude/CLAUDE.md` location, creating the `.claude/` directory if needed.
+    When the session's document already exists, no action is taken
+    (preserves existing project configuration). Otherwise it creates
+    `doc.path`, the create target `resolve_managed_document` named, creating
+    the `.claude/` directory if needed.
 
     Args:
-        project_dir: The base directory whose CLAUDE.md this call manages.
-            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
-            caller is byte-identical. A worktree-lead caller passes
-            `project_scope.project_memory_root()` so the target AND the
-            containment anchor below are the main checkout.
+        doc: The session's managed document, resolved by the caller from its
+            one session observation. `doc.base` is the containment anchor.
 
     Returns:
         Status message or None if no action taken.
     """
-    if project_dir is None:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
+    if doc.exists:
         return None
-
-    target_file, source = resolve_project_claude_md_path(project_dir)
-
-    # Don't overwrite existing project CLAUDE.md (either location)
-    if source != "new_default":
-        return None
+    target_file = doc.path
 
     # Create minimal CLAUDE.md with memory sections at the new default location.
     # Structure (#404): outer PACT_MANAGED boundary wraps all plugin-managed
@@ -1353,9 +1339,7 @@ def ensure_project_memory_md(
             if target_file.exists():
                 return None
             try:
-                _atomic_write_text(
-                    target_file, memory_template, Path(project_dir)
-                )
+                _atomic_write_text(target_file, memory_template, doc.base)
                 return "Created project CLAUDE.md with memory sections"
             except ContainmentError:
                 return "Project CLAUDE.md skipped: path precondition not met."
@@ -1375,9 +1359,7 @@ def ensure_project_memory_md(
         return f"Project CLAUDE.md failed: {failure_cause(e)}"
 
 
-def migrate_to_managed_structure(
-    project_dir: str | os.PathLike[str] | None = None,
-) -> str | None:
+def migrate_to_managed_structure(doc: ManagedDocument) -> str | None:
     """
     One-time migration: wrap existing project CLAUDE.md content in the
     PACT_MANAGED boundary and add PACT_MEMORY markers around memory sections.
@@ -1412,26 +1394,17 @@ def migrate_to_managed_structure(
     fence-aware parser, so a fenced copy is never a real memory section.
 
     Args:
-        project_dir: The base directory whose CLAUDE.md this call manages.
-            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
-            caller is byte-identical. A worktree-lead caller passes
-            `project_scope.project_memory_root()` so the target AND the
-            containment anchor below are the main checkout.
+        doc: The session's managed document, resolved by the caller from its
+            one session observation. `doc.base` is the containment anchor.
 
     Returns:
         Status message on successful migration, None on no-op (already
         migrated or file doesn't exist), or a "failed"/"skipped" string
         on error (routed to systemMessages by session_init.py).
     """
-    if project_dir is None:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-
-    target_file, source = resolve_project_claude_md_path(project_dir)
-
-    if source == "new_default":
-        return None  # File doesn't exist; ensure_project_memory_md() handles creation
+    if not doc.exists:
+        return None  # ensure_project_memory_md() handles creation
+    target_file = doc.path
 
     try:
         with file_lock(target_file):
@@ -1469,7 +1442,7 @@ def migrate_to_managed_structure(
 
             try:
                 _atomic_write_text(
-                    target_file, new_content, Path(project_dir)
+                    target_file, new_content, doc.base
                 )
                 return "Migrated project CLAUDE.md to managed structure (#404)"
             except ContainmentError:

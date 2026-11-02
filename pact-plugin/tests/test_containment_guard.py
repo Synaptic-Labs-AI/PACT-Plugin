@@ -33,6 +33,8 @@ import os
 from pathlib import Path
 
 import pytest
+from helpers import doc_at  # noqa: E402
+from helpers import doc_for  # noqa: E402
 
 # claude_md_ambient (module-wide): these tests force containment refusal via
 # a deliberately wrong base; the suite-wide tmp redirect would change the
@@ -88,7 +90,7 @@ class TestSite6EnsureProjectMemoryMd:
         _mount_symlinked_parent_escape(project, outside)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         # Refused with the opaque skip; NO file created through the escaping link.
         assert result == "Project CLAUDE.md skipped: path precondition not met."
@@ -101,7 +103,7 @@ class TestSite6EnsureProjectMemoryMd:
         target = _mount_benign_dot_claude(project)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         # Allowed: the in-project file is created (over-block cert for this site).
         assert result == "Created project CLAUDE.md with memory sections"
@@ -132,7 +134,7 @@ class TestSite7MigrateToManagedStructure:
         outside_before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result == "Migration skipped: project CLAUDE.md path precondition not met."
         # The out-of-project victim is byte-unchanged — no write-through.
@@ -147,7 +149,7 @@ class TestSite7MigrateToManagedStructure:
         target.write_text(self._LEGACY, encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result == "Migrated project CLAUDE.md to managed structure (#404)"
         assert "PACT_MANAGED_START" in target.read_text(encoding="utf-8")
@@ -181,7 +183,7 @@ class TestSite1StalenessParentAndMultiHop:
         from unittest.mock import patch
         with patch("session_init._get_project_claude_md_path", return_value=managed), \
              patch("staleness._get_project_claude_md_path", return_value=managed):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(managed))
 
         # Lexical base = proj (parent.name=='.claude' -> parent.parent); target
         # resolves into `outside` -> escapes -> opaque refuse, victim untouched.
@@ -208,7 +210,7 @@ class TestSite1StalenessParentAndMultiHop:
         from unittest.mock import patch
         with patch("session_init._get_project_claude_md_path", return_value=managed), \
              patch("staleness._get_project_claude_md_path", return_value=managed):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(managed))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert (outside / "CLAUDE.md").read_text(encoding="utf-8") == before
@@ -332,7 +334,7 @@ class TestSites234UpdateSessionInfo:
         _mount_symlinked_parent_escape(project, outside)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = update_session_info("sid-123", "PACT-team")
+        result = update_session_info("sid-123", "PACT-team", doc=doc_at())
 
         # Refused: nothing written through the escaping link.
         assert not (outside / "CLAUDE.md").exists(), "session write escaped the project"
@@ -345,7 +347,7 @@ class TestSites234UpdateSessionInfo:
         _mount_benign_dot_claude(project)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = update_session_info("sid-123", "PACT-team")
+        result = update_session_info("sid-123", "PACT-team", doc=doc_at())
 
         target = project / ".claude" / "CLAUDE.md"
         assert target.exists()

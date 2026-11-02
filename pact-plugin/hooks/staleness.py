@@ -369,37 +369,21 @@ def get_project_claude_md_path(
 _get_project_claude_md_path = get_project_claude_md_path
 
 
-def resolve_session_claude_md_path(
-    project_dir: Optional[os.PathLike[str] | str] = None,
-    memory_root: Optional[Path] = None,
-) -> Optional[Path]:
+def resolve_session_claude_md_path() -> Optional[Path]:
     """The SESSION's existing managed project document, or None.
 
-    A no-argument call is `session_document()`: the one anchor (the
-    declaration, else the session record, else the cwd), the one root and the
-    one resolver. None when the root is unknown or holds no document; no git
-    or cwd fall-through is ever consulted.
-
-    A supplied `memory_root` is resolved as given. A `project_dir` alone is
-    classified first and answers None when its root is unknown. Both
-    parameters are transitional: callers move to the no-argument form.
+    `session_document()`: the one anchor (the declaration, else the session
+    record, else the cwd), the one root and the one resolver. None when the
+    root is unknown or holds no document; no git or cwd fall-through is ever
+    consulted.
     """
-    # Late-bound: staleness is imported by the modules below at their top.
-    from shared.claude_md_manager import resolve_managed_document, session_document
+    # Late-bound: staleness is imported by claude_md_manager's callers.
+    from shared.claude_md_manager import session_document
 
-    if memory_root is None and project_dir:
-        from shared.project_scope import memory_root_of
-
-        memory_root, _cause = memory_root_of(project_dir)
-        if memory_root is None:
-            return None
-    if memory_root is not None:
-        document = resolve_managed_document(memory_root)
-    else:
-        _session, document = session_document()
-        if document is None:
-            return None
-    return document.path if document.exists else None
+    _session, document = session_document()
+    if document is None or not document.exists:
+        return None
+    return document.path
 
 
 def estimate_tokens(text: str) -> int:
@@ -819,7 +803,7 @@ _UNDECODABLE_SKIP = (
 )
 
 
-def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[str]:
+def check_pinned_staleness(claude_md_path: Path) -> Optional[str]:
     """
     Detect stale pinned context entries in the project CLAUDE.md.
 
@@ -837,33 +821,21 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     This function orchestrates detection (detect_stale_entries) and
     mutation (apply_staleness_markings) as separate steps for testability.
 
-    PASSING None IS A HAZARD, NOT AN OPTION. It delegates resolution to
-    `_resolve_project_claude_md_with_base()`, whose git and cwd rungs can
-    return a linked worktree's own CLAUDE.md -- a file that belongs to the
-    worktree, not to project memory. Callers resolve project memory and pass
-    the path.
-
     Args:
-        claude_md_path: Explicit path to CLAUDE.md. When None, this function
-            calls `_resolve_project_claude_md_with_base()` itself. Callers
-            (e.g. session_init.py) pass the path explicitly so their own
-            resolution can be patched independently in tests.
+        claude_md_path: The session's existing managed document, resolved by
+            the caller (session_init passes `doc.path`). There is no default:
+            this function never resolves a document itself.
 
     Returns:
         Informational message about stale pins found, or None.
     """
     if claude_md_path is None:
-        claude_md_path, project_root = _resolve_project_claude_md_with_base()
-    else:
-        # A caller-supplied path came from a TRUSTED resolver -- session_init
-        # resolves via _get_project_claude_md_path() and PASSES it here, so
-        # production DOES supply the param. Recover its pre-.claude base by
-        # inverting the resolver's construction (see _lexical_base_of): the
-        # SAME base the resolver used, not a re-derived root, and F1-safe
-        # (purely lexical, no symlink follow) + parity-locked.
-        project_root = _lexical_base_of(claude_md_path)
-    if claude_md_path is None:
         return None
+    # The path came from the one resolver. Recover its pre-.claude base by
+    # inverting the canonical construction (see _lexical_base_of): purely
+    # lexical, no symlink follow, so the containment anchor is the base the
+    # resolver used.
+    project_root = _lexical_base_of(claude_md_path)
 
     # Decoded with replacement, so a file that is not UTF-8 is still planned on
     # and gets a valid file's no-op when no pin is due. The text is NEVER
@@ -1041,7 +1013,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
 
 
 def check_pinned_block_signal(
-    claude_md_path: Optional[Path] = None,
+    claude_md_path: Path,
 ) -> Optional[CapViolation]:
     """Detect stale-pin overflow that warrants a SessionStart block directive.
 
@@ -1054,21 +1026,14 @@ def check_pinned_block_signal(
     Fail-open: all I/O and parse errors yield None. The block directive
     ONLY fires on positive detection; ambiguous state never blocks.
 
-    PASSING None IS A HAZARD, NOT AN OPTION. It resolves through
-    get_project_claude_md_path(), whose git and cwd rungs can return a linked
-    worktree's own CLAUDE.md -- a file that belongs to the worktree, not to
-    project memory. Callers resolve project memory and pass the path.
-
     Args:
-        claude_md_path: Explicit path. When None, it is resolved through
-            get_project_claude_md_path(). Callers may patch resolution
-            independently from this module.
+        claude_md_path: The session's existing managed document, resolved by
+            the caller. There is no default: this function never resolves a
+            document itself.
 
     Returns:
         CapViolation describing the stale overflow, or None.
     """
-    if claude_md_path is None:
-        claude_md_path = _get_project_claude_md_path()
     if claude_md_path is None:
         return None
 

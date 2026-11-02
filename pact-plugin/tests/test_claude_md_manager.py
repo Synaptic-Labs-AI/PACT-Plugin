@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from helpers import doc_at  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -70,16 +71,6 @@ def mock_home(tmp_path, monkeypatch):
 class TestEnsureProjectMemoryMd:
     """Tests for ensure_project_memory_md() -- project CLAUDE.md creation."""
 
-    def test_returns_none_when_no_project_dir(self, monkeypatch):
-        """Should return None when CLAUDE_PROJECT_DIR not set."""
-        from shared.claude_md_manager import ensure_project_memory_md
-
-        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-
-        result = ensure_project_memory_md()
-
-        assert result is None
-
     def test_returns_none_when_file_exists(self, tmp_path, monkeypatch):
         """Should return None when project CLAUDE.md already exists."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -87,7 +78,7 @@ class TestEnsureProjectMemoryMd:
         (tmp_path / "CLAUDE.md").write_text("existing content")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result is None
         # Content should be unchanged
@@ -100,7 +91,7 @@ class TestEnsureProjectMemoryMd:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result == "Created project CLAUDE.md with memory sections"
         new_default = tmp_path / ".claude" / "CLAUDE.md"
@@ -119,7 +110,7 @@ class TestEnsureProjectMemoryMd:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         assert "<!-- SESSION_START -->" in content
@@ -136,7 +127,7 @@ class TestEnsureProjectMemoryMd:
         dot_claude_file.write_text("existing dot-claude content")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result is None
         assert dot_claude_file.read_text() == "existing dot-claude content"
@@ -151,7 +142,7 @@ class TestEnsureProjectMemoryMd:
         legacy.write_text("existing legacy content")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result is None
         # Legacy file is preserved as-is; no migration to .claude/
@@ -170,7 +161,7 @@ class TestEnsureProjectMemoryMd:
         legacy.write_text("legacy")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result is None
         assert dot_claude_file.read_text() == "preferred"
@@ -183,7 +174,7 @@ class TestEnsureProjectMemoryMd:
         from shared.claude_md_manager import ensure_project_memory_md
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         new_default = tmp_path / ".claude" / "CLAUDE.md"
         assert new_default.exists()
@@ -217,7 +208,7 @@ class TestEnsureProjectMemoryMdErrorPaths:
 
         import shared.claude_md_manager as cmm
         with patch.object(cmm, "_atomic_write_text", side_effect=OSError("No space left")):
-            result = ensure_project_memory_md()
+            result = ensure_project_memory_md(doc_at())
 
         assert result is not None
         assert "Project CLAUDE.md failed:" in result
@@ -257,7 +248,7 @@ class TestEnsureProjectMemoryMdErrorPaths:
 
         monkeypatch.setattr(cmm, "file_lock", timing_out_lock)
 
-        result = cmm.ensure_project_memory_md()
+        result = cmm.ensure_project_memory_md(doc_at())
 
         # Result must be the human-readable skip message routed to systemMessage.
         assert result is not None
@@ -1763,13 +1754,13 @@ class TestBuildMigratedContentIdempotent:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        first = migrate_to_managed_structure()
+        first = migrate_to_managed_structure(doc_at())
         assert first is not None
 
         content_after = claude_md.read_text()
         assert content_after.count(_MANAGED_START) == 1
 
-        second = migrate_to_managed_structure()
+        second = migrate_to_managed_structure(doc_at())
         assert second is None  # no-op
 
         assert claude_md.read_text() == content_after  # unchanged
@@ -1799,7 +1790,7 @@ class TestMigrateToManagedStructure:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result is not None
         assert "Migrated" in result
@@ -1829,27 +1820,17 @@ class TestMigrateToManagedStructure:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
         # First call migrates
-        first = migrate_to_managed_structure()
+        first = migrate_to_managed_structure(doc_at())
         assert first is not None
 
         content_after_first = claude_md.read_text(encoding="utf-8")
 
         # Second call is no-op
-        second = migrate_to_managed_structure()
+        second = migrate_to_managed_structure(doc_at())
         assert second is None
 
         # File unchanged
         assert claude_md.read_text(encoding="utf-8") == content_after_first
-
-    def test_returns_none_when_no_project_dir(self, monkeypatch):
-        """Returns None when CLAUDE_PROJECT_DIR not set."""
-        from shared.claude_md_manager import migrate_to_managed_structure
-
-        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-
-        result = migrate_to_managed_structure()
-
-        assert result is None
 
     @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
     def test_returns_none_when_file_missing(self, tmp_path, monkeypatch):
@@ -1858,7 +1839,7 @@ class TestMigrateToManagedStructure:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result is None
 
@@ -1886,7 +1867,7 @@ class TestMigrateToManagedStructure:
             return original_read_text(self, *args, **kwargs)
 
         with mock_patch.object(Path, "read_text", selective_read_text):
-            result = migrate_to_managed_structure()
+            result = migrate_to_managed_structure(doc_at())
 
         assert result is None
 
@@ -1922,7 +1903,7 @@ class TestMigrateToManagedStructure:
         claude_md.symlink_to(outside_victim)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result is not None
         assert "skipped" not in result.lower()
@@ -1944,7 +1925,7 @@ class TestMigrateToManagedStructure:
         claude_md.write_text("# Project Memory\n\n## Retrieved Context\n")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        migrate_to_managed_structure()
+        migrate_to_managed_structure(doc_at())
 
         file_mode = stat.S_IMODE(claude_md.stat().st_mode)
         assert file_mode == 0o600, f"Expected 0o600, got {oct(file_mode)}"
@@ -1974,7 +1955,7 @@ class TestMigrateToManagedStructure:
         t.start()
         assert holder_has_lock.wait(timeout=600)
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result is not None
         assert "failed" in result.lower()
@@ -2002,7 +1983,7 @@ class TestMigrateToManagedStructure:
         with mock_patch.object(
             cmm, "_atomic_write_text", side_effect=OSError("disk full")
         ):
-            result = migrate_to_managed_structure()
+            result = migrate_to_managed_structure(doc_at())
 
         assert result is not None
         assert "failed" in result.lower()
@@ -2028,7 +2009,7 @@ class TestMigrateToManagedStructure:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result is not None
         assert "Migrated" in result
@@ -2046,7 +2027,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         assert _MANAGED_START in content
@@ -2059,7 +2040,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         assert _MEMORY_START in content
@@ -2073,7 +2054,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         assert "# PACT Framework and Managed Project Memory" in content
@@ -2090,7 +2071,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         mem_start_idx = content.index(_MEMORY_START)
@@ -2107,7 +2088,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
 
@@ -2136,7 +2117,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        ensure_project_memory_md()
+        ensure_project_memory_md(doc_at())
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         mem_start_idx = content.index(_MEMORY_START)
@@ -2325,15 +2306,14 @@ class TestSessionInitMigrationIntegration:
 
     def test_session_init_calls_migration(self):
         """session_init.py must call migrate_to_managed_structure() with the
-        base of the session's one resolved document (#1653): the directory
-        that holds it, or the root it will be created at. The call sits under
+        session's one resolved document (#1653). The call sits under
         the declared-only creator gate, so a frame handed no project dir
         migrates nothing."""
         session_init_path = (
             Path(__file__).parent.parent / "hooks" / "session_init.py"
         )
         source = session_init_path.read_text(encoding="utf-8")
-        assert "migrate_to_managed_structure(doc.base)" in source
+        assert "migrate_to_managed_structure(doc)" in source
 
     def test_migration_result_routing_failed(self):
         """session_init routes 'failed'/'skipped' migration messages to
@@ -2788,7 +2768,7 @@ class TestEnsureProjectMemoryMdOSErrorOnMkdir:
         # Create a file at .claude to block mkdir
         dot_claude.write_text("blocker")
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result is not None
         assert "failed" in result.lower() or "skipped" in result.lower()

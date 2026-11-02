@@ -63,6 +63,7 @@ import pytest
 
 from shared import BOOTSTRAP_MARKER_NAME
 from shared.marker_schema import MARKER_SCHEMA_VERSION
+from helpers import doc_at  # noqa: E402
 
 _SUPPRESS_EXPECTED = {
     "suppressOutput": True,
@@ -2565,10 +2566,7 @@ def _arm_write_back(tmp_path, monkeypatch, *, with_session_start):
              "project_dir": str(main), "source": "startup"},
             session_dir=str(session_dir),
         )
-    assert update_session_info(
-        "prev", "old-team", str(session_dir), started=_OLD_STARTED,
-        project_dir=str(main),
-    ) is not None
+    assert update_session_info("prev", "old-team", str(session_dir), started=_OLD_STARTED, doc=doc_at(str(main))) is not None
 
     written = []
     monkeypatch.setattr(bmw.pact_context, "is_lead", lambda frame: True)

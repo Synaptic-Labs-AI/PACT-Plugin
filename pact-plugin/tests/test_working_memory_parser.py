@@ -1,3 +1,4 @@
+from helpers import doc_at  # noqa: E402
 """
 Tests for working_memory.py section parsers and the migration->sync pipeline.
 
@@ -436,7 +437,7 @@ class TestMigrationSyncPipeline:
         # the same get_project_claude_md_path() helper the hooks use, which
         # honors CLAUDE_PROJECT_DIR.
 
-        migration_msg = migrate_to_managed_structure()
+        migration_msg = migrate_to_managed_structure(doc_at())
         # Migration should have run (not skipped, not failed)
         assert migration_msg is not None
         assert "failed" not in migration_msg.lower()

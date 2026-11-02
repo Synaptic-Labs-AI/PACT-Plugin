@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import doc_for  # noqa: E402
 
 
 def _build_pinned_claude_md(n_pins=0, pin_body_chars=100, stale_indices=()):
@@ -113,7 +114,7 @@ class TestCheckPinSlotStatus_SessionInit:
         monkeypatch.setattr(
             "session_init._get_project_claude_md_path", lambda: claude_md
         )
-        result = check_pin_slot_status()
+        result = check_pin_slot_status(doc_for(claude_md))
         assert result is not None
         assert "3/12" in result
 
@@ -129,21 +130,14 @@ class TestCheckPinSlotStatus_SessionInit:
         monkeypatch.setattr(
             "session_init._get_project_claude_md_path", lambda: claude_md
         )
-        result = check_pin_slot_status()
+        result = check_pin_slot_status(doc_for(claude_md))
         assert result == "Pin slots: 0/12 used"
 
     def test_returns_none_when_no_claude_md(self, monkeypatch):
         from session_init import check_pin_slot_status
 
-        # The wrapper resolves through the one-rule helper since #1653/D2,
-        # which probes the memory root directly and does not delegate to
-        # `staleness.get_project_claude_md_path` on any known route. Stub the
-        # helper the wrapper actually calls.
-        monkeypatch.setattr(
-            "session_init.resolve_session_claude_md_path",
-            lambda *a, **k: None,
-        )
-        assert check_pin_slot_status() is None
+        # A document that does not exist: nothing to count.
+        assert check_pin_slot_status(doc_for(None)) is None
 
     def test_returns_none_on_read_error(self, tmp_path, monkeypatch):
         from session_init import check_pin_slot_status
@@ -159,7 +153,7 @@ class TestCheckPinSlotStatus_SessionInit:
             raise IOError("simulated")
 
         monkeypatch.setattr(Path, "read_text", _raise)
-        assert check_pin_slot_status() is None
+        assert check_pin_slot_status(doc_for(claude_md)) is None
 
     def test_idempotent_on_repeated_invocation(self, tmp_path, monkeypatch):
         """P0: SessionStart fires repeatedly; output MUST NOT drift."""
@@ -171,7 +165,7 @@ class TestCheckPinSlotStatus_SessionInit:
         monkeypatch.setattr(
             "session_init._get_project_claude_md_path", lambda: claude_md
         )
-        results = [check_pin_slot_status() for _ in range(3)]
+        results = [check_pin_slot_status(doc_for(claude_md)) for _ in range(3)]
         assert results[0] == results[1] == results[2]
 
     def test_returns_none_on_parse_exception(self, tmp_path, monkeypatch):
@@ -189,7 +183,7 @@ class TestCheckPinSlotStatus_SessionInit:
             raise RuntimeError("nope")
 
         monkeypatch.setattr(si, "section_pins", _boom)
-        assert check_pin_slot_status() is None
+        assert check_pin_slot_status(doc_for(claude_md)) is None
 
 
 class TestCheckPinStaleBlockDirective_MarkerLifecycle:
@@ -221,7 +215,7 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
             ctx_module, "get_session_dir", lambda: str(session_dir)
         )
 
-        result = check_pin_stale_block_directive()
+        result = check_pin_stale_block_directive(doc_for(claude_md))
         assert result is not None
         assert "MUST" in result
         # NAME THE COMMAND THAT ARCHIVES. This arm read `/PACT:pin-memory`,
@@ -254,7 +248,7 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
             ctx_module, "get_session_dir", lambda: str(session_dir)
         )
 
-        result = check_pin_stale_block_directive()
+        result = check_pin_stale_block_directive(doc_for(claude_md))
         assert result is None
         assert not (session_dir / PIN_STALENESS_MARKER_NAME).exists()
 
@@ -279,8 +273,8 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
             ctx_module, "get_session_dir", lambda: str(session_dir)
         )
 
-        r1 = check_pin_stale_block_directive()
-        r2 = check_pin_stale_block_directive()
+        r1 = check_pin_stale_block_directive(doc_for(claude_md))
+        r2 = check_pin_stale_block_directive(doc_for(claude_md))
         assert r1 == r2
         assert (session_dir / PIN_STALENESS_MARKER_NAME).exists()
 
@@ -300,7 +294,7 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: None)
 
-        result = check_pin_stale_block_directive()
+        result = check_pin_stale_block_directive(doc_for(claude_md))
         assert result is not None
         assert "MUST" in result
 

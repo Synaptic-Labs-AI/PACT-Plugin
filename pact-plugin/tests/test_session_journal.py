@@ -116,6 +116,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 # Module-level for the arc-scoping / read-contract fixtures (#972 — #963/#966).
 from shared.session_journal import make_event  # noqa: E402
+from helpers import doc_at  # noqa: E402
 
 
 # Module-level worker for multi-process concurrency tests.
@@ -2950,7 +2951,7 @@ class TestExtractPrevSessionDir:
         assert str(named).startswith(str(tmp_path))
         named.mkdir(parents=True)
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
         assert result is not None
         assert result.endswith("pact-sessions/myproject/abc123")
 
@@ -2969,7 +2970,7 @@ class TestExtractPrevSessionDir:
             "<!-- SESSION_END -->\n"
         )
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
         assert result is not None
         slug = tmp_path.name  # project slug = basename of project_dir
         assert slug in result
@@ -2979,7 +2980,7 @@ class TestExtractPrevSessionDir:
         """Returns None when CLAUDE.md doesn't exist."""
         from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
         assert result is None
 
     def test_returns_none_when_no_session_info(self, tmp_path):
@@ -2989,21 +2990,21 @@ class TestExtractPrevSessionDir:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Project\nNo session info here.\n")
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
         assert result is None
 
     def test_returns_none_for_empty_project_dir(self):
         """Returns None when project_dir is empty string."""
         from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_session_dir("")
+        result = _extract_prev_session_dir("", doc=doc_at(""))
         assert result is None
 
     def test_returns_none_for_none_project_dir(self):
         """Returns None when project_dir is None."""
         from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_session_dir(None)  # type: ignore[arg-type]
+        result = _extract_prev_session_dir(None, doc=doc_at(None))  # type: ignore[arg-type]
         assert result is None
 
     def test_returns_none_on_ioerror(self, tmp_path):
@@ -3020,7 +3021,7 @@ class TestExtractPrevSessionDir:
 
         # Patch read_text to raise IOError
         with mock_patch.object(Path, "read_text", side_effect=IOError("disk error")):
-            result = _extract_prev_session_dir(str(tmp_path))
+            result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result is None
 
@@ -3051,7 +3052,7 @@ class TestExtractPrevSessionDir:
             "- Started: 2026-04-05\n"
         )
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
         # /var/data/... is NOT under ~/.claude/pact-sessions → validator returns None.
         assert result is None
 

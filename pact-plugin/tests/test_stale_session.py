@@ -29,6 +29,7 @@ from shared.stale_session import (
     detect_stale_session_block,
     _RESUME_LINE_RE,
 )
+from helpers import doc_at  # noqa: E402
 
 _LIVE_ID = "11111111-2222-4000-8000-000000000000"
 _RECORDED_DIFFERENT = "99999999-8888-4000-8000-000000000000"
@@ -309,7 +310,7 @@ def test_the_written_resume_line_carries_the_lead_flag_and_parses(
     project = tmp_path / "proj"
     project.mkdir()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
-    update_session_info(_LIVE_ID, "session-11111111")
+    update_session_info(_LIVE_ID, "session-11111111", doc=doc_at())
     written = "".join(p.read_text() for p in project.rglob("CLAUDE.md"))
     assert f"`claude --agent PACT:pact-orchestrator --resume {_LIVE_ID}`" in written
     m = _RESUME_LINE_RE.search(written)

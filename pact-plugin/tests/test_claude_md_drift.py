@@ -198,7 +198,8 @@ def _legacy(count):
 
 # session_init's migration, run on the world's CLAUDE.md.
 _MIGRATE = (f"PYTHONPATH={HOOKS} python3 -c 'from shared.claude_md_manager import "
-            "migrate_to_managed_structure as m; print(m())'")
+            "migrate_to_managed_structure as m, session_document as s; "
+            "print(m(s()[1]))'")
 
 
 def _count_report(w, step):

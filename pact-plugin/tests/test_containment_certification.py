@@ -78,6 +78,8 @@ import unicodedata
 from pathlib import Path
 
 import pytest
+from helpers import doc_at  # noqa: E402
+from helpers import doc_for  # noqa: E402
 
 # hooks/ and the pact-memory scripts dir on path (mirrors the sibling test
 # files: test_containment_guard.py adds hooks/, test_staleness.py adds the
@@ -770,7 +772,7 @@ class TestTwoLegCompositionThroughProductionEntryPoints:
         victim_before = (project / "real.md").read_bytes()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result == (
             "Migration skipped: project CLAUDE.md path precondition not met."
@@ -789,7 +791,7 @@ class TestTwoLegCompositionThroughProductionEntryPoints:
         victim_before = (project / "real.md").read_bytes()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = update_session_info("sid-123", "PACT-team")
+        result = update_session_info("sid-123", "PACT-team", doc=doc_at())
 
         # EXACT string. `result is None or "skipped" in result` would pass on
         # the None returned when no project dir is set -- a disjunction that
@@ -811,11 +813,9 @@ class TestTwoLegCompositionThroughProductionEntryPoints:
         target.write_text(self._STALE, encoding="utf-8")
         victim_before = (project / "real.md").read_bytes()
 
-        with patch("session_init.resolve_project_claude_md_path",
-                   return_value=(target, "legacy")), \
-             patch("session_init._get_project_claude_md_path", return_value=target), \
+        with patch("session_init._get_project_claude_md_path", return_value=target), \
              patch("staleness._get_project_claude_md_path", return_value=target):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(target))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert (project / "real.md").read_bytes() == victim_before

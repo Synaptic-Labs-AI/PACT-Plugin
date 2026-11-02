@@ -56,6 +56,8 @@ import pytest
 
 import session_init
 from shared.project_scope import SessionRoot
+from helpers import doc_at  # noqa: E402
+from helpers import session_doc  # noqa: E402
 
 LEAD = "PACT:pact-orchestrator"
 SESSION_ID = "dddddddd-eeee-ffff-0000-111111111111"
@@ -730,9 +732,7 @@ def _seed_session_blocks(monkeypatch, writer, main, worktree, session_dir):
 
     for root in (main, worktree):
         (root / ".claude").mkdir(exist_ok=True)
-        update_session_info(
-            SESSION_ID, "old-team", str(session_dir), "/plugin", project_dir=root
-        )
+        update_session_info(SESSION_ID, "old-team", str(session_dir), "/plugin", doc=doc_at(root))
     monkeypatch.setattr(writer.pact_context, "get_team_name", lambda: "session-new")
     monkeypatch.setattr(writer.pact_context, "get_plugin_root", lambda: "/plugin")
     monkeypatch.setattr(writer.pact_context, "get_lead_address", lambda: "lead")
@@ -1199,7 +1199,6 @@ def test_d2_step4_never_writes_the_worktree_copy(repo, monkeypatch):
     git/cwd fall-through reached the worktree copy and step 4 wrote a STALE
     marker there."""
     from session_init import check_pinned_staleness
-    from shared.project_scope import project_memory_root
 
     worktree = _worktree(repo, "d2-write")
     doc = _managed_doc(_stale_capable_pin())
@@ -1210,7 +1209,7 @@ def test_d2_step4_never_writes_the_worktree_copy(repo, monkeypatch):
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
     monkeypatch.chdir(worktree)
 
-    check_pinned_staleness(repo, project_memory_root(str(repo)))
+    check_pinned_staleness(session_doc())
 
     assert wt_md.read_text(encoding="utf-8") == doc, (
         "step 4 wrote into the worktree copy through the fall-through"
@@ -1224,7 +1223,7 @@ def test_f4_no_env_step4_marks_the_memory_root(repo, monkeypatch):
     every writer was the defect, so the comment was corrected rather than the
     asymmetry."""
     from session_init import check_pinned_staleness
-    from shared.project_scope import project_memory_root_or_none
+    from shared.project_scope import memory_root_of
 
     worktree = _worktree(repo, "f4-no-env")
     main_md = repo / ".claude" / "CLAUDE.md"
@@ -1237,10 +1236,10 @@ def test_f4_no_env_step4_marks_the_memory_root(repo, monkeypatch):
 
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(worktree)
-    memory_root = project_memory_root_or_none(os.getcwd())
+    memory_root, _cause = memory_root_of(os.getcwd())
     assert memory_root == repo.resolve(), "the cwd-derived root is not MAIN"
 
-    check_pinned_staleness(os.getcwd(), memory_root)
+    check_pinned_staleness(session_doc())
 
     assert "<!-- STALE" in main_md.read_text(encoding="utf-8"), (
         "step 4 did not reach the memory root on the no-declared-dir shape"
@@ -1509,17 +1508,13 @@ def _two_stale_pins() -> str:
 def test_the_stale_block_directive_never_reads_the_worktree_copy(
     repo, monkeypatch
 ):
-    """The known-root short-circuit is load-bearing, not decorative.
-
-    Declared MAIN, cwd in a worktree, MAIN empty, and the WORKTREE copy carries
-    two stale pins -- enough to fire the block signal. The directive must return
-    None: the memory root has no document, and delegating None to the callee
-    re-resolves env-first and reads the worktree copy. The non-vacuity line
-    proves that fallback WOULD fire, so the guard is what changes the answer;
+    """Declared MAIN, cwd in a worktree, MAIN empty, and the WORKTREE copy
+    carries two stale pins -- enough to fire the block signal. The directive
+    reads only the session's document, which does not exist, so it returns
+    None; the non-vacuity line shows the worktree copy WOULD fire if read, and
     the control then puts the document in MAIN and requires the directive.
     """
     from session_init import _staleness_block_check, check_pin_stale_block_directive
-    from shared.project_scope import project_memory_root
 
     worktree = _worktree(repo, "directive-guard")
     doc = _managed_doc(_two_stale_pins())
@@ -1529,20 +1524,18 @@ def test_the_stale_block_directive_never_reads_the_worktree_copy(
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
     monkeypatch.chdir(worktree)
-    root = project_memory_root(str(repo))
-
-    assert _staleness_block_check(claude_md_path=None) is not None, (
-        "the fixture no longer fires the block signal through the fallback, "
-        "so the guard below proves nothing"
+    assert _staleness_block_check(claude_md_path=wt_md) is not None, (
+        "the worktree copy no longer fires the block signal, so the guard "
+        "below proves nothing"
     )
-    assert check_pin_stale_block_directive(repo, root) is None, (
-        "the directive read the worktree copy through a None delegation"
+    assert check_pin_stale_block_directive(session_doc()) is None, (
+        "the directive read something other than the session's document"
     )
 
     main_md = repo / ".claude" / "CLAUDE.md"
     main_md.parent.mkdir()
     main_md.write_text(doc, encoding="utf-8")
-    assert check_pin_stale_block_directive(repo, root) is not None, (
+    assert check_pin_stale_block_directive(session_doc()) is not None, (
         "control: the same document in MAIN must fire the directive"
     )
 

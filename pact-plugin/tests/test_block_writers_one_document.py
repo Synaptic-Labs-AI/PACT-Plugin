@@ -26,6 +26,7 @@ from test_worktree_git_failure_skip import (  # noqa: F401  # `repo` is a fixtur
     _session_with_session_start,
     repo,
 )
+from helpers import doc_at  # noqa: E402
 
 
 def _subdirectory_lead(repo, monkeypatch, session_dir):
@@ -34,9 +35,7 @@ def _subdirectory_lead(repo, monkeypatch, session_dir):
     from shared.session_resume import update_session_info
 
     (repo / ".claude").mkdir()
-    assert update_session_info(
-        SESSION_ID, "old-team", str(session_dir), "/plugin", project_dir=repo
-    )
+    assert update_session_info(SESSION_ID, "old-team", str(session_dir), "/plugin", doc=doc_at(repo))
     subdir = repo / "pkg"
     subdir.mkdir()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(subdir))
@@ -102,9 +101,7 @@ def _undeclared_lead_at(repo, monkeypatch, session_dir):
     from shared.session_resume import update_session_info
 
     (repo / ".claude").mkdir()
-    assert update_session_info(
-        SESSION_ID, "old-team", str(session_dir), "/plugin", project_dir=repo
-    )
+    assert update_session_info(SESSION_ID, "old-team", str(session_dir), "/plugin", doc=doc_at(repo))
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(repo)
     doc = repo / ".claude" / "CLAUDE.md"

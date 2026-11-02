@@ -58,6 +58,7 @@ from fixtures.team_split import (
 
 import bootstrap_marker_writer
 from shared import session_resume
+from helpers import doc_at  # noqa: E402
 
 OLD_TASKS = (
     {"id": "202", "subject": "in flight", "status": "in_progress"},
@@ -336,10 +337,9 @@ def test_a_write_back_keeps_the_recorded_start(tmp_path, monkeypatch):
 
 def test_read_session_started_reads_only_the_block_value(tmp_path, monkeypatch):
     world = _world(tmp_path, monkeypatch)
-    started = session_resume.read_session_started(str(world.project_dir))
+    started = session_resume.read_session_started(doc_at(str(world.project_dir)))
     assert started and started.endswith(" UTC")
-    assert session_resume.read_session_started("") is None
-    assert session_resume.read_session_started(str(tmp_path / "nowhere")) is None
+    assert session_resume.read_session_started(doc_at(str(tmp_path / "nowhere"))) is None
 
 
 # ── #1653 B10: a worktree lead's mid-session realign reaches MAIN ───────────
@@ -388,9 +388,7 @@ def test_a_realign_from_a_worktree_writes_the_team_line_in_main(
          "project_dir": str(main), "source": "startup"},
         session_dir=str(session_dir),
     ), "the fixture could not write the session_start the guard requires"
-    assert update_session_info(
-        "prev", "pact-old", str(session_dir), project_dir=str(main)
-    ) is not None
+    assert update_session_info("prev", "pact-old", str(session_dir), doc=doc_at(str(main))) is not None
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
     monkeypatch.chdir(worktree)

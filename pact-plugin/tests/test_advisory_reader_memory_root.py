@@ -26,6 +26,7 @@ from shared.claude_md_manager import (
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
 )
+from helpers import session_doc  # noqa: E402
 
 
 def _git(*args, cwd):
@@ -92,7 +93,6 @@ def world(tmp_path, monkeypatch):
 
 def test_slot_status_counts_main_pins(world):
     from session_init import check_pin_slot_status
-    from shared.project_scope import project_memory_root
 
     main, worktree = world
     _write_doc(main, _doc(
@@ -100,7 +100,7 @@ def test_slot_status_counts_main_pins(world):
     ))
     _write_doc(worktree, _doc())  # worktree: ZERO pins
 
-    out = check_pin_slot_status(str(worktree), project_memory_root(worktree))
+    out = check_pin_slot_status(session_doc())
 
     assert out is not None
     assert "2/12" in out, f"slot status did not count MAIN's pins: {out!r}"
@@ -108,7 +108,6 @@ def test_slot_status_counts_main_pins(world):
 
 def test_refusal_report_names_main(world):
     from session_init import check_claude_md_refusals
-    from shared.project_scope import project_memory_root
 
     main, worktree = world
     main_md = _write_doc(
@@ -116,7 +115,7 @@ def test_refusal_report_names_main(world):
     )
     _write_doc(worktree, _doc())  # worktree: clean
 
-    out = check_claude_md_refusals(str(worktree), project_memory_root(worktree))
+    out = check_claude_md_refusals(session_doc())
 
     assert out is not None
     assert str(main_md) in out, (
@@ -124,22 +123,21 @@ def test_refusal_report_names_main(world):
     )
 
 
-def test_the_helper_honours_a_base_passed_alone(world):
-    """`resolve_session_claude_md_path(project_dir)` must read that base, not
-    the environment. `world` points the environment at the worktree, so a
-    helper that ignored its argument would answer with the worktree's file."""
+def test_the_session_helper_reads_main_for_a_worktree_session(world):
+    """`resolve_session_claude_md_path()` takes no base: `world` declares the
+    worktree, and the helper answers with MAIN's document, never the
+    worktree's own copy."""
     from staleness import resolve_session_claude_md_path
 
     main, worktree = world
     main_md = _write_doc(main, _doc())
     _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))
 
-    assert resolve_session_claude_md_path(str(main)).resolve() == main_md.resolve()
+    assert resolve_session_claude_md_path().resolve() == main_md.resolve()
 
 
 def test_stale_block_directive_reads_main(world):
     from session_init import check_pin_stale_block_directive
-    from shared.project_scope import project_memory_root
 
     main, worktree = world
     _write_doc(main, _doc(
@@ -147,9 +145,7 @@ def test_stale_block_directive_reads_main(world):
     ))
     _write_doc(worktree, _doc())  # worktree: no stale pins
 
-    out = check_pin_stale_block_directive(
-        str(worktree), project_memory_root(worktree)
-    )
+    out = check_pin_stale_block_directive(session_doc())
 
     assert out is not None, (
         "the directive did not fire from MAIN's stale pins"
@@ -494,15 +490,7 @@ def test_the_pin_gate_matches_main(world):
     assert match_project_claude_md(str(worktree / ".claude" / "CLAUDE.md")) is None
 
 
-# --- F3: a supplied memory root is honoured, and a falsy base is like None ---
-
-
-def _supplied_root(tmp_path: Path) -> Path:
-    """A directory that is neither the env base nor the cwd, with its own doc."""
-    supplied = tmp_path / "supplied"
-    supplied.mkdir()
-    _write_doc(supplied, _doc())
-    return supplied
+# --- F3: with no declaration, the cwd's memory root, never a worktree copy ---
 
 
 def test_f3_an_empty_base_with_no_root_does_not_return_the_worktree_copy(
@@ -517,38 +505,6 @@ def test_f3_an_empty_base_with_no_root_does_not_return_the_worktree_copy(
     _write_doc(worktree, _doc())
     monkeypatch.delenv("CLAUDE_PROJECT_DIR")
 
-    assert resolve_session_claude_md_path("", None) == main_md, (
+    assert resolve_session_claude_md_path() == main_md, (
         "an empty base fell through to the worktree copy"
     )
-
-
-def test_f3_an_empty_base_still_honours_a_supplied_root(world, tmp_path):
-    """F3: the branch that probed a root required a TRUTHY base, so `("", root)`
-    ignored the supplied root and re-read the environment -- which here names
-    the worktree."""
-    from staleness import resolve_session_claude_md_path
-
-    main, worktree = world
-    _write_doc(main, _doc())
-    _write_doc(worktree, _doc())
-    supplied = _supplied_root(tmp_path)
-
-    assert resolve_session_claude_md_path("", supplied) == (
-        supplied / ".claude" / "CLAUDE.md"
-    ), "an empty base discarded the supplied memory root"
-
-
-def test_f3_a_none_base_still_honours_a_supplied_root(world, tmp_path):
-    """The same defect one branch over: a None base re-derived the root from
-    the environment and REPLACED the supplied one."""
-    from staleness import resolve_session_claude_md_path
-
-    main, worktree = world
-    main_md = _write_doc(main, _doc())
-    _write_doc(worktree, _doc())
-    supplied = _supplied_root(tmp_path)
-
-    assert resolve_session_claude_md_path(None, supplied) == (
-        supplied / ".claude" / "CLAUDE.md"
-    ), "a None base discarded the supplied memory root"
-    assert main_md != supplied / ".claude" / "CLAUDE.md"

@@ -51,6 +51,7 @@ from shared.pin_markers import Insertion, Refusal, SkipReason, apply_insertion, 
 from shared.session_resume import _plan_session_block, _session_block_text
 from shared.stale_session import recorded_session_id
 from staleness import check_pinned_staleness, locate_pinned
+from helpers import doc_at  # noqa: E402
 
 _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
@@ -149,7 +150,7 @@ def test_the_started_reader_reads_only_a_found_block(case, tmp_path):
 
     text = _text(case)
     (tmp_path / "CLAUDE.md").write_bytes(text.encode("utf-8"))
-    got = _extract_session_started(str(tmp_path))
+    got = _extract_session_started(doc_at(str(tmp_path)))
     if _state(case, "SESSION") != "FOUND":
         assert got is None
         return
@@ -159,7 +160,7 @@ def test_the_started_reader_reads_only_a_found_block(case, tmp_path):
     alone.mkdir()
     (alone / "CLAUDE.md").write_bytes(
         "".join(text[line.start:line.end] for line in doc.lines[first:last + 1]).encode("utf-8"))
-    assert got == _extract_session_started(str(alone))
+    assert got == _extract_session_started(doc_at(str(alone)))
 
 
 def test_a_written_block_is_read_back_by_the_reader():
@@ -280,7 +281,7 @@ def test_the_started_reader_reads_most_found_blocks(tmp_path):
             project = tmp_path / case
             project.mkdir()
             (project / "CLAUDE.md").write_bytes(_text(case).encode("utf-8"))
-            read += _extract_session_started(str(project)) is not None
+            read += _extract_session_started(doc_at(str(project))) is not None
     assert read >= 30
 
 

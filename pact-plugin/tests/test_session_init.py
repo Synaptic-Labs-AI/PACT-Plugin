@@ -2480,7 +2480,7 @@ class TestExtractPrevSessionDirDualLocation:
         """Returns None when neither .claude/CLAUDE.md nor ./CLAUDE.md exists."""
         from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result is None
 
@@ -2488,7 +2488,7 @@ class TestExtractPrevSessionDirDualLocation:
         """Returns None when project_dir is the empty string."""
         from session_init import _extract_prev_session_dir
 
-        assert _extract_prev_session_dir("") is None
+        assert _extract_prev_session_dir("", doc=doc_at("")) is None
 
     def test_absent_session_dir_line_falls_through_to_derived_path(
         self, tmp_path, monkeypatch
@@ -2505,7 +2505,7 @@ class TestExtractPrevSessionDirDualLocation:
             self._make_content(sid, absent), encoding="utf-8"
         )
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == str(sessions_root / tmp_path.name / sid)
         assert result != absent
@@ -2527,7 +2527,7 @@ class TestExtractPrevSessionDirDualLocation:
             self._make_content(sid, absent_raw), encoding="utf-8"
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result == str(sanitised)
 
@@ -2555,7 +2555,7 @@ class TestExtractPrevSessionDirDualLocation:
         # Legacy must NOT exist for this case
         assert not (tmp_path / "CLAUDE.md").exists()
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == expected
 
@@ -2577,7 +2577,7 @@ class TestExtractPrevSessionDirDualLocation:
         # .claude/ must NOT exist for this case
         assert not (tmp_path / ".claude").exists()
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == expected
 
@@ -2612,7 +2612,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == preferred
         assert result != legacy
@@ -2650,7 +2650,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         expected = str(
             (tmp_path / "home") / ".claude" / "pact-sessions"
@@ -2703,7 +2703,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         # (a) Fallback path still resolves the session dir — behavior unchanged.
         expected = str(
@@ -2752,7 +2752,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result == expected
         captured = capsys.readouterr()
@@ -2789,7 +2789,7 @@ class TestExtractPrevSessionDirDualLocation:
 
         monkeypatch.setattr(Path, "read_text", raising_read_text)
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is None
 
@@ -2822,7 +2822,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is None
 
@@ -2861,7 +2861,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is None
 
@@ -2904,7 +2904,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         # Fallback derives a path that IS under pact-sessions, so the validator
         # passes it through. Asserting the round-trip works confirms the
@@ -3042,7 +3042,7 @@ class TestCurrentSessionReadersTakeNoLock:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is not None and result.endswith("abc12345")
         assert sorted(p.name for p in project_dir.iterdir()) == ["CLAUDE.md"]
@@ -3059,7 +3059,7 @@ class TestCurrentSessionReadersTakeNoLock:
             encoding="utf-8",
         )
 
-        result = _extract_session_started(str(project_dir))
+        result = _extract_session_started(doc_at(str(project_dir)))
 
         assert result == "2026-01-02 03:04:05 UTC"
         assert sorted(p.name for p in project_dir.iterdir()) == ["CLAUDE.md"]
@@ -3771,6 +3771,7 @@ def _run_session_init_compact(
 
 
 from contextlib import ExitStack
+from helpers import doc_at  # noqa: E402
 
 
 def _nested(*context_managers):

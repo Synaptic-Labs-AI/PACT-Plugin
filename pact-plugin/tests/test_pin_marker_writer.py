@@ -55,6 +55,7 @@ from shared.pin_markers import (
     plan_insertion,
 )
 from clock_shift.clock_shift_env import carry_clock_shift
+from helpers import doc_at  # noqa: E402
 
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 HOOK_SCRIPT = HOOKS_DIR / "pin_marker_writer.py"
@@ -91,7 +92,7 @@ def production_skeleton() -> str:
         previous = os.environ.get("CLAUDE_PROJECT_DIR")
         os.environ["CLAUDE_PROJECT_DIR"] = tmp
         try:
-            ensure_project_memory_md()
+            ensure_project_memory_md(doc_at())
             return (Path(tmp) / ".claude" / "CLAUDE.md").read_text(
                 encoding="utf-8"
             )

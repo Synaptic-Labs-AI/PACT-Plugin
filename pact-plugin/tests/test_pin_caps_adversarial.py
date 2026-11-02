@@ -19,6 +19,7 @@ Risk tier: CRITICAL. These probe CVE-adjacent surfaces.
 
 
 import pytest
+from helpers import doc_for  # noqa: E402
 
 
 class TestPinCapsAdversarial_PathResolution:
@@ -357,5 +358,5 @@ class TestPinCapsAdversarial_SessionInitReentry:
             "session_init._get_project_claude_md_path", lambda: claude_md
         )
         for _ in range(5):
-            check_pin_slot_status()
+            check_pin_slot_status(doc_for(claude_md))
         assert claude_md.read_text(encoding="utf-8") == original_content

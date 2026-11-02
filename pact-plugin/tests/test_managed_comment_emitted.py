@@ -72,6 +72,7 @@ from shared.claude_md_manager import ensure_project_memory_md  # noqa: E402
 from shared.session_resume import update_session_info  # noqa: E402
 
 from scripts import working_memory as _ssot  # noqa: E402
+from helpers import doc_at  # noqa: E402
 
 # THE SSOT, READ AS VALUES RATHER THAN RE-SPELLED. Every assertion below
 # compares emitted text against these two names, so an emitter that drifts to
@@ -172,7 +173,7 @@ class TestEachEmitterMarksTheSectionItWrites:
         """Emitter 1 of 5: claude_md_manager.ensure_project_memory_md."""
         _redirect_project_dir(tmp_path, monkeypatch)
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         assert result == "Created project CLAUDE.md with memory sections", (
             f"the emitter did not create the document, so nothing below was "
@@ -225,7 +226,7 @@ class TestEachEmitterMarksTheSectionItWrites:
         target = tmp_path / ".claude" / "CLAUDE.md"
         assert not target.exists(), "the create path needs an absent target"
 
-        result = update_session_info("test-session-id", "test-team")
+        result = update_session_info("test-session-id", "test-team", doc=doc_at())
 
         assert result == "Session info created in new project CLAUDE.md", (
             f"the emitter did not take its create path, so the comments below "

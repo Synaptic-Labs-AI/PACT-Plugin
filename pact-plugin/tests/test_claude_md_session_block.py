@@ -36,6 +36,7 @@ from shared.claude_md_manager import (
 from shared.claude_md_markers import State, parse
 from shared.session_resume import _session_block_text, update_session_info
 from shared.stale_session import detect_stale_session_block, recorded_session_id
+from helpers import doc_at  # noqa: E402
 
 SID = "0123abcd-0000-4000-8000-00000000000a"
 OLD_SID = "fedc4321-1111-4000-8000-00000000000b"
@@ -73,7 +74,7 @@ def _read(proj):
 
 
 def _update():
-    return update_session_info(SID, TEAM, started=STARTED)
+    return update_session_info(SID, TEAM, started=STARTED, doc=doc_at())
 
 
 def _status():
@@ -143,7 +144,7 @@ def test_a_block_before_the_memory_block_is_kept_there_and_rewritten_in_place(pr
     first = _read(project)
     assert _update() is None
     assert _read(project) == first
-    assert update_session_info(OLD_SID, TEAM, started=STARTED) == (
+    assert update_session_info(OLD_SID, TEAM, started=STARTED, doc=doc_at()) == (
         "Session info updated in project CLAUDE.md")
     assert _read(project) == "# Notes\n\n" + OLD_BLOCK + "\n\n" + MEMORY_WITH_HEADING
 
@@ -355,10 +356,10 @@ def test_the_previous_session_dir_is_read_only_from_the_found_block(project, tmp
     session_dir.mkdir(parents=True)
     block = _session_block_text(OLD_SID, TEAM, str(session_dir), None, STARTED)
     _write(project, block + "\n")
-    found = _extract_prev_session_dir(str(project))
+    found = _extract_prev_session_dir(str(project), doc=doc_at(str(project)))
     assert found is not None and pathlib.Path(found).resolve() == session_dir.resolve()
     _write(project, "# Notes\n```\n" + block + "\n```\n")
-    assert _extract_prev_session_dir(str(project)) is None
+    assert _extract_prev_session_dir(str(project), doc=doc_at(str(project))) is None
 
 
 def test_the_previous_session_id_fallback_reads_only_the_found_block(project):
@@ -367,7 +368,7 @@ def test_the_previous_session_id_fallback_reads_only_the_found_block(project):
     # A block with no Session dir line falls back to its own Resume line; the
     # fenced example above it names another session.
     _write(project, "# Notes\n" + FENCED_EXAMPLE + "\n" + _block() + "\n")
-    derived = _extract_prev_session_dir(str(project))
+    derived = _extract_prev_session_dir(str(project), doc=doc_at(str(project)))
     assert derived is not None and derived.endswith(SID)
 
 
@@ -375,9 +376,9 @@ def test_the_started_value_is_read_only_from_the_found_block(project):
     from session_init import _extract_session_started
 
     _write(project, "# Notes\n" + FENCED_EXAMPLE)
-    assert _extract_session_started(str(project)) is None
+    assert _extract_session_started(doc_at(str(project))) is None
     _write(project, OLD_BLOCK + "\n")
-    assert _extract_session_started(str(project)) == STARTED
+    assert _extract_session_started(doc_at(str(project))) == STARTED
 
 
 # --- the bootstrap gate's recording branch ---------------------------------

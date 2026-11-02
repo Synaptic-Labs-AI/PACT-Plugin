@@ -742,6 +742,7 @@ class TestStalenessDetection:
 # file's recorded id in the parity test above. Imported rather than mirrored,
 # so it reads both Resume-line forms the production parser reads.
 from shared.stale_session import _RESUME_LINE_RE as _RE_RESUME_TEST  # noqa: E402
+from helpers import doc_at  # noqa: E402
 
 
 class TestStalenessComposition:
@@ -1225,9 +1226,7 @@ def test_b13p_the_gate_replaces_the_block_in_main_not_the_worktree(
     main, worktree = _git_repo_with_worktree(tmp_path)
     session_dir = tmp_path / "sd"
     session_dir.mkdir()
-    assert update_session_info(
-        "prev-session", "old-team", str(session_dir), project_dir=str(main)
-    ) is not None
+    assert update_session_info("prev-session", "old-team", str(session_dir), doc=doc_at(str(main))) is not None
     worktree_md = worktree / ".claude" / "CLAUDE.md"
     worktree_md.parent.mkdir()
     worktree_md.write_text("# Worktree copy\n")
@@ -1277,9 +1276,7 @@ def test_f2_the_gate_reads_the_previous_dir_from_main_and_surfaces_its_claim(
     session_dir.mkdir()
     prev_dir = Path.home() / ".claude" / "pact-sessions" / "proj" / "prev-f2"
     prev_dir.mkdir(parents=True)
-    assert update_session_info(
-        "prev-session", "old-team", str(prev_dir), project_dir=str(main)
-    ) is not None
+    assert update_session_info("prev-session", "old-team", str(prev_dir), doc=doc_at(str(main))) is not None
     main_before = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
     assert "prev-session" in main_before
     assert "cccccccc-dddd-eeee-ffff-000000000000" not in main_before

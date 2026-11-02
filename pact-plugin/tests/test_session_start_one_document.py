@@ -28,6 +28,7 @@ import pytest
 
 import session_init
 from shared.claude_md_manager import ensure_project_memory_md
+from helpers import doc_at  # noqa: E402
 
 LEAD = "PACT:pact-orchestrator"
 SESSION_ID = "abababab-cdcd-efef-0101-232323232323"
@@ -78,7 +79,7 @@ def test_a_subdirectory_lead_manages_the_toplevel_document(repo, monkeypatch):
     `ensure_project_memory_md(write_root)`), this start creates
     `pkg/.claude/CLAUDE.md` and writes its Current Session block there, so
     both assertions below go red."""
-    assert ensure_project_memory_md(repo) is not None
+    assert ensure_project_memory_md(doc_at(repo)) is not None
     toplevel_doc = repo / ".claude" / "CLAUDE.md"
     subdir = repo / "pkg"
     subdir.mkdir()
@@ -119,7 +120,7 @@ def test_an_unknown_root_reads_no_predecessor(repo, monkeypatch):
     _git("worktree", "add", "-q", str(worktree), "-b", "unknown-root", cwd=repo)
     predecessor = get_claude_config_dir() / "pact-sessions" / "wt" / "prev-sid"
     predecessor.mkdir(parents=True)
-    assert ensure_project_memory_md(worktree) is not None
+    assert ensure_project_memory_md(doc_at(worktree)) is not None
     copy = worktree / ".claude" / "CLAUDE.md"
     copy.write_text(
         copy.read_text(encoding="utf-8").replace(
@@ -129,7 +130,7 @@ def test_an_unknown_root_reads_no_predecessor(repo, monkeypatch):
         encoding="utf-8",
     )
     # Control: the copy really names the predecessor to a reader.
-    assert session_init._extract_prev_session_dir(str(worktree)) == str(
+    assert session_init._extract_prev_session_dir(str(worktree), doc=doc_at(str(worktree))) == str(
         predecessor
     )
 
@@ -163,7 +164,7 @@ def test_the_resume_line_fallback_uses_the_sessions_own_slug(repo):
 
     worktree = repo / ".worktrees" / "feature-x"
     _git("worktree", "add", "-q", str(worktree), "-b", "feature-x", cwd=repo)
-    assert ensure_project_memory_md(repo) is not None
+    assert ensure_project_memory_md(doc_at(repo)) is not None
     doc = resolve_managed_document(repo)
     previous = "12121212-3434-5656-7878-909090909090"
     # No session_dir: the block carries the Resume line and no Session dir.
@@ -180,12 +181,12 @@ def test_the_resume_line_fallback_uses_the_sessions_own_slug(repo):
 def test_a_subdirectory_with_its_own_document_keeps_it(repo, monkeypatch):
     """Control: the enclosing rung applies only when the subdirectory holds
     no document; its own document wins and the toplevel's is untouched."""
-    assert ensure_project_memory_md(repo) is not None
+    assert ensure_project_memory_md(doc_at(repo)) is not None
     toplevel_doc = repo / ".claude" / "CLAUDE.md"
     before = toplevel_doc.read_bytes()
     subdir = repo / "pkg"
     subdir.mkdir()
-    assert ensure_project_memory_md(subdir) is not None
+    assert ensure_project_memory_md(doc_at(subdir)) is not None
 
     _start(monkeypatch, subdir)
 

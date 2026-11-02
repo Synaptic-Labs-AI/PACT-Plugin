@@ -42,6 +42,7 @@ import pytest
 # SHAPE, so that a change to either compiled anchor cannot move the test and
 # the subject together. See `_WARNING_LINE_RE` for the arm that depends on it.
 from staleness import _BUDGET_WARNING_PREFIX, _BUDGET_WARNING_SHAPE
+from helpers import doc_for  # noqa: E402
 
 # Pulls the token figure out of a warning comment, so a test can compare the
 # number in the file against the number in the returned status string.
@@ -190,7 +191,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
 
@@ -205,7 +206,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
 
@@ -217,7 +218,7 @@ class TestCheckPinnedStaleness:
              patch("staleness._get_project_claude_md_path", return_value=None), \
              patch("staleness._resolve_project_claude_md_with_base",
                    return_value=(None, None)):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(None))
 
         assert result is None
 
@@ -236,7 +237,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
         # File should not be modified
@@ -258,7 +259,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "stale" in result.lower()
@@ -280,7 +281,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is None
         content = claude_md.read_text(encoding="utf-8")
@@ -303,7 +304,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "stale" in result.lower()
@@ -328,7 +329,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         # Should report budget info
         assert result is not None
@@ -365,7 +366,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         content = claude_md.read_text(encoding="utf-8")
         assert _BUDGET_WARNING_PREFIX not in content
@@ -387,7 +388,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "1 stale" in result
@@ -412,7 +413,7 @@ class TestCheckPinnedStaleness:
         ))
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         assert result is not None
         assert "stale" in result.lower()
@@ -586,12 +587,12 @@ class TestBudgetWarningIdempotency:
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md):
             # First run -- should add the warning
-            result1 = check_pinned_staleness()
+            result1 = check_pinned_staleness(doc_for(claude_md))
             assert result1 is not None
             assert "budget" in result1.lower()
 
             # Second run -- should NOT add a second warning
-            result2 = check_pinned_staleness()
+            result2 = check_pinned_staleness(doc_for(claude_md))
 
         content_after = claude_md.read_text(encoding="utf-8")
         warning_count = content_after.count(_BUDGET_WARNING_PREFIX)
@@ -1680,13 +1681,11 @@ class TestCheckPinnedStalenessHardening:
         os.symlink(str(outside_victim), str(managed_path))
         assert managed_path.is_symlink()
 
-        with patch("session_init.resolve_project_claude_md_path",
-                   return_value=(managed_path, "legacy")), \
-             patch("session_init._get_project_claude_md_path",
+        with patch("session_init._get_project_claude_md_path",
                    return_value=managed_path), \
              patch("staleness._get_project_claude_md_path",
                    return_value=managed_path):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(managed_path))
 
         assert result is not None
         assert "skipped" not in result.lower()
@@ -1727,13 +1726,11 @@ class TestCheckPinnedStalenessHardening:
         os.symlink(str(sibling), str(managed_path))
         assert managed_path.is_symlink()
 
-        with patch("session_init.resolve_project_claude_md_path",
-                   return_value=(managed_path, "legacy")), \
-             patch("session_init._get_project_claude_md_path",
+        with patch("session_init._get_project_claude_md_path",
                    return_value=managed_path), \
              patch("staleness._get_project_claude_md_path",
                    return_value=managed_path):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(managed_path))
 
         # ALLOWED: the write proceeded (a detection message, not the opaque skip).
         assert result is not None
@@ -1772,13 +1769,11 @@ class TestCheckPinnedStalenessHardening:
         managed_path.write_text(self._stale_pinned_content(), encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        with patch("session_init.resolve_project_claude_md_path",
-                   return_value=(managed_path, "legacy")), \
-             patch("session_init._get_project_claude_md_path",
+        with patch("session_init._get_project_claude_md_path",
                    return_value=managed_path), \
              patch("staleness._get_project_claude_md_path",
                    return_value=managed_path):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(managed_path))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert "lock contention" not in result.lower()
@@ -1857,7 +1852,7 @@ class TestCheckPinnedStalenessHardening:
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
              patch("staleness._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         # The inside-lock re-read detected the content change → skip write
         # → return None (idempotent skip).
@@ -1891,7 +1886,7 @@ class TestCheckPinnedStalenessHardening:
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
              patch("staleness._get_project_claude_md_path", return_value=claude_md):
-            result = check_pinned_staleness()
+            result = check_pinned_staleness(doc_for(claude_md))
 
         # Function reports the stale entry was found
         assert result is not None
