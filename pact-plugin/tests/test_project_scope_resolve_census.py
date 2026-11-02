@@ -58,8 +58,9 @@ def _resolve_calls(tree) -> list[int]:
 def test_every_resolve_call_is_caught_for_a_symlink_loop():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     calls = _resolve_calls(tree)
-    # Control: the census sees the calls it is about (twelve at this writing).
-    assert len(calls) >= 10, calls
+    # Control: the census sees the calls it is about (nine at this writing,
+    # after the containment guard's home check was removed).
+    assert len(calls) >= 9, calls
 
     unguarded = sorted(set(calls) - _guarded_lines(tree))
 
