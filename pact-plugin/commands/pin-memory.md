@@ -37,11 +37,11 @@ If the hook allows an edit with a note that it could not locate the Pinned secti
 
 ## Process
 
-**Target file**: The project CLAUDE.md may be at either `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Use `.claude/CLAUDE.md` if it exists, otherwise `./CLAUDE.md`. If neither exists, create at `.claude/CLAUDE.md`.
+**Target file**: the path on the `Project memory file:` line of the SessionStart context. If the context has no such line, run `python3 "{plugin_root}/skills/pact-memory/scripts/cli.py" project-file` and use the path it prints. If either source says the file is unavailable, stop and tell the user; do not create or edit any CLAUDE.md. Only if the command itself fails to run, use `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` if it exists, otherwise `$CLAUDE_PROJECT_DIR/CLAUDE.md`; if neither exists, create `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md`. If the target file does not exist, create it.
 
 ### Adding a pin
 
-1. Read existing CLAUDE.md.
+1. Read the target file.
 2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`). If the file has a `<!-- PACT_MEMORY_START -->` … `<!-- PACT_MEMORY_END -->` block, the section MUST be inside it.
 3. **If the file carries a `<!-- PACT_MEMORY_PINNED_END -->` line, the new entry MUST go ABOVE that line.** The pinned region ends there, so a pin placed below it is outside the Pinned Context section. Insert immediately before that line, after the last existing entry. If the file has no such line, append at the end of the section as usual.
 4. Add the new entry with a date tag. **Make this write with the `Edit` tool. Do NOT use the `Write` tool.** Step 1 gave you the full file, so a `Write` call looks like the short route to the new content. After a `Write`, a file that had CRLF line endings has LF line endings. The curator then sees a change to a file they did not edit. An `Edit` keeps the line endings of the file. Use the example below:
@@ -50,14 +50,14 @@ If the hook allows an edit with a note that it could not locate the Pinned secti
    ### Entry Title
    Content here (~5-10 lines max)
    ```
-5. **Commit — then confirm `CLAUDE.md` is actually in the resulting commit.** Where a project git-ignores `CLAUDE.md` (a bare `CLAUDE.md` line in `.gitignore` matches at any depth), the failure is loud in the obvious cases and silent in the one that matters. An explicit `git add CLAUDE.md` errors, and a commit whose only change is `CLAUDE.md` reports "nothing to commit" — both non-zero, both visible. But a blanket `git commit -a` / `-am` that also picks up other changed files **succeeds, exits 0, and simply omits `CLAUDE.md`**. Checking the commit's exit status instead of its contents is what turns that into a pin reported as durable while it has no git backing at all. So verify the file is in the commit, not that the commit succeeded. If it is not, report the pin as **applied to the working file but not version-controlled**, so the curator knows it lives only on this machine. NEVER use `git add -f` to force it past the ignore rule — the rule is the project's decision, not an obstacle.
+5. **First check where the target file is.** If its absolute path is not under the directory `git rev-parse --show-toplevel` prints, it is outside the current checkout: do NOT commit it here and do NOT run the check below. Report that the pin was applied to the target file, which lives outside this checkout and is not part of this commit. A lead working in a linked worktree hits this case, because its target file is the main checkout's. Otherwise, **commit — then confirm the target file is actually in the resulting commit.** Where a project git-ignores `CLAUDE.md` (a bare `CLAUDE.md` line in `.gitignore` matches at any depth), the failure is loud in the obvious cases and silent in the one that matters. An explicit `git add CLAUDE.md` errors, and a commit whose only change is `CLAUDE.md` reports "nothing to commit" — both non-zero, both visible. But a blanket `git commit -a` / `-am` that also picks up other changed files **succeeds, exits 0, and simply omits `CLAUDE.md`**. Checking the commit's exit status instead of its contents is what turns that into a pin reported as durable while it has no git backing at all. So verify the file is in the commit, not that the commit succeeded. If it is not, report the pin as **applied to the working file but not version-controlled**, so the curator knows it lives only on this machine. NEVER use `git add -f` to force it past the ignore rule — the rule is the project's decision, not an obstacle.
 
 ### Without arguments — session review
 
-1. Read existing CLAUDE.md.
+1. Read the target file.
 2. Review the session for pin-worthy context. Apply the "When to Pin" criteria above.
 3. For each pin-worthy entry, add it as in "Adding a pin." If nothing is pin-worthy, report "No new context to pin."
-4. Commit any changes — and apply the same check as **Adding a pin** step 5: confirm `CLAUDE.md` is in the resulting commit rather than trusting the commit's exit status, and report any pin that did not make it in as applied to the working file but not version-controlled.
+4. Commit any changes as in **Adding a pin** step 5: when the target file is outside the current checkout, report that instead of committing; otherwise confirm the target file is in the resulting commit rather than trusting the commit's exit status, and report any pin that did not make it in as applied to the working file but not version-controlled.
 
 ## Refusal flow (hook-denied edits)
 
