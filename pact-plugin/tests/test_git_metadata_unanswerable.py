@@ -430,9 +430,14 @@ def test_an_unresolved_ceiling_after_an_empty_entry_reaches_a_broken_gitfile(
 # ---------------------------------------------------------------------------
 # One arm per broken layout: the classifier answers UNANSWERABLE AND a lead
 # SessionStart there writes nothing and says why. Each layout is real git
-# under tmp_path; the exit-1 row uses a `git` shim on PATH (git itself never
-# exits 1 for rev-parse at a healthy worktree), and the ownership rows use
-# git's own GIT_TEST_ASSUME_DIFFERENT_OWNER switch, honoured since git 2.35.
+# under tmp_path. Two rows put a `git` shim first on PATH: the exit-1 row
+# (git itself never exits 1 for rev-parse at a healthy worktree), and the
+# ownership rows, whose shim answers every call that names the protected
+# directory (or runs inside it) exactly as git refuses a repository it does
+# not trust: "fatal: detected dubious ownership" on stderr and exit 128. That
+# makes the ownership rows deterministic on any git. git's own
+# GIT_TEST_ASSUME_DIFFERENT_OWNER switch drives two further rows, run only
+# where the git under test honours it (a CI runner's git did not).
 #
 # Revert check for every row: without the metadata rule in `_raw_rev_parse`
 # the cause is "ok" and the root is the directory itself, so the classifier
@@ -456,6 +461,61 @@ def _exit_one_git_on_path(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ.get('PATH', '')}")
 
 
+def _dubious_git_on_path(tmp_path, monkeypatch, protected):
+    """A `git` that refuses `protected` the way git refuses an untrusted
+    repository, and runs the real git for everything else."""
+    import shlex
+
+    real = shutil.which("git")
+    assert real, "git is not installed"
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    git = shim / "git"
+    quoted = shlex.quote(str(protected))
+    git.write_text(
+        "#!/bin/sh\n"
+        f"protected={quoted}\n"
+        'case "$PWD" in "$protected"|"$protected"/*) refuse=1 ;; esac\n'
+        'for arg in "$@"; do\n'
+        '  case "$arg" in "$protected"|"$protected"/*) refuse=1 ;; esac\n'
+        "done\n"
+        'if [ -n "$refuse" ]; then\n'
+        "  echo \"fatal: detected dubious ownership in repository at '$protected'\" >&2\n"
+        "  exit 128\n"
+        "fi\n"
+        f"exec {shlex.quote(real)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ.get('PATH', '')}")
+    # Control: the shim refuses the protected directory as git does, and is
+    # the real git everywhere else -- so a red arm is the refusal, not a
+    # broken shim.
+    refused = subprocess.run(
+        ["git", "-C", str(protected), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert refused.returncode == 128, refused
+    assert "detected dubious ownership" in refused.stderr, refused.stderr
+    answered = subprocess.run(
+        ["git", "--version"], capture_output=True, text=True, timeout=30
+    )
+    assert answered.returncode == 0 and answered.stdout.startswith("git version")
+
+
+def _git_honours_the_ownership_switch(tmp_path) -> bool:
+    probe = tmp_path / "ownership-probe"
+    probe.mkdir()
+    _git("init", "-q", ".", cwd=probe)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+    refused = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--git-dir"],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    return refused.returncode != 0 and "dubious ownership" in refused.stderr
+
+
 def _broken(tmp_path, monkeypatch, row):
     """Build `row` and return (the directory to start in, its main checkout)."""
     main = _main(tmp_path)
@@ -473,11 +533,18 @@ def _broken(tmp_path, monkeypatch, row):
         shutil.rmtree(main / ".git" / "worktrees" / "wt")
         return worktree, main
     if row == "dubious_worktree":
-        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        _dubious_git_on_path(tmp_path, monkeypatch, worktree)
         return worktree, main
     if row == "dubious_main":
-        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        _dubious_git_on_path(tmp_path, monkeypatch, main)
         return main, main
+    if row in ("switch_dubious_worktree", "switch_dubious_main"):
+        if not _git_honours_the_ownership_switch(tmp_path):
+            pytest.skip(
+                "the git under test does not honour GIT_TEST_ASSUME_DIFFERENT_OWNER"
+            )
+        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        return (worktree if row.endswith("worktree") else main), main
     raise AssertionError(row)
 
 
@@ -505,13 +572,14 @@ def _lead_start(monkeypatch, project_dir):
 
 _ROWS = [
     "exit_one_stub", "moved_main", "deleted_admin", "dubious_worktree",
-    "dubious_main",
+    "dubious_main", "switch_dubious_worktree", "switch_dubious_main",
 ]
 
 
-@pytest.mark.parametrize(
-    "row", ["exit_one_stub", "dubious_worktree", "dubious_main"]
-)
+@pytest.mark.parametrize("row", [
+    "exit_one_stub", "dubious_worktree", "dubious_main",
+    "switch_dubious_worktree", "switch_dubious_main",
+])
 def test_a_broken_layout_is_unanswerable(tmp_path, monkeypatch, row):
     """The rows the arms above do not already build. The moved-main and
     deleted-admin rows have their own classifier arms and appear below only
