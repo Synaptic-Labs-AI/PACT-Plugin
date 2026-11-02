@@ -714,3 +714,34 @@ def test_a_session_with_no_home_and_no_config_root_names_the_missing_home(
     assert project_scope.unknown_root_status(
         "Project CLAUDE.md", ROOT_CAUSE_HOME_UNKNOWN, project, "nothing was written."
     ).startswith("Project CLAUDE.md skipped: the home directory cannot be found, ")
+
+
+def _symlink_then_dots(tmp_path, monkeypatch, leaf: str) -> Path:
+    """<proj>/link points at <t>/elsewhere/inner, and CLAUDE_CONFIG_DIR is
+    <proj>/link/../<leaf>: the kernel reads <t>/elsewhere/<leaf>, a lexical
+    normaliser reads <proj>/<leaf>."""
+    project = _plain_project(tmp_path, monkeypatch)
+    inner = tmp_path / "elsewhere" / "inner"
+    inner.mkdir(parents=True)
+    (project / "link").symlink_to(inner, target_is_directory=True)
+    monkeypatch.setenv(
+        "CLAUDE_CONFIG_DIR", os.path.join(str(project), "link", "..", leaf)
+    )
+    return project
+
+
+def test_a_symlink_then_dots_config_root_is_also_read_lexically(tmp_path, monkeypatch):
+    project = _symlink_then_dots(tmp_path, monkeypatch, ".claude")
+
+    assert memory_root_of(project) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_a_symlink_then_dots_config_root_naming_neither_form_leaves_a_project_known(
+    tmp_path, monkeypatch
+):
+    """Control: <proj>/link/../cfg is <proj>/cfg lexically and
+    <t>/elsewhere/cfg by the kernel; neither is a canonical document of
+    <proj>."""
+    project = _symlink_then_dots(tmp_path, monkeypatch, "cfg")
+
+    assert memory_root_of(project) == (project, None)

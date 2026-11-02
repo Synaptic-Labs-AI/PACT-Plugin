@@ -1327,25 +1327,32 @@ def user_global_documents() -> Tuple[Path, ...]:
     every other consumer of the config root reads and writes. A relative
     CLAUDE_CONFIG_DIR is ALSO read against an absolute CLAUDE_PROJECT_DIR:
     the platform resolved it once at launch, and a process run from a
-    subdirectory has another cwd. An extra location can only refuse more.
+    subdirectory has another cwd. Each config-derived location is ALSO kept
+    in its lexical form (`os.path.abspath`, `..` collapsed as text): resolving
+    follows a symlink before its `..`, as the kernel does, and a launcher that
+    normalises lexically names another directory. An extra location can only
+    refuse more.
     """
     found: List[Path] = []
-    for source in (
-        lambda: get_claude_config_dir() / "CLAUDE.md",
-        _config_document_under_the_declared_project,
-        lambda: Path.home() / ".claude" / "CLAUDE.md",
+    for source, config_derived in (
+        (lambda: get_claude_config_dir() / "CLAUDE.md", True),
+        (_config_document_under_the_declared_project, True),
+        (lambda: Path.home() / ".claude" / "CLAUDE.md", False),
     ):
         try:
             located = source()
             if located is None:
                 continue
-            path = located.absolute().resolve(strict=False)
+            forms = [located.absolute().resolve(strict=False)]
+            if config_derived:
+                forms.append(Path(os.path.abspath(located)))
         except (OSError, RuntimeError, KeyError, ValueError):
             # RuntimeError / KeyError: Path.home() with no resolvable home;
             # RuntimeError: a symlink loop, on Pythons before 3.13.
             continue
-        if not any(same_path(path, kept) for kept in found):
-            found.append(path)
+        for path in forms:
+            if not any(same_path(path, kept) for kept in found):
+                found.append(path)
     return tuple(found)
 
 
