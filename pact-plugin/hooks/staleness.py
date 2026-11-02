@@ -33,13 +33,10 @@ from shared.claude_md_manager import (
     PINNED_END_MARKER,
     PINNED_START_MARKER,
     SESSION_BOUNDARY_PREFIX,
-    resolve_project_claude_md_path,
+    resolve_project_claude_md_path,  # noqa: F401  # re-exported: scripts/archive_pin.py reads it from this module
 )
 from shared.failure_cause import failure_cause
-from shared.project_scope import (
-    git_env_without_location,
-    project_memory_root,
-)
+from shared.project_scope import git_env_without_location
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     _PIN_HEADING_ROW,
@@ -376,73 +373,33 @@ def resolve_session_claude_md_path(
     project_dir: Optional[os.PathLike[str] | str] = None,
     memory_root: Optional[Path] = None,
 ) -> Optional[Path]:
-    """The project CLAUDE.md the SESSION's PACT state lives in (#1653).
+    """The SESSION's existing managed project document, or None.
 
-    ONE RULE FOR EVERY ADVISORY READER AND THE WRITERS: a linked-worktree
-    session's project file is the MAIN checkout's, so a reader that resolved
-    the worktree copy would describe a document nothing writes any more.
-    EVERY known base is probed at its PROJECT-MEMORY root and the raw
-    git/cwd fall-through is never consulted; a non-worktree session is
-    unchanged only while its own root holds a document. A no-argument call
-    with the variable absent derives the CWD's memory root and answers
-    nothing when it is unknown, rather than falling through to a worktree
-    copy.
+    A no-argument call is `session_document()`: the one anchor (the
+    declaration, else the session record, else the cwd), the one root and the
+    one resolver. None when the root is unknown or holds no document; no git
+    or cwd fall-through is ever consulted.
 
-    Returns None when the memory root has no file; callers treat that as
-    "nothing to read" rather than delegating None to a resolver that would
-    re-resolve env-first (the step-4 lesson: None is not "do nothing").
-
-    A caller that names a base is honoured: `project_dir` alone derives its
-    memory root here and the non-worktree route passes the same base to the
-    resolver. Otherwise the argument would be a no-op and the call would
-    silently read the environment instead -- the reader/writer trap this
-    helper exists to close. A no-argument call reads the environment, and
-    when it is absent it derives the CWD's memory root through the
-    unknown-aware helper instead of the raw fall-through.
-
-    A SUPPLIED `memory_root` IS ALWAYS HONOURED, including with no base or an
-    empty one; a falsy `project_dir` is treated exactly like None. The base is
-    only consulted when no root was supplied.
+    A supplied `memory_root` is resolved as given. A `project_dir` alone is
+    classified first and answers None when its root is unknown. Both
+    parameters are transitional: callers move to the no-argument form.
     """
-    if memory_root is None:
-        # A SUPPLIED MEMORY ROOT IS THE CALLER'S ANSWER AND IS NEVER DERIVED
-        # OVER. Guarding the derivation on `memory_root is None` rather than
-        # on `project_dir is None` is the F3 fix: a supplied root used to be
-        # REPLACED when the base was None, and IGNORED entirely when it was
-        # falsy, because the branch below required a truthy `project_dir` and
-        # the fall-through re-resolved the environment. A caller that hands in
-        # a root has already answered the question this function would
-        # otherwise guess at.
-        #
-        # A FALSY BASE IS TREATED EXACTLY LIKE None. An empty string is not a
-        # directory anyone named, and letting it take a different route is how
-        # a future env-derived base could reach the worktree copy again.
-        if not project_dir:
-            project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        if not project_dir:
-            # NO DECLARATION: the CWD is the anchor, and it gets the SAME rule
-            # (the D3 shape). Deriving it through the unknown-aware helper is
-            # what stops this route returning the worktree shadow copy; an
-            # unknown root answers NOTHING rather than falling through.
-            project_dir = Path.cwd()
-            # Late-bound: a module-level copy would keep whatever function was
-            # bound at first import, so a test that patches the source module
-            # before this one is imported would bind its stand-in here.
-            from shared.project_scope import project_memory_root_or_none
+    # Late-bound: staleness is imported by the modules below at their top.
+    from shared.claude_md_manager import resolve_managed_document, session_document
 
-            memory_root = project_memory_root_or_none(project_dir)
-            if memory_root is None:
-                return None
-        else:
-            memory_root = project_memory_root(project_dir)
-    # ONE RULE (#1653/D2): probe the memory root and take ONLY its answer. The
-    # resolver's git/cwd fall-through is never consulted on this route -- it
-    # can return a linked worktree's own copy, the document this rule keeps
-    # out of project memory, and on the declared-MAIN / cwd-in-worktree /
-    # MAIN-empty shape it did exactly that to check_pinned_staleness, which
-    # wrote a STALE marker there.
-    target, source = resolve_project_claude_md_path(memory_root)
-    return target if source != "new_default" else None
+    if memory_root is None and project_dir:
+        from shared.project_scope import memory_root_of
+
+        memory_root, _cause = memory_root_of(project_dir)
+        if memory_root is None:
+            return None
+    if memory_root is not None:
+        document = resolve_managed_document(memory_root)
+    else:
+        _session, document = session_document()
+        if document is None:
+            return None
+    return document.path if document.exists else None
 
 
 def estimate_tokens(text: str) -> int:

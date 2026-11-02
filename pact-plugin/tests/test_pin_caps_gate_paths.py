@@ -499,8 +499,8 @@ def test_gate_target_names_the_target_the_file_before_and_the_base(tmp_path, mon
 
 
 def test_gate_target_returns_none_when_the_resolver_fails(tmp_path, monkeypatch):
-    import staleness
     from helpers import point_resolver_at
+    from shared import claude_md_manager
     from shared.claude_md_manager import gate_target
 
     point_resolver_at(monkeypatch, tmp_path)
@@ -508,7 +508,7 @@ def test_gate_target_returns_none_when_the_resolver_fails(tmp_path, monkeypatch)
     def _fails(*args, **kwargs):
         raise OSError("resolver failed")
 
-    monkeypatch.setattr(staleness, "_resolve_project_claude_md_with_base", _fails)
+    monkeypatch.setattr(claude_md_manager, "resolve_managed_document", _fails)
     assert gate_target(str(tmp_path / ".claude" / "CLAUDE.md")) is None
 
 

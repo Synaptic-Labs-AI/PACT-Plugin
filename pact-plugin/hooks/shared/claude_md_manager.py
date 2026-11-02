@@ -1875,10 +1875,10 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
 
     Worktree-safe: imports `staleness.resolve_session_claude_md_path` lazily
     to avoid circular-import and module-load cost on every Edit/Write. That
-    function returns the SESSION's project-memory file (#1653: MAIN's for a
-    linked worktree) and on the non-worktree route delegates to
-    `get_project_claude_md_path`, whose env-var / git-root / cwd fallbacks are
-    unchanged.
+    function returns the SESSION's existing managed document
+    (`session_document`): MAIN's for a linked worktree, and nothing when the
+    root is unknown or holds no document. No git or cwd fall-through is
+    consulted.
 
     Fail-safe: any OSError / RuntimeError while resolving returns None.
     Callers treat None as "not our target; let the tool through."
@@ -1891,12 +1891,9 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     except ImportError:
         return None
 
-    # #1653: the SESSION's project-memory file. A linked-worktree session
-    # matches the MAIN checkout's file -- the document every writer targets --
-    # so a pin gate is not bypassed by a worktree-local copy. For a
-    # non-worktree session the helper probes the declared base's own memory
-    # root; when it holds no document it answers None rather than falling
-    # through to another repository's file.
+    # The SESSION's managed document: a linked-worktree session matches the
+    # MAIN checkout's file, the document every writer targets, so a pin gate
+    # is not bypassed by a worktree-local copy.
     project_md = resolve_session_claude_md_path()
     if project_md is None:
         return None
@@ -1922,39 +1919,16 @@ def session_memory_root() -> Path | None:
     """The directory that owns this session's project memory, or None when it
     is unknown.
 
-    ONE ANCHOR FOR BOTH: `gate_target` resolves through it, and the pin-cap
-    gate asks it why a target was NOT gated, so an unknown root is reported
-    instead of silently allowing the edit with the cap off. An absent
-    `CLAUDE_PROJECT_DIR` must not skip the guard; `or os.getcwd()` is the
-    anchor session_init records when the platform declares nothing.
-
-    A MISSING DECLARATION IS RESOLVED FROM THE SESSION RECORD. Without this,
-    the gate declares the root unknown and the pin cap goes DARK on MAIN's
-    document for a session whose worktree was removed -- the silent-off
-    failure this rule exists to remove. The record is used only when the
-    declared directory no longer exists, and only after it verifies against
-    the candidate main root.
-
-    Fail-safe is None (refuse to identify a document), and an import failure
-    is the same answer.
+    A thin Path-or-None view of `project_scope.session_memory_root`, which
+    decides the anchor (CLAUDE_PROJECT_DIR, else the session record, else the
+    cwd), the root and the record recovery. An import failure is None too:
+    refuse to identify a document.
     """
     try:
-        from .project_scope import (
-            anchor_directory_is_missing,
-            get_worktree_identity_from_session_record,
-            project_memory_root_or_none,
-            recorded_main_root,
-        )
+        from .project_scope import session_memory_root as _session_root
     except ImportError:
         return None
-    declared = os.environ.get("CLAUDE_PROJECT_DIR")
-    anchor = declared or os.getcwd()
-    root = project_memory_root_or_none(anchor)
-    if root is None and anchor_directory_is_missing(anchor):
-        root = recorded_main_root(
-            Path(anchor), get_worktree_identity_from_session_record()
-        )
-    return root
+    return _session_root().root
 
 
 class GateTarget(NamedTuple):
@@ -1967,31 +1941,30 @@ class GateTarget(NamedTuple):
     base: Path
 
 
-def gate_target(file_path: str) -> GateTarget | None:
+def gate_target(
+    file_path: str, session: SessionRoot | None = None
+) -> GateTarget | None:
     """The project CLAUDE.md the pin-cap gate checks for this Edit or Write
     `file_path`, or None when it checks none.
 
-    Gated: an absolute path whose name is `claude.md` in any case, which the
-    project resolver returns once the change exists AND whose IDENTITY is one
-    of the two canonical managed-document paths under the session's
-    project-memory root (`.claude/CLAUDE.md` or `CLAUDE.md`). CONTAINMENT IS
-    NOT ENOUGH: the resolver returns a nested worktree's copy through its cwd
-    rung, which sits inside the root, and only identity refuses it. The
-    resolver runs with the target counted as present, so a Write that creates
-    the file is gated, and a Write to a file the resolver would not return
-    (`./CLAUDE.md` while `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns now, which can be a
-    different file from the target: the other location under the target's base
-    (`./CLAUDE.md` before a Write creates `.claude/CLAUDE.md`), or the main
-    checkout's file for a worktree that has none. A file the resolver finds
-    outside the target's repository (the working directory's repository, when
-    that is another one) is never `before`: the target itself is, or None when
-    it does not exist.
+    Gated: an absolute path named `claude.md` in any case that IS the
+    session's managed document once the change exists, i.e. what
+    `resolve_managed_document(root, assume_present=target)` returns. That
+    resolver only ever yields a canonical path under the root or under its
+    verified enclosing checkout, so a worktree's own copy, a nested
+    checkout's copy or any other `CLAUDE.md` is never gated. A Write that
+    creates the document is gated; a Write to the location the resolver
+    would not return (`./CLAUDE.md` while `.claude/CLAUDE.md` exists) is not.
 
-    A relative path is not gated; a target that is not one of the two canonical
-    managed-document paths under the memory root is not (a worktree's own copy
-    is not the managed document, whether it sits BESIDE or INSIDE the root); an
-    unknown memory root gates nothing; and any failure while resolving returns
-    None: a path the gate is unsure of is allowed.
+    `before` is the session's document now, which can be the other location
+    under the same base (`./CLAUDE.md` before a Write creates
+    `.claude/CLAUDE.md`), or None when there is none. `base` is the directory
+    the target resolved under.
+
+    `session` is the caller's one observation of the session root; computed
+    here when None. A relative path is not gated, an unknown root gates
+    nothing, and any failure while resolving returns None: a path the gate is
+    unsure of is allowed.
     """
     if not isinstance(file_path, str) or not file_path:
         return None
@@ -1999,16 +1972,10 @@ def gate_target(file_path: str) -> GateTarget | None:
     if not target.is_absolute() or target.name.casefold() != "claude.md":
         return None
     try:
-        from staleness import _resolve_project_claude_md_with_base, same_path
+        from staleness import same_path
     except ImportError:
         return None
     try:
-        # #1653: gate the SESSION's project-memory file. For a linked worktree
-        # that is MAIN's; the resolver is given that base, so an edit to the
-        # worktree-local copy is not what the pin cap protects. A non-worktree
-        # session passes its own env dir, which the resolver treats as the
-        # same first rung as before.
-        #
         # A TRACKED-CLAUDE.md PROJECT KEEPS THE SAME-RELATIVE-PATH CONSEQUENCE,
         # RECORDED HERE AND DELIBERATELY NOT GUARDED. The worktree copy sits at
         # the same repo-relative path, so a commit from the worktree plus a
@@ -2018,51 +1985,21 @@ def gate_target(file_path: str) -> GateTarget | None:
         # through this target either. The cap is session-local hygiene, not a
         # security boundary; delivery is a human-reviewed merge; and an
         # inode-identity guard would reintroduce the worktree copy as a
-        # managed artifact in weaker form -- the assumption the one rule
-        # exists to remove. Do not build that guard.
-        # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
-        # must not skip the guard. `session_memory_root` anchors on the cwd
-        # exactly as session_init does, and a hook frame's cwd is the session's
-        # project dir in every observed shape, so a cwd that is not the project
-        # narrows the gate rather than binding a wrong document. An UNKNOWN
-        # root identifies nothing.
-        memory_root = session_memory_root()
-        if memory_root is None:
-            return None
-        resolved, base = _resolve_project_claude_md_with_base(
-            assume_present=target, project_dir=memory_root)
-        if resolved is None or base is None or not same_path(resolved, target):
-            return None
-        # IDENTITY, NOT ANCESTOR CONTAINMENT (#1653, security lane). PACT
-        # creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, INSIDE the
-        # memory root, so containment admits a worktree's own copy whenever
-        # MAIN holds no CLAUDE.md. The managed document is exactly one of the
-        # two canonical paths under the root, so anything else is not it.
-        # `same_path` handles a not-yet-existing leaf and a symlinked parent;
-        # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
-        # so a leaf symlink is not an escape.
-        preferred, legacy = managed_document_paths(memory_root)
-        if not (same_path(target, preferred) or same_path(target, legacy)):
-            return None
-        before, before_base = _resolve_project_claude_md_with_base(
-            project_dir=memory_root)
-        if before_base is not None and not same_path(before_base, base):
-            from .project_scope import same_repository
+        # managed artifact in weaker form. Do not build that guard.
+        if session is None:
+            from .project_scope import session_memory_root as _session_root
 
-            # THE ARGUMENT ORDER IS THE GUARD, and it is not symmetric:
-            # `same_repository(env_dir, base)` asks "is base the MAIN repo of
-            # the checkout at env_dir". Called with the target's base first,
-            # a `before` that the resolver's cwd rung found in the WORKTREE
-            # answers False (a worktree is not a main repo), so the worktree
-            # copy is never taken as this target's pre-state (#1653). Swapping
-            # the arguments would answer True and silently restore that
-            # fall-through; `test_the_pin_gate_does_not_take_the_worktree_as_before`
-            # pins it.
-            if not same_repository(base, before_base):
-                before = target if target.is_file() else None
+            session = _session_root()
+        if session.root is None:
+            return None
+        document = resolve_managed_document(session.root, assume_present=target)
+        if not document.exists or not same_path(document.path, target):
+            return None
+        current = resolve_managed_document(session.root)
+        before = current.path if current.exists else None
     except (OSError, RuntimeError, ValueError):
         return None
-    return GateTarget(target, before, base)
+    return GateTarget(target, before, document.base)
 
 
 # What a team member is told when a change would add pins past the cap, in

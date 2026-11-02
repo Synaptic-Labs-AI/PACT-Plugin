@@ -92,7 +92,7 @@ def world(tmp_path, monkeypatch):
 
 def test_slot_status_counts_main_pins(world):
     from session_init import check_pin_slot_status
-    from staleness import project_memory_root
+    from shared.project_scope import project_memory_root
 
     main, worktree = world
     _write_doc(main, _doc(
@@ -108,7 +108,7 @@ def test_slot_status_counts_main_pins(world):
 
 def test_refusal_report_names_main(world):
     from session_init import check_claude_md_refusals
-    from staleness import project_memory_root
+    from shared.project_scope import project_memory_root
 
     main, worktree = world
     main_md = _write_doc(
@@ -139,7 +139,7 @@ def test_the_helper_honours_a_base_passed_alone(world):
 
 def test_stale_block_directive_reads_main(world):
     from session_init import check_pin_stale_block_directive
-    from staleness import project_memory_root
+    from shared.project_scope import project_memory_root
 
     main, worktree = world
     _write_doc(main, _doc(
