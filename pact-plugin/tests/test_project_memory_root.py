@@ -105,6 +105,33 @@ def test_a5b_worktree_of_a_bare_repo_returns_input(tmp_path):
     assert root_or_input(worktree) == worktree
 
 
+@pytest.mark.parametrize("broken", [False, True], ids=["healthy", "head_removed"])
+def test_a5c_a_bare_repository_as_the_anchor_is_its_own_known_root(tmp_path, broken):
+    """A bare repository directory has no `.git` entry (it IS a git dir) and
+    no other checkout to defer to, so it is a KNOWN root equal to itself,
+    healthy or broken. A git failure there must not change that answer: the
+    git-failure rule exists to stop a write moving to the wrong checkout, and
+    there is none."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _git("init", "-q", ".", cwd=src)
+    (src / "README").write_text("seed\n")
+    _git("add", ".", cwd=src)
+    _git("commit", "-qm", "seed", cwd=src)
+    bare = tmp_path / "bare.git"
+    _git("clone", "-q", "--bare", str(src), str(bare), cwd=tmp_path)
+    if broken:
+        (bare / "HEAD").unlink()
+        failed = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=str(bare),
+            capture_output=True, text=True, timeout=30,
+            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        )
+        assert failed.returncode != 0, "FIXTURE INVALID: git still reads the repository"
+
+    assert project_scope.memory_root_of(bare) == (bare, None)
+
+
 def test_a6_inherited_git_dir_is_stripped(repo, monkeypatch):
     """An inherited GIT_DIR makes every directory report one repository; the
     helper's git calls run without the location variables."""
