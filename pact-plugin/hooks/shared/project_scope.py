@@ -646,6 +646,10 @@ def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
 
     The anchor path is part of the clause: several worktrees can be in play and
     the user needs to know which one.
+
+    Raises:
+        ValueError: `cause` is not one of the three unknown causes. "ok", None
+            or an unexpected value is a caller bug, never a sentence.
     """
     anchor = f"{project_dir}"
     if cause == ROOT_CAUSE_MISSING:
@@ -655,7 +659,27 @@ def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
             f"the project directory {anchor} exists but could not be verified "
             "as a checkout of a repository"
         )
-    return "git could not answer"
+    if cause == ROOT_CAUSE_UNANSWERABLE:
+        return "git could not answer"
+    raise ValueError(f"not an unknown-root cause: {cause!r}")
+
+
+def unknown_root_status(
+    subject: str,
+    cause: str,
+    anchor: str | os.PathLike[str],
+    consequence: str,
+) -> str:
+    """THE ONE TEMPLATE for a writer's skip line on an unknown root.
+
+    `subject` names what was skipped ("Project CLAUDE.md"), `consequence`
+    what that means for this invocation. The cause clause comes from
+    `unknown_root_reason`, so the same ValueError guards a known cause.
+    """
+    return (
+        f"{subject} skipped: {unknown_root_reason(cause, anchor)}, so the "
+        f"project memory target is unknown; {consequence}"
+    )
 
 
 def cwd_checkout_memory_root() -> Optional[Path]:
