@@ -810,7 +810,11 @@ def test_the_archive_reports_no_unknown_cause_when_none_is_identified(
     forged = _forged_gitfile(repo, tmp_path, "no-cause-archive")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
-    monkeypatch.setattr(project_scope, "unknown_root_cause", lambda pd: None)
+    # (None, None): the root observation says unknown while the cause says
+    # known -- the disagreement a reintroduced default text would fire on.
+    monkeypatch.setattr(
+        project_scope, "project_memory_root_and_cause", lambda pd: (None, None)
+    )
 
     try:
         archive_pin.resolve_claude_md()

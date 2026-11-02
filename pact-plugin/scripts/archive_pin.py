@@ -584,10 +584,9 @@ def resolve_claude_md():
         ROOT_CAUSE_MISSING,
         anchor_directory_is_missing,
         cwd_checkout_memory_root,
-        project_memory_root,
+        project_memory_root_and_cause,
         project_memory_root_or_none,
         record_resolution,
-        unknown_root_cause,
         unknown_root_reason,
     )
 
@@ -599,14 +598,17 @@ def resolve_claude_md():
     # it has its own record/fall-through rung below. An existing base that
     # cannot be identified still refuses -- probing on could archive another
     # repository's document.
-    cause = unknown_root_cause(anchor)
+    # ONE RESOLUTION: the root and the cause come from the same call, so a
+    # state change between a guard and a separate root lookup cannot let the
+    # archive proceed on a fail-safe input path.
+    resolved_root, cause = project_memory_root_and_cause(anchor)
     if cause is not None and cause != ROOT_CAUSE_MISSING:
         raise _Unevaluable(
             f"project memory root unknown: "
             f"{unknown_root_reason(cause, anchor)}, so the project CLAUDE.md "
             "cannot be identified; nothing was archived"
         )
-    memory_root = project_memory_root(anchor) if cause is None else None
+    memory_root = None if cause is not None else resolved_root
     # THE SYNC SITES' MODEL, in two steps. (1) The PROJECT-MEMORY root first:
     # a worktree session archives MAIN's document even when the worktree
     # carries its own copy (#1653). (2) When the root holds no document, the
