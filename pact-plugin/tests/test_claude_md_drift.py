@@ -870,7 +870,7 @@ _BASH_TRUE = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id
 def test_no_git_process_starts_once_the_base_is_cached(world, tmp_path):
     env, session_dir = _worktree_like(world)
     _hook(world, TRACK, _BASH_TRUE, env=env)
-    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"version": _BASE_CACHE_VERSION, "base": str(world.repo)}
+    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"version": _BASE_CACHE_VERSION, "base": str(world.repo), "enclosing": None}
     shim_env, log = _shim_git(env, tmp_path)
     _sh(world, _append_pin_script(12))
     assert "count cap" in (_context(_hook(world, TRACK, _BASH_TRUE, env=shim_env)) or "")
@@ -885,9 +885,36 @@ def test_a_cached_no_file_starts_no_git_process(world, tmp_path):
     _hook(world, TRACK, _BASH_TRUE, env=env)
     # The KNOWN root is cached even when it holds no file (#1653), so a file
     # MAIN gains later is picked up by the cached-base two-file check.
-    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"version": _BASE_CACHE_VERSION, "base": str(world.repo)}
+    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"version": _BASE_CACHE_VERSION, "base": str(world.repo), "enclosing": None}
     shim_env, log = _shim_git(env, tmp_path)
     _hook(world, TRACK, _BASH_TRUE, env=shim_env)
+    assert not log.exists()
+
+
+def test_a_main_subdirectory_watches_the_checkout_document_without_git(world, tmp_path):
+    """CLAUDE_PROJECT_DIR names a subdirectory of the main checkout holding no
+    document: the detector watches the checkout's document (the session
+    document's enclosing-checkout rung), and once the cache holds both
+    directories no git process starts. Red if the cache holds only the root
+    (the re-probe then needs git, or misses the checkout's document)."""
+    from shared.pact_context import project_slug
+
+    subdir = world.repo / "pkg"
+    subdir.mkdir()
+    session_dir = world.cfg / "pact-sessions" / project_slug(str(subdir)) / SID
+    session_dir.mkdir(parents=True)
+    (session_dir / "pact-session-context.json").write_text(
+        json.dumps({"session_id": SID, "project_dir": str(subdir)}), encoding="utf-8")
+    env = dict(world.env, CLAUDE_PROJECT_DIR=str(subdir))
+    assert world.claude_md.exists(), "FIXTURE INVALID: the checkout has no document"
+
+    _hook(world, TRACK, _BASH_TRUE, env=env)
+    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {
+        "version": _BASE_CACHE_VERSION, "base": str(subdir),
+        "enclosing": str(world.repo)}
+    shim_env, log = _shim_git(env, tmp_path)
+    _sh(world, _append_pin_script(12))
+    assert "count cap" in (_context(_hook(world, TRACK, _BASH_TRUE, env=shim_env)) or "")
     assert not log.exists()
 
 

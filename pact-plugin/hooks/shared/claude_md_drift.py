@@ -57,8 +57,10 @@ _BASE_CACHE = "claude-md-base.json"
 # resolver returned (including a worktree directory or None); v2 caches only
 # the PROJECT-MEMORY root. A v1 entry must be REBUILT, not accepted: a session
 # resumed after an upgrade would otherwise keep watching the worktree copy (or
-# nothing) while the writers update MAIN.
-_BASE_CACHE_VERSION = 2
+# nothing) while the writers update MAIN. v3 caches the root AND the main
+# checkout enclosing it (or null), the two directories the session document
+# resolver probes, so a cached answer is re-probed without git.
+_BASE_CACHE_VERSION = 3
 _LAST_SEEN_DIR = "claude-md-last-seen"
 _BASELINE = "claude-md-baseline.json"
 _RECORD_KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -343,40 +345,37 @@ def _write_baseline(session_dir: Path, base: Path, path: Path, digest: str,
                  "state": state})
 
 
+def _first_existing_document(bases: list[Path]) -> tuple[Path | None, Path | None]:
+    """The first canonical document under the first base that holds one, with
+    that base: the session document resolver's two rungs, without git."""
+    from shared.claude_md_manager import managed_document_paths
+
+    for base in bases:
+        for candidate in managed_document_paths(base):
+            if candidate.exists():
+                return candidate, base
+    return None, None
+
+
 def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
-    """The project CLAUDE.md and its base directory, the resolver's answer,
-    starting git at most once per session.
+    """The project CLAUDE.md and its base directory, the session document's
+    answer, starting git at most once per session.
 
-    #1653: the base is the PROJECT-MEMORY root, so a linked-worktree session
-    watches the MAIN checkout's file -- the document every writer targets --
-    and the reader's anchor is the writers' anchor (`CLAUDE_PROJECT_DIR`, or
-    the cwd when it is absent). Retargeting needs git, so the root is paid
-    only when the cache is being built; afterwards the cached base (already
-    the memory root) is used with the two-file check and starts no git. Within
-    one session the declaration is stable, so a changed CLAUDE_PROJECT_DIR is
-    picked up by the next session rather than mid-session. THE CACHE STORES
-    THE BASE, NOT A FILE ANSWER: the two-file check re-probes that base on
-    every call, so a document that appears later in the session is picked up.
-    "No document" is not cached separately -- there is nothing to cache it in,
-    and a cached base that later disappears simply probes to no file.
+    The document is the one `claude_md_manager.session_document()` names:
+    for a linked worktree the MAIN checkout's file, the one every writer
+    targets, and never the worktree's own copy. Resolving needs git, so it is
+    paid only when the cache is built. THE CACHE STORES DIRECTORIES, NOT A
+    FILE ANSWER: the root and the main checkout strictly enclosing it (null
+    when there is none), the two places that resolver probes. Every later
+    call re-probes them in order with no git, so a document that appears
+    later in the session is picked up. Within one session the declaration is
+    stable, so a changed CLAUDE_PROJECT_DIR is picked up by the next session.
 
-    THE RESOLVER'S FALL-THROUGH IS NEVER CONSULTED (#1653, Bugbot). Its git
-    and cwd rungs can return the WORKTREE copy when the memory root holds no
-    file -- including when the declared dir IS MAIN and the process sits in
-    the worktree, the shape the old `memory_root != project_dir` guard did not
-    cover. A known root with no file therefore answers "no file", and the base
-    is cached so a file MAIN gains later is picked up by the two-file check.
-
-    AN UNKNOWN MEMORY ROOT IS NOT PROBED AND NOT CACHED. `project_memory_root`
-    fails open to its input, so on a git failure the env rung would read and
-    then CACHE the worktree copy ('#1653 task #59); the cache outlives the
-    failure and leaves the detector watching the wrong file for the rest of
-    the session. This module writes no project memory -- it writes session
-    state -- so it is a reader, but the fail-open shape is the same one
-    removed everywhere else: answer "nothing" now, and let the next check,
-    when git answers, take the real base."""
-    from shared.project_scope import project_memory_root_or_none
-    from staleness import _find_existing_claude_md
+    AN UNKNOWN MEMORY ROOT IS NOT PROBED AND NOT CACHED. A transient git
+    failure would otherwise pin a guess for the whole session: answer
+    "nothing" now, and let the next check, when git answers, take the real
+    base."""
+    from shared.project_scope import enclosing_main_checkout, session_memory_root
 
     cache_path = session_dir / _BASE_CACHE
     cached = _read_json(cache_path)
@@ -385,29 +384,28 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
         and cached.get("version") == _BASE_CACHE_VERSION
         and "base" in cached
     ):
-        base = cached["base"]
-        if not isinstance(base, str):
+        base, enclosing = cached["base"], cached.get("enclosing")
+        if not isinstance(base, str) or not isinstance(enclosing, (str, type(None))):
             return None, None
-        found = _find_existing_claude_md(Path(base))
-        return (found, Path(base)) if found is not None else (None, None)
-    # A LEGACY/UNVERSIONED CACHE IS IGNORED, NOT ACCEPTED. It may hold a
-    # worktree directory or null; accepting it would leave a session resumed
-    # after an upgrade watching the worktree copy (or nothing) while the
-    # writers update MAIN. It is rebuilt from the memory root below.
+        return _first_existing_document(
+            [Path(base)] + ([Path(enclosing)] if enclosing else [])
+        )
+    # A LEGACY/UNVERSIONED CACHE IS IGNORED, NOT ACCEPTED. An older version
+    # may hold a worktree directory, null, or a directory with a different
+    # meaning; it is rebuilt from the session root below.
 
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    memory_root = project_memory_root_or_none(
-        Path(project_dir) if project_dir else Path.cwd()
-    )
-    if memory_root is None:
-        # UNKNOWN, and NOTHING IS CACHED: a transient failure here would
-        # otherwise pin the wrong file for the whole session.
+    session = session_memory_root()
+    if session.root is None:
         return None, None
-    found = _find_existing_claude_md(memory_root)
+    enclosing = enclosing_main_checkout(session.root)
     _write_json(
-        cache_path, {"version": _BASE_CACHE_VERSION, "base": str(memory_root)}
+        cache_path,
+        {"version": _BASE_CACHE_VERSION, "base": str(session.root),
+         "enclosing": str(enclosing) if enclosing is not None else None},
     )
-    return (found, memory_root) if found is not None else (None, None)
+    return _first_existing_document(
+        [session.root] + ([enclosing] if enclosing is not None else [])
+    )
 
 
 def _session_dir(frame: dict) -> Path | None:
