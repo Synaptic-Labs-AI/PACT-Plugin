@@ -290,7 +290,7 @@ def test_a_backtick_in_the_path_is_never_interpolated(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "name", ["line\nbreak", "bidi‮override", "para sep", "tab\there"]
+    "name", ["line\nbreak", "bidi\u202eoverride", "para\u2029sep", "tab\there"]
 )
 def test_an_unsafe_character_in_the_path_is_refused(tmp_path, name):
     from shared.claude_md_manager import ManagedDocument
