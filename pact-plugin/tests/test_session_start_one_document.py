@@ -105,6 +105,49 @@ def test_the_readers_see_the_document_step_3_just_created(repo, monkeypatch):
     assert "Pin slots: 0/" in context, context[-400:]
 
 
+def test_an_unknown_root_reads_no_predecessor(repo, monkeypatch):
+    """An unknown root has no document, so step 5a reads no previous
+    session: not from the worktree copy and not from anywhere else. The
+    worktree copy here names a real, valid session directory, so a read of it
+    would return that directory. Revert check: with 5a falling back to the
+    raw project dir, the spy records that directory and this goes red."""
+    from shared.paths import get_claude_config_dir
+
+    worktree = repo / ".worktrees" / "unknown-root"
+    _git("worktree", "add", "-q", str(worktree), "-b", "unknown-root", cwd=repo)
+    predecessor = get_claude_config_dir() / "pact-sessions" / "wt" / "prev-sid"
+    predecessor.mkdir(parents=True)
+    assert ensure_project_memory_md(worktree) is not None
+    copy = worktree / ".claude" / "CLAUDE.md"
+    copy.write_text(
+        copy.read_text(encoding="utf-8").replace(
+            "## Current Session\n",
+            f"## Current Session\n- Session dir: `{predecessor}`\n",
+        ),
+        encoding="utf-8",
+    )
+    # Control: the copy really names the predecessor to a reader.
+    assert session_init._extract_prev_session_dir(str(worktree)) == str(
+        predecessor
+    )
+
+    found = []
+    real = session_init._extract_prev_session_dir
+
+    def spy(*args, **kwargs):
+        result = real(*args, **kwargs)
+        found.append(result)
+        return result
+
+    monkeypatch.setattr(session_init, "_extract_prev_session_dir", spy)
+    monkeypatch.setenv("PATH", "")  # git unavailable: the root is unknown
+
+    _context, system_message = _start(monkeypatch, worktree)
+
+    assert "Project CLAUDE.md skipped" in system_message
+    assert all(result is None for result in found), found
+
+
 def test_a_subdirectory_with_its_own_document_keeps_it(repo, monkeypatch):
     """Control: the enclosing rung applies only when the subdirectory holds
     no document; its own document wins and the toplevel's is untouched."""

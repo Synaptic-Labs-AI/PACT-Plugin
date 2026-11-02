@@ -2278,10 +2278,13 @@ def main():
         # otherwise it reads back the just-written current session dir and
         # silently breaks cross-session resume (step 7) and paused/refreshed-
         # work detection (step 8).
+        #
+        # An UNKNOWN root has no document, so there is no predecessor to read:
+        # any file this start could name is the copy it cannot verify. Cross-
+        # session restore and resume detection do not run on such a start;
+        # the skip line above names the cause.
         prev_session_dir = (
-            _extract_prev_session_dir(doc=doc)
-            if doc is not None
-            else _extract_prev_session_dir(project_dir)
+            _extract_prev_session_dir(doc=doc) if doc is not None else None
         )
 
         if not session_id_was_missing:
