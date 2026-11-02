@@ -1274,6 +1274,8 @@ def session_memory_root() -> SessionRoot:
     may recover it, but ONLY when it verifies and its checkout CONTAINS the
     anchor. An UNVERIFIED root is never recovered: there the present answer
     contradicts the record, and a CORRUPT or UNRELATED record keeps the cause.
+    A recovered root whose canonical document is user-global is refused with
+    cause user_global, as `memory_root_of` refuses a classified one.
     """
     anchor, declared = session_anchor()
     if anchor is None:
@@ -1286,6 +1288,8 @@ def session_memory_root() -> SessionRoot:
             anchor, get_worktree_identity_from_session_record()
         )
         if status == RECORD_CONTAINED and recovered is not None:
+            if names_user_global_document(recovered):
+                return SessionRoot(anchor, declared, None, ROOT_CAUSE_USER_GLOBAL)
             return SessionRoot(anchor, declared, recovered, None)
     return SessionRoot(anchor, declared, root, cause)
 
