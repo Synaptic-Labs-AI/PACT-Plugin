@@ -427,6 +427,8 @@ characters). If a journal block fails with `Journal read-back failed`, read the
 last few lines of `{session_dir}/session-journal.jsonl`: if the expected event
 is there, the write landed, so do not write it again; otherwise re-run only that
 write and its read-back, once.
+Then run, in order, each write that follows it in the block, each with its
+read-back.
 
 The remaining skip outcomes take the same form. **One emit per fence** — do not
 combine them.

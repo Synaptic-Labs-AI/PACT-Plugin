@@ -3615,7 +3615,8 @@ _READBACK_RECOVERY = (
     "If a journal block fails with `Journal read-back failed`, read the last few "
     "lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, "
     "the write landed, so do not write it again; otherwise re-run only that write "
-    "and its read-back, once."
+    "and its read-back, once. Then run, in order, each write that follows it in "
+    "the block, each with its read-back."
 )
 
 
@@ -3623,7 +3624,4 @@ _READBACK_RECOVERY = (
 def test_each_journal_command_states_readback_recovery_once(filename):
     """Every file with a read-back tells the agent what to do when it fails, once."""
     text = " ".join((COMMANDS_DIR / filename).read_text(encoding="utf-8").split())
-    recovery = _READBACK_RECOVERY
-    if filename == "wrap-up.md":
-        recovery = recovery.replace("If a journal block fails", "If the block fails", 1)
-    assert text.count(recovery) == 1, f"{filename}: read-back recovery instruction count"
+    assert text.count(_READBACK_RECOVERY) == 1, f"{filename}: read-back recovery instruction count"

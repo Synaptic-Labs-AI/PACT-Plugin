@@ -106,7 +106,7 @@ python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <
 JSON
 ```
 
-> ⚠️ **Heredoc-stdin contract**: the writes use `--stdin <<'JSON' ... JSON` (quoted delimiter), so an apostrophe in a substituted value cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once.
+> ⚠️ **Heredoc-stdin contract**: the writes use `--stdin <<'JSON' ... JSON` (quoted delimiter), so an apostrophe in a substituted value cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
 
 **Event fields**:
 
