@@ -450,3 +450,99 @@ def test_a_removed_declaration_never_resolves_into_a_git_home(tmp_path, monkeypa
     legacy.write_text("# legacy\n", encoding="utf-8")
 
     assert stays_in_declared_project(home / "proj-gone", home, legacy) is False
+
+
+# ---------------------------------------------------------------------------
+# The containment guard when the HOME DIRECTORY CANNOT BE COMPUTED. Path.home()
+# raises. `get_claude_config_dir` reads the home before it reads
+# CLAUDE_CONFIG_DIR, so NEITHER global location can be computed, and "unable to
+# tell" reads as user-global: the removed-declaration branch refuses every
+# resolution, its own repository included. Fail-closed, so no write can reach a
+# global file. Each arm asserts the raising home was consulted, so none can
+# pass on a route that never reached the lookup; the control shows the same
+# layout is admitted when the home is computable.
+# ---------------------------------------------------------------------------
+
+
+class _HomeUnknown:
+    def __init__(self, tmp_path, monkeypatch):
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                    "GIT_CEILING_DIRECTORIES"):
+            monkeypatch.delenv(key, raising=False)
+        self.tmp_path = tmp_path
+        self.monkeypatch = monkeypatch
+        self.config = self.repo("cfg")
+        (self.config / "CLAUDE.md").write_text(_global_text(), encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.config))
+        self.calls = 0
+
+    def repo(self, name, document=False):
+        repo = self.tmp_path / name
+        repo.mkdir()
+        _git("init", "-q", ".", cwd=repo)
+        _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=repo)
+        if document:
+            (repo / ".claude").mkdir()
+            (repo / ".claude" / "CLAUDE.md").write_text("# p\n", encoding="utf-8")
+        return repo
+
+    def judge(self, declared, resolved, document):
+        assert not declared.exists()
+
+        def unknown_home(*_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("Could not determine home directory.")
+
+        self.monkeypatch.setattr(Path, "home", unknown_home)
+        verdict = stays_in_declared_project(declared, resolved, document)
+        assert self.calls >= 1, "the guard never consulted the home directory"
+        return verdict
+
+
+def test_a_removed_declaration_in_its_own_repository_is_admitted_when_home_is_known(
+    tmp_path, monkeypatch
+):
+    """Control for the three arms below: with a computable home this layout
+    is admitted, so their refusals come from the unknown home."""
+    world = _HomeUnknown(tmp_path, monkeypatch)
+    repo = world.repo("repo", document=True)
+
+    assert stays_in_declared_project(
+        repo / "gone", repo, repo / ".claude" / "CLAUDE.md"
+    ) is True
+
+
+def test_home_unknown_refuses_a_removed_declaration_in_its_own_repository(
+    tmp_path, monkeypatch
+):
+    """Red if an unknown home lets the same-repository rules admit it, which
+    happens when the config root is computed without the home."""
+    world = _HomeUnknown(tmp_path, monkeypatch)
+    repo = world.repo("repo", document=True)
+
+    verdict = world.judge(repo / "gone", repo, repo / ".claude" / "CLAUDE.md")
+
+    assert verdict is False
+
+
+def test_home_unknown_refuses_a_removed_declaration_landing_in_another_repository(
+    tmp_path, monkeypatch
+):
+    world = _HomeUnknown(tmp_path, monkeypatch)
+    repo = world.repo("repo")
+    other = world.repo("other", document=True)
+
+    verdict = world.judge(repo / "gone", other, other / ".claude" / "CLAUDE.md")
+
+    assert verdict is False
+
+
+def test_home_unknown_refuses_the_config_roots_global_file(tmp_path, monkeypatch):
+    """The config root is a git checkout and a declaration removed inside it
+    resolves to its CLAUDE.md, which every session loads."""
+    world = _HomeUnknown(tmp_path, monkeypatch)
+    config = world.config
+
+    verdict = world.judge(config / "gone", config, config / "CLAUDE.md")
+
+    assert verdict is False
