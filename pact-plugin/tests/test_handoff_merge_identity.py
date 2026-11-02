@@ -537,6 +537,26 @@ class TestMixedOldFormatEvent:
         assert outcome.state == OLD_FORMAT_OWNED
         assert outcome.team == "session-old"
 
+    @pytest.mark.parametrize("owner", [None, "   "])
+    def test_empty_owner_candidate_is_not_mixed_and_is_kept(self, owner):
+        """DISCRIMINATING (F2): the emit substitutes the platform teammate
+        name for an empty owner, and the record cannot reproduce it. A content
+        match against such a file must NOT be read as a foreign identity —
+        before the fix this returned MIXED and the event was discarded."""
+        task = {
+            "id": "57",
+            "subject": "NEW subject",
+            "metadata": {"handoff": dict(self.EVENT_HANDOFF)},
+        }
+        if owner is not None:
+            task["owner"] = owner
+        outcome = self._classify(
+            "review-backend", "NEW subject",
+            [{"team": "session-old", "task": task}],
+        )
+        assert outcome.state == OLD_FORMAT_UNMATCHED
+        assert old_format_destination(outcome, "session-this") == "this"
+
     def test_non_dict_event_handoff_is_unmatched(self):
         outcome = mixed_old_format_event(
             "57",
@@ -713,6 +733,14 @@ class TestHarvestRuleProse:
         assert from_block.count("report(outcome.report)") == 0
         assert else_block.count("report(outcome.report)") == 1
         assert "task_id, e.get(\"agent\", \"\")" in SKILL_TEXT
+
+    def test_report_lines_use_the_shared_sanitiser(self):
+        """F1: the skill's hand-written report sites must interpolate through
+        `report_safe`. The helper-produced strings are already sanitised; the
+        asymmetry this pin closes is the four sites the skill composes
+        itself."""
+        assert "report_safe" in SKILL_TEXT
+        assert SKILL_TEXT.count("report_safe(") >= 4
 
     def test_empty_membership_rule_is_stated(self):
         """The rule text must define EMPTY as membership, not falsiness: 0 and

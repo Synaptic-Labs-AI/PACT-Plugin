@@ -146,7 +146,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 1. **Subject term.** When the record subject is missing, empty, or whitespace-only, substitute the literal `(no subject)` before hashing. The two emit paths both apply this.
 2. **Agent term.** When the record owner is missing, empty, or whitespace-only, the `TaskCompleted` emit path hashes the platform teammate name for that task in place of the owner. The task record does not carry that name, so this one is NOT reproducible from the record. Report such a task through the report-message rule below and do not read it as a drain.
 
-**HOW TO CALL THE TWO NAMES THIS STEP USES.** The step above names `occupant_hash` and the pseudocode below names `latest_by_ts_then_journal_order`. Neither is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement either. Use these.**
+**HOW TO CALL THE NAMES THIS STEP USES.** The step above names `occupant_hash` and `report_safe`, and the pseudocode below names `latest_by_ts_then_journal_order`. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.**
 
 1. **`occupant_hash`**, the SHARED identity hash. This is the one runnable copy in this file. Step 3.1 uses the same command and points here.
 
@@ -156,7 +156,15 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
    🔴 **THE AGENT AND THE SUBJECT MUST CROSS AS DATA, NEVER AS COMMAND TEXT.** Pass them as separate ARGV entries read through `sys.argv`, or carry them in a JSON payload on STDIN to a command whose text is a FIXED LITERAL — and never interpolate either value into the `-c` string or into an unquoted heredoc body. The author of the task writes its subject, so a subject folded into command text is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the DATA BOUNDARY is what makes it safe, and rewriting the command is enough to remove it. The `occupant_hash` command above uses ARGV; the merge helper uses the STDIN form because its payload carries the two HANDOFF mappings.
 
-2. **`latest_by_ts_then_journal_order`**, defined HERE because it is defined at no site in the repo. It takes the events of ONE group, in journal order, and returns the authoritative one:
+2. **`report_safe`**, the SHARED report sanitiser. Every `report(...)` value that comes from the journal, the task file or the context is interpolated through it:
+
+   ```bash
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import report_safe; print(report_safe(sys.argv[1]))" "$VALUE"
+   ```
+
+   It strips control characters and every line boundary (so a crafted team name, field name or task id cannot forge a report line) and caps the length. The helper-produced strings — `outcome.report` and the union's `reports` — are already sanitised; this applies to the values THIS step interpolates.
+
+3. **`latest_by_ts_then_journal_order`**, defined HERE because it is defined at no site in the repo. It takes the events of ONE group, in journal order, and returns the authoritative one:
 
    ```python
    def latest_by_ts_then_journal_order(events):
@@ -248,8 +256,8 @@ for task_id in unprocessed:
         # Routing everything here is SAFE: named_store_candidates then reads
         # only the from-stores, and read_task_json with an empty team returns
         # {} which is skipped.
-        report(f"handoff team identity underivable for task {task_id}: no "
-               f"Task list: directory in context")
+        report(f"handoff team identity underivable for task "
+               f"{report_safe(task_id)}: no Task list: directory in context")
         this_team_events, from_events, foreign, old_format = [], {}, [], list(matches)
     else:
         this_team_events, from_events, foreign, old_format = [], {}, [], []
@@ -264,8 +272,9 @@ for task_id in unprocessed:
             else:
                 foreign.append(e)
     for e in foreign:
-        report(f"handoff identity mismatch for task {task_id}: journal event "
-               f"names team {e.get('team')}; this store is team {this_team}")
+        report(f"handoff identity mismatch for task {report_safe(task_id)}: "
+               f"journal event names team {report_safe(e.get('team'))}; this "
+               f"store is team {report_safe(this_team)}")
     # OLD-FORMAT events carry no `team`; content decides them against the
     # NAMED stores only. The classifier names a MIXED event's source store,
     # an OWNED event's owner, and leaves the rest UNMATCHED (this team's by
@@ -352,13 +361,14 @@ for task_id in unprocessed:
             handoff = merged
         elif not task:
             report(f"handoff divergence check unavailable for task "
-                   f"{task_id}: task file absent")
+                   f"{report_safe(task_id)}: task file absent")
         else:
             # The task file is PRESENT and belongs to at most one group.
             # This is an identity mismatch, NOT a drain. Do not reuse the
             # drain wording for it.
-            report(f"handoff identity mismatch for task {task_id}: task "
-                   f"file present, no event group carries its identity")
+            report(f"handoff identity mismatch for task "
+                   f"{report_safe(task_id)}: task file present, no event "
+                   f"group carries its identity")
         process(handoff)
 ```
 

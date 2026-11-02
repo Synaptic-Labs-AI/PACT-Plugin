@@ -163,7 +163,8 @@ class TestEmitTeamUncertaintyGuard:
     }
 
     def _run(self, tmp_path, monkeypatch, capsys, payload_team, payload_subject,
-             context_team, create_payload_store=False):
+             context_team, create_payload_store=False,
+             record_subject="OLD subject"):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         if create_payload_store:
@@ -179,9 +180,14 @@ class TestEmitTeamUncertaintyGuard:
             "team_name": payload_team,
             "task_subject": payload_subject,
         }
+        task = dict(self.OLD_TASK)
+        if record_subject is None:
+            task.pop("subject", None)
+        else:
+            task["subject"] = record_subject
         code = _run_main(
             stdin_payload=payload,
-            task_data=dict(self.OLD_TASK),
+            task_data=task,
             append_calls=calls,
             context_team_name=context_team,
         )
@@ -302,6 +308,55 @@ class TestEmitTeamUncertaintyGuard:
         assert code == 0
         assert len(calls) == 1
         assert calls[0]["team"] == "session-old"
+
+    def test_payload_team_differing_only_by_whitespace_emits(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F3a: task_dir_for strips surrounding whitespace before joining, so
+        this payload names the SAME store as the resolver. Raw-string
+        inequality suppressed here; store identity must not."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live ",
+            payload_subject="LIVE subject",
+            context_team="session-live",
+        )
+        assert code == 0
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize("payload_subject", [None, "", "   "])
+    def test_missing_payload_subject_does_not_manufacture_signal_two(
+        self, tmp_path, monkeypatch, capsys, payload_subject
+    ):
+        """F3b (payload side): a payload with no subject normalises to the
+        sentinel on BOTH sides and must not count as a disagreement — it would
+        suppress the very event the sentinel exists to preserve."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live",
+            payload_subject=payload_subject,
+            context_team="session-old",
+            create_payload_store=True,
+        )
+        assert code == 0
+        assert len(calls) == 1
+
+    def test_absent_record_subject_does_not_manufacture_signal_two(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F3b (record side, the symmetric case): an absent RECORD subject
+        normalises to the sentinel too, so it cannot manufacture a
+        disagreement with a genuine payload subject."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live",
+            payload_subject="LIVE subject",
+            context_team="session-old",
+            create_payload_store=True,
+            record_subject=None,
+        )
+        assert code == 0
+        assert len(calls) == 1
 
     def test_agreeing_teams_with_differing_subjects_emits(
         self, tmp_path, monkeypatch, capsys

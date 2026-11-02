@@ -299,6 +299,9 @@ def handoff_content_key(handoff: object) -> str:
     return hashlib.sha256(canonical).hexdigest()[:_CONTENT_HASH_LEN]
 
 
+NO_SUBJECT_SENTINEL = "(no subject)"
+
+
 def emit_side_subject(subject: object) -> str:
     """Both emit paths' sentinel substitution. "" / whitespace -> "(no subject)".
 
@@ -313,7 +316,7 @@ def emit_side_subject(subject: object) -> str:
     The value is returned UNCHANGED when present (not str-coerced), matching
     both emit paths: occupant_hash stringifies it in its own f-string.
     """
-    return subject if (subject and str(subject).strip()) else "(no subject)"
+    return subject if (subject and str(subject).strip()) else NO_SUBJECT_SENTINEL
 
 
 def disk_identity(owner: str, subject: object) -> str:
@@ -658,9 +661,15 @@ def mixed_old_format_event(
         if handoff_content_key(task_handoff) != event_content:
             continue
         owner = task.get("owner")
-        file_identity = disk_identity(
-            owner if isinstance(owner, str) else "", task.get("subject")
-        )
+        if not isinstance(owner, str) or not owner.strip():
+            # The emit substitutes the PLATFORM TEAMMATE NAME for an empty
+            # owner, and the task record cannot reproduce that name. Comparing
+            # identities here would MANUFACTURE a mismatch and report this
+            # team's own event as MIXED, discarding content that was never
+            # foreign. Skipping the candidate leaves the event UNMATCHED, so
+            # it is kept as this team's.
+            continue
+        file_identity = disk_identity(owner, task.get("subject"))
         if file_identity == event_identity:
             return OldFormatOutcome(OLD_FORMAT_OWNED, team=team)
         content_matches.append((team, task))

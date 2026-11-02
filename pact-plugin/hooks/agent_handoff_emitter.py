@@ -67,10 +67,13 @@ Output: {"suppressOutput": true} on every path; exit 0.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import shared.pact_context as pact_context
 from shared.agent_handoff_marker import (
+    NO_SUBJECT_SENTINEL,
+    emit_side_subject,
     handoff_already_emitted,
     handoff_content_key,
     handoff_unclaim,
@@ -297,8 +300,10 @@ def main() -> None:
         # session's own team": the persisted context is what goes stale in
         # this failure, and the resolver cannot see the platform's claim.
         #   1. the payload's stdin team_name names an EXISTING task store (the
-        #      LIVE-CLAIM GATE), the resolved store name is non-empty, and
-        #      the two DIFFER;
+        #      LIVE-CLAIM GATE), the resolved store name is non-empty, and the
+        #      two address DIFFERENT stores — compared by STORE IDENTITY, not
+        #      by the raw strings, because task_dir_for strips surrounding
+        #      whitespace before joining and two spellings can name one store;
         #   2. the resolved store's record carries a non-empty subject that
         #      DIFFERS from the payload's task_subject.
         # Both together prove the content read (owner, handoff) belongs to a
@@ -318,23 +323,48 @@ def main() -> None:
         # false-suppression mode — and that trade is deliberate.
         #
         # The subject comparison is what stops a stale stdin value from
-        # suppressing a legitimate event, and the team comparison is what
-        # stops a re-scoped subject from doing the same. b2 is deliberately
-        # excluded: it has no independent platform claim and its content is
-        # internally consistent.
+        # suppressing a legitimate event, and the store comparison is what
+        # stops a re-scoped subject from doing the same. Signal 2 applies ONLY
+        # when the payload actually carried a subject: task_subject is the
+        # emitter's own sentinel when it did not, and a sentinel-vs-record
+        # comparison would manufacture the disagreement and suppress the very
+        # event the sentinel exists to preserve. b2 is deliberately excluded:
+        # it has no independent platform claim and its content is internally
+        # consistent.
         payload_team = str(input_data.get("team_name") or "")
         resolved_team = resolved_task_dir.name if resolved_task_dir else ""
         # task_dir_for validates and anchors the caller-supplied name; it
         # makes no existence claim, so the live-claim test is the is_dir().
         payload_store = task_dir_for(payload_team) if payload_team else None
         payload_team_is_live = bool(payload_store and payload_store.is_dir())
+        # Compare STORE IDENTITY, not the raw names: task_dir_for strips
+        # surrounding whitespace before joining, so "team " and "team" address
+        # one store and must not count as a difference.
+        same_store = False
+        if payload_store is not None and resolved_task_dir is not None:
+            try:
+                same_store = os.path.samefile(payload_store, resolved_task_dir)
+            except OSError:
+                same_store = False
         record_subject = task_data.get("subject")
+        # Signal 2 normalises BOTH sides through the SAME substitution, so a
+        # missing subject on EITHER side is the sentinel and cannot manufacture
+        # a disagreement. It fires only when both values are genuine (not the
+        # sentinel) and differ: a payload with no subject, or a record whose
+        # subject is absent, must not suppress the event the sentinel exists
+        # to preserve.
+        record_subject_norm = emit_side_subject(record_subject)
+        payload_subject_norm = emit_side_subject(raw_task_subject)
+        subjects_differ = (
+            record_subject_norm != NO_SUBJECT_SENTINEL
+            and payload_subject_norm != NO_SUBJECT_SENTINEL
+            and record_subject_norm != payload_subject_norm
+        )
         if (
             payload_team_is_live
             and resolved_team
-            and payload_team != resolved_team
-            and isinstance(record_subject, str) and record_subject.strip()
-            and record_subject != task_subject
+            and not same_store
+            and subjects_differ
         ):
             print(
                 f"agent_handoff_emitter: resolved store "
