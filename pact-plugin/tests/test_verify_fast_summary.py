@@ -249,6 +249,34 @@ def test_an_add_back_selection_is_accepted(tmp_path, rig):
     assert "select_all=None" in proc.stdout
 
 
+def test_the_ordinary_selection_is_accepted(tmp_path, rig):
+    """Third B2 arm: the everyday path — exclusions applied, no add-backs.
+
+    The other controls are SELECT_ALL (no exclusions applied) and an
+    add-back (>0). This pins the shape between them: a changed path with no
+    selection effect, the 24 exclusions applied, added_back == 0.
+    """
+    root, plugin, manifest = rig
+    base = _git(root, "rev-parse", "HEAD")
+    (root / "README.md").write_text("docs\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "change a non-plugin file")
+    head = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    expected = [
+        path for path in discovered
+        if not path.startswith("tests/test_slow_")
+    ]
+    summary, canary, _ = _artifacts(
+        root, plugin, manifest, base_sha=base, head_sha=head,
+        expected_files=expected, selection_status="ok",
+        select_all_reason=None, excluded=24, added_back=0)
+    proc = _run(summary, canary, base, root, manifest)
+    assert proc.returncode == 0, proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+    assert "select_all=None" in proc.stdout
+
+
 def test_a_decorated_summary_is_accepted(tmp_path, rig):
     """The CI run form (`-ra`, no `-q`) is `=`-decorated."""
     root, plugin, manifest = rig

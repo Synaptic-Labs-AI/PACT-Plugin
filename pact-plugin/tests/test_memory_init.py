@@ -637,8 +637,8 @@ class TestDependencyDriftIsDetectable:
                pinned fast runner path. In a profiled job (exactly one
                (workflow path, job id) pair per profile) the step must match
                one of that profile's pinned forms; everywhere else a pytest
-               step must match TEST_CMD or the generic whole-file ignore
-               arm, and the fast runner is not allowed at all;
+               step must be EXACTLY TEST_CMD, and the fast runner is not
+               allowed at all;
           (iii) no verify step and no test step carries `env:` or
                `shell:`, and no verify step carries `working-directory:`
                (VERIFY_CMD names the script relative to the repo root).
@@ -708,8 +708,7 @@ class TestDependencyDriftIsDetectable:
                         elif not self._GENERIC_ALLOWED.fullmatch(run.strip()):
                             problems.append(
                                 f"{where} step {n}: a pytest step must run "
-                                f"exactly `{self.TEST_CMD}` (or the generic "
-                                f"whole-file ignore form), not "
+                                f"exactly `{self.TEST_CMD}`, not "
                                 f"{run.strip()!r}")
                     if is_test and (n == 0 or runs[n - 1].strip() != self.VERIFY_CMD):
                         problems.append(
