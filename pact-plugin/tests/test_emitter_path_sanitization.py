@@ -515,7 +515,7 @@ class TestPathSanitization:
             # WORST-case form is marker creation OUTSIDE any team's
             # scope. Guard must prevent all three escape paths:
             home_root_marker = (
-                tmp_path / ".claude" / ".agent_handoff_emitted"
+                Path.home() / ".claude" / ".agent_handoff_emitted"
             )
             assert not home_root_marker.exists(), (
                 f"home-root pollution detected: degenerate team_name "
@@ -628,7 +628,7 @@ class TestPathSanitization:
                 f"team_name={raw_team_name!r}) must emit via #24 guard."
             )
             # Neither home-root nor teams-root pollution.
-            home_root_marker = tmp_path / ".claude" / ".agent_handoff_emitted"
+            home_root_marker = Path.home() / ".claude" / ".agent_handoff_emitted"
             teams_root_marker = (
                 Path.home() / ".claude" / "teams" / ".agent_handoff_emitted"
             )
