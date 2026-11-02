@@ -92,7 +92,13 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_pinned_section_parser_migration.py",
     "tests/test_project_dir_resolution.py",
     "tests/test_sync_result_contract.py",
+    # classifier input data: path-mutation sources it parses, never runs
+    "tests/test_fast_suite_selection.py",
 }
+
+# Keep-set files whose mutation tokens are DATA only: they may carry the
+# tokens in strings, but no real mutation node at any level.
+_DATA_ONLY = {"tests/test_fast_suite_selection.py"}
 
 # Sanctioned path roots, mirroring the two conftests: tests/conftest.py owns
 # tests/, hooks/, skills/pact-memory/, skills/pact-memory/scripts/,
@@ -251,6 +257,28 @@ def test_no_insert_of_any_form_outside_keep_set():
         "and subprocess files are a FIXED set; adding one means updating "
         "this pin deliberately: " + ", ".join(violations)
     )
+
+
+def test_data_only_carriers_mutate_nothing():
+    """A data-only keep-set entry exempts strings, not code: a real insert,
+    append, extend, slice-assign or += on sys.path, at any level, still
+    fails here."""
+    assert _DATA_ONLY <= _KEEP_SET
+    real = []
+    for rel in sorted(_DATA_ONLY):
+        tree = ast.parse((PLUGIN_ROOT / rel).read_text(encoding="utf-8"))
+        real += [f"{rel}:{node.lineno}" for node in ast.walk(tree)
+                 if _is_path_mutation(node)]
+    assert not real, "real path mutation in a data-only carrier: " + ", ".join(real)
+
+
+def test_the_data_only_check_sees_a_function_level_insert():
+    """Pins the arm above: its matcher flags a real function-level insert
+    the module-level arm cannot see."""
+    # Concatenated, like _STR_TOKENS, so this file carries no needle itself.
+    tree = ast.parse("import sys\ndef f():\n    sys.path" + ".insert(0, 'x')\n")
+    assert [node.lineno for node in ast.walk(tree)
+            if _is_path_mutation(node)] == [3]
 
 
 def test_negative_fixture_flags_every_matcher_leg():

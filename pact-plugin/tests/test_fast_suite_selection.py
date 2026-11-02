@@ -1592,6 +1592,12 @@ class TestEveryAllowlistIsAProofObligation:
         ("import pytest\ndef test_x(p):\n"
          "    pytest.MonkeyPatch.context().setenv('HOME', p)\n",
          "injects an unproven value into monkeypatch.setenv"),
+        ("import pytest\nMP = pytest.MonkeyPatch()\ndef test_x(p):\n"
+         "    MP.setenv('HOME', p)\n",
+         "injects an unproven value into monkeypatch.setenv"),
+        ("import pytest\nCTX = pytest.MonkeyPatch.context()\ndef test_x(p):\n"
+         "    with CTX as mp:\n        mp.setenv('HOME', p)\n",
+         "injects an unproven value into monkeypatch.setenv"),
         ("from pathlib import Path\ndef test_x(p):\n"
          "    return vars(Path)['read_text'](p)\n", "namespace of an imported name"),
         ("import types\ndef test_x():\n"

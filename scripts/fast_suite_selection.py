@@ -2171,17 +2171,23 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
         base = root_name(func.value)
         if isinstance(base, ast.Name) and base.id == "monkeypatch":
             return True
-        if isinstance(base, ast.Call) and (canonical(base.func) or "").endswith(
-                ("MonkeyPatch.context", "MonkeyPatch")):
-            return True  # pytest.MonkeyPatch().setenv(...) inline
-        if isinstance(base, ast.Name):
-            scope = scope_of.get(id(func), tree)
-            for value in [*bindings_of(scope).get(base.id, ()),
-                          *bindings_of(module_scope).get(base.id, ())]:
-                if value is not None and isinstance(value, ast.Call) and (
-                        (canonical(value.func) or "").endswith(
-                            ("MonkeyPatch.context", "MonkeyPatch"))):
-                    return True
+        return monkeypatch_value(base, scope_of.get(id(func), tree))
+
+    def monkeypatch_value(value: ast.AST | None, scope: ast.AST,
+                          depth: int = 0) -> bool:
+        """A pytest.MonkeyPatch() or MonkeyPatch.context() call, or a name
+        bound to one (in the scope or the module), followed through
+        `with CTX as mp` and plain rebinding."""
+        if value is None or depth > 4:
+            return False
+        if isinstance(value, ast.Call):
+            return (canonical(value.func) or "").endswith(
+                ("MonkeyPatch.context", "MonkeyPatch"))
+        if isinstance(value, ast.Name):
+            return any(
+                monkeypatch_value(bound, scope, depth + 1)
+                for bound in [*bindings_of(scope).get(value.id, ()),
+                              *bindings_of(module_scope).get(value.id, ())])
         return False
 
     def injection_site(node: ast.Call) -> tuple[list[ast.AST], str,
