@@ -65,12 +65,12 @@ instrument alarm rather than a finding.
 
 SAFETY NOTE FOR ANYONE EDITING THIS FILE. Read this before adding a test.
 
-`staleness._resolve_project_claude_md_with_base` returns on
-`CLAUDE_PROJECT_DIR` ONLY when a file EXISTS there. When the fixture is
-EMPTY it FALLS THROUGH to the parent of `git rev-parse --git-common-dir`,
-and a worktree shares the main checkout's common dir -- so a subprocess whose
-working directory sits inside the repo resolves the DEVELOPER'S OWN
-`CLAUDE.md`, which is gitignored and unrecoverable. The empty fixture is the
+The writer resolves `claude_md_manager.session_document()`. When the
+fixture directory holds no document, that resolver's second rung probes the
+main checkout ENCLOSING the directory, and a missing or unset
+`CLAUDE_PROJECT_DIR` makes the anchor the working directory -- so a
+subprocess whose fixture or working directory sits inside the repo resolves
+the DEVELOPER'S OWN `CLAUDE.md`, which is gitignored and unrecoverable. The empty fixture is the
 commonest shape in a no-op test, so this fires exactly where it is least
 expected. Pinning the environment variable alone does NOT close it.
 

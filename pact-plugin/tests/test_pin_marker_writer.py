@@ -1504,7 +1504,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         the collision label now means a complete pair off the writer's rows.
         """
         import pin_marker_writer
-        from staleness import _resolve_project_claude_md_with_base
+        from shared.claude_md_manager import session_document
 
         original = build_claude_md(
             working=(
@@ -1513,8 +1513,8 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         )
         assert START_LINE in original, "FIXTURE INVALID: no own-line copy"
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        resolved, _base = _resolve_project_claude_md_with_base()
-        assert resolved == tmp_path / "CLAUDE.md", (
+        _session, doc = session_document()
+        assert doc is not None and doc.path == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "
             "real CLAUDE.md"
         )
@@ -1532,7 +1532,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         """
         import pin_marker_writer
         import shared.pin_markers as pin_markers
-        from staleness import _resolve_project_claude_md_with_base
+        from shared.claude_md_manager import session_document
 
         original = build_claude_md()
         assert isinstance(plan_insertion(original), Insertion), (
@@ -1544,8 +1544,8 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
 
         monkeypatch.setattr(pin_markers, "apply_insertion", broken_assembly)
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        resolved, _base = _resolve_project_claude_md_with_base()
-        assert resolved == tmp_path / "CLAUDE.md", (
+        _session, doc = session_document()
+        assert doc is not None and doc.path == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "
             "real CLAUDE.md"
         )
@@ -2198,10 +2198,11 @@ def test_b12b_a_fallthrough_target_outside_the_memory_root_is_refused(
 ):
     """Bugbot: a first-rung miss must not fall through to the worktree.
 
-    MAIN has NO CLAUDE.md, the worktree has one. The resolver's git/cwd rungs
-    return the WORKTREE file, so without the containment check the marker
-    pair lands there -- the committable worktree write this change exists to
-    stop. The outcome must be a no-op and the worktree file byte-identical.
+    MAIN has NO CLAUDE.md, the worktree has one. The session's managed
+    document is MAIN's create target, which does not exist, so the writer
+    reports `noop_no_file` and the worktree file stays byte-identical. Restore
+    a resolver rung that reaches the worktree copy and this goes red: the
+    outcome becomes `written` and the worktree copy gains the marker pair.
     """
     import pin_marker_writer
     from shared.pin_markers import plan_insertion, Insertion
@@ -2219,7 +2220,7 @@ def test_b12b_a_fallthrough_target_outside_the_memory_root_is_refused(
 
     outcome = pin_marker_writer._plan_and_write()
 
-    assert outcome == "noop_not_the_managed_document", (
+    assert outcome == "noop_no_file", (
         f"the fall-through target was not refused: {outcome}"
     )
     assert worktree_md.read_text(encoding="utf-8") == original, (
@@ -2233,9 +2234,9 @@ def test_b12b_a_fallthrough_target_outside_the_memory_root_is_refused(
 def test_b12c_a_nested_worktree_target_is_refused(tmp_path, monkeypatch, env_var):
     """PACT's own layout nests the worktree INSIDE the memory root.
 
-    Ancestor containment passes there, so the writer must decline by document
-    identity -- both with CLAUDE_PROJECT_DIR declared and with it absent
-    (#1653, security lane).
+    Ancestor containment passes there, so only the resolver's document rule
+    keeps the worktree copy out: main holds no document, so the writer reports
+    `noop_no_file` both with CLAUDE_PROJECT_DIR declared and with it absent.
     """
     import pin_marker_writer
 
@@ -2255,7 +2256,7 @@ def test_b12c_a_nested_worktree_target_is_refused(tmp_path, monkeypatch, env_var
 
     outcome = pin_marker_writer._plan_and_write()
 
-    assert outcome == "noop_not_the_managed_document", (
+    assert outcome == "noop_no_file", (
         f"the nested fall-through target was not refused: {outcome}"
     )
     assert worktree_md.read_text(encoding="utf-8") == original, (
