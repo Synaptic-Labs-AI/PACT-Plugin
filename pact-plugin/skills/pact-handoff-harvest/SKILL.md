@@ -82,7 +82,7 @@ You have several sources for finding completed agent tasks. Sources 1 and 2 find
               --session-dir "$SESSION_DIR" --type agent_handoff)
    ```
 
-   `read` prints a **JSON ARRAY** to stdout (`[ {...}, {...} ]`), NOT one JSON object per line. So parse the whole stdout once — `json.loads(EVENTS)` → a list of event dicts — then iterate the list (do **not** iterate line-by-line). Each event is `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. **Deduplicate**: extract unique task_ids only.
+   `read` prints a **JSON ARRAY** to stdout (`[ {...}, {...} ]`), NOT one JSON object per line. So parse the whole stdout once — `json.loads(EVENTS)` → a list of event dicts — then iterate the list (do **not** iterate line-by-line). Each event is `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "team": "<task-store name>", "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. `team` names the task-store directory the emitting path read its task file from. It is ABSENT on an event written before that field existed; such an event is OLD-FORMAT, and the SELECTION rule below decides it. **Deduplicate**: extract unique task_ids only.
 2. **`TaskList`** (supplementary): Read `TaskList` for completed tasks owned by agents. Useful as a cross-reference and for catching tasks where the completion hook didn't fire. Note: the platform garbage-collects older task files during long sessions, so `TaskList` may be incomplete.
 3. **Task-file metadata census** (required for coverage): list the team's task files under the task-list directory named in your context (`Task list: <abs>`) and read the **metadata key set** of every completed task. A task is in scope when it carries ANY agent-authored key — `handoff`, `handoff_amendment`, `handoff_addendum`, `teachback_submit`, `post_completion_verification`, `audit_summary`, `audit_summary_authored`, or any key not on this list. **Enumerate the keys each task carries; never test for one key.** A task whose content sits only in a non-`handoff` key emits no `agent_handoff` event, so sources 1 and 2 cannot see it — resolving `handoff` alone finds nothing on that task and reports success. An auditor carries its findings in `audit_summary`, mirrored to `audit_summary_authored`, and its task carries no `handoff` key at all, so a census that resolves `handoff` reports an auditor as having produced nothing.
 
@@ -108,12 +108,14 @@ For each discovered task, read the HANDOFF from the two copies and combine them.
 
 **SELECTION, because `agent_handoff` is a multi-event family.** Do not take the first match. The first match is the FIRST emit, which is the superseded copy. Use the rule Step 3.1 uses for snapshots:
 
-1. Filter the `agent_handoff` events to the matching `task_id`.
-2. Group the match by the `(agent, task_subject)` identity the event carries. Compute that identity with the shared `occupant_hash` function and not with a local reimplementation. An `agent_handoff` event carries no `occupant` field, so compute the identity from the event's own fields. The platform reuses task_ids across arcs, and a reused task_id carries one identity for each arc. When the group count is more than one, process each group as a distinct work unit. Do not pick one group.
+1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: run Step 2 and Step 8 for it against its own `## team={from}` section and THAT team's task store, and never union it with this team's task file. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory cannot be read, the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
+2. Group the match by the `(agent, task_subject)` identity the event carries. Compute that identity with the shared `occupant_hash` function and not with a local reimplementation. An `agent_handoff` event carries no `occupant` field, so compute the identity from the event's own fields. The platform reuses task_ids across arcs, and a reused task_id carries one identity for each arc. When the group count is more than one, process each group as a distinct work unit. Do not pick one group. **DO NOT FOLD THE TEAM INTO `occupant_hash`.** The marker filename and the `task_metadata_snapshot` occupant are `occupant_hash(agent, subject)` alone, so a team inside the hash re-keys every existing marker and breaks every existing snapshot join. The team term routes partitions and is never a term of the group key.
 3. In each group take the **latest `ts`**, and take the **last in journal order on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties. The later line in journal order is the authoritative one, the same tie-break Step 3.1 uses).
 4. The task file belongs to at most one group. Union the task-file copy into the group with the identity `occupant_hash(owner, subject)` computed from the task record, and report each other group through the report-message rule below.
 
-🔴 **THIS STEP IS THE ONE PLACE THE SELECTION RULE IS WRITTEN, AND IT HAS A SECOND IMPLEMENTATION.** `hooks/shared/session_resume.py` applies the same grouping and latest-wins when it renders its Completed Work summary, and it points here rather than repeat the rule. A change to the selection above MUST change that code in the SAME commit. Nothing compares the two.
+**AN OLD-FORMAT EVENT CARRIES NO `team` FIELD, AND ITS IDENTITY ALONE DOES NOT PROVE IT IS THIS TEAM'S.** Decide it by content against the stores whose names you hold: this team's store, and each team a `team_realigned` event names in its `from` field. Read `{that store}/{task_id}.json` directly and compare its `metadata.handoff` content key with the event's, using the shared `handoff_content_key` function — never a local equality test. Mark the event MIXED when the content keys are EQUAL and the event's `(agent, task_subject)` identity is NOT that file's `(owner, subject)` identity; discard a mixed event and report `handoff identity mismatch for task N: journal content equals team <X> task N, whose identity it does not carry`. An event whose content AND identity both match one named store is that store's work unit: process it under that team. When no other named store matches, keep the identity match and report `handoff cross-team check unavailable for task N: no other named store carries the identity` — a store you cannot name is out of reach, and the rule reports that bound instead of guessing. **DO NOT ENUMERATE THE TASKS ROOT.** THE CHECK IS REQUIRED FOR OLD-FORMAT EVENTS: every event already in a journal predates the `team` field, and nothing else protects them.
+
+🔴 **THIS STEP IS THE ONE PLACE THE SELECTION RULE IS WRITTEN, AND `session_resume` IS A CONSUMER, NOT A SECOND IMPLEMENTATION.** `hooks/shared/session_resume.py` renders its Completed Work summary from the journal alone: it applies latest-wins within a `(task_id, team, agent, task_subject)` key, and it does NOT partition by team and does NOT union the task-file copy, because it has no team identity and no task file. It is a renderer, not a second implementation, and the difference is deliberate. A change to the selection above MUST change that code in the SAME commit when the key shape changes. Nothing compares the two.
 
 **DERIVE THE DISK-SIDE IDENTITY THE WAY THE EMIT PATHS DERIVE THEIRS.** The two emit paths SUBSTITUTE before they hash, and the task record carries the value the substitution replaced. Compute the disk identity from the SUBSTITUTED values. Without the substitution the identity of a substituted task cannot equal one group identity, so the union does not run on the very tasks it protects:
 
@@ -128,7 +130,7 @@ For each discovered task, read the HANDOFF from the two copies and combine them.
    python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import occupant_hash; print(occupant_hash(sys.argv[1], sys.argv[2]))" "$AGENT" "$TASK_SUBJECT"
    ```
 
-   🔴 **THE AGENT AND THE SUBJECT MUST RIDE AS ARGV. DO NOT INTERPOLATE THEM INTO THE `-c` STRING.** Read `sys.argv[1]` and `sys.argv[2]` as written above, and keep the two values as separate shell arguments after the closing quote. The author of the task writes its subject, so a subject folded into the `-c` body is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the ARGV BOUNDARY is what makes it safe, and rewriting the command is enough to remove it.
+   🔴 **THE AGENT AND THE SUBJECT MUST CROSS AS DATA, NEVER AS COMMAND TEXT.** Pass them as separate ARGV entries read through `sys.argv`, or carry them in a JSON payload on STDIN to a command whose text is a FIXED LITERAL — and never interpolate either value into the `-c` string or into an unquoted heredoc body. The author of the task writes its subject, so a subject folded into command text is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the DATA BOUNDARY is what makes it safe, and rewriting the command is enough to remove it. The `occupant_hash` command above uses ARGV; the merge helper uses the STDIN form because its payload carries the two HANDOFF mappings.
 
 2. **`latest_by_ts_then_journal_order`**, defined HERE because it is defined at no site in the repo. It takes the events of ONE group, in journal order, and returns the authoritative one:
 
@@ -195,19 +197,89 @@ def union_preferring_task_file(journal_handoff, disk_handoff):
     return merged
 
 
+# The harvest's own team: the LAST PATH COMPONENT of the `Task list:`
+# directory in this agent's context. `from_teams` is every team the journal's
+# `team_realigned` events name in `from` (Step 1 source 4).
+this_team = Path(task_list_dir).name
+from_teams = [e["from"] for e in realign_events]
+
+
+def group_by_identity(events):
+    """One group per (agent, task_subject); a reused task_id has one per arc."""
+    groups = {}
+    for e in events:
+        groups.setdefault(occupant_hash(e.agent, e.task_subject), []).append(e)
+    return groups
+
+
+def named_store_candidates(task_id, this_team, from_teams):
+    """The PARSED task files of the stores whose NAMES the harvest holds.
+
+    This team's store and each `team_realigned` `from` store. No directory
+    enumeration: a store no realignment event names is out of reach.
+    """
+    candidates = []
+    for team in [this_team, *from_teams]:
+        task = read_task_json(task_id, team)
+        if task:
+            candidates.append({"team": team, "task": task})
+    return candidates
+
+
 for task_id in unprocessed:
     matches = [e for e in journal_events if e.task_id == task_id]
 
-    # STEP 2: group by identity. An agent_handoff event carries no `occupant`
-    # field, so compute the identity from the event's own (agent, task_subject)
-    # with the shared function.
-    groups = {}
+    # STEP 1: PARTITION by team. A realigned earlier team's events are still
+    # harvested — under that team's own section and store.
+    this_team_events, from_events, foreign, old_format = [], {}, [], []
     for e in matches:
-        groups.setdefault(occupant_hash(e.agent, e.task_subject), []).append(e)
+        team = e.get("team")
+        if not team:
+            old_format.append(e)
+        elif team == this_team:
+            this_team_events.append(e)
+        elif team in from_teams:
+            from_events.setdefault(team, []).append(e)
+        else:
+            foreign.append(e)
+    for e in foreign:
+        report(f"handoff identity mismatch for task {task_id}: journal event "
+               f"names team {e.get('team')}; this store is team {this_team}")
+    # OLD-FORMAT events carry no `team`; content decides them against the
+    # NAMED stores only. The classifier names a MIXED event's source store,
+    # an OWNED event's owner, and leaves the rest UNMATCHED (this team's by
+    # identity). ROUTE on the outcome: a realigned earlier team's work unit
+    # belongs under ITS section and store, never here.
+    candidates = named_store_candidates(task_id, this_team, from_teams)
+    for e in old_format:
+        outcome = mixed_old_format_event(
+            e.get("agent", ""), e.get("task_subject", ""),
+            e.get("handoff") or {}, candidates,
+        )
+        destination = old_format_destination(outcome, this_team)
+        if destination == "mixed":
+            report(outcome.report)          # discard: another store's content
+        elif destination == "from":
+            from_events.setdefault(outcome.team, []).append(e)
+        else:
+            this_team_events.append(e)
+
+    for team, events in from_events.items():
+        # THAT team's work unit: its own section and store, and NEVER unioned
+        # with this team's task file. This runs AFTER the old-format
+        # classification above, because that classification can add to it.
+        for group in group_by_identity(events).values():
+            process(latest_by_ts_then_journal_order(group).handoff,
+                    section=f"team={team}")
+
+    # STEP 2: group THIS team's events by identity. An agent_handoff event
+    # carries no `occupant` field, so compute the identity from the event's
+    # own (agent, task_subject) with the shared function.
+    groups = group_by_identity(this_team_events)
 
     # EMPTY DICT once the drain removed it, and NOT None. read_task_json is
     # fail-open: a missing file, a malformed file and an IO error all give {}.
-    task = read_task_json(task_id, team_name)
+    task = read_task_json(task_id, this_team)
     # Hash the SUBSTITUTED subject, because that is what the emit paths
     # hashed. The owner substitution (platform teammate name on an empty
     # owner) is NOT reproducible from the record, so a task carrying it
@@ -273,7 +345,7 @@ A HANDOFF may reference sibling metadata keys on its task (verification records,
                  --session-dir "$SESSION_DIR" --type task_metadata_snapshot)
    ```
 
-   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated`. **Selection**: filter to events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally filter to events whose `occupant` equals `occupant_hash(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. **The runnable command is in Step 3, under HOW TO CALL THE TWO NAMES THIS STEP USES.** It is stated once, there, and referenced here. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
+   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `occupant_hash(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. A snapshot with NO `team` is OLD-FORMAT and passes. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **The runnable command is in Step 3, under HOW TO CALL THE TWO NAMES THIS STEP USES.** It is stated once, there, and referenced here. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
 3. **Graceful degrade**: neither source resolves → record the gap (task_id, key, timestamp) exactly as Step 3's report-gap tier does; never invent content.
 
 **SIBLING KEY NAMES CARRY NO ORDER.** A task commonly carries a family of related sibling keys, and their names do not record which one is newest. A key that names itself `final` can be the earlier of two. Do not sort sibling keys by name, and do not read a name as a position. **ONE NAME DOES CARRY A RELATION, and it is not a position: a sibling key that amends, corrects or withdraws HANDOFF content SUPERSEDES what it addresses, whatever its date. Synthesize from the amended state, and never bank a claim an amendment withdrew.** Resolve the order of the rest in this priority:

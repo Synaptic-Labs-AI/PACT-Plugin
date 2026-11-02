@@ -1130,7 +1130,15 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     # two are coupled and nothing compares them.
     latest = {}
     for h in handoffs:
-        key = (h.get("agent", "unknown"), h.get("task_subject", ""))
+        # `task_id` and `team` are part of the key so two tasks (or two
+        # teams' same-numbered tasks) that share an occupant stay separate.
+        # An OLD-FORMAT event has no `team` and keys on "".
+        key = (
+            h.get("task_id", ""),
+            h.get("team", ""),
+            h.get("agent", "unknown"),
+            h.get("task_subject", ""),
+        )
         # `>=` keeps the LATER journal line on an equal ts. Same tie-break.
         if key not in latest or h.get("ts", "") >= latest[key].get("ts", ""):
             latest[key] = h

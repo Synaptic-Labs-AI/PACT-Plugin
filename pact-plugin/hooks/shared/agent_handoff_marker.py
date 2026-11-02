@@ -12,8 +12,9 @@ Summary: SSOT for agent_handoff emission — the shape-agnostic emit-eligibility
          It also carries the reader-side reconciliation helpers the harvest
          skill calls instead of keeping a second prose copy: the emit-side
          subject sentinel (emit_side_subject), the harvest's disk identity
-         (disk_identity) and the task-file-preferred union
-         (union_preferring_task_file).
+         (disk_identity), the task-file-preferred union
+         (union_preferring_task_file), and the OLD-FORMAT classification and
+         routing (mixed_old_format_event, old_format_destination).
          Imported by BOTH agent_handoff emit paths
          so they derive the SAME emit decision and the SAME marker key and
          dedup to one agent_handoff event for each distinct (team, task_id,
@@ -74,6 +75,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from .canonical_json import canonical_bytes
 from .paths import get_claude_config_dir
@@ -366,6 +368,124 @@ def union_preferring_task_file(
             continue
         merged[field] = disk_value
     return merged, []
+
+
+OLD_FORMAT_MIXED = "mixed"          # content is another store's; discard + report
+OLD_FORMAT_OWNED = "owned_by"       # content AND identity match a named store
+OLD_FORMAT_UNMATCHED = "unmatched"  # no named store carries the content
+
+
+class OldFormatOutcome(NamedTuple):
+    """Structured result of classifying one OLD-FORMAT journal event.
+
+    `state` is one of the three OLD_FORMAT_* constants. `team` names the store
+    that owns a MIXED event's content or an OWNED event outright, and is None
+    for UNMATCHED. `report` is the skill's report line for a MIXED event and
+    None otherwise.
+    """
+
+    state: str
+    team: str | None = None
+    report: str | None = None
+
+
+def old_format_destination(outcome: OldFormatOutcome, this_team: str) -> str:
+    """Where an OLD-FORMAT event belongs, given its classification.
+
+    "mixed"  — discard it and report `outcome.report`.
+    "from"   — it is `outcome.team`'s work unit: process it under that team's
+               `## team={team}` section against that team's store, never
+               unioned with this team's task file.
+    "this"   — this team's work unit (OWNED_BY this team, or UNMATCHED).
+
+    A caller that routes every non-MIXED outcome to this team misroutes a
+    realigned earlier team's HANDOFF, which is the population the old-format
+    rule exists to protect. Pure; never raises.
+    """
+    if outcome.state == OLD_FORMAT_MIXED:
+        return "mixed"
+    if outcome.state == OLD_FORMAT_OWNED and outcome.team != this_team:
+        return "from"
+    return "this"
+
+
+def mixed_old_format_event(
+    event_agent: object,
+    event_subject: object,
+    event_handoff: object,
+    candidate_tasks: list[dict],
+) -> OldFormatOutcome:
+    """Classify an OLD-FORMAT journal event against the stores whose NAMES
+    the harvest holds.
+
+    An OLD-FORMAT event carries no `team` field (every event written before
+    that field existed), so its `(agent, task_subject)` identity alone cannot
+    prove it belongs to this team. `candidate_tasks` are the PARSED task files
+    of the stores whose names the harvest holds — this team's store and each
+    `team_realigned` `from` store — as `{"team": <store name>, "task": <dict>}`.
+
+    Three outcomes, because the caller must ROUTE the event, not merely decide
+    whether to discard it:
+      - OLD_FORMAT_OWNED: one store's handoff content key equals the event's
+        AND that store's `(owner, subject)` identity equals the event's
+        `(agent, task_subject)` identity. The event is that store's work unit;
+        `team` names it, and the caller routes a non-current team to its own
+        section. Checked across ALL candidates BEFORE any MIXED report, so a
+        later coincidental content match cannot override an identity match.
+      - OLD_FORMAT_MIXED: a store's content key matches while its identity
+        does not. The content came from a store whose identity the event does
+        not carry; discard it and report `report`.
+      - OLD_FORMAT_UNMATCHED: no named store carries the content. Keep the
+        identity match as this team's, and report the unavailable check — a
+        store no realignment event names is out of reach, and guessing is
+        worse than reporting the bound.
+
+    A non-dict / empty event handoff is UNMATCHED: there is no content to
+    compare. Pure; no I/O; never raises.
+    """
+    unmatched = OldFormatOutcome(OLD_FORMAT_UNMATCHED)
+    if not isinstance(event_handoff, dict) or not event_handoff:
+        return unmatched
+    event_content = handoff_content_key(event_handoff)
+    event_identity = disk_identity(
+        event_agent if isinstance(event_agent, str) else "", event_subject
+    )
+    content_matches: list[tuple[str, dict]] = []
+    for candidate in candidate_tasks or ():
+        if not isinstance(candidate, dict):
+            continue
+        team = candidate.get("team")
+        task = candidate.get("task")
+        if not isinstance(task, dict):
+            continue
+        metadata = task.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        task_handoff = metadata.get("handoff")
+        if not isinstance(task_handoff, dict) or not task_handoff:
+            continue
+        if handoff_content_key(task_handoff) != event_content:
+            continue
+        owner = task.get("owner")
+        file_identity = disk_identity(
+            owner if isinstance(owner, str) else "", task.get("subject")
+        )
+        if file_identity == event_identity:
+            return OldFormatOutcome(OLD_FORMAT_OWNED, team=team)
+        content_matches.append((team, task))
+    if not content_matches:
+        return unmatched
+    team, task = content_matches[0]
+    task_id = task.get("id", "?")
+    return OldFormatOutcome(
+        OLD_FORMAT_MIXED,
+        team=team,
+        report=(
+            f"handoff identity mismatch for task {task_id}: journal content "
+            f"equals team {team} task {task_id}, whose identity it does not "
+            f"carry"
+        ),
+    )
 
 
 def _handoff_marker_discriminator(occupant: str, content_key: str) -> str:
