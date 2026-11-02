@@ -76,7 +76,10 @@ expected. Pinning the environment variable alone does NOT close it.
 
 Every subprocess here therefore pins `CLAUDE_PROJECT_DIR`, `HOME` AND `cwd`
 to a `tmp_path`, and no test process runs with a working directory inside a
-git repository. Do not remove any of the three.
+git repository. Do not remove any of the three. `HOME` is a directory BELOW
+the project, never the project itself: `$HOME/.claude/CLAUDE.md` is the
+default profile's user-global file, so a project at `$HOME` has no project
+memory and every writer would skip it.
 
 USE THE IMPORTED CONSTANTS, NEVER A MARKER LITERAL. `MANAGED_START_MARKER`
 carries a long human-readable suffix. A hand-typed short form parses as a
@@ -777,7 +780,7 @@ def _run_rotation(start_marker: str, marker_above_gap: bool = False) -> dict:
         (fixture_dir / "CLAUDE.md").write_text(content, encoding="utf-8")
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(fixture_dir),
+            "HOME": str(fixture_dir / "home"),
             "CLAUDE_PROJECT_DIR": str(fixture_dir),
             "CLAUDE_CONFIG_DIR": str(fixture_dir / "config"),
             "HOOKS_DIR": str(PLUGIN_ROOT / "hooks"),
@@ -1301,7 +1304,7 @@ def _run_hook_with_journal(pinned_body: str, prompt: str) -> tuple[int, list, st
         session_dir = _write_session_context(fixture_dir, session_id)
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(fixture_dir),
+            "HOME": str(fixture_dir / "home"),
             "CLAUDE_PROJECT_DIR": str(fixture_dir),
             "CLAUDE_CONFIG_DIR": str(fixture_dir / "config"),
         }
@@ -1530,7 +1533,7 @@ class TestNonDenialOverTheEnvironment:
     def _run(self, fixture_dir: Path):
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(fixture_dir),
+            "HOME": str(fixture_dir / "home"),
             "CLAUDE_PROJECT_DIR": str(fixture_dir),
             "CLAUDE_CONFIG_DIR": str(fixture_dir / "config"),
         }

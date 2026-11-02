@@ -1105,11 +1105,14 @@ def run_hook(frame, tmp_path, timeout=600):
     """Drive the REAL script as a subprocess and return (rc, stdout, stderr).
 
     CLAUDE_PROJECT_DIR is pinned to tmp_path so the resolver cannot reach the
-    developer's own CLAUDE.md. Do not remove that.
+    developer's own CLAUDE.md. Do not remove that. HOME is a directory below
+    it, never tmp_path itself: a project at $HOME is user-global (its
+    `.claude/CLAUDE.md` is the default profile's global file), so it has no
+    project memory.
     """
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
-        "HOME": str(tmp_path),
+        "HOME": str(tmp_path / "home"),
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
     }

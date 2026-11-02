@@ -322,17 +322,24 @@ def test_a_bare_repository_worktree_subdirectory_is_not_enclosed(
 
 
 def test_a_dotfiles_home_is_never_the_enclosing_checkout(tmp_path, clean_env):
-    """N10: $HOME is a git repository and the config dir is $HOME/.claude.
-    Red if the user-global exclusion is dropped (E would be $HOME)."""
-    home = tmp_path / "home"
-    home.mkdir()
-    _git("init", "-q", ".", cwd=home)
-    _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=home)
-    project = home / "projects" / "app"
-    project.mkdir(parents=True)
-    clean_env.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    """N10: $HOME is a git repository. Its `.claude/CLAUDE.md` is user-global
+    both when it is the active config root's and, under another config root,
+    as the default profile's global file, so $HOME never encloses. The same
+    layout in a directory that is not $HOME does enclose. Red if the
+    user-global exclusion is dropped (E would be $HOME)."""
+    assert Path.home() == tmp_path / "home"
+    for checkout in (tmp_path / "home", tmp_path / "dotfiles"):
+        checkout.mkdir()
+        _git("init", "-q", ".", cwd=checkout)
+        _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=checkout)
+        (checkout / "projects" / "app").mkdir(parents=True)
+    project = tmp_path / "home" / "projects" / "app"
+    clean_env.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "home" / ".claude"))
 
     assert enclosing_main_checkout(project) is None
 
     clean_env.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
-    assert enclosing_main_checkout(project) == home.resolve()
+    assert enclosing_main_checkout(project) is None
+
+    other = tmp_path / "dotfiles"
+    assert enclosing_main_checkout(other / "projects" / "app") == other.resolve()

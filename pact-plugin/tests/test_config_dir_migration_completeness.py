@@ -18,11 +18,16 @@ discipline): the detector is exercised against synthetic source that DOES and
 does NOT contain the construction, so the negative leg cannot be a vacuous
 always-pass. A guard that can't fail is the inert class we are fighting.
 
-Allowlist — the ONE legitimate residual `Path.home() / ".claude"` LITERAL
+Allowlist — the legitimate residual `Path.home() / ".claude"` LITERAL
 (verified by hand + by the detector run at authoring time):
   - shared/symlinks.py   — the C6 dual-location protocols-symlink HOME-side root
                            (the link is created in BOTH ~/.claude and $CONFIG when
                            they differ; the home-side is intentional + answer-immune).
+  - shared/project_scope.py — `user_global_documents()` names the DEFAULT
+                           profile's `~/.claude/CLAUDE.md` on purpose: it is the
+                           global file whatever the active config root is, so a
+                           session in $HOME under another CLAUDE_CONFIG_DIR must
+                           not treat it as project memory.
 (shared/session_registry.py's inline `_config_root()` env-UNSET fallback and
 shared/paths.py's fallback are BOTH param-style `home / ".claude"` — NOT the
 literal `Path.home() / ".claude"` — so they do NOT match the detector and need
@@ -40,6 +45,7 @@ HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 # (basename, exact unparsed construction) pairs that are legitimate residuals.
 ALLOWLIST = {
     ("symlinks.py", "Path.home() / '.claude'"),
+    ("project_scope.py", "Path.home() / '.claude' / 'CLAUDE.md'"),
 }
 
 

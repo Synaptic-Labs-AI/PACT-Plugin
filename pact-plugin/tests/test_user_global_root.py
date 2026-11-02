@@ -12,7 +12,11 @@ Used by: pytest. Exercises hooks/shared/project_scope.py (`memory_root_of`,
          reader and pin_marker_writer.
 
 Every home is a tmp_path directory with CLAUDE_CONFIG_DIR=<home>/.claude and
-HOME=<home>; the operator's real ~/.claude is never read or written.
+HOME=<home>, except the split-profile arms, where CLAUDE_CONFIG_DIR=<t>/cfg and
+<home>/.claude/CLAUDE.md is the default profile's global file. The operator's
+real ~/.claude is never read or written. Further arms pin the identity test:
+a hardlink or a case variant of the global file is the global file, a
+case-distinct sibling of home is not, and an undecidable comparison refuses.
 
 Layouts (a)-(f) are user-global; (g) is the control. Removing the check from
 `memory_root_of` turns every (a)-(f) arm red: the root becomes the anchor and
@@ -231,21 +235,147 @@ def test_a_project_directory_keeps_its_own_root(control):
     assert document.path == control.anchor / ".claude" / "CLAUDE.md"
 
 
-def test_a_document_path_that_cannot_be_resolved_counts_as_user_global(
+def test_a_document_path_that_cannot_be_compared_counts_as_user_global(
     control, monkeypatch
 ):
-    """Fail closed: when realpath raises on a canonical document path (or the
-    user-global one), the classifier cannot tell the root's document from the
-    user-global file, so it refuses the root as user_global. The same layout
-    is a KNOWN root in the control above, so only the unable-to-tell rule can
-    turn it user_global. Red if that branch answers False."""
-    real_realpath = os.path.realpath
+    """Fail closed: when stat raises on a canonical document path, the
+    identity test cannot tell the root's document from the user-global file,
+    so the classifier refuses the root as user_global. The same layout is a
+    KNOWN root in the control above, so only the cannot-tell rule can turn it
+    user_global. Red if cannot-tell answers "not global"."""
+    real_stat = os.stat
 
-    def refusing_realpath(path, *args, **kwargs):
+    def refusing_stat(path, *args, **kwargs):
         if os.fspath(path).endswith("CLAUDE.md"):
-            raise OSError(5, "cannot resolve", os.fspath(path))
-        return real_realpath(path, *args, **kwargs)
+            raise PermissionError(13, "cannot stat", os.fspath(path))
+        return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(project_scope.os.path, "realpath", refusing_realpath)
+    monkeypatch.setattr(project_scope.os, "stat", refusing_stat)
 
     assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_no_computable_global_location_counts_as_user_global(control, monkeypatch):
+    """Cannot tell where the global files are: refuse every root."""
+    monkeypatch.setattr(project_scope, "user_global_documents", lambda: ())
+
+    assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_a_hardlink_to_the_global_file_counts_as_user_global(control):
+    """A project's legacy CLAUDE.md that is a hardlink of the global file is
+    the same file under another name: realpath strings differ, identity does
+    not."""
+    os.link(control.global_md, control.anchor / "CLAUDE.md")
+
+    assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def _case_insensitive(directory: Path) -> bool:
+    probe = directory / "CaseProbe"
+    probe.write_text("x", encoding="utf-8")
+    try:
+        return (directory / "caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_a_case_variant_spelling_of_the_config_dir_counts_as_user_global(
+    tmp_path, monkeypatch
+):
+    world = _World(tmp_path, monkeypatch, "g_control")
+    if not _case_insensitive(tmp_path):
+        pytest.skip("the tmp volume matches names with case")
+    variant = world.home / ".CLAUDE"
+
+    assert memory_root_of(variant) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_a_case_distinct_sibling_of_home_is_its_own_root(tmp_path, monkeypatch):
+    """No over-block: where names match with case, <t>/Home beside <t>/home is
+    another directory, so it keeps its own root."""
+    world = _World(tmp_path, monkeypatch, "g_control")
+    if _case_insensitive(tmp_path):
+        pytest.skip("the tmp volume folds case, so Home and home are one directory")
+    sibling = tmp_path / "Home"
+    sibling.mkdir()
+
+    assert memory_root_of(sibling) == (sibling, None)
+
+
+class _SplitProfile:
+    """V2: the active config root is <t>/cfg, HOME is <t>/home, and the
+    session runs in <t>/home. <t>/home/.claude/CLAUDE.md is the default
+    profile's global file, so <t>/home is not a project-memory root."""
+
+    def __init__(self, tmp_path: Path, monkeypatch):
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        self.config = tmp_path / "cfg"
+        self.config.mkdir()
+        (self.config / "CLAUDE.md").write_text(_global_text(), encoding="utf-8")
+        self.default_global = self.home / ".claude" / "CLAUDE.md"
+        self.anchor = self.home
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                    "GIT_CEILING_DIRECTORIES"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("HOME", str(self.home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.config))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(self.anchor))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: self.home))
+        monkeypatch.chdir(self.anchor)
+        monkeypatch.setattr(project_scope, "recorded_project_dir", lambda: "")
+        monkeypatch.setattr(
+            project_scope, "get_worktree_identity_from_session_record", lambda: {}
+        )
+
+    def session_start(self):
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith(("GIT_", "CLAUDE_", "PYTEST_"))
+        }
+        env.update(
+            HOME=str(self.home),
+            CLAUDE_CONFIG_DIR=str(self.config),
+            CLAUDE_PROJECT_DIR=str(self.anchor),
+        )
+        stdin = json.dumps(
+            {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+        )
+        result = subprocess.run(
+            [sys.executable, str(_HOOK)], input=stdin, cwd=str(self.anchor),
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr[-500:]
+        return json.loads(result.stdout).get("systemMessage", "")
+
+
+def test_home_under_another_config_root_is_user_global(tmp_path, monkeypatch):
+    world = _SplitProfile(tmp_path, monkeypatch)
+
+    assert memory_root_of(world.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_a_session_start_in_home_under_another_config_root_creates_nothing(
+    tmp_path, monkeypatch
+):
+    world = _SplitProfile(tmp_path, monkeypatch)
+
+    message = world.session_start()
+
+    assert not world.default_global.exists()
+    reason = unknown_root_reason(ROOT_CAUSE_USER_GLOBAL, world.anchor)
+    assert f"Project CLAUDE.md skipped: {reason}" in message, message[-600:]
+
+
+def test_a_session_start_in_home_leaves_the_default_profile_file_alone(
+    tmp_path, monkeypatch
+):
+    world = _SplitProfile(tmp_path, monkeypatch)
+    world.default_global.parent.mkdir()
+    world.default_global.write_text(_global_text(), encoding="utf-8")
+    before = world.default_global.read_bytes()
+
+    world.session_start()
+
+    assert world.default_global.read_bytes() == before

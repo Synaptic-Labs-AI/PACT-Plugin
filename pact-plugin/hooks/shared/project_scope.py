@@ -1261,7 +1261,7 @@ def memory_root_of(
     root, cause = _project_memory_root_cause(directory)
     if cause != ROOT_CAUSE_OK:
         return None, cause
-    if _names_the_user_global_document(Path(root)):
+    if names_user_global_document(Path(root)):
         return None, ROOT_CAUSE_USER_GLOBAL
     return root, None
 
@@ -1290,17 +1290,47 @@ def session_memory_root() -> SessionRoot:
     return SessionRoot(anchor, declared, root, cause)
 
 
-def _names_the_user_global_document(checkout: Path) -> bool:
-    """Whether either canonical document path under `checkout` is the
-    user-global `<config>/CLAUDE.md`. Unable to tell reads as True."""
-    try:
-        user_global = os.path.realpath(get_claude_config_dir() / "CLAUDE.md")
-        return any(
-            os.path.realpath(candidate) == user_global
-            for candidate in (checkout / ".claude" / "CLAUDE.md", checkout / "CLAUDE.md")
-        )
-    except (OSError, RuntimeError, ValueError):
+def user_global_documents() -> Tuple[Path, ...]:
+    """The CLAUDE.md files Claude Code loads into EVERY session: the active
+    config root's, and the default profile's `~/.claude/CLAUDE.md`, which a
+    profile switch makes global again. Deduplicated by same_path. A source
+    that raises is skipped; an empty tuple means neither could be computed.
+    """
+    found: List[Path] = []
+    for source in (
+        lambda: get_claude_config_dir() / "CLAUDE.md",
+        lambda: Path.home() / ".claude" / "CLAUDE.md",
+    ):
+        try:
+            path = source()
+        except (OSError, RuntimeError, KeyError, ValueError):
+            # RuntimeError / KeyError: Path.home() with no resolvable home.
+            continue
+        if not any(same_path(path, kept) for kept in found):
+            found.append(path)
+    return tuple(found)
+
+
+def is_user_global_document(path: Path) -> bool:
+    """True when `path` is, or would be once created, a user-global CLAUDE.md.
+
+    Compared by file identity (hardlinks, case variants on a case-insensitive
+    volume). Unable to tell reads as True: unlike a gate, which allows on
+    doubt, this check refuses on doubt.
+    """
+    globals_ = user_global_documents()
+    if not globals_:
         return True
+    return any(_same_file(Path(path), g) is not False for g in globals_)
+
+
+def names_user_global_document(root: Path) -> bool:
+    """True when either canonical document under `root` is user-global."""
+    root = Path(root)
+    return any(
+        is_user_global_document(candidate)
+        for candidate in (root / ".claude" / "CLAUDE.md", root / "CLAUDE.md")
+    )
 
 
 def enclosing_main_checkout(root: Path) -> Optional[Path]:
@@ -1333,6 +1363,6 @@ def enclosing_main_checkout(root: Path) -> Optional[Path]:
         return None
     if memory_root_of(toplevel) != (toplevel, None):
         return None
-    if _names_the_user_global_document(toplevel):
+    if names_user_global_document(toplevel):
         return None
     return toplevel
