@@ -889,19 +889,24 @@ def _gate(input_data: dict):
 
     pact_context.init(input_data)
     from shared.claude_md_manager import gate_frame, gate_target
+    from shared.project_scope import session_memory_root
 
     frame = gate_frame(input_data)
     if frame is None:
         return None
 
-    target = gate_target(file_path)
+    # ONE OBSERVATION: the gate's target and the advisory's cause come from
+    # the same SessionRoot, so the advisory never describes a state the gate
+    # did not act on.
+    session = session_memory_root()
+    target = gate_target(file_path, session)
     if target is None:
-        return _unknown_root_decision(tool_name)
+        return _unknown_root_decision(tool_name, session)
     decision = _decide(target, tool_name, tool_input, input_data, frame)
     return _member_reason(decision) if frame == "member" else decision
 
 
-def _unknown_root_decision(tool_name: str):
+def _unknown_root_decision(tool_name: str, session):
     """The advisory when a target was NOT gated because the session's memory
     root is unknown, or None when that is not the reason.
 
@@ -911,39 +916,29 @@ def _unknown_root_decision(tool_name: str):
     document can be identified for the whole session, so every later edit
     passes unchecked. The sibling `check_claude_md_refusals` names this
     condition on the SessionStart channel; this is the PreToolUse channel.
+
+    `session` is the SessionRoot the gate passed to `gate_target`; the cause
+    is rendered from it, never from a second resolution.
     """
+    if session.cause is None:
+        return None
     try:
-        import os
+        from shared.project_scope import ROOT_CAUSE_MISSING, unknown_root_reason
 
-        from shared.claude_md_manager import session_memory_root
-        from shared.project_scope import anchor_directory_is_missing
-
-        if session_memory_root() is not None:
-            return None
-        declared = os.environ.get("CLAUDE_PROJECT_DIR")
-        declared_gone = anchor_directory_is_missing(declared or os.getcwd())
+        clause = unknown_root_reason(session.cause, session.anchor)
     except Exception:  # noqa: BLE001 — fail-open: report nothing
         return None
     from shared.pin_growth import PinDecision
 
-    if declared_gone:
-        # THE REMOVED-WORKTREE SHAPE NAMES ITSELF. A user whose declaration
-        # was deleted must not read a message describing a git failure. The
-        # wording stays TRUE when a record reader exists: this advisory fires
-        # only after `session_memory_root` produced nothing, which includes
-        # every record that did not verify.
-        reason = (
-            "PACT could not identify this session's project memory: the "
-            "declared directory no longer exists and the session record did "
-            "not verify a main checkout for it, so the pin cap was not "
-            f"checked for this {tool_name}."
-        )
-    else:
-        reason = (
-            "PACT could not determine this session's project-memory root "
-            "(git could not identify it), so the pin cap was not checked for "
-            f"this {tool_name}."
-        )
+    if session.cause == ROOT_CAUSE_MISSING:
+        # THE REMOVED-WORKTREE SHAPE NAMES ITSELF: record recovery already ran
+        # for a missing anchor and did not verify a main checkout, which is
+        # the only reason the cause survived.
+        clause += " and the session record did not verify a main checkout for it"
+    reason = (
+        f"PACT could not identify this session's project memory: {clause}, "
+        f"so the pin cap was not checked for this {tool_name}."
+    )
     return PinDecision("ALLOW_ADVISORY", 0, 0, None, "unknown_root", reason)
 
 

@@ -17,6 +17,11 @@ skills/pact-memory/scripts/memory_api.py (`PACTMemory.search`).
 """
 from __future__ import annotations
 
+import os
+import subprocess
+
+import pytest
+
 
 def _write_frame(file_path):
     return {
@@ -60,6 +65,85 @@ def test_the_pin_cap_gate_stays_silent_on_a_known_root_non_target(
     monkeypatch.chdir(tmp_path)
 
     assert _gate(_write_frame(target)) is None
+
+
+def _git(*args, cwd):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "-c", "init.defaultBranch=main", *args],
+        cwd=str(cwd), env=env, capture_output=True, text=True,
+        timeout=30, check=True,
+    )
+
+
+def _missing_anchor(tmp_path):
+    """A declared directory that does not exist: cause MISSING (no record is
+    read under pytest, so recovery cannot rescue it)."""
+    return tmp_path / "removed-worktree"
+
+
+def _forged_anchor(tmp_path):
+    """A `.git` FILE naming another repository's live worktree admin dir: git
+    answers, the answer fails verification, cause UNVERIFIED."""
+    main = tmp_path / "main"
+    main.mkdir()
+    _git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    _git("add", ".", cwd=main)
+    _git("commit", "-qm", "seed", cwd=main)
+    _git("worktree", "add", "-q", str(main / ".worktrees" / "wt"), "-b", "wt",
+         cwd=main)
+    admin = next((main / ".git" / "worktrees").iterdir())
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n")
+    return forged
+
+
+@pytest.mark.parametrize(
+    "build, cause",
+    [(_missing_anchor, "missing"), (_forged_anchor, "unverified")],
+    ids=["missing", "unverified"],
+)
+def test_the_advisory_renders_the_cause_of_the_one_observation(
+    tmp_path, monkeypatch, build, cause
+):
+    """The advisory's cause clause is `unknown_root_reason` for the cause the
+    gate acted on, and the gate resolves the session ONCE. Red if the gate
+    resolves a second time (the spy counts two) or renders a cause of its own
+    instead of the SessionRoot's (the clause is missing from the reason)."""
+    import shared.project_scope as project_scope
+    from pin_caps_gate import _gate
+
+    anchor = build(tmp_path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(anchor))
+    monkeypatch.chdir(tmp_path)
+
+    real = project_scope.session_memory_root
+    seen = []
+
+    def spy():
+        session = real()
+        seen.append(session)
+        return session
+
+    monkeypatch.setattr(project_scope, "session_memory_root", spy)
+    target = tmp_path / "CLAUDE.md"
+
+    decision = _gate(_write_frame(target))
+
+    assert len(seen) == 1, f"the gate resolved the session {len(seen)} times"
+    assert seen[0].cause == cause, (
+        f"FIXTURE INVALID: the layout gave {seen[0].cause!r}, not {cause!r}"
+    )
+    assert decision is not None and decision.cause == "unknown_root"
+    clause = project_scope.unknown_root_reason(cause, seen[0].anchor)
+    assert clause in decision.reason, decision.reason
+    assert "pin cap was not checked" in decision.reason
+    if cause == "missing":
+        assert "session record did not verify a main checkout" in decision.reason
 
 
 def test_search_keeps_the_retrieved_sync_reason(monkeypatch):
