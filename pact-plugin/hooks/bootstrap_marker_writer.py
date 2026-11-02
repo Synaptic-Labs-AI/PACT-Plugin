@@ -639,8 +639,10 @@ def _try_write_marker(input_data: dict) -> str | None:
 
     # Lead-role gate (#878): only the team-lead realigns the team and drives
     # bootstrap (writes the marker). This is NOT a teammate discriminator: an
-    # Agent-spawned team teammate has no UserPromptSubmit-fire path (it wakes via inbox/SendMessage,
-    # which is not hookable), so this event never carries a teammate frame
+    # Agent-spawned team teammate has no UserPromptSubmit-fire path (it wakes via
+    # inbox delivery, which fires no UserPromptSubmit in the recipient; the
+    # sender's SendMessage itself does reach PreToolUse), so this event never
+    # carries a teammate frame
     # (empirically confirmed by the discriminator audit). The guard ensures a
     # plain / non-PACT primary frame (agent_type absent → is_lead False) does
     # not write the marker. Migrated from the negative

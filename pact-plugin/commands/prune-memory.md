@@ -406,50 +406,83 @@ legitimate eviction would be a data-loss bug arriving from the observability
 layer, which is the one place nobody is watching for it.
 
 ```bash
-set -e
-trap 'rc=$?; echo "[JOURNAL WRITE FAILED] prune-memory.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "cancelled", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"cancelled","pin_count":12}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 The heredoc delimiter is quoted (`<<'JSON'`) so bash performs no expansion
 inside it — a curator's reason containing an apostrophe or a backtick passes
-through verbatim instead of closing the quote and aborting the write under
-`set -e`. Construct JSON-valid string content (escape `\"`, `\\`, and control
-characters).
+through verbatim instead of closing the quote and breaking the write. Construct JSON-valid string content (escape `\"`, `\\`, and control
+characters). If a journal block fails at a write or its read-back, read the
+last few lines of `{session_dir}/session-journal.jsonl`: if the expected event
+is there, the write landed, so do not write it again; otherwise re-run only that
+write and its read-back, once.
+Then run, in order, each write that follows it in the block, each with its
+read-back.
 
-The remaining skip outcomes take the same form; the `set -e` and `trap` lines
-above apply to each and are not repeated. **One emit per fence** — do not
+The remaining skip outcomes take the same form. **One emit per fence** — do not
 combine them.
 
 `no_candidates`, where the empty `age_distribution` records that the measured
 set was empty rather than standing in for a value:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "no_candidates", "pin_count": 0, "age_distribution": {}}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"no_candidates","pin_count":0}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `unknown_state`, where the CLI could not parse CLAUDE.md, so no age is known:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "unknown_state", "pin_count": 12, "age_distribution": {}, "reason": "Pin slots: unknown (CLAUDE.md unparseable)"}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"unknown_state","pin_count":12}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `archive_refused`, where the archive definitively failed and the pin survives:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "archive_refused", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "memory CLI timed out"}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"archive_refused","pin_count":12}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `delete_unsafe`, where the archive SUCCEEDED and only the automatic removal was
@@ -457,31 +490,53 @@ declined — note it still carries a `reason`, because unlike a bare Cancel this
 exit always has one:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "delete_unsafe", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "block occurs 2 times; removal would be ambiguous"}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"delete_unsafe","pin_count":12}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `unverified_eviction` is emitted on the escape-hatch path, where the pin was
 removed without a verified archive:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "unverified_eviction", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "curator acknowledged the pin block was captured elsewhere"}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"unverified_eviction","pin_count":12}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 The success event is emitted at Step 5, once the removal Edit has landed:
 
 ```bash
-set -e
-trap 'rc=$?; echo "[JOURNAL WRITE FAILED] prune-memory.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
+if ! python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_pruned --session-dir '{session_dir}' --stdin <<'JSON'
 {"heading": "First Pin", "memory_id": "0f3a9c1d7e2b48f6a5c04d8e1b7f2a93", "pin_count": 12}
 JSON
+then
+  echo "[JOURNAL WRITE FAILED] prune-memory.md: telemetry write failed; continuing" >&2
+elif ! python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_pruned","memory_id":"0f3a9c1d7e2b48f6a5c04d8e1b7f2a93","pin_count":12}}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 Two things in that payload are deliberate and are the ones most likely to be

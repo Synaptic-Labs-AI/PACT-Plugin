@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.9.0: minimum Python 3.12, single 3.12 CI job (issue #1681)
+## v4.8.17: minimum Python 3.12, single 3.12 CI job (issue #1681)
 
 ### Summary
 
@@ -35,6 +35,24 @@ The plugin now requires Python 3.12 or newer and CI certifies exactly that inter
 ### Why
 
 Three CI cells cost over 100 minutes per run while the 3.9 cell certified an interpreter being retired; the investigation machine's default python3 is 3.12.3 and the full unrestricted suite passes there (28,736 passed, 31 skipped at the pre-collapse tree). A single cell at the declared floor makes the run and the floor the same thing; newer-interpreter coverage is surrendered deliberately and recorded, not lost silently.
+
+## v4.8.16: correct SendMessage hook guidance and verify journal writes (issue #1684)
+
+### Summary
+
+The wake guidance now states that `SendMessage` fires `PreToolUse`, keeps `PostToolUse` explicitly unmeasured, and preserves the asynchronous-inbox prohibition on synchronous wake detection. Every command-template session journal write now has an executable physical-last-line read-back, backed by dynamic structural, mutation, and real-journal coverage.
+
+### What landed
+
+- Corrected the `SendMessage` hook claim in the completion-authority protocol and its byte-mirrored consolidated region, which now also says the `PreToolUse` hook runs before delivery and so cannot observe a wake. Seven hook comments that repeated the old claim are corrected too. Existing write/read behavior and event schemas are unchanged.
+- Added `verify-last` read-backs to all 50 journal-write templates across ten command files. Each non-prune site runs `write && verify || { report; exit; }`, so a failed write or read-back stops the block loudly with or without `set -e`; prune-memory telemetry warns and continues on either failure. The `review_finding` read-back also binds `severity` and `finding`, and each command file says what to do when a read-back fails.
+- `verify-last` requires a non-empty `exact.type`, rejects unknown spec keys, makes `absent` optional, reads only the journal's final line so one bad earlier byte cannot break later checks, and bounds comparison depth.
+- Added per-site structural and behavioral coverage: every site must carry the guard, every site is run against a seeded stale event with a failing write, and the write census finds env-prefixed, `if`-wrapped and console-fenced writes. The retired-claim pin now scans every non-test file under `pact-plugin/` and catches paraphrases.
+- Kept the cloud-startup test seam from reaching a checkout's real `CLAUDE.md`.
+
+### Why
+
+The old hook claim was false for `PreToolUse`. A journal write already exits 1 on bad JSON, an invalid schema or a write error, but a block that discarded that exit code could let an older event with the same keys pass the read-back. The guarded per-site read-backs and the stricter verifier make both contracts durable through the existing journal CLI, without changing event schemas or existing write/read behavior.
 
 ## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
 

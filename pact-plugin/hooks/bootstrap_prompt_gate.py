@@ -287,8 +287,10 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
 
     # Lead-role gate (#878): only the team-lead drives the bootstrap ritual.
     # This is NOT a teammate discriminator: an Agent-spawned team teammate has
-    # no UserPromptSubmit-fire path (it wakes via inbox/SendMessage, which is
-    # not hookable), so this event never carries a teammate frame (empirically
+    # no UserPromptSubmit-fire path (it wakes via inbox delivery, which fires
+    # no UserPromptSubmit in the recipient; the sender's SendMessage itself
+    # does reach PreToolUse), so this event never carries a
+    # teammate frame (empirically
     # confirmed by the discriminator audit). The guard ensures a plain /
     # non-PACT primary frame (agent_type absent → is_lead False) does not drive
     # bootstrap. Migrated from the negative `resolve_agent_name(...) != ""`
