@@ -78,7 +78,9 @@ def test_a_session_whose_root_slipped_past_the_checks_reads_as_user_global(
     home, tmp_path, monkeypatch
 ):
     """A route that hands `session_document` a user-global root gets the
-    unknown-root answer every reader already renders, not an exception."""
+    unknown-root answer every reader already renders, not an exception. The
+    catch is there and nowhere else: the resolver called directly on the same
+    root still raises."""
     _config(monkeypatch, tmp_path / "cfg")
     slipped = SessionRoot(home, True, home, None)
     monkeypatch.setattr(project_scope, "session_memory_root", lambda: slipped)
@@ -89,6 +91,8 @@ def test_a_session_whose_root_slipped_past_the_checks_reads_as_user_global(
     assert (session.anchor, session.root, session.cause) == (
         home, None, ROOT_CAUSE_USER_GLOBAL
     )
+    with pytest.raises(UserGlobalDocumentRefused):
+        resolve_managed_document(home)
 
 
 def test_a_drift_cache_naming_home_watches_nothing(home, tmp_path, monkeypatch):

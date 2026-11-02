@@ -1190,10 +1190,12 @@ def _first_document_under(
 class UserGlobalDocumentRefused(RuntimeError):
     """`resolve_managed_document` was about to return a user-global CLAUDE.md.
 
-    Unreachable through `memory_root_of` and `session_memory_root`, which
-    never yield such a root. If it fires, a new route to a root skipped that
-    check. Do not catch it specifically: every caller sits under a handler
-    whose failure direction is "no write".
+    Unreachable through `memory_root_of` and `session_memory_root`, except by
+    a filesystem change between their check and this one. It is caught in
+    exactly one place, `session_document`, and mapped to the cause
+    `user_global`, so the readers behind it report a skip. Do not catch it
+    anywhere else: a direct caller that trips it has found a route to a root
+    that skipped the user-global check.
     """
 
 
