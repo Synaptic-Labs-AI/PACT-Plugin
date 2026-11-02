@@ -229,3 +229,23 @@ def test_a_project_directory_keeps_its_own_root(control):
     session, document = session_document()
     assert session.cause is None
     assert document.path == control.anchor / ".claude" / "CLAUDE.md"
+
+
+def test_a_document_path_that_cannot_be_resolved_counts_as_user_global(
+    control, monkeypatch
+):
+    """Fail closed: when realpath raises on a canonical document path (or the
+    user-global one), the classifier cannot tell the root's document from the
+    user-global file, so it refuses the root as user_global. The same layout
+    is a KNOWN root in the control above, so only the unable-to-tell rule can
+    turn it user_global. Red if that branch answers False."""
+    real_realpath = os.path.realpath
+
+    def refusing_realpath(path, *args, **kwargs):
+        if os.fspath(path).endswith("CLAUDE.md"):
+            raise OSError(5, "cannot resolve", os.fspath(path))
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(project_scope.os.path, "realpath", refusing_realpath)
+
+    assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
