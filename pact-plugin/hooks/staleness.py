@@ -17,7 +17,6 @@ and under the 500-line maintainability limit.
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +33,9 @@ from shared.claude_md_manager import (
     SESSION_BOUNDARY_PREFIX,
 )
 from shared.failure_cause import failure_cause
+# The same-file test lives beside the project-memory classifier; re-exported
+# here so every importer and patch point of `staleness.same_path` keeps working.
+from shared.project_scope import same_path  # noqa: F401
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     _PIN_HEADING_ROW,
@@ -163,52 +165,6 @@ _BUDGET_WARNING_ROW = re.compile(_BUDGET_WARNING_SHAPE)
 # `test_the_strip_cannot_reach_below_the_head` and
 # `test_text_after_a_warning_on_its_row_is_never_deleted`.
 _BUDGET_WARNING_WHOLE_ROW =re.compile(rf"{_BUDGET_WARNING_HEAD}(?:(?!-->).)*-->\Z")
-
-
-def _existing_anchor(path: Path) -> Tuple[Path, Tuple[str, ...]]:
-    """The deepest ancestor of `path` (itself included) that exists, and the
-    names below it, in order."""
-    rest: List[str] = []
-    while not path.exists() and path.parent != path:
-        rest.append(path.name)
-        path = path.parent
-    return path, tuple(reversed(rest))
-
-
-def _case_insensitive(directory: Path) -> bool:
-    """Whether names are matched without case where `directory` lives: its
-    case-swapped spelling names the same directory. A name with no cased
-    letters cannot be probed and reads as case-sensitive."""
-    swapped = directory.name.swapcase()
-    if swapped == directory.name:
-        return False
-    try:
-        return os.path.samefile(directory, directory.with_name(swapped))
-    except (OSError, ValueError):
-        return False
-
-
-def same_path(a: Path, b: Path) -> bool:
-    """Whether `a` and `b` name the same file, created or not.
-
-    When both exist, `os.path.samefile`. Otherwise the deepest existing
-    ancestor of each must be the same directory, and the names below it must
-    be equal, or equal case-folded where that directory's volume matches names
-    without case. Never raises: an error reads as different paths.
-    """
-    try:
-        if a.exists() and b.exists():
-            return os.path.samefile(a, b)
-        anchor_a, rest_a = _existing_anchor(a)
-        anchor_b, rest_b = _existing_anchor(b)
-        if not os.path.samefile(anchor_a, anchor_b):
-            return False
-        if rest_a == rest_b:
-            return True
-        folded = [name.casefold() for name in rest_a] == [name.casefold() for name in rest_b]
-        return folded and _case_insensitive(anchor_a)
-    except (OSError, ValueError):
-        return False
 
 
 def _find_existing_claude_md(base: Path, assume_present: Optional[Path] = None) -> Optional[Path]:

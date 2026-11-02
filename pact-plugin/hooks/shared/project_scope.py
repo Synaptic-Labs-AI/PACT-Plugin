@@ -34,7 +34,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import NamedTuple, Optional, Set
+from typing import List, NamedTuple, Optional, Set, Tuple
 
 from . import state_file
 from .git_helpers import run_git
@@ -50,6 +50,62 @@ _GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 # Written by session_init into a session's own folder when the session starts
 # inside a linked worktree; read back by the working-memory write guard.
 WORKTREE_IDENTITY_FILE = "worktree-identity.json"
+
+
+def _existing_anchor(path: Path) -> Tuple[Path, Tuple[str, ...]]:
+    """The deepest ancestor of `path` (itself included) that exists, and the
+    names below it, in order."""
+    rest: List[str] = []
+    while not path.exists() and path.parent != path:
+        rest.append(path.name)
+        path = path.parent
+    return path, tuple(reversed(rest))
+
+
+def _case_insensitive(directory: Path) -> bool:
+    """Whether names are matched without case where `directory` lives: its
+    case-swapped spelling names the same directory. A name with no cased
+    letters cannot be probed and reads as case-sensitive."""
+    swapped = directory.name.swapcase()
+    if swapped == directory.name:
+        return False
+    try:
+        return os.path.samefile(directory, directory.with_name(swapped))
+    except (OSError, ValueError):
+        return False
+
+
+def _same_file(a: Path, b: Path) -> Optional[bool]:
+    """Whether `a` and `b` name the same file, created or not: True or False
+    when decided, None when an error prevents deciding.
+
+    When both exist, `os.path.samefile` (a hardlink or a case variant counts
+    as the same file). Otherwise the deepest existing ancestor of each must be
+    the same directory, and the names below it must be equal, or equal
+    case-folded where that directory's volume matches names without case.
+    """
+    try:
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+        anchor_a, rest_a = _existing_anchor(a)
+        anchor_b, rest_b = _existing_anchor(b)
+        if not os.path.samefile(anchor_a, anchor_b):
+            return False
+        if rest_a == rest_b:
+            return True
+        folded = [name.casefold() for name in rest_a] == [name.casefold() for name in rest_b]
+        return folded and _case_insensitive(anchor_a)
+    except (OSError, ValueError):
+        return None
+
+
+def same_path(a: Path, b: Path) -> bool:
+    """Whether `a` and `b` name the same file, created or not.
+
+    `_same_file` decided True. Never raises: an error reads as different
+    paths, the direction a gate wants (allow on doubt).
+    """
+    return _same_file(a, b) is True
 
 
 def git_env_without_location() -> dict:

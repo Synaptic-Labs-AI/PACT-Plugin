@@ -456,14 +456,39 @@ def test_same_path_compares_exactly_under_a_directory_whose_name_has_no_cased_le
 
 def test_same_path_never_raises(tmp_path, monkeypatch):
     import staleness
+    from shared import project_scope
 
     assert staleness.same_path(tmp_path / "a\0b", tmp_path / "CLAUDE.md") is False
 
     def _denied(a, b):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(staleness.os.path, "samefile", _denied)
+    monkeypatch.setattr(project_scope.os.path, "samefile", _denied)
     assert staleness.same_path(tmp_path, tmp_path) is False
+
+
+def test_staleness_re_exports_the_one_same_file_test():
+    import staleness
+    from shared import project_scope
+
+    assert staleness.same_path is project_scope.same_path
+
+
+def test_same_file_cannot_tell_on_an_error_and_same_path_reads_it_as_different(tmp_path, monkeypatch):
+    from shared import project_scope
+
+    (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
+    real_stat = os.stat
+
+    def _stat(path, *args, **kwargs):
+        if "CLAUDE.md" in os.fspath(path):
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(project_scope.os, "stat", _stat)
+    a = tmp_path / "CLAUDE.md"
+    assert project_scope._same_file(a, a) is None
+    assert project_scope.same_path(a, a) is False
 
 
 @pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counter/absence outcome
