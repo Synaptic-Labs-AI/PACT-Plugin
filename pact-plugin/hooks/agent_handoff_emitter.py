@@ -76,6 +76,7 @@ from shared.agent_handoff_marker import (
     handoff_unclaim,
     is_signal_task,
     occupant_hash,
+    report_safe,
     sanitize_path_component,
 )
 from shared.session_journal import append_event, get_journal_path, make_event
@@ -316,9 +317,11 @@ def main() -> None:
             and record_subject != task_subject
         ):
             print(
-                f"agent_handoff_emitter: resolved store {resolved_team!r} is not the "
-                f"payload team {payload_team!r} and its record subject differs from the "
-                f"payload subject; suppressing mixed handoff for task {task_id}",
+                f"agent_handoff_emitter: resolved store "
+                f"{report_safe(resolved_team)!r} is not the payload team "
+                f"{report_safe(payload_team)!r} and its record subject differs "
+                f"from the payload subject; suppressing mixed handoff for task "
+                f"{report_safe(task_id)}",
                 file=sys.stderr,
             )
             print(_SUPPRESS_OUTPUT)

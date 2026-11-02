@@ -128,7 +128,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 **SELECTION, because `agent_handoff` is a multi-event family.** Do not take the first match. The first match is the FIRST emit, which is the superseded copy. Use the rule Step 3.1 uses for snapshots:
 
-1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: run Step 2 and Step 8 for it against its own `## team={from}` section and THAT team's task store, and never union it with this team's task file. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory cannot be read, the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
+1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: run Step 2 and Step 8 for it against its own `## team={from}` section and THAT team's task store, and never union it with this team's task file. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
 2. Group the match by the `(agent, task_subject)` identity the event carries. Compute that identity with the shared `occupant_hash` function and not with a local reimplementation. An `agent_handoff` event carries no `occupant` field, so compute the identity from the event's own fields. The platform reuses task_ids across arcs, and a reused task_id carries one identity for each arc. When the group count is more than one, process each group as a distinct work unit. Do not pick one group. **DO NOT FOLD THE TEAM INTO `occupant_hash`.** The marker filename and the `task_metadata_snapshot` occupant are `occupant_hash(agent, subject)` alone, so a team inside the hash re-keys every existing marker and breaks every existing snapshot join. The team term routes partitions and is never a term of the group key.
 3. In each group take the **latest `ts`**, and take the **last in journal order on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties. The later line in journal order is the authoritative one, the same tie-break Step 3.1 uses).
 4. The task file belongs to at most one group. Union the task-file copy into the group with the identity `occupant_hash(owner, subject)` computed from the task record, and report each other group through the report-message rule below.
@@ -200,8 +200,11 @@ def emit_side_subject(subject):
 
 # The harvest's own team: the LAST PATH COMPONENT of the `Task list:`
 # directory in this agent's context. `from_teams` is every team the journal's
-# `team_realigned` events name in `from` (Step 1 source 4).
-this_team = Path(task_list_dir).name
+# `team_realigned` events name in `from` (Step 1 source 4). An ABSENT or EMPTY
+# path value gives "" — NEVER a raise — because the empty value is the state
+# the partition guard below turns into OLD-FORMAT. The guard checks the
+# DERIVED NAME, not whether the directory can be read.
+this_team = Path(task_list_dir).name if task_list_dir else ""
 from_teams = [e["from"] for e in realign_events]
 
 
@@ -232,17 +235,30 @@ for task_id in unprocessed:
 
     # STEP 1: PARTITION by team. A realigned earlier team's events are still
     # harvested — under that team's own section and store.
-    this_team_events, from_events, foreign, old_format = [], {}, [], []
-    for e in matches:
-        team = e.get("team")
-        if not team:
-            old_format.append(e)
-        elif team == this_team:
-            this_team_events.append(e)
-        elif team in from_teams:
-            from_events.setdefault(team, []).append(e)
-        else:
-            foreign.append(e)
+    if not this_team:
+        # The team term cannot be evaluated (the `Task list:` directory is
+        # absent, or its last path component is underivable — this_team is
+        # empty): EVERY partition is OLD-FORMAT, per the rule above. Without
+        # this guard an empty this_team makes every team-carrying event fail
+        # both team tests and be reported FOREIGN — the OPPOSITE of that rule.
+        # Routing everything here is SAFE: named_store_candidates then reads
+        # only the from-stores, and read_task_json with an empty team returns
+        # {} which is skipped.
+        report(f"handoff team identity underivable for task {task_id}: no "
+               f"Task list: directory in context")
+        this_team_events, from_events, foreign, old_format = [], {}, [], list(matches)
+    else:
+        this_team_events, from_events, foreign, old_format = [], {}, [], []
+        for e in matches:
+            team = e.get("team")
+            if not team:
+                old_format.append(e)
+            elif team == this_team:
+                this_team_events.append(e)
+            elif team in from_teams:
+                from_events.setdefault(team, []).append(e)
+            else:
+                foreign.append(e)
     for e in foreign:
         report(f"handoff identity mismatch for task {task_id}: journal event "
                f"names team {e.get('team')}; this store is team {this_team}")

@@ -196,6 +196,24 @@ class TestEmitTeamUncertaintyGuard:
         )
         assert "suppressing mixed handoff for task 12" in err
 
+    def test_payload_team_cannot_forge_a_report_line(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CWE-117: the payload team is stdin-supplied. A newline in it must
+        not create a second line in the stderr report; report_safe strips it
+        while the value's visible text survives."""
+        code, calls, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live\nFORGED: approved",
+            payload_subject="LIVE subject",
+            context_team="session-old",
+        )
+        assert code == 0
+        assert calls == []
+        assert "\nFORGED" not in err
+        assert "session-liveFORGED: approved" in err
+        assert err.count("\n") == 1  # the report line plus print's newline
+
     def test_team_disagreement_with_agreeing_subjects_emits(
         self, tmp_path, monkeypatch, capsys
     ):

@@ -337,6 +337,23 @@ _EMPTY_VALUES = (None, "", [], {})
 
 _REQUIRED = frozenset(HANDOFF_REQUIRED_FIELDS)
 
+# Longest raw value allowed into a report line. Reports name a task id and a
+# field name; neither is legitimately long, and an unbounded value is a
+# line-swallowing vector.
+_REPORT_VALUE_MAX = 128
+
+
+def report_safe(value: object, limit: int = _REPORT_VALUE_MAX) -> str:
+    """Make a value safe to interpolate into a ONE-LINE report (CWE-117).
+
+    Report lines are read by an agent that may act on them, and field names
+    come from the task file and the append-only journal — both outside this
+    module's control. C0 control characters (including CR and LF) would let a
+    value forge or split a report line, so they are stripped, and the result
+    is length-capped so one value cannot swallow the line.
+    """
+    return re.sub(r"[\x00-\x1f\x7f]", "", str(value))[:limit]
+
 
 def _identity(raw_key: str) -> str:
     """Canonical identity of one raw key.
@@ -414,23 +431,35 @@ def union_preferring_task_file(
     """
     merged = dict(journal_handoff)
     reports: list[str] = []
+    report_task = report_safe(task_id)
 
     journal_fields = _field_map(journal_handoff)
     disk_fields = _field_map(disk_handoff)
     j_req = _required_set(journal_fields)
     d_req = _required_set(disk_fields)
 
+    def _drop_journal_identity(identity: str) -> None:
+        """Remove EVERY journal raw key whose canonical identity is `identity`.
+
+        A journal copy may carry BOTH the canonical and an alias spelling of
+        one field. `_field_map` collapses them for the set math, but `merged`
+        starts as a copy of the RAW journal mapping, so dropping only the one
+        spelling `_field_map` selected would leave the other in the output and
+        defeat the decision below: a reader resolving aliases still finds the
+        value that was just decided against.
+        """
+        for raw_key in journal_handoff:
+            if _identity(raw_key) == identity:
+                merged.pop(raw_key, None)
+
     def _take_disk(identity: str, disk_value: object) -> None:
         disk_key, _ = disk_fields[identity]
+        _drop_journal_identity(identity)
         merged[disk_key] = disk_value
-        journal_key = journal_fields.get(identity, (None, None))[0]
-        # No duplicate spellings in the output: when the disk wins under a
-        # different spelling, drop the journal's spelling of the same field.
-        if journal_key is not None and journal_key != disk_key:
-            merged.pop(journal_key, None)
 
     # State A: every field the task file carries.
     for identity, (disk_key, disk_value) in disk_fields.items():
+        report_field = report_safe(identity)
         journal_present = identity in journal_fields
         journal_value = (
             resolve_handoff_field(journal_handoff, identity)
@@ -443,53 +472,54 @@ def union_preferring_task_file(
         ):
             if d_req >= j_req:  # covering, EQUALITY INCLUDED
                 reports.append(
-                    f"handoff field kept empty for task {task_id}: field "
-                    f"{identity} present and empty; the task-file required "
-                    f"key set covers the journal copy"
+                    f"handoff field kept empty for task {report_task}: field "
+                    f"{report_field} present and empty; the task-file "
+                    f"required key set covers the journal copy"
                 )
                 _take_disk(identity, disk_value)
             elif d_req < j_req:  # proper subset
                 reports.append(
                     f"handoff field restored from the journal for task "
-                    f"{task_id}: field {identity} present and empty; the "
-                    f"task-file required key set is a proper subset of the "
-                    f"journal copy"
+                    f"{report_task}: field {report_field} present and empty; "
+                    f"the task-file required key set is a proper subset of "
+                    f"the journal copy"
                 )
                 # keep the journal value: merged already holds it
             else:  # incomparable
                 reports.append(
-                    f"handoff field undecidable for task {task_id}: field "
-                    f"{identity} present and empty; the required key sets "
-                    f"are incomparable"
+                    f"handoff field undecidable for task {report_task}: "
+                    f"field {report_field} present and empty; the required "
+                    f"key sets are incomparable"
                 )
                 _take_disk(identity, disk_value)
         else:
             _take_disk(identity, disk_value)
 
     # State B: fields only the journal carries.
-    for identity, (journal_key, journal_value) in journal_fields.items():
+    for identity in journal_fields:
         if identity in disk_fields:
             continue
+        report_field = report_safe(identity)
         if identity in _REQUIRED:
             if d_req < j_req:
                 reports.append(
                     f"handoff field restored from the journal for task "
-                    f"{task_id}: required field {identity} absent from the "
-                    f"task file; the task-file required key set is a proper "
-                    f"subset of the journal copy"
+                    f"{report_task}: required field {report_field} absent "
+                    f"from the task file; the task-file required key set is "
+                    f"a proper subset of the journal copy"
                 )
                 # keep it
             else:  # incomparable; covering is impossible here
                 reports.append(
-                    f"handoff field undecidable for task {task_id}: required "
-                    f"field {identity} absent from the task file; the "
-                    f"required key sets are incomparable"
+                    f"handoff field undecidable for task {report_task}: "
+                    f"required field {report_field} absent from the task "
+                    f"file; the required key sets are incomparable"
                 )
-                merged.pop(journal_key, None)
+                _drop_journal_identity(identity)
         else:
             reports.append(
-                f"handoff field kept from the journal for task {task_id}: "
-                f"field {identity} absent from the task file and not a "
+                f"handoff field kept from the journal for task {report_task}: "
+                f"field {report_field} absent from the task file and not a "
                 f"required field; the required key sets do not decide it"
             )
             # keep it: the union default for a non-required field
@@ -581,8 +611,9 @@ def mixed_old_format_event(
     unmatched = OldFormatOutcome(
         OLD_FORMAT_UNMATCHED,
         report=(
-            f"handoff cross-team check unavailable for task {task_id}: no "
-            f"other named store carries the identity"
+            f"handoff cross-team check unavailable for task "
+            f"{report_safe(task_id)}: no other named store carries the "
+            f"identity"
         ),
     )
     if not isinstance(event_handoff, dict) or not event_handoff:
@@ -617,13 +648,15 @@ def mixed_old_format_event(
     if not content_matches:
         return unmatched
     team, _ = content_matches[0]
+    report_task = report_safe(task_id)
+    report_team = report_safe(team)
     return OldFormatOutcome(
         OLD_FORMAT_MIXED,
         team=team,
         report=(
-            f"handoff identity mismatch for task {task_id}: journal content "
-            f"equals team {team} task {task_id}, whose identity it does not "
-            f"carry"
+            f"handoff identity mismatch for task {report_task}: journal "
+            f"content equals team {report_team} task {report_task}, whose "
+            f"identity it does not carry"
         ),
     )
 
