@@ -77,6 +77,8 @@ from pathlib import Path
 
 import pytest
 
+import ci_contract
+
 # The two collection roots pytest resolves from `pact-plugin/`, and the pytest
 # config filenames that can carry a `testpaths` entry. Both directories are
 # scanned: rootdir resolution depends on which one holds a config, and that in
@@ -124,6 +126,25 @@ def _require_checkout():
         f"a FAILURE, not a skip: inside a checkout the workflow is required."
     )
     return root, workflow.read_text(encoding="utf-8")
+
+
+def _require_fast_lane(repo_root):
+    """LOUD skip when the whole fast lane is deleted; fail on a partial lane."""
+    state, present, missing = ci_contract.fast_lane_state(repo_root)
+    if state == "absent":
+        pytest.skip(
+            "SKIPPED, NOT PASSED — the WHOLE fast lane is absent (all "
+            f"{len(ci_contract.FAST_LANE_FILES)} sentinel files missing): "
+            f"{list(ci_contract.FAST_LANE_FILES)}. This arm checks the fast "
+            "lane and cannot judge a lane that is not there; the full gate's "
+            "independent guards still run. This skip is NO INFORMATION about "
+            "the fast lane."
+        )
+    assert state == "present", (
+        f"FAST LANE PARTIALLY PRESENT: present={present}, missing={missing}. "
+        f"Deleting the whole lane is supported (this arm skips loudly); "
+        f"deleting only part of it is a broken checkout and FAILS."
+    )
 
 
 def _pytest_run_commands(workflow_text):
@@ -566,6 +587,7 @@ class TestTheFastManifestNamesRealCorpusFiles:
 
     def test_manifest_paths_exist_and_appear_in_the_discovered_corpus(self):
         repo_root, _ = _require_checkout()
+        _require_fast_lane(repo_root)
         plugin_root = _plugin_root()
         manifest = repo_root / "scripts" / "fast_suite_exclusions.json"
         cli = repo_root / "scripts" / "fast_suite_args.py"
@@ -635,4 +657,162 @@ class TestTheFastManifestNamesRealCorpusFiles:
         assert proc.returncode == 0, (
             f"scripts/fast_suite_args.py --check exited {proc.returncode}.\n"
             f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+
+
+# The reviewed exclusion identities: path, production_seams, mechanism.
+# Changing any entry is a reviewed manifest change, not a code tweak. This
+# table is a DRIFT GUARD, not an adversarial barrier: a PR can edit this pin
+# and the manifest in the same commit, so review remains the real control.
+EXPECTED_EXCLUSIONS = (
+    ('tests/test_merge_guard_refused_is_mintable.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/merge_guard_common.py'),
+     'mint matrix over nested refusal shapes'),
+    ('tests/test_snapshot_provenance_semantics.py',
+     ('hooks/shared/session_journal.py',
+      'hooks/shared/task_metadata_snapshot.py'),
+     'deep-pressure totality over lookalike provenance values'),
+    ('tests/test_merge_guard_substitution_mint.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/gh_helpers.py', 'hooks/shared/merge_guard_common.py'),
+     'large substitution-mint matrix'),
+    ('tests/test_task_metadata_snapshot.py',
+     ('hooks/shared/task_metadata_snapshot.py',),
+     'deep-pressure totality over metadata payloads'),
+    ('tests/test_snapshot_key_count_discriminator.py',
+     ('hooks/shared/task_metadata_snapshot.py',),
+     'key-count discriminator totality matrix'),
+    ('tests/test_merge_guard_review_fixes.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/merge_guard_common.py'),
+     'large review-fix regression matrix'),
+    ('tests/test_memory_cli.py',
+     ('skills/pact-memory/scripts/cli.py',
+      'skills/pact-memory/scripts/database.py',
+      'skills/pact-memory/scripts/memory_api.py',
+      'skills/pact-memory/scripts/search.py',
+      'skills/pact-memory/scripts/working_memory.py'),
+     'real CLI subprocess and database work'),
+    ('tests/test_pin_growth_populations.py',
+     ('hooks/pin_caps_gate.py', 'hooks/shared/claude_md_markers.py',
+      'hooks/shared/pin_growth.py'),
+     'pin-growth population matrices'),
+    ('tests/test_merge_guard_1140_carrier5_cert.py',
+     ('hooks/shared/merge_guard_common.py',),
+     'carrier certification matrix over nested compounds'),
+    ('tests/test_claude_md_locator_census.py',
+     ('hooks/shared/claude_md_markers.py', 'hooks/shared/pin_growth.py'),
+     'whole-tree AST census of shipped CLAUDE.md parse sites; its true '
+     'subject is every production module, so an unmapped production change '
+     'forces SELECT_ALL'),
+    ('tests/test_working_memory_fidelity.py',
+     ('skills/pact-memory/scripts/working_memory.py',),
+     'working-memory fidelity over many project populations'),
+    ('tests/test_merge_guard_perf.py',
+     ('hooks/merge_guard_pre.py', 'hooks/shared/merge_guard_common.py'),
+     'parser performance and deep tokenization cases'),
+    ('tests/test_claude_md_corpus_writers.py',
+     ('hooks/pin_caps.py', 'hooks/session_init.py',
+      'hooks/shared/claude_md_manager.py',
+      'hooks/shared/claude_md_markers.py', 'hooks/shared/pin_markers.py',
+      'hooks/shared/session_resume.py', 'hooks/shared/stale_session.py',
+      'hooks/staleness.py', 'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/working_memory.py'),
+     'large corpus-writer matrix'),
+    ('tests/test_bootstrap_prompt_gate_unrecorded_lead.py',
+     ('hooks/bootstrap_marker_writer.py', 'hooks/bootstrap_prompt_gate.py',
+      'hooks/session_init.py'),
+     'subprocess hook runs per case'),
+    ('tests/test_merge_guard_fan_out.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/merge_guard_common.py'),
+     'merge-guard fan-out matrix'),
+    ('tests/test_merge_guard_retirement_gaps.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/merge_guard_common.py'),
+     'retirement-gap regression matrix'),
+    ('tests/test_telegram_tools.py',
+     ('telegram/telegram_client.py', 'telegram/tools.py'),
+     'telegram tool rate-limit and reply-queue timing arms'),
+    ('tests/test_claude_md_drift.py',
+     ('hooks/missed_wake_scan.py', 'hooks/shared/background_work.py',
+      'hooks/shared/claude_md_drift.py',
+      'hooks/shared/claude_md_manager.py', 'hooks/shared/constants.py',
+      'hooks/shared/pact_context.py', 'hooks/track_files.py'),
+     'clock-shift subprocess matrix over the drift writers'),
+    ('tests/test_embedding_model_load_is_cache_first.py',
+     ('skills/pact-memory/scripts/embeddings.py',),
+     'embedding model load and cache arms'),
+    ('tests/test_merge_guard_pr_state_retirement.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/merge_guard_common.py'),
+     'PR-state retirement regression matrix'),
+    ('tests/test_archive_pin.py',
+     ('hooks/pin_caps.py', 'hooks/shared/claude_md_markers.py',
+      'hooks/shared/project_scope.py', 'hooks/staleness.py',
+      'skills/pact-memory/scripts/config.py'),
+     'archive-pin corpus census over CLAUDE.md fixtures'),
+    ('tests/test_clock_shift_instrument.py',
+     ('tests/clock_shift/clock_shift_census.py',),
+     'clock-shift instrument subprocess probes'),
+    ('tests/test_pin_caps_gate_credit.py',
+     ('hooks/shared/claude_md_drift.py',),
+     'pin-caps credit matrix'),
+    ('tests/test_merge_guard_nested_compound.py',
+     ('hooks/merge_guard_post.py', 'hooks/merge_guard_pre.py',
+      'hooks/shared/merge_guard_common.py'),
+     'nested compound detection matrix'),
+)
+
+
+class TestTheShippedManifestIsTheReviewedManifest:
+    """F5: WHICH 24 exclusions, their seams, and their named reasons.
+
+    A drift guard, not an adversarial barrier: a PR edits this table and the
+    manifest in the same commit, so review remains the real control. Impact
+    today is the advisory lane only. Reddens on: a swapped path (missing +
+    unexpected), an altered seam tuple, or a changed mechanism.
+    """
+
+    def test_the_manifest_identities_and_seams_are_the_reviewed_set(self):
+        repo_root, _ = _require_checkout()
+        _require_fast_lane(repo_root)
+        manifest = json.loads(
+            (repo_root / "scripts" / "fast_suite_exclusions.json").read_text(
+                encoding="utf-8"))
+        actual = {
+            entry["path"]: (
+                tuple(entry.get("production_seams") or ()),
+                entry.get("mechanism"),
+            )
+            for entry in manifest.get("exclusions") or []
+        }
+        expected = {
+            path: (seams, mechanism)
+            for path, seams, mechanism in EXPECTED_EXCLUSIONS
+        }
+        missing = sorted(set(expected) - set(actual))
+        unexpected = sorted(set(actual) - set(expected))
+        changed = []
+        for path in sorted(set(expected) & set(actual)):
+            expected_seams, expected_mechanism = expected[path]
+            actual_seams, actual_mechanism = actual[path]
+            if actual_seams != expected_seams:
+                changed.append(
+                    f"{path}: production_seams {actual_seams!r} != "
+                    f"{expected_seams!r}")
+            if actual_mechanism != expected_mechanism:
+                changed.append(
+                    f"{path}: mechanism {actual_mechanism!r} != "
+                    f"{expected_mechanism!r}")
+        assert not missing and not unexpected and not changed, (
+            "THE MANIFEST IS NOT THE REVIEWED MANIFEST.\n"
+            f"  missing paths: {missing}\n"
+            f"  unexpected paths: {unexpected}\n"
+            f"  changed entries:\n"
+            + "\n".join(f"    {line}" for line in changed)
+            + "\nEvery exclusion, its production_seams tuple and its "
+            "mechanism are reviewed data. If the change is intended, update "
+            "EXPECTED_EXCLUSIONS in the same commit and say why."
         )

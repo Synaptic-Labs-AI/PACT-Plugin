@@ -136,6 +136,15 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 3
+        if status == "invalid-base":
+            # A caller must be able to tell "your base was unusable" from
+            # "no exclusions apply". Both used to exit 0 with SELECT_ALL.
+            print(
+                f"input error: base SHA {args.base_sha!r} is not a usable "
+                f"commit id (expected 7-40 hex characters, not all zeros)",
+                file=sys.stderr,
+            )
+            return 3
     else:
         print(
             "input error: one of --base-sha, --changed-file or --check is "

@@ -44,7 +44,7 @@ _GLOB_CHARS = ("*", "?", "[", "]")
 # in the shipped JSON. A key added to one without the other is an error, never
 # a silently ignored field.
 _TOP_LEVEL_KEYS = frozenset({
-    "schema_version", "path_base", "baseline", "production_roots",
+    "schema_version", "path_base", "baseline",
     "selection_machinery", "guard_files", "exclusions",
 })
 _BASELINE_KEYS = frozenset({
@@ -105,7 +105,6 @@ class Exclusion:
 @dataclass(frozen=True)
 class Manifest:
     path_base: str
-    production_roots: tuple[str, ...]
     selection_machinery: tuple[str, ...]
     guard_files: tuple[str, ...]
     exclusions: tuple[Exclusion, ...]
@@ -211,7 +210,21 @@ def _validate_data_path(
 
 def _validate_top_level_keys(data: dict, errors: list[str]) -> None:
     for key in sorted(set(data) - _TOP_LEVEL_KEYS):
-        errors.append(f"manifest: unknown key {key!r}")
+        if key == "production_roots":
+            # Named explicitly rather than folded into the generic message:
+            # this field was load-bearing once, and a reader who finds it in
+            # an old manifest must be told what replaced it, not just that it
+            # is unwelcome.
+            errors.append(
+                "manifest: 'production_roots' was removed from the schema. "
+                "Selection no longer uses an allowlist of production "
+                "directories; it uses a plugin-wide denylist, where any "
+                "changed path under pact-plugin/ that is neither a test "
+                "module nor a mapped seam forces SELECT_ALL. Delete the field "
+                "rather than replacing it with another allowlist."
+            )
+        else:
+            errors.append(f"manifest: unknown key {key!r}")
     for key in sorted(_TOP_LEVEL_KEYS - set(data)):
         errors.append(f"manifest: missing required key {key!r}")
 
@@ -224,27 +237,6 @@ def _validate_baseline(baseline: object, errors: list[str]) -> None:
         errors.append(f"baseline: unknown key {key!r}")
     for key in sorted(_BASELINE_KEYS - set(baseline)):
         errors.append(f"baseline: missing required key {key!r}")
-
-
-def _validate_production_roots(roots: object, plugin_root: Path,
-                               errors: list[str]) -> tuple[str, ...]:
-    if not isinstance(roots, list) or not roots:
-        errors.append("production_roots: expected a non-empty list")
-        return ()
-    validated: list[str] = []
-    for index, raw in enumerate(roots):
-        field = f"production_roots[{index}]"
-        if not isinstance(raw, str) or not raw.endswith("/"):
-            errors.append(f"{field}: expected a directory prefix ending in '/'")
-            continue
-        resolved = _check_under(raw, field, plugin_root, errors)
-        if resolved is None:
-            continue
-        if not resolved.is_dir():
-            errors.append(f"{field}: {raw!r} is not an existing directory")
-            continue
-        validated.append(raw)
-    return tuple(validated)
 
 
 def _validate_selection_machinery(entries: object, repo_root: Path,
@@ -437,8 +429,6 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
         raise ManifestError(errors)
 
     _validate_baseline(data.get("baseline"), errors)
-    production_roots = _validate_production_roots(
-        data.get("production_roots"), plugin_root, errors)
     selection_machinery = _validate_selection_machinery(
         data.get("selection_machinery"), repo_root, errors)
     guard_files = _validate_guard_files(
@@ -458,7 +448,6 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
         raise ManifestError(errors)
     return Manifest(
         path_base=SUPPORTED_PATH_BASE,
-        production_roots=production_roots,
         selection_machinery=selection_machinery,
         guard_files=guard_files,
         exclusions=exclusions,
@@ -626,10 +615,19 @@ def select(discovered: frozenset[str], manifest: Manifest,
         seam for exclusion in manifest.exclusions
         for seam in exclusion.production_seams
     }
+    # A DENYLIST OVER THE WHOLE PLUGIN TREE, not an allowlist of "production"
+    # roots. Any changed path under the plugin that is neither a test module
+    # nor a mapped seam can affect what the fast lane runs, so it selects
+    # everything. The allowlist this replaced named hooks, scripts, skills,
+    # telegram and bin, and silently omitted agents, commands, protocols,
+    # templates, reference and the plugin manifest: a change to the repo's own
+    # instruction surfaces applied all 24 exclusions with no add-back, which
+    # is the narrow-the-lane outcome the design forbids. An allowlist drifts
+    # on the next directory; this cannot.
     for rel in plugin_changed:
-        if not _is_test_file(rel) and rel not in known_seams and any(
-                rel.startswith(root) for root in manifest.production_roots):
-            return _select_all(discovered, status, f"unmapped-production:{rel}")
+        if _is_test_file(rel) or rel in known_seams:
+            continue
+        return _select_all(discovered, status, f"unmapped-production:{rel}")
 
     added_back_paths = {entry.path for entry in added_back}
     applied = {
@@ -710,9 +708,12 @@ def build_argv(selection: Selection, cwd: Path, mode: str,
 # --------------------------------------------------------------------------
 
 _TIMING_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
+# `no tests ran` carries no leading count, so it cannot sit inside the
+# digit-prefixed alternation: required here, or a zero-collection run never
+# parses and gets reported as "no summary at all", naming the wrong cause.
 _OUTCOME_RE = re.compile(
-    r"\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed"
-    r"|warnings?|tests? collected|test collected|no tests ran)"
+    r"(?:\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed"
+    r"|warnings?|tests? collected|test collected)|no tests ran)"
 )
 _COUNT_PATTERNS = (
     ("passed", re.compile(r"(\d+) passed")),
@@ -787,6 +788,7 @@ def parse_pytest_summary(text: str) -> dict[str, object] | None:
         collected = 0
     if collected is None:
         collected = sum(int(result[name]) for name in (
-            "passed", "failed", "errors", "skipped", "xfailed", "xpassed"))
+            "passed", "failed", "errors", "skipped", "xfailed", "xpassed",
+            "deselected"))
     result["collected"] = collected
     return result

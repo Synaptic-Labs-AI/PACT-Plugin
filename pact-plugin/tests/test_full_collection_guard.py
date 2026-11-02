@@ -47,6 +47,18 @@ print("nowhere/test_unknown.py::test_unknown")
 print("1 test collected in 0.01s")
 '''
 
+FAKE_DESELECTED = '''\
+print("tests/test_alpha.py::test_alpha")
+print("tests/test_ci_collection_scope.py::test_anchor")
+print("2 tests collected, 1 deselected in 0.01s")
+'''
+
+FAKE_ERRORS = '''\
+print("tests/test_alpha.py::test_alpha")
+print("tests/test_ci_collection_scope.py::test_anchor")
+print("2 tests collected, 1 error in 0.01s")
+'''
+
 
 def _write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +84,10 @@ def _base_rig(tmp_path, name="rig", corpus=True):
         anchor = rig / ANCHOR
         anchor.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / ANCHOR, anchor)
+        # The anchor module imports the shared test helper; a rig without it
+        # produces a COLLECTION ERROR that masks the behaviour under test.
+        shutil.copy2(root / "pact-plugin" / "tests" / "ci_contract.py",
+                     anchor.parent / "ci_contract.py")
         _write(rig / "pact-plugin" / "tests" / "test_alpha.py",
                "def test_alpha():\n    assert True\n")
         _write(rig / SKILL_TEST, "def test_skill():\n    assert True\n")
@@ -162,6 +178,24 @@ def test_an_absent_summary_is_a_parse_failure_not_a_scope_mismatch(tmp_path):
     assert "PARSE FAILURE" in output, output
     assert "SCOPE MISMATCH" not in output, (
         f"a missing summary was reported as a scope mismatch:\n{output}")
+
+
+@pytest.mark.parametrize(
+    "fake,case_id",
+    [(FAKE_DESELECTED, "deselected"), (FAKE_ERRORS, "errors")],
+)
+def test_a_deselected_or_error_summary_is_rejected(tmp_path, fake, case_id):
+    """F3: the token scan is the only catch for a partial deselection.
+
+    A deselection leaves the file collected, so the file-set comparison
+    passes; only this scan sees it. Deleting the scan must redden here.
+    """
+    rig = _base_rig(tmp_path, name=f"scan-{case_id}")
+    _install_fake_pytest(rig, fake)
+    proc, output = _run_guard(rig)
+    assert proc.returncode == 2, output
+    assert "COLLECTION FAILURE" in output, output
+    assert "reports deselection or errors" in output, output
 
 
 def test_an_unresolvable_node_id_base_is_refused(tmp_path):

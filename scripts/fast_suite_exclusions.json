@@ -14,13 +14,6 @@
     "displayed_seconds_total": 1261.64,
     "wall_seconds_total": 1393.62
   },
-  "production_roots": [
-    "hooks/",
-    "scripts/",
-    "skills/",
-    "telegram/",
-    "bin/"
-  ],
   "selection_machinery": [
     "scripts/fast_suite_selection.py",
     "scripts/fast_suite_args.py",

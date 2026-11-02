@@ -57,6 +57,7 @@ from fast_suite_selection import (  # noqa: E402  (path must precede import)
 
 SCHEMA_VERSION = 1
 _TAIL_LINES = 400
+_ITEMS_LINE_RE = re.compile(r"collected \d+ items?\b")
 
 
 def _node_id_file(line: str) -> str | None:
@@ -279,8 +280,18 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
 def _run(args, selection, manifest_path: Path, plugin_root: Path,
          repo_root: Path) -> int:
     argv = build_argv(selection, plugin_root, "run")
-    rc, tail = _stream(argv, plugin_root)
-    parsed = parse_pytest_summary("\n".join(tail))
+    # The `collected N items` header sits at the TOP of a run log of tens of
+    # thousands of lines, so a tail-only parse never sees it and the collected
+    # count silently falls back to the outcome sum. Capture it as it streams.
+    collected_header: list[str] = []
+
+    def note_collected(line: str) -> None:
+        if _ITEMS_LINE_RE.search(line):
+            collected_header[:] = [line.strip()]
+
+    rc, tail = _stream(argv, plugin_root, note_collected)
+    parsed = parse_pytest_summary(
+        "\n".join([*collected_header, *tail]))
 
     payload = _base_payload(selection, manifest_path, args.base_sha,
                             repo_root, "run")
@@ -315,6 +326,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="summary artifact path (default: "
                              "${GITHUB_WORKSPACE}/.fast-suite-summary.json)")
     args = parser.parse_args(argv)
+
+    # Inherited pytest options can change what runs without appearing in the
+    # command, and the canary's collection checks cannot see a run-only
+    # option. Refuse rather than run under an unknown configuration.
+    if os.environ.get("PYTEST_ADDOPTS"):
+        print(
+            "FAST-SUITE REFUSAL: PYTEST_ADDOPTS is set in this process "
+            f"({os.environ['PYTEST_ADDOPTS']!r}). Inherited options can "
+            "narrow or reshape the run without appearing in the recorded "
+            "command, so the runner refuses to start.",
+            file=sys.stderr,
+        )
+        return 3
 
     repo_root = (Path(args.repo_root).resolve() if args.repo_root
                  else Path(__file__).resolve().parent.parent)

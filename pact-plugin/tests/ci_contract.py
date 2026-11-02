@@ -28,6 +28,33 @@ FAST_WORKFLOW = Path(".github") / "workflows" / "fast-tests.yml"
 VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra"
 
+# The files that together make up the fast lane. Used to distinguish a
+# WHOLLY deleted lane (a loud skip) from a half-deleted one (a failure).
+FAST_LANE_FILES = (
+    ".github/workflows/fast-tests.yml",
+    "scripts/fast_suite_exclusions.json",
+    "scripts/fast_suite_args.py",
+    "scripts/fast_suite_selection.py",
+    "scripts/run_fast_suite.py",
+    "scripts/verify_fast_summary.py",
+)
+
+
+def fast_lane_state(root):
+    """Return (state, present, missing) for the fast lane's sentinel files.
+
+    state is "present" (all files), "absent" (none), or "mixed" (some).
+    A mixed state is a broken checkout, never a skip.
+    """
+    root = Path(root)
+    present = [rel for rel in FAST_LANE_FILES if (root / rel).is_file()]
+    missing = [rel for rel in FAST_LANE_FILES if rel not in present]
+    if not present:
+        return "absent", present, missing
+    if not missing:
+        return "present", present, missing
+    return "mixed", present, missing
+
 
 def source_repo_root(start=None):
     """The checkout root by the positive marker, or None when there is none."""
@@ -161,31 +188,6 @@ def summary_counts(line):
         if match:
             counts[key] = int(match.group(1))
     return counts
-
-
-def collect_node_ids(cwd, args=(), timeout=900):
-    """Run a real collection and return (node-id set, completed process).
-
-    A real collection rather than a prediction: the defect this guards exists
-    because a narrowed invocation LOOKS correct.
-    """
-    command = [sys.executable, "-m", "pytest", "--collect-only", "-q",
-               "-p", "no:cacheprovider", *args]
-    proc = subprocess.run(
-        command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
-    ids = set()
-    for raw in proc.stdout.splitlines():
-        line = raw.strip()
-        if "::" not in line:
-            continue
-        if line.split("::", 1)[0].endswith(".py"):
-            ids.add(line)
-    return ids, proc
-
-
-def node_id_files(node_ids):
-    """The file part of every node ID, as a set."""
-    return {node.split("::", 1)[0] for node in node_ids}
 
 
 _PROBE_CONFTEST = '''\

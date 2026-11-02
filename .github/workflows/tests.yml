@@ -491,6 +491,15 @@ jobs:
         working-directory: pact-plugin
         run: python -m pytest -ra
 
+      # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
+      # inspects a separate --collect-only run; this reads the in-band record
+      # of the run that actually certifies, so a session that deselects or
+      # silently drops items at run time cannot leave this job green. A
+      # missing record fails. The run: text carries no pytest token, so the
+      # one-bare-pytest-invocation rule above still holds.
+      - name: Verify the certifying run
+        run: python scripts/verify_full_run.py
+
       - name: Verify the CI environment (after tests)
         if: always()
         run: python scripts/verify_ci_environment.py

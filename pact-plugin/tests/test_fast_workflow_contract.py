@@ -20,12 +20,10 @@ from pathlib import Path
 import ci_contract
 
 RUN_FORM = (
-    'python ../scripts/run_fast_suite.py --base-sha '
-    '"${{ github.event.pull_request.base.sha }}"'
+    'python ../scripts/run_fast_suite.py --base-sha "$BASE_SHA"'
 )
 COLLECT_FORM = (
-    'python ../scripts/run_fast_suite.py --collect-only --base-sha '
-    '"${{ github.event.pull_request.base.sha }}"'
+    'python ../scripts/run_fast_suite.py --collect-only --base-sha "$BASE_SHA"'
 )
 FAST_JOB = "fast-suite"
 FULL_JOB = "full-suite"
@@ -78,13 +76,20 @@ class TestFastWorkflowShape:
             f"fast-tests.yml triggers {sorted(triggers or {})}; the advisory "
             f"lane is PR-only by design."
         )
-        types = (triggers or {}).get("pull_request")
-        if isinstance(types, dict):
-            assert set(types) <= {"types"}, (
-                f"fast-tests.yml carries a path/branch filter: {sorted(types)}. "
-                f"A filter on the advisory lane is not part of the contract."
-            )
-            assert types.get("types") == ["opened", "synchronize", "reopened"]
+        pulls = (triggers or {}).get("pull_request")
+        assert isinstance(pulls, dict), (
+            "fast-tests.yml declares a BARE `pull_request:`; the event-type "
+            "list is part of the contract and must be explicit (a removed "
+            "types: key must redden here)."
+        )
+        assert set(pulls) <= {"types"}, (
+            f"fast-tests.yml carries a path/branch filter: {sorted(pulls)}. "
+            f"A filter on the advisory lane is not part of the contract."
+        )
+        assert pulls.get("types") == ["opened", "synchronize", "reopened"], (
+            f"fast-tests.yml pull_request types are {pulls.get('types')!r}, "
+            f"not ['opened', 'synchronize', 'reopened']"
+        )
 
     def test_fast_job_is_a_scalar_named_fast_suite(self):
         root = ci_contract.require_root("the fast job name")
@@ -206,20 +211,57 @@ class TestFastWorkflowHygiene:
         )
 
     def test_actions_are_allowlisted_and_sha_pinned(self):
-        root = ci_contract.require_root("the fast action allowlist")
-        steps = ci_contract.steps_of(
-            ci_contract.jobs_of(_fast_doc(root))[FAST_JOB])
-        uses_values = [step["uses"] for step in steps
-                       if isinstance(step.get("uses"), str)]
-        assert uses_values, "no action steps read"
+        """Both workflows, not only the fast one (security finding F4).
+
+        This catches drift and honest mistakes. It is NOT an adversarial
+        barrier: a PR can edit this pin and the workflow in the same commit,
+        so review remains the real control.
+        """
+        root = ci_contract.require_root("the action allowlist")
         problems = []
-        for uses in uses_values:
-            if not uses.startswith(ALLOWED_ACTIONS):
-                problems.append(f"{uses!r} is not on the allowlist")
-            match = re.search(r"@([0-9a-f]{40})(?:\s|$)", uses)
-            if not match:
-                problems.append(f"{uses!r} is not pinned to a full commit SHA")
+        read_any = False
+        for relative in (ci_contract.FAST_WORKFLOW, ci_contract.FULL_WORKFLOW):
+            doc = ci_contract.load_workflow(root, relative)
+            for job in ci_contract.jobs_of(doc).values():
+                for step in ci_contract.steps_of(job):
+                    uses = step.get("uses")
+                    if not isinstance(uses, str):
+                        continue
+                    read_any = True
+                    if not uses.startswith(ALLOWED_ACTIONS):
+                        problems.append(f"{relative}: {uses!r} is not allowlisted")
+                    if not re.search(r"@[0-9a-f]{40}(?:\s|$)", uses):
+                        problems.append(
+                            f"{relative}: {uses!r} is not pinned to a full "
+                            f"commit SHA")
+        assert read_any, "no action steps read from either workflow"
         assert not problems, "\n".join(problems)
+
+
+class TestWorkflowHardening:
+    """Security finding F4: minimal permissions and no pull_request_target.
+
+    A drift guard, not an adversarial barrier: the reviewed PR can edit these
+    pins alongside the workflows.
+    """
+
+    def test_workflow_permissions_are_minimal(self):
+        root = ci_contract.require_root("the workflow permissions")
+        for relative in (ci_contract.FAST_WORKFLOW, ci_contract.FULL_WORKFLOW):
+            doc = ci_contract.load_workflow(root, relative)
+            assert doc.get("permissions") == {"contents": "read"}, (
+                f"{relative} declares permissions {doc.get('permissions')!r}; "
+                f"both workflows must declare exactly {{'contents': 'read'}}"
+            )
+
+    def test_pull_request_target_appears_nowhere(self):
+        root = ci_contract.require_root("the workflow event names")
+        for relative in (ci_contract.FAST_WORKFLOW, ci_contract.FULL_WORKFLOW):
+            text = ci_contract.read_workflow(root, relative)
+            assert "pull_request_target" not in text, (
+                f"{relative} names pull_request_target; that event runs with "
+                f"write permissions for fork PRs and is not part of this design"
+            )
 
 
 def _assert_full_workflow_contract(root):
@@ -231,12 +273,19 @@ def _assert_full_workflow_contract(root):
         "never be reported on a PR and the merge queue would deadlock"
     )
     pull_request = triggers.get("pull_request")
-    if isinstance(pull_request, dict):
-        forbidden = {"paths", "paths-ignore", "branches", "branches-ignore"}
-        assert not (set(pull_request) & forbidden), (
-            f"tests.yml carries a workflow-level filter {sorted(set(pull_request) & forbidden)}; "
-            f"a skipped workflow emits no check run and the required check stays Pending"
-        )
+    assert isinstance(pull_request, dict), (
+        "tests.yml declares a BARE `pull_request:`; the event-type list is "
+        "part of the contract, and a removed types: key must redden here."
+    )
+    forbidden = {"paths", "paths-ignore", "branches", "branches-ignore"}
+    assert not (set(pull_request) & forbidden), (
+        f"tests.yml carries a workflow-level filter {sorted(set(pull_request) & forbidden)}; "
+        f"a skipped workflow emits no check run and the required check stays Pending"
+    )
+    assert pull_request.get("types") == ["opened", "synchronize", "reopened"], (
+        f"tests.yml pull_request types are {pull_request.get('types')!r}, "
+        f"not ['opened', 'synchronize', 'reopened']"
+    )
     assert "workflow_dispatch" in triggers, (
         "the documented manual fallback needs workflow_dispatch"
     )
@@ -309,6 +358,23 @@ def _assert_full_workflow_contract(root):
     assert runs[-1] == ci_contract.VERIFY_CMD, "the after-verify is not the last step"
     assert str(steps[-1].get("if", "")).strip() in ("always()", "${{ always() }}")
 
+    # F1-pin: the certifying run's own evidence step. It must be the step
+    # immediately after the test step, must not name pytest (the one-pytest
+    # rule), and must not be silenceable.
+    evidence_cmd = "python scripts/verify_full_run.py"
+    assert (root / "scripts" / "verify_full_run.py").is_file(), (
+        "scripts/verify_full_run.py is missing; the evidence step cannot run")
+    assert position + 1 < len(runs), "no step follows the test step"
+    assert runs[position + 1] == evidence_cmd, (
+        f"the step after the test step is {runs[position + 1]!r}, not the "
+        f"run-evidence verifier {evidence_cmd!r}")
+    assert "pytest" not in runs[position + 1], (
+        "the evidence step's run text names pytest; test_ci_collection_scope "
+        "permits exactly one pytest invocation in this file")
+    assert steps[position + 1].get("continue-on-error", False) is False, (
+        "the run-evidence step may not carry continue-on-error; a silenced "
+        "evidence check cannot certify anything")
+
     merge_steps = [step for step in steps
                    if step.get("name") == "Assert the merge-group certification subject"]
     assert len(merge_steps) == 1, "the merge-group SHA assertion is missing"
@@ -326,7 +392,20 @@ class TestFullWorkflowContract:
 
 
 class TestRemovability:
-    """Deleting the fast lane must leave the full gate green."""
+    """Deleting the fast lane must leave the full gate green — EXECUTED.
+
+    Copying a test is not running it. The two fast-dependent arms are
+    executed in the rig and must SKIP loudly there; a silent skip, a pass, or
+    a failure all redden this arm.
+    """
+
+    _FAST_DEPENDENT_NODE_IDS = (
+        "tests/test_memory_init.py::TestDependencyDriftIsDetectable::"
+        "test_the_fast_lane_is_present_or_wholly_absent",
+        "tests/test_ci_collection_scope.py::"
+        "TestTheFastManifestNamesRealCorpusFiles::"
+        "test_manifest_paths_exist_and_appear_in_the_discovered_corpus",
+    )
 
     def _rig(self, tmp_path):
         root = ci_contract.require_root("the removability rig")
@@ -337,13 +416,28 @@ class TestRemovability:
         for relative in (
             ci_contract.FULL_WORKFLOW,
             Path("scripts") / "verify_full_collection.py",
+            Path("scripts") / "verify_full_run.py",
             Path("pact-plugin") / "tests" / "test_ci_collection_scope.py",
+            Path("pact-plugin") / "tests" / "test_memory_init.py",
+            Path("pact-plugin") / "tests" / "ci_contract.py",
         ):
             target = rig / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / relative, target)
         smoke = rig / "pact-plugin" / "tests" / "test_smoke.py"
         smoke.write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+        # test_memory_init.py carries an autouse fixture that imports
+        # `scripts.memory_init` (which resolves through the skill scripts dir
+        # in the real tree). The executed arm does not use it; this stub keeps
+        # the harness importable without dragging the memory stack into the
+        # rig.
+        stub_pkg = rig / "pact-plugin" / "scripts"
+        stub_pkg.mkdir(parents=True, exist_ok=True)
+        (stub_pkg / "__init__.py").write_text("", encoding="utf-8")
+        (stub_pkg / "memory_init.py").write_text(
+            "def reset_initialization():\n"
+            "    \"\"\"Rig stub: the removability arm does not exercise it.\"\"\"\n"
+            "    return None\n", encoding="utf-8")
         for relative in FAST_PATH_FILES:
             assert not (rig / relative).exists(), (
                 f"the rig inherited a fast-path file: {relative}"
@@ -368,3 +462,37 @@ class TestRemovability:
             f"the full-collection guard failed in a rig with no fast files "
             f"(rc={proc.returncode}).\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         )
+        # M6: EXECUTE the fast-dependent arms; they must skip loudly.
+        arms = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-rA",
+             "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
+            cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
+            timeout=300)
+        assert arms.returncode == 0, (
+            f"the fast-dependent arms did not skip cleanly in a rig with no "
+            f"fast lane (rc={arms.returncode}).\nstdout:\n{arms.stdout}\n"
+            f"stderr:\n{arms.stderr}")
+        assert "2 skipped" in arms.stdout, (
+            f"expected both fast-dependent arms to SKIP; output:\n{arms.stdout}")
+        assert "WHOLE fast lane is absent" in arms.stdout, (
+            f"the skip reason does not name the missing lane; output:\n"
+            f"{arms.stdout}")
+        assert "FAILED" not in arms.stdout and "ERROR" not in arms.stdout
+
+    def test_a_partially_deleted_fast_lane_fails(self, tmp_path):
+        """B1: one side present without the other is a failure, not a skip."""
+        rig = self._rig(tmp_path)
+        partial = rig / ".github/workflows/fast-tests.yml"
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text(
+            "name: fast-tests\non: [pull_request]\n", encoding="utf-8")
+        arms = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-rA",
+             "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
+            cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
+            timeout=300)
+        assert arms.returncode != 0, (
+            f"a partially deleted fast lane did not fail; output:\n"
+            f"{arms.stdout}")
+        combined = arms.stdout + arms.stderr
+        assert "FAST LANE PARTIALLY PRESENT" in combined, combined

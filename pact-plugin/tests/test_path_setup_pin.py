@@ -76,6 +76,8 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_working_memory_concurrency_comprehensive.py",
     # codegen strings (subprocess harnesses embed path lines in child code)
     "tests/test_agent_handoff_marker.py",
+    # rig conftest embeds a sys.path line so the copied plugin imports
+    "tests/test_ci_full_run_record.py",
     "tests/test_containment_certification.py",
     "tests/test_embedding_status_contract.py",
     "tests/test_memory_cli.py",

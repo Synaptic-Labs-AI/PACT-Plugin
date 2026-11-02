@@ -18,6 +18,7 @@ Rows fall into three groups:
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,7 +28,6 @@ import ci_contract
 
 SELECTOR = Path("scripts") / "fast_suite_selection.py"
 
-PRODUCTION_ROOTS = ("hooks/", "scripts/", "skills/", "telegram/", "bin/")
 SELECTION_MACHINERY = (
     "scripts/fast_suite_selection.py",
     "scripts/fast_suite_args.py",
@@ -99,7 +99,6 @@ def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None):
     )
     return core.Manifest(
         path_base="plugin_root",
-        production_roots=PRODUCTION_ROOTS,
         selection_machinery=SELECTION_MACHINERY,
         guard_files=GUARD_FILES,
         exclusions=exclusions,
@@ -194,6 +193,13 @@ class TestAddBacks:
             "selection-machinery",
         ),
         (
+            "pyproject-pin",
+            ("pyproject.toml",),
+            "ok",
+            {},
+            "selection-machinery",
+        ),
+        (
             "shared-conftest",
             ("pact-plugin/tests/conftest.py",),
             "ok",
@@ -242,6 +248,30 @@ def test_select_all_fail_closed(core, case_id, changed, status, kwargs, reason):
     result = _select(core, changed=changed, status=status, **kwargs)
     assert result.select_all_reason == reason, case_id
     _assert_select_all(result)
+
+
+def test_changed_test_wins_over_changed_seam(core):
+    """One add-back per entry; changed_test is the first reason."""
+    result = _select(
+        core,
+        changed=[
+            "pact-plugin/tests/test_slow.py",
+            "pact-plugin/hooks/merge_guard_pre.py",
+        ],
+        seams={"tests/test_slow.py": ("hooks/merge_guard_pre.py",)},
+    )
+    assert result.select_all_reason is None
+    assert len(result.added_back) == 1, result.added_back
+    assert result.added_back[0].reason == "changed_test"
+
+
+def test_multiple_unmapped_paths_name_the_first(core):
+    """The SELECT_ALL reason names the FIRST unmapped changed path."""
+    result = _select(
+        core,
+        changed=["pact-plugin/hooks/zeta.py", "pact-plugin/hooks/alpha.py"],
+    )
+    assert result.select_all_reason == "unmapped-production:hooks/zeta.py"
 
 
 def test_mapped_and_unmapped_production_in_one_change_selects_all(core):
@@ -310,7 +340,6 @@ def _build_rig(tmp_path):
             "displayed_seconds_total": 10.0,
             "wall_seconds_total": 11.0,
         },
-        "production_roots": list(PRODUCTION_ROOTS),
         "selection_machinery": list(SELECTION_MACHINERY),
         "guard_files": guards,
         "exclusions": exclusion_entries,
@@ -362,13 +391,17 @@ def _swap_a_guard_for_a_real_but_wrong_path(document, root):
             "glob",
             lambda doc, root: _mutate_exclusion(
                 doc, 0, path="tests/test_slow_*.py"),
-            "tests/test_slow_*.py",
+            # Rule-unique fragment: the nonexistence error also names this
+            # path, so the path alone would not prove the glob rule fired.
+            "contains a glob character",
         ),
         (
             "rootdir-relative",
             lambda doc, root: _mutate_exclusion(
                 doc, 0, path="pact-plugin/tests/test_slow_0.py"),
-            "pact-plugin/tests/test_slow_0.py",
+            # The wrong-base rejection is the existence message's diagnostic;
+            # assert the part that names the repo-relative-spelling cause.
+            "repo-relative spellings",
         ),
         (
             "duplicate",
@@ -395,7 +428,9 @@ def _swap_a_guard_for_a_real_but_wrong_path(document, root):
         (
             "absolute-path",
             lambda doc, root: _mutate_exclusion(doc, 0, path="/etc/passwd"),
-            "/etc/passwd",
+            # Rule-unique fragment: without this branch the `.py` rule would
+            # also name `/etc/passwd`.
+            "must be a relative path with no '..' segment and no backslash",
         ),
         (
             "backslash",
@@ -406,15 +441,21 @@ def _swap_a_guard_for_a_real_but_wrong_path(document, root):
         (
             "not-python",
             lambda doc, root: _mutate_exclusion(doc, 0, path="tests/notes.txt"),
-            "notes.txt",
+            # Rule-unique fragment: the nonexistence error also names this
+            # path, so the path alone would not prove the .py rule fired.
+            "must end in .py",
         ),
         (
             "seam-is-directory",
             lambda doc, root: (
-                (root / "pact-plugin" / "hooks" / "seam_dir").mkdir(parents=True),
-                doc["exclusions"][0].update({"production_seams": ["hooks/seam_dir"]}),
+                # End in .py so the `.py` rule does NOT fire first: the
+                # directory check must be the rule that rejects it.
+                (root / "pact-plugin" / "hooks" / "seam_dir.py").mkdir(
+                    parents=True),
+                doc["exclusions"][0].update(
+                    {"production_seams": ["hooks/seam_dir.py"]}),
             ),
-            "hooks/seam_dir",
+            "hooks/seam_dir.py",
         ),
     ],
 )
@@ -477,8 +518,13 @@ def test_to_pytest_args_refuses_a_missing_path(core, tmp_path):
 
 
 def test_to_pytest_args_refuses_an_escape(core, tmp_path):
-    _, plugin, _ = _build_rig(tmp_path)
-    with pytest.raises(ValueError):
+    root, plugin, _ = _build_rig(tmp_path)
+    # The outside file EXISTS, so the existence check cannot be what raises;
+    # the escape check must be. Assert its message, not merely ValueError.
+    outside = root / "outside.py"
+    outside.write_text(
+        "def test_outside():\n    assert True\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="outside the pytest working directory"):
         core.to_pytest_args(_selection(core, {"../outside.py"}), plugin)
 
 
@@ -512,6 +558,71 @@ def test_build_argv_rejects_workers_in_collect_only(core, tmp_path):
     _, plugin, _ = _build_rig(tmp_path)
     with pytest.raises(ValueError):
         core.build_argv(_selection(core, set()), plugin, "collect-only", workers=2)
+
+
+def _git(repo, *args):
+    proc = subprocess.run(
+        ["git", *args], cwd=str(repo), capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _git_repo(tmp_path):
+    repo = tmp_path / "gitrepo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "a.txt").write_text("a", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "one")
+    (repo / "b.txt").write_text("b", encoding="utf-8")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-q", "-m", "two")
+    return repo
+
+
+class TestChangedPathsStatuses:
+    """F2: the four statuses, including the all-zeros regression.
+
+    The fail-closed chain depends on these labels: a git failure mislabelled
+    `ok` would fire no add-backs and narrow the fast lane silently.
+    """
+
+    def test_all_zero_base_is_invalid_base(self, core, tmp_path):
+        repo = _git_repo(tmp_path)
+        paths, status = core.changed_paths("0" * 40, repo)
+        assert status == "invalid-base"
+        assert paths == []
+
+    def test_missing_and_empty_base_are_invalid_base(self, core, tmp_path):
+        repo = _git_repo(tmp_path)
+        for base in (None, ""):
+            paths, status = core.changed_paths(base, repo)
+            assert status == "invalid-base", (base, status)
+            assert paths == []
+
+    def test_unknown_sha_is_git_error(self, core, tmp_path):
+        repo = _git_repo(tmp_path)
+        paths, status = core.changed_paths("f" * 40, repo)
+        assert status == "git-error"
+        assert paths == []
+
+    def test_head_against_itself_is_empty_diff(self, core, tmp_path):
+        repo = _git_repo(tmp_path)
+        # A full 40-hex SHA: "HEAD" is not a valid base and maps to
+        # invalid-base, which the row above covers.
+        head = _git(repo, "rev-parse", "HEAD")
+        paths, status = core.changed_paths(head, repo)
+        assert status == "empty-diff"
+        assert paths == []
+
+    def test_parent_against_head_is_ok_with_paths(self, core, tmp_path):
+        repo = _git_repo(tmp_path)
+        parent = _git(repo, "rev-parse", "HEAD~1")
+        paths, status = core.changed_paths(parent, repo)
+        assert status == "ok"
+        assert paths == ["b.txt"]
 
 
 def test_discover_excludes_a_nested_worktree_on_the_relative_path(core, tmp_path):

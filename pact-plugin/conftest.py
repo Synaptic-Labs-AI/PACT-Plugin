@@ -50,14 +50,19 @@ from import_identity_map import (  # noqa: E402
 
 
 def pytest_configure(config):
-    """Register the CI environment check that runs inside this process.
+    """Register the in-band plugins that run inside this process.
 
-    A plugin object, because this module already re-exports a
-    pytest_sessionstart. The binding is stdlib-only and gated on
-    GITHUB_ACTIONS, so outside CI it does nothing.
+    Plugin objects, because this module already re-exports a
+    pytest_sessionstart. Both are stdlib-only and gated on GITHUB_ACTIONS, so
+    outside CI they do nothing. The full-run recorder is registered here
+    rather than through PYTEST_PLUGINS: PYTEST_PLUGINS would inject it into
+    every nested pytest subprocess the suite spawns.
     """
     from ci_environment_binding import CIEnvironmentBinding
+    from ci_full_run_record import FullRunRecord
 
     if not config.pluginmanager.has_plugin("ci-environment-binding"):
         config.pluginmanager.register(
             CIEnvironmentBinding(), "ci-environment-binding")
+    if not config.pluginmanager.has_plugin("full-run-record"):
+        config.pluginmanager.register(FullRunRecord(), "full-run-record")

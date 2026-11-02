@@ -157,7 +157,16 @@ def main(argv: list[str] | None = None) -> int:
                              ".fast-suite-canary.json)")
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--manifest", default=None)
+    parser.add_argument(
+        "--base-sha",
+        default=None,
+        help="the base commit the run should have diffed against, taken from "
+             "an INDEPENDENT source (the workflow event). Falls back to the "
+             "BASE_SHA environment variable. The artifact's recorded value is "
+             "only cross-checked against it, never used as the target.",
+    )
     args = parser.parse_args(argv)
+    independent_base = (args.base_sha or os.environ.get("BASE_SHA") or "").strip()
 
     repo_root = (Path(args.repo_root).resolve() if args.repo_root
                  else Path(__file__).resolve().parent.parent)
@@ -199,10 +208,53 @@ def main(argv: list[str] | None = None) -> int:
         _require_summary_line(canary["canary"], "canary")
         _require_summary_line(summary["run"], "run")
 
+        # M5: the canary must have exercised the SAME selection the run used,
+        # and both artifacts must describe the same commit. Without this the
+        # canary could prove a selection nobody ran.
+        canary_ignores = canary["canary"].get("ignore_paths")
+        run_command = summary["run"].get("command")
+        run_ignores = [
+            argument.split("=", 1)[1] for argument in (run_command or [])
+            if isinstance(argument, str) and argument.startswith("--ignore=")
+        ]
+        if sorted(canary_ignores or []) != sorted(run_ignores):
+            raise VerificationFailure(
+                "IGNORE-ARGS-MISMATCH",
+                f"the canary's --ignore paths differ from the run's: "
+                f"canary={sorted(canary_ignores or [])} "
+                f"run={sorted(run_ignores)}",
+            )
+        for key in ("base_sha", "head_sha"):
+            if canary.get(key) != summary.get(key):
+                raise VerificationFailure(
+                    "ARTIFACT-SHA-MISMATCH",
+                    f"{key}: the canary records {canary.get(key)!r} but the "
+                    f"run records {summary.get(key)!r}",
+                )
+
         # 7: the canary process must have succeeded.
         if canary["canary"]["rc"] != 0:
             raise VerificationFailure(
                 "CANARY-RC", f"canary rc is {canary['canary']['rc']}")
+
+        # F3: the comparison target comes from an INDEPENDENT source. Taking
+        # it from the artifact let a self-consistent forged artifact pick the
+        # commit it is compared against, which makes the comparison vacuous.
+        if not independent_base:
+            raise VerificationFailure(
+                "BASE-SHA-MISSING",
+                "no independent base SHA was supplied (--base-sha or the "
+                "BASE_SHA environment variable). The artifact's own value "
+                "cannot be the comparison target.",
+            )
+        for label, artifact in (("canary", canary), ("run", summary)):
+            recorded = artifact.get("base_sha")
+            if recorded != independent_base:
+                raise VerificationFailure(
+                    "BASE-SHA-MISMATCH",
+                    f"{label}: artifact records base_sha {recorded!r} but the "
+                    f"independent source says {independent_base!r}",
+                )
 
         # Independent recomputation. Never read from either artifact.
         try:
@@ -212,8 +264,7 @@ def main(argv: list[str] | None = None) -> int:
                 "MANIFEST-INVALID",
                 f"{manifest_path}: " + "; ".join(exc.errors),
             ) from exc
-        base_sha = summary.get("base_sha")
-        changed, status = changed_paths(base_sha, repo_root)
+        changed, status = changed_paths(independent_base, repo_root)
         recomputed = select(discover(repo_root), manifest, changed, status)
         expected = sorted(recomputed.included)
 
@@ -249,11 +300,16 @@ def main(argv: list[str] | None = None) -> int:
                 "RUN-RC", f"run rc is {summary['run']['rc']}")
 
         # 13-16: counts. Only reachable after the summary was proven present.
-        if summary["run"]["collected"] is None or (
-                int(summary["run"]["collected"]) <= 0):
+        # A well-typed-but-wrong value must be a NAMED failure: this verifier's
+        # contract is one named condition per failure, and int("abc") used to
+        # escape as a traceback instead.
+        collected_value = summary["run"]["collected"]
+        if (not isinstance(collected_value, int)
+                or isinstance(collected_value, bool)
+                or collected_value <= 0):
             raise VerificationFailure(
                 "RUN-COLLECTED",
-                f"run collected {summary['run']['collected']!r}; expected > 0",
+                f"run collected {collected_value!r}; expected an integer > 0",
             )
         for key in ("failed", "errors", "deselected"):
             value = summary["run"].get(key)
@@ -264,8 +320,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
         # 17: secondary arithmetic identity, from the recomputation.
-        identity = (len(recomputed.discovered) - len(recomputed.excluded)
-                    + len(recomputed.added_back))
+        # `excluded` is the APPLIED set (exclusions minus add-backs), so
+        # included == discovered - excluded already holds. Adding added_back
+        # counted those files twice and failed EVERY pull request that touched
+        # an excluded test or a mapped seam.
+        identity = len(recomputed.discovered) - len(recomputed.excluded)
         if len(recomputed.included) != identity:
             raise VerificationFailure(
                 "SELECTION-ARITHMETIC",

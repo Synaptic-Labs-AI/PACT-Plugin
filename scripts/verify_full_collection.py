@@ -28,6 +28,8 @@ EXIT CODES
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import re
 import subprocess
@@ -40,6 +42,18 @@ NON_VACUITY_FILE = "tests/test_ci_collection_scope.py"
 _CONFIG_NAMES = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini",
                  "setup.cfg")
 _NARROWING_TOKENS = ("--ignore", "--deselect", "-k", "-m")
+
+
+def _is_narrowing(token: str) -> bool:
+    """Exact-token match, never a substring.
+
+    A substring test reads the `-m` inside `--strict-markers` (or any future
+    `--m...` flag) as a marker expression and reports an innocent config as
+    narrowing. The flag must be the whole token, or the whole token before an
+    equals sign.
+    """
+    return any(token == flag or token.startswith(flag + "=")
+               for flag in _NARROWING_TOKENS)
 _SUMMARY_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
 _COLLECTED_RE = re.compile(r"(\d+) tests? collected")
 
@@ -108,14 +122,34 @@ def _config_problems(repo_root: Path, plugin_root: Path) -> list[str]:
                         f"{path}:{number}: a testpaths entry re-narrows "
                         f"collection; the full gate must stay unrestricted")
                 if "addopts" in stripped and any(
-                        token in stripped for token in _NARROWING_TOKENS):
+                        _is_narrowing(token)
+                        for token in stripped.partition("=")[2].split()):
                     problems.append(
                         f"{path}:{number}: addopts carries a narrowing flag "
                         f"({stripped!r}); the full gate must stay unrestricted")
     return problems
 
 
-def main() -> int:
+def _write_record(path: Path, payload: dict) -> None:
+    """Atomic write: a truncated record must never look like a real one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Prove the full suite still collects the whole corpus.")
+    parser.add_argument(
+        "--record", default=None,
+        help="write a collection record here (default: "
+             "${GITHUB_WORKSPACE}/.full-collection-record.json when "
+             "GITHUB_WORKSPACE is set; no record is written otherwise, so a "
+             "local run leaves the tree clean)",
+    )
+    args = parser.parse_args(argv)
     repo_root = _repo_root()
     if repo_root is None:
         return _refuse(
@@ -214,9 +248,37 @@ def main() -> int:
             f"{'discovery' if NON_VACUITY_FILE not in discovered else 'collection'}",
         )
 
+    count_match = _COLLECTED_RE.search(summary)
+    if count_match is None:
+        return _failure(
+            "PARSE FAILURE",
+            f"the collection summary carries no item count: {summary!r}. The "
+            f"run-record comparison needs it to catch a run-only narrowing.",
+        )
+    collected_items = int(count_match.group(1))
+
+    # A record so the certifying RUN can be compared against this independent
+    # collection. Only written inside a CI workspace (or when asked): a local
+    # run must not leave an artifact in the tree.
+    if args.record:
+        record_path: Path | None = Path(args.record)
+    elif os.environ.get("GITHUB_WORKSPACE"):
+        record_path = (Path(os.environ["GITHUB_WORKSPACE"])
+                       / ".full-collection-record.json")
+    else:
+        record_path = None
+    if record_path is not None:
+        _write_record(record_path, {
+            "schema_version": 1,
+            "collected_items": collected_items,
+            "collected_files": len(collected),
+            "discovered_files": len(discovered),
+            "subject": os.environ.get("GITHUB_SHA") or "local",
+        })
+
     subject = os.environ.get("GITHUB_SHA") or "local"
-    print(f"FULL-COLLECTION-OK {len(collected)} test files match discovery; "
-          f"subject={subject}")
+    print(f"FULL-COLLECTION-OK {len(collected)} test files and "
+          f"{collected_items} items match discovery; subject={subject}")
     return 0
 
 

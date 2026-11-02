@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+import ci_contract
+
 
 class TestEnsureMemoryReady:
     """Tests for ensure_memory_ready() - the main lazy initialization entry point."""
@@ -471,17 +473,17 @@ class TestDependencyDriftIsDetectable:
         ],
         (".github/workflows/fast-tests.yml", "fast-suite"): [
             (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
-             r'"\$\{\{ github\.event\.pull_request\.base\.sha \}\}"$', 1),
+             r'"\$BASE_SHA"$', 1),
             (r'^python \.\./scripts/run_fast_suite\.py --collect-only '
-             r'--base-sha "\$\{\{ github\.event\.pull_request\.base\.sha '
-             r'\}\}"$', 1),
+             r'--base-sha "\$BASE_SHA"$', 1),
         ],
     }
 
-    # The generic arm for every OTHER workflow: TEST_CMD, optionally with
-    # whole-file absolute ignore flags.
-    _GENERIC_ALLOWED = re.compile(
-        r"^python -m pytest -ra( --ignore=[A-Za-z0-9._/-]+)*$")
+    # The generic arm for every OTHER workflow: TEST_CMD only. The
+    # ignore-bearing form is confined to the profiled pair above, so a future
+    # workflow cannot run a narrowed suite while the bracketing rules pass
+    # (the one-pair carve-out).
+    _GENERIC_ALLOWED = re.compile(r"^python -m pytest -ra$")
 
     # The pinned fast runner. A wrapper invocation names `python` but not
     # `pytest`, so without this classifier the verify bracket silently does
@@ -750,12 +752,22 @@ class TestDependencyDriftIsDetectable:
             "admitted to run a non-TEST_CMD test step. Re-point it; do not "
             "delete it."
         )
+        fast_state, fast_present, fast_missing = ci_contract.fast_lane_state(root)
         for profile_path, profile_job in self._PROFILES:
+            if (profile_path == ".github/workflows/fast-tests.yml"
+                    and fast_state == "absent"):
+                # The whole lane is gone (a supported deletion): the dedicated
+                # tri-state arm skips loudly; the full-workflow checks below
+                # still run. A mixed state is not excused here and fails via
+                # the profile-file assertion.
+                continue
             profile_file = root / profile_path
             assert profile_file.is_file(), (
                 f"the pinned profile {profile_path!r} names a workflow that "
                 f"does not exist under {root}. A renamed workflow reddens "
-                f"here instead of silently dropping its admission.")
+                f"here instead of silently dropping its admission. "
+                f"Fast-lane state: {fast_state} (present={fast_present}, "
+                f"missing={fast_missing}).")
             profile_doc = self._load_workflow_yaml(profile_file)
             assert profile_job in ((profile_doc or {}).get("jobs") or {}), (
                 f"the pinned profile {profile_path!r} names job "
@@ -775,6 +787,38 @@ class TestDependencyDriftIsDetectable:
             "keep the pytest command exactly as pinned, and move env/shell "
             "settings off those steps."
         )
+
+    def test_the_fast_lane_is_present_or_wholly_absent(self):
+        """B1: a deleted fast lane is a LOUD skip; a half-deleted one fails.
+
+        The full gate must survive deletion of the fast lane. This is the
+        fast-dependent half: it skips with a reason naming every missing file
+        when the whole lane is absent, and fails when one side is present
+        without the other.
+        """
+        root = self._require_root("the fast lane presence")
+        state, present, missing = ci_contract.fast_lane_state(root)
+        if state == "absent":
+            pytest.skip(
+                "SKIPPED, NOT PASSED — the WHOLE fast lane is absent (all "
+                f"{len(ci_contract.FAST_LANE_FILES)} sentinel files missing): "
+                f"{list(ci_contract.FAST_LANE_FILES)}. This arm checks the "
+                "fast-lane profile and cannot judge a lane that is not there; "
+                "the full gate's independent guards still run. This skip is "
+                "NO INFORMATION about the fast lane."
+            )
+        assert state == "present", (
+            f"FAST LANE PARTIALLY PRESENT: present={present}, "
+            f"missing={missing}. Deleting the whole lane is supported (this "
+            f"arm skips loudly); deleting only part of it is a broken "
+            f"checkout and FAILS."
+        )
+        profile_file = root / ".github/workflows/fast-tests.yml"
+        assert profile_file.is_file()
+        doc = self._load_workflow_yaml(profile_file)
+        assert "fast-suite" in ((doc or {}).get("jobs") or {}), (
+            "the complete fast lane does not declare the fast-suite job the "
+            "governed-workflow profile requires")
 
     # C-LITE TRIPWIRE. Tools whose installs the runtime check cannot see
     # (isolated environments), the uninstall verb, and the index-redirect
