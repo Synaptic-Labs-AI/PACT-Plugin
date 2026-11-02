@@ -423,7 +423,7 @@ fi
 The heredoc delimiter is quoted (`<<'JSON'`) so bash performs no expansion
 inside it — a curator's reason containing an apostrophe or a backtick passes
 through verbatim instead of closing the quote and breaking the write. Construct JSON-valid string content (escape `\"`, `\\`, and control
-characters). If a journal block fails with `Journal read-back failed`, read the
+characters). If a journal block fails at a write or its read-back, read the
 last few lines of `{session_dir}/session-journal.jsonl`: if the expected event
 is there, the write landed, so do not write it again; otherwise re-run only that
 write and its read-back, once.

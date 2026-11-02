@@ -29,7 +29,7 @@ Create a nested Task hierarchy as a child of the current context:
 6. On completion: Parent task unblocked
 ```
 
-**Sub-feature journal event** (after step 1's stamp): write a feature-level `variety_assessed` event keyed on the sub-feature task id (no `scope` field — feature-level is the discriminator's absent value). If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
+**Sub-feature journal event** (after step 1's stamp): write a feature-level `variety_assessed` event keyed on the sub-feature task id (no `scope` field — feature-level is the discriminator's absent value). If a journal block fails at a write or its read-back, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
 ```bash
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] rePACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR

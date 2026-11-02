@@ -3612,7 +3612,7 @@ def test_failed_write_fails_block_despite_stale_matching_event(
 
 
 _READBACK_RECOVERY = (
-    "If a journal block fails with `Journal read-back failed`, read the last few "
+    "If a journal block fails at a write or its read-back, read the last few "
     "lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, "
     "the write landed, so do not write it again; otherwise re-run only that write "
     "and its read-back, once. Then run, in order, each write that follows it in "

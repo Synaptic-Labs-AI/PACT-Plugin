@@ -47,7 +47,7 @@ python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <
 JSON
 ```
 
-If a journal block fails with `Journal read-back failed`, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
+If a journal block fails at a write or its read-back, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
 
 If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-surface once; its staleness downgrade bounds the repetition). Never write a consumption event when no refresh prompt surfaced.
 
