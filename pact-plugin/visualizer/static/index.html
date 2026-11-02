@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070b16">
+  <title>PACT // Mission Control</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./css/base.css">
+  <link rel="stylesheet" href="./css/stage.css">
+  <link rel="stylesheet" href="./css/panels.css">
+</head>
+<body>
+  <a class="skip-link" href="#layout">Skip to the floor</a>
+
+  <div class="crt" id="app">
+    <header id="topbar">
+      <div class="brand" aria-label="PACT Mission Control">
+        <span class="brand-mark" aria-hidden="true">▚</span>
+        <span class="brand-name">PACT</span>
+        <span class="brand-slash" aria-hidden="true">//</span>
+        <span class="brand-sub">MISSION CONTROL</span>
+      </div>
+
+      <div class="topbar-controls">
+        <label class="pick">
+          <span class="pick-label">ROOT</span>
+          <select id="root-select" aria-label="Config root"></select>
+        </label>
+        <label class="pick">
+          <span class="pick-label">PROJECT</span>
+          <select id="project-select" aria-label="Project"></select>
+        </label>
+        <label class="pick pick-wide">
+          <span class="pick-label">RUN</span>
+          <select id="session-select" aria-label="Session"></select>
+        </label>
+
+        <button id="btn-refresh" class="icon-btn" type="button" title="Refresh session list">↻</button>
+        <button id="btn-random" class="icon-btn" type="button" title="Surprise me: random historical run">🎲</button>
+        <button id="btn-demo" class="chip-btn" type="button" title="Open the training simulation">DEMO</button>
+
+        <button id="live-badge" class="live-badge" type="button" title="Return to live / show run mode">● LIVE</button>
+        <span id="mission-clock" class="mission-clock" title="Elapsed mission time">00:00:00</span>
+
+        <button id="btn-crew" class="icon-btn rail-toggle" type="button" title="Toggle the crew rail" aria-pressed="false">CREW</button>
+        <button id="btn-comms" class="icon-btn rail-toggle" type="button" title="Toggle the comms rail" aria-pressed="false">COMMS</button>
+        <button id="btn-sound" class="icon-btn" type="button" title="Toggle 8-bit sound" aria-pressed="false">SND</button>
+        <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen">⛶</button>
+        <button id="btn-help" class="icon-btn" type="button" title="Keyboard shortcuts and legend">?</button>
+        <button id="btn-about" class="icon-btn" type="button" title="About and privacy">i</button>
+      </div>
+    </header>
+
+    <main id="layout">
+      <aside id="left-rail" aria-label="Run summary and crew"></aside>
+
+      <section id="stage-shell" aria-label="The floor">
+        <div id="stage-frame">
+          <canvas id="stage" role="img" aria-label="Animated PACT control room"></canvas>
+        </div>
+        <div id="stage-caption" class="stage-caption"></div>
+        <div id="stage-legend" class="stage-legend" aria-hidden="true">
+          <span class="legend-item"><span class="dot prepare"></span>PREPARE</span>
+          <span class="legend-item"><span class="dot architect"></span>ARCHITECT</span>
+          <span class="legend-item"><span class="dot code"></span>CODE</span>
+          <span class="legend-item"><span class="dot test"></span>TEST</span>
+          <span class="legend-item legend-muted">read-only · local-only</span>
+        </div>
+      </section>
+
+      <aside id="right-rail" aria-label="Comms feed"></aside>
+    </main>
+
+    <footer id="recorder" aria-label="Flight recorder"></footer>
+
+    <div id="modal-root" hidden></div>
+    <div id="toast-root" aria-live="polite" aria-atomic="false"></div>
+
+    <div id="loading" hidden>
+      <div class="loading-box">
+        <div class="loading-title">TUNING ANTENNAS…</div>
+        <div class="loading-bar"><span></span></div>
+        <div class="loading-sub" id="loading-sub">reading local journals</div>
+      </div>
+    </div>
+
+    <div id="error-banner" hidden role="alert">
+      <span id="error-text"></span>
+      <button id="error-retry" type="button">RETRY</button>
+      <button id="error-demo" type="button">DEMO</button>
+    </div>
+  </div>
+
+  <noscript>
+    <p class="noscript">PACT Mission Control needs JavaScript. It is a local, read-only viewer and makes no external requests.</p>
+  </noscript>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

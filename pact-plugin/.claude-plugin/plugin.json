@@ -38,7 +38,8 @@
     "./commands/next.md",
     "./commands/pin-memory.md",
     "./commands/telegram-setup.md",
-    "./commands/prune-memory.md"
+    "./commands/prune-memory.md",
+    "./commands/visualize.md"
   ],
   "agents": [
     "./agents/pact-architect.md",

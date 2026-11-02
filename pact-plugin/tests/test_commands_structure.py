@@ -82,6 +82,7 @@ EXPECTED_COMMANDS = {
     "rePACT",
     "refresh",
     "telegram-setup",
+    "visualize",
     "wrap-up",
 }
 

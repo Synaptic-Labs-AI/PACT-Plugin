@@ -131,6 +131,7 @@ EXEMPT = {
     "prune-memory.md": "utility; prunes pins and returns",
     "rePACT.md": "nested cycle; returns to the parent workflow",
     "telegram-setup.md": "utility; configures notifications and returns",
+    "visualize.md": "local Mission Control launcher; starts/stops a read-only viewer and returns, no workflow follows",
 }
 
 # Option bullets across commands/*.md on the reference tree. A floor, never
