@@ -438,7 +438,7 @@ class TestWritePathResolverIdentity:
 
         recorded = []
 
-        def _spy():
+        def _spy(_session=None):
             recorded.append(1)
             return (seeded_path, tmp_path)
 

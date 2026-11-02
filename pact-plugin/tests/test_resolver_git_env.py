@@ -92,19 +92,19 @@ def test_get_claude_md_path_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, 
 def test_resolve_display_claude_md_with_base_ignores_an_inherited_GIT_DIR(
     tmp_path, monkeypatch, unrelated
 ):
-    """The `--show-toplevel` call. Under an inherited GIT_DIR git reports the
-    working directory as the top of the tree, so a subdirectory holding its own
-    CLAUDE.md is answered instead of the repository root."""
+    """The enclosing-checkout rung. Under an inherited GIT_DIR git reports
+    the working directory as the top of the tree, so a subdirectory WITHOUT a
+    document of its own would not reach the repository root's."""
     repo = _repo(tmp_path / "R")
-    _document(repo / "sub")
+    (repo / "sub").mkdir()
     monkeypatch.chdir(repo / "sub")
     _inherit_git_dir(monkeypatch, unrelated)
 
     found, base = wm._resolve_display_claude_md_with_base()
 
     assert _same(found, repo / ".claude" / "CLAUDE.md") and _same(base, repo), (
-        f"the display resolver answered {found} (base {base}); its --show-toplevel "
-        "call is reading the inherited GIT_DIR"
+        f"the display resolver answered {found} (base {base}); its enclosing-"
+        "checkout rung is reading the inherited GIT_DIR"
     )
 
 
@@ -157,7 +157,6 @@ def test_main_repo_root_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, unre
 # finds fewer is not reading the function it names.
 _RESOLVER_GIT_CALLS = {
     ("skills/pact-memory/scripts/working_memory.py", "_get_claude_md_path"): 1,
-    ("skills/pact-memory/scripts/working_memory.py", "_resolve_display_claude_md_with_base"): 2,
     ("hooks/staleness.py", "_resolve_project_claude_md_with_base"): 1,
     ("skills/pact-memory/scripts/memory_api.py", "main_repo_root"): 1,
 }

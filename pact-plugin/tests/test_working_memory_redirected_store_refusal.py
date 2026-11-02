@@ -187,12 +187,17 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
     """The refusal, its cost, and the write that must keep working."""
 
     def test_a_redirected_store_that_escaped_its_root_writes_nothing(self, tmp_path):
-        """THE INCIDENT SHAPE. Redirected store, and resolution escaped the
-        declared root exactly as it did on the day.
+        """THE INCIDENT SHAPE. Redirected store, a declared root holding no
+        document, and the cwd in a project that has one.
 
-        MUTANT that reddens this arm: remove the
-        `_refuse_ambient_sync_from_a_redirected_store(target, claude_md_root,
-        claude_md_path)` call from `sync_to_claude_md`. The entry is then
+        RESOLUTION NO LONGER ESCAPES. The display resolver is the session
+        document, which has no cwd rung: a declared directory holding no
+        document resolves NOTHING, so the sync reports UNRESOLVED and the
+        escape guard never sees a target. The document must stay
+        byte-identical either way.
+
+        MUTANT that reddens this arm: restore a cwd rung in the display
+        resolver AND remove the escape guard call. The entry is then
         projected, the document grows, and the byte comparison fails.
 
         The BASELINE is taken before the drive rather than after, so a document
@@ -208,7 +213,7 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
             env, tmp_path / "project", "save", _save_payload("redirected-store-arm")
         )
 
-        assert _sync_status(result) == SyncResult.REFUSED
+        assert _sync_status(result) == SyncResult.UNRESOLVED
         assert target.read_bytes() == before, (
             "the projection reached a document outside the declared root even "
             "though the row went to a redirected store"
@@ -217,9 +222,10 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
     def test_the_record_survives_the_refusal(self, tmp_path):
         """THE COST OF THE CHOSEN FAILURE DIRECTION, MEASURED RATHER THAN ARGUED.
 
-        The guard refuses a PROJECTION, never a RECORD. This arm is what makes
-        that claim checkable: the same refused save must still report success and
-        still return an id, so a wrong refusal costs a display line and no data.
+        A skipped PROJECTION never costs the RECORD. This arm is what makes
+        that claim checkable: the same unprojected save must still report
+        success and still return an id, so a skip costs a display line and no
+        data.
 
         MUTANT that reddens this arm: raise the refusal BEFORE the row is
         committed (move the guard above the write in `save`). The envelope then
@@ -234,9 +240,9 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
             env, tmp_path / "project", "save", _save_payload("record-survives-arm")
         )
 
-        assert _sync_status(result) == SyncResult.REFUSED
+        assert _sync_status(result) == SyncResult.UNRESOLVED
         assert _envelope(result).get("memory_id"), (
-            "a refused sync must not cost the record"
+            "a skipped sync must not cost the record"
         )
 
     def test_a_redirected_store_inside_its_declared_root_still_writes(self, tmp_path):
@@ -340,6 +346,12 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
         THE TRIPWIRE FRAMING IS KEPT, POINTING THE OTHER WAY. If a future
         change re-admits this, the arm reddens and the narrowing becomes a
         decision somebody takes on purpose, exactly as the widening was.
+
+        RESOLUTION NO LONGER ESCAPES. The display resolver is the session
+        document, which has no cwd rung: a declared directory holding no
+        document resolves NOTHING, so the sync reports UNRESOLVED and the
+        escape guard never sees a target. The document must stay
+        byte-identical either way.
         """
         target = _seed_project(tmp_path)
         before = target.read_bytes()
@@ -350,9 +362,9 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
             env, tmp_path / "project", "save", _save_payload("default-escape-arm")
         )
 
-        assert _sync_status(result) == SyncResult.REFUSED, (
-            "a DEFAULT-store save whose declared scope resolved into a "
-            "different project was admitted. Store origin is not the property "
+        assert _sync_status(result) == SyncResult.UNRESOLVED, (
+            "a DEFAULT-store save whose declared scope holds no document "
+            "reached a different project. Store origin is not the property "
             "— the incident had a redirected store and escaped anyway, because "
             "the projection path never reads store origin. If this admission "
             "is deliberate, say which property replaced repository identity."
@@ -408,7 +420,7 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
         monkeypatch.setattr(
             wm,
             "_resolve_display_claude_md_with_base",
-            lambda: (target, target.parent.parent),
+            lambda *_: (target, target.parent.parent),
         )
 
         retrieved = [{"id": "0" * 32, "context": "retrieved-context-arm"}]
@@ -708,6 +720,12 @@ class TestTheBOUNDARYOfTheEscapeRefusal:
         and nothing else. An asymmetry here would mean the refusal depends on a
         property of the DESTINATION rather than on the relationship between the
         declared scope and it, which is the class of proxy this change replaced.
+
+        RESOLUTION NO LONGER ESCAPES. The display resolver is the session
+        document, which has no cwd rung: a declared directory holding no
+        document resolves NOTHING, so the sync reports UNRESOLVED and the
+        escape guard never sees a target. The document must stay
+        byte-identical either way.
         """
         target = _seed_project(tmp_path)
         if git_backed:
@@ -720,7 +738,7 @@ class TestTheBOUNDARYOfTheEscapeRefusal:
             env, tmp_path / "project", "save", _save_payload("symmetry-arm")
         )
 
-        assert _sync_status(result) == SyncResult.REFUSED, (
+        assert _sync_status(result) == SyncResult.UNRESOLVED, (
             "git_backed=%s changed the verdict. The refusal must depend on the "
             "RELATIONSHIP between declared scope and resolved root, never on "
             "whether the destination happens to be a repository."
@@ -758,6 +776,11 @@ class TestTheBOUNDARYOfTheEscapeRefusal:
         arm above carried, which is what made the widening it guarded visible
         rather than silent. Whoever relaxes it must say which property replaced
         repository identity, and why that one tracks it.
+
+        RESOLUTION NOW STOPS FIRST. The session document probes the declared
+        root and the main checkout enclosing it, never the cwd, so the
+        subdirectory's document is not resolved at all: UNRESOLVED, and the
+        document is byte-identical.
         """
         repo = tmp_path / "repo"
         (repo / "sub" / ".claude").mkdir(parents=True)
@@ -777,7 +800,7 @@ class TestTheBOUNDARYOfTheEscapeRefusal:
         env["CLAUDE_PROJECT_DIR"] = str(repo)
         result = _run_cli(env, repo / "sub", "save", _save_payload("same-project-arm"))
 
-        assert _sync_status(result) == SyncResult.REFUSED, (
+        assert _sync_status(result) == SyncResult.UNRESOLVED, (
             "a same-project SUBDIRECTORY escape was admitted. If that is "
             "deliberate, say which property replaced repository identity and "
             "why a path prefix tracks it — containment does not, which is why "
@@ -1078,24 +1101,35 @@ _SAME_PROJECT = {
     "declared_main_worktree_document": _declared_main_worktree_document,
     "declared_main_subdirectory_worktree_document": _declared_main_subdirectory_worktree_document,
     "sibling_worktrees": _sibling_worktrees,
+    "live_declaration_under_a_git_home": _live_declaration_under_a_git_home,
+}
+
+# The declared directory no longer exists and no session record recovers it
+# (the suite reads no record), so the root's cause is MISSING. There is no cwd
+# rung: every site skips and names the missing directory, whether the document
+# the cwd could reach belongs to the declaration's repository or not.
+_DECLARATION_GONE = {
     "removed_worktree_inside_its_repository": _removed_worktree_inside_its_repository,
     "removed_subdirectory": _removed_subdirectory,
     "moved_away_worktree_still_listed": _moved_away_worktree_still_listed,
-    "live_declaration_into_the_config_root_document": _live_declaration_into_the_config_root_document,
-    "live_declaration_under_a_git_home": _live_declaration_under_a_git_home,
     "moved_away_worktree_of_a_git_home_landing_at_home": _moved_away_worktree_of_a_git_home_landing_at_home,
     "removed_independent_repository_nested_in_the_enclosing_one": _removed_independent_repository_nested_in_the_enclosing_one,
     "worktree_removed_from_the_claude_code_worktree_location": _worktree_removed_from_the_claude_code_worktree_location,
-}
-
-_OUTSIDE_THE_PROJECT = {
-    "another_repository": _another_repository,
     "removed_declaration_in_another_repository": _removed_declaration_in_another_repository,
-    "repository_root_declared_subdirectory_document": _repository_root_declared_subdirectory_document,
     "worktree_removed_outside_its_repository": _worktree_removed_outside_its_repository,
     "deleted_project_resolving_into_the_config_root_document": _deleted_project_resolving_into_the_config_root_document,
     "deleted_project_under_a_git_home": _deleted_project_under_a_git_home,
     "deleted_project_under_a_git_home_legacy_document": _deleted_project_under_a_git_home_legacy_document,
+}
+
+# The declared root is KNOWN but neither it nor a main checkout strictly
+# enclosing it holds a document the resolver may return; the document lies
+# elsewhere (another repository, a subdirectory, or the user-global file).
+# Every site resolves nothing and the document is untouched.
+_NO_DOCUMENT_IN_SCOPE = {
+    "live_declaration_into_the_config_root_document": _live_declaration_into_the_config_root_document,
+    "another_repository": _another_repository,
+    "repository_root_declared_subdirectory_document": _repository_root_declared_subdirectory_document,
     "inherited_git_dir_naming_another_repository": _inherited_git_dir_naming_another_repository,
     "independent_repository_nested_in_the_enclosing_one": _independent_repository_nested_in_the_enclosing_one,
 }
@@ -1133,7 +1167,12 @@ def _run_site(site):
 
 
 class TestEverySiteJudgesProjectScopeAlike:
-    """ONE population, THREE sites, the real resolver at each.
+    """THREE populations, THREE sites, the real resolver at each.
+
+    All three sites resolve through the session document, so each layout gets
+    one outcome at all three: admitted (the declaration's own or enclosing
+    checkout's document), skipped with the missing cause, or resolved to
+    nothing.
 
     `sync_to_claude_md`, `sync_retrieved_to_claude_md` and
     `archive_pin.resolve_claude_md` all decide scope with
@@ -1173,11 +1212,14 @@ class TestEverySiteJudgesProjectScopeAlike:
         )
 
     @pytest.mark.parametrize("site", _SITES)
-    @pytest.mark.parametrize("layout", sorted(_OUTSIDE_THE_PROJECT))
-    def test_a_resolution_outside_the_declared_project_is_refused(
+    @pytest.mark.parametrize("layout", sorted(_DECLARATION_GONE))
+    def test_a_declaration_that_no_longer_exists_is_skipped_with_its_cause(
         self, tmp_path, monkeypatch, layout, site
     ):
-        document = _arrange(_OUTSIDE_THE_PROJECT[layout], tmp_path, monkeypatch)
+        """No cwd rung: a missing declaration with no record recovers nothing,
+        and every site names the missing directory. Red if a site falls through
+        to the cwd's checkout (the document changes, or the archive returns)."""
+        document = _arrange(_DECLARATION_GONE[layout], tmp_path, monkeypatch)
         before = document.read_bytes()
 
         if site == "archive_pin":
@@ -1185,10 +1227,39 @@ class TestEverySiteJudgesProjectScopeAlike:
 
             with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
-            assert "different project" in excinfo.value.reason, excinfo.value.reason
+            assert "no longer exists" in excinfo.value.reason, excinfo.value.reason
         else:
-            with pytest.raises(AmbientSyncRefused):
+            result = _run_site(site)
+            assert result == SyncResult(SyncResult.ROOT_UNKNOWN), (
+                f"{layout}: {site} returned {result!r}"
+            )
+        assert document.read_bytes() == before, (
+            f"{layout}: {site} wrote a document for a declaration that is gone"
+        )
+
+    @pytest.mark.parametrize("site", _SITES)
+    @pytest.mark.parametrize("layout", sorted(_NO_DOCUMENT_IN_SCOPE))
+    def test_a_document_outside_the_declared_scope_is_never_resolved(
+        self, tmp_path, monkeypatch, layout, site
+    ):
+        """The resolver probes the declared root and the main checkout strictly
+        enclosing it, never the cwd and never the user-global file, so a
+        document anywhere else is not resolved at all. Red if a site reaches
+        it (the document changes, or the archive returns a path)."""
+        document = _arrange(_NO_DOCUMENT_IN_SCOPE[layout], tmp_path, monkeypatch)
+        before = document.read_bytes()
+
+        if site == "archive_pin":
+            import archive_pin
+
+            with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
+            assert excinfo.value.reason == "CLAUDE.md not found", excinfo.value.reason
+        else:
+            result = _run_site(site)
+            assert result == SyncResult(SyncResult.UNRESOLVED), (
+                f"{layout}: {site} returned {result!r}"
+            )
         assert document.read_bytes() == before, (
             f"{layout}: {site} wrote into a document outside the declared project"
         )
@@ -1288,12 +1359,11 @@ class TestNoSiteTakesAWorktreeShadowCopy:
         if site == "archive_pin":
             with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
-            # The fixture builds the worktree at `<tmp>/worktree`, so a bare
-            # "worktree" token is supplied by the PATH in the message. Assert
-            # a phrase only the refusal itself can supply.
-            assert "project memory belongs to the main checkout" in (
+            # Main holds no document and the worktree copy is never a
+            # candidate, so there is nothing to archive.
+            assert excinfo.value.reason == "CLAUDE.md not found", (
                 excinfo.value.reason
-            ), excinfo.value.reason
+            )
         else:
             result = _run_site(site)
             assert result.reason == wm.SyncResult.UNRESOLVED, (
@@ -1308,13 +1378,12 @@ class TestNoSiteTakesAWorktreeShadowCopy:
     def test_a_missing_declaration_never_resolves_a_sibling_worktree(
         self, tmp_path, monkeypatch, site
     ):
-        """THE FALL-THROUGH'S HARD EDGE, and the shape no record covers: the
-        declared worktree path is GONE, a SIBLING worktree of the same
-        repository carries its own CLAUDE.md, there is no session record, and
-        the cwd is inside that sibling. A missing declaration may fall through
-        only because every rung retargets a worktree root to MAIN. So the sync
-        sites must write MAIN's document, and the archive must resolve MAIN or
-        refuse -- it must NEVER return the sibling's copy.
+        """THE HARD EDGE, and the shape no record covers: the declared
+        worktree path is GONE, a SIBLING worktree of the same repository
+        carries its own CLAUDE.md, there is no session record, and the cwd is
+        inside that sibling. There is no cwd rung, so every site skips with
+        the missing cause: no site writes MAIN's document or the sibling's
+        copy, and the archive returns neither.
         """
         main = _committed_repo(tmp_path / "main")
         main_document = _document_in(main)
@@ -1325,26 +1394,22 @@ class TestNoSiteTakesAWorktreeShadowCopy:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(missing))
         monkeypatch.chdir(sibling)
+        before_main = main_document.read_bytes()
 
         if site == "archive_pin":
-            path, _base = _run_site(site)
-            assert Path(path).resolve() == main_document.resolve(), (
-                f"archive_pin resolved {path}, not MAIN's document"
-            )
-            assert sibling_document.read_bytes() == _SEED_DOCUMENT.encode(), (
-                "archive_pin touched the sibling worktree's copy"
-            )
-            return
+            import archive_pin
 
-        before_main = main_document.read_bytes()
-        result = _run_site(site)
-
-        assert result == SyncResult(SyncResult.WROTE), (
-            f"{site} returned {result!r} for a missing declaration whose "
-            "enclosing checkout holds the document"
-        )
-        assert main_document.read_bytes() != before_main, (
-            f"{site} reported WROTE but MAIN's document did not change"
+            with pytest.raises(archive_pin._Unevaluable) as excinfo:
+                _run_site(site)
+            assert "no longer exists" in excinfo.value.reason, excinfo.value.reason
+        else:
+            result = _run_site(site)
+            assert result == SyncResult(SyncResult.ROOT_UNKNOWN), (
+                f"{site} returned {result!r} for a missing declaration with no "
+                "record"
+            )
+        assert main_document.read_bytes() == before_main, (
+            f"{site} wrote MAIN's document for a declaration it cannot recover"
         )
         assert sibling_document.read_bytes() == _SEED_DOCUMENT.encode(), (
             f"{site} wrote the sibling worktree's copy"
@@ -1353,11 +1418,9 @@ class TestNoSiteTakesAWorktreeShadowCopy:
     def test_a_missing_declaration_with_no_main_document_still_refuses_the_sibling(
         self, tmp_path, monkeypatch
     ):
-        """THE PAIR, AND THE ARM THAT PROVES THE RETARGET WAS ADDED UNDER THE
-        CHECK RATHER THAN REPLACING IT. Same missing declaration and sibling
-        copy, but MAIN holds no document: the retarget lands on MAIN and finds
-        nothing, the raw fall-through reaches the sibling's copy, and the
-        base-identity check must still refuse it with its own message.
+        """THE PAIR: same missing declaration and sibling copy, but MAIN
+        holds no document. The archive refuses with the missing cause and the
+        sibling's copy is never resolved.
         """
         import archive_pin
 
@@ -1373,7 +1436,8 @@ class TestNoSiteTakesAWorktreeShadowCopy:
         with pytest.raises(archive_pin._Unevaluable) as excinfo:
             _run_site("archive_pin")
 
-        assert "linked worktree copy" in excinfo.value.reason, excinfo.value.reason
+        assert "no longer exists" in excinfo.value.reason, excinfo.value.reason
+        assert str(sibling) not in excinfo.value.reason, excinfo.value.reason
         assert sibling_document.read_bytes() == _SEED_DOCUMENT.encode(), (
             "archive_pin wrote the sibling worktree's copy while refusing it"
         )

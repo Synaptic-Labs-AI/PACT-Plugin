@@ -457,6 +457,14 @@ def test_both_sync_writers_stop_on_an_unknown_anchor(
         elsewhere.mkdir()
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(elsewhere)
+        # The session anchor reads the record through project_scope, the one
+        # precedence every site shares; the escape guard reads it through
+        # working_memory's own import.
+        import shared.project_scope as project_scope
+
+        monkeypatch.setattr(
+            project_scope, "recorded_project_dir", lambda: str(forged)
+        )
         monkeypatch.setattr(
             wm, "get_project_dir_from_session_record", lambda: str(forged)
         )

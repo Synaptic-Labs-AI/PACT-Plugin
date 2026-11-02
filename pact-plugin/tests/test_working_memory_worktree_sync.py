@@ -144,30 +144,28 @@ def clean_env(monkeypatch):
 
 
 def _install_find_spy(monkeypatch):
-    """Spy scripts.working_memory._find_existing_claude_md, recording each call's
-    (base, result) so a test can assert WHICH resolver branch produced the answer.
+    """Spy `shared.claude_md_manager.resolve_managed_document`, recording each
+    call's (root, result) so a test can assert WHICH root the display resolver
+    probed and what it found.
 
-    _resolve_display_claude_md_path carries no branch tag, log line, or return
-    enum: it distinguishes branches only by which _find_existing_claude_md(base)
-    call first returns non-None. So the call sequence IS the branch trace — branch
-    2 passes the `--show-toplevel` worktree root, branch 3 passes the
-    `--git-common-dir` main-repo root. Spying the function itself (not a durable
-    side effect like the lock sidecar, which outlives the call and would measure
-    its own residue) is the seam the backend-coder used for the same distinction.
+    The display resolver carries no branch tag, log line, or return enum; it
+    passes the session's project-memory root to that function exactly once.
+    So the call IS the trace: one probe, at the root the session resolved.
+    `result` is the document path when it exists, else None.
 
-    Returns a list of (Path(base), result) tuples in call order; monkeypatch tears
-    the spy down at test teardown so it never leaks into a sibling test.
+    Returns a list of (Path(root), result) tuples in call order; monkeypatch
+    tears the spy down at test teardown so it never leaks into a sibling test.
     """
-    import scripts.working_memory as wm
+    import shared.claude_md_manager as manager
     calls = []
-    real = wm._find_existing_claude_md
+    real = manager.resolve_managed_document
 
-    def spy(base):
-        result = real(base)
-        calls.append((Path(base), result))
-        return result
+    def spy(root, assume_present=None):
+        doc = real(root, assume_present)
+        calls.append((Path(root), doc.path if doc.exists else None))
+        return doc
 
-    monkeypatch.setattr(wm, "_find_existing_claude_md", spy)
+    monkeypatch.setattr(manager, "resolve_managed_document", spy)
     return calls
 
 
@@ -206,7 +204,7 @@ class TestAmbientBranchAbsentTarget:
         import scripts.working_memory as wm
         monkeypatch.setattr(
             wm, "_resolve_display_claude_md_with_base",
-            lambda: (path, path.parent),
+            lambda *_: (path, path.parent),
         )
 
     def test_ambient_absent_destination_is_a_skip_and_touches_nothing(
@@ -341,7 +339,7 @@ class TestRetrievedSyncAbsentTarget:
         import scripts.working_memory as wm
         monkeypatch.setattr(
             wm, "_resolve_display_claude_md_with_base",
-            lambda: (path, path.parent),
+            lambda *_: (path, path.parent),
         )
 
     def test_absent_destination_is_a_skip_and_touches_nothing(
@@ -512,7 +510,7 @@ class TestBothWriteCallersAgreeOnAbsentDestinations:
                      else root / "a" / "b" / "c" / "CLAUDE.md")
             clean_env.setattr(
                 wm, "_resolve_display_claude_md_with_base",
-                lambda g=ghost: (g, g.parent),
+                lambda *_, g=ghost: (g, g.parent),
             )
             returned = drive()
             # tuple, not list: these are compared as a set below to detect
@@ -558,7 +556,7 @@ class TestBothWriteCallersAgreeOnAbsentDestinations:
         """
         import scripts.working_memory as wm
         clean_env.setattr(
-            wm, "_resolve_display_claude_md_with_base", lambda: (None, None)
+            wm, "_resolve_display_claude_md_with_base", lambda *_: (None, None)
         )
         for name, drive in self._drivers():
             # Truthiness, for the same reason the sibling arm normalises: the
@@ -942,21 +940,21 @@ class TestDisplayTargetResolver:
         self, worktree_repo, tmp_path, monkeypatch
     ):
         """When the env points at an unrelated directory that has no CLAUDE.md,
-        the resolver falls through to the git/cwd probe and resolves the MAIN
-        checkout for the worktree session it is actually in (#1653).
-
-        This guards the cwd-divergence degradation path: a stale or mismatched
-        CLAUDE_PROJECT_DIR must not silently suppress the sync.
+        the resolver does NOT fall through to the cwd's checkout: the declared
+        directory is the session's root, it holds no document, and nothing is
+        resolved. The cwd's MAIN document (the worktree session the process
+        sits in) is never named, so a declaration cannot be overridden by
+        where the process happens to run.
         """
         main, _worktree = worktree_repo
         stray = tmp_path / "stray-no-claude"
         stray.mkdir()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(stray))
+        assert (main / ".claude" / "CLAUDE.md").exists(), (
+            "FIXTURE INVALID: the cwd's checkout has no document to fall to"
+        )
         resolved = _resolve_display_claude_md_path()
-        # Env dir has no CLAUDE.md -> falls through to the worktree probe,
-        # which is retargeted to MAIN.
-        assert resolved is not None
-        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+        assert resolved is None, resolved
 
 
 # ---------------------------------------------------------------------------
@@ -1455,3 +1453,50 @@ class TestWorktreeLeadEndToEndClosure:
         assert all(result is None for _base, result in calls[:-1]), (
             f"a probe before the main-checkout hit returned a file: {calls}"
         )
+
+
+# ---------------------------------------------------------------------------
+# One observation per sync
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "writer", ["sync_to_claude_md", "sync_retrieved_to_claude_md"]
+)
+def test_each_sync_resolves_the_session_once(tmp_path, monkeypatch, writer):
+    """Each ambient sync takes ONE SessionRoot and feeds it to the cause
+    renderer and the display resolver alike, so the verdict and the path
+    cannot describe two states. Red if either consumer resolves again (the
+    spy counts two)."""
+    import shared.project_scope as project_scope
+    import scripts.working_memory as wm
+
+    main = tmp_path / "mainproj"
+    worktree = tmp_path / "wt-feature"
+    _init_main_repo(main)
+    _add_worktree(main, worktree, with_dot_claude=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    real = project_scope.session_memory_root
+    seen = []
+
+    def spy():
+        seen.append(True)
+        return real()
+
+    monkeypatch.setattr(project_scope, "session_memory_root", spy)
+
+    if writer == "sync_to_claude_md":
+        result = wm.sync_to_claude_md(
+            {"context": "one-observation", "goal": "g"}, memory_id="0" * 32
+        )
+    else:
+        result = wm.sync_retrieved_to_claude_md(
+            [{"id": "0" * 32, "context": "one-observation"}], query="q"
+        )
+
+    assert result == wm.SyncResult(wm.SyncResult.WROTE), result
+    assert len(seen) == 1, f"{writer} resolved the session {len(seen)} times"
+    assert "one-observation" in (main / ".claude" / "CLAUDE.md").read_text(
+        encoding="utf-8"
+    )

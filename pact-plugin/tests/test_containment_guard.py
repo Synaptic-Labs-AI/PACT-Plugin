@@ -303,7 +303,7 @@ class TestSites89DisplayOverBlockAnchorIdentity:
         # Swap the base to the worktree root (the wrong anchor). MAIN's target
         # never walks up to the worktree's inode -> the ancestry walk reaches
         # the filesystem root without matching -> ContainmentError.
-        def _wrong_base():
+        def _wrong_base(_session=None):
             return (target, worktree)
         monkeypatch.setattr(wm, "_resolve_display_claude_md_with_base", _wrong_base)
 

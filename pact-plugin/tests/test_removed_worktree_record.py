@@ -870,10 +870,12 @@ class TestAnOutOfTreePrunedWorktreeAfterContainment:
 
         with pytest.raises(archive_pin._Unevaluable):
             archive_pin.resolve_claude_md()
-        with pytest.raises(wm.AmbientSyncRefused):
-            wm.sync_to_claude_md(
-                {"context": "oot", "goal": "oot"}, memory_id="0" * 32
-            )
+        # The sync reports the missing root rather than resolving anything,
+        # so the escape guard never has a resolution to refuse.
+        result = wm.sync_to_claude_md(
+            {"context": "oot", "goal": "oot"}, memory_id="0" * 32
+        )
+        assert result == wm.SyncResult(wm.SyncResult.ROOT_UNKNOWN), result
         decision = _gate({
             "tool_name": "Write",
             "agent_type": "pact-orchestrator",
