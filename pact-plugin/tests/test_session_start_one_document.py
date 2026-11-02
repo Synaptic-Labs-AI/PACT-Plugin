@@ -316,3 +316,116 @@ def test_an_unsafe_anchor_in_the_cause_is_refused(tmp_path):
     )
 
     assert line == _UNSAFE
+
+
+# ---------------------------------------------------------------------------
+# One resolver, two channels, every layout: the SessionStart hook and
+# `cli.py project-file`, each run as the platform runs it (a subprocess with
+# CLAUDE_PROJECT_DIR, a cwd and an isolated config dir), name the same file.
+# Revert check: a channel that resolves on its own (a raw project dir, the
+# cwd, or no record recovery) names a different path on at least one layout,
+# and the expected-path assertion or the equality assertion goes red.
+# ---------------------------------------------------------------------------
+
+_CLI = (
+    Path(session_init.__file__).resolve().parent.parent
+    / "skills" / "pact-memory" / "scripts" / "cli.py"
+)
+
+
+def _channel_env(tmp_path, declared, session_id=None, path=None):
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith(("GIT_", "CLAUDE_", "PYTEST_"))
+    }
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env.update(
+        HOME=str(home),
+        CLAUDE_CONFIG_DIR=str(home / ".claude"),
+        CLAUDE_PROJECT_DIR=str(declared),
+    )
+    if session_id is not None:
+        env["CLAUDE_CODE_SESSION_ID"] = session_id
+    if path is not None:
+        env["PATH"] = path
+    return env
+
+
+def _hook_context(env, cwd):
+    stdin = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    result = subprocess.run(
+        [sys.executable, str(Path(session_init.__file__))], input=stdin,
+        cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def _cli_line(env, cwd):
+    result = subprocess.run(
+        [sys.executable, str(_CLI), "project-file"],
+        cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120,
+    )
+    return result.returncode, result.stdout
+
+
+def _layout(repo, tmp_path, name):
+    """Return (declared, cwd, env, expected file or None for unknown)."""
+    main_doc = repo / ".claude" / "CLAUDE.md"
+    if name == "main":
+        return repo, repo, _channel_env(tmp_path, repo), main_doc
+    if name == "main_subdirectory":
+        assert ensure_project_memory_md(doc_at(repo)) is not None
+        sub = repo / "pkg"
+        sub.mkdir()
+        return sub, sub, _channel_env(tmp_path, sub), main_doc
+    if name == "linked_worktree":
+        worktree = repo / ".worktrees" / "lw"
+        _git("worktree", "add", "-q", str(worktree), "-b", "lw", cwd=repo)
+        return worktree, worktree, _channel_env(tmp_path, worktree), main_doc
+    if name == "removed_worktree_with_record":
+        worktree = repo / ".worktrees" / "gone"
+        _git("worktree", "add", "-q", str(worktree), "-b", "gone", cwd=repo)
+        env = _channel_env(tmp_path, worktree, session_id=SESSION_ID)
+        # The first start inside the live worktree writes the identity record.
+        _hook_context(env, worktree)
+        _git("worktree", "remove", "--force", str(worktree), cwd=repo)
+        assert not worktree.exists()
+        # Control: without the record the same removed declaration is
+        # unknown, so the known answer below comes from record recovery.
+        no_record = dict(env)
+        del no_record["CLAUDE_CODE_SESSION_ID"]
+        assert _cli_line(no_record, repo)[0] == 3
+        return worktree, repo, env, main_doc
+    if name == "unknown_root":
+        worktree = repo / ".worktrees" / "nogit"
+        _git("worktree", "add", "-q", str(worktree), "-b", "nogit", cwd=repo)
+        return worktree, worktree, _channel_env(tmp_path, worktree, path=""), None
+    raise AssertionError(name)
+
+
+@pytest.mark.parametrize("name", [
+    "main", "main_subdirectory", "linked_worktree",
+    "removed_worktree_with_record", "unknown_root",
+])
+def test_the_hook_line_and_the_cli_name_the_same_file(repo, tmp_path, name):
+    declared, cwd, env, expected = _layout(repo, tmp_path, name)
+
+    context = _hook_context(env, cwd)
+    code, stdout = _cli_line(env, cwd)
+
+    if expected is None:
+        assert (
+            "Project memory file unavailable (git could not answer). Do not "
+            "create or edit a project CLAUDE.md this session."
+        ) in context, context[-600:]
+        assert (code, stdout) == (3, "unavailable: git could not answer\n")
+    else:
+        assert _KNOWN.format(expected) in context, context[-600:]
+        assert (code, stdout) == (0, f"{expected}\n")
+    if declared.exists() and declared != repo:
+        status = _git("status", "--porcelain", "--ignored", cwd=declared)
+        assert "CLAUDE.md" not in status, status
