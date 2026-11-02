@@ -125,12 +125,10 @@ from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
 from shared.project_scope import (
-    ROOT_CAUSE_MISSING,
-    ROOT_CAUSE_UNVERIFIED,
     _record_worktree_identity,
     project_memory_root,
     project_memory_root_or_none,
-    unknown_root_cause,
+    unknown_root_reason,
 )
 from shared import backlog_store
 
@@ -1822,23 +1820,12 @@ def main():
         # route. `unknown_root_cause` decides all three in one place.
         if frame_is_lead and memory_unknown:
             anchor = declared_project_dir or project_dir
-            root_cause = unknown_root_cause(anchor)
-            if root_cause == ROOT_CAUSE_MISSING:
-                skip_reason = (
-                    f"the project directory {anchor} no longer exists, so the "
-                    "project memory target is unknown"
-                )
-            elif root_cause == ROOT_CAUSE_UNVERIFIED:
-                skip_reason = (
-                    f"the project directory {anchor} exists but could not be "
-                    "verified as a checkout of a repository, so the project "
-                    "memory target is unknown"
-                )
-            else:
-                skip_reason = (
-                    "git could not answer, so the project memory target is "
-                    "unknown"
-                )
+            # ONE RENDERER FOR EVERY CHANNEL (project_scope.unknown_root_reason):
+            # the cause text cannot land here and not in the siblings.
+            skip_reason = (
+                f"{unknown_root_reason(anchor) or 'git could not answer'}, so "
+                "the project memory target is unknown"
+            )
             system_messages.append(
                 f"Project CLAUDE.md skipped: {skip_reason}; this start wrote "
                 "nothing to either checkout."

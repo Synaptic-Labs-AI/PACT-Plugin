@@ -122,8 +122,9 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     memory_root = project_scope.project_memory_root_or_none(project_dir)
     if memory_root is None:
         print(
-            "realign_team: project CLAUDE.md skipped: git could not answer, so "
-            "the project memory target is unknown; nothing was written to "
+            "realign_team: project CLAUDE.md skipped: "
+            f"{project_scope.unknown_root_reason(project_dir) or 'git could not answer'}"
+            ", so the project memory target is unknown; nothing was written to "
             "either checkout.",
             file=sys.stderr,
         )

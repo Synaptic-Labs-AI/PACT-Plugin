@@ -400,7 +400,11 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
 def project_memory_root_or_none(
     project_dir: str | os.PathLike[str],
 ) -> Optional[Path]:
-    """The memory root, or None when git could not answer.
+    """The memory root, or None when the root is UNKNOWN.
+
+    None covers three facts -- the directory does not exist, its checkout
+    verification failed, or git could not run or enumerate. `unknown_root_cause`
+    names which; `unknown_root_reason` renders it for a user-facing message.
 
     A NON-GIT directory is a KNOWN answer and returns the directory itself.
     None is returned when git could not run (timeout, no git, an unreadable
@@ -467,6 +471,37 @@ def unknown_root_cause(
     """
     _root, cause = _project_memory_root_cause(project_dir)
     return None if cause == ROOT_CAUSE_OK else cause
+
+
+def unknown_root_reason(
+    project_dir: str | os.PathLike[str],
+) -> Optional[str]:
+    """The user-facing CLAUSE for an unknown root, or None when it is known.
+
+    ONE SOURCE FOR EVERY CHANNEL THAT REPORTS THIS. Six surfaces compose their
+    own sentence around this clause -- "Project CLAUDE.md skipped: ..." in
+    session_init, the bootstrap prompt gate, the bootstrap marker writer and
+    the memory sync, "realign_team: ..." on stderr, and archive_pin's
+    "project memory root unknown: ..." refusal. Rendering here rather than at
+    each site is what stops the cause text from reaching one channel and not
+    its siblings, which is how the wrong wording survived four rounds.
+
+    The anchor path is part of the clause: several worktrees can be in play and
+    the user needs to know which one. A caller that renders nothing when this
+    returns None keeps the old behaviour for a known root.
+    """
+    cause = unknown_root_cause(project_dir)
+    if cause is None:
+        return None
+    anchor = f"{project_dir}"
+    if cause == ROOT_CAUSE_MISSING:
+        return f"the project directory {anchor} no longer exists"
+    if cause == ROOT_CAUSE_UNVERIFIED:
+        return (
+            f"the project directory {anchor} exists but could not be verified "
+            "as a checkout of a repository"
+        )
+    return "git could not answer"
 
 
 def cwd_checkout_memory_root() -> Optional[Path]:
@@ -601,7 +636,7 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
 def _listed_worktrees_result(
     checkout: Path, resolve_against: Optional[Path] = None
 ) -> Optional[Set[Path]]:
-    """Resolved worktree paths, or None when git could not answer.
+    """Resolved worktree paths, or None when git could not ENUMERATE them.
 
     Includes a PRUNABLE worktree, whose directory is gone but whose record
     remains until `git worktree prune`. `git worktree remove` deletes the

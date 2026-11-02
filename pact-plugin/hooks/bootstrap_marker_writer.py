@@ -176,7 +176,10 @@ try:
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
     from shared.claude_md_manager import resolve_project_claude_md_path
-    from shared.project_scope import project_memory_root_or_none
+    from shared.project_scope import (
+        project_memory_root_or_none,
+        unknown_root_reason,
+    )
     from shared.marker_schema import (
         MARKER_MAX_BYTES,
         MARKER_SCHEMA_VERSION,
@@ -502,9 +505,10 @@ def _write_back_aligned_team_name(input_data: dict) -> str | None:
         memory_root = project_memory_root_or_none(project_dir)
         if memory_root is None:
             return (
-                "Project CLAUDE.md skipped: git could not answer, so the project "
-                "memory target is unknown; this prompt wrote nothing to either "
-                "checkout."
+                "Project CLAUDE.md skipped: "
+                f"{unknown_root_reason(project_dir) or 'git could not answer'}"
+                ", so the project memory target is unknown; this prompt wrote "
+                "nothing to either checkout."
             )
         target_file, _source = resolve_project_claude_md_path(memory_root)
         if not target_file.exists():

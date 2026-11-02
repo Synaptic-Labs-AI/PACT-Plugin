@@ -1394,11 +1394,7 @@ def _display_root_unknown_reason() -> Optional[str]:
     the file is"); without the record case a forged record would resolve to
     nothing yet report the wrong cause.
     """
-    from shared.project_scope import (
-        ROOT_CAUSE_MISSING,
-        ROOT_CAUSE_UNVERIFIED,
-        unknown_root_cause,
-    )
+    from shared.project_scope import unknown_root_reason
 
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
     if declared:
@@ -1406,17 +1402,7 @@ def _display_root_unknown_reason() -> Optional[str]:
     else:
         record = get_project_dir_from_session_record()
         anchor = Path(record) if record else Path.cwd()
-    cause = unknown_root_cause(anchor)
-    if cause is None:
-        return None
-    if cause == ROOT_CAUSE_MISSING:
-        return f"the project directory {anchor} no longer exists"
-    if cause == ROOT_CAUSE_UNVERIFIED:
-        return (
-            f"the project directory {anchor} exists but could not be verified "
-            "as a checkout of a repository"
-        )
-    return "git could not answer"
+    return unknown_root_reason(anchor)
 
 
 def _estimate_tokens(text: str) -> int:

@@ -585,6 +585,7 @@ def resolve_claude_md():
         cwd_checkout_memory_root,
         project_memory_root_or_none,
         record_resolution,
+        unknown_root_reason,
     )
 
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -595,7 +596,8 @@ def resolve_claude_md():
         # not run, or the base is a forged gitfile / unverifiable worktree.
         # Probing on could archive another repository's document.
         raise _Unevaluable(
-            "project memory root unknown: git could not answer, so the "
+            f"project memory root unknown: "
+            f"{unknown_root_reason(anchor) or 'git could not answer'}, so the "
             "project CLAUDE.md cannot be identified; nothing was archived"
         )
     # THE SYNC SITES' MODEL, in two steps. (1) The PROJECT-MEMORY root first:

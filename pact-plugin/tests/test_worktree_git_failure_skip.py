@@ -90,6 +90,21 @@ def _worktree(repo, name):
     return path
 
 
+def _forged_gitfile(repo, tmp_path, name):
+    """A directory whose `.git` FILE names a REAL worktree's admin dir.
+
+    git RAN on this directory and answered -- the answer names another
+    checkout -- so it is the VERIFICATION-FAILURE shape, not a git failure.
+    The worktree listing does not contain the asking directory, which is what
+    makes the answer fail verification."""
+    real = _worktree(repo, name + "-target")
+    admin = _git("rev-parse", "--absolute-git-dir", cwd=real).strip()
+    forged = tmp_path / name
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+    return forged
+
+
 def _hide_git(monkeypatch):
     """Make git genuinely UNAVAILABLE: an empty PATH fails every git call at
     the binary lookup, both `project_scope.run_git` and the direct
@@ -350,6 +365,32 @@ def test_a_git_failure_skips_the_bootstrap_write_back(repo, monkeypatch):
     )
 
 
+def test_a_forged_gitfile_names_the_verification_failure_in_the_write_back(
+    repo, tmp_path, monkeypatch
+):
+    """THE THIRD CAUSE in the bootstrap marker writer's skip line: git RAN and
+    answered, and the answer failed verification. The skip must say that, not
+    that git could not answer and not that the directory is gone."""
+    import bootstrap_marker_writer as writer
+
+    forged = _forged_gitfile(repo, tmp_path, "bootstrap-forge")
+    session_dir = _session_with_session_start(repo)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+    _patch_bootstrap_context(monkeypatch, writer, forged, session_dir)
+
+    status = writer._write_back_aligned_team_name({"agent_type": LEAD})
+
+    assert status is not None and "Project CLAUDE.md skipped" in status, status
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in status
+    ), status
+    assert "git could not answer" not in status, status
+    assert "no longer exists" not in status, status
+    assert str(forged) in status, status
+
+
 def test_the_bootstrap_write_back_updates_main_with_working_git(repo, monkeypatch):
     import bootstrap_marker_writer as writer
 
@@ -397,6 +438,30 @@ def test_a_git_failure_skips_the_realign_team_line(repo, monkeypatch, capsys):
     assert worktree_md.read_text(encoding="utf-8") == original, (
         "a git failure wrote the team line into the worktree"
     )
+
+
+def test_a_forged_gitfile_names_the_verification_failure_in_realign_team(
+    repo, tmp_path, monkeypatch, capsys
+):
+    """THE THIRD CAUSE on realign_team's stderr line: git RAN and answered, and
+    the answer failed verification."""
+    from shared.realign_team import _write_team_line
+
+    forged = _forged_gitfile(repo, tmp_path, "realign-forge")
+    session_dir = _session_with_session_start(repo)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+
+    _write_team_line("sid", "session-new", str(session_dir), "/plugin")
+
+    err = capsys.readouterr().err
+    assert "project CLAUDE.md skipped" in err, err
+    assert (
+        "exists but could not be verified as a checkout of a repository" in err
+    ), err
+    assert "git could not answer" not in err, err
+    assert "no longer exists" not in err, err
+    assert str(forged) in err, err
 
 
 def test_the_realign_team_line_updates_main_with_working_git(repo, monkeypatch):
@@ -631,6 +696,32 @@ def test_a_git_failure_skips_the_prompt_gate_block_rewrite(repo, monkeypatch):
     )
 
 
+def test_a_forged_gitfile_names_the_verification_failure_in_the_prompt_gate(
+    repo, tmp_path, monkeypatch
+):
+    """THE THIRD CAUSE in the prompt gate's block status: git RAN and
+    answered, and the answer failed verification."""
+    import bootstrap_prompt_gate as writer
+
+    forged = _forged_gitfile(repo, tmp_path, "prompt-gate-forge")
+    session_dir = _session_with_session_start(repo)
+    _seed_session_blocks(monkeypatch, writer, repo, forged, session_dir)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+
+    out = writer._record_unrecorded_lead(_prompt_gate_frame(), str(session_dir))
+
+    assert "Project CLAUDE.md skipped" in out, (
+        f"the unknown root was not reported: {out[-300:]!r}"
+    )
+    assert (
+        "exists but could not be verified as a checkout of a repository" in out
+    ), out[-300:]
+    assert "git could not answer" not in out, out[-300:]
+    assert "no longer exists" not in out, out[-300:]
+    assert str(forged) in out, out[-300:]
+
+
 def test_the_prompt_gate_block_rewrite_updates_main(repo, monkeypatch):
     import bootstrap_prompt_gate as writer
 
@@ -742,11 +833,7 @@ def test_a_forged_gitfile_names_the_verification_failure_in_the_sync(
     is saying the directory is gone -- it exists."""
     import scripts.working_memory as wm
 
-    real = _worktree(repo, "forge-target-sync")
-    admin = _git("rev-parse", "--absolute-git-dir", cwd=real).strip()
-    forged = tmp_path / "forged-sync"
-    forged.mkdir()
-    (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+    forged = _forged_gitfile(repo, tmp_path, "forged-sync")
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)
@@ -1076,11 +1163,7 @@ def test_a_forged_gitfile_names_the_verification_failure(repo, tmp_path, monkeyp
     another repository's worktree admin dir: git RAN and answered, and the
     answer failed verification. The skip must say that -- not that git could
     not answer, and not that the directory is gone."""
-    real = _worktree(repo, "forge-target-session")
-    admin = _git("rev-parse", "--absolute-git-dir", cwd=real).strip()
-    forged = tmp_path / "forged-session"
-    forged.mkdir()
-    (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+    forged = _forged_gitfile(repo, tmp_path, "forged-session")
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
     monkeypatch.chdir(forged)

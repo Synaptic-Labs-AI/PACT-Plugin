@@ -174,7 +174,12 @@ def test_the_archive_refuses(sep_worktree, monkeypatch):
     # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
     # prefix, so a prefix-only assertion passes when the anchor refusal is
     # removed and the fall-through reaches the base refusal instead.
-    assert "git could not answer" in reason, reason
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in reason
+    ), reason
+    # NOT the git-failure text: on these three shapes git RAN and answered.
+    assert "git could not answer" not in reason, reason
     assert "cannot be identified" in reason, reason
     assert "could not classify" not in reason, reason
     assert wt_md.read_text(encoding="utf-8") == original
@@ -304,7 +309,12 @@ def test_a_forged_gitfile_is_unknown_and_the_archive_refuses(
     # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
     # prefix, so a prefix-only assertion passes when the anchor refusal is
     # removed and the fall-through reaches the base refusal instead.
-    assert "git could not answer" in reason, reason
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in reason
+    ), reason
+    # NOT the git-failure text: on these three shapes git RAN and answered.
+    assert "git could not answer" not in reason, reason
     assert "cannot be identified" in reason, reason
     assert "could not classify" not in reason, reason
     assert victim_md.read_bytes() == victim_before, (
@@ -351,7 +361,12 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
     # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
     # prefix, so a prefix-only assertion passes when the anchor refusal is
     # removed and the fall-through reaches the base refusal instead.
-    assert "git could not answer" in reason, reason
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in reason
+    ), reason
+    # NOT the git-failure text: on these three shapes git RAN and answered.
+    assert "git could not answer" not in reason, reason
     assert "cannot be identified" in reason, reason
     assert "could not classify" not in reason, reason
 
