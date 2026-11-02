@@ -508,3 +508,97 @@ def test_f3_an_empty_base_with_no_root_does_not_return_the_worktree_copy(
     assert resolve_session_claude_md_path() == main_md, (
         "an empty base fell through to the worktree copy"
     )
+
+
+# ---------------------------------------------------------------------------
+# The same readers when git CANNOT answer, with the session declared on the
+# worktree and the worktree carrying its own copy. Git is made unavailable
+# with an empty PATH (every launcher fails, not one patched layer). Each
+# reader must read nothing rather than fall back to the worktree copy.
+# Revert check for every arm: a declared route that falls back to the
+# declared directory when the root is unknown resolves the worktree copy, and
+# the arm's assertion goes red. Each arm's control is the live-git arm above
+# for the same reader.
+# ---------------------------------------------------------------------------
+
+
+def _pending_marker(worktree, monkeypatch):
+    import shared.pact_context as pact_context
+    from shared.constants import PIN_STALENESS_MARKER_NAME
+
+    session_dir = worktree / "session-dir"
+    session_dir.mkdir()
+    marker = session_dir / PIN_STALENESS_MARKER_NAME
+    marker.write_text("pending", encoding="utf-8")
+    monkeypatch.setattr(pact_context, "get_session_dir", lambda: str(session_dir))
+    return marker
+
+
+@pytest.mark.parametrize("tool_name, tool_input", [
+    ("Bash", {"command": "python3 archive_pin.py 0"}),
+    ("Edit", {"file_path": "WORKTREE_COPY", "old_string": "a", "new_string": "b"}),
+])
+def test_track_files_keeps_the_marker_when_git_cannot_answer(
+    world, monkeypatch, tool_name, tool_input
+):
+    """The worktree copy is CLEAN, so a reader that took it would clear the
+    marker. An unknown root reads nothing, and the marker stays."""
+    import track_files
+
+    main, worktree = world
+    _write_doc(main, _doc(_stale_pin("2020-01-05", "Old A")))
+    copy = _write_doc(worktree, _doc())
+    marker = _pending_marker(worktree, monkeypatch)
+    if tool_input.get("file_path") == "WORKTREE_COPY":
+        tool_input = dict(tool_input, file_path=str(copy))
+    monkeypatch.setenv("PATH", "")
+
+    track_files.clear_pin_staleness_marker_if_resolved(tool_name, tool_input)
+
+    assert marker.exists(), "the marker was cleared from the worktree copy"
+
+
+def test_check_pin_caps_lists_nothing_when_git_cannot_answer(world, monkeypatch):
+    import check_pin_caps
+
+    main, worktree = world
+    _write_doc(main, _doc(_pin("2026-10-01", "Pin A")))
+    _write_doc(worktree, _doc(
+        _pin("2026-10-01", "Copy A"), _pin("2026-10-02", "Copy B")
+    ))
+    monkeypatch.setenv("PATH", "")
+
+    pins, reason = check_pin_caps._resolve_pins()
+
+    assert (pins, reason) == ([], "claude.md not found"), (pins, reason)
+
+
+@pytest.mark.parametrize("git_answers", [True, False])
+def test_the_pin_staleness_gate_ignores_the_worktree_copy_when_git_cannot_answer(
+    world, monkeypatch, git_answers
+):
+    """With the marker pending, an add-shaped Edit to the SESSION's document is
+    denied. With git unavailable no document is known, so an Edit to the
+    worktree copy is not that document and passes. The live-git case is the
+    control: the same Edit to MAIN's document is denied."""
+    from pin_staleness_gate import _check_tool_allowed
+
+    main, worktree = world
+    main_doc = _write_doc(main, _doc(_stale_pin("2020-01-05", "Old A")))
+    copy = _write_doc(worktree, _doc(_stale_pin("2020-01-05", "Old A")))
+    _pending_marker(worktree, monkeypatch)
+    target = main_doc if git_answers else copy
+    if not git_answers:
+        monkeypatch.setenv("PATH", "")
+
+    decision = _check_tool_allowed({
+        "tool_name": "Edit",
+        "agent_type": "pact-orchestrator",
+        "tool_input": {
+            "file_path": str(target),
+            "old_string": "## Pinned Context\n",
+            "new_string": "## Pinned Context\n\n" + _pin("2026-11-01", "New").rstrip("\n") + "\n",
+        },
+    })
+
+    assert (decision is None) is (not git_answers), decision
