@@ -35,6 +35,11 @@ ALLOWED = {
         "the session document it already resolved must be refused; it never "
         "uses what it finds there"
     ),
+    ("hooks/shared/project_scope.py", "_config_document_under_the_declared_project"): (
+        "names where a relative CLAUDE_CONFIG_DIR's user-global file sits when "
+        "read against the declaration, so that location is REFUSED; nothing "
+        "reads or writes the path it returns"
+    ),
 }
 
 

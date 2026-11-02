@@ -1298,6 +1298,17 @@ def session_memory_root() -> SessionRoot:
     return SessionRoot(anchor, declared, root, cause)
 
 
+def _config_document_under_the_declared_project() -> Optional[Path]:
+    """A relative config root's CLAUDE.md read against an absolute
+    CLAUDE_PROJECT_DIR, or None when the root is absolute or nothing absolute
+    is declared."""
+    config = get_claude_config_dir()
+    declared = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if config.is_absolute() or not os.path.isabs(declared):
+        return None
+    return Path(declared) / config / "CLAUDE.md"
+
+
 def user_global_documents() -> Tuple[Path, ...]:
     """The CLAUDE.md files Claude Code loads into EVERY session: the active
     config root's, and the default profile's `~/.claude/CLAUDE.md`, which a
@@ -1306,15 +1317,22 @@ def user_global_documents() -> Tuple[Path, ...]:
 
     Each location is made absolute against the cwd and resolved, so `..` over
     a missing segment and a relative CLAUDE_CONFIG_DIR name the directory
-    every other consumer of the config root reads and writes.
+    every other consumer of the config root reads and writes. A relative
+    CLAUDE_CONFIG_DIR is ALSO read against an absolute CLAUDE_PROJECT_DIR:
+    the platform resolved it once at launch, and a process run from a
+    subdirectory has another cwd. An extra location can only refuse more.
     """
     found: List[Path] = []
     for source in (
         lambda: get_claude_config_dir() / "CLAUDE.md",
+        _config_document_under_the_declared_project,
         lambda: Path.home() / ".claude" / "CLAUDE.md",
     ):
         try:
-            path = source().absolute().resolve(strict=False)
+            located = source()
+            if located is None:
+                continue
+            path = located.absolute().resolve(strict=False)
         except (OSError, RuntimeError, KeyError, ValueError):
             # RuntimeError / KeyError: Path.home() with no resolvable home;
             # RuntimeError: a symlink loop, on Pythons before 3.13.

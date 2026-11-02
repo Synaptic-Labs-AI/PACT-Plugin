@@ -656,3 +656,32 @@ def test_an_absolute_config_root_elsewhere_leaves_a_project_known(tmp_path, monk
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
 
     assert memory_root_of(project) == (project, None)
+
+
+def test_a_relative_config_root_is_also_read_against_the_declared_project(
+    tmp_path, monkeypatch
+):
+    """Launched in <proj> with CLAUDE_CONFIG_DIR=.claude, then run from
+    <proj>/sub: the cwd spelling names <proj>/sub/.claude, but the platform's
+    launch-time reading is <proj>/.claude, so <proj> is still user-global."""
+    project = _plain_project(tmp_path, monkeypatch)
+    (project / "sub").mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", ".claude")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.chdir(project / "sub")
+
+    assert memory_root_of(project) == (None, ROOT_CAUSE_USER_GLOBAL)
+
+
+def test_a_relative_config_root_outside_the_declared_project_leaves_it_known(
+    tmp_path, monkeypatch
+):
+    """Control: a relative value naming a directory outside <proj> from both
+    the cwd and the declaration does not touch <proj>'s root."""
+    project = _plain_project(tmp_path, monkeypatch)
+    (project / "sub").mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", os.path.join("..", "cfg"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.chdir(project / "sub")
+
+    assert memory_root_of(project) == (project, None)
