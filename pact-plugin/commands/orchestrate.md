@@ -216,12 +216,15 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"task_id": "{feature_task_id}", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{feature_task_id}"},"absent":["scope"]}
 JSON
 ```
 
-> ⚠️ **Heredoc-stdin contract for journal events**: All journal-event writes use `--stdin <<'JSON' ... JSON` (note the **quoted** delimiter `'JSON'`). The quoted delimiter disables bash variable expansion inside the heredoc body, so apostrophes, double quotes, dollar signs, and backticks in template-substituted values are passed through verbatim. **The orchestrator's responsibility**: any value substituted into the heredoc body (e.g., `{first_line}`, `{finding}`, `{branch}`) MUST be a JSON-valid string literal — apostrophes are fine inside JSON strings, but embedded double quotes must be escaped (`\"`), backslashes (`\\`), and control characters (`\n`, `\t`) likewise. When in doubt, JSON-encode the value before substitution. Without this discipline, an unescaped `"` in a finding text would still corrupt the event.
+> ⚠️ **Heredoc-stdin contract for journal events**: All journal-event writes use `--stdin <<'JSON' ... JSON` (note the **quoted** delimiter `'JSON'`). The quoted delimiter disables bash variable expansion inside the heredoc body, so apostrophes, double quotes, dollar signs, and backticks in template-substituted values are passed through verbatim. **The orchestrator's responsibility**: any value substituted into the heredoc body (e.g., `{first_line}`, `{finding}`, `{branch}`) MUST be a JSON-valid string literal — apostrophes are fine inside JSON strings, but embedded double quotes must be escaped (`\"`), backslashes (`\\`), and control characters (`\n`, `\t`) likewise. When in doubt, JSON-encode the value before substitution. Without this discipline, an unescaped `"` in a finding text would still corrupt the event. If a journal block fails at a write or its read-back, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
 
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
@@ -292,8 +295,11 @@ Each case is a separate bash block — select and execute the ONE block that mat
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"phase": "{PHASE}", "status": "started", "skip_reason": "", "metadata": {}}
+JSON
+python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"{PHASE}","status":"started"}}
 JSON
 ```
 
@@ -302,11 +308,17 @@ JSON
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"phase": "{PHASE}", "status": "completed", "skip_reason": "", "metadata": {}}
 JSON
-python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' --stdin <<'JSON'
+python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"{PHASE}","status":"completed"}}
+JSON
+python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"phase": "{PHASE}", "completed_phases": [...], "active_agents": [{"name": "...", "task_id": "...", "status": "..."}], "variety": VARIETY_DICT_OR_NULL, "pending_phases": [...], "safe_to_retry": true}
+JSON
+python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"checkpoint","phase":"{PHASE}","safe_to_retry":true}}
 JSON
 ```
 
@@ -315,8 +327,11 @@ JSON
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"phase": "{PHASE}", "status": "skipped", "skip_reason": "{reason}", "metadata": {}}
+JSON
+python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"{PHASE}","status":"skipped"}}
 JSON
 ```
 
@@ -484,8 +499,11 @@ When a phase is skipped but a coder encounters a decision that would have been h
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
    Then `agent_dispatch`:
@@ -493,8 +511,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"preparer","phase":"PREPARE"}}
 JSON
    ```
 6. Spawn the preparer with the canonical dispatch form:
@@ -520,8 +541,11 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   SJ="{plugin_root}/hooks/shared/session_journal.py"
   # Enumerate this feature's PREPARE artifacts (worktree-isolated → this feature only).
   # Emit only when ≥1 non-empty path is found; an empty result is the missing-artifact anomaly, not an event.
-  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON' &&
   {"workflow": "prepare", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{prepare_task_id}"}
+JSON
+  python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"prepare","feature":"{feature}","task_id":"{prepare_task_id}"}}
 JSON
   ```
 - [ ] **Complete the PREPARE phase task** — ONLY after the artifact check and the `artifact_paths` emit above: `TaskUpdate(prepareTaskId, status="completed")`. This ordering is load-bearing: the emit MUST land before the phase-task completion so the durability pointer is on disk by the time completion is observed. (A skipped PREPARE phase completes earlier with `metadata.skipped=true` and runs neither the check nor the emit.)
@@ -601,8 +625,11 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
    Then `agent_dispatch`:
@@ -610,8 +637,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"architect","phase":"ARCHITECT"}}
 JSON
    ```
 6. Spawn the architect with the canonical dispatch form:
@@ -637,8 +667,11 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   SJ="{plugin_root}/hooks/shared/session_journal.py"
   # Enumerate this feature's ARCHITECT artifacts (worktree-isolated → this feature only).
   # Emit only when ≥1 non-empty path is found; an empty result is the missing-artifact anomaly, not an event.
-  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON' &&
   {"workflow": "architect", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{architect_task_id}"}
+JSON
+  python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"architect","feature":"{feature}","task_id":"{architect_task_id}"}}
 JSON
   ```
 - [ ] **Complete the ARCHITECT phase task** — ONLY after the artifact check and the `artifact_paths` emit above: `TaskUpdate(architectTaskId, status="completed")`. This ordering is load-bearing: the emit MUST land before the phase-task completion so the durability pointer is on disk by the time completion is observed. (A skipped ARCHITECT phase completes earlier with `metadata.skipped=true` and runs neither the check nor the emit.)
@@ -721,8 +754,11 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type s2_state_seeded --session-dir '{session_dir}' --stdin <<'JSON'
+  --type s2_state_seeded --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"worktree": "{worktree_path}", "agents": ["{agent1}", "{agent2}"], "boundaries": {"{agent1}": ["path/"], "{agent2}": ["path/"]}}
+JSON
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"s2_state_seeded","worktree":"{worktree_path}"}}
 JSON
 ```
 
@@ -749,8 +785,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
    Then `agent_dispatch`:
@@ -758,8 +797,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{coder-name}","phase":"CODE"}}
 JSON
    ```
 6. Spawn each coder with the canonical dispatch form:
@@ -820,8 +862,11 @@ Pass through whatever the coder's stage-ready message claimed about the staged w
   set -e
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-    --type commit --session-dir '{session_dir}' --stdin <<'JSON'
+    --type commit --session-dir '{session_dir}' --stdin <<'JSON' &&
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
+JSON
+  python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"commit","sha":"{short_sha}","phase":"CODE"}}
 JSON
   ```
 - [ ] **Emit `artifact_paths` for auditor decision-logs (conditional, capture-if-present)** — if a concurrent auditor produced decision-log artifacts, glob `docs/decision-logs/{feature}-*.md`; when ≥1 is present, write a path-only `artifact_paths` event (`workflow=code-auditor`) so they harvest. Unlike PREPARE/ARCHITECT, this is **capture-if-present, not flag-if-missing**: the auditor is optional, so absence is normal — emit nothing and do NOT flag a missing artifact.
@@ -830,8 +875,11 @@ JSON
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   SJ="{plugin_root}/hooks/shared/session_journal.py"
   # Best-effort: only when the glob found ≥1 decision-log; if none, skip this emit entirely (auditor is optional).
-  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON' &&
   {"workflow": "code-auditor", "feature": "{feature}", "paths": ["{absolute_decision_log_path}"]}
+JSON
+  python3 -I "$SJ" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"code-auditor","feature":"{feature}"}}
 JSON
   ```
 - [ ] **HANDOFF acceptance**: on receiving each Task-complete `SendMessage`, accept on the HANDOFF payload the notify carries. If the notify carries no HANDOFF payload, `SendMessage` the agent to submit one before downstream dispatch proceeds. The disk copy is the deferred audit, not the acceptance surface — see [pact-completion-authority.md §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) point 4 for the audit, the integrity finding and the repair.
@@ -907,8 +955,11 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+     --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
    ```
    Then `agent_dispatch`:
@@ -916,8 +967,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"test-engineer","phase":"TEST"}}
 JSON
    ```
 6. Spawn the test engineer with the canonical dispatch form:

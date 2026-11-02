@@ -463,8 +463,11 @@ def _run_main_seam(tmp_path, monkeypatch):
         "hook_event_name": "SessionStart", "source": "startup",
         "session_id": SESSION_ID, "agent_type": LEAD,
     }))
+    # The tmp project holds no CLAUDE.md, so an unpatched staleness check falls
+    # back to the git repo root and rewrites the developer's real CLAUDE.md.
     with patch("session_init.ensure_project_memory_md", return_value=None), \
          patch("session_init.update_session_info", return_value=None), \
+         patch("session_init.check_pinned_staleness", return_value=None), \
          patch("session_init.setup_plugin_symlinks", return_value=None), \
          patch("session_init.migrate_to_managed_structure", _spy_migrate), \
          patch("session_init.persist_context", _spy_persist), \

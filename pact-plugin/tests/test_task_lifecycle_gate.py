@@ -608,8 +608,10 @@ def _setup_team_inbox(
 # The per-completion paired-wake detector was removed: it read
 # inboxes/{owner}.json to confirm a paired wake-SendMessage before a teachback
 # completion, but that store is platform-written ASYNC on delivery (after the
-# synchronous PostToolUse(TaskUpdate-completed) read), and SendMessage is
-# unhookable, so the advisory was ~100%-false-positive by construction.
+# synchronous PostToolUse(TaskUpdate-completed) read), so the advisory was
+# ~100%-false-positive by construction. SendMessage itself is hookable: it
+# fires PreToolUse (measured); PostToolUse on SendMessage is unmeasured. The
+# async inbox write alone is what makes a synchronous wake check dead.
 #
 # The issue's originally-proposed non-vacuity test ("a teachback completion
 # WITH a real paired wake must NOT emit the advisory") is UN-BUILDABLE: you

@@ -226,8 +226,11 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"}}
 JSON
 ```
 
@@ -250,12 +253,15 @@ After dispatching all reviewers, write a `review_dispatch` event:
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type review_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+  --type review_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}
+JSON
+python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"review_dispatch","pr_number":{pr_number}}}
 JSON
 ```
 
-> ⚠️ **Heredoc-stdin contract**: All journal-event writes use `--stdin <<'JSON' ... JSON` (quoted delimiter). This disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g. `{first_line}`, `{finding}`, `{branch}`) pass through verbatim — fixing the silent journal-drop bug where commit messages with `don't` would close the bash quote and abort the write under `set -e`. The orchestrator must still produce JSON-valid string content (escape `\"` and `\\` and control chars when constructing the body).
+> ⚠️ **Heredoc-stdin contract**: All journal-event writes use `--stdin <<'JSON' ... JSON` (quoted delimiter). This disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g. `{first_line}`, `{finding}`, `{branch}`) pass through verbatim — fixing the silent journal-drop bug where commit messages with `don't` would close the bash quote and abort the write under `set -e`. The orchestrator must still produce JSON-valid string content (escape `\"` and `\\` and control chars when constructing the body). If a journal block fails at a write or its read-back, read the last few lines of `{session_dir}/session-journal.jsonl`: if the expected event is there, the write landed, so do not write it again; otherwise re-run only that write and its read-back, once. Then run, in order, each write that follows it in the block, each with its read-back.
 
 **HANDOFF review** (after every reviewer has reported — PRIMARY memory trigger):
 ```
@@ -305,8 +311,11 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
      set -e
      trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
      python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-       --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+       --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON' &&
      {"workflow": "peer-review", "feature": "{feature}", "paths": ["{absolute_review_doc_path}"]}
+JSON
+     python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"peer-review","feature":"{feature}"}}
 JSON
      ```
 2. **Journal events**: Write a `review_finding` event for each synthesized finding:
@@ -315,8 +324,11 @@ JSON
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    # Repeat for each finding:
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type review_finding --session-dir '{session_dir}' --stdin <<'JSON'
+     --type review_finding --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"severity": "{blocking|suggestion|nitpick}", "finding": "{one-line description}", "reviewer": "{reviewer-name}", "task_id": "{reviewer_task_id}"}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"review_finding","task_id":"{reviewer_task_id}","reviewer":"{reviewer-name}","severity":"{blocking|suggestion|nitpick}","finding":"{one-line description}"}}
 JSON
    ```
 3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
@@ -341,8 +353,11 @@ JSON
        set -e
        trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
        python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-         --type remediation --session-dir '{session_dir}' --stdin <<'JSON'
+         --type remediation --session-dir '{session_dir}' --stdin <<'JSON' &&
        {"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}", "task_id": "{fixer_task_id}"}
+JSON
+       python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"remediation","cycle":{cycle_number},"task_id":"{fixer_task_id}"}}
 JSON
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
@@ -451,8 +466,11 @@ JSON
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type pr_ready --session-dir '{session_dir}' --stdin <<'JSON'
+     --type pr_ready --session-dir '{session_dir}' --stdin <<'JSON' &&
    {"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}
+JSON
+   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
+{"session_dir":"{session_dir}","exact":{"type":"pr_ready","pr_number":{pr_number},"commits":{total_commit_count}}}
 JSON
    ```
 

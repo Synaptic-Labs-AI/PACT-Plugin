@@ -237,9 +237,13 @@ PHRASE_PINS = [
     (SKILL, "revise it on the same task without waiting to be asked"),
     # --- lead-side completion-authority (+ byte-mirrored SSOT region) ---
     (COMPLETION_AUTHORITY, "exactly ONE redundant confirm"),
-    # The behavioral no-hook non-goal note: the race cannot be closed with
-    # a synchronous hook (SendMessage fires no hook event; inbox writes are
-    # asynchronous-on-delivery; idle notifications are content-blind).
+    # The behavioral no-hook non-goal note: PreToolUse fires, but inbox
+    # delivery is asynchronous and PostToolUse remains unmeasured, so no
+    # synchronous hook can close the delivery-ordering race.
+    (COMPLETION_AUTHORITY, "SendMessage does fire PreToolUse"),
+    (COMPLETION_AUTHORITY, "that hook runs before delivery, so it cannot observe the wake"),
+    (COMPLETION_AUTHORITY, "PostToolUse remains unmeasured, not refuted"),
+    (COMPLETION_AUTHORITY, "inbox files are written asynchronously on delivery"),
     (COMPLETION_AUTHORITY, "Synchronous wake/send detection is therefore dead-by-construction"),
     (COMPLETION_AUTHORITY, "in-process and tmux teammateMode"),
     (COMPLETION_AUTHORITY, "boundary-drain: inbox empty"),
@@ -293,6 +297,10 @@ PHRASE_PINS = [
     # the sentence-initial capitalized form.
     (COMPLETION_AUTHORITY, "Delivery is not processing"),
     (PROTOCOLS_SSOT, "exactly ONE redundant confirm"),
+    (PROTOCOLS_SSOT, "SendMessage does fire PreToolUse"),
+    (PROTOCOLS_SSOT, "that hook runs before delivery, so it cannot observe the wake"),
+    (PROTOCOLS_SSOT, "PostToolUse remains unmeasured, not refuted"),
+    (PROTOCOLS_SSOT, "inbox files are written asynchronously on delivery"),
     (PROTOCOLS_SSOT, "Synchronous wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "in-process and tmux teammateMode"),
     (PROTOCOLS_SSOT, "boundary-drain: inbox empty"),
@@ -476,6 +484,139 @@ def test_retired_inbox_grew_token_absent(doc_path: Path):
         f"instruction surfaces (if a future rule genuinely needs it, "
         f"update this guard deliberately)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Absence pin — retired "SendMessage fires no hook" claim, in any wording, in
+# every non-test text file of the plugin.
+# ---------------------------------------------------------------------------
+
+_RETIRED_CLAIM_SUFFIXES = {".md", ".py", ".json", ".sh", ".txt", ".toml", ".yaml", ".yml"}
+_HOOK_TERM = r"(?:pre/posttooluse|pretooluse|posttooluse|hook(?:able)?|hook event)"
+# Each alternative is a denial that SendMessage reaches a hook. A clause is
+# flagged only when it ALSO names SendMessage, so the true statement "a tool
+# that never fires PreToolUse is a dead entry" stays clean, and so does the
+# corrected wording ("SendMessage does fire PreToolUse ... PostToolUse
+# remains unmeasured, not refuted").
+_RETIRED_CLAIM_DENIAL = re.compile(
+    "|".join(
+        (
+            rf"\bfires? no (?:\w+ ){{0,2}}{_HOOK_TERM}",
+            rf"\b(?:does|do|did) not fire (?:any |a )?{_HOOK_TERM}",
+            rf"\b(?:doesn't|never) fires? (?:any |a )?{_HOOK_TERM}",
+            rf"\bno (?:\w+ ){{0,2}}{_HOOK_TERM}s? event",
+            r"\b(?:cannot|can't|can not) be hooked",
+            r"\b(?:un|non-?)hookable",
+            r"\bnot (?:a |an )?(?:\w+[- ]){0,3}hookable",
+            r"\bnot in the \S*hookable",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+
+def _retired_claim_clauses(text: str) -> list:
+    """Clauses of ``text`` that pair SendMessage with a hook denial.
+
+    Backticks and line-leading comment markers (``#``, ``//``, ``*``, ``>``)
+    are removed and whitespace collapsed first, so a claim wrapped across
+    comment lines or split by inline code is still one clause. Clauses split
+    at sentence punctuation, semicolons and spaced em-dashes.
+    """
+    flat = " ".join(
+        re.sub(r"(?m)^\s*(?:#+|//|\*|>)\s?", " ", text.replace("`", "")).split()
+    )
+    return [
+        clause
+        for clause in re.split(r"(?<=[.;!?])\s+|\s+—\s+", flat)
+        if re.search(r"sendmessage", clause, re.IGNORECASE)
+        and _RETIRED_CLAIM_DENIAL.search(clause)
+    ]
+
+
+def _non_test_plugin_files() -> list:
+    """Every text file under the plugin root outside tests/, from the tree."""
+    return [
+        path
+        for path in sorted(PLUGIN_ROOT.rglob("*"))
+        if path.is_file()
+        and path.suffix in _RETIRED_CLAIM_SUFFIXES
+        and path.relative_to(PLUGIN_ROOT).parts[0] != "tests"
+        and "__pycache__" not in path.parts
+    ]
+
+
+@pytest.mark.parametrize(
+    "doc_path",
+    _non_test_plugin_files(),
+    ids=lambda p: p.relative_to(PLUGIN_ROOT).as_posix(),
+)
+def test_retired_sendmessage_hook_denial_absent(doc_path: Path):
+    """SendMessage reaches PreToolUse; no plugin file may deny it in any wording."""
+    hits = _retired_claim_clauses(doc_path.read_text(encoding="utf-8", errors="replace"))
+    assert hits == [], (
+        f"{doc_path.relative_to(PLUGIN_ROOT)}: retired SendMessage hook denial "
+        f"reappeared: {hits!r}. PreToolUse fires on SendMessage; PostToolUse "
+        "remains unmeasured, not refuted."
+    )
+
+
+def test_retired_claim_scan_covers_hooks_and_protocols():
+    """The tree-derived scan must reach the surfaces that carried the claim."""
+    scanned = {p.relative_to(PLUGIN_ROOT).as_posix() for p in _non_test_plugin_files()}
+    for required in (
+        "hooks/bootstrap_gate.py",
+        "hooks/handoff_ordering_gate.py",
+        "hooks/task_lifecycle_gate.py",
+        "hooks/shared/HOOK_STDIN_DISCRIMINATORS.md",
+        "protocols/pact-completion-authority.md",
+        "protocols/pact-protocols.md",
+        "skills/pact-agent-teams/SKILL.md",
+        "commands/orchestrate.md",
+    ):
+        assert required in scanned
+    assert not any(name.startswith("tests/") for name in scanned)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "`SendMessage` fires no PreToolUse/PostToolUse event; inbox files are async.",
+        "`SendMessage` does not fire `PreToolUse`.",
+        "SendMessage doesn't fire any hook.",
+        "SendMessage never fires PreToolUse.",
+        "Calling SendMessage produces no PreToolUse event.",
+        "SendMessage cannot be hooked.",
+        "only `SendMessage` is verified-unhookable.",
+        "it wakes via inbox/SendMessage, which is\n    # not hookable), so this event",
+        "inbox / `SendMessage` (a context injection, not a hookable tool).",
+        "# and SendMessage is not in the Pre/PostToolUse-hookable\n# tool set, so",
+    ],
+    ids=[
+        "fires-no", "does-not-fire", "doesnt-fire-any-hook", "never-fires",
+        "no-event", "cannot-be-hooked", "unhookable", "wrapped-comment",
+        "not-a-hookable-tool", "not-in-hookable-set",
+    ],
+)
+def test_retired_claim_matcher_catches_paraphrase(text):
+    assert _retired_claim_clauses(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "`SendMessage` does fire `PreToolUse`, but that hook runs before delivery, "
+        "so it cannot observe the wake; `PostToolUse` remains unmeasured, not refuted; "
+        "inbox files are written asynchronously on delivery;",
+        "an entry for a tool that never fires PreToolUse is a harmless dead entry.",
+        "No registered PostToolUse hook matches SendMessage, so zero runs say nothing.",
+        "SendMessage does reach PreToolUse, but that fires before delivery, and "
+        "PostToolUse on it is unmeasured.",
+    ],
+    ids=["corrected-protocol", "no-sendmessage", "true-registration-fact", "corrected-comment"],
+)
+def test_retired_claim_matcher_spares_true_statements(text):
+    assert _retired_claim_clauses(text) == []
 
 
 # ---------------------------------------------------------------------------
