@@ -1,9 +1,9 @@
 """A worktree writer during a git failure writes NOTHING (#1653 item 4).
 
-`project_memory_root` fails safe to its input, which during a git failure would
-re-plant a CLAUDE.md in the worktree. Every WRITER that resolves the project
-memory root therefore uses `project_memory_root_or_none` and skips when the
-root is UNKNOWN: the session-start writers (session_init steps 3/3b/5b) and the
+Falling back to the input during a git failure would re-plant a CLAUDE.md in
+the worktree. Every WRITER therefore resolves the project memory root through
+`project_scope.session_memory_root` and skips when the root is UNKNOWN: the
+session-start writers (session_init steps 3/3b/5b) and the
 prompt-time writers (`pin_marker_writer`, `bootstrap_marker_writer`,
 `realign_team`'s CLAUDE.md line).
 
@@ -1122,7 +1122,7 @@ def test_a_moved_main_checkout_is_unanswerable_and_writes_nothing(
 def test_an_invalid_utf8_worktree_path_still_starts_the_session(repo, monkeypatch):
     """F1 arm D: an undecodable path must not fail the SessionStart.
 
-    Before the fix, `project_memory_root_or_none` raised UnicodeDecodeError
+    Before the fix, the root classifier raised UnicodeDecodeError
     inside session_init, the safety net emitted "PACT hook warning ... codec
     can't decode byte", and the team was NOT generated. Now the root
     classifies and the launch is normal.

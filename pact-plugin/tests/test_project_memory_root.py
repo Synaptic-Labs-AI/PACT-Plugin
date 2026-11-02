@@ -1,4 +1,4 @@
-"""Arms for `project_scope.project_memory_root` (#1653).
+"""Arms for the project-memory root classifier, `project_scope.memory_root_of` (#1653).
 
 A lead's project memory belongs to the MAIN checkout when the session's
 project dir is a linked worktree; every other layout -- a main checkout, a
@@ -6,7 +6,8 @@ subdirectory of one, a non-git directory, a submodule or `--separate-git-dir`
 repository, a worktree of a bare repo, and any git failure -- returns the
 input EXACTLY as given (no resolve, no absolutise).
 
-Used by/with: hooks/shared/project_scope.py (`project_memory_root`), consumed
+Used by/with: hooks/shared/project_scope.py (`memory_root_of`, read here through
+the `known_root` / `root_or_input` helpers in tests/helpers.py), consumed
 by session_init, claude_md_manager, session_resume, staleness,
 bootstrap_prompt_gate, bootstrap_marker_writer, realign_team and
 pin_marker_writer.
@@ -155,7 +156,7 @@ def test_a10_a_repo_nested_in_a_worktree_returns_input(repo):
     A legitimate layout the listing check must not reject: a nested repository
     is its own main checkout, so it owns its own memory. It is labelled here
     because it CANNOT redden on the SEC-1 code it sits beside: a nested repo
-    has git-dir == common-dir, so `project_memory_root` returns `given` at
+    has git-dir == common-dir, so the classifier returns `given` at
     that discriminator before the listing check or the candidate line can
     run. MEASURED: removing the listing check leaves this arm green, and no
     single-site mutation was found that reddens it, because every
@@ -295,8 +296,8 @@ def test_a11d_a_newline_path_survives_a_forced_z_failure(repo, tmp_path, monkeyp
 
 
 def test_a14_a_git_failure_is_reported_unknown(repo, monkeypatch):
-    """Item 4: `project_memory_root_or_none` returns None when git cannot run,
-    while `project_memory_root` keeps its fail-safe input for readers."""
+    """Item 4: `memory_root_of` reports no root when git cannot run;
+    `root_or_input` folds that unknown root back to the input."""
     worktree = _worktree(repo, "wt-unknown")
     monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
     assert known_root(worktree) is None

@@ -2,8 +2,8 @@
 Tests for syncing Working Memory to the display CLAUDE.md a session actually reads.
 
 A session rooted in a git worktree reads and is shown the MAIN checkout's
-.claude/CLAUDE.md: since #1653 the display resolver retargets every base
-through `project_scope.project_memory_root`, so a worktree that carries its
+.claude/CLAUDE.md: since #1653 the display resolver reads the session's
+document (`claude_md_manager.session_document`), so a worktree that carries its
 own file no longer shadows the project-memory target. The database that backs
 memory search is keyed to the MAIN repository too, so every worktree session
 of a project shares one history and one display target.
