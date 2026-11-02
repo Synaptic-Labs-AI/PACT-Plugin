@@ -290,6 +290,7 @@ try:
     )
     from shared.agent_handoff_marker import (
         already_emitted,
+        emit_side_subject,
         handoff_already_emitted,
         handoff_content_key,
         handoff_unclaim,
@@ -1024,21 +1025,17 @@ def _emit_lead_side_agent_handoff(
         handoff = task_metadata.get("handoff")
         if not isinstance(handoff, dict) or not handoff:
             return
-        # #917 R2 (validate-before-claim): substitute the sentinel for a
-        # whitespace-only / empty subject (mirrors b1's falsy+whitespace
-        # substitution) so a degenerate subject is schema-valid BEFORE the
-        # claim rather than poisoning the marker. _is_teachback_subject above
-        # already ran on the original subject (a blank subject is not a
-        # teachback), so substituting here does not change the teachback gate.
-        #
-        # The "(no subject)" sentinel is MIRRORED IN PROSE by the harvest,
-        # which derives its disk-side identity for the same position — do not
-        # change this substitution without the paired edit to Step 3 of
-        # skills/pact-handoff-harvest/SKILL.md. Nothing enforces the mirror,
-        # and a divergence makes the harvest skip its union and report an
-        # identity mismatch on a task file that is present.
-        if not subject or not subject.strip():
-            subject = "(no subject)"
+        # #917 R2 (validate-before-claim): THE SUBSTITUTION IS THE SHARED
+        # HELPER, not a local copy. It is STRICT — any value that is not a
+        # non-empty stripped STRING becomes the sentinel — so a non-str
+        # subject can no longer raise here (the old `subject.strip()` did, and
+        # this function's fail-open handler turned that into a silent
+        # no-emit). The TaskCompleted emit and the harvest's disk identity
+        # call the same helper, so the three cannot drift.
+        # _is_teachback_subject above already ran on the original subject (a
+        # blank subject is not a teachback), so substituting here does not
+        # change the teachback gate.
+        subject = emit_side_subject(subject)
         # #917 symmetry: same writability precondition as b1
         # (agent_handoff_emitter). In the lead's gate process this is a no-op
         # (the lead's context is persisted -> get_journal_path() resolves), but

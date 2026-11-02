@@ -146,7 +146,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 1. **Subject term.** When the record subject is missing, empty, or whitespace-only, substitute the literal `(no subject)` before hashing. The two emit paths both apply this.
 2. **Agent term.** When the record owner is missing, empty, or whitespace-only, the `TaskCompleted` emit path hashes the platform teammate name for that task in place of the owner. The task record does not carry that name, so this one is NOT reproducible from the record. Report such a task through the report-message rule below and do not read it as a drain.
 
-**HOW TO CALL THE NAMES THIS STEP USES.** The step above names `occupant_hash` and `report_safe`, and the pseudocode below names `latest_by_ts_then_journal_order`. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.**
+**HOW TO CALL THE NAMES THIS STEP USES.** The step above names `occupant_hash`, `report_safe`, `emit_side_subject` and `disk_identity`, and the pseudocode below names `latest_by_ts_then_journal_order`. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.**
 
 1. **`occupant_hash`**, the SHARED identity hash. This is the one runnable copy in this file. Step 3.1 uses the same command and points here.
 
@@ -164,7 +164,23 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
    It strips control characters and every line boundary (so a crafted team name, field name or task id cannot forge a report line) and caps the length. The helper-produced strings — `outcome.report` and the union's `reports` — are already sanitised; this applies to the values THIS step interpolates.
 
-3. **`latest_by_ts_then_journal_order`**, defined HERE because it is defined at no site in the repo. It takes the events of ONE group, in journal order, and returns the authoritative one:
+3. **`emit_side_subject`**, the SHARED sentinel substitution BOTH emit paths apply before they hash:
+
+   ```bash
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import emit_side_subject; print(emit_side_subject(sys.argv[1] if len(sys.argv) > 1 else None))" "$SUBJECT"
+   ```
+
+   STRICT: any value that is not a non-empty stripped string prints `(no subject)`. A present string is returned unchanged.
+
+4. **`disk_identity`**, the SHARED disk-side identity, `occupant_hash(owner, emit_side_subject(subject))`:
+
+   ```bash
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import disk_identity; print(disk_identity(sys.argv[1], sys.argv[2]))" "$OWNER" "$SUBJECT"
+   ```
+
+   Use this for the task record's identity; never recompose the hash inline.
+
+5. **`latest_by_ts_then_journal_order`**, defined HERE because it is defined at no site in the repo. It takes the events of ONE group, in journal order, and returns the authoritative one:
 
    ```python
    def latest_by_ts_then_journal_order(events):
@@ -186,9 +202,9 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    🔴 **THE PRECONDITION: THAT RULE HOLDS WHERE THE DATETIME PREFIX IS FIXED-WIDTH AND THE SECONDS ARE PRESENT. OUTSIDE THAT, THE DECIDING BYTE IS NOT THE ONE THE RULE NAMES.** MEASURED, two forms that break it. `2026-08-19 20:00:00+00:00` against the `Z` form decides at INDEX 10, a SPACE at 0x20 against `T` at 0x54, and `str(datetime.now(timezone.utc))` produces that form. `2026-08-19T20:00:00.123Z` against `2026-08-19T20:00:00.123456Z` carries `.` as the byte after the seconds for BOTH, so the rule answers nothing, and the compare decides at INDEX 23 with the LATER instant reading as older. A `timespec='minutes'` form has no seconds field at all, so the named position does not exist.
    THE BOUND ON THAT LIST, AND IT IS THE CAUSE FOR PUTTING THE PARSE INSTRUCTION FIRST: it comes from a probe of the stdlib producers and one hand-built form, so a producer outside those is outside the check. NO RULE ABOUT WHICH BYTE DECIDES CAN BE MADE COMPLETE, because a new spelling can move the deciding byte to a position no rule anticipated.
 
-🔴 **THIS RULE MIRRORS CODE, AND NOTHING ENFORCES THE MIRROR.** The two substitutions above are implemented in `agent_handoff_emitter` and in `task_lifecycle_gate._emit_lead_side_agent_handoff`. One rule thus lives at THREE sites: two emit paths IMPLEMENT it and this step DESCRIBES it. **A change to the identity derivation in either emit path MUST change this step in the SAME commit.** The coupling is stated because it cannot be removed here, and one rule at several sites with nothing to say the sites are coupled is what let a repaired rule and a stale rule stand together in this same file.
+🔴 **THIS RULE IS NOT MIRRORED ANY MORE — IT IS CALLED.** The substitution is implemented ONCE, in `emit_side_subject`, and BOTH emit paths and this step's `disk_identity` call it. There is no second copy to keep in step: a change to the helper changes all three consumers at once. Do not reintroduce a local `def` or an inline hash composition here; that is how the mirrors this branch removed came to exist.
 
-**A NON-MATCHING GROUP IS NOT ALWAYS A DRAIN, AND THE TWO CASES MUST NOT SHARE ONE MESSAGE.** Report an ABSENT task file as `handoff divergence check unavailable for task N: task file absent`. When the task file is PRESENT and no group carries its identity, report `handoff identity mismatch for task N: task file present, no event group carries its identity`. One message for the two cases makes a present file read as a drained one, which is the strongest signal this workflow emits.
+**A NON-MATCHING GROUP IS NOT ALWAYS A DRAIN, AND THESE CASES MUST NOT SHARE ONE MESSAGE.** Report an ABSENT task file as `handoff divergence check unavailable for task N: task file absent`. When the task file is PRESENT and NO group carries its identity, report `handoff identity mismatch for task N: task file present, no event group carries its identity`. When the task file is PRESENT and ANOTHER group carries its identity, this group is a distinct work unit (a reused task_id across arcs) and must NOT borrow the total-mismatch message: report `handoff identity mismatch for task N: journal group <identity> is not the task file's group; processed from the journal copy alone`. One message for these cases makes a present file read as a drained one, which is the strongest signal this workflow emits.
 
 **A SUBSTITUTION IS NOT THE ONLY CAUSE OF A MISMATCH, WHICH IS WHY THE SECOND MESSAGE IS NEEDED AND NOT MERELY TIDY.** The identity terms are the agent and the subject AS THEY STOOD AT EMIT TIME. An edit to either term after an emit leaves the record holding a value that no group carries. The subject term also reaches the `TaskCompleted` emit path from the platform payload rather than from the task record. So a mismatch on a present task file is an ordinary state, it is not evidence of a drain, and it is not always closable by the substitution rule above. Report it as itself, and process each group from the journal copy alone.
 
@@ -199,10 +215,9 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 Pseudocode for the read. It carries all the selection steps, because a task_id reused across arcs resolves to the wrong arc when any one of them is dropped:
 
 ```python
-def emit_side_subject(subject):
-    """Mirror of the sentinel BOTH emit paths apply before they hash.
-    Change this when either emit path changes, in the SAME commit."""
-    return subject if (subject and str(subject).strip()) else "(no subject)"
+# The sentinel substitution and the disk identity are NOT restated here. Both
+# are shipped in shared.agent_handoff_marker and called below, so this file
+# cannot carry a stale second copy of either.
 
 
 # The union predicate is NOT restated here. It is the shipped
@@ -288,9 +303,9 @@ for task_id in unprocessed:
                 e.get("handoff") or {}, candidates,
             )
             destination = old_format_destination(outcome, this_team)
-            if destination == "mixed":
+            if destination == OLD_FORMAT_DEST_MIXED:
                 report(outcome.report)      # discard: another store's content
-            elif destination == "from":
+            elif destination == OLD_FORMAT_DEST_FROM:
                 from_events.setdefault(outcome.team, []).append(e)
             else:
                 # OWNED_BY(this_team) carries no report; UNMATCHED carries
@@ -330,10 +345,8 @@ for task_id in unprocessed:
     # `subject` is missing in 0 of 1421 today, and it takes `.get` anyway:
     # read_task_json is FAIL-OPEN, so it returns a SHAPE and not a SCHEMA,
     # and a subscript asserts a guarantee that reader does not make.
-    disk_identity = (
-        occupant_hash(
-            task.get("owner", ""), emit_side_subject(task.get("subject", ""))
-        )
+    disk_id = (
+        disk_identity(task.get("owner", ""), task.get("subject", ""))
         if task else None
     )
     disk_handoff = (task.get("metadata", {}).get("handoff") if task else None) or {}
@@ -346,12 +359,16 @@ for task_id in unprocessed:
         continue
 
     # More than one group means the task_id was reused across arcs. Each group
-    # is a distinct work unit. Do NOT pick one.
+    # is a distinct work unit. Do NOT pick one. `disk_group_matches` is what
+    # keeps the "no event group carries its identity" message TRUE: it is the
+    # total-mismatch message, and emitting it for every non-matching group
+    # would be false whenever another group matched the task file.
+    disk_group_matches = disk_id in groups
     for identity, events in groups.items():
         # STEP 3: latest ts, and the line that comes after it on an equal ts.
         journal_event = latest_by_ts_then_journal_order(events)
         handoff = journal_event.handoff  # content at the last emitting write
-        if identity == disk_identity:
+        if identity == disk_id:
             # UNION via the shared predicate; every branch reports.
             merged, reports = union_preferring_task_file(
                 handoff, disk_handoff, task_id
@@ -362,13 +379,20 @@ for task_id in unprocessed:
         elif not task:
             report(f"handoff divergence check unavailable for task "
                    f"{report_safe(task_id)}: task file absent")
-        else:
-            # The task file is PRESENT and belongs to at most one group.
+        elif not disk_group_matches:
+            # The task file is PRESENT and NO group carries its identity.
             # This is an identity mismatch, NOT a drain. Do not reuse the
             # drain wording for it.
             report(f"handoff identity mismatch for task "
                    f"{report_safe(task_id)}: task file present, no event "
                    f"group carries its identity")
+        else:
+            # ANOTHER group matched the task file: this group is a distinct
+            # work unit (a reused task_id across arcs), not a total mismatch.
+            report(f"handoff identity mismatch for task "
+                   f"{report_safe(task_id)}: journal group "
+                   f"{report_safe(identity)} is not the task file's group; "
+                   f"processed from the journal copy alone")
         process(handoff)
 ```
 
@@ -386,7 +410,7 @@ A HANDOFF may reference sibling metadata keys on its task (verification records,
                  --session-dir "$SESSION_DIR" --type task_metadata_snapshot)
    ```
 
-   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `occupant_hash(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. A snapshot with NO `team` is OLD-FORMAT and passes. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **The runnable command is in Step 3, under HOW TO CALL THE TWO NAMES THIS STEP USES.** It is stated once, there, and referenced here. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
+   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `occupant_hash(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. A snapshot with NO `team` is OLD-FORMAT and passes. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **The runnable command is in Step 3, under HOW TO CALL THE NAMES THIS STEP USES.** It is stated once, there, and referenced here. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
 3. **Graceful degrade**: neither source resolves → record the gap (task_id, key, timestamp) exactly as Step 3's report-gap tier does; never invent content.
 
 **SIBLING KEY NAMES CARRY NO ORDER.** A task commonly carries a family of related sibling keys, and their names do not record which one is newest. A key that names itself `final` can be the earlier of two. Do not sort sibling keys by name, and do not read a name as a position. **ONE NAME DOES CARRY A RELATION, and it is not a position: a sibling key that amends, corrects or withdraws HANDOFF content SUPERSEDES what it addresses, whatever its date. Synthesize from the amended state, and never bank a claim an amendment withdrew.** Resolve the order of the rest in this priority:

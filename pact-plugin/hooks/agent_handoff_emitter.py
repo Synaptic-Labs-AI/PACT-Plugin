@@ -141,20 +141,18 @@ def main() -> None:
         # marker, then FAIL append_event — the claim-without-write poison the
         # writability gate only NARROWED. Substituting the sentinel here makes
         # the subject deterministically schema-valid before the claim.
-        # The "(no subject)" sentinel is MIRRORED IN PROSE by the harvest,
-        # which derives its disk-side identity for the same position — do not
-        # change this substitution without the paired edit to Step 3 of
-        # skills/pact-handoff-harvest/SKILL.md. The harvest reads the task
-        # RECORD while this path reads the platform payload, so the two must
-        # agree by convention: nothing enforces the mirror, and a divergence
-        # makes the harvest report an identity mismatch on a present file.
+        # THE SUBSTITUTION IS THE SHARED HELPER, not a local copy. It is
+        # STRICT: any value that is not a non-empty stripped STRING becomes
+        # the sentinel. That covers the non-str case the old local test let
+        # through — a non-str subject passed it, then FAILED the journal
+        # schema after the marker was claimed, and the event was LOST. The
+        # same helper is called by the lead-side emit and by the harvest's
+        # disk identity, so the three cannot drift.
         task_subject_was_missing = not (
-            raw_task_subject and str(raw_task_subject).strip()
+            isinstance(raw_task_subject, str) and raw_task_subject.strip()
         )
         task_id = raw_task_id or "unknown"
-        task_subject = (
-            raw_task_subject if not task_subject_was_missing else "(no subject)"
-        )
+        task_subject = emit_side_subject(raw_task_subject)
 
         # task_id (from stdin) is sanitized for the two filesystem sinks it
         # feeds: read_task_json for the status read, and the marker join inside

@@ -13,6 +13,7 @@ The omit-when-empty arms are the load-bearing ones: an unconditional write
 passes every "resolved name present" assertion and then silently drops
 events in production when the resolver returns "".
 """
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -79,7 +80,7 @@ class TestEmitterTeamField:
 
 
 class TestLeadSideGateTeamField:
-    def _emit(self, team_name):
+    def _emit(self, team_name, subject="collect the arms"):
         calls: list[dict] = []
         with patch(
             "task_lifecycle_gate.get_journal_path", return_value="/tmp/j.jsonl"
@@ -92,10 +93,18 @@ class TestLeadSideGateTeamField:
             from task_lifecycle_gate import _emit_lead_side_agent_handoff
 
             _emit_lead_side_agent_handoff(
-                team_name, "12", "coder-a", "collect the arms",
+                team_name, "12", "coder-a", subject,
                 {"handoff": VALID_HANDOFF},
             )
         return calls
+
+    def test_non_str_subject_is_sentinel_not_a_crash(self):
+        """STRICT SENTINEL: the old local `subject.strip()` RAISED on a
+        non-str, and this function's fail-open handler turned that into a
+        silent no-emit. The shared helper substitutes the sentinel instead."""
+        calls = self._emit("session-abc", subject=42)
+        assert len(calls) == 1
+        assert calls[0]["task_subject"] == "(no subject)"
 
     def test_resolved_store_name_is_recorded(self):
         calls = self._emit("session-abc")
@@ -192,6 +201,23 @@ class TestEmitTeamUncertaintyGuard:
             context_team_name=context_team,
         )
         return code, calls, capsys.readouterr().err
+
+    def test_non_str_subject_is_sentinel_not_event_loss(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """STRICT SENTINEL: a non-str payload subject used to pass the local
+        falsy/whitespace test, then FAIL the journal schema after the marker
+        was claimed — the event was LOST. The shared helper turns it into the
+        sentinel before the claim, so the event emits."""
+        code, calls, _ = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-abc",
+            payload_subject=42,
+            context_team="session-abc",
+        )
+        assert code == 0
+        assert len(calls) == 1
+        assert calls[0]["task_subject"] == "(no subject)"
 
     def test_non_tty_short_name_with_absent_store_emits(
         self, tmp_path, monkeypatch, capsys
@@ -419,3 +445,24 @@ class TestTeamFieldSchemaContract:
             ok, reason = _validate_event_schema({**base, "team": 42})
             assert ok is False
             assert "team" in reason
+
+
+HOOKS_DIR = Path(__file__).resolve().parents[1] / "hooks"
+
+
+class TestEmitPathsUseTheSharedSentinel:
+    """ONE pin per emit site: the substitution must be IMPORTED AND CALLED,
+    with no local definition. Without these a future un-wiring has no
+    detector — which is how four copies of the rule shipped."""
+
+    def test_task_completed_emit_path_calls_the_shared_helper(self):
+        src = (HOOKS_DIR / "agent_handoff_emitter.py").read_text(encoding="utf-8")
+        assert "emit_side_subject" in src
+        assert "emit_side_subject(" in src
+        assert "def emit_side_subject" not in src
+
+    def test_lead_side_emit_path_calls_the_shared_helper(self):
+        src = (HOOKS_DIR / "task_lifecycle_gate.py").read_text(encoding="utf-8")
+        assert "emit_side_subject" in src
+        assert "emit_side_subject(" in src
+        assert "def emit_side_subject" not in src

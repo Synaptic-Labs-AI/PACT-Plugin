@@ -412,6 +412,21 @@ class TestUnionPreferringTaskFile:
         merged, _ = union_preferring_task_file(journal, disk, "61")
         assert merged == {"decisions": ["new"]}
 
+    def test_dual_spelling_disk_copy_keeps_the_alias_value(self):
+        """DISCRIMINATING (alignment with resolve_handoff_field): a FALSY
+        canonical spelling on the DISK side must fall through to a truthy
+        alias. Before the alignment the map selected the empty canonical, so
+        the alias value was ignored AND the journal content was dropped."""
+        journal = {"produced": "p", "decisions": ["journal"]}
+        disk = {
+            "produced": "p2",
+            "decisions": "",
+            "key_decisions": ["disk alias"],
+        }
+        merged, _ = union_preferring_task_file(journal, disk, "61")
+        assert merged["key_decisions"] == ["disk alias"]
+        assert "decisions" not in merged
+
     def test_drop_removes_every_spelling_of_the_dropped_identity(self):
         journal = {"produced": "p", "decisions": ["d"], "key_decisions": ["d2"]}
         disk = {"produced": "p2", "uncertainty": ["u"]}
@@ -712,8 +727,8 @@ class TestHarvestRuleProse:
         appended to that team's partition, never to this team's."""
         assert "old_format_destination(outcome, this_team)" in SKILL_TEXT
         assert "from_events.setdefault(outcome.team, []).append(e)" in SKILL_TEXT
-        assert 'if destination == "mixed":' in SKILL_TEXT
-        assert 'elif destination == "from":' in SKILL_TEXT
+        assert 'if destination == OLD_FORMAT_DEST_MIXED:' in SKILL_TEXT
+        assert 'elif destination == OLD_FORMAT_DEST_FROM:' in SKILL_TEXT
 
     def test_old_format_section_reports_branch_locally(self):
         """BRANCH-LOCAL: one report in the MIXED block, ZERO in the FROM
@@ -721,9 +736,9 @@ class TestHarvestRuleProse:
         would pass a version that reported twice in MIXED and never in the
         UNMATCHED branch, which is the silent-choice defect on the common
         old-format path."""
-        after_from_label = SKILL_TEXT.split('elif destination == "from":', 1)[1]
-        mixed_block = SKILL_TEXT.split('if destination == "mixed":', 1)[1].split(
-            'elif destination == "from":', 1
+        after_from_label = SKILL_TEXT.split('elif destination == OLD_FORMAT_DEST_FROM:', 1)[1]
+        mixed_block = SKILL_TEXT.split('if destination == OLD_FORMAT_DEST_MIXED:', 1)[1].split(
+            'elif destination == OLD_FORMAT_DEST_FROM:', 1
         )[0]
         from_block = after_from_label.split("\n            else:", 1)[0]
         else_block = after_from_label.split("\n            else:", 1)[1].split(
@@ -733,6 +748,22 @@ class TestHarvestRuleProse:
         assert from_block.count("report(outcome.report)") == 0
         assert else_block.count("report(outcome.report)") == 1
         assert "task_id, e.get(\"agent\", \"\")" in SKILL_TEXT
+
+    def test_skill_calls_the_shared_identity_helpers(self):
+        """The skill must NOT carry a local `def emit_side_subject` and must
+        CALL `disk_identity` for the record side, so the identity rule has
+        one executable home."""
+        assert "def emit_side_subject" not in SKILL_TEXT
+        assert "disk_identity(task.get(" in SKILL_TEXT
+        assert "emit_side_subject" in SKILL_TEXT  # the call-route entry
+
+    def test_group_mismatch_messages_are_distinguished(self):
+        """The total-mismatch message must fire only when NO group carries
+        the task file's identity; a group that lost to ANOTHER matching group
+        gets its own message, and the discriminator is tracked."""
+        assert "disk_group_matches = disk_id in groups" in SKILL_TEXT
+        assert "journal group" in SKILL_TEXT
+        assert "processed from the journal copy alone" in SKILL_TEXT
 
     def test_report_lines_use_the_shared_sanitiser(self):
         """F1: the skill's hand-written report sites must interpolate through

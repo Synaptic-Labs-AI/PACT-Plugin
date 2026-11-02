@@ -204,6 +204,10 @@ def occupant_hash(teammate_name: str, task_subject: str) -> str:
     """
     Return a stable occupant-identity hash for the marker key.
 
+    THE TEAM IS A ROUTER, NEVER A TERM OF THIS HASH. Adding a team to the
+    payload would re-key every existing marker and break every existing
+    snapshot join; the harvest partitions on the event's `team` field instead.
+
     The "occupant" of a task is (teammate_name, task_subject). Keying the
     marker on the occupant — rather than on task_id alone — is the #887 fix:
 
@@ -303,20 +307,27 @@ NO_SUBJECT_SENTINEL = "(no subject)"
 
 
 def emit_side_subject(subject: object) -> str:
-    """Both emit paths' sentinel substitution. "" / whitespace -> "(no subject)".
+    """Both emit paths' sentinel substitution. ANY value that is not a
+    non-empty stripped STRING -> "(no subject)".
 
     The EXECUTABLE copy of the substitution both emit paths apply BEFORE they
-    hash: agent_handoff_emitter branches on the same `subject and
-    str(subject).strip()` test, and task_lifecycle_gate replaces an empty or
-    whitespace-only subject the same way. The harvest's disk identity must
-    hash the SUBSTITUTED value, because that is what the emit hashed; without
-    this mirror, a substituted task's identity can never equal its group and
-    the union does not run on the tasks it exists to protect.
+    hash, and BOTH emit paths call it: a non-str subject (an int, a mapping)
+    becomes the sentinel rather than reaching the journal schema, which would
+    reject it after the marker was claimed and lose the event. It also gives
+    the gate's previous `subject.strip()` a safe shape — that raised on a
+    non-str.
 
-    The value is returned UNCHANGED when present (not str-coerced), matching
-    both emit paths: occupant_hash stringifies it in its own f-string.
+    A present string is returned UNCHANGED (not str-coerced, whitespace kept):
+    occupant_hash stringifies it in its own f-string.
+
+    The harvest's disk identity must hash the SUBSTITUTED value, because that
+    is what the emit hashed; without this mirror, a substituted task's
+    identity can never equal its group and the union does not run on the
+    tasks it exists to protect.
     """
-    return subject if (subject and str(subject).strip()) else NO_SUBJECT_SENTINEL
+    if isinstance(subject, str) and subject.strip():
+        return subject
+    return NO_SUBJECT_SENTINEL
 
 
 def disk_identity(owner: str, subject: object) -> str:
@@ -392,14 +403,27 @@ def _identity(raw_key: str) -> str:
 def _field_map(handoff: dict) -> dict:
     """canonical identity -> (raw key, value) for one copy.
 
-    If a copy carries BOTH spellings of a field, the canonical spelling wins,
-    matching resolve_handoff_field's canonical-first, alias-fallback order.
+    VALUE SELECTION MIRRORS `resolve_handoff_field`: the canonical spelling
+    wins when it holds content; when it is FALSY, the first truthy alias
+    spelling wins. Before this alignment the map chose the canonical spelling
+    unconditionally, so a disk copy carrying `decisions: ''` beside
+    `key_decisions: [...]` selected the empty canonical: the alias value was
+    ignored AND the journal content was dropped — measured content loss on a
+    dual-spelling task file.
     """
     fields: dict[str, tuple[str, object]] = {}
     for raw_key, value in handoff.items():
         identity = _identity(raw_key)
         current = fields.get(identity)
-        if current is None or raw_key == identity:
+        if current is None:
+            fields[identity] = (raw_key, value)
+        elif raw_key == identity:
+            # Canonical spelling: wins when it has content, and supplies the
+            # fallback value when it is falsy and no alias did.
+            if value or not current[1]:
+                fields[identity] = (raw_key, value)
+        elif not current[1]:
+            # Alias spelling with content beats a falsy canonical.
             fields[identity] = (raw_key, value)
     return fields
 
@@ -553,6 +577,13 @@ OLD_FORMAT_MIXED = "mixed"          # content is another store's; discard + repo
 OLD_FORMAT_OWNED = "owned_by"       # content AND identity match a named store
 OLD_FORMAT_UNMATCHED = "unmatched"  # no named store carries the content
 
+# Route labels `old_format_destination` returns. EXPORTED so a caller cannot
+# drift a bare literal into an else bucket: a typo there would silently route
+# a realigned team's work unit into THIS team.
+OLD_FORMAT_DEST_MIXED = "mixed"
+OLD_FORMAT_DEST_FROM = "from"
+OLD_FORMAT_DEST_THIS = "this"
+
 
 class OldFormatOutcome(NamedTuple):
     """Structured result of classifying one OLD-FORMAT journal event.
@@ -571,23 +602,25 @@ class OldFormatOutcome(NamedTuple):
 def old_format_destination(outcome: OldFormatOutcome, this_team: str) -> str:
     """Where an OLD-FORMAT event belongs, given its classification.
 
-    "mixed"  — discard it and report `outcome.report`.
-    "from"   — it is `outcome.team`'s work unit: process it under that team's
-               `## team={team}` section against that team's store, never
-               unioned with this team's task file.
-    "this"   — this team's work unit (OWNED_BY this team, or UNMATCHED).
-               UNMATCHED carries `outcome.report`, the unavailable-check line
-               the caller MUST emit; OWNED_BY(this_team) carries none.
+    Returns one of the EXPORTED OLD_FORMAT_DEST_* labels; callers compare
+    against those constants, never against bare literals.
+      - OLD_FORMAT_DEST_MIXED — discard it and report `outcome.report`.
+      - OLD_FORMAT_DEST_FROM — it is `outcome.team`'s work unit: process it
+        under that team's `## team={team}` section against that team's store,
+        never unioned with this team's task file.
+      - OLD_FORMAT_DEST_THIS — this team's work unit (OWNED_BY this team, or
+        UNMATCHED). UNMATCHED carries `outcome.report`, the unavailable-check
+        line the caller MUST emit; OWNED_BY(this_team) carries none.
 
     A caller that routes every non-MIXED outcome to this team misroutes a
     realigned earlier team's HANDOFF, which is the population the old-format
     rule exists to protect. Pure; never raises.
     """
     if outcome.state == OLD_FORMAT_MIXED:
-        return "mixed"
+        return OLD_FORMAT_DEST_MIXED
     if outcome.state == OLD_FORMAT_OWNED and outcome.team != this_team:
-        return "from"
-    return "this"
+        return OLD_FORMAT_DEST_FROM
+    return OLD_FORMAT_DEST_THIS
 
 
 def mixed_old_format_event(
