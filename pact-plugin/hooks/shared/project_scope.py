@@ -453,6 +453,11 @@ def _project_memory_root_cause(
         return given, _unanswered_cause(given)
     if toplevel_at_candidate != candidate:
         return _failed_verification_root(given, common_dir)
+    # DEFENCE IN DEPTH: the candidate must report OUR common dir. It refuses a
+    # candidate checkout whose own `.git` is another repository (a common dir
+    # relocated beside an unrelated checkout). The worktree-listing check below
+    # refuses that layout too, so dropping this one changes no outcome; it
+    # stays so that the listing is not the only thing standing there.
     common_dir_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
     if not ran:
         return given, _unanswered_cause(given)
@@ -838,10 +843,13 @@ def _listed_worktrees_result(
     remains until `git worktree prune`. `git worktree remove` deletes the
     record as well, so a worktree removed that way is not listed.
 
-    `resolve_against` is the directory a RELATIVE recorded path resolves
-    against. git records relative worktree paths against the main worktree
-    root, so a caller holding that root passes it; the default, the process
-    cwd, is what every pre-existing caller used.
+    `resolve_against` is the directory a RELATIVE listed path resolves
+    against; the default is the process cwd. DEFENCE IN DEPTH: every source
+    `_worktree_list_paths` reads yields absolute paths (git prints them
+    absolute, and the admin-record fallback resolves a relative record against
+    its admin dir), so no path from git reaches this join today. The callers
+    holding the main root pass it, so a relative path from some future source
+    lands under that repository rather than under whatever the cwd is.
 
     The None/empty distinction is load-bearing for `project_memory_root`:
     an EMPTY set is a real answer (no worktrees), while None means git could
