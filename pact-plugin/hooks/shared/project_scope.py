@@ -170,6 +170,10 @@ ROOT_CAUSE_OK = "ok"
 ROOT_CAUSE_MISSING = "missing"
 ROOT_CAUSE_UNVERIFIED = "unverified"
 ROOT_CAUSE_UNANSWERABLE = "unanswerable"
+# A known checkout whose canonical document IS the user-global CLAUDE.md (the
+# config dir itself, or a home whose `.claude` is the config dir): every
+# session loads that file, so it is not one project's memory.
+ROOT_CAUSE_USER_GLOBAL = "user_global"
 
 
 def _unanswered_cause(given: Path) -> str:
@@ -530,7 +534,7 @@ def unknown_root_reason(
     has only the MISSING clause, which names no path.
 
     Raises:
-        ValueError: `cause` is not one of the three unknown causes ("ok", None
+        ValueError: `cause` is not one of the four unknown causes ("ok", None
             or an unexpected value is a caller bug, never a sentence), or the
             anchor is None with a cause other than MISSING.
     """
@@ -548,6 +552,11 @@ def unknown_root_reason(
         )
     if cause == ROOT_CAUSE_UNANSWERABLE:
         return "git could not answer"
+    if cause == ROOT_CAUSE_USER_GLOBAL:
+        return (
+            f"the project directory {anchor} holds the user-global CLAUDE.md, "
+            "which every session loads, so it is not project memory"
+        )
     raise ValueError(f"not an unknown-root cause: {cause!r}")
 
 
@@ -1145,7 +1154,8 @@ class SessionRoot(NamedTuple):
     None when the cwd is gone and nothing names it), `declared` says it came
     from CLAUDE_PROJECT_DIR, and `root` is the
     project-memory root, None exactly when `cause` names why it is unknown
-    (ROOT_CAUSE_MISSING, ROOT_CAUSE_UNVERIFIED or ROOT_CAUSE_UNANSWERABLE).
+    (ROOT_CAUSE_MISSING, ROOT_CAUSE_UNVERIFIED, ROOT_CAUSE_UNANSWERABLE or
+    ROOT_CAUSE_USER_GLOBAL).
     """
 
     anchor: Optional[Path]
@@ -1186,11 +1196,18 @@ def memory_root_of(
 
     It never consults the session record, which belongs to a session and not
     to a directory; `session_memory_root` adds the record's recovery.
+
+    A known root whose canonical document is the user-global CLAUDE.md is
+    reported as ROOT_CAUSE_USER_GLOBAL: reading or writing it as project memory
+    would change the file every session loads. Unable to tell counts as
+    user-global (fail closed).
     """
     root, cause = _project_memory_root_cause(directory)
-    if cause == ROOT_CAUSE_OK:
-        return root, None
-    return None, cause
+    if cause != ROOT_CAUSE_OK:
+        return None, cause
+    if _names_the_user_global_document(Path(root)):
+        return None, ROOT_CAUSE_USER_GLOBAL
+    return root, None
 
 
 def session_memory_root() -> SessionRoot:
