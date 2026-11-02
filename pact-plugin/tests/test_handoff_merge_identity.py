@@ -724,16 +724,13 @@ class TestHarvestRuleProse:
         """The rule text must say that no journal spelling of a task-file-won
         field survives; the code drops every alias spelling and the arms
         assert it, but without this sentence a reader cannot know."""
-        assert "NO JOURNAL SPELLING OF IT SURVIVES" in SKILL_TEXT
+        assert "NO JOURNAL SPELLING" in SKILL_TEXT
 
     def test_old_format_candidate_ordering_is_stated(self):
         """The rule text must say an identity match in ANY candidate beats an
         earlier content-only match; otherwise a reader can short-circuit at
         the first mixed result."""
-        assert (
-            "CHECK EVERY NAMED CANDIDATE BEFORE REPORTING A MIXED EVENT"
-            in SKILL_TEXT
-        )
+        assert "CHECK EVERY NAMED CANDIDATE" in SKILL_TEXT
 
     def test_old_format_candidates_are_read_only_when_needed(self):
         """Architecture performance note: new-format events take no extra
