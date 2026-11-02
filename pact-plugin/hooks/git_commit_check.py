@@ -111,31 +111,9 @@ def get_staged_file_content(filename):
     result = run_git(["show", f":{filename}"], text=False)
     if result is None or result.returncode != 0:
         return ""
-    return os.fsdecode(result.stdout or b"")
-
-
-# THE SCAN MUST NOT BLOCK ITS OWN MAINTENANCE. This file contains the
-# detection patterns themselves, and its test file contains the fake
-# credentials those patterns are tested with; scanning either one reports the
-# other's fixtures as a leak and denies every commit that improves the hook.
-#
-# THE EXEMPTION IS AN EXACT SET, NOT A SUFFIX OR A DIRECTORY PREFIX. Those are
-# two different holes and each has its own arm: a `tests/` prefix would blind
-# the scan to every file under tests/, and an unanchored endswith would exempt
-# ANY path carrying the basename (`vendor/hooks/git_commit_check.py`). Only the
-# four repository-relative spellings this repository can stage are listed: the
-# plugin-root form used when the repo root IS pact-plugin, and the repo-root
-# form used by the umbrella repository.
-_SELF_SCAN_PATHS = frozenset({
-    "pact-plugin/hooks/git_commit_check.py",
-    "pact-plugin/tests/test_git_commit_check.py",
-    "hooks/git_commit_check.py",
-    "tests/test_git_commit_check.py",
-})
-
-
-def _is_self_maintenance_file(path: str) -> bool:
-    return path.replace("\\", "/") in _SELF_SCAN_PATHS
+    # Explicit codec, not os.fsdecode: on Windows fsdecode uses surrogatepass,
+    # which raises on an invalid byte and would bring the abort back.
+    return (result.stdout or b"").decode("utf-8", "surrogateescape")
 
 
 def check_security(staged_files):
@@ -176,8 +154,6 @@ def check_security(staged_files):
     code_extensions = ('.js', '.ts', '.jsx', '.tsx', '.py', '.mjs', '.cjs')
 
     for f in staged_files:
-        if _is_self_maintenance_file(f):
-            continue
         if f.endswith(code_extensions):
             content = get_staged_file_content(f)
             for pattern in risky_patterns:
@@ -408,8 +384,6 @@ def check_hardcoded_secrets(staged_files):
     code_extensions = ('.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.go', '.rs', '.rb')
 
     for f in staged_files:
-        if _is_self_maintenance_file(f):
-            continue
         if f.endswith(code_extensions):
             content = get_staged_file_content(f)
             for pattern, description in secret_patterns:

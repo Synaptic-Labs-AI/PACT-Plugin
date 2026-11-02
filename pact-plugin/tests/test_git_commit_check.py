@@ -1149,12 +1149,59 @@ class TestMain:
 
 class TestTheScanDoesNotBlockItself:
     """This hook carries the detection patterns and its test file carries the
-    credentials those patterns are tested with, so a whole-file scan found its
-    own source and denied every commit that improved it. The literals are
-    split so the SOURCE no longer matches; the compiled patterns are
-    unchanged. Both arms below are required: one proves a genuine secret is
-    still caught, the other proves the exemption is not a tests/ hole.
+    credentials those patterns are tested with. No path is exempt from the
+    scan: the literals are split (or built from fragments) so the SOURCE never
+    contains a contiguous match, while the compiled patterns are unchanged.
     """
+
+    _HOOK_SOURCE = os.path.join(
+        os.path.dirname(__file__), os.pardir, "hooks", "git_commit_check.py"
+    )
+
+    def test_the_hook_and_its_tests_carry_no_match_of_their_own(self):
+        """Every file is scanned, including these two, so their own text must
+        produce zero findings or the hook denies its own maintenance. A
+        fixture added as one contiguous literal turns this RED."""
+        from git_commit_check import check_hardcoded_secrets, check_security
+
+        sources = {
+            "hooks/git_commit_check.py": self._HOOK_SOURCE,
+            "tests/test_git_commit_check.py": __file__,
+        }
+
+        def read_from_disk(name):
+            with open(sources[name], "rb") as handle:
+                return handle.read().decode("utf-8", "surrogateescape")
+
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            side_effect=read_from_disk,
+        ):
+            findings = check_security(list(sources)) + check_hardcoded_secrets(
+                list(sources)
+            )
+
+        assert findings == [], findings
+
+    def test_a_consumer_file_at_the_hooks_own_paths_is_scanned(self):
+        """A consumer repository may hold its own file at either path. A real
+        secret there must be denied; a path exemption would let it through."""
+        from git_commit_check import check_hardcoded_secrets
+
+        secret = 'key = "AKIA' + "Z" * 16 + '"'
+        with patch(
+            "git_commit_check.get_staged_file_content", return_value=secret
+        ):
+            for path in (
+                "hooks/git_commit_check.py",
+                "tests/test_git_commit_check.py",
+                "pact-plugin/hooks/git_commit_check.py",
+                "pact-plugin/tests/test_git_commit_check.py",
+            ):
+                errors = check_hardcoded_secrets([path])
+                assert any("AWS access key ID" in e for e in errors), (
+                    path, errors
+                )
 
     def test_the_split_azure_pattern_still_matches_a_genuine_string(self):
         """The adjacent literals join at compile time, so a real connection
@@ -1175,36 +1222,9 @@ class TestTheScanDoesNotBlockItself:
 
         assert any("Azure SQL" in error for error in errors), errors
 
-    def test_the_exclusion_is_exactly_the_two_paths(self):
-        """The scan skips its own source and its own test file and NOTHING
-        else: a real secret in a THIRD file under tests/ is still caught."""
-        from git_commit_check import check_hardcoded_secrets
-
-        secret = (
-            'key = "sk_live_'
-            'FAKE0123456789abcdefghij"'
-        )
-        with patch(
-            "git_commit_check.get_staged_file_content", return_value=secret
-        ):
-            own_test = check_hardcoded_secrets(
-                ["tests/test_git_commit_check.py"]
-            )
-            own_source = check_hardcoded_secrets(
-                ["hooks/git_commit_check.py"]
-            )
-            third_file = check_hardcoded_secrets(["tests/test_other.py"])
-
-        assert own_test == [], own_test
-        assert own_source == [], own_source
-        assert any("Stripe live" in error for error in third_file), (
-            third_file
-        )
-
     def test_a_foreign_file_with_the_same_basename_is_still_scanned(self):
-        """The exemption is EXACT paths, not a basename suffix: a directory
-        that merely carries the hook's filename is not this repository's
-        file, and a secret inside it must still be caught."""
+        """A directory that merely carries the hook's filename is scanned like
+        any other file, and a secret inside it is caught."""
         from git_commit_check import check_hardcoded_secrets
 
         secret = (
