@@ -8,6 +8,8 @@ because the platform fired TaskCompleted before persisting the status
 flip. Also pins the Option E handoff-presence gate against the B1
 phantom-fire-revert sequence.
 """
+from pathlib import Path
+
 import pytest
 
 from fixtures.emitter import (
@@ -75,7 +77,7 @@ class TestRaceShapeRegression:
     def test_hook_event_name_primary_signal_emits_despite_disk_in_progress(
         self, race_kind, disk_status, disk_metadata, tmp_path, monkeypatch
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls: list[dict] = []
         exit_code = _run_main(
             stdin_payload={
@@ -123,7 +125,7 @@ class TestRaceShapeRegression:
                   → handoff present, marker claimed, ONE event with full
                     handoff content lands in journal.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         from shared.agent_handoff_marker import occupant_hash
 
         calls: list[dict] = []
@@ -162,7 +164,7 @@ class TestRaceShapeRegression:
         # the fire-2 assertion would have reported the drift.
         occ = occupant_hash("probe-agent", "two-fire revert sequence probe")
         marker = (
-            tmp_path / ".claude" / "teams" / "pact-test"
+            Path.home() / ".claude" / "teams" / "pact-test"
             / ".agent_handoff_emitted"
             / f"two-fire-revert-{occ}-{VALID_HANDOFF_CONTENT_KEY}"
         )
@@ -214,7 +216,7 @@ class TestRaceShapeRegression:
         This pins the property that no number of phantom fires can
         consume the marker prematurely.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls: list[dict] = []
         payload = {
             "hook_event_name": "TaskCompleted",
@@ -243,7 +245,7 @@ class TestRaceShapeRegression:
         # a marker into this directory and a bare-path `not exists` assertion
         # STILL PASSES. Match the prefix so this leg can go red.
         marker_dir = (
-            tmp_path / ".claude" / "teams" / "pact-test"
+            Path.home() / ".claude" / "teams" / "pact-test"
             / ".agent_handoff_emitted"
         )
         claimed = (
@@ -267,7 +269,7 @@ class TestRaceShapeRegression:
         With status=in_progress on disk AND no hook_event_name in stdin,
         the fallback gate aborts and no event is written.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls: list[dict] = []
         _run_main(
             stdin_payload={
@@ -299,7 +301,7 @@ class TestRaceShapeRegression:
         hook_event_name), so this test confirms their happy-path
         semantics still hold.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls: list[dict] = []
         _run_main(
             stdin_payload={

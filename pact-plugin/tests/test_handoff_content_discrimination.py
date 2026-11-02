@@ -52,6 +52,8 @@ TestContentProjectionsThatCollide for the rule that builds an arm for a
 projection nobody has named.
 """
 
+from pathlib import Path
+
 import pytest
 
 from fixtures.emitter import _run_main
@@ -70,11 +72,11 @@ _TEAM = "pact-test"
 def _marker_dir(tmp_path):
     """The marker directory the emit path writes into.
 
-    The autouse config-root fixture redirects Path.home() to tmp_path, so
-    get_claude_config_dir() resolves below it.
+    The autouse config-root fixture redirects Path.home() to a per-test home
+    below tmp_path, and get_claude_config_dir() resolves under that home.
     """
     return (
-        tmp_path / ".claude" / "teams" / _TEAM / ".agent_handoff_emitted"
+        Path.home() / ".claude" / "teams" / _TEAM / ".agent_handoff_emitted"
     )
 
 
@@ -148,7 +150,7 @@ class TestPostCompletionHandoffRevision:
         exactly one marker. Without this arm, a fixture that doubled every fire
         would make the revision arm pass while measuring nothing.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "firstset"
         handoff = {"produced": ["src/a.py"], "decisions": ["chose A"]}
@@ -178,7 +180,7 @@ class TestPostCompletionHandoffRevision:
         keys distinct rather than fewer. The suppression arm below is what
         covers that direction.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "revision"
         first = {"produced": ["src/a.py"], "decisions": ["chose A"]}
@@ -259,7 +261,7 @@ class TestEqualLengthContentStillDiscriminates:
     def test_two_handoffs_of_equal_length_emit_two_events(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "eqlength"
         first = {"produced": "aaaa"}
@@ -383,7 +385,7 @@ class TestContentProjectionsThatCollide:
         THE DEFECT IT MODELS: a handoff revised by a FIELD RENAME, with the
         values unchanged, is suppressed and reaches no carrier.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "renamearm"
         first = {"aaa": "x"}
@@ -428,7 +430,7 @@ class TestContentProjectionsThatCollide:
         THE DEFECT IT MODELS: a content change that holds the byte multiset
         is suppressed and reaches no carrier.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "permutearm"
         first = {"k": "ab"}
@@ -480,7 +482,7 @@ class TestInsertionOrderDoesNotSplitTheKey:
     def test_two_insertion_orders_of_one_handoff_emit_one_event(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "reorder"
         # Equal content. Different insertion order. Python preserves insertion
@@ -552,7 +554,7 @@ class TestInsertionOrderDoesNotSplitTheKey:
         intact: rewriting the SAME handoff emits once, not twice. This is the
         property a content term is most likely to break by accident.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "unchanged"
         handoff = {"produced": ["src/a.py"], "decisions": ["chose A"]}
@@ -613,7 +615,7 @@ class TestContentTermIsATotalFunction:
     def test_a_non_serializable_handoff_still_emits(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "unserial"
         handoff = {"produced": {"a", "b"}}
@@ -652,7 +654,7 @@ class TestContentTermIsATotalFunction:
         event reaches the journal WITH ITS CONTENT, and the marker key
         carries the non-hex fallback term rather than a digest.
         """
-        monkeypatch_free_home = tmp_path / ".claude"
+        monkeypatch_free_home = Path.home() / ".claude"
         assert not monkeypatch_free_home.exists()
         calls = []
         task_id = "mixedkey"
@@ -738,7 +740,7 @@ class TestContentTermIsATotalFunction:
         that module imports canonical_bytes by value and a patch of the
         defining module would not be the object it calls.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_id = "deepnest"
 

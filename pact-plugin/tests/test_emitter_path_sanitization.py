@@ -268,7 +268,7 @@ class TestPathSanitization:
             # the guard returned False), but it must contain NO file named
             # with the degenerate sanitized value.
             marker_dir = (
-                tmp_path / ".claude" / "teams" / "pact-test"
+                Path.home() / ".claude" / "teams" / "pact-test"
                 / ".agent_handoff_emitted"
             )
             if marker_dir.exists():
@@ -316,7 +316,7 @@ class TestPathSanitization:
                 f"suppresses future emits via spurious EEXIST."
             )
             marker_dir = (
-                tmp_path / ".claude" / "teams" / "pact-test"
+                Path.home() / ".claude" / "teams" / "pact-test"
                 / ".agent_handoff_emitted"
             )
             # Crucial invariant: marker_dir itself must not have been
@@ -387,7 +387,7 @@ class TestPathSanitization:
             # Pin that no stray marker files landed above team scope at
             # `~/.claude/teams/` level (the pre-#24 escape shape when
             # the `..` collapses marker_dir onto its parent).
-            teams_dir = tmp_path / ".claude" / "teams"
+            teams_dir = Path.home() / ".claude" / "teams"
             teams_children = (
                 {p.name for p in teams_dir.iterdir()}
                 if teams_dir.exists() else set()
@@ -523,7 +523,7 @@ class TestPathSanitization:
                 f"(OUTSIDE any team's scope). The #24 guard failed."
             )
             teams_root_marker = (
-                tmp_path / ".claude" / "teams" / ".agent_handoff_emitted"
+                Path.home() / ".claude" / "teams" / ".agent_handoff_emitted"
             )
             assert not teams_root_marker.exists(), (
                 f"cross-team pollution detected: degenerate team_name "
@@ -630,7 +630,7 @@ class TestPathSanitization:
             # Neither home-root nor teams-root pollution.
             home_root_marker = tmp_path / ".claude" / ".agent_handoff_emitted"
             teams_root_marker = (
-                tmp_path / ".claude" / "teams" / ".agent_handoff_emitted"
+                Path.home() / ".claude" / "teams" / ".agent_handoff_emitted"
             )
             assert not home_root_marker.exists()
             assert not teams_root_marker.exists()
@@ -941,7 +941,7 @@ class TestPostRebindMarkerKeyInvariants:
         )
         assert calls == [], "an unresolvable teammate frame must write no event."
         # No marker dir of any kind was created (the claim was never reached).
-        teams_dir = tmp_path / ".claude" / "teams"
+        teams_dir = Path.home() / ".claude" / "teams"
         created_markers = (
             [str(p) for p in teams_dir.rglob(".agent_handoff_emitted")]
             if teams_dir.exists()
