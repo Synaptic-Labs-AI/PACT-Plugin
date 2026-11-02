@@ -9,6 +9,11 @@ Summary: SSOT for agent_handoff emission — the shape-agnostic emit-eligibility
          the O_EXCL test-and-set (already_emitted) + the compensating-unclaim
          rollback (unclaim, #901) that removes a marker whose journal write
          failed, both resolving the marker path via one SSOT derivation.
+         It also carries the reader-side reconciliation helpers the harvest
+         skill calls instead of keeping a second prose copy: the emit-side
+         subject sentinel (emit_side_subject), the harvest's disk identity
+         (disk_identity) and the task-file-preferred union
+         (union_preferring_task_file).
          Imported by BOTH agent_handoff emit paths
          so they derive the SAME emit decision and the SAME marker key and
          dedup to one agent_handoff event for each distinct (team, task_id,
@@ -284,6 +289,83 @@ def handoff_content_key(handoff: object) -> str:
     except Exception:
         return _UNSERIALIZABLE_CONTENT_KEY
     return hashlib.sha256(canonical).hexdigest()[:_CONTENT_HASH_LEN]
+
+
+def emit_side_subject(subject: object) -> str:
+    """Both emit paths' sentinel substitution. "" / whitespace -> "(no subject)".
+
+    The EXECUTABLE copy of the substitution both emit paths apply BEFORE they
+    hash: agent_handoff_emitter branches on the same `subject and
+    str(subject).strip()` test, and task_lifecycle_gate replaces an empty or
+    whitespace-only subject the same way. The harvest's disk identity must
+    hash the SUBSTITUTED value, because that is what the emit hashed; without
+    this mirror, a substituted task's identity can never equal its group and
+    the union does not run on the tasks it exists to protect.
+
+    The value is returned UNCHANGED when present (not str-coerced), matching
+    both emit paths: occupant_hash stringifies it in its own f-string.
+    """
+    return subject if (subject and str(subject).strip()) else "(no subject)"
+
+
+def disk_identity(owner: str, subject: object) -> str:
+    """occupant_hash(owner, emit_side_subject(subject)) — the harvest's disk identity.
+
+    The harvest computes a task file's group identity from the RECORD
+    (owner, subject), while the emit computed it from the value it had at emit
+    time. Routing both through this one function is what keeps the two in
+    agreement on the sentinel substitution.
+    """
+    return occupant_hash(owner, emit_side_subject(subject))
+
+
+# The values that count as EMPTY for the union below. Test MEMBERSHIP, not
+# truthiness: `not disk_value` is also TRUE for `0` and for `False`, so a
+# task-file field that deliberately holds one of those would keep the journal
+# value and discard the disk value. KEEP `None` IN THIS SET. Drop it and the
+# narrowing itself opens the erasure it was written to close: a field
+# explicitly holding null would count as CONTENT and overwrite the journal
+# copy with null.
+_EMPTY_VALUES = (None, "", [], {})
+
+
+def union_preferring_task_file(
+    journal_handoff: dict, disk_handoff: dict, task_id: str
+) -> tuple[dict, list[str]]:
+    """Merge the two HANDOFF copies: the task file wins each conflict, apart
+    from a task-file field that is PRESENT AND EMPTY while the journal holds
+    content.
+
+    THIS IS THE CURRENT RULE, IMPLEMENTED VERBATIM from the pseudocode in
+    skills/pact-handoff-harvest/SKILL.md Step 3, so the rule has one
+    executable copy a test can reach. Preserve these properties; each is
+    behaviour, not style:
+      - emptiness is EQUALITY MEMBERSHIP in _EMPTY_VALUES, so `0` and `False`
+        are CONTENT and a task file carrying one wins;
+      - the exception tests the JOURNAL value's TRUTHINESS, not membership,
+        so a journal value of `0`, `False`, `[]` or `{}` does NOT trigger it
+        and the task-file value wins;
+      - a field absent from the task file never enters the loop, so the
+        journal value survives by construction;
+      - keys are compared RAW. There is no alias normalization here (a later
+        form of this rule normalizes legacy spellings), so an alias spelling
+        and its canonical name are two distinct keys;
+      - both inputs are left unmutated.
+
+    `task_id` is accepted but unused: it is the task name the report-bearing
+    form of this rule needs, and keeping it in the signature now means that
+    form does not churn every caller. `reports` is empty for this rule.
+
+    Pure; no I/O; returns a fresh dict.
+    """
+    merged = {**journal_handoff}
+    for field, disk_value in disk_handoff.items():
+        # PRESENT AND EMPTY on the task file, with content in the journal:
+        # keep the journal value. Each other state: the task file wins.
+        if disk_value in _EMPTY_VALUES and journal_handoff.get(field):
+            continue
+        merged[field] = disk_value
+    return merged, []
 
 
 def _handoff_marker_discriminator(occupant: str, content_key: str) -> str:
