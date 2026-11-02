@@ -581,25 +581,32 @@ def resolve_claude_md():
     from shared.project_scope import (
         RECORD_CONTAINED,
         RECORD_CORRUPT,
+        ROOT_CAUSE_MISSING,
         anchor_directory_is_missing,
         cwd_checkout_memory_root,
+        project_memory_root,
         project_memory_root_or_none,
         record_resolution,
+        unknown_root_cause,
         unknown_root_reason,
     )
 
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     anchor = Path(env_dir) if env_dir else Path.cwd()
-    memory_root = project_memory_root_or_none(anchor)
-    if memory_root is None and not anchor_directory_is_missing(anchor):
-        # AN EXISTING BASE THAT CANNOT BE IDENTIFIED STILL REFUSES: git did
-        # not run, or the base is a forged gitfile / unverifiable worktree.
-        # Probing on could archive another repository's document.
+    # ONE RESOLUTION DECIDES BOTH THE BRANCH AND THE TEXT. The cause is not
+    # re-derived for the message, so the refusal cannot describe a state the
+    # branch did not see. A MISSING anchor is the only cause that continues:
+    # it has its own record/fall-through rung below. An existing base that
+    # cannot be identified still refuses -- probing on could archive another
+    # repository's document.
+    cause = unknown_root_cause(anchor)
+    if cause is not None and cause != ROOT_CAUSE_MISSING:
         raise _Unevaluable(
             f"project memory root unknown: "
-            f"{unknown_root_reason(anchor) or 'git could not answer'}, so the "
-            "project CLAUDE.md cannot be identified; nothing was archived"
+            f"{unknown_root_reason(cause, anchor)}, so the project CLAUDE.md "
+            "cannot be identified; nothing was archived"
         )
+    memory_root = project_memory_root(anchor) if cause is None else None
     # THE SYNC SITES' MODEL, in two steps. (1) The PROJECT-MEMORY root first:
     # a worktree session archives MAIN's document even when the worktree
     # carries its own copy (#1653). (2) When the root holds no document, the

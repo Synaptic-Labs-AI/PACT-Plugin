@@ -178,6 +178,7 @@ try:
     from shared.claude_md_manager import resolve_project_claude_md_path
     from shared.project_scope import (
         project_memory_root_or_none,
+        unknown_root_cause,
         unknown_root_reason,
     )
     from shared.marker_schema import (
@@ -504,11 +505,14 @@ def _write_back_aligned_team_name(input_data: dict) -> str | None:
         # session_init uses for its step 3/3b skip.
         memory_root = project_memory_root_or_none(project_dir)
         if memory_root is None:
+            cause = unknown_root_cause(project_dir)
+            if cause is None:
+                return None
             return (
-                "Project CLAUDE.md skipped: "
-                f"{unknown_root_reason(project_dir) or 'git could not answer'}"
-                ", so the project memory target is unknown; this prompt wrote "
-                "nothing to either checkout."
+                f"Project CLAUDE.md skipped: "
+                f"{unknown_root_reason(cause, project_dir)}, so the project "
+                "memory target is unknown; this prompt wrote nothing to either "
+                "checkout."
             )
         target_file, _source = resolve_project_claude_md_path(memory_root)
         if not target_file.exists():

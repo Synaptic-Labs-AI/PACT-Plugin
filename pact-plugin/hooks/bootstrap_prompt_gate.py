@@ -394,6 +394,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         from shared.project_scope import (
             _record_worktree_identity,
             project_memory_root_or_none,
+            unknown_root_cause,
             unknown_root_reason,
         )
         from shared.session_journal import append_event, make_event
@@ -439,12 +440,14 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         prev_session_dir = None
         block_status = None
         if env_project_dir and memory_root is None:
-            block_status = (
-                "Project CLAUDE.md skipped: "
-                f"{unknown_root_reason(env_project_dir) or 'git could not answer'}"
-                ", so the project memory target is unknown; the session block "
-                "was not rewritten."
-            )
+            cause = unknown_root_cause(env_project_dir)
+            if cause is not None:
+                block_status = (
+                    f"Project CLAUDE.md skipped: "
+                    f"{unknown_root_reason(cause, env_project_dir)}, so the "
+                    "project memory target is unknown; the session block was "
+                    "not rewritten."
+                )
         try:
             if env_project_dir and memory_root is not None:
                 claude_md, source = resolve_project_claude_md_path(memory_root)

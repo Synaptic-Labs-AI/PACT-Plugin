@@ -191,9 +191,14 @@ def test_the_archive_base_refusal_fires_when_only_the_base_is_unknown(
     """The base-level refusal is defence-in-depth BEHIND the anchor-level one.
 
     Nothing in the population reached it: replacing its raise with a marker
-    left the suite green. This arm faults ONLY the second classification --
-    the anchor answers with a real root -- so the base refusal is the one
+    left the suite green. This arm faults ONLY the base classification -- the
+    anchor's cause resolver answers "known" -- so the base refusal is the one
     that fires, and its own message (not the anchor's) is what is asserted.
+
+    THE TWO CLASSIFICATIONS ARE DIFFERENT CALLS. The anchor is decided by
+    `unknown_root_cause`; the base is still `project_memory_root_or_none`, and
+    it is the only caller of that function left in this path, so stubbing it
+    to None faults the base alone.
     """
     import archive_pin
     import shared.project_scope as project_scope
@@ -206,29 +211,24 @@ def test_the_archive_base_refusal_fires_when_only_the_base_is_unknown(
     main_md.parent.mkdir()
     main_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
 
-    real = project_scope.project_memory_root_or_none
     classified = []
 
-    def anchor_known_base_unknown(candidate):
+    def base_unknown(candidate):
         classified.append(candidate)
-        if len(classified) == 1:
-            return real(candidate)   # the ANCHOR classification succeeds
-        return None                  # the BASE classification cannot answer
+        return None
 
     # The archive imports the classifier INSIDE resolve_claude_md, so the
     # source-module attribute is what the import re-reads; patching
     # `archive_pin.project_memory_root_or_none` would be inert.
-    monkeypatch.setattr(
-        project_scope, "project_memory_root_or_none", anchor_known_base_unknown
-    )
+    monkeypatch.setattr(project_scope, "project_memory_root_or_none", base_unknown)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
     monkeypatch.chdir(main)
 
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()
 
-    assert classified == [main, main], (
-        f"expected the anchor then the base classification, saw {classified}"
+    assert classified == [main], (
+        f"expected only the base classification to be faulted, saw {classified}"
     )
     reason = excinfo.value.reason
     assert "could not classify" in reason, reason

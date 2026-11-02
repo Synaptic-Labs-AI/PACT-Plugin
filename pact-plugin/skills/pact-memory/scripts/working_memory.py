@@ -1394,7 +1394,7 @@ def _display_root_unknown_reason() -> Optional[str]:
     the file is"); without the record case a forged record would resolve to
     nothing yet report the wrong cause.
     """
-    from shared.project_scope import unknown_root_reason
+    from shared.project_scope import unknown_root_cause, unknown_root_reason
 
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
     if declared:
@@ -1402,7 +1402,8 @@ def _display_root_unknown_reason() -> Optional[str]:
     else:
         record = get_project_dir_from_session_record()
         anchor = Path(record) if record else Path.cwd()
-    return unknown_root_reason(anchor)
+    cause = unknown_root_cause(anchor)
+    return unknown_root_reason(cause, anchor) if cause is not None else None
 
 
 def _estimate_tokens(text: str) -> int:

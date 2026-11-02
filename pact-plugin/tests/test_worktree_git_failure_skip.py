@@ -391,6 +391,25 @@ def test_a_forged_gitfile_names_the_verification_failure_in_the_write_back(
     assert str(forged) in status, status
 
 
+def test_the_write_back_reports_nothing_when_no_cause_is_identified(
+    repo, tmp_path, monkeypatch
+):
+    """Negative control: the guard believes the root is unknown while the
+    cause resolver says otherwise, so the channel emits NOTHING."""
+    import bootstrap_marker_writer as writer
+
+    forged = _forged_gitfile(repo, tmp_path, "no-cause-write-back")
+    session_dir = _session_with_session_start(repo)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+    _patch_bootstrap_context(monkeypatch, writer, forged, session_dir)
+    monkeypatch.setattr(writer, "unknown_root_cause", lambda pd: None)
+
+    status = writer._write_back_aligned_team_name({"agent_type": LEAD})
+
+    assert status is None, status
+
+
 def test_the_bootstrap_write_back_updates_main_with_working_git(repo, monkeypatch):
     import bootstrap_marker_writer as writer
 
@@ -462,6 +481,26 @@ def test_a_forged_gitfile_names_the_verification_failure_in_realign_team(
     assert "git could not answer" not in err, err
     assert "no longer exists" not in err, err
     assert str(forged) in err, err
+
+
+def test_realign_reports_nothing_when_no_cause_is_identified(
+    repo, tmp_path, monkeypatch, capsys
+):
+    """Negative control: the guard believes the root is unknown while the
+    cause resolver says otherwise, so nothing reaches stderr."""
+    import shared.project_scope as project_scope
+    from shared.realign_team import _write_team_line
+
+    forged = _forged_gitfile(repo, tmp_path, "no-cause-realign")
+    session_dir = _session_with_session_start(repo)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+    monkeypatch.setattr(project_scope, "unknown_root_cause", lambda pd: None)
+
+    _write_team_line("sid", "session-new", str(session_dir), "/plugin")
+
+    err = capsys.readouterr().err
+    assert err == "", err
 
 
 def test_the_realign_team_line_updates_main_with_working_git(repo, monkeypatch):
@@ -720,6 +759,57 @@ def test_a_forged_gitfile_names_the_verification_failure_in_the_prompt_gate(
     assert "git could not answer" not in out, out[-300:]
     assert "no longer exists" not in out, out[-300:]
     assert str(forged) in out, out[-300:]
+
+
+def test_the_prompt_gate_reports_nothing_when_no_cause_is_identified(
+    repo, tmp_path, monkeypatch
+):
+    """Negative control: the guard believes the root is unknown while the
+    cause resolver says otherwise, so the gate emits no skip line."""
+    import bootstrap_prompt_gate as writer
+    import shared.project_scope as project_scope
+
+    forged = _forged_gitfile(repo, tmp_path, "no-cause-prompt-gate")
+    session_dir = _session_with_session_start(repo)
+    _seed_session_blocks(monkeypatch, writer, repo, forged, session_dir)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+    monkeypatch.setattr(project_scope, "unknown_root_cause", lambda pd: None)
+
+    out = writer._record_unrecorded_lead(_prompt_gate_frame(), str(session_dir))
+
+    assert "Project CLAUDE.md skipped" not in out, out[-300:]
+    assert "no longer exists" not in out, out[-300:]
+    assert "could not be verified as a checkout" not in out, out[-300:]
+    assert "git could not answer" not in out, out[-300:]
+
+
+def test_the_archive_reports_no_unknown_cause_when_none_is_identified(
+    repo, tmp_path, monkeypatch
+):
+    """Negative control for the refusal channel. `resolve_claude_md` is a
+    RESOLUTION, not a write: with the cause resolver stubbed to None the guard
+    and the resolver disagree, and the refusal must not invent one of the
+    three causes. Whatever it does instead is allowed, but it may not name a
+    cause that was never identified."""
+    import archive_pin
+    import shared.project_scope as project_scope
+
+    forged = _forged_gitfile(repo, tmp_path, "no-cause-archive")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+    monkeypatch.setattr(project_scope, "unknown_root_cause", lambda pd: None)
+
+    try:
+        archive_pin.resolve_claude_md()
+    except archive_pin._Unevaluable as exc:
+        reason = str(exc.reason)
+    else:
+        reason = ""
+
+    assert "no longer exists" not in reason, reason
+    assert "could not be verified as a checkout" not in reason, reason
+    assert "git could not answer" not in reason, reason
 
 
 def test_the_prompt_gate_block_rewrite_updates_main(repo, monkeypatch):
@@ -1185,6 +1275,31 @@ def test_a_forged_gitfile_names_the_verification_failure(repo, tmp_path, monkeyp
     assert "no longer exists" not in system_message, system_message[:300]
     assert "git could not answer" not in system_message, system_message[:300]
     assert str(forged) in system_message, system_message[:300]
+
+
+def test_the_session_start_reports_nothing_when_no_cause_is_identified(
+    repo, tmp_path, monkeypatch
+):
+    """NEGATIVE CONTROL for the fallback. A KNOWN root has no cause to report,
+    so a channel that resolves a cause and gets None must emit NOTHING rather
+    than guess a sentence. A plain known-root shape never reaches the guarded
+    branch at all, so the discriminating shape is the disagreement: the guard
+    still believes the root is unknown while the cause resolver says otherwise.
+    Stubbing the resolver to None is exactly that disagreement, and it is the
+    only route by which a reintroduced `or 'could not...'` could fire."""
+    import session_init as gate
+
+    forged = _forged_gitfile(repo, tmp_path, "no-cause-session")
+    monkeypatch.setattr(gate, "unknown_root_cause", lambda pd: None)
+
+    _context, system_message = _run(monkeypatch, forged)
+
+    assert "Project CLAUDE.md skipped" not in system_message, system_message[:300]
+    assert "no longer exists" not in system_message, system_message[:300]
+    assert (
+        "could not be verified as a checkout" not in system_message
+    ), system_message[:300]
+    assert "git could not answer" not in system_message, system_message[:300]
 
 
 def test_a_bare_worktree_resolves_and_prints_no_skip(tmp_path, monkeypatch):

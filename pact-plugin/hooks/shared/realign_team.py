@@ -121,13 +121,15 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     # exit contract stays 0 -- a skip is not a refusal).
     memory_root = project_scope.project_memory_root_or_none(project_dir)
     if memory_root is None:
-        print(
-            "realign_team: project CLAUDE.md skipped: "
-            f"{project_scope.unknown_root_reason(project_dir) or 'git could not answer'}"
-            ", so the project memory target is unknown; nothing was written to "
-            "either checkout.",
-            file=sys.stderr,
-        )
+        cause = project_scope.unknown_root_cause(project_dir)
+        if cause is not None:
+            print(
+                f"realign_team: project CLAUDE.md skipped: "
+                f"{project_scope.unknown_root_reason(cause, project_dir)}, so "
+                "the project memory target is unknown; nothing was written to "
+                "either checkout.",
+                file=sys.stderr,
+            )
         return
     target_file, _source = claude_md_manager.resolve_project_claude_md_path(
         memory_root

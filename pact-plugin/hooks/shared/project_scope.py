@@ -473,10 +473,8 @@ def unknown_root_cause(
     return None if cause == ROOT_CAUSE_OK else cause
 
 
-def unknown_root_reason(
-    project_dir: str | os.PathLike[str],
-) -> Optional[str]:
-    """The user-facing CLAUSE for an unknown root, or None when it is known.
+def unknown_root_reason(cause: str, project_dir: str | os.PathLike[str]) -> str:
+    """The user-facing CLAUSE for a cause returned by `unknown_root_cause`.
 
     ONE SOURCE FOR EVERY CHANNEL THAT REPORTS THIS. Six surfaces compose their
     own sentence around this clause -- "Project CLAUDE.md skipped: ..." in
@@ -486,13 +484,15 @@ def unknown_root_reason(
     each site is what stops the cause text from reaching one channel and not
     its siblings, which is how the wrong wording survived four rounds.
 
+    THE CAUSE IS A PARAMETER, NOT A SECOND LOOKUP. A caller that resolved the
+    cause once renders from that same decision, so the text cannot describe a
+    different state than the branch that emitted it. There is deliberately no
+    None return and no default text: a KNOWN root has no cause to report, and
+    a caller in that state emits nothing rather than guessing a sentence.
+
     The anchor path is part of the clause: several worktrees can be in play and
-    the user needs to know which one. A caller that renders nothing when this
-    returns None keeps the old behaviour for a known root.
+    the user needs to know which one.
     """
-    cause = unknown_root_cause(project_dir)
-    if cause is None:
-        return None
     anchor = f"{project_dir}"
     if cause == ROOT_CAUSE_MISSING:
         return f"the project directory {anchor} no longer exists"
