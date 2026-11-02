@@ -230,6 +230,9 @@ ROOT_CAUSE_UNANSWERABLE = "unanswerable"
 # config dir itself, or a home whose `.claude` is the config dir): every
 # session loads that file, so it is not one project's memory.
 ROOT_CAUSE_USER_GLOBAL = "user_global"
+# Neither user-global location can be computed (no home directory), so no
+# root can be told apart from the user-global file; every root is refused.
+ROOT_CAUSE_HOME_UNKNOWN = "home_unknown"
 
 
 def _unanswered_cause(given: Path) -> str:
@@ -590,7 +593,7 @@ def unknown_root_reason(
     has only the MISSING clause, which names no path.
 
     Raises:
-        ValueError: `cause` is not one of the four unknown causes ("ok", None
+        ValueError: `cause` is not one of the unknown causes ("ok", None
             or an unexpected value is a caller bug, never a sentence), or the
             anchor is None with a cause other than MISSING.
     """
@@ -613,6 +616,8 @@ def unknown_root_reason(
             f"the project directory {anchor} holds the user-global CLAUDE.md, "
             "which every session loads, so it is not project memory"
         )
+    if cause == ROOT_CAUSE_HOME_UNKNOWN:
+        return "the home directory cannot be found"
     raise ValueError(f"not an unknown-root cause: {cause!r}")
 
 
@@ -1265,8 +1270,9 @@ def memory_root_of(
     root, cause = _project_memory_root_cause(directory)
     if cause != ROOT_CAUSE_OK:
         return None, cause
-    if names_user_global_document(Path(root)):
-        return None, ROOT_CAUSE_USER_GLOBAL
+    refusal = user_global_cause(Path(root))
+    if refusal is not None:
+        return None, refusal
     return root, None
 
 
@@ -1292,8 +1298,9 @@ def session_memory_root() -> SessionRoot:
             anchor, get_worktree_identity_from_session_record()
         )
         if status == RECORD_CONTAINED and recovered is not None:
-            if names_user_global_document(recovered):
-                return SessionRoot(anchor, declared, None, ROOT_CAUSE_USER_GLOBAL)
+            refusal = user_global_cause(recovered)
+            if refusal is not None:
+                return SessionRoot(anchor, declared, None, refusal)
             return SessionRoot(anchor, declared, recovered, None)
     return SessionRoot(anchor, declared, root, cause)
 
@@ -1353,6 +1360,19 @@ def is_user_global_document(path: Path) -> bool:
     if not globals_:
         return True
     return any(_same_file(Path(path), g) is not False for g in globals_)
+
+
+def user_global_cause(root: Path) -> Optional[str]:
+    """Why `root` is refused as a user-global root, or None when it is not.
+
+    ROOT_CAUSE_HOME_UNKNOWN when no user-global location can be computed
+    (still a refusal: nothing can be told apart from the global file), else
+    ROOT_CAUSE_USER_GLOBAL when either canonical document under `root` is
+    user-global.
+    """
+    if not user_global_documents():
+        return ROOT_CAUSE_HOME_UNKNOWN
+    return ROOT_CAUSE_USER_GLOBAL if names_user_global_document(root) else None
 
 
 def names_user_global_document(root: Path) -> bool:

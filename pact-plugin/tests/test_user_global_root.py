@@ -35,6 +35,7 @@ import pytest
 from helpers import make_claude_md_with_pins, make_pin_entry
 from shared import project_scope
 from shared.project_scope import (
+    ROOT_CAUSE_HOME_UNKNOWN,
     ROOT_CAUSE_USER_GLOBAL,
     memory_root_of,
     session_memory_root,
@@ -256,11 +257,12 @@ def test_a_document_path_that_cannot_be_compared_counts_as_user_global(
     assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
 
 
-def test_no_computable_global_location_counts_as_user_global(control, monkeypatch):
-    """Cannot tell where the global files are: refuse every root."""
+def test_no_computable_global_location_refuses_with_its_own_cause(control, monkeypatch):
+    """Cannot tell where the global files are: refuse every root, naming the
+    missing home rather than claiming the root holds the global file."""
     monkeypatch.setattr(project_scope, "user_global_documents", lambda: ())
 
-    assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_USER_GLOBAL)
+    assert memory_root_of(control.anchor) == (None, ROOT_CAUSE_HOME_UNKNOWN)
 
 
 def test_a_hardlink_to_the_global_file_counts_as_user_global(control):
@@ -685,3 +687,30 @@ def test_a_relative_config_root_outside_the_declared_project_leaves_it_known(
     monkeypatch.chdir(project / "sub")
 
     assert memory_root_of(project) == (project, None)
+
+
+def test_the_home_unknown_reason_text():
+    assert unknown_root_reason(ROOT_CAUSE_HOME_UNKNOWN, "/h") == (
+        "the home directory cannot be found"
+    )
+
+
+def test_a_session_with_no_home_and_no_config_root_names_the_missing_home(
+    tmp_path, monkeypatch
+):
+    """CLAUDE_CONFIG_DIR unset and Path.home() raising: neither user-global
+    location exists, so the root is refused (fail closed) with the cause that
+    says why, and the skip line carries that text."""
+    project = _plain_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    def no_home(cls=None):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    assert project_scope.user_global_documents() == ()
+
+    assert memory_root_of(project) == (None, ROOT_CAUSE_HOME_UNKNOWN)
+    assert project_scope.unknown_root_status(
+        "Project CLAUDE.md", ROOT_CAUSE_HOME_UNKNOWN, project, "nothing was written."
+    ).startswith("Project CLAUDE.md skipped: the home directory cannot be found, ")
