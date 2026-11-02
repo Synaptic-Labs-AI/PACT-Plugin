@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional, Set
 
@@ -187,6 +188,129 @@ def _unanswered_cause(given: Path) -> str:
     )
 
 
+_GIT_TRUE_WORDS = frozenset({"true", "yes", "on"})
+_GIT_FALSE_WORDS = frozenset({"", "false", "no", "off"})
+# git's integer form: optional sign, decimal or 0x-hex, optional k/m/g unit.
+_GIT_INT_RE = re.compile(r"\s*[-+]?(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<dec>[0-9]+))[kKmMgG]?")
+
+
+def _git_env_bool(value: Optional[str]) -> bool:
+    """A git boolean environment value, read as git reads it.
+
+    Unset is false. The words true/yes/on and false/no/off (any case) and the
+    empty string are git's text forms; otherwise git parses an integer, and
+    any nonzero integer is true. A value git cannot parse makes git itself
+    refuse to run, so it reads as true here: the walk then counts more
+    metadata, which is the fail-closed direction.
+    """
+    if value is None:
+        return False
+    lowered = value.lower()
+    if lowered in _GIT_TRUE_WORDS:
+        return True
+    if lowered in _GIT_FALSE_WORDS:
+        return False
+    match = _GIT_INT_RE.fullmatch(value)
+    if match is None:
+        return True
+    digits = match.group("hex") or match.group("dec")
+    return digits.strip("0") != ""
+
+
+def _git_ceiling_directories() -> Set[str]:
+    """The GIT_CEILING_DIRECTORIES entries git honours, in both spellings.
+
+    Only absolute entries count, as in git: a relative entry is ignored. Each
+    is kept as written (normalised) and, until the first EMPTY entry, as its
+    real path too: git resolves symlinks in the entries before an empty one
+    and compares the entries after it as written.
+    """
+    ceilings: Set[str] = set()
+    resolve_symlinks = True
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            resolve_symlinks = False
+            continue
+        if not os.path.isabs(entry):
+            continue
+        ceilings.add(os.path.normpath(entry))
+        if not resolve_symlinks:
+            continue
+        try:
+            ceilings.add(os.path.realpath(entry))
+        except (OSError, ValueError):
+            continue
+    return ceilings
+
+
+def _git_metadata_at_or_above(directory: Path) -> bool:
+    """Whether git's own repository discovery from `directory` meets a `.git`.
+
+    A `.git` file or directory on that path means git's refusal to answer is a
+    FAILURE on a checkout (a broken gitfile, a deleted admin dir, a moved main
+    checkout, dubious ownership), not the answer "no repository".
+
+    THE WALK IS GIT'S DISCOVERY PATH AND STOPS WHERE GIT STOPS: from the real
+    path of `directory` (always checked, even when it is itself a ceiling
+    entry), upwards, never stepping INTO a GIT_CEILING_DIRECTORIES entry, and
+    never onto a filesystem other than the START directory's unless
+    GIT_DISCOVERY_ACROSS_FILESYSTEM is a true git boolean. A `.git` beyond
+    those limits is
+    one git never reached, so a refusal there is a genuine "no repository".
+    Both variables reach git unchanged (`git_env_without_location` strips only
+    the location variables), so the walk and git read the same values.
+
+    Anything that cannot be stat'ed for a reason other than absence counts as
+    metadata present: unable to tell, the caller fails closed.
+    """
+    try:
+        current = Path(os.path.realpath(directory))
+        start_device = os.stat(current).st_dev
+    except (OSError, ValueError):
+        return True
+    ceilings = _git_ceiling_directories()
+    across_filesystems = _git_env_bool(
+        os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM")
+    )
+    while True:
+        try:
+            os.lstat(current / ".git")
+            return True
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except (OSError, ValueError):
+            return True
+        parent = current.parent
+        if parent == current or str(parent) in ceilings:
+            return False
+        if not across_filesystems:
+            try:
+                if os.stat(parent).st_dev != start_device:
+                    return False
+            except (OSError, ValueError):
+                return True
+        current = parent
+
+
+def _git_dir_answers(directory: Path) -> bool:
+    """Whether `git -C <directory> rev-parse --git-dir` succeeds.
+
+    Asked only after `--show-toplevel` failed on a directory holding git
+    metadata: it separates a bare repository, which has no work tree, from a
+    repository git cannot open at all. Any error is False, which makes the caller fail closed.
+    """
+    try:
+        result = run_git(
+            ["-C", str(directory), "rev-parse", "--git-dir"],
+            timeout=5,
+            text=False,
+            env=git_env_without_location(),
+        )
+    except (OSError, ValueError):
+        return False
+    return result is not None and result.returncode == 0 and bool(result.stdout)
+
+
 def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     """`git -C <directory> rev-parse <flag>` as (resolved path, git RAN).
 
@@ -232,7 +356,18 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     if result is None:
         return None, False
     if result.returncode != 0 or not result.stdout:
-        return None, True
+        # "No path" is an answer only where no git metadata exists, or where
+        # git still locates a repository here. With a `.git` at or above the
+        # directory and no repository git can open, the refusal is git failing
+        # on a checkout, so it reads as could-not-run and the root is unknown.
+        # ONLY a `--show-toplevel` refusal is re-probed: a bare repository
+        # kept at `<dir>/.git` refuses it (no work tree) while `--git-dir`
+        # succeeds, and its worktrees are genuine checkouts. Every other field
+        # stays could-not-run on a failure, because the callers read a None
+        # git dir or common dir as "no repository" (a KNOWN root).
+        if not _git_metadata_at_or_above(Path(directory)):
+            return None, True
+        return None, flag == "--show-toplevel" and _git_dir_answers(directory)
     raw = _fsdecode(result.stdout)
     if raw.endswith("\n"):
         raw = raw[:-1]

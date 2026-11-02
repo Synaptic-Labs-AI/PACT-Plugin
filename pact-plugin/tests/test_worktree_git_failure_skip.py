@@ -34,15 +34,13 @@ GIT UNAVAILABILITY IS ONE FAILURE SHAPE, NOT ALL OF THEM. Every failing-git
 arm here empties PATH (`_hide_git`), so the binary lookup fails in
 `project_scope.run_git` AND in every direct `subprocess.run(["git", ...])` an
 arm's code path can reach. Patching only `run_git` left those direct calls on
-the real binary (#59). THIS COVERS "COULD NOT RUN" ONLY. A git that RUNS and
-exits non-zero is a KNOWN answer -- the helper treats the directory itself as
-the root -- which is correct for a directory OUTSIDE git, but NOT for a real
-worktree whose repo is broken: a moved or deleted main checkout, a
-dubious-ownership refusal, a permission-denied .git. There the fallback
-re-plants the worktree copy. That residual is the ACCEPTED TRADE-OFF (the
-alternative skips project-memory maintenance on every repo hiccup), and it is
-pinned by `test_a_moved_main_checkout_is_a_known_root_and_creates_the_copy`
-so it stays visible rather than implied.
+the real binary (#59). A git that RUNS and exits non-zero is a KNOWN answer
+only for a directory with no `.git` entry at or above it. On a checkout whose
+repo is broken (a moved or deleted main checkout, a deleted admin dir,
+dubious ownership, an unreadable `.git`) the refusal is a git failure, so the
+root is unknown and the writers skip;
+`test_a_moved_main_checkout_is_unanswerable_and_writes_nothing` pins it and
+`tests/test_git_metadata_unanswerable.py` covers the class.
 """
 from __future__ import annotations
 
@@ -1077,20 +1075,18 @@ def test_the_archive_resolution_still_names_main(repo, monkeypatch):
     )
 
 
-def test_a_moved_main_checkout_is_a_known_root_and_creates_the_copy(
+def test_a_moved_main_checkout_is_unanswerable_and_writes_nothing(
     repo, monkeypatch
 ):
-    """R-2: exit 128 is a KNOWN answer, not "git could not answer".
+    """A git failure on a directory holding git metadata is UNKNOWN.
 
     A worktree whose gitfile names a moved or deleted main checkout exits 128
-    on every rev-parse. `project_memory_root_or_none` therefore returns the
-    directory itself, and a lead SessionStart writes `.claude/CLAUDE.md` there
-    -- the worktree write #1653 exists to keep out. THIS IS THE ACCEPTED
-    TRADE-OFF, asserted rather than implied: making exit 128 "unknown" would
-    skip project-memory maintenance in every repo on any git hiccup. The
-    comment at the top of this module names the other causes in this class
-    (dubious ownership, permission-denied .git) that the PATH-emptied arms do
-    not cover.
+    on every rev-parse. Its `.git` entry shows it is a checkout, so the refusal
+    is git failing, not the answer "no repository": the root is unknown and a
+    lead SessionStart skips with the cause instead of planting
+    `.claude/CLAUDE.md` in the worktree. Reverting the metadata rule in
+    `_raw_rev_parse` turns this red (the root becomes the worktree and the
+    copy is created).
     """
     from shared.project_scope import project_memory_root_or_none
 
@@ -1106,17 +1102,16 @@ def test_a_moved_main_checkout_is_a_known_root_and_creates_the_copy(
     )
     assert probe.returncode != 0, "precondition: a broken gitfile must fail"
 
-    assert project_memory_root_or_none(str(gone)) == gone, (
-        "exit 128 stopped being a known answer; if that is the new rule, "
-        "re-rate this arm and the module's trade-off paragraph"
+    assert project_memory_root_or_none(str(gone)) is None, (
+        "a broken-gitfile worktree classified as a KNOWN root"
     )
 
     _context, system_message = _run(monkeypatch, gone)
 
-    assert "Project CLAUDE.md skipped" not in system_message
-    assert (gone / ".claude" / "CLAUDE.md").exists(), (
-        "the documented residual changed: the broken-repo worktree no longer "
-        "receives the copy, so the trade-off text is stale"
+    assert "Project CLAUDE.md skipped" in system_message, system_message[:300]
+    assert "git could not answer" in system_message, system_message[:300]
+    assert not (gone / ".claude" / "CLAUDE.md").exists(), (
+        "the lead start planted a CLAUDE.md in a broken-gitfile worktree"
     )
 
 
