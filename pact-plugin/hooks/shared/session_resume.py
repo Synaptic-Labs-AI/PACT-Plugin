@@ -42,6 +42,7 @@ from shared.claude_md_manager import (
     ContainmentError,
     _atomic_write_text,
     _read_replaced,
+    ManagedDocument,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -354,6 +355,7 @@ def update_session_info(
     plugin_root: str | None = None,
     started: str | None = None,
     project_dir: str | os.PathLike[str] | None = None,
+    doc: ManagedDocument | None = None,
 ) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
@@ -378,22 +380,29 @@ def update_session_info(
             None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
             caller is byte-identical. A worktree-lead caller passes
             `project_scope.project_memory_root()` so the target AND the
-            containment anchors below are the main checkout.
+            containment anchors below are the main checkout. Ignored when
+            `doc` is given.
+        doc: The session's managed document, resolved by the caller from
+            its one session observation. Writes `doc.path` (creating it when
+            `doc.exists` is False) with `doc.base` as the containment anchor.
 
     Returns:
         Status message or None if no action taken. A failure that may clear on
         its own returns a TransientSessionInfoFailure.
     """
-    if project_dir is None:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-
-    # Honor both supported project CLAUDE.md locations.
-    # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
-    # if neither exists, the resolver returns the new default
-    # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
-    target_file, _source = resolve_project_claude_md_path(project_dir)
+    if doc is not None:
+        target_file, base = doc.path, doc.base
+    else:
+        if project_dir is None:
+            project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        if not project_dir:
+            return None
+        # Honor both supported project CLAUDE.md locations.
+        # Existing files take precedence (.claude/CLAUDE.md > legacy
+        # ./CLAUDE.md); if neither exists, the resolver returns the new
+        # default ($project_dir/.claude/CLAUDE.md) so we create there.
+        target_file, _source = resolve_project_claude_md_path(project_dir)
+        base = Path(project_dir)
 
     timestamp = started or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -465,7 +474,7 @@ def update_session_info(
                         "\n"
                         f"{MANAGED_END_MARKER}\n"
                     )
-                    _atomic_write_text(target_file, new_content, Path(project_dir))
+                    _atomic_write_text(target_file, new_content, base)
                     return "Session info created in new project CLAUDE.md"
 
                 content = target_file.read_text(encoding="utf-8")
@@ -481,7 +490,7 @@ def update_session_info(
                     content, session_id, team_name, session_dir, plugin_root, timestamp
                 )
                 if new_content is not None:
-                    _atomic_write_text(target_file, new_content, Path(project_dir))
+                    _atomic_write_text(target_file, new_content, base)
                 return status
 
             except ContainmentError:
@@ -577,7 +586,31 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def read_session_started(project_dir: str | os.PathLike[str]) -> str | None:
+def existing_document(
+    doc: ManagedDocument | None,
+    project_dir: str | os.PathLike[str] | None,
+) -> tuple[Path, Path] | None:
+    """The existing document to READ and the base it was found under, or None.
+
+    With `doc` (the caller's one session resolution): `(doc.path, doc.base)`
+    when the document exists, else None. Without it, the legacy resolution of
+    `project_dir` at that directory only. Nothing is created.
+    """
+    if doc is not None:
+        return (doc.path, doc.base) if doc.exists else None
+    if not project_dir:
+        return None
+    claude_md, source = resolve_project_claude_md_path(project_dir)
+    if source == "new_default":
+        return None
+    return claude_md, Path(project_dir)
+
+
+def read_session_started(
+    project_dir: str | os.PathLike[str] | None = None,
+    *,
+    doc: ManagedDocument | None = None,
+) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     Pass it as update_session_info's ``started`` to rewrite the block without
@@ -585,14 +618,14 @@ def read_session_started(project_dir: str | os.PathLike[str]) -> str | None:
     read, or the line is not in a Current Session block the parser finds (a
     copy in a fenced example is not read). Only the exact shape
     update_session_info writes is returned. Read without the sidecar lock:
-    every writer replaces the file whole. Never raises.
+    every writer replaces the file whole. Never raises. `doc`, when given,
+    names the document to read and `project_dir` is ignored.
     """
     try:
-        if not project_dir:
+        found = existing_document(doc, project_dir)
+        if found is None:
             return None
-        claude_md, source = resolve_project_claude_md_path(project_dir)
-        if source == "new_default":
-            return None
+        claude_md, _base = found
         # Read-only, and the pattern takes ASCII digits only, so a replaced
         # byte cannot reach the block.
         content = claude_md.read_text(encoding="utf-8", errors="replace")
@@ -642,7 +675,9 @@ def _validate_under_pact_sessions(path: str) -> str | None:
 
 
 def _extract_prev_session_dir(
-    project_dir: str | os.PathLike[str],
+    project_dir: str | os.PathLike[str] | None = None,
+    *,
+    doc: ManagedDocument | None = None,
 ) -> str | None:
     """
     Extract the previous session's directory path from the project CLAUDE.md.
@@ -670,19 +705,20 @@ def _extract_prev_session_dir(
     pact-sessions tree.
 
     Args:
-        project_dir: CLAUDE_PROJECT_DIR path
+        project_dir: CLAUDE_PROJECT_DIR path. Ignored when `doc` is given.
+        doc: The session's managed document. Read when it exists; the
+            fallback slug derives from `doc.base`, the directory it was
+            found under.
 
     Returns:
         Previous session directory path string, or None if not found
     """
-    if not project_dir:
-        return None
-
     try:
-        claude_md, source = resolve_project_claude_md_path(project_dir)
-        # source == "new_default" means neither location exists -- nothing to read
-        if source == "new_default":
+        found = existing_document(doc, project_dir)
+        # None means no document exists -- nothing to read
+        if found is None:
             return None
+        claude_md, slug_base = found
 
         # No lock. Every writer of the project CLAUDE.md replaces it whole
         # (_atomic_write_text: a temp file, then os.replace), so this read
@@ -737,7 +773,7 @@ def _extract_prev_session_dir(
             # Same slug derivation and sanitisation as every session path,
             # so the fallback lands on the directory the writers used.
             derived = str(
-                _build_session_path(project_slug(project_dir), session_id)
+                _build_session_path(project_slug(str(slug_base)), session_id)
             )
             return _validate_under_pact_sessions(derived)
 

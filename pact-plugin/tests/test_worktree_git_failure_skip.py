@@ -1353,15 +1353,16 @@ def test_the_session_start_reports_nothing_when_no_cause_is_identified(
     single-line production grep for the old phrase is what certifies no
     fallback text exists there."""
     import session_init as gate
+    from shared.project_scope import SessionRoot
 
     forged = _forged_gitfile(repo, tmp_path, "no-cause-session")
     calls = []
 
-    def known_root(pd):
-        calls.append(pd)
-        return (Path(str(pd)), None)
+    def known_root():
+        calls.append(forged)
+        return SessionRoot(forged, True, forged, None)
 
-    monkeypatch.setattr(gate, "project_memory_root_and_cause", known_root)
+    monkeypatch.setattr(gate, "session_memory_root", known_root)
 
     _context, system_message = _run(monkeypatch, forged)
 

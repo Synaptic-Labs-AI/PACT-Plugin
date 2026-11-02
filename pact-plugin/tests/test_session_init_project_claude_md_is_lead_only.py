@@ -141,13 +141,14 @@ class TestTeammateWritesNothing:
         import shared.session_resume as session_resume
 
         reads = []
-        real = session_resume.resolve_project_claude_md_path
+        real = session_resume.existing_document
 
-        def spy(project_dir):
-            reads.append(project_dir)
-            return real(project_dir)
+        def spy(doc, project_dir):
+            found = real(doc, project_dir)
+            reads.append(found)
+            return found
 
-        monkeypatch.setattr(session_resume, "resolve_project_claude_md_path", spy)
+        monkeypatch.setattr(session_resume, "existing_document", spy)
         project = _project(tmp_path, "p", user_md=True)
         before = sorted(p.name for p in project.rglob("*"))
         if agent_type is None:
@@ -159,7 +160,9 @@ class TestTeammateWritesNothing:
                     session_init.main()
         else:
             _run(monkeypatch, project, agent_type)
-        assert reads, "the start never read the project CLAUDE.md"
+        assert any(found is not None for found in reads), (
+            "the start never read the project CLAUDE.md"
+        )
         assert sorted(p.name for p in project.rglob("*")) == before
 
     @pytest.mark.parametrize("agent_type", UNRECOGNIZED)
