@@ -1193,7 +1193,8 @@ class UserGlobalDocumentRefused(RuntimeError):
     Unreachable through `memory_root_of` and `session_memory_root`, except by
     a filesystem change between their check and this one. The one SPECIFIC
     catch is in `session_document`, which maps it to the cause `user_global`
-    so the readers behind it report a skip. Two broad handlers also absorb
+    (`home_unknown` when no user-global location can be computed) so the
+    readers behind it report a skip. Two broad handlers also absorb
     it: `gate_target`'s `except RuntimeError` (the gate gets no target) and
     the working_memory display resolver's `except Exception` (the sync finds
     no document). Both fail safe: nothing is written. Add no new specific
@@ -1259,9 +1260,14 @@ def session_document(
     The document is None exactly when the root is unknown; the SessionRoot
     then carries the cause. Every ambient reader calls this and nothing else.
     A resolver refusal of a user-global document reads as that unknown root,
-    with cause user_global, so a reader renders it like any other skip.
+    with cause user_global (home_unknown when no user-global location can be
+    computed), so a reader renders it like any other skip.
     """
-    from .project_scope import ROOT_CAUSE_USER_GLOBAL, session_memory_root
+    from .project_scope import (
+        ROOT_CAUSE_USER_GLOBAL,
+        session_memory_root,
+        user_global_cause,
+    )
 
     session = session_memory_root()
     if session.root is None:
@@ -1269,7 +1275,8 @@ def session_document(
     try:
         return session, resolve_managed_document(session.root, assume_present)
     except UserGlobalDocumentRefused:
-        return session._replace(root=None, cause=ROOT_CAUSE_USER_GLOBAL), None
+        cause = user_global_cause(session.root) or ROOT_CAUSE_USER_GLOBAL
+        return session._replace(root=None, cause=cause), None
 
 
 def ensure_dot_claude_parent(path: Path) -> None:

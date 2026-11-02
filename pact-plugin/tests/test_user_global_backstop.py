@@ -29,7 +29,7 @@ from shared.claude_md_manager import (
     session_document,
     strip_orphan_kernel_block,
 )
-from shared.project_scope import ROOT_CAUSE_USER_GLOBAL, SessionRoot
+from shared.project_scope import ROOT_CAUSE_HOME_UNKNOWN, ROOT_CAUSE_USER_GLOBAL, SessionRoot
 
 KERNEL = "<!-- PACT_START: v3 -->\nold kernel\n<!-- PACT_END -->\n"
 
@@ -157,3 +157,24 @@ def test_the_kernel_strip_still_edits_the_config_root_document(home, monkeypatch
 
     assert status is not None and "Removed obsolete PACT kernel block" in status
     assert "PACT_START" not in (config / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+def test_a_resolver_refusal_with_no_global_location_reports_the_missing_home(
+    tmp_path, monkeypatch
+):
+    """The backstop fires during a race in which the home disappears: the
+    session's root was known, but no user-global location can be computed by
+    the time the resolver checks. The skip names the missing home, not a
+    user-global file."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(
+        project_scope, "session_memory_root",
+        lambda: SessionRoot(project, True, project, None),
+    )
+    monkeypatch.setattr(project_scope, "user_global_documents", lambda: ())
+
+    session, document = session_document()
+
+    assert document is None
+    assert (session.root, session.cause) == (None, ROOT_CAUSE_HOME_UNKNOWN)
