@@ -1491,12 +1491,17 @@ class TestClosedByDefaultReach:
                  if index.view(exclusion.path).trio_named]
         assert named == [], named
 
-    def test_a_trio_only_change_adds_no_exclusion_back(self):
-        _, _, _, split = self._split()
+    def test_a_trio_only_change_adds_back_only_broad_scanners(self):
+        """The trio is ignored for a broad exclusion only while nothing in
+        its closure names a trio file or scans a tree; a confined one never
+        reads outside the plugin."""
+        _, manifest, index, split = self._split()
         selection = _select_real(["CHANGELOG.md", "README.md",
                                   ".claude-plugin/marketplace.json"])
         assert selection.select_all_reason is None
-        assert selection.added_back == (), selection.added_back
+        expected = {path for path, reasons in split.items() if reasons and (
+            index.view(path).trio_named or index.view(path).scans_tree)}
+        assert {entry.path for entry in selection.added_back} == expected
 
     def test_an_outside_change_adds_back_exactly_the_broad_exclusions(self):
         _, _, _, split = self._split()
@@ -1519,6 +1524,27 @@ class TestClosedByDefaultReach:
                         if key not in unproven_anywhere)
         assert not stale, f"reviews whose module changed since review: {stale}"
         assert not unused, f"reviews of modules nothing flags: {unused}"
+
+    def test_every_review_clears_an_exclusion(self):
+        """A review that turns no exclusion from broad to confined vouches
+        for nothing the selection uses: drop it rather than keep it."""
+        repo_root, core, manifest, index = _shipped_manifest()
+        reviewed, reads = core.current_reviews(index.plugin_root, manifest)
+
+        def confined(reviews):
+            facts = core.ChangeFacts(
+                views={}, value_inert=frozenset(), conftest_verdicts={},
+                conftest_imported=frozenset(), reviewed=frozenset(reviews),
+                review_reads=reads)
+            return {exclusion.path for exclusion in manifest.exclusions
+                    if not core.broad_reasons(index.view(exclusion.path),
+                                              facts)}
+
+        everything = confined(reviewed)
+        idle = sorted(key for key, *_ in manifest.reach_reviews
+                      if confined(reviewed - {key}) == everything)
+        assert manifest.reach_reviews, "no reviews: the check read nothing"
+        assert not idle, f"reviews that clear no exclusion: {idle}"
 
     PINNED_ISOLATION = (
         "_isolate_config_root_to_tmp", "_scrub_claude_project_dir_env",
@@ -1564,55 +1590,29 @@ class TestClosedByDefaultReach:
             ["tests/test_archive_pin.py"])
 
     def test_every_autouse_fixture_is_pinned_or_confined(self):
-        """Autouse fixtures are exempt from the four rules only because the
-        isolation set is pinned by name. Every other autouse fixture must
-        come out confined under the rules."""
+        """Autouse fixtures are exempt from the confinement rules only
+        because the isolation set is pinned by name. Every other autouse
+        fixture must come out confined under the rules."""
         repo_root, core, _, index = _shipped_manifest()
         pinned = set(self.PINNED_ISOLATION)
         unpinned_unproven = []
+        examined = 0
         for conftest in ("conftest.py", "tests/conftest.py"):
             path = repo_root / "pact-plugin" / conftest
             tree = ast.parse(path.read_text(encoding="utf-8"))
-            reasons = core._confinement_reasons(
+            reasons = core._test_side_reasons(
                 tree, conftest, index.roots, index.plugin_root,
-                core._docstring_nodes(tree))
+                core._docstring_nodes(tree), {})
             for name, (first, last, autouse) in core._fixture_spans(
                     tree).items():
                 if not autouse or name in pinned:
                     continue
+                examined += 1
                 sites = [reason for reason in reasons
                          if first <= int(reason.split(":", 1)[0]) <= last]
                 if sites:
                     unpinned_unproven.append(f"{conftest}::{name}: {sites[:2]}")
+        # The rule must have something to judge, or it proves nothing.
+        assert examined > 0, "no unpinned autouse fixture was examined"
         assert not unpinned_unproven, unpinned_unproven
-
-    def test_every_memory_store_call_passes_a_bare_file_name(self):
-        """The memory_store review's premise: every caller passes a literal
-        file name with no '/', no '..' and no leading '/', so the store stays
-        inside tmp_path."""
-        repo_root, _, _, _ = _shipped_manifest()
-        calls, bad = 0, []
-        for path in sorted((repo_root / "pact-plugin").rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "memory_store"):
-                    continue
-                calls += 1
-                arguments = node.args + [keyword.value
-                                         for keyword in node.keywords]
-                if not all(isinstance(argument, ast.Constant)
-                           and isinstance(argument.value, str)
-                           and argument.value and "/" not in argument.value
-                           and ".." not in argument.value
-                           for argument in arguments):
-                    bad.append(f"{path.name}:{node.lineno}")
-        assert calls, "no memory_store call found: the scan read nothing"
-        assert not bad, f"memory_store called with a non-bare name: {bad}"
 

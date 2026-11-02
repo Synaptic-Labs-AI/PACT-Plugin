@@ -109,13 +109,14 @@ def _manifest(core, exclusion_paths=("tests/test_slow.py",), seams=None,
 
 def _view(core, closure=(), targets=(), literals=(), names=(),
           path_literals=(), scan_roots=(), repo_reach=(), unproven=(),
-          trio_named=False):
+          trio_named=False, scans_tree=False):
     return core.ExclusionView(
         closure=frozenset(closure), import_targets=frozenset(targets),
         literals=frozenset(literals), test_names=frozenset(names),
         path_literals=frozenset(path_literals),
         scan_roots=frozenset(scan_roots), repo_reach=tuple(repo_reach),
-        unproven=tuple(unproven), trio_named=trio_named)
+        unproven=tuple(unproven), trio_named=trio_named,
+        scans_tree=scans_tree)
 
 
 def _facts(core, manifest, views=None, value_inert=(), verdicts=None,
@@ -1504,10 +1505,10 @@ class TestAuditorShapesAreUnproven:
         # io is an I/O module: a path through it needs a confined argument.
         ("import io\ndef test_x(p):\n    io.open(p)\n", "unproven io.open()"),
         ("import io\ndef test_x(p):\n    io.FileIO(p)\n", "unproven io.FileIO()"),
-        # Inline python code is unchecked code.
+        # Inline code is unchecked code.
         ("import subprocess\nimport sys\ndef test_x(tmp_path):\n"
          "    subprocess.run([sys.executable, '-c', 'print(1)'], cwd=tmp_path)\n",
-         "inline python code"),
+         "inline code (-c)"),
         # A dynamic attribute of an I/O module, and code-running builtins.
         ("import os\ndef test_x(tmp_path):\n"
          "    getattr(os, 'listdir')(tmp_path)\n", "dynamic attribute"),
@@ -1539,6 +1540,304 @@ class TestAuditorShapesAreUnproven:
     ])
     def test_the_safe_counterpart_is_confined(self, core, tmp_path, source):
         assert _classify(core, tmp_path, source) == ()
+
+
+class TestEveryAllowlistIsAProofObligation:
+    """Each allowlist entry must be proven: a module with any I/O-capable
+    name is not COMPUTE, a reference is judged like a call, and every value
+    injected into process state is a temporary folder or plain data."""
+
+    @pytest.mark.parametrize("module", [
+        "asyncio", "codecs", "concurrent", "contextlib", "inspect", "unittest",
+        "linecache", "traceback", "tokenize", "gzip", "bz2", "lzma", "zipfile",
+        "tarfile", "xml", "argparse", "logging", "platform", "uuid", "pickle",
+        "pkgutil", "runpy", "urllib", "http", "socket", "email", "pytest",
+        "hypothesis", "warnings", "locale", "posixpath", "signal",
+    ])
+    def test_an_io_capable_module_is_not_compute(self, core, module):
+        assert module not in core._COMPUTE_MODULES
+
+    @pytest.mark.parametrize("source,kind", [
+        # References, not calls.
+        ("import operator\ndef test_x(p):\n"
+         "    return operator.methodcaller('read_text')(p)\n",
+         "attribute getter"),
+        ("import operator\ndef test_x(p, name):\n"
+         "    return operator.attrgetter(name)(p)\n", "attribute getter"),
+        ("def test_x(p, reader=open):\n    return reader(p)\n",
+         "references the I/O builtin open"),
+        ("def test_x(p):\n    get = lambda: open\n    return get()(p)\n",
+         "references the I/O builtin open"),
+        ("def test_x(p, name):\n    return getattr(p, name)()\n",
+         "getattr by a computed name"),
+        ("def test_x(p):\n    return getattr(p, 'read_text')()\n",
+         "getattr of a path method"),
+        ("def test_x(p):\n    reader = p.read_text\n    return reader()\n",
+         "references a path method"),
+        ("from pathlib import Path\ndef test_x(paths):\n"
+         "    return list(map(Path.read_text, paths))\n",
+         "references the I/O name pathlib.Path.read_text"),
+        ("import os\ndef test_x():\n    walker = os.walk\n    return walker\n",
+         "references the I/O name os.walk"),
+        ("from pathlib import Path\ndef test_x(p):\n"
+         "    return vars(Path)['read_text'](p)\n", "namespace of an imported name"),
+        ("import types\ndef test_x():\n"
+         "    return types.FunctionType(compile('1', '<x>', 'eval'), {})()\n",
+         "runs code or reads input compile()"),
+        ("import sys\ndef test_x(tmp_path):\n"
+         "    return open(sys.prefix + '/x')\n", "unproven"),
+        # State injection: every value must be tmp-rooted or plain data.
+        ("import os\nfrom pathlib import Path\nfrom unittest.mock import patch\n"
+         "REPO = Path(__file__).resolve().parents[2]\n"
+         "def test_x():\n"
+         "    with patch.dict(os.environ, {'CLAUDE_PROJECT_DIR': str(REPO)}):\n"
+         "        pass\n", "injects an unproven value into mock.dict"),
+        ("import os\nfrom pathlib import Path\nfrom unittest import mock\n"
+         "HERE = Path(__file__).resolve().parent\n"
+         "def test_x():\n"
+         "    with mock.patch.dict(os.environ, {'X': str(HERE)}):\n"
+         "        pass\n", "injects an unproven value into mock.dict"),
+        ("from unittest.mock import patch\n"
+         "@patch('plugin_mod.VALUE', '/etc/passwd')\ndef test_x():\n    pass\n",
+         "injects an unproven value into mock.patch"),
+        ("import plugin_mod\nfrom unittest.mock import patch\ndef test_x():\n"
+         "    with patch.object(plugin_mod, 'VALUE', '~/x'):\n        pass\n",
+         "injects an unproven value into mock.object"),
+        ("def test_x(monkeypatch, project_dir):\n"
+         "    monkeypatch.setenv('CLAUDE_PROJECT_DIR', str(project_dir))\n",
+         "injects an unproven value into monkeypatch.setenv"),
+        ("import plugin_mod\nfrom pathlib import Path\n"
+         "ROOT = Path(__file__).resolve().parent\n"
+         "def test_x(monkeypatch):\n"
+         "    monkeypatch.setattr(plugin_mod, 'VALUE', ROOT)\n",
+         "injects an unproven value into monkeypatch.setattr"),
+        ("def test_x(monkeypatch):\n"
+         "    monkeypatch.setattr('plugin_mod.VALUE', lambda: '/etc')\n",
+         "injects an unproven value into monkeypatch.setattr"),
+        ("import sys\ndef test_x(monkeypatch):\n"
+         "    monkeypatch.setitem(sys.modules, 'x', '/etc')\n",
+         "injects an unproven value into monkeypatch.setitem"),
+        ("def test_x(monkeypatch):\n    monkeypatch.syspath_prepend('/opt/x')\n",
+         "injects an unproven value into sys.path"),
+        ("import os\ndef test_x():\n    os.environ['X'] = '/etc'\n",
+         "injects an unproven value into os.environ"),
+        ("import os\ndef test_x():\n    os.environ.update({'X': '/etc'})\n",
+         "injects an unproven value into os.environ"),
+        ("import os\ndef test_x():\n    os.putenv('X', '/etc')\n",
+         "injects an unproven value into os.environ"),
+        ("import sys\ndef test_x():\n    sys.path.insert(0, '/opt/x')\n",
+         "injects an unproven value into sys.path"),
+        ("import plugin_mod\ndef test_x():\n    plugin_mod.VALUE = '/etc'\n",
+         "injects an unproven value into the module attribute"),
+        ("from pathlib import Path\nfrom unittest.mock import MagicMock\n"
+         "REPO = Path(__file__).resolve().parent\n"
+         "def test_x():\n    fake = MagicMock()\n    fake.return_value = REPO\n",
+         "injects an unproven value into the attribute .return_value"),
+        ("import plugin_mod\ndef test_x():\n"
+         "    setattr(plugin_mod, 'VALUE', '/etc')\n",
+         "injects an unproven value into a module attribute"),
+        ("import subprocess\ndef test_x(tmp_path):\n"
+         "    subprocess.run(['git', 'status'], cwd=tmp_path,"
+         " env={'HOME': '/root'})\n", "injects an unproven env="),
+        ("import os\nimport subprocess\ndef test_x(tmp_path):\n"
+         "    env = dict(os.environ)\n    env['HOME'] = '/root'\n"
+         "    subprocess.run(['git', 'status'], cwd=tmp_path, env=env)\n",
+         "injects an unproven env="),
+        ("import subprocess\nfrom pathlib import Path\n"
+         "HERE = Path(__file__).resolve().parent\n"
+         "def test_x():\n    subprocess.run(['git', 'status'], cwd=HERE)\n",
+         "program without a rig cwd"),
+        # A cwd must be a temporary folder: None inherits the checkout's.
+        ("import subprocess\ndef test_x():\n"
+         "    subprocess.run(['git', 'status'], cwd=None)\n",
+         "program without a rig cwd"),
+        ("import subprocess\ndef test_x():\n"
+         "    subprocess.run(['git', 'status'], cwd='sub')\n",
+         "program without a rig cwd"),
+        ("import subprocess\ndef test_x():\n"
+         "    subprocess.run(['git', '-C', None, 'status'])\n",
+         "program without a rig cwd"),
+        # Processes: -c for any program, and a shell.
+        ("import subprocess\ndef test_x(tmp_path):\n"
+         "    subprocess.run(['bash', '-c', 'ls'], cwd=tmp_path)\n",
+         "inline code (-c)"),
+        ("import subprocess\ndef test_x(tmp_path):\n"
+         "    subprocess.run(['sh', '-ec', 'ls'], cwd=tmp_path)\n",
+         "inline code (-c)"),
+        ("import subprocess\ndef test_x(tmp_path):\n"
+         "    subprocess.run(['git', 'status'], cwd=tmp_path, shell=True)\n",
+         "shell launch"),
+        ("import subprocess\ndef test_x(tmp_path, flag):\n"
+         "    subprocess.run(['git', 'status'], cwd=tmp_path, shell=flag)\n",
+         "shell launch"),
+        # Strings at an I/O site: whitespace, or a token that starts at /.
+        ("import subprocess\ndef test_x(tmp_path):\n"
+         "    subprocess.run(['tool', '--root=/etc'], cwd=tmp_path)\n",
+         "unproven argv"),
+        ("def test_x(tmp_path):\n    (tmp_path / 'a b').write_text('x')\n",
+         "path method on an unproven receiver"),
+        # Imports by name must resolve.
+        ("import importlib\ndef test_x():\n"
+         "    importlib.import_module('no_such_module')\n",
+         "imports an unresolved module by name"),
+        ("import importlib\ndef test_x(name):\n    importlib.import_module(name)\n",
+         "imports an unresolved module by name"),
+        ("import pytest\ndef test_x():\n    pytest.importorskip('no_such_module')\n",
+         "imports an unresolved module by name"),
+        ("import pytest\ndef test_x():\n    pytest.main(['-q'])\n",
+         "loads or runs code"),
+        # A climb is unproven wherever it appears, even unused.
+        ("from pathlib import Path\nREPO = Path(__file__).resolve().parents[3]\n",
+         "climb climbs above the plugin"),
+        ("from pathlib import Path\n"
+         "ROOTS = [p for p in Path(__file__).resolve().parents]\n",
+         "climb walks every ancestor"),
+        # Nothing about an unparseable module can be proven.
+        ("def test_x(:\n", "unparseable module"),
+        # A checkout path with a computed part names a file no literal does.
+        ("from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+         "SUFFIX = '.md'\ndef test_x():\n    for name in ('a',):\n"
+         "        (HERE / 'data' / (name + SUFFIX)).read_text()\n",
+         "path method on an unproven receiver"),
+        ("from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+         "def test_x(stem):\n    return open(HERE / f'{stem}.md')\n",
+         "unproven open()"),
+        # A module object is not a location.
+        ("import inspect\nimport json\ndef test_x():\n"
+         "    return inspect.getsource(json)\n", "unproven inspect.getsource()"),
+    ])
+    def test_the_entry_point_is_unproven(self, core, tmp_path, source, kind):
+        sites = _classify(core, tmp_path, source)
+        assert any(kind in site for site in sites), sites
+
+    @pytest.mark.parametrize("source", [
+        "def test_x(monkeypatch, tmp_path):\n"
+        "    monkeypatch.setenv('X', str(tmp_path / 'home'))\n",
+        "def test_x(monkeypatch):\n    monkeypatch.setenv('X', '1')\n",
+        "from unittest.mock import MagicMock\ndef test_x(tmp_path):\n"
+        "    fake = MagicMock()\n    fake.return_value = tmp_path / 'x'\n"
+        "    fake.side_effect = None\n    fake.calls = [1, 'a']\n",
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.delenv('CLAUDE_PROJECT_DIR', raising=False)\n",
+        "def test_x(monkeypatch, name):\n    monkeypatch.delenv(name, raising=False)\n",
+        "import os\nfrom unittest.mock import patch\ndef test_x(tmp_path):\n"
+        "    with patch.dict(os.environ, {'X': str(tmp_path)}):\n        pass\n",
+        "import plugin_mod\ndef test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(plugin_mod, 'VALUE', lambda *a: None)\n",
+        "import plugin_mod\nfrom unittest.mock import MagicMock\n"
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(plugin_mod, 'VALUE', MagicMock(return_value=1))\n",
+        "import plugin_mod\ndef fake(*args):\n    return 0\n"
+        "def test_x(monkeypatch):\n    monkeypatch.setattr(plugin_mod, 'VALUE', fake)\n",
+        "import pytest\nimport plugin_mod\n@pytest.fixture\ndef home(tmp_path):\n"
+        "    return tmp_path / 'home'\n"
+        "def test_x(monkeypatch, home):\n    monkeypatch.setenv('HOME', str(home))\n",
+        "import os\nimport subprocess\ndef test_x(tmp_path):\n"
+        "    subprocess.run(['git', 'status'], cwd=tmp_path,\n"
+        "                   env={**os.environ, 'HOME': str(tmp_path)})\n",
+        "import os\ndef test_x():\n    os.environ.pop('X', None)\n",
+        "import ast\ndef test_x(node):\n"
+        "    for field in ('body', 'orelse'):\n        getattr(node, field, None)\n",
+        "import pytest\n@pytest.mark.parametrize('a', [1])\ndef test_x(a):\n"
+        "    with pytest.raises(ValueError):\n        raise ValueError(a)\n",
+        "import subprocess\ndef test_x():\n"
+        "    return subprocess.CalledProcessError, subprocess.PIPE\n",
+        "import importlib\ndef test_x():\n    importlib.import_module('plugin_mod')\n",
+        "import sys\nfrom pathlib import Path\n"
+        "HOOKS = Path(__file__).resolve().parents[1] / 'hooks'\n"
+        "sys.path.insert(0, str(HOOKS))\n",
+        # partial / map over a pure callable, getattr by a constant name.
+        "import functools\ndef test_x(xs, node):\n"
+        "    to_int = functools.partial(int, base=16)\n"
+        "    return to_int('ff'), list(map(str.upper, xs)), getattr(node, 'lineno')\n",
+        # json / re on in-memory strings.
+        "import json\nimport re\ndef test_x():\n"
+        "    return json.loads('{}'), re.match('a', 'a').group(0)\n",
+        # A cwd in a tempfile folder or a module fixture's tmp path.
+        "import subprocess\nimport tempfile\ndef test_x():\n"
+        "    with tempfile.TemporaryDirectory() as d:\n"
+        "        subprocess.run(['git', 'status'], cwd=d)\n",
+        "import pytest\nimport subprocess\n@pytest.fixture\ndef rig(tmp_path):\n"
+        "    return tmp_path / 'rig'\n"
+        "def test_x(rig):\n    subprocess.run(['git', 'status'], cwd=rig)\n",
+        # A file a scan of the checkout yields is under a scanner root.
+        "from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+        "def test_x():\n    for path in sorted(HERE.rglob('*.py')):\n"
+        "        path.read_text()\n",
+        # Every part a literal, through module-level names.
+        "from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+        "DATA = 'data'\nNAME = 'x.md'\n"
+        "def test_x():\n    return (HERE / DATA / NAME).read_text()\n",
+    ])
+    def test_the_safe_counterpart_is_confined(self, core, tmp_path, source):
+        assert _classify(core, tmp_path, source) == ()
+
+    def test_an_unparseable_production_module_is_a_climb(self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "broken.py", "def f(:\n")
+        assert core.ScanIndex(plugin).scan("hooks/broken.py").repo_reach == (
+            "0:unparseable module",)
+
+    def test_an_unparseable_conftest_makes_every_fixture_unproven(
+            self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "tests" / "conftest.py", "def f(:\n")
+        _write(plugin / "tests" / "test_uses.py",
+               "def test_x(anything):\n    assert anything\n")
+        view = core.ScanIndex(plugin).view("tests/test_uses.py")
+        assert view.unproven == (("tests/conftest.py::*",
+                                  ("0:unparseable conftest",)),)
+
+    def test_a_scan_anywhere_in_the_closure_is_recorded(self, core, tmp_path):
+        plugin = tmp_path / "repo" / "pact-plugin"
+        _write(plugin / "hooks" / "lister.py",
+               "def names(root):\n    return list(root.iterdir())\n")
+        _write(plugin / "tests" / "test_lists.py", "import lister\n")
+        _write(plugin / "tests" / "test_plain.py", "import plugin_mod\n")
+        _write(plugin / "hooks" / "plugin_mod.py", "VALUE = 1\n")
+        index = core.ScanIndex(plugin)
+        assert index.view("tests/test_lists.py").scans_tree
+        assert not index.view("tests/test_plain.py").scans_tree
+
+
+class TestTheTrioCarveOutOnTheRealIndex:
+    """The trio carve-out end to end: a real ScanIndex, gather_facts and
+    select, not a hand-built view."""
+
+    MODULE = "import fcntl\n\ndef test_ok():\n    assert {literal!r}\n"
+
+    def _run(self, core, tmp_path, literal):
+        repo, plugin, _ = _git_rig(tmp_path)
+        _write(repo / "CHANGELOG.md", "# changes\n")
+        (plugin / "tests" / "test_slow.py").write_text(
+            self.MODULE.format(literal=literal), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "rig")
+        base = _git(repo, "rev-parse", "HEAD")
+        (repo / "CHANGELOG.md").write_text("# changes\n\n- one\n",
+                                           encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "notes")
+        manifest = _facts_manifest(core)
+        changed = ["CHANGELOG.md"]
+        facts = core.gather_facts(repo, manifest, changed, base)
+        view = facts.views["tests/test_slow.py"]
+        return view, core.select(core.discover(repo), manifest, changed, "ok",
+                                 facts)
+
+    def test_a_test_naming_a_trio_file_comes_back_on_a_trio_change(
+            self, core, tmp_path):
+        view, result = self._run(core, tmp_path, "CHANGELOG.md")
+        assert view.trio_named
+        assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
+
+    def test_a_test_naming_none_stays_out_on_a_trio_change(self, core,
+                                                          tmp_path):
+        view, result = self._run(core, tmp_path, "unrelated")
+        assert not view.trio_named and not view.scans_tree
+        assert core.broad_reasons(view, core.ChangeFacts(
+            views={}, value_inert=frozenset(), conftest_verdicts={},
+            conftest_imported=frozenset())), "the rig is not broad"
+        assert result.added_back == ()
 
 
 class TestTheTwoN7ProbesAreBroad:
@@ -1693,10 +1992,10 @@ class TestBroadSelection:
 
     BROAD = ("tests/test_slow.py", ("3:unclassified import fcntl",))
 
-    def _views(self, core, trio_named=False):
+    def _views(self, core, trio_named=False, scans_tree=False):
         return {"tests/test_slow.py": _view(
             core, closure=("tests/test_slow.py",), unproven=(self.BROAD,),
-            trio_named=trio_named)}
+            trio_named=trio_named, scans_tree=scans_tree)}
 
     @pytest.mark.parametrize("changed", [
         "pact-plugin/hooks/unrelated.py", ".github/workflows/x.yml",
@@ -1719,6 +2018,18 @@ class TestBroadSelection:
                          facts={"views": self._views(core, trio_named=True)})
         assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
 
+    def test_the_trio_counts_when_the_closure_scans_a_tree(self, core):
+        """A scan can reach a trio file that no literal names."""
+        result = _select(core, changed=["README.md"],
+                         facts={"views": self._views(core, scans_tree=True)})
+        assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
+
+    def test_a_confined_scanning_exclusion_still_ignores_the_trio(self, core):
+        view = _view(core, closure=("tests/test_slow.py",), scans_tree=True)
+        result = _select(core, changed=list(core.BUMP_TRIO),
+                         facts={"views": {"tests/test_slow.py": view}})
+        assert result.added_back == ()
+
     def test_a_value_inert_bump_adds_nothing_back(self, core):
         path = "pact-plugin/.claude-plugin/plugin.json"
         result = _select(core, changed=[path], facts={
@@ -1733,6 +2044,21 @@ class TestBroadSelection:
         result = _select(core, changed=[".github/workflows/x.yml"], facts={
             "views": self._views(core), "reviewed": ("tests/test_slow.py",)})
         assert result.added_back == ()
+
+    @pytest.mark.parametrize("requested,added", [(True, True), (False, False)])
+    def test_a_fixture_review_extra_read_follows_the_request(
+            self, core, requested, added):
+        """A 'conftest::fixture' key is never a closure path; its reads
+        apply to the exclusions that request the fixture."""
+        key = "tests/conftest.py::store"
+        view = _view(core, closure=("tests/test_slow.py",),
+                     names=("store",) if requested else (),
+                     unproven=(((key, ("9:unproven open()",)),)))
+        result = _select(core, changed=["pact-plugin/tests/data/x.bin"], facts={
+            "views": {"tests/test_slow.py": view}, "reviewed": (key,),
+            "review_reads": ((key, ("pact-plugin/tests/data/**",)),)})
+        assert _reasons(result) == ([("tests/test_slow.py",
+                                      "review_extra_read")] if added else [])
 
     def test_extra_reads_add_a_reviewed_exclusion_back(self, core):
         result = _select(core, changed=["pact-plugin/tests/data/x.bin"], facts={
@@ -1826,7 +2152,10 @@ class TestFixtureReviews:
     def test_a_missing_function_has_no_digest(self, core):
         assert core.fixture_digest(self.CONFTEST, "absent") is None
 
-    def test_the_loader_requires_the_function(self, core, tmp_path):
+    def test_a_review_of_a_missing_function_or_module_degrades(
+            self, core, tmp_path):
+        """A deleted or renamed reviewed fixture or module does not stop the
+        loader: like a stale hash, the review just stops matching."""
         root, plugin, document = _build_rig(tmp_path)
         _write(plugin / "tests" / "conftest.py", self.CONFTEST)
         digest = core.fixture_digest(self.CONFTEST, "store")
@@ -1834,12 +2163,22 @@ class TestFixtureReviews:
             "tests/conftest.py::store": {"sha256": digest, "reason": "tmp only",
                                          "extra_reads": []},
             "tests/conftest.py::absent": {"sha256": digest, "reason": "x",
-                                          "extra_reads": []}}
-        with pytest.raises(core.ManifestError) as excinfo:
+                                          "extra_reads": []},
+            "tests/test_renamed_away.py": {"sha256": digest, "reason": "x",
+                                           "extra_reads": []}}
+        manifest = core.load_manifest(_write_manifest(root, document))
+        reviewed, _ = core.current_reviews(plugin, manifest)
+        assert reviewed == frozenset({"tests/conftest.py::store"})
+
+    @pytest.mark.parametrize("key", ["tests/conftest.py::", "tests/x.txt",
+                                     "tests/conftest.py::not-a-name"])
+    def test_a_malformed_review_key_is_still_an_error(self, core, tmp_path,
+                                                      key):
+        root, plugin, document = _build_rig(tmp_path)
+        document["reach_reviews"] = {key: {
+            "sha256": "0" * 64, "reason": "x", "extra_reads": []}}
+        with pytest.raises(core.ManifestError):
             core.load_manifest(_write_manifest(root, document))
-        rendered = "\n".join(excinfo.value.errors)
-        assert "no module-level function 'absent'" in rendered
-        assert "'store'" not in rendered
 
     def test_a_current_fixture_review_clears_only_that_fixture(
             self, core, tmp_path):

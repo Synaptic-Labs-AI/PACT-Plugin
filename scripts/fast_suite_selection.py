@@ -33,8 +33,11 @@ PATH DOMAINS (the single easiest thing to get wrong)
 from __future__ import annotations
 
 import ast
+import enum
 import fnmatch
+import functools
 import hashlib
+import importlib
 import json
 import re
 import subprocess
@@ -349,17 +352,21 @@ def _validate_reach_reviews(entries: object, plugin_root: Path,
         path_part, separator, function = (raw.partition("::")
                                           if isinstance(raw, str)
                                           else (raw, "", ""))
-        rel = _validate_data_path(path_part, field, plugin_root, errors)
+        # A reviewed module or fixture that was deleted or renamed is NOT an
+        # error here: like a stale hash, the review simply stops matching at
+        # selection, so its exclusion turns broad. The review contract
+        # reports it.
+        rel = _check_relative(path_part, field, errors)
         if rel is None:
             continue
+        if not rel.endswith(".py"):
+            errors.append(f"{field}: {rel!r} must end in .py")
+            continue
+        if _check_under(rel, field, plugin_root, errors) is None:
+            continue
         if separator:
-            try:
-                source = (plugin_root / rel).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                source = ""
-            if not function or fixture_digest(source, function) is None:
-                errors.append(f"{field}: {rel!r} has no module-level "
-                              f"function {function!r}")
+            if not function or not function.isidentifier():
+                errors.append(f"{field}: {function!r} is not a function name")
                 continue
             rel = f"{rel}::{function}"
         if not (rel.startswith("tests/") or _is_test_file(rel.split("::")[0])):
@@ -722,6 +729,8 @@ class FileScan:
     unproven: tuple[str, ...]
     dynamic_imports: tuple[str, ...]
     dynamic_fixtures: tuple[str, ...]
+    # Whether the module calls a directory scan, glob or walk.
+    scans: bool = False
 
 
 @dataclass(frozen=True)
@@ -742,6 +751,10 @@ class ExclusionView:
     # Whether a test-side literal names a bump-trio file; if so the trio is
     # not carved out for this exclusion.
     trio_named: bool = False
+    # Whether any module in the closure scans, globs or walks a directory;
+    # such a scan can reach a trio file no literal names, so the trio is not
+    # carved out either.
+    scans_tree: bool = False
 
 
 _EMPTY_SCAN = FileScan((), frozenset(), frozenset(), frozenset(), frozenset(),
@@ -1076,18 +1089,15 @@ def _module_anchors(tree: ast.Module, rel: str,
 def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
                 module_files: dict[str, str],
                 docstrings: set[int]) -> tuple[str, ...]:
-    """Evidence that this PRODUCTION module climbs out of the plugin.
+    """Evidence that a module climbs out of the plugin.
 
     Recorded as 'line:why': an anchored path that climbs above the plugin;
     an anchored climb (.parent, .parents[n], dirname) whose depth cannot be
     resolved; an anchored `.parents` used other than with a literal index
-    (a walk up to a marker). Any of these makes an exclusion broad.
+    (a walk up to a marker). Wherever it appears, assignments included, any
+    of these makes an exclusion broad: in production code as a climb, in
+    test-side code as an unproven site.
     """
-    test_side = rel.startswith("tests/") or _is_test_file(rel)
-    if test_side:
-        # Test-side reach is judged by the confinement rules, which prove
-        # every access instead of listing the shapes of a bad one.
-        return ()
     _, anchors, resolved = _module_anchors(tree, rel, module_files)
     depth = len(Path(rel).parts)
     evidence: list[str] = []
@@ -1275,33 +1285,107 @@ def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
 # whole exclusion BROAD. A new kind of access therefore defaults to broad
 # instead of slipping past a list of known shapes.
 
-# Imports that touch no file, process or environment.
+# Modules PROVEN pure: none of their public names reaches a file, a process,
+# the network, the environment or an import. A module that cannot meet that
+# proof is I/O (every use checked) or unlisted (an unclassified import, so
+# the exclusion is broad).
 _COMPUTE_MODULES = frozenset({
-    "__future__", "abc", "array", "ast", "asyncio", "base64", "binascii",
-    "bisect", "calendar", "codecs", "collections", "concurrent", "contextlib",
-    "copy", "csv", "dataclasses", "datetime", "decimal", "difflib", "dis",
-    "email", "enum", "errno", "fnmatch", "fractions", "functools", "hashlib",
-    "heapq", "hmac", "html", "hypothesis", "inspect", "itertools",
-    "json", "keyword", "locale", "math", "numbers", "operator", "posixpath",
-    "pprint", "pytest", "queue", "random", "re", "secrets", "shlex",
-    "signal", "stat", "statistics", "string", "struct", "textwrap",
-    "threading", "time", "traceback", "types", "typing",
-    "typing_extensions", "unicodedata", "unittest", "uuid", "warnings",
-    "weakref", "zlib",
+    "__future__", "abc", "array", "ast", "base64", "binascii", "bisect",
+    "calendar", "collections", "copy", "dataclasses", "datetime", "decimal",
+    "difflib", "enum", "errno", "fnmatch", "fractions", "functools",
+    "hashlib", "heapq", "hmac", "html", "itertools", "json", "keyword",
+    "math", "numbers", "operator", "pprint", "queue", "random", "re",
+    "secrets", "shlex", "stat", "statistics", "string", "struct",
+    "textwrap", "threading", "time", "types", "typing", "typing_extensions",
+    "unicodedata", "weakref", "zlib",
 })
-# Imports that can touch files, processes or the environment. Allowed, but
-# every call rooted at one of their names must pass confined values.
+# Modules with at least one name that can touch files, processes, the
+# environment or imports. Allowed, but every call needs confined values or a
+# place on _PURE_CALLABLES, and every other reference must be a constant, an
+# exception class or a listed safe name.
 _IO_MODULES = frozenset({
-    "glob", "importlib", "io", "os", "pathlib", "runpy", "shutil", "sqlite3",
-    "subprocess", "sys", "tempfile",
+    "asyncio", "codecs", "concurrent", "contextlib", "csv", "dis", "email",
+    "glob", "hypothesis", "importlib", "inspect", "io", "locale", "logging",
+    "os", "pathlib", "posixpath", "pytest", "runpy", "shutil", "signal",
+    "sqlite3", "subprocess", "sys", "tempfile", "traceback", "unittest",
+    "uuid", "warnings",
+})
+# Names in I/O modules proven to reach no location, by canonical dotted name.
+# A call to one passes whatever arguments it likes; a reference to one is
+# fine. A name ending in '.' covers everything under it.
+_PURE_CALLABLES = frozenset({
+    "pytest.raises", "pytest.skip", "pytest.fail", "pytest.xfail",
+    "pytest.param", "pytest.approx", "pytest.fixture", "pytest.warns",
+    "pytest.deprecated_call", "pytest.mark.", "pytest.MonkeyPatch.context",
+    "pytest.MonkeyPatch",
+    "unittest.TestCase", "unittest.IsolatedAsyncioTestCase", "unittest.skip",
+    "unittest.skipIf", "unittest.skipUnless", "unittest.expectedFailure",
+    "unittest.mock.Mock", "unittest.mock.MagicMock", "unittest.mock.AsyncMock",
+    "unittest.mock.NonCallableMock", "unittest.mock.NonCallableMagicMock",
+    "unittest.mock.PropertyMock", "unittest.mock.create_autospec",
+    "unittest.mock.call", "unittest.mock.sentinel", "unittest.mock.ANY",
+    "unittest.mock.DEFAULT", "unittest.mock.seal", "unittest.mock.mock_open",
+    "contextlib.contextmanager", "contextlib.asynccontextmanager",
+    "contextlib.suppress", "contextlib.ExitStack", "contextlib.AsyncExitStack",
+    "contextlib.nullcontext", "contextlib.closing",
+    "contextlib.redirect_stdout", "contextlib.redirect_stderr",
+    "asyncio.run", "asyncio.gather", "asyncio.sleep", "asyncio.wait_for",
+    "asyncio.wait", "asyncio.get_event_loop", "asyncio.new_event_loop",
+    "asyncio.set_event_loop", "asyncio.get_running_loop", "asyncio.Event",
+    "asyncio.Future", "asyncio.Queue", "asyncio.Lock", "asyncio.Semaphore",
+    "asyncio.create_task", "asyncio.ensure_future", "asyncio.iscoroutine",
+    "asyncio.iscoroutinefunction", "asyncio.timeout", "asyncio.shield",
+    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.wait",
+    "concurrent.futures.as_completed",
+    "inspect.signature", "inspect.Parameter", "inspect.Signature",
+    "inspect.isfunction", "inspect.iscoroutinefunction", "inspect.isclass",
+    "inspect.ismethod", "inspect.isgeneratorfunction", "inspect.unwrap",
+    "inspect.getattr_static", "inspect.getmembers", "inspect.isabstract",
+    "logging.getLogger", "logging.debug", "logging.info", "logging.warning",
+    "logging.error", "logging.exception", "logging.critical",
+    "logging.Logger", "logging.LogRecord", "logging.Handler",
+    "traceback.format_exc", "traceback.format_exception",
+    "traceback.format_exception_only",
+    "warnings.warn", "warnings.catch_warnings", "warnings.simplefilter",
+    "warnings.filterwarnings", "warnings.resetwarnings",
+    "uuid.uuid4", "uuid.UUID", "uuid.uuid3", "uuid.uuid5",
+    "codecs.encode", "codecs.decode", "codecs.lookup", "codecs.BOM_UTF8",
+    "signal.Signals", "signal.getsignal",
+    "subprocess.CompletedProcess", "subprocess.PIPE", "subprocess.DEVNULL",
+    "subprocess.STDOUT",
+    "csv.reader", "csv.writer", "csv.DictReader", "csv.DictWriter",
+    "pathlib.Path", "pathlib.PurePath", "pathlib.PurePosixPath",
+    "pathlib.PureWindowsPath",
+    "os.environ", "sys.path", "sys.argv", "sys.modules", "sys.flags",
+})
+# Names that load or run code by name or by path: unproven whatever their
+# arguments.
+_RUNS_CODE = frozenset({
+    "pytest.main", "unittest.main", "runpy.run_path", "runpy.run_module",
+    "importlib.reload", "importlib.__import__", "code.interact",
+})
+# Calls that import a module by its name: the name must be a literal that
+# resolves to a classified or plugin module.
+_IMPORT_BY_NAME = frozenset({
+    "importlib.import_module", "pytest.importorskip",
+})
+# Attribute-name routes to a method no rule sees.
+_ATTRIBUTE_GETTERS = frozenset({
+    "operator.methodcaller", "operator.attrgetter",
+})
+# Mock constructors: a value at an injection site when its own arguments are.
+_INJECTION_SAFE_CONSTRUCTORS = frozenset({
+    "unittest.mock.Mock", "unittest.mock.MagicMock", "unittest.mock.AsyncMock",
+    "unittest.mock.NonCallableMock", "unittest.mock.NonCallableMagicMock",
+    "unittest.mock.PropertyMock", "unittest.mock.create_autospec",
+    "unittest.mock.mock_open",
 })
 # In-memory stream constructors: their argument is data, not a location.
-_IN_MEMORY_STREAMS = frozenset({
-    "io.StringIO", "io.BytesIO", "StringIO", "BytesIO",
-})
-# Builtins that run code or read input: unproven whatever their arguments.
+_IN_MEMORY_STREAMS = frozenset({"io.StringIO", "io.BytesIO"})
+# Builtins that build or run code or read input: unproven whatever their
+# arguments.
 _ALWAYS_UNPROVEN_BUILTINS = frozenset({
-    "exec", "eval", "__import__", "breakpoint", "input",
+    "exec", "eval", "compile", "__import__", "breakpoint", "input",
 })
 _IO_BUILTINS = frozenset({
     "open", "exec", "eval", "compile", "__import__", "breakpoint", "input",
@@ -1312,38 +1396,57 @@ _TMP_FIXTURES = frozenset({
 # Attribute reads and calls on I/O modules that pass no location.
 _ZERO_ARG_CONFINED = frozenset({
     "os.sep", "os.pathsep", "os.linesep", "os.name", "os.environ.copy",
+    "os.environ", "os.devnull", "os.curdir",
     "sys.executable", "sys.platform", "sys.version_info", "sys.modules",
     "sys.maxsize", "sys.stdout", "sys.stderr", "sys.stdin",
     "tempfile.mkdtemp", "tempfile.mkstemp", "tempfile.TemporaryDirectory",
     "tempfile.NamedTemporaryFile", "tempfile.TemporaryFile",
-    "tempfile.gettempdir", "io.StringIO", "io.BytesIO", "StringIO", "BytesIO",
+    "tempfile.gettempdir", "io.StringIO", "io.BytesIO",
 })
 _TEMPFILE_RESULTS = frozenset({
     "mkdtemp", "mkstemp", "TemporaryDirectory", "NamedTemporaryFile",
     "TemporaryFile", "gettempdir",
 })
 _LOCATION_SOURCES = frozenset({
-    "Path.cwd", "Path.home", "os.getcwd", "os.path.expanduser", "os.getenv",
-    "os.environ.get",
+    "pathlib.Path.cwd", "pathlib.Path.home", "os.getcwd", "os.getcwdb",
+    "os.path.expanduser", "os.path.expandvars", "os.getenv", "os.getenvb",
+    "os.environ.get", "posixpath.expanduser", "posixpath.expandvars",
+})
+# Environment calls that only remove state.
+_ENV_SCRUBS = frozenset({
+    "os.environ.pop", "os.environ.clear", "os.unsetenv",
+})
+# Environment calls that write state: their values are injected.
+_ENV_WRITES = frozenset({
+    "os.environ.update", "os.environ.setdefault", "os.putenv",
 })
 _SUBPROCESS_CALLS = frozenset({
     "run", "check_output", "Popen", "check_call", "call",
 })
 # Process launches with no argv/cwd discipline: always unproven.
 _SHELL_CALL_PREFIXES = ("os.system", "os.popen", "os.exec", "os.spawn",
-                        "os.startfile", "os.posix_spawn")
+                        "os.startfile", "os.posix_spawn", "os.fork",
+                        "asyncio.create_subprocess", "pty.")
 # Keyword arguments of a subprocess call that carry data, not a location.
+# cwd= and env= are injection sites; shell=True is unproven; any other
+# keyword must be confined.
 _SUBPROCESS_DATA_KEYWORDS = frozenset({
     "input", "capture_output", "text", "timeout", "check", "encoding",
-    "errors", "stdout", "stderr", "universal_newlines", "env", "stdin",
-    "shell",
+    "errors", "stdout", "stderr", "universal_newlines", "stdin",
 })
+# monkeypatch methods that only remove state.
+_MONKEYPATCH_SCRUBS = frozenset({"delenv", "delattr", "delitem", "undo",
+                                 "context"})
+# mock.patch keywords that name a spec, not a value.
+_PATCH_SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "create",
+                                  "clear"})
 # Builtins and constructors a confined value may pass through.
 _PASSTHROUGH_NAMES = frozenset({
     "str", "Path", "PurePath", "len", "sorted", "list", "tuple", "dict",
     "set", "int", "bool", "repr", "range", "bytes", "frozenset", "enumerate",
     "zip", "min", "max", "any", "all", "isinstance", "True", "False", "None",
 })
+_TOKEN_SPLIT = re.compile(r"[\s=,;]")
 
 
 def _path_methods() -> frozenset[str]:
@@ -1370,9 +1473,68 @@ _PURE_STRING_METHODS = frozenset({
 })
 # Receivers whose methods are never file reads.
 _NON_FILE_RECEIVERS = frozenset({
-    "monkeypatch", "self", "cls", "mock", "pytest", "re", "json", "capsys",
+    "monkeypatch", "self", "cls", "mock", "re", "json", "capsys",
     "caplog", "request",
 })
+_MISSING = object()
+
+
+def _is_pure(canonical: str | None) -> bool:
+    return bool(canonical) and (canonical in _PURE_CALLABLES or any(
+        entry.endswith(".") and canonical.startswith(entry)
+        for entry in _PURE_CALLABLES))
+
+
+@functools.lru_cache(maxsize=None)
+def _io_object(canonical: str) -> object:
+    """The object a canonical name in an I/O module names, or _MISSING."""
+    parts = canonical.split(".")
+    for cut in range(len(parts), 0, -1):
+        try:
+            found: object = importlib.import_module(".".join(parts[:cut]))
+        except Exception:  # noqa: BLE001 - any import failure is "unknown"
+            continue
+        for attr in parts[cut:]:
+            found = getattr(found, attr, _MISSING)
+            if found is _MISSING:
+                return _MISSING
+        return found
+    return _MISSING
+
+
+def _inert_reference(canonical: str) -> bool:
+    """A reference (not a call) to an I/O-module name that reaches nothing:
+    a listed pure name, a plain constant or an exception class."""
+    if _is_pure(canonical) or canonical in _ZERO_ARG_CONFINED:
+        return True
+    found = _io_object(canonical)
+    if found is _MISSING:
+        return False
+    if isinstance(found, type) and issubclass(found, BaseException):
+        return True
+    return isinstance(found, (int, float, str, bytes, bool, type(None),
+                              tuple, frozenset, enum.Enum))
+
+
+# I/O-module names that are references to a location, not inert data.
+_LOCATION_DATA = frozenset({"sys.path", "sys.argv"})
+
+
+def _value_reference(canonical: str) -> bool:
+    """An I/O-module name a confined VALUE may carry: a listed constant, or
+    an inert reference that is not a string (sys.prefix, tempfile.tempdir
+    and their kind name real locations)."""
+    if canonical in _ZERO_ARG_CONFINED:
+        return True
+    if canonical in _LOCATION_DATA or not _inert_reference(canonical):
+        return False
+    return not isinstance(_io_object(canonical), (str, bytes, list))
+
+
+def _builtin_exception(name: str) -> bool:
+    import builtins
+    found = getattr(builtins, name, None)
+    return isinstance(found, type) and issubclass(found, BaseException)
 
 
 def _dotted(node: ast.AST) -> str:
@@ -1433,32 +1595,54 @@ def _names_repo_path(text: str, repo_root: Path, plugin_root: Path) -> bool:
         return False
 
 
+def _confined_string(value: str) -> bool:
+    """A string that can name only a relative location with no escape: no
+    leading '/' or '~' on any token, no '..' segment, no ':' and no
+    whitespace."""
+    if any(ch.isspace() for ch in value) or ":" in value:
+        return False
+    if ".." in value.split("/"):
+        return False
+    return not any(token.startswith(("/", "~"))
+                   for token in _TOKEN_SPLIT.split(value))
+
+
 def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
                          plugin_root: Path,
                          docstrings: set[int]) -> tuple[str, ...]:
     """'line:why' for every site that keeps this test-side module unproven.
 
-    (1) every import is COMPUTE, I/O or a plugin module;
-    (2) every call rooted at an I/O name passes only confined values; a
-        subprocess call needs a confined argv AND (a confined cwd= OR argv[0]
-        is sys.executable);
-    (3) every Path or file method has a confined receiver;
-    (4) no literal, literal concatenation or '<rev>:<path>' names a
+    (1) every import is COMPUTE, I/O or a plugin module, and every import by
+        name resolves to one;
+    (2) every call into an I/O module is a pure name or passes only confined
+        values; a subprocess needs a confined argv with no '-c' and no
+        shell, and a cwd= in a temporary folder unless it is a python run
+        with no operand;
+    (3) every Path or file method, called or referenced, has a confined
+        receiver, and no getattr or attribute getter names one by a value;
+    (4) every other reference to an I/O builtin or I/O-module name is inert;
+    (5) every value injected into process state (monkeypatch, mock.patch,
+        os.environ, sys.*, a module attribute, subprocess env= and cwd=)
+        is built from temporary folders and plain literals, or is a mock,
+        a lambda or a module-defined function or class whose results are;
+    (6) no literal, literal concatenation or '<rev>:<path>' names a
         repository path outside the plugin.
     Confined values: tmp fixtures and tempfile results, __file__ anchors
-    inside the plugin, relative literals with no '..', '~', ':' or leading
-    '/', sys.executable, and values built only from those.
+    inside the plugin (not at an injection site), confined strings,
+    sys.executable, and values built only from those.
     """
     repo_root = plugin_root.parent
     reasons: list[str] = []
     io_names = set(_IO_BUILTINS)
     subprocess_names: set[str] = set()
     other_modules: set[str] = set()
+    canonical_of: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 top = alias.name.split(".")[0]
                 bound = (alias.asname or alias.name).split(".")[0]
+                canonical_of[bound] = alias.name if alias.asname else top
                 if top in _COMPUTE_MODULES:
                     other_modules.add(bound)
                 elif top in _IO_MODULES:
@@ -1472,9 +1656,14 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
                         f"{node.lineno}:unclassified import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             if node.level:
+                other_modules.update(alias.asname or alias.name
+                                     for alias in node.names)
                 continue  # a relative import is a plugin module
             module = node.module or ""
             top = module.split(".")[0]
+            for alias in node.names:
+                canonical_of[alias.asname or alias.name] = (
+                    f"{module}.{alias.name}")
             if top in _COMPUTE_MODULES:
                 other_modules.update(alias.asname or alias.name
                                      for alias in node.names)
@@ -1489,6 +1678,31 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
                                      for alias in node.names)
             else:
                 reasons.append(f"{node.lineno}:unclassified import {module}")
+    module_bound = (io_names - _IO_BUILTINS) | other_modules
+    compute_names = {name for name in other_modules
+                     if canonical_of.get(name, name).split(".")[0]
+                     in _COMPUTE_MODULES}
+
+    def canonical(node: ast.AST) -> str | None:
+        """'os.path.join' for os.path.join, 'pathlib.Path.cwd' for Path.cwd
+        after `from pathlib import Path`; None when not rooted at a name."""
+        attrs: list[str] = []
+        while isinstance(node, ast.Attribute):
+            attrs.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        head = canonical_of.get(node.id, node.id)
+        return ".".join([head, *reversed(attrs)])
+
+    def root_name(node: ast.AST) -> ast.AST:
+        while isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        return node
+
+    def io_rooted(node: ast.AST) -> bool:
+        root = root_name(node)
+        return isinstance(root, ast.Name) and root.id in io_names
 
     _, _, resolved = _module_anchors(tree, rel, {})
     depth = len(Path(rel).parts)
@@ -1526,162 +1740,803 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
                 return True
         return False
 
-    def confined(expr: ast.AST, local: set[str]) -> bool:
+    def confined(expr: ast.AST, local: set[str], anchors: bool = True) -> bool:
+        """Built only from confined names and strings. With anchors=False a
+        __file__ anchor is not confined: an injected checkout path lets the
+        code under test read whatever it likes below it."""
         if climbs_out(expr):
             return False
+        inner_parents = {id(child): node for node in ast.walk(expr)
+                         for child in ast.iter_child_nodes(node)}
         for sub in ast.walk(expr):
+            if isinstance(sub, (ast.Name, ast.Attribute)) and io_rooted(sub):
+                parent = inner_parents.get(id(sub))
+                if not ((isinstance(parent, ast.Attribute)
+                         and parent.value is sub)
+                        or (isinstance(parent, ast.Call)
+                            and parent.func is sub)):
+                    # A value taken from an I/O module, not called: only a
+                    # name proven to carry no location.
+                    canon = canonical(sub)
+                    if canon is None or not _value_reference(canon):
+                        return False
             if isinstance(sub, ast.Name):
-                if (sub.id in local
-                        or sub.id in anchored_inside or sub.id == "__file__"
-                        or sub.id in _PASSTHROUGH_NAMES):
+                if sub.id in local or sub.id in _PASSTHROUGH_NAMES:
+                    continue
+                if anchors and (sub.id in anchored_inside
+                                or sub.id == "__file__"):
                     continue
                 if sub.id in io_names:
-                    continue  # judged where it is called
-                return False
+                    continue  # judged where it is called or referenced
+                if sub.id in compute_names:
+                    parent = inner_parents.get(id(sub))
+                    if (isinstance(parent, ast.Attribute)
+                            and parent.value is sub) or (
+                            isinstance(parent, ast.Call)
+                            and parent.func is sub):
+                        continue  # json.dumps(...): data from data
+                return False  # a bare module object is not a location
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                value = sub.value
-                if (value.startswith("/") or value.startswith("~")
-                        or ".." in value.split("/") or ":" in value):
+                if not _confined_string(sub.value):
                     return False
             if isinstance(sub, ast.Attribute) and sub.attr == "__file__":
                 return False
+        if not anchors:
+            return True
+        scope = scope_of.get(id(expr), tree)
+        tmp = tmp_locals.get(id(scope), set())
+        if any(isinstance(sub, ast.Name) and (
+                sub.id in anchored_inside or sub.id == "__file__"
+                or (sub.id in local and sub.id not in tmp))
+               for sub in ast.walk(expr)):
+            # A checkout path: the selector finds the file it names only from
+            # the literals it is built from, so every part must be one.
+            return resolvable(expr, local, scope)
         return True
 
-    scopes: list[ast.AST] = [
-        node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    module_body = [statement for statement in tree.body
-                   if not isinstance(statement, (ast.FunctionDef,
-                                                 ast.AsyncFunctionDef,
-                                                 ast.ClassDef))]
-    scopes.append(ast.Module(body=module_body, type_ignores=[]))
-    # A nested function sees its enclosing function's confined names.
+    def resolvable(expr: ast.AST, local: set[str], scope: ast.AST,
+                   depth: int = 0) -> bool:
+        """A checkout path built from the anchor and literal parts only: no
+        part computed by concatenation, formatting or a call."""
+        if depth > 24:
+            return False
+        tmp = tmp_locals.get(id(scope), set())
+        if isinstance(expr, ast.Constant):
+            return isinstance(expr.value, (str, int))
+        if isinstance(expr, ast.Name):
+            if (expr.id == "__file__" or expr.id in anchored_inside
+                    or (expr.id in local and expr.id not in tmp)):
+                return True  # the anchor, or a name whose binding was judged
+            return literal_strings(expr, scope) is not None
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Div):
+            return (resolvable(expr.left, local, scope, depth + 1)
+                    and resolvable(expr.right, local, scope, depth + 1))
+        if isinstance(expr, (ast.BinOp, ast.JoinedStr)):
+            return _literal_string(expr) is not None
+        if isinstance(expr, ast.Subscript) and isinstance(
+                expr.value, ast.Attribute) and expr.value.attr == "parents":
+            return resolvable(expr.value.value, local, scope, depth + 1)
+        if isinstance(expr, ast.Attribute) and expr.attr in ("parent",
+                                                              "parents"):
+            return resolvable(expr.value, local, scope, depth + 1)
+        if isinstance(expr, ast.Call):
+            func = expr.func
+            canon = canonical(func) or ""
+            arguments = [*expr.args, *(k.value for k in expr.keywords)]
+            if _is_scan_call(expr):
+                # What a scan of a checkout directory yields is under a
+                # scanner root, which the scanned-tree rule already covers.
+                receiver = (expr.args[0] if canon.startswith(("os.", "glob."))
+                            and expr.args else func.value
+                            if isinstance(func, ast.Attribute) else None)
+                return receiver is not None and resolvable(
+                    receiver, local, scope, depth + 1)
+            if isinstance(func, ast.Name) and func.id in (
+                    "sorted", "list", "tuple", "set", "reversed",
+                    "frozenset") and len(expr.args) == 1:
+                return resolvable(expr.args[0], local, scope, depth + 1)
+            if (isinstance(func, ast.Name) and func.id in ("str", "Path",
+                                                           "PurePath")) or (
+                    canon in ("pathlib.Path", "pathlib.PurePath",
+                              "os.path.join", "os.path.dirname",
+                              "os.path.abspath", "os.path.realpath",
+                              "os.path.normpath", "os.fspath")):
+                return all(resolvable(argument, local, scope, depth + 1)
+                           for argument in arguments)
+            if isinstance(func, ast.Attribute) and func.attr in (
+                    "resolve", "absolute", "joinpath", "with_name",
+                    "with_suffix", "as_posix"):
+                return resolvable(func.value, local, scope, depth + 1) and all(
+                    resolvable(argument, local, scope, depth + 1)
+                    for argument in arguments)
+        return False
+
+    # Every function in the module, by name, for injected callables.
+    defs: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            defs.setdefault(node.name, node)
+    fixture_defs = {name for name, node in defs.items()
+                    if isinstance(node, (ast.FunctionDef,
+                                         ast.AsyncFunctionDef))
+                    and any(_dotted(d.func if isinstance(d, ast.Call) else d)
+                            .endswith("fixture")
+                            for d in node.decorator_list)}
+
+    # Scopes: the module (everything outside a function, class bodies
+    # included) and each function. One pass records each node's innermost
+    # scope and each function's enclosing function.
+    scope_of: dict[int, ast.AST] = {}
+    nodes_by_scope: dict[int, list[ast.AST]] = {id(tree): []}
     enclosing: dict[int, ast.AST] = {}
-    for outer in scopes[:-1]:
-        for inner in ast.walk(outer):
-            if inner is not outer and isinstance(
-                    inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                enclosing.setdefault(id(inner), outer)
+    scopes: list[ast.AST] = [tree]
+    stack: list[tuple[ast.AST, ast.AST]] = [(tree, tree)]
+    while stack:
+        node, scope = stack.pop()
+        scope_of[id(node)] = scope
+        nodes_by_scope[id(scope)].append(node)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if scope is not tree:
+                    enclosing[id(child)] = scope
+                scopes.append(child)
+                nodes_by_scope[id(child)] = []
+                stack.append((child, child))
+            else:
+                stack.append((child, scope))
+    bindings_cache: dict[int, dict[str, list[ast.AST | None]]] = {}
+
+    def bindings_of(scope: ast.AST) -> dict[str, list[ast.AST | None]]:
+        if id(scope) not in bindings_cache:
+            bindings_cache[id(scope)] = bindings(nodes_by_scope[id(scope)])
+        return bindings_cache[id(scope)]
+
+    module_scope = tree
+
+    def sequence_strings(expr: ast.AST) -> list[str] | None:
+        """The strings a literal tuple or list (or a module-level name bound
+        only to one) holds."""
+        if isinstance(expr, ast.Name):
+            values = bindings_of(module_scope).get(expr.id, ())
+            if len(values) != 1 or values[0] is None:
+                return None
+            expr = values[0]
+        if not isinstance(expr, (ast.Tuple, ast.List)):
+            return None
+        items = [_str_constant(element) for element in expr.elts]
+        return None if any(item is None for item in items) else items
+
+    def literal_strings(expr: ast.AST, scope: ast.AST) -> list[str] | None:
+        """Every string `expr` can be: a literal, or a name bound only by a
+        loop over a literal sequence. None when any value is computed."""
+        text = _str_constant(expr)
+        if text is not None:
+            return [text]
+        if not isinstance(expr, ast.Name):
+            return None
+        owner = scope if expr.id in bindings_of(scope) else module_scope
+        values = bindings_of(owner).get(expr.id, ())
+        loops = [inner for inner in nodes_by_scope[id(owner)]
+                 if isinstance(inner, (ast.For, ast.comprehension))
+                 and isinstance(inner.target, ast.Name)
+                 and inner.target.id == expr.id]
+        if not values:
+            return None
+        iterators = {id(loop.iter) for loop in loops}
+        found: list[str] = []
+        for value in values:
+            items = (sequence_strings(value) if value is not None
+                     and id(value) in iterators
+                     else [_str_constant(value)] if value is not None
+                     and _str_constant(value) is not None else None)
+            if items is None:
+                return None
+            found += items
+        return found
+
+    def bindings(nodes: list[ast.AST]) -> dict[str, list[ast.AST | None]]:
+        """Every value bound to, or written into, each local name. None is a
+        value no rule can judge (an augmented or unpacked write)."""
+        found: dict[str, list[ast.AST | None]] = {}
+
+        def bind(target: ast.AST, value: ast.AST | None) -> None:
+            if isinstance(target, ast.Name):
+                found.setdefault(target.id, []).append(value)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for element in target.elts:
+                    bind(element, None)
+            elif isinstance(target, ast.Starred):
+                bind(target.value, None)
+            elif isinstance(target, ast.Subscript) and isinstance(
+                    target.value, ast.Name):
+                # env["X"] = value writes into the name's value.
+                found.setdefault(target.value.id, []).append(value)
+
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(
+                            node.value, (ast.Tuple, ast.List)) and len(
+                            target.elts) == len(node.value.elts):
+                        for element, value in zip(target.elts,
+                                                  node.value.elts):
+                            bind(element, value)
+                    elif isinstance(target, (ast.Tuple, ast.List)):
+                        for element in ast.walk(target):
+                            if isinstance(element, ast.Name):
+                                found.setdefault(element.id, []).append(
+                                    node.value)
+                    else:
+                        bind(target, node.value)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                bind(node.target, node.value)
+            elif isinstance(node, ast.AugAssign):
+                bind(node.target, node.value)
+            elif isinstance(node, ast.NamedExpr):
+                bind(node.target, node.value)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                for element in ast.walk(node.target):
+                    if isinstance(element, ast.Name):
+                        found.setdefault(element.id, []).append(node.iter)
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        for element in ast.walk(item.optional_vars):
+                            if isinstance(element, ast.Name):
+                                found.setdefault(element.id, []).append(
+                                    item.context_expr)
+            elif (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.attr in ("update", "setdefault", "append",
+                                           "extend", "insert", "add")):
+                # env.update({...}) writes into the name's value.
+                for value in [*node.args, *(k.value for k in node.keywords)]:
+                    found.setdefault(node.func.value.id, []).append(value)
+        return found
+
+    def solve(scope: ast.AST, seed: set[str], anchors: bool,
+              inherited: set[str]) -> set[str]:
+        """The names every binding of which is confined: a greatest fixed
+        point, so a name built from itself (p = p / 'x') stays confined."""
+        bound = {name: list(values)
+                 for name, values in bindings_of(scope).items()}
+        for name in params(scope):
+            if name not in seed and name in bound:
+                bound[name].append(None)  # the caller's value
+        candidates = set(bound) | seed
+        while True:
+            names = candidates | inherited
+            drop = {name for name in candidates - seed
+                    if any(value is None or not confined(value, names,
+                                                         anchors)
+                           for value in bound.get(name, ()))}
+            # A seeded tmp name rebound to something else is not confined.
+            drop |= {name for name in seed & set(bound)
+                     if any(value is None or not confined(value, names,
+                                                          anchors)
+                            for value in bound[name])}
+            if not drop:
+                return names
+            candidates -= drop
+
     final_locals: dict[int, set[str]] = {}
+    tmp_locals: dict[int, set[str]] = {}
+
+    def params(scope: ast.AST) -> list[str]:
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda)):
+            return []
+        arguments = scope.args
+        names = [arg.arg for arg in (*arguments.posonlyargs, *arguments.args,
+                                     *arguments.kwonlyargs)]
+        names += [arg.arg for arg in (arguments.vararg, arguments.kwarg)
+                  if arg is not None]
+        return names
+
+    tmp_fixture_cache: dict[str, bool] = {}
+
     for scope in scopes:
-        nodes = list(ast.walk(scope))
-        local: set[str] = set()
         parent = enclosing.get(id(scope))
         while parent is not None and id(parent) not in final_locals:
             parent = enclosing.get(id(parent))
-        if parent is not None:
-            local |= final_locals[id(parent)]
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            local |= {arg.arg for arg in scope.args.args
-                      if arg.arg in _TMP_FIXTURES}
-        for _ in range(3):  # bindings built from confined values
-            for node in nodes:
-                targets: list[ast.AST] = []
-                if isinstance(node, (ast.Assign, ast.AnnAssign)) and getattr(
-                        node, "value", None) is not None and confined(
-                            node.value, local):
-                    targets = (node.targets if isinstance(node, ast.Assign)
-                               else [node.target])
-                elif isinstance(node, (ast.For, ast.comprehension)) and confined(
-                        node.iter, local):
-                    targets = [node.target]
-                elif isinstance(node, (ast.With, ast.AsyncWith)):
-                    targets = [item.optional_vars for item in node.items
-                               if item.optional_vars is not None
-                               and confined(item.context_expr, local)]
-                elif (isinstance(node, ast.Call)
-                        and _call_name(node) in _TEMPFILE_RESULTS):
-                    continue
-                for target in targets:
-                    local.update(name.id for name in ast.walk(target)
-                                 if isinstance(name, ast.Name))
-        final_locals[id(scope)] = local
-        for node in nodes:
+        if parent is None and scope is not module_scope:
+            parent = module_scope  # a module-level name every binding of
+            # which is confined is confined inside functions too
+        inherited = final_locals[id(parent)] if parent is not None else set()
+        inherited_tmp = tmp_locals[id(parent)] if parent is not None else set()
+        seed = {name for name in params(scope) if name in _TMP_FIXTURES}
+        tmp_locals[id(scope)] = solve(scope, seed, False, inherited_tmp)
+        final_locals[id(scope)] = solve(scope, seed, True, inherited)
+
+
+    def returns_injectable(name: str, depth: int) -> bool:
+        """A module-defined function or class whose results (returns,
+        yields, class-level values) are injectable."""
+        node = defs.get(name)
+        if node is None or depth > 4:
+            return False
+        if isinstance(node, ast.ClassDef):
+            values = [statement.value for statement in node.body
+                      if isinstance(statement, (ast.Assign, ast.AnnAssign))
+                      and statement.value is not None]
+            methods = [statement.name for statement in node.body
+                       if isinstance(statement, (ast.FunctionDef,
+                                                 ast.AsyncFunctionDef))]
+            local = set()
+            return all(injectable(value, local, depth + 1) for value in values
+                       ) and all(returns_injectable_def(defs_in(node, method),
+                                                        depth + 1)
+                                 for method in methods)
+        return returns_injectable_def(node, depth)
+
+    def defs_in(cls: ast.ClassDef, name: str) -> ast.AST:
+        for statement in cls.body:
+            if getattr(statement, "name", None) == name:
+                return statement
+        return cls
+
+    def returns_injectable_def(node: ast.AST, depth: int) -> bool:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        # The function's own arguments are the caller's values, passed
+        # through; anything it builds itself must be injectable.
+        local = tmp_locals.get(id(node), set()) | set(params(node))
+        for inner in ast.walk(node):
+            if isinstance(inner, (ast.Return, ast.Yield, ast.YieldFrom)) and (
+                    inner.value is not None
+                    and not injectable(inner.value, local, depth + 1)):
+                return False
+        return True
+
+    def tmp_fixture(name: str) -> bool:
+        """A fixture defined in this module whose results are injectable."""
+        if name not in tmp_fixture_cache:
+            tmp_fixture_cache[name] = False
+            tmp_fixture_cache[name] = (name in fixture_defs
+                                       and returns_injectable(name, 0))
+        return tmp_fixture_cache[name]
+
+    def injectable(expr: ast.AST, local: set[str], depth: int = 0) -> bool:
+        """A value that cannot hand the code under test a real location."""
+        if depth > 6:
+            return False
+        if isinstance(expr, ast.Lambda):
+            return injectable(expr.body, local | set(params(expr)), depth + 1)
+        if isinstance(expr, ast.Name):
+            if expr.id in local or expr.id in ("True", "False", "None"):
+                return True
+            if expr.id in defs:
+                return returns_injectable(expr.id, depth + 1)
+            if _builtin_exception(expr.id) or expr.id in _PASSTHROUGH_NAMES:
+                return True
+            canon = canonical(expr)
+            return (expr.id in io_names and canon is not None
+                    and (_is_pure(canon) or _inert_reference(canon)))
+        if isinstance(expr, ast.Call):
+            canon = canonical(expr.func)
+            arguments = [*expr.args, *(keyword.value
+                                       for keyword in expr.keywords)]
+            if canon in _IN_MEMORY_STREAMS:
+                return True
+            if (canon in _INJECTION_SAFE_CONSTRUCTORS
+                    or (isinstance(expr.func, ast.Name)
+                        and (expr.func.id in defs
+                             or _builtin_exception(expr.func.id)))):
+                if (isinstance(expr.func, ast.Name) and expr.func.id in defs
+                        and not returns_injectable(expr.func.id, depth + 1)):
+                    return False
+                return all(injectable(argument, local, depth + 1)
+                           for argument in arguments)
+        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+            return all(injectable(element, local, depth + 1)
+                       for element in expr.elts)
+        if isinstance(expr, ast.Dict):
+            return all(injectable(part, local, depth + 1)
+                       for part in [*expr.keys, *expr.values]
+                       if part is not None)
+        if isinstance(expr, ast.Starred):
+            return injectable(expr.value, local, depth + 1)
+        return confined(expr, local, anchors=False)
+
+    def judge_injection(node: ast.AST, values: list[ast.AST], what: str,
+                        local: set[str], anchors_ok: bool = False) -> None:
+        for value in values:
+            ok = (confined(value, local_any(node), True) if anchors_ok
+                  else injectable(value, local))
+            if not ok:
+                reasons.append(f"{node.lineno}:injects an unproven value "
+                               f"into {what}")
+                return
+
+    def local_any(node: ast.AST) -> set[str]:
+        return final_locals.get(id(scope_of.get(id(node))), set())
+
+    def local_tmp(node: ast.AST) -> set[str]:
+        scope = scope_of.get(id(node))
+        names = set(tmp_locals.get(id(scope), set()))
+        names |= {name for name in params(scope) if tmp_fixture(name)}
+        return names
+
+    def monkeypatch_receiver(func: ast.AST) -> bool:
+        if not isinstance(func, ast.Attribute):
+            return False
+        base = root_name(func.value)
+        if isinstance(base, ast.Name) and base.id == "monkeypatch":
+            return True
+        if isinstance(base, ast.Name):
+            for value in bindings_of(scope_of.get(id(func), tree)).get(
+                    base.id, ()):
+                if value is not None and isinstance(value, ast.Call) and (
+                        (canonical(value.func) or "").endswith(
+                            ("MonkeyPatch.context", "MonkeyPatch"))):
+                    return True
+        return False
+
+    def injection_site(node: ast.Call) -> tuple[list[ast.AST], str,
+                                                bool] | None:
+        """(values, what, anchors_ok) when this call writes process state."""
+        func = node.func
+        canon = canonical(func) or ""
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        if monkeypatch_receiver(func):
+            method = func.attr
+            if method in _MONKEYPATCH_SCRUBS:
+                return [], "", False
+            if method == "setattr":
+                positional = (node.args[1:2] if node.args and _str_constant(
+                    node.args[0]) is not None else node.args[2:3])
+                return ([*positional, *([keywords["value"]]
+                                        if "value" in keywords else [])],
+                        "monkeypatch.setattr", False)
+            if method == "setenv":
+                return ([*node.args[1:2], *[v for k, v in keywords.items()
+                                            if k == "value"]],
+                        "monkeypatch.setenv", False)
+            if method == "setitem":
+                return ([*node.args[2:3], *[v for k, v in keywords.items()
+                                            if k == "value"]],
+                        "monkeypatch.setitem", False)
+            if method == "syspath_prepend":
+                return list(node.args), "sys.path", True
+            if method == "chdir":
+                return None  # judged by the working-directory rule
+            return ([*node.args, *keywords.values()],
+                    f"monkeypatch.{method}", False)
+        if canon == "unittest.mock.patch" or canon.startswith(
+                "unittest.mock.patch."):
+            kind = canon.rsplit(".", 1)[-1]
+            skip = 2 if kind == "object" else 1
+            if kind in ("stopall", "stop"):
+                return [], "", False
+            return ([*node.args[skip:],
+                     *[value for key, value in keywords.items()
+                       if key not in _PATCH_SPEC_KEYWORDS]],
+                    f"mock.{kind if kind != 'patch' else 'patch'}", False)
+        if canon in _ENV_SCRUBS:
+            return [], "", False
+        if canon in _ENV_WRITES:
+            positional = (list(node.args) if canon == "os.environ.update"
+                          else list(node.args[1:]))
+            return [*positional, *keywords.values()], "os.environ", False
+        if canon.startswith("sys.path."):
+            return [*node.args, *keywords.values()], "sys.path", True
+        if (isinstance(func, ast.Name) and func.id == "setattr"
+                and len(node.args) >= 3
+                and isinstance(root_name(node.args[0]), ast.Name)
+                and root_name(node.args[0]).id in module_bound):
+            return [node.args[2]], "a module attribute", False
+        return None
+
+    # Where a reference to an I/O name is not a use: annotations, the type
+    # positions of isinstance/issubclass and except, and the module or
+    # object that a patch or setattr targets.
+    exempt: set[int] = set()
+    for node in ast.walk(tree):
+        subtrees: list[ast.AST] = []
+        if isinstance(node, ast.arg) and node.annotation is not None:
+            subtrees.append(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                node.returns is not None):
+            subtrees.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            subtrees.append(node.annotation)
+        elif isinstance(node, ast.ExceptHandler) and node.type is not None:
+            subtrees.append(node.type)
+        elif isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else ""
+            if name in ("isinstance", "issubclass") and len(node.args) > 1:
+                subtrees.append(node.args[1])
+            if name in ("setattr", "delattr", "hasattr") and node.args:
+                subtrees.append(node.args[0])
+            canon = canonical(node.func) or ""
+            if (monkeypatch_receiver(node.func)
+                    and node.func.attr in ("setattr", "delattr", "setitem",
+                                           "delitem") and node.args):
+                subtrees.append(node.args[0])
+            if canon in ("unittest.mock.patch.object",
+                         "unittest.mock.patch.dict",
+                         "unittest.mock.patch.multiple") and node.args:
+                subtrees.append(node.args[0])
+        for subtree in subtrees:
+            exempt.update(id(inner) for inner in ast.walk(subtree))
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    bound_anywhere = {node.id for node in ast.walk(tree)
+                      if isinstance(node, ast.Name)
+                      and isinstance(node.ctx, (ast.Store, ast.Del))}
+    bound_anywhere |= {node.arg for node in ast.walk(tree)
+                       if isinstance(node, ast.arg)}
+    bound_anywhere |= set(defs)
+
+    def receiver_proven(receiver: ast.AST, local: set[str]) -> bool:
+        base = receiver
+        while isinstance(base, (ast.Attribute, ast.Subscript, ast.Call)):
+            base = base.func if isinstance(base, ast.Call) else base.value
+        if isinstance(base, ast.Name) and (
+                base.id in other_modules or base.id in _NON_FILE_RECEIVERS):
+            return True
+        if isinstance(base, ast.Constant):
+            return True  # a literal string's method
+        return confined(receiver, local)
+
+    # (4) and (3): references that are not calls.
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Name, ast.Attribute)) or not isinstance(
+                node.ctx, ast.Load) or id(node) in exempt:
+            continue
+        parent = parents.get(id(node))
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            continue  # part of a longer name
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue  # a call, judged below
+        if isinstance(node, ast.Name):
+            if node.id in _IO_BUILTINS and node.id not in bound_anywhere:
+                reasons.append(f"{node.lineno}:references the I/O builtin "
+                               f"{node.id}")
+            elif node.id == "__builtins__":
+                reasons.append(f"{node.lineno}:references __builtins__")
+            elif node.id in io_names and node.id not in _IO_BUILTINS:
+                canon = canonical(node) or node.id
+                if not _inert_reference(canon):
+                    reasons.append(f"{node.lineno}:references the I/O name "
+                                   f"{canon}")
+            continue
+        if io_rooted(node):
+            canon = canonical(node)
+            if canon is None or not _inert_reference(canon):
+                reasons.append(f"{node.lineno}:references the I/O name "
+                               f"{canon or _dotted(node)}")
+            continue
+        if node.attr in _PATH_METHODS and node.attr not in _PURE_STRING_METHODS:
+            if not receiver_proven(node.value, local_any(node)):
+                reasons.append(f"{node.lineno}:references a path method on an "
+                               f"unproven receiver .{node.attr}")
+
+    # (5) assignments that write process state.
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            continue
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target])
+        if node.value is None:
+            continue
+        for target in targets:
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Subscript) and canonical(
+                        sub.value) == "os.environ":
+                    judge_injection(node, [node.value], "os.environ",
+                                    local_tmp(node))
+                elif isinstance(sub, ast.Attribute) and isinstance(
+                        root_name(sub), ast.Name) and root_name(
+                        sub).id in module_bound:
+                    canon = canonical(sub) or ""
+                    judge_injection(node, [node.value],
+                                    f"the module attribute {canon}",
+                                    local_tmp(node),
+                                    anchors_ok=canon.startswith("sys.path"))
+                elif sub is target and isinstance(sub, ast.Attribute):
+                    # fake.return_value = REPO: a mock's attributes reach
+                    # the code under test once it is patched in.
+                    judge_injection(node, [node.value],
+                                    f"the attribute .{sub.attr}",
+                                    local_tmp(node))
+
+    def rig_path(expr: ast.AST, tmp: set[str], depth: int = 0) -> bool:
+        """A working directory proven to be a temporary folder: injectable
+        AND rooted at a tmp fixture, a tempfile result or a name bound only
+        to one. None (inherit the checkout's cwd), a bare literal or any
+        other value is not a rig."""
+        return injectable(expr, tmp) and tmp_rooted(expr, depth)
+
+    def tmp_rooted(expr: ast.AST, depth: int = 0) -> bool:
+        if depth > 8:
+            return False
+        for sub in ast.walk(expr):
+            if isinstance(sub, ast.Name):
+                if sub.id in _TMP_FIXTURES:
+                    return True
+                if tmp_fixture(sub.id) and all(
+                        inner.value is not None
+                        and tmp_rooted(inner.value, depth + 1)
+                        for inner in ast.walk(defs[sub.id])
+                        if isinstance(inner, (ast.Return, ast.Yield))):
+                    return True  # a module fixture that returns a tmp path
+                scope = scope_of.get(id(sub), tree)
+                owner = (scope if sub.id in bindings_of(scope)
+                         else module_scope)
+                values = bindings_of(owner).get(sub.id, ())
+                if values and all(value is not None
+                                  and tmp_rooted(value, depth + 1)
+                                  for value in values):
+                    return True
+            if isinstance(sub, (ast.Call, ast.Attribute)):
+                target = sub.func if isinstance(sub, ast.Call) else sub
+                if (canonical(target) or "").startswith("tempfile."):
+                    return True
+        return False
+
+    def judge_subprocess(node: ast.Call, dotted: str, local: set[str],
+                         tmp: set[str]) -> None:
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        shell = keywords.get("shell")
+        if shell is not None and not (isinstance(shell, ast.Constant)
+                                      and shell.value is False):
+            reasons.append(f"{node.lineno}:shell launch {dotted}()")
+            return
+        argv = node.args[0] if node.args else keywords.get("args")
+        elements = (argv.elts if isinstance(argv, (ast.List, ast.Tuple))
+                    else None)
+        if elements is not None and any(
+                re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", _str_constant(item) or "")
+                for item in elements):
+            reasons.append(f"{node.lineno}:inline code (-c) {dotted}()")
+            return
+        argv_ok = argv is not None and (
+            all(confined(item, local) for item in elements)
+            if elements is not None else confined(argv, local))
+        if not argv_ok:
+            reasons.append(f"{node.lineno}:unproven argv {dotted}()")
+            return
+        if "env" in keywords and not injectable(keywords["env"], tmp):
+            reasons.append(f"{node.lineno}:injects an unproven env= "
+                           f"{dotted}()")
+            return
+        for key, value in keywords.items():
+            if key in _SUBPROCESS_DATA_KEYWORDS or key in ("env", "cwd",
+                                                           "shell", "args"):
+                continue
+            if key is None or not confined(value, local):
+                reasons.append(f"{node.lineno}:unproven keyword {key}= "
+                               f"{dotted}()")
+                return
+        python = bool(elements) and canonical(elements[0]) == "sys.executable"
+        # A python run with no script or module operand (only options such as
+        # --version) reads nothing relative to the cwd.
+        python_without_operand = python and all(
+            (_str_constant(item) or "").startswith("-")
+            for item in elements[1:])
+        cwd_ok = "cwd" in keywords and rig_path(keywords["cwd"], tmp)
+        if elements and not cwd_ok:
+            # `git -C <rig>` runs in the rig just like cwd=.
+            for flag, value in zip(elements, elements[1:]):
+                if (_str_constant(flag) == "-C"
+                        and rig_path(value, tmp)):
+                    cwd_ok = True
+        if not (cwd_ok or python_without_operand):
+            reasons.append(f"{node.lineno}:program without a rig cwd "
+                           f"{dotted}()")
+
+    for scope in scopes:
+        local = final_locals[id(scope)]
+        for node in nodes_by_scope[id(scope)]:
+            if isinstance(node, ast.Subscript) and canonical(
+                    node.value) == "os.environ" and isinstance(
+                    node.ctx, ast.Load):
+                reasons.append(f"{node.lineno}:reads os.environ[]")
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            root = func
-            while isinstance(root, ast.Attribute):
-                root = root.value
+            canon = canonical(func)
             dotted = _dotted(func)
             if isinstance(func, ast.Name) and func.id in _ALWAYS_UNPROVEN_BUILTINS:
                 reasons.append(f"{node.lineno}:runs code or reads input "
                                f"{func.id}()")
                 continue
-            if (isinstance(func, ast.Name) and func.id == "getattr"
-                    and node.args and isinstance(node.args[0], ast.Name)
-                    and node.args[0].id in io_names):
-                # getattr(os, 'listdir') reaches an I/O call no rule sees.
-                reasons.append(f"{node.lineno}:dynamic attribute of an I/O "
-                               f"module getattr({node.args[0].id}, ...)")
+            if isinstance(func, ast.Name) and func.id == "getattr":
+                attributes = (literal_strings(node.args[1], scope)
+                              if len(node.args) > 1 else None)
+                if attributes is None:
+                    reasons.append(f"{node.lineno}:getattr by a computed name")
+                    continue
+                named = [attribute for attribute in attributes
+                         if attribute in _PATH_METHODS
+                         and attribute not in _PURE_STRING_METHODS]
+                if named:
+                    reasons.append(f"{node.lineno}:getattr of a path method "
+                                   f"{named[0]!r}")
+                    continue
+                if isinstance(root_name(node.args[0]), ast.Name) and root_name(
+                        node.args[0]).id in io_names:
+                    reasons.append(f"{node.lineno}:dynamic attribute of an I/O "
+                                   f"module getattr({dotted}, ...)")
+                    continue
+            if (isinstance(func, ast.Name) and func.id == "vars"
+                    and func.id not in bound_anywhere and node.args
+                    and isinstance(root_name(node.args[0]), ast.Name)
+                    and root_name(node.args[0]).id in module_bound):
+                # vars(Path)['read_text'] reaches a method no rule sees,
+                # like .__dict__.
+                reasons.append(f"{node.lineno}:namespace of an imported "
+                               f"name vars({_dotted(node.args[0])})")
                 continue
-            if (isinstance(func, ast.Attribute) and func.attr == "chdir"
-                    and not (node.args and all(confined(argument, local)
-                                               for argument in node.args))):
-                reasons.append(f"{node.lineno}:changes directory to an "
-                               f"unproven location {dotted}()")
+            if canon in _ATTRIBUTE_GETTERS:
+                names = [_str_constant(argument) for argument in node.args]
+                if not names or any(
+                        name is None or any(
+                            part in _PATH_METHODS
+                            and part not in _PURE_STRING_METHODS
+                            for part in name.split("."))
+                        for name in names):
+                    reasons.append(f"{node.lineno}:attribute getter that may "
+                                   f"reach a path method {dotted}()")
                 continue
-            if dotted in _IN_MEMORY_STREAMS:
+            if canon in _RUNS_CODE:
+                reasons.append(f"{node.lineno}:loads or runs code {dotted}()")
+                continue
+            if canon in _IMPORT_BY_NAME:
+                name = _str_constant(node.args[0]) if node.args else None
+                top = (name or "").split(".")[0]
+                if name is None or not (top in _COMPUTE_MODULES
+                                        or top in _IO_MODULES
+                                        or _resolve_module(name, roots)):
+                    reasons.append(f"{node.lineno}:imports an unresolved "
+                                   f"module by name {dotted}()")
+                continue
+            site = injection_site(node)
+            if site is not None:
+                values, what, anchors_ok = site
+                judge_injection(node, values, what, local_tmp(node),
+                                anchors_ok)
+                continue
+            if isinstance(func, ast.Attribute) and func.attr == "chdir":
+                if not (node.args and all(
+                        injectable(argument, local_tmp(node))
+                        for argument in node.args)):
+                    reasons.append(f"{node.lineno}:changes directory to an "
+                                   f"unproven location {dotted}()")
+                continue
+            if canon in _IN_MEMORY_STREAMS:
                 continue  # StringIO(text) / BytesIO(data): no location
-            if isinstance(root, ast.Name) and root.id in io_names:
-                if dotted in _LOCATION_SOURCES or dotted.startswith(
-                        "os.environ"):
-                    if dotted not in _ZERO_ARG_CONFINED:
+            if io_rooted(func) or (isinstance(func, ast.Name)
+                                   and func.id in io_names):
+                if _is_pure(canon):
+                    continue
+                if canon in _LOCATION_SOURCES or (canon or "").startswith(
+                        "os.environ."):
+                    if canon not in _ZERO_ARG_CONFINED:
                         reasons.append(f"{node.lineno}:location source "
                                        f"{dotted}()")
-                        continue
+                    continue
                 name = _call_name(node)
-                if dotted.startswith(_SHELL_CALL_PREFIXES):
+                if (canon or "").startswith(_SHELL_CALL_PREFIXES):
                     reasons.append(f"{node.lineno}:shell or exec launch "
                                    f"{dotted}()")
                     continue
-                if root.id in subprocess_names and name not in _SUBPROCESS_CALLS:
-                    if dotted not in _ZERO_ARG_CONFINED:
+                if (canon or "").startswith("subprocess."):
+                    if name not in _SUBPROCESS_CALLS:
                         reasons.append(f"{node.lineno}:unproven subprocess "
                                        f"{dotted}()")
-                    continue
-                if root.id in subprocess_names:
-                    argv = node.args[0] if node.args else None
-                    elements = (argv.elts if isinstance(argv, (ast.List,
-                                                               ast.Tuple))
-                                else None)
-                    argv_ok = (argv is not None and (
-                        all(confined(item, local) for item in elements)
-                        if elements is not None else confined(argv, local)))
-                    python = bool(elements) and _dotted(
-                        elements[0]) == "sys.executable"
-                    if python and len(elements) > 1 and _str_constant(
-                            elements[1]) == "-c":
-                        reasons.append(f"{node.lineno}:inline python code "
-                                       f"{dotted}()")
                         continue
-                    # A python run with no script or module operand (only
-                    # options such as --version) reads nothing relative to
-                    # the cwd; any other python run needs a rig cwd too.
-                    python_without_operand = python and all(
-                        (_str_constant(item) or "").startswith("-")
-                        for item in elements[1:])
-                    cwd = [keyword.value for keyword in node.keywords
-                           if keyword.arg == "cwd"]
-                    cwd_ok = bool(cwd) and confined(cwd[0], local)
-                    if elements and not cwd_ok:
-                        # `git -C <rig>` runs in the rig just like cwd=.
-                        for flag, value in zip(elements, elements[1:]):
-                            if (_str_constant(flag) == "-C"
-                                    and _str_constant(value) is None
-                                    and confined(value, local)):
-                                cwd_ok = True
-                    if not argv_ok:
-                        reasons.append(f"{node.lineno}:unproven argv "
-                                       f"{dotted}()")
-                    elif not (cwd_ok or python_without_operand):
-                        reasons.append(f"{node.lineno}:program without a rig "
-                                       f"cwd {dotted}()")
+                    judge_subprocess(node, dotted, local, local_tmp(node))
                     continue
                 arguments = list(node.args) + [keyword.value
                                                for keyword in node.keywords]
                 if not arguments:
-                    if dotted not in _ZERO_ARG_CONFINED:
+                    if canon not in _ZERO_ARG_CONFINED:
                         reasons.append(f"{node.lineno}:unproven zero-argument "
                                        f"{dotted}()")
                     continue
@@ -1691,26 +2546,11 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
             # (3) a Path or file method needs a confined receiver.
             if (isinstance(func, ast.Attribute) and func.attr in _PATH_METHODS
                     and func.attr not in _PURE_STRING_METHODS):
-                receiver = func.value
-                base = receiver
-                while isinstance(base, (ast.Attribute, ast.Subscript,
-                                        ast.Call)):
-                    base = base.func if isinstance(base, ast.Call) else base.value
-                if isinstance(base, ast.Name) and (
-                        base.id in other_modules
-                        or base.id in _NON_FILE_RECEIVERS):
-                    continue
-                if isinstance(base, ast.Constant):
-                    continue  # a literal string's method
-                if not confined(receiver, local):
+                if not receiver_proven(func.value, local):
                     reasons.append(f"{node.lineno}:path method on an unproven "
                                    f"receiver .{func.attr}()")
-        for node in nodes:
-            if (isinstance(node, ast.Subscript)
-                    and _dotted(node.value) == "os.environ"
-                    and isinstance(node.ctx, ast.Load)):
-                reasons.append(f"{node.lineno}:reads os.environ[]")
-    # (4) literals naming repository paths outside the plugin.
+
+    # (6) literals naming repository paths outside the plugin.
     for node in ast.walk(tree):
         if id(node) in docstrings:
             continue
@@ -1724,7 +2564,8 @@ def _confinement_reasons(tree: ast.Module, rel: str, roots: list[Path],
         if any(_names_repo_path(candidate, repo_root, plugin_root)
                for candidate in candidates):
             reasons.append(f"{node.lineno}:names a repository path {text!r}")
-    return tuple(dict.fromkeys(reasons))
+    return tuple(dict.fromkeys(sorted(
+        reasons, key=lambda reason: int(reason.split(":", 1)[0]))))
 
 
 def _fixture_spans(tree: ast.Module) -> dict[str, tuple[int, int, bool]]:
@@ -1742,12 +2583,36 @@ def _fixture_spans(tree: ast.Module) -> dict[str, tuple[int, int, bool]]:
     return spans
 
 
+def _test_side_reasons(tree: ast.Module, rel: str, roots: list[Path],
+                       plugin_root: Path, docstrings: set[int],
+                       module_files: dict[str, str]) -> tuple[str, ...]:
+    """Every unproven site in a test-side module: the confinement rules plus
+    each anchored climb out of the plugin."""
+    reasons = (*_confinement_reasons(tree, rel, roots, plugin_root,
+                                     docstrings),
+               *(f"{where.split(':', 1)[0]}:climb {where.split(':', 1)[1]}"
+                 for where in _repo_reach(tree, rel, plugin_root,
+                                          module_files, docstrings)))
+    return tuple(dict.fromkeys(sorted(
+        reasons, key=lambda reason: int(reason.split(":", 1)[0]))))
+
+
 def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                is_tracked_dir) -> FileScan:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
-        return _EMPTY_SCAN
+        # Nothing about an unparseable module can be proven: its imports,
+        # literals and calls are all unknown.
+        try:
+            rel = path.resolve().relative_to(plugin_root.resolve()).as_posix()
+        except ValueError:
+            rel = path.name
+        unparsed = ("0:unparseable module",)
+        test_side = rel.startswith("tests/") or _is_test_file(rel)
+        return FileScan((), frozenset(), frozenset(), frozenset(),
+                        frozenset(), None, () if test_side else unparsed,
+                        unparsed if test_side else (), (), (), scans=True)
     rel_name = path.name
     docstrings = _docstring_nodes(tree)
     literal_names = _literal_loop_names(tree)
@@ -1758,6 +2623,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
     path_literals: set[str] = set()
     dynamic_imports: list[str] = []
     dynamic_fixtures: list[str] = []
+    scans = False
 
     def is_literal(node: ast.AST) -> bool:
         return _str_constant(node) is not None or (
@@ -1815,6 +2681,8 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         if not isinstance(node, ast.Call):
             continue
         call = _call_name(node)
+        if call in _SCAN_CALLS:
+            scans = True
         if call in _PATH_CALLS:
             for argument in node.args:
                 text = _str_constant(argument)
@@ -1866,6 +2734,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                         root).as_posix()
                 except ValueError:
                     pass
+    test_side = module_rel.startswith("tests/") or _is_test_file(module_rel)
     return FileScan(
         edges=tuple(dict.fromkeys(to_rel(edges))),
         import_targets=frozenset(to_rel(targets)),
@@ -1874,14 +2743,14 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         path_literals=frozenset(path_literals),
         scanner_roots=_scanner_roots(tree, module_rel, is_tracked_dir,
                                      module_files),
-        repo_reach=_repo_reach(tree, module_rel, root, module_files,
-                               docstrings),
-        unproven=(_confinement_reasons(tree, module_rel, roots, root,
-                                       docstrings)
-                  if module_rel.startswith("tests/") or _is_test_file(module_rel)
-                  else ()),
+        repo_reach=(() if test_side else _repo_reach(
+            tree, module_rel, root, module_files, docstrings)),
+        unproven=(_test_side_reasons(tree, module_rel, roots, root,
+                                     docstrings, module_files)
+                  if test_side else ()),
         dynamic_imports=tuple(dynamic_imports),
         dynamic_fixtures=tuple(dynamic_fixtures),
+        scans=scans,
     )
 
 
@@ -1944,11 +2813,17 @@ class ScanIndex:
                 path = self.plugin_root / conftest
                 try:
                     tree = ast.parse(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+                except OSError:
+                    continue  # no such conftest
+                except (UnicodeDecodeError, SyntaxError, ValueError):
+                    # Its fixtures cannot be named, so any request of any
+                    # fixture is unproven.
+                    self._fixtures[conftest] = {
+                        "*": ("0:unparseable conftest",)}
                     continue
-                reasons = _confinement_reasons(
+                reasons = _test_side_reasons(
                     tree, conftest, self.roots, self.plugin_root,
-                    _docstring_nodes(tree))
+                    _docstring_nodes(tree), {})
                 found: dict[str, tuple[str, ...]] = {}
                 for name, (first, last, autouse) in _fixture_spans(tree).items():
                     if autouse:
@@ -1981,8 +2856,10 @@ class ScanIndex:
             repo_reach: list[str] = []
             unproven: list[tuple[str, tuple[str, ...]]] = []
             trio_named = False
+            scans_tree = False
             for rel in sorted(closure):
                 scan = self.scan(rel)
+                scans_tree = scans_tree or scan.scans
                 targets |= scan.import_targets
                 literals |= scan.literals
                 path_literals |= scan.path_literals
@@ -2000,7 +2877,7 @@ class ScanIndex:
                     test_names |= scan.names | scan.literals
             for conftest, fixtures in self.fixture_reasons().items():
                 for name, reasons in sorted(fixtures.items()):
-                    if name in test_names and reasons:
+                    if (name in test_names or name == "*") and reasons:
                         unproven.append((f"{conftest}::{name}", reasons))
             self._views[exclusion_path] = ExclusionView(
                 closure=closure,
@@ -2012,6 +2889,7 @@ class ScanIndex:
                 repo_reach=tuple(repo_reach),
                 unproven=tuple(unproven),
                 trio_named=trio_named,
+                scans_tree=scans_tree,
             )
         return self._views[exclusion_path]
 
@@ -2432,6 +3310,16 @@ def _is_test_file(plugin_relative: str) -> bool:
     return bool(_TEST_FILE_RE.search(plugin_relative))
 
 
+def _review_applies(key: str, view: ExclusionView) -> bool:
+    """A module review applies to an exclusion whose closure loads the
+    module; a 'conftest::fixture' review applies to one that requests the
+    fixture."""
+    path, _, function = key.partition("::")
+    if function:
+        return path in _CONFTEST_NAMES and function in view.test_names
+    return key in view.closure
+
+
 def broad_reasons(view: ExclusionView, facts: ChangeFacts) -> tuple[str, ...]:
     """Why an exclusion is BROAD: each unreviewed unproven test-side module
     or requested fixture, and each production climb out of the plugin.
@@ -2579,10 +3467,11 @@ def select(discovered: frozenset[str], manifest: Manifest,
         if broad:
             # Not proven confined: back on ANY change, except value-inert
             # keys (already dropped above) and the bump trio, unless its own
-            # test-side code names a trio file.
+            # test-side code names a trio file or its closure scans a tree.
             trigger = next(
                 (path for path in changed
-                 if view.trio_named or path not in BUMP_TRIO), None)
+                 if view.trio_named or view.scans_tree
+                 or path not in BUMP_TRIO), None)
             if trigger is not None:
                 added[exclusion.path] = AddBack(
                     path=exclusion.path, reason="unproven_reach",
@@ -2591,7 +3480,7 @@ def select(discovered: frozenset[str], manifest: Manifest,
             continue
         extra = next(
             ((module, path) for module, globs in facts.review_reads
-             if module in view.closure for path in changed
+             if _review_applies(module, view) for path in changed
              for glob in globs if fnmatch.fnmatchcase(path, glob)), None)
         if extra is not None:
             added[exclusion.path] = AddBack(
