@@ -76,8 +76,12 @@ _MINIMAL_ARGS = {
     "sync": (),
 }
 
+# A command that opens no store takes no `--db-path`, so it has no caller path
+# to refuse; it is swept by its own row below instead.
 _NON_EXEMPT_COMMANDS = sorted(
-    set(cli._COMMANDS) - set(cli._COMMANDS_THAT_MAY_CREATE_A_CALLER_PATH)
+    set(cli._COMMANDS)
+    - set(cli._COMMANDS_THAT_MAY_CREATE_A_CALLER_PATH)
+    - set(cli._COMMANDS_WITHOUT_A_STORE)
 )
 
 
@@ -384,6 +388,23 @@ class TestEachNonExemptCommandRefusesAnAbsentCallerPath:
             "swept, so a widening must be a deliberate edit here as well as "
             "there."
         )
+        assert cli._COMMANDS_WITHOUT_A_STORE == frozenset({"project-file"}), (
+            "the storeless set widened. Each command it holds stops being "
+            "swept, so a widening must be a deliberate edit here as well as "
+            "there."
+        )
+
+    @pytest.mark.parametrize("command", sorted(cli._COMMANDS_WITHOUT_A_STORE))
+    def test_a_storeless_command_accepts_no_caller_path(self, command, tmp_path):
+        """A command that opens no store refuses `--db-path` at argparse, so a
+        caller path can never reach it, and nothing is built there."""
+        absent = tmp_path / f"{command}-not-there.db"
+
+        proc = _run(command, "--db-path", str(absent))
+
+        assert proc.returncode == 2, proc.stderr
+        assert "unrecognized arguments: --db-path" in proc.stderr, proc.stderr
+        assert not absent.exists()
 
     @pytest.mark.parametrize("command", _NON_EXEMPT_COMMANDS)
     def test_an_absent_caller_path_is_refused(self, command, tmp_path):

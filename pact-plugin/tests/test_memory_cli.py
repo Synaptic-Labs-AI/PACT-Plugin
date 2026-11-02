@@ -281,8 +281,98 @@ class TestCliArgParsing:
         assert exc_info.value.code == 2
 
     def test_dispatch_table_covers_all_subcommands(self):
-        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync"}
+        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file"}
         assert set(_COMMANDS.keys()) == expected
+
+
+# ---------------------------------------------------------------------------
+# project-file Command
+# ---------------------------------------------------------------------------
+
+_CLI = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
+
+
+def _git_quiet(*args, cwd):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "-c", "init.defaultBranch=main", *args],
+        cwd=str(cwd), env=env, capture_output=True, text=True, timeout=60,
+        check=True,
+    )
+
+
+class TestProjectFileCommand:
+    """`project-file` prints this session's project memory file: one line on
+    stdout, the SessionStart line's path, and nothing written."""
+
+    @staticmethod
+    def _run(tmp_path, declared, cwd):
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("CLAUDE_PROJECT_DIR", "PYTEST_CURRENT_TEST",
+                         "CLAUDE_CODE_SESSION_ID")
+        }
+        env.update(
+            CLAUDE_PROJECT_DIR=str(declared),
+            CLAUDE_CONFIG_DIR=str(tmp_path / "config"),
+            HOME=str(tmp_path / "home"),
+        )
+        return subprocess.run(
+            [sys.executable, str(_CLI), "project-file"],
+            cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120,
+        )
+
+    def test_a_worktree_prints_the_main_checkouts_file_and_writes_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """Red if the CLI resolves anything but the session document (it
+        would name the worktree), or creates the file it names."""
+        from shared.claude_md_manager import session_document
+        from shared.session_resume import format_project_memory_line
+
+        main = tmp_path / "main"
+        main.mkdir()
+        _git_quiet("init", "-q", ".", cwd=main)
+        (main / "README").write_text("seed\n", encoding="utf-8")
+        _git_quiet("add", "README", cwd=main)
+        _git_quiet("commit", "-qm", "seed", cwd=main)
+        worktree = tmp_path / "wt"
+        _git_quiet("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+
+        result = self._run(tmp_path, worktree, worktree)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"{main / '.claude' / 'CLAUDE.md'}\n"
+        assert not (main / ".claude").exists(), "project-file created a file"
+        assert not (worktree / ".claude").exists(), "project-file created a file"
+
+        # ONE RESOLVER, TWO CHANNELS: the SessionStart line names the same path.
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        line = format_project_memory_line(*session_document())
+        assert f"`{result.stdout.strip()}`" in line, line
+
+    def test_an_unknown_root_prints_unavailable_with_its_cause(self, tmp_path):
+        gone = tmp_path / "removed-worktree"
+
+        result = self._run(tmp_path, gone, tmp_path)
+
+        assert result.returncode == 3, result.stderr
+        assert result.stdout == (
+            f"unavailable: the project directory {gone} no longer exists\n"
+        )
+
+    def test_an_unsafe_path_is_never_printed(self, tmp_path):
+        """A path that could break the one-line contract (here a backtick) is
+        reported as unavailable, as the SessionStart line reports it."""
+        odd = tmp_path / "we`ird"
+        odd.mkdir()
+
+        result = self._run(tmp_path, odd, odd)
+
+        assert result.returncode == 3, result.stderr
+        assert result.stdout == "unavailable: not a safe path\n"
 
 
 # ---------------------------------------------------------------------------
