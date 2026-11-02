@@ -204,6 +204,11 @@ class TestUnionPreferringTaskFile:
 
     # ---- P10: journal-only fields, three arms --------------------------
     def test_p10_required_journal_only_under_a_proper_subset_is_kept(self):
+        """THE #61 RESIDUAL'S ARM. This is the same proper-subset branch the
+        residual describes: a DELIBERATE complete removal of a required key
+        and an accidental partial rewrite both leave D a proper subset, so the
+        branch restores the journal value and reports that it did. Key sets
+        cannot separate the two, and the rule text says so."""
         journal = {"produced": "p", "decisions": ["d"], "uncertainty": ["u"]}
         disk = {"produced": "p2", "decisions": ["d2"]}
         merged, reports = union_preferring_task_file(journal, disk, "61")
@@ -260,47 +265,91 @@ class TestUnionPreferringTaskFile:
         )
         assert merged == {"decisions": empty}
 
+    # THE FOUR FALSY ARMS BELOW ARE RETAINED-BEHAVIOUR PINS, NOT GUARDS. TEST
+    # measured all four green under BOTH auditor mutants: at EQUAL required key
+    # sets the membership and truthiness readings route identically. They are
+    # kept because the 0/False-as-content property is what this branch depends
+    # on; the two PROPER-SUBSET probes after them are the only regime that
+    # separates the readings and are the arms that fail under the mutants.
     def test_zero_is_content_and_wins(self):
-        """DISCRIMINATING: emptiness is equality membership in
-        (None, "", [], {}), so 0 is a VALUE. A truthiness test on the disk
-        side (`if not disk_value and journal_value`) would keep the journal
-        here instead."""
+        """RETAINED-BEHAVIOUR PIN, NOT A DISCRIMINATOR (both mutants green):
+        documents that 0 is content and wins the disk side. The discriminating
+        proper-subset probe is `test_p10_proper_subset_disk_zero_is_content`."""
         merged, _ = union_preferring_task_file(
             {"decisions": ["journal"]}, {"decisions": 0}, "61"
         )
         assert merged == {"decisions": 0}
 
     def test_false_is_content_and_wins(self):
-        """DISCRIMINATING for the same reason as 0: `False == 0` but neither
-        is in _EMPTY_VALUES, so a truthiness test would keep the journal."""
+        """RETAINED-BEHAVIOUR PIN, NOT A DISCRIMINATOR (both mutants green):
+        documents that False is content, like 0."""
         merged, _ = union_preferring_task_file(
             {"decisions": ["journal"]}, {"decisions": False}, "61"
         )
         assert merged == {"decisions": False}
 
     def test_empty_string_journal_value_does_not_trigger_the_rule(self):
-        """DISCRIMINATING: the rule tests the JOURNAL value's TRUTHINESS, not
-        membership. "" is a member of _EMPTY_VALUES, so a membership test on
-        the journal side would keep ""; the rule lets the task file's [] win."""
+        """RETAINED-BEHAVIOUR PIN, NOT A DISCRIMINATOR (both mutants green):
+        documents the journal-truthiness reading; "" is both falsy and a set
+        member, so every variant agrees at equal key sets."""
         merged, _ = union_preferring_task_file(
             {"decisions": ""}, {"decisions": []}, "61"
         )
         assert merged == {"decisions": []}
 
     def test_falsy_journal_values_let_the_task_file_win(self):
-        """DISCRIMINATING against a JOURNAL-SIDE MEMBERSHIP rewrite: 0 and
-        False are falsy but NOT in _EMPTY_VALUES, so a rule testing
-        `journal_value not in _EMPTY_VALUES` would call them content and keep
-        them, while this rule tests truthiness and lets the task file's []
-        win. The [] and {} rows are the non-discriminating tail of the falsy
-        family — they ARE set members, so every variant agrees on them; they
-        are kept for completeness, not as guards. The "" arm above covers the
-        set-member case."""
+        """RETAINED-BEHAVIOUR PIN, NOT A DISCRIMINATOR (both mutants green):
+        documents that a falsy journal value does not itself trigger the
+        present-and-empty state. The proper-subset probes below are the
+        guards."""
         for falsy in (0, False, [], {}):
             merged, _ = union_preferring_task_file(
                 {"decisions": falsy}, {"decisions": []}, "61"
             )
             assert merged == {"decisions": []}
+
+    def test_p10_proper_subset_disk_zero_is_content(self):
+        """DISCRIMINATING (proper subset): D = {decisions} is a proper subset
+        of J = {decisions, uncertainty}, so 0 is content on the disk side and
+        wins. Mutant `not disk_value` restores ["j"] and reddens this arm."""
+        journal = {"decisions": ["j"], "uncertainty": ["u"]}
+        disk = {"decisions": 0}
+        merged, _ = union_preferring_task_file(journal, disk, "61")
+        assert merged["decisions"] == 0
+
+    def test_p10_proper_subset_empty_list_beats_journal_zero(self):
+        """DISCRIMINATING (proper subset): the journal's 0 is falsy but NOT a
+        member of (None, '', [], {}), so the task file's [] wins. Mutant
+        `journal_value not in _EMPTY_VALUES` restores 0 and reddens this arm."""
+        journal = {"decisions": 0, "uncertainty": ["u"]}
+        disk = {"decisions": []}
+        merged, _ = union_preferring_task_file(journal, disk, "61")
+        assert merged["decisions"] == []
+
+    def test_present_and_empty_with_incomparable_sets_keeps_the_empty_value(self):
+        """THE INCOMPARABLE / PRESENT-AND-EMPTY BRANCH, which had no arm at
+        all. J = {produced, decisions, open_questions}, D = {produced,
+        uncertainty, open_questions}: neither covers the other, so the empty
+        value stands and the state is reported as undecidable. The old rule
+        (always keep the journal on present-and-empty) returns ["q"] here."""
+        journal = {
+            "produced": "p",
+            "decisions": ["d"],
+            "open_questions": ["q"],
+        }
+        disk = {
+            "produced": "p2",
+            "uncertainty": ["u"],
+            "open_questions": [],
+        }
+        merged, reports = union_preferring_task_file(journal, disk, "61")
+        assert merged["open_questions"] == []
+        assert any(
+            "undecidable" in line
+            and "open_questions" in line
+            and "incomparable" in line
+            for line in reports
+        )
 
     def test_inputs_are_not_mutated(self):
         journal = {"decisions": ["old"], "open_questions": ["q"]}

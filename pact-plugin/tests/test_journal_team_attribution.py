@@ -232,9 +232,10 @@ class TestEmitTeamUncertaintyGuard:
     def test_payload_team_cannot_forge_a_report_line(
         self, tmp_path, monkeypatch, capsys
     ):
-        """CWE-117: the payload team is stdin-supplied. A newline in it must
-        not create a second line in the stderr report; report_safe strips it
-        while the value's visible text survives."""
+        """A payload team carrying a newline cannot name an EXISTING store —
+        the path validator rejects it — so signal 1 never fires, no report is
+        produced at all, and the value reaches no report by any route.
+        report_safe itself is covered by TestReportSafe."""
         code, calls, err = self._run(
             tmp_path, monkeypatch, capsys,
             payload_team="session-live\nFORGED: approved",
