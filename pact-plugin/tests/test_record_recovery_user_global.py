@@ -8,9 +8,13 @@ Summary: Pins that a session-record recovery never hands back a root whose
          removed path. The record verifies and its checkout ($HOME) contains
          the anchor, so without the check the recovery returns $HOME and
          session start writes the global file.
+         The containment guard (`stays_in_declared_project`) must agree: its
+         record branch and its worktree-listing admit never let a resolution
+         into that root through.
 Used by: pytest. Exercises hooks/shared/project_scope.py
-         (`session_memory_root`, `_record_worktree_identity`) in process, and
-         hooks/session_init.py as a SessionStart subprocess.
+         (`session_memory_root`, `stays_in_declared_project`,
+         `_record_worktree_identity`) in process, and hooks/session_init.py as
+         a SessionStart subprocess.
 
 Every home is tmp_path/"home" (the suite's Path.home()); git runs with no
 global or system config, and no checkout here has a remote.
@@ -27,9 +31,14 @@ import pytest
 
 from shared import project_scope
 from shared.project_scope import (
+    RECORD_CONTAINED,
+    ROOT_CAUSE_MISSING,
     ROOT_CAUSE_USER_GLOBAL,
     WORKTREE_IDENTITY_FILE,
+    memory_root_of,
+    record_resolution,
     session_memory_root,
+    stays_in_declared_project,
     unknown_root_reason,
 )
 
@@ -111,6 +120,14 @@ def home_worktree(tmp_path, monkeypatch):
 
 
 def test_a_recovery_landing_on_a_dotfiles_home_is_user_global(home_worktree):
+    """The classifier alone says MISSING and the record recovers $HOME, so the
+    refusal comes from the recovery check and not from an earlier one."""
+    assert memory_root_of(home_worktree.worktree) == (None, ROOT_CAUSE_MISSING)
+    identity = project_scope.get_worktree_identity_from_session_record()
+    assert record_resolution(home_worktree.worktree, identity) == (
+        RECORD_CONTAINED, home_worktree.main.resolve()
+    ), "FIXTURE INVALID: the recovery path is not reached"
+
     session = session_memory_root()
 
     assert (session.root, session.cause) == (None, ROOT_CAUSE_USER_GLOBAL)
@@ -149,3 +166,53 @@ def test_a_recovery_landing_on_a_project_checkout_still_recovers_it(tmp_path, mo
     session = session_memory_root()
 
     assert (session.root, session.cause) == (world.main.resolve(), None)
+
+
+@pytest.mark.parametrize("document", [".claude/CLAUDE.md", "CLAUDE.md"])
+def test_the_guard_refuses_a_contained_record_landing_on_a_dotfiles_home(
+    home_worktree, document
+):
+    """The record verifies and contains the declaration, so the guard's
+    RECORD_CONTAINED branch is reached; it must still refuse $HOME, for the
+    global document and for the legacy one beside it."""
+    identity = project_scope.get_worktree_identity_from_session_record()
+    status, recovered = record_resolution(home_worktree.worktree, identity)
+    assert status == RECORD_CONTAINED and recovered == home_worktree.main.resolve(), (
+        "FIXTURE INVALID: the record branch is not reached"
+    )
+
+    assert stays_in_declared_project(
+        home_worktree.worktree, home_worktree.main, home_worktree.main / document,
+        identity,
+    ) is False
+
+
+def test_the_guard_still_admits_a_contained_record_landing_on_a_project_checkout(
+    tmp_path, monkeypatch
+):
+    """Control: the record branch admits main when main is not $HOME."""
+    world = _RemovedWorktree(tmp_path, monkeypatch, tmp_path / "main")
+    identity = project_scope.get_worktree_identity_from_session_record()
+    assert record_resolution(world.worktree, identity)[0] == RECORD_CONTAINED
+
+    assert stays_in_declared_project(
+        world.worktree, world.main, world.main / ".claude" / "CLAUDE.md", identity,
+    ) is True
+
+
+def test_the_guard_refuses_a_listed_worktree_landing_on_a_dotfiles_home(
+    tmp_path, monkeypatch
+):
+    """A worktree moved away while its home repository still lists it: the
+    listing proves identity, and the guard must still refuse $HOME."""
+    world = _RemovedWorktree(tmp_path, monkeypatch, Path.home())
+    moved = world.main / ".worktrees" / "listed"
+    _git("worktree", "add", "-q", str(moved), "-b", "listed", cwd=world.main)
+    moved.rename(tmp_path / "moved-away")
+    assert moved.resolve() in project_scope._listed_worktrees(world.main.resolve()), (
+        "FIXTURE INVALID: the listing branch is not reached"
+    )
+
+    assert stays_in_declared_project(
+        moved, world.main, world.main / ".claude" / "CLAUDE.md", {},
+    ) is False

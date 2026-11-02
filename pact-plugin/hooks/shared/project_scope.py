@@ -982,6 +982,14 @@ def stays_in_declared_project(
         return False
     if anchor != declared:
         try:
+            # First, before the worktree listing and the record can admit: a
+            # resolution is refused when its document, or either canonical
+            # document under its root, is user-global, exactly as
+            # `session_memory_root` refuses a recovered root, so the two agree.
+            if is_user_global_document(Path(claude_md)) or names_user_global_document(
+                resolved
+            ):
+                return False
             if declared.resolve() in _listed_worktrees(resolved):
                 return True
             # THE RECORD IS TRUSTED ONLY WHEN THE RECORDED CHECKOUT CONTAINS
@@ -998,8 +1006,6 @@ def stays_in_declared_project(
                     == Path(recorded_common_dir)
                 )
             if resolved == Path.home().resolve():
-                return False
-            if is_user_global_document(Path(claude_md)):
                 return False
         except (OSError, RuntimeError):
             # RuntimeError: Path.home() when no home directory can be found.
