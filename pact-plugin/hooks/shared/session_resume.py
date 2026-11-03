@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from shared.agent_handoff_marker import report_safe
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
     MANAGED_START_MARKER,
@@ -1349,6 +1350,12 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             summary = _coerce_decision_summary(
                 resolve_handoff_field(handoff_data, "decisions")
             )
+            # Journal-supplied text rendered into agent context: strip every
+            # line-breaking and invisible format character, so one value
+            # cannot forge a second bullet or reorder the line's text.
+            agent = report_safe(agent, limit=None)
+            subject = report_safe(subject, limit=None)
+            summary = report_safe(summary, limit=None)
             if summary:
                 lines.append(f"- {agent}: {subject} -> {summary}{annotation}")
             else:
@@ -1950,7 +1957,8 @@ def _sanitize_prompt_field(
 
     Collapses control characters (C0, DEL, U+2028/U+2029 — anything that
     could break the prompt onto a new line and masquerade as a separate
-    directive) to single spaces, strips, and bounds the length with the
+    directive) to single spaces, drops format and surrogate characters
+    (zero-width and bidi controls), strips, and bounds the length with the
     same ``...`` truncation convention as ``_coerce_decision_summary``.
 
     Total for any input: an internal failure returns ``""`` so the caller
@@ -1958,7 +1966,9 @@ def _sanitize_prompt_field(
     (a sanitizer error must not become a new suppress path).
     """
     try:
-        cleaned = _PROMPT_CONTROL_CHARS_RE.sub(" ", value).strip()
+        cleaned = report_safe(
+            _PROMPT_CONTROL_CHARS_RE.sub(" ", value), limit=None
+        ).strip()
         if len(cleaned) > limit:
             cleaned = cleaned[:limit - 3] + "..."
         return cleaned

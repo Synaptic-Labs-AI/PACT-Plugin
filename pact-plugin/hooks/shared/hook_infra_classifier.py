@@ -268,6 +268,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_state", "stale_session", "staleness", "state_file", "symlinks",
         "intentional_wait", "task_utils", "teammate_mode",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
+        "agent_handoff_marker", "canonical_json",  # session_resume's report_safe
     }),  # background_launch, background_work and intentional_wait reached via
          # claude_md_manager.gate_frame's function-level team read.
          # stale_session reached via session_resume's Current Session reader,
@@ -380,6 +381,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_registry", "session_resume", "session_state", "stale_session",
         "staleness", "state_file", "task_utils",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
+        "agent_handoff_marker", "canonical_json",  # session_resume's report_safe
     }),  # background_launch, background_work, intentional_wait and task_utils
          # reached via claude_md_manager.gate_frame's function-level team read.
          # gh_helpers reached via session_resume's function-level
@@ -490,6 +492,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_journal", "session_registry", "session_resume", "session_state",
         "stale_session", "staleness", "state_file", "task_utils",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
+        "agent_handoff_marker", "canonical_json",  # session_resume's report_safe
     }),  # from the live derivation: session_resume's check_resume_state and
          # session_start record, and what they import.
 }

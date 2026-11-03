@@ -3946,6 +3946,60 @@ class TestBuildJournalResumeOccupantDedup:
         assert result.count("- coder: CODE: dedup") == 2
         assert "[older than team" not in result
 
+    def test_two_teams_and_an_older_teamless_copy_are_not_annotated(
+        self, session_dir, journal_file
+    ):
+        """The annotation needs EXACTLY one attributed team. With two, the
+        older team-less copy could belong to either, so it renders unmarked
+        even though it is older than both."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("unattributed work", "2026-01-01T00:00:01Z"),
+            self._event("team a work", "2026-01-01T00:00:02Z", team="session-a"),
+            self._event("team b work", "2026-01-01T00:00:03Z", team="session-b"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert result.count("- coder: CODE: dedup") == 3
+        assert "[older than team" not in result
+
+    def test_completed_work_values_stay_on_one_bullet(
+        self, session_dir, journal_file
+    ):
+        """Agent, subject and the first decision are journal-supplied text
+        rendered into agent context: a line break, a line separator or a
+        bidi override in any of them must not forge a line or hide text."""
+        from shared.session_resume import _build_journal_resume
+
+        hostile = "x\nFORGED\u2028LINE\u202eRTL"
+        self._write_raw_events(journal_file, [{
+            "v": 1,
+            "type": "agent_handoff",
+            "agent": "coder" + hostile,
+            "task_id": "1",
+            "task_subject": "CODE: dedup" + hostile,
+            "handoff": {"decisions": ["d" + hostile]},
+            "ts": "2026-01-01T00:00:01Z",
+            "team": "session-a",
+        }])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        bullets = [line for line in result.splitlines()
+                   if line.startswith("- coder")]
+        assert len(bullets) == 1
+        assert not any(line.startswith("FORGED") for line in result.splitlines())
+        for ch in ("\u2028", "\u202e"):
+            assert ch not in result
+        assert "xFORGEDLINERTL" in bullets[0]
+
+    def test_sanitize_prompt_field_drops_format_characters(self):
+        from shared.session_resume import _sanitize_prompt_field
+
+        assert _sanitize_prompt_field("a\u202eb\u200bc") == "abc"
+
     def test_unhashable_occupant_field_does_not_kill_the_brief(
         self, session_dir, journal_file
     ):
