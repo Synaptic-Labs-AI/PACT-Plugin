@@ -1044,17 +1044,24 @@ def record_team_realign(
         return None
     if outcome == REALIGN_ALREADY_RECORDED and not notify_if_already_recorded:
         return None
+    # Both names are interpolated into PROMPT text below. The same helper
+    # that cleans the task ids in the main return collapses control
+    # characters here too: one unsanitised name would break the notice onto
+    # a new line and masquerade as a separate directive. The RAW names stay
+    # in the journal event, which is data, not prompt text.
+    clean_old = _sanitize_prompt_field(old_team)
+    clean_new = _sanitize_prompt_field(new_team)
     if outcome == REALIGN_FAILED:
         print(
             "session_resume: could not record team_realigned "
-            f"{old_team} -> {new_team} in the session journal",
+            f"{clean_old} -> {clean_new} in the session journal",
             file=sys.stderr,
         )
         return (
-            f"PACT moved this session's team from `{old_team}` to `{new_team}` "
+            f"PACT moved this session's team from `{clean_old}` to `{clean_new}` "
             f"but could not record the move in the session journal. "
-            f"`TaskList` shows only `{new_team}`; in-progress tasks may remain in "
-            f"`tasks/{old_team}/`. Use `{old_team}` as the earlier team in the "
+            f"`TaskList` shows only `{clean_new}`; in-progress tasks may remain in "
+            f"`tasks/{clean_old}/`. Use `{clean_old}` as the earlier team in the "
             f"team-split recovery."
         )
     # Task ids come from task files: sanitised as the resume claim's are.
@@ -1063,9 +1070,9 @@ def record_team_realign(
         if clean
     ) or "none"
     return (
-        f"PACT moved this session from team `{old_team}` to `{new_team}`, "
-        f"the team the platform is using. `TaskList` shows only `{new_team}`. "
-        f"In-progress tasks still in `tasks/{old_team}/`: {ids}. "
+        f"PACT moved this session from team `{clean_old}` to `{clean_new}`, "
+        f"the team the platform is using. `TaskList` shows only `{clean_new}`. "
+        f"In-progress tasks still in `tasks/{clean_old}/`: {ids}. "
         f"Follow the team-split recovery in `pact-state-recovery.md` "
         f"before spawning any specialist."
     )
@@ -1244,17 +1251,20 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     # (OLD-FORMAT) partition is NEVER deleted: agent and subject are not
     # unique across teams, so a team-less copy may be a DIFFERENT store's
     # real work — the exact collision this branch exists to protect. It is
-    # ANNOTATED as superseded only in the ordinary case: exactly ONE
-    # attributed team, and the team-less copy strictly older by PARSED
-    # instants (`_parse_ts`; the lexical compare lets a fractional
-    # `...T07:00:00.123456Z` sort BEFORE `...T07:00:00Z` while naming the
-    # later instant). An unparseable or missing timestamp never annotates:
-    # an unknown instant cannot establish "strictly older". No annotation
-    # when two or more teams exist, or when the team-less copy is newer.
-    # Visibility beats deletion: showing a stale handoff as current is the
-    # harm; a marked duplicate is readable and recoverable. Two DIFFERENT
-    # teams are two distinct tasks that merely share a number: both render
-    # rather than collapsing.
+    # ANNOTATED as OLDER than the single attributed candidate only in the
+    # ordinary case: exactly ONE attributed team, and the team-less copy
+    # strictly older by PARSED instants (`_parse_ts`; the lexical compare
+    # lets a fractional `...T07:00:00.123456Z` sort BEFORE `...T07:00:00Z`
+    # while naming the later instant). An unparseable or missing timestamp
+    # never annotates: an unknown instant cannot establish "strictly older".
+    # No annotation when two or more teams exist, or when the team-less copy
+    # is newer. THE WORDING CLAIMS ONLY WHAT THE COMPARISON ESTABLISHED —
+    # age relative to that team's copy, never that this copy WAS that team's
+    # superseded revision, which the renderer cannot know. Visibility beats
+    # deletion: showing a stale handoff as current is the harm; a marked
+    # duplicate is readable and recoverable. Two DIFFERENT teams are two
+    # distinct tasks that merely share a number: both render rather than
+    # collapsing.
     def _key_str(value: object) -> str:
         """A journal-supplied value safe to use as a dict key: a non-string
         becomes "" (the renderer's absent sentinel). A raw list would raise
@@ -1294,14 +1304,15 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             if older:
                 # ANNOTATE, never delete: agent and subject are not unique
                 # across teams, so a team-less copy may be a DIFFERENT
-                # store's real work. The annotation marks the ordinary
-                # superseded case without hiding content.
+                # store's real work. The wording states only what the
+                # comparison established: this copy is OLDER than that
+                # team's, not that it was superseded by it.
                 safe_team = (
                     candidate_team
                     if _safe_for_line(candidate_team)
                     else "not a safe name"
                 )
-                teamless_mark = f" [superseded by team {safe_team}]"
+                teamless_mark = f" [older than team {safe_team}'s copy]"
         if teamless is not None:
             rendered.append((teamless, teamless_mark))
         rendered.extend((event, "") for event in attributed.values())

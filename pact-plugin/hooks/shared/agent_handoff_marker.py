@@ -676,8 +676,18 @@ def partition_destination(
 
     Callers handle an underivable `this_team` BEFORE partitioning — every
     event is OLD-FORMAT then — so this function compares the names as given.
+
+    A NON-STR `event_team` IS NEVER A VALID TEAM NAME and returns
+    PARTITION_FOREIGN, even when the caller's list happens to hold the same
+    non-str value. `None` is the ABSENT case and stays OLD-FORMAT. THE
+    CALLER STILL BUILDS THE DICT KEY AND MUST FILTER: this function no
+    longer maps a non-str to FROM, but that does not license passing one.
     Pure; never raises.
     """
+    if not isinstance(event_team, str):
+        if event_team is None:
+            return PARTITION_OLD_FORMAT
+        return PARTITION_FOREIGN
     if not event_team:
         return PARTITION_OLD_FORMAT
     if event_team == this_team:

@@ -3606,10 +3606,11 @@ class TestBuildJournalResumeOccupantDedup:
     a team-less copy may be a DIFFERENT store's real work — the collision
     this branch exists to protect. In the ordinary superseded case (exactly
     one attributed team, team-less strictly older by parsed instants) the
-    copy renders ANNOTATED as superseded; otherwise it renders unmarked.
-    Writers omit `team` whenever the resolver fails closed, at any time:
-    visibility beats deletion, because a marked duplicate is readable and a
-    stale handoff shown as current is not."""
+    copy renders ANNOTATED as OLDER THAN that team's copy — never as
+    "superseded by" it, which the renderer cannot know; otherwise it renders
+    unmarked. Writers omit `team` whenever the resolver fails closed, at any
+    time: visibility beats deletion, because a marked duplicate is readable
+    and a stale handoff shown as current is not."""
 
     @pytest.fixture
     def session_dir(self, tmp_path):
@@ -3642,12 +3643,13 @@ class TestBuildJournalResumeOccupantDedup:
             event["team"] = team
         return event
 
-    def test_superseded_teamless_copy_renders_marked(
+    def test_older_teamless_copy_renders_hedged_mark(
         self, session_dir, journal_file
     ):
-        """ARM ii (RED on d0cb4b03, which hid it): the ordinary superseded
-        case renders TWO lines; the team-less copy is ANNOTATED, never
-        deleted. Agent and subject are not unique across teams."""
+        """ARM ii (RED on d0cb4b03, which hid it): the ordinary older case
+        renders TWO lines; the team-less copy is ANNOTATED as OLDER than the
+        single attributed candidate — never as "superseded by" it, which the
+        renderer cannot know. Agent and subject are not unique across teams."""
         from shared.session_resume import _build_journal_resume
 
         self._write_raw_events(journal_file, [
@@ -3658,17 +3660,18 @@ class TestBuildJournalResumeOccupantDedup:
         result = _build_journal_resume(session_dir)
         assert result is not None
         assert "new copy" in result
-        assert "old copy [superseded by team session-a]" in result
+        assert "old copy [older than team session-a's copy]" in result
         assert result.count("- coder: CODE: dedup") == 2
 
-    def test_steering_input_renders_both_with_the_teamless_marked(
+    def test_steering_input_renders_both_with_the_older_mark(
         self, session_dir, journal_file
     ):
         """ARM i (RED on d0cb4b03): a team-less event for task 57 at 10:00
         plus an attributed event from a DIFFERENT store for the same (agent,
         subject) at 11:00. `len(attributed)==1` is not proof they are one
-        task's revisions, so the team-less copy must render — marked as
-        superseded here, because the single candidate is later."""
+        task's revisions, so the team-less copy must render — annotated as
+        OLDER than that store's copy here, because the single candidate is
+        later."""
         from shared.session_resume import _build_journal_resume
 
         self._write_raw_events(journal_file, [
@@ -3682,7 +3685,7 @@ class TestBuildJournalResumeOccupantDedup:
         result = _build_journal_resume(session_dir)
         assert result is not None
         assert "other store copy" in result
-        assert "steering copy [superseded by team session-other]" in result
+        assert "steering copy [older than team session-other's copy]" in result
         assert result.count("- coder: CODE: dedup") == 2
 
     def test_newer_teamless_copy_is_not_dropped(
@@ -3707,7 +3710,7 @@ class TestBuildJournalResumeOccupantDedup:
         assert "attributed old" in result
         assert result.count("- coder: CODE: dedup") == 2
         # NEWER, so it is the current revision: no superseded annotation.
-        assert "[superseded by team" not in result
+        assert "[older than team" not in result
 
     def test_fractional_newer_teamless_is_not_dropped(
         self, session_dir, journal_file
@@ -3730,7 +3733,7 @@ class TestBuildJournalResumeOccupantDedup:
         assert "fractional newer" in result
         assert "attributed base" in result
         assert result.count("- coder: CODE: dedup") == 2
-        assert "[superseded by team" not in result
+        assert "[older than team" not in result
 
     def test_equal_instant_with_a_different_suffix_is_not_dropped(
         self, session_dir, journal_file
@@ -3754,7 +3757,7 @@ class TestBuildJournalResumeOccupantDedup:
         assert "attributed suffix" in result
         assert "teamless suffix" in result
         assert result.count("- coder: CODE: dedup") == 2
-        assert "[superseded by team" not in result
+        assert "[older than team" not in result
 
     def test_teamless_without_a_ts_is_not_dropped(
         self, session_dir, journal_file
@@ -3776,7 +3779,7 @@ class TestBuildJournalResumeOccupantDedup:
         assert "teamless unstamped" in result
         assert "attributed stamped" in result
         assert result.count("- coder: CODE: dedup") == 2
-        assert "[superseded by team" not in result
+        assert "[older than team" not in result
 
     def test_malformed_ts_is_not_dropped(self, session_dir, journal_file):
         """ARM 4 (RED on the lexical compare): "!!!" sorts before any digit,
@@ -3796,7 +3799,7 @@ class TestBuildJournalResumeOccupantDedup:
         assert "teamless malformed ts" in result
         assert "attributed valid ts" in result
         assert result.count("- coder: CODE: dedup") == 2
-        assert "[superseded by team" not in result
+        assert "[older than team" not in result
 
     @pytest.mark.parametrize("position", ["first", "middle", "last"])
     def test_two_teams_plus_a_teamless_copy_all_render(
@@ -3828,7 +3831,7 @@ class TestBuildJournalResumeOccupantDedup:
             assert text in result
         assert result.count("- coder: CODE: dedup") == 3
         # No single candidate whose supersession it would be: nothing marked.
-        assert "[superseded by team" not in result
+        assert "[older than team" not in result
 
     def test_old_format_only_still_renders(self, session_dir, journal_file):
         """CONTROL: the drop must not remove a legitimate old-format entry."""

@@ -721,3 +721,22 @@ class TestPartitionDestination:
             PARTITION_OLD_FORMAT,
         }
         assert len(labels) == 4
+
+    def test_a_non_str_team_is_foreign_even_when_the_list_holds_it(self):
+        """HARDENING: `["x"]` matched a non-str element of `from_teams` and
+        returned FROM, reopening the unhashable-key path for any caller that
+        passes raw journal values. A non-str is never a valid team name."""
+        assert (
+            partition_destination(["x"], "session-abc", [["x"]])
+            == PARTITION_FOREIGN
+        )
+        # An int is equally invalid, even when the list stringifies to it.
+        assert (
+            partition_destination(7, "session-abc", ["7"]) == PARTITION_FOREIGN
+        )
+
+    def test_none_still_means_absent_and_is_old_format(self):
+        assert (
+            partition_destination(None, "session-abc", [])
+            == PARTITION_OLD_FORMAT
+        )
