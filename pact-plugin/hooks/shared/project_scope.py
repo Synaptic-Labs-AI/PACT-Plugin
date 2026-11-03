@@ -808,10 +808,25 @@ def _listed_worktrees(
 
 
 def _record_names_declaration(identity: Optional[dict], declared: Path) -> bool:
-    """Whether the record was written for exactly this declaration."""
-    return isinstance(identity, dict) and identity.get(
-        "declared"
-    ) == os.path.realpath(declared)
+    """Whether the record was written for exactly this declaration.
+
+    TOTAL: a declaration the OS will not canonicalise (an embedded NUL, or a
+    path otherwise refused) answers False instead of raising. False is the
+    honest answer — the record's `declared` value cannot equal a path whose
+    own canonical form does not exist — and every consumer reads it as "this
+    record does not apply", which is the fail-closed direction. The
+    isinstance short-circuit stays first, so a non-dict identity is decided
+    without touching the filesystem at all.
+
+    Both exception types are measured, not speculative: `os.path.realpath`
+    raises ValueError on an embedded NUL, and OSError on an unreadable path.
+    """
+    if not isinstance(identity, dict):
+        return False
+    try:
+        return identity.get("declared") == os.path.realpath(declared)
+    except (OSError, ValueError):
+        return False
 
 
 def _recorded_common_dir(identity: Optional[dict], declared: Path) -> Optional[str]:
@@ -979,7 +994,12 @@ def stays_in_declared_project(
         resolved = Path(resolved_root).resolve()
         if declared.resolve() == resolved:
             return True
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError: an embedded NUL in the declaration. A path that cannot
+        # be resolved cannot be shown to stay in the declared project, and
+        # this function's fail-safe is False — refuse. Before this, a corrupt
+        # session record crashed the working-memory sync guard here, one call
+        # before the record predicate could answer.
         # RuntimeError: a symlink loop, on Pythons before 3.13.
         return False
     anchor = _nearest_existing_directory(declared)
