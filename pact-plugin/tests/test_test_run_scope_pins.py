@@ -193,6 +193,7 @@ LINE_PINS = (
         (
             # orchestrate.md:856 — the CODE-phase boundary checklist.
             "Scoped test run green at every commit boundary",
+            "the tests the change affects",
             "the full suite is not a per-commit gate",
         ),
     ),
@@ -398,6 +399,15 @@ _RUN = re.compile(
     r"(?:tests?|suites?)\b"
 )
 _RUN_BARE = re.compile(r"(?i)\btests?\s+runs?\b")
+# The noun form "test run", which the verb-first pattern cannot see. The
+# commit-boundary checklist says "Scoped test run green at every commit
+# boundary"; without this, dropping its set parenthetical left an unscoped
+# obligation the classifier never even treated as a demand.
+#
+# Bounded to the PREDICATE form on purpose: bare "test run" is an ordinary noun
+# ("covered by at least one test run"), and matching that promoted the correct
+# carriers, whose own text contains that sentence, to in-class.
+_RUN_NOUN = re.compile(r"(?i)\btest\s+run\s+(?:is\s+|must\s+)?(?:green|pass(?:es|ing)?)\b")
 # Covers both a tests-pass and a SUITE-pass predicate, with or without a modal
 # and with or without "be"/"all" inside it: "tests pass", "tests are green",
 # "the suite must be green", "suites must pass", "a suite passes", "the suite
@@ -439,13 +449,24 @@ PREEXISTING_SCOPE_PHRASES = (
 ALL_SCOPE_MARKERS = SCOPE_MARKERS + PREEXISTING_SCOPE_PHRASES
 
 # The already-correct full-suite boundary. A pass/fail question asked HERE is
-# not the defect class, so it stays out.
-PREPR_MARKERS = (
-    "before creating pr",
-    "pre-pr",
-    "before pr",
-    "at the pr boundary",
+# not the defect class, so it stays out. As a REGEX, not a substring: the raw
+# substring "before pr" also matches inside "before proceeding", which turned
+# the commonest English closer into a pre-PR exemption.
+_PREPR = re.compile(
+    r"(?i)\bbefore\s+creating\s+pr\b"
+    r"|\bpre-pr\b"
+    r"|\bbefore\s+pr(?![a-z])"
+    r"|\bat\s+the\s+pr\s+boundary\b"
 )
+
+# Sentence and template-line boundaries. NOT ":" — the Pre-PR checkpoint puts
+# its marker before a colon and its question after it, and splitting there
+# would separate an exemption from the demand it applies to.
+_SEGMENT_BOUNDARY = re.compile(r"(?<=\.)\s+|\|")
+
+
+def _segments(line: str) -> list[str]:
+    return [segment for segment in _SEGMENT_BOUNDARY.split(line) if segment.strip()]
 
 # A line that demands or gates an UNBOUNDED set without a run verb — the other
 # half of the class, previously a candidate the classifier silently discarded.
@@ -557,7 +578,6 @@ ALLOWLIST = (
 # Per file as well as in total: with only a total, one candidate added in one
 # file and one lost in another cancel out, and the operator who sees "38, same
 # as before" has nothing to look at. The failure names the file that moved.
-BASELINE_CANDIDATES = 54
 BASELINE_BY_FILE = {
     "agents/pact-backend-coder.md": 1,
     "agents/pact-database-engineer.md": 1,
@@ -585,6 +605,10 @@ BASELINE_BY_FILE = {
     "skills/pact-testing-strategies/references/test-pyramid.md": 1,
 }
 
+# Derived, never restated: the per-file map is the source of truth, so a second
+# literal cannot drift away from it.
+BASELINE_CANDIDATES = sum(BASELINE_BY_FILE.values())
+
 
 def _surfaces() -> list[Path]:
     found: list[Path] = []
@@ -608,8 +632,8 @@ def _candidates(surfaces):
                 yield rel, lineno, line
 
 
-def _in_class(line: str) -> bool:
-    """IN = a demand to run tests that names no SET and sits at no PR boundary.
+def _segment_in_class(segment: str) -> bool:
+    """The class rule applied to ONE sentence or clause.
 
     Three ways in: an imperative to run, a gate/requirement over an unbounded
     set, or a CONTRAST demand that names a full-suite run alongside a smaller
@@ -619,19 +643,34 @@ def _in_class(line: str) -> bool:
     demand to it: "run the full test suite, not just the integration tests"
     names a set and still demands everything.
     """
-    lowered = line.lower()
-    contrast = _contrast(line) and bool(_UNBOUNDED_SET.search(line))
-    if not contrast:
-        if any(marker in lowered for marker in ALL_SCOPE_MARKERS):
-            return False
-        if any(marker in lowered for marker in PREPR_MARKERS):
-            return False
-        if _SIGNAL_ROW.search(line):
-            return False
-    if _RUN.search(line):
+    lowered = segment.lower()
+    demand = bool(_RUN.search(segment) or _RUN_NOUN.search(segment))
+    unbounded = bool(_UNBOUNDED_SET.search(segment))
+    if _contrast(segment) and unbounded and demand:
         return True
-    unbounded = bool(_UNBOUNDED_SET.search(line))
-    return unbounded and bool(_GATE.search(line) or _REQUIRED.search(line))
+    if any(marker in lowered for marker in ALL_SCOPE_MARKERS):
+        return False
+    if _PREPR.search(segment):
+        return False
+    if demand:
+        return True
+    return unbounded and bool(_GATE.search(segment) or _REQUIRED.search(segment))
+
+
+def _in_class(line: str) -> bool:
+    """IN if ANY segment of the line is in class.
+
+    Per SEGMENT, not per line. These dispatch templates are single physical
+    lines that carry the test obligation and a test-count noun in different
+    sentences, so a scope phrase anywhere on the line used to excuse the whole
+    line: the pre-fix carriers put "New unit tests for logic changes." next to
+    "Run test suite before HANDOFF." and the restored defect classified as
+    scoped. A signal row stays a whole-line exclusion because "a signal row is
+    a status description" is a property of the row, not of one of its cells.
+    """
+    if _SIGNAL_ROW.search(line):
+        return False
+    return any(_segment_in_class(segment) for segment in _segments(line))
 
 
 def _allowlisted(rel: str, line: str, allowlist) -> bool:
@@ -797,6 +836,19 @@ CAUGHT_SHAPES = (
     "Run the affected tests, then in addition the whole test suite.",
     "Make the entire suite green before commit.",
     "The complete suite must be green before commit.",
+    # F1: the pre-PR marker used to be a raw substring, so "before pr" matched
+    # inside "before proceeding" and this common closer was exempted.
+    "Before proceeding, run the full test suite.",
+    # F3: the commit-boundary checklist with its set parenthetical removed. The
+    # noun form "test run green" was not treated as a demand at all.
+    "- [ ] Scoped test run green at every commit boundary",
+    # F2: the PRE-FIX carrier shapes, taken from the parent revision. Each
+    # carries a test-count noun ("unit tests") in the same line as the unscoped
+    # demand, which is what let a scope phrase excuse the whole line.
+    "Testing: New unit tests for logic changes. Fix broken existing tests. "
+    "Run test suite before HANDOFF.",
+    "Testing: New unit tests for logic changes (optional for trivial changes). "
+    "Fix broken existing tests. Run test suite before HANDOFF.",
 )
 
 
