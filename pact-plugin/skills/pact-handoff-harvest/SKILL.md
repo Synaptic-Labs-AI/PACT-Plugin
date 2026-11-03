@@ -108,7 +108,7 @@ For each discovered task, read the HANDOFF from the two copies and combine them.
 
 Let `J` be the journal copy's required key set and `D` the task file's.
 
-**`EMPTY` MEANS MEMBERSHIP IN `(None, '', [], {})`, NOT FALSINESS — AND THAT TEST APPLIES TO THE TASK-FILE SIDE.** State A is gated on the disk value's membership in that tuple, so a task file carrying `0` or `False` is NOT empty: it is content and wins that field. **THE JOURNAL SIDE IS DECIDED BY TRUTHINESS, NOT MEMBERSHIP:** State A runs only when the journal value is TRUTHY, so a journal `0`, `False`, `''`, `[]` or `{}` does not trigger it — the task-file value wins silently, with no report. The two sides use different tests; do not restate either as the other.
+**`EMPTY` MEANS MEMBERSHIP IN `(None, '', [], {})`, NOT FALSINESS, ON BOTH SIDES.** A task-file `0` or `False` is content and wins its field; a journal `0` or `False` beside an empty task-file field is content and the State A rules decide it.
 
 **WHEN THE TASK FILE WINS A FIELD, NO JOURNAL SPELLING OF IT SURVIVES.** A journal copy may carry BOTH the canonical and a legacy spelling of one field; the output keeps the winner's spelling and removes EVERY raw journal key that maps to that identity, so a stale alias cannot defeat the decision. The same applies to a REQUIRED field dropped in the incomparable state: every spelling of it goes.
 

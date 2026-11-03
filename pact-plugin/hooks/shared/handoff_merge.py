@@ -234,7 +234,9 @@ def union_preferring_task_file(
         if (
             disk_value in _EMPTY_VALUES
             and journal_present
-            and journal_value
+            # MEMBERSHIP, as on the disk side: a journal 0 or False is
+            # content, and the State A rules below decide it.
+            and journal_value not in _EMPTY_VALUES
         ):
             if d_req >= j_req:  # covering, EQUALITY INCLUDED
                 reports.append(

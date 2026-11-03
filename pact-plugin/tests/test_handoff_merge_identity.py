@@ -333,14 +333,15 @@ class TestUnionPreferringTaskFile:
         merged, _ = union_preferring_task_file(journal, disk, "61")
         assert merged["decisions"] == 0
 
-    def test_p10_proper_subset_empty_list_beats_journal_zero(self):
-        """DISCRIMINATING (proper subset): the journal's 0 is falsy but NOT a
-        member of (None, '', [], {}), so the task file's [] wins. Mutant
-        `journal_value not in _EMPTY_VALUES` restores 0 and reddens this arm."""
+    def test_p10_proper_subset_restores_journal_zero(self):
+        """DISCRIMINATING (proper subset): the journal's 0 is NOT a member of
+        (None, '', [], {}), so it is content, and a proper-subset task file
+        restores it. Mutant `journal_value` (truthiness) keeps the task
+        file's [] and reddens this arm."""
         journal = {"decisions": 0, "uncertainty": ["u"]}
         disk = {"decisions": []}
         merged, _ = union_preferring_task_file(journal, disk, "61")
-        assert merged["decisions"] == []
+        assert merged["decisions"] == 0
 
     def test_present_and_empty_with_incomparable_sets_keeps_the_empty_value(self):
         """THE INCOMPARABLE / PRESENT-AND-EMPTY BRANCH, which had no arm at
@@ -1169,17 +1170,18 @@ class TestHarvestRuleProse:
             not in SKILL_TEXT
         )
 
-    def test_b2_journal_side_is_truthiness_not_membership(self):
-        """B2: the old sentence gave two answers for a falsy journal value.
-        The code gates State A on journal TRUTHINESS and on DISK membership;
-        the text must state the two tests separately."""
-        assert "THE JOURNAL SIDE IS DECIDED BY TRUTHINESS, NOT MEMBERSHIP" in SKILL_TEXT
-        assert "AND THAT TEST APPLIES TO THE TASK-FILE SIDE" in SKILL_TEXT
+    def test_journal_side_is_membership(self):
+        """The code gates State A on MEMBERSHIP on both sides; the text must
+        say so and must not describe a truthiness test on the journal side."""
         assert (
-            "and a journal value of `0`, `False`, `[]` or `{}` does not "
-            "trigger the present-and-empty state"
-            not in SKILL_TEXT
+            "**`EMPTY` MEANS MEMBERSHIP IN `(None, '', [], {})`, NOT "
+            "FALSINESS, ON BOTH SIDES.**" in SKILL_TEXT
         )
+        assert (
+            "a journal `0` or `False` beside an empty task-file field is "
+            "content and the State A rules decide it" in SKILL_TEXT
+        )
+        assert "DECIDED BY TRUTHINESS" not in SKILL_TEXT
 
     def test_b3_alias_map_is_the_normaliser_not_resolve_handoff_field(self):
         """B3: `resolve_handoff_field` returns None for absent AND for
