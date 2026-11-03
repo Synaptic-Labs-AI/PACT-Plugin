@@ -391,6 +391,24 @@ def test_a_changed_sibling_only_task_is_harvested_again():
     assert len(second.processed) == 1
 
 
+# Orphan recovery: the block runs with the PRIOR session as this section.
+PRIOR = "session-prior"
+
+
+def test_a_prior_session_is_recovered_only_when_run_as_its_own_section():
+    """Run with the prior team as `this_team`, its events are this section's
+    units and their tokens are unprefixed (the recovery adds the prefix). Run
+    as the current team, every team-attributed prior event is FOREIGN and
+    nothing is recovered, which is why the recovery must set the inputs."""
+    stores = {PRIOR: {"5": task()}}
+    own = Run([ev("5", PRIOR)], stores, this=PRIOR, realign=())
+    assert own.sections() == [None]
+    assert own.recorded == [f"5#{key(H)}"]
+    wrong = Run([ev("5", PRIOR)], stores, realign=(), tasklist=["5"])
+    assert wrong.processed == []
+    assert wrong.count(f"journal event names team {PRIOR}") == 1
+
+
 # ---- A1-A8: every report and every from-team route ------------------------
 
 class _FixedClock:

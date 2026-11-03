@@ -332,6 +332,20 @@ def _journal_reads():
         for match in re.finditer(r"session_journal\.py\"?\s+read\b([^`)]*)", line):
             typed = re.search(r"--type\s+(\w+)", match.group(1))
             reads.append(typed.group(1) if typed else None)
+        # The Python reader form: read_events(...) / read_events_from(...),
+        # with the type as its first (read_events) or second (_from)
+        # positional argument, or as event_type=.
+        for match in re.finditer(r"\bread_events(_from)?\(([^)]*)\)", line):
+            args = [a.strip() for a in match.group(2).split(",") if a.strip()]
+            keyword = [a for a in args if a.startswith("event_type=")]
+            positional = [a for a in args if "=" not in a]
+            if keyword:
+                value = keyword[0].split("=", 1)[1]
+            else:
+                index = 1 if match.group(1) else 0
+                value = positional[index] if len(positional) > index else None
+            value = value.strip("'\"") if value else None
+            reads.append(None if value in (None, "...") else value)
     return reads
 
 

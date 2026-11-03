@@ -1355,6 +1355,18 @@ class TestHarvestRuleProse:
         assert "Read that store's task file with the `read_task_json` route" in SKILL_TEXT
         assert "WITH THE `disk_identity` ROUTE, NEVER BY HAND" in SKILL_TEXT
 
+    def test_orphan_recovery_sets_the_block_inputs_for_the_prior_session(self):
+        """Orphan Recovery runs the Step 3 block with the prior session as
+        THIS section, reads that session's whole journal, and prefixes the
+        unprefixed tokens it records with the prior team."""
+        orphan = SKILL_TEXT.split("## Orphaned Handoff Recovery", 1)[1]
+        assert "RUN THE STEP 3 BLOCK WITH THE PRIOR SESSION AS THIS SECTION" in orphan
+        assert "`task_list_dir` is `{config_dir}/tasks/{prior team_id}`" in orphan
+        assert "`read_events_from(session_dir)` with no type" in orphan
+        assert "Prefix each recorded token that carries no `/` with `{prior team}/`" in orphan
+        assert "read_events_from(session_dir, 'agent_handoff')" not in SKILL_TEXT
+        assert "re-derives its processed set" not in SKILL_TEXT
+
     def test_inventory_routes_every_listed_helper(self):
         """Every helper in this test's LITERAL list has a runnable import
         route in the inventory. The list is a literal, not derived from the
@@ -1445,7 +1457,7 @@ class TestHarvestRuleProse:
         )
         assert "recorded_tokens.append(token)" in SKILL_TEXT
         assert "**append** the recorded tokens" in SKILL_TEXT
-        assert "Add the recovered units' tokens, each prefixed `{prior team}/`" in SKILL_TEXT
+        assert "Prefix each recorded token that carries no `/` with `{prior team}/`" in SKILL_TEXT
         assert "WRITE THIS TEAM'S IDS ONLY" not in SKILL_TEXT
         assert "{comma-separated IDs}" not in SKILL_TEXT
 
