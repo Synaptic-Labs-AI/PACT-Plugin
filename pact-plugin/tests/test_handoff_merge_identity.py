@@ -1357,6 +1357,7 @@ class TestHarvestRuleProse:
             "latest_by_ts_then_journal_order",
             "group_events",
             "current_arc",
+            "arc_of",
             "owning_group",
             "undivided_contents",
             "partition_destination",
@@ -1393,7 +1394,7 @@ class TestHarvestRuleProse:
         (section, id) pairs, and Step 3 checks each selected unit's token, so
         a from-store task whose NUMBER this team recorded is still reached."""
         assert (
-            "**Route each `agent_handoff` event at discovery with "
+            "**Route each remaining `agent_handoff` event at discovery with "
             "`partition_destination`, and collect `(section, task_id)` pairs, "
             "never bare ids.**" in SKILL_TEXT
         )
@@ -1665,18 +1666,45 @@ class TestHarvestRuleProse:
         assert "for line in from_reports:" in SKILL_TEXT
         assert "Never join a `from` that route rejected into a path" in SKILL_TEXT
 
-    def test_step31_item1_requires_identity_match(self):
-        """Step 3.1 reads a task file's metadata for a unit only when that
-        record's identity is the unit's group identity."""
-        assert "use the `metadata` Step 3 passed for this unit" in SKILL_TEXT
+    def test_step31_item1_uses_only_the_metadata_step3_passed(self):
+        """Step 3.1 reads task-file siblings ONLY through the metadata Step 3
+        passed, which only the owning group receives. An identity-only read
+        would hand an older instance of the same occupant the current
+        instance's siblings."""
+        assert "use ONLY the `metadata` Step 3 passed for this unit" in SKILL_TEXT
         assert (
-            "only if that record's `disk_identity(owner, subject)` equals the "
-            "unit's group identity" in SKILL_TEXT
+            "When Step 3 passed none, skip this item and use the snapshot "
+            "fallback; do not read the task file." in SKILL_TEXT
         )
+        assert "Only the group that owns the task file ever reads its siblings" in SKILL_TEXT
+        assert "equals the unit's group identity" not in SKILL_TEXT
+
+    def test_step31_snapshots_are_scoped_to_the_units_arc(self):
+        """The snapshot fallback is the other site where one instance could
+        take another instance's siblings: a snapshot carrying a team must
+        carry the unit's arc."""
         assert (
-            "A same-numbered task file of a different occupant is never this "
-            "unit's sibling source." in SKILL_TEXT
+            "A snapshot that carries a `team` must also carry the unit's ARC"
+            in SKILL_TEXT
         )
+        assert "with the `arc_of` route" in SKILL_TEXT
+
+    def test_population_is_never_framed_as_an_id_delta(self):
+        """The population is the units whose tokens the ledger lacks; no
+        sentence frames it as a delta subtracted from the ledger."""
+        assert "delta against" not in SKILL_TEXT
+        assert "delta-only pass" not in SKILL_TEXT
+        assert "processes only the delta" not in SKILL_TEXT
+        assert "the units whose tokens this ledger lacks are the population" in SKILL_TEXT
+
+    def test_discovery_skips_a_non_string_task_id(self):
+        """Journal task ids are sorted, so a non-str id is skipped and
+        reported at discovery, in the prose and in the block."""
+        assert (
+            "Skip an `agent_handoff` event whose `task_id` is not a non-empty "
+            "string" in SKILL_TEXT
+        )
+        assert 'if not isinstance(e.get("task_id"), str) or not e.get("task_id"):' in SKILL_TEXT
 
     def test_foreign_non_str_team_reports_a_schema_line(self):
         """A non-str team is a SCHEMA violation wearing a routing label: the

@@ -89,6 +89,11 @@ FIXTURES = {
         _json([[[_IDENTITY, [0, 0]], [1, 2]]])),
     "current_arc": ([], {"journal": _JOURNAL, "team": TEAM, "task_id": "5"},
                     _json([0, 0])),
+    # The event after a re-creation: its arc is the second instance's, not
+    # the first event's, so a route that reads the wrong position is caught.
+    "arc_of": ([], {"journal": _JOURNAL + [
+        {"type": "task_created", "task_id": "5", "team": TEAM, "ts": T1},
+        _ev(H)], "position": 4}, _json([1, 3])),
     "owning_group": (
         [], {"groups": [[_IDENTITY, None], [_IDENTITY, [0, 0]]],
              "disk_id": _IDENTITY, "file_arc": [0, 0]},

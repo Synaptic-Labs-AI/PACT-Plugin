@@ -336,6 +336,28 @@ def test_a_dated_current_group_owns_the_file_over_a_teamless_one():
     assert run.count("identity mismatch") == 0
 
 
+# 22 -- mutant: a non-owning group of the same identity gets the file's metadata
+def test_an_older_instance_of_the_same_occupant_never_gets_the_owners_siblings():
+    old, new = _handoff("old instance"), _handoff("current instance")
+    stores = {THIS: {"5": task(new, sib="current instance's")}}
+    journal = [created("5", THIS, ts=T0), ev("5", THIS, handoff=old, ts=T1),
+               created("5", THIS, ts=T2), ev("5", THIS, handoff=new, ts=T3)]
+    run = Run(journal, stores)
+    by_produced = {h["produced"]: metadata for _, h, metadata in run.processed}
+    assert by_produced["old instance"] is None
+    assert by_produced["current instance"]["sib"] == "current instance's"
+
+
+# 23 -- mutant: the non-str task-id guard is removed
+@pytest.mark.parametrize("bad_id", [7, None, ""])
+def test_a_non_string_task_id_is_skipped_and_reported_once(bad_id):
+    bad = ev("8", THIS)
+    bad["task_id"] = bad_id
+    run = Run([bad, ev("8", THIS)], {})
+    assert run.sections() == [None]
+    assert run.count("handoff event skipped: task id") == 1
+
+
 @pytest.mark.parametrize("this", ["", None])
 def test_an_underivable_team_routes_every_event_old_format(this):
     """Control for the guard: no `Task list:` makes every event OLD-FORMAT
