@@ -511,9 +511,10 @@ class PACTMemory:
                 )
                 return recorded_root.name, "worktree identity record"
             logger.warning(
-                "project_id could not be resolved for %s: the declared "
-                "directory does not exist and no verified worktree identity "
-                "record names it. No name was derived from the path.",
+                "the directory declared via %s could not be resolved: %s "
+                "does not exist and no verified worktree identity record "
+                "names it. No name was derived from the path.",
+                source,
                 declared_dir,
             )
             return None, source
@@ -984,6 +985,26 @@ class PACTMemory:
             self._last_sync_status = SyncResult.REFUSED
             raise ProjectScopeDisagreementError(
                 format_project_dir_disagreement(*disagreement)
+            )
+
+        # A PAYLOAD project_id THAT IS PRESENT MUST BE USABLE. Omission means
+        # "auto-detect"; an empty string (or any other falsy-but-present value)
+        # cannot mean that, so it is rejected as bad input rather than treated
+        # as a warrant or silently replaced by the detected id. This check is
+        # unconditional on the instance's identity, because on a RESOLVED
+        # instance a falsy payload id would otherwise survive the defaulting
+        # and be written to the memory row AND its file rows under a key no
+        # `PACTMemory` instance can ever hold (`__init__` routes falsy input to
+        # detection), so no reader could address those rows.
+        #
+        # ValueError is this module's payload-validation channel; the CLI
+        # already envelopes it as invalid input (exit 2), so it cannot read as
+        # an env/record disagreement.
+        payload_project = memory.get("project_id")
+        if payload_project is not None and not payload_project:
+            raise ValueError(
+                "project_id, when supplied, must be a non-empty string; omit "
+                "it to auto-detect the project. Nothing was written."
             )
 
         # AND FAIL CLOSED WHEN NO IDENTITY RESOLVED AT ALL. A None id is not a

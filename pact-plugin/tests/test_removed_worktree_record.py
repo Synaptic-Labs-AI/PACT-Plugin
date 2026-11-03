@@ -1242,7 +1242,25 @@ class TestUnresolvedIdentityRefusesWrites:
             memory_id = memory.save(
                 {"context": "EMPTY-ID", "project_id": ""}, sync_to_claude=False
             )
-        except ProjectScopeDisagreementError:
+        except ProjectIdentityUnresolvedError as exc:
+            # CATCHING THE SUBCLASS PROVES THE CHANNEL; THE MESSAGE PROVES THE
+            # CAUSE, and the two fail differently. A refusal from any other
+            # ProjectScopeDisagreementError site now propagates and errors the
+            # arm instead of satisfying it, and a same-class refusal for a
+            # different reason fails the assertion below.
+            assert "no project identity could be resolved" in str(exc), (
+                "the empty-id save was refused by ProjectIdentityUnresolvedError "
+                f"for a cause other than the unresolved identity: {str(exc)!r}"
+            )
+            memory_id = None
+        except ValueError as exc:
+            # The payload-validation channel. An empty supplied id is invalid
+            # input regardless of whether an instance identity resolved, and
+            # this guard runs first, so both routes may report it here. Also
+            # cause-specific: an unrelated ValueError fails the message check.
+            assert "non-empty string" in str(exc), (
+                f"refused for an unrelated ValueError reason: {str(exc)!r}"
+            )
             memory_id = None
 
         if memory_id is None:
@@ -1269,6 +1287,84 @@ class TestUnresolvedIdentityRefusesWrites:
         assert row[0] not in (None, ""), (
             "an empty-string payload project was accepted silently; the row "
             "has no project identity and no later read can attribute it"
+        )
+
+    def test_f2_a_resolved_instance_still_rejects_a_falsy_payload_id(
+        self, tmp_path
+    ):
+        """The RESOLVED-instance route, which the unresolved arm cannot reach.
+
+        With an instance identity present the no-identity guard does not fire,
+        so before this was fixed the falsy payload reached the defaulting (it
+        is not None) and was written to `memories.project_id` AND
+        `files.project_id`. `__init__` routes falsy input to detection, so no
+        instance can ever address those rows.
+
+        The contract is the same as the unresolved arm: refuse for a
+        cause-specific reason, or write a non-empty id. An unrelated
+        ProjectScopeDisagreementError is NOT caught here on purpose — it
+        propagates and errors the arm.
+        """
+        db_path = tmp_path / "resolved-empty-id.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        assert memory.project_id == "detected-b"
+
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        try:
+            memory_id = memory.save(
+                {"context": "RESOLVED-EMPTY-ID", "project_id": ""},
+                files=[str(linked)],
+                sync_to_claude=False,
+            )
+        except ProjectIdentityUnresolvedError as exc:
+            assert "no project identity could be resolved" in str(exc), (
+                f"refused for an unrelated identity cause: {str(exc)!r}"
+            )
+            memory_id = None
+        except ValueError as exc:
+            # The payload-validation channel: an empty supplied id is invalid
+            # input, not a project-scope disagreement.
+            assert "non-empty string" in str(exc), (
+                f"refused for an unrelated reason: {str(exc)!r}"
+            )
+            memory_id = None
+
+        if memory_id is None:
+            # No row may survive with an empty or NULL id — in `memories` OR
+            # in `files`, because the file row keying is new in this fix.
+            if db_path.exists():
+                with db_connection(db_path) as conn:
+                    empty_ids = 0
+                    for table in ("memories", "files"):
+                        present = conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' "
+                            "AND name=?",
+                            (table,),
+                        ).fetchone()
+                        if present:
+                            empty_ids += conn.execute(
+                                f"SELECT COUNT(*) FROM {table} "
+                                "WHERE project_id IS NULL OR project_id = ''"
+                            ).fetchone()[0]
+                assert empty_ids == 0, (
+                    "a refused falsy-payload save left empty or NULL project "
+                    "ids in the store"
+                )
+            return
+
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            file_row = conn.execute(
+                "SELECT project_id FROM files WHERE path LIKE ?",
+                (f"%/{linked.name}",),
+            ).fetchone()
+        assert row is not None and row[0] not in (None, "")
+        assert file_row is not None and file_row[0] not in (None, ""), (
+            "the resolved-instance save wrote a file row with an empty or "
+            "NULL project id"
         )
 
 
