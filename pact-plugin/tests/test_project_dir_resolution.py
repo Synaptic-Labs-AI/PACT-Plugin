@@ -636,6 +636,51 @@ class TestCliRefusalEnvelope:
             "utf-8", errors="ignore"
         ), "a refused save left the row behind"
 
+    def test_memory_save_cli_envelopes_the_no_identity_refusal(self, tmp_path):
+        """The new refusal's actual boundary: exit non-zero, SCOPE_DISAGREEMENT,
+        nothing written.
+
+        The subclass relationship is pinned in-process by W1's isinstance
+        assertion; this arm proves the CLI's own except-site catches it and
+        emits the documented envelope rather than a traceback.
+        """
+        umbrella = make_umbrella(tmp_path)
+        gone = tmp_path / "removed-worktree"
+        gone.mkdir()
+        gone.rmdir()
+        store = tmp_path / "no-identity.db"
+        env = child_env(
+            umbrella.config_root,
+            home=tmp_path,
+            session_id=SID,
+            project_dir=gone,
+        )
+        setup = subprocess.run(
+            [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
+            capture_output=True, text=True, env=carry_clock_shift(env),
+            cwd=str(umbrella.project), timeout=120,
+        )
+        assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
+
+        proc = subprocess.run(
+            [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
+             json.dumps({"context": "NO-IDENTITY", "goal": "g"})],
+            capture_output=True, text=True, env=carry_clock_shift(env),
+            cwd=str(umbrella.project), timeout=120,
+        )
+        assert proc.returncode != 0, (
+            f"a save with no resolvable identity exited 0: {proc.stdout!r}"
+        )
+        assert "SCOPE_DISAGREEMENT" in proc.stderr, (
+            f"the envelope type is missing from stderr: {proc.stderr!r}"
+        )
+        assert "no project identity could be resolved" in proc.stderr, (
+            f"the envelope does not name the actual cause: {proc.stderr!r}"
+        )
+        assert not store.exists() or "NO-IDENTITY" not in store.read_bytes().decode(
+            "utf-8", errors="ignore"
+        ), "the refused save left the row behind"
+
     def test_child_env_defaults_delete_the_project_dir_var(self, tmp_path):
         """Guard the env-builder itself: DELETE is the default and the pytest
         marker never crosses — the two leaks that would make every row above
@@ -1709,3 +1754,24 @@ class TestDeclinedDeclaration:
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
         monkeypatch.chdir(umbrella.project)  # has CLAUDE.md, no .git
         assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+
+    def test_criterion_c_the_helper_itself_warns(self, tmp_path, monkeypatch, caplog):
+        """Criterion (c)'s 'refuses loudly', at the HELPER seam.
+
+        T1 asserts the same warning through the detector; this arm calls the
+        helper directly, which is the form the acceptance criterion's unit
+        requirement names.
+        """
+        main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            name, label = PACTMemory._project_name_for_declared_dir(
+                str(worktree), "probe"
+            )
+
+        assert name is None and label == "probe"
+        messages = " ".join(r.message for r in caplog.records)
+        assert str(worktree) in messages, (
+            "the helper declined silently; the unit-level 'refuses loudly' "
+            f"half is unproven. captured: {messages!r}"
+        )
+        assert "could not be resolved" in messages

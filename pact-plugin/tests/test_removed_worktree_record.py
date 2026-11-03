@@ -1094,7 +1094,19 @@ class TestUnresolvedIdentityRefusesWrites:
     def _prepopulated(self, tmp_path) -> Path:
         db_path = tmp_path / "store.db"
         seed = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
-        seed.save({"context": "SEED"}, sync_to_claude=False)
+        seed_id = seed.save({"context": "SEED"}, sync_to_claude=False)
+        # THE PREMISE OF EVERY ASSERTION BELOW: the store is NOT empty. A
+        # silent no-write makes `counts == before` (0 == 0) and both NULL
+        # checks (0) vacuous, which is the failure class this control exists
+        # to prevent. Assert the seed's own row, not merely that save returned.
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (seed_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "other-proj-a", (
+            "the seed row did not land; W1's count comparisons would prove "
+            "nothing"
+        )
         return db_path
 
     def test_w1_a_refused_save_writes_no_null_row(self, tmp_path, monkeypatch):
@@ -1176,8 +1188,11 @@ class TestUnresolvedIdentityRefusesWrites:
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None
 
+        linked = tmp_path / "explicit.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
         memory_id = memory.save(
             {"context": "EXPLICIT", "project_id": "explicitly-elsewhere"},
+            files=[str(linked)],
             sync_to_claude=False,
         )
 
@@ -1185,8 +1200,76 @@ class TestUnresolvedIdentityRefusesWrites:
             row = conn.execute(
                 "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
             ).fetchone()
+            # F1: the payload warrant must key the FILE row too. The save
+            # links files with the INSTANCE identity, which is None here, so
+            # asserting only the memories row left a NULL-keyed files row
+            # unnoticed by both this arm and the suite.
+            file_row = conn.execute(
+                "SELECT project_id FROM files WHERE path LIKE ?",
+                (f"%/{linked.name}",),
+            ).fetchone()
+            null_files = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
+            ).fetchone()[0]
         assert row is not None and row[0] == "explicitly-elsewhere"
+        assert file_row is not None, "the save did not link the file row"
+        assert file_row[0] == "explicitly-elsewhere", (
+            "the file row was keyed by the instance identity (None), not by "
+            "the payload warrant"
+        )
+        assert null_files == 0, "a NULL-keyed file row survived the save"
         assert memory.last_project_scope["source"] == "supplied"
+
+    def test_f2_an_empty_string_payload_project_is_not_accepted_silently(
+        self, tmp_path, monkeypatch
+    ):
+        """F2: an empty-string id is neither a warrant nor a project name.
+
+        Accepted silently it produces a row no read can attribute to a
+        project. Either outcome is acceptable — refuse, or write a non-empty
+        id — but a row whose project_id is "" is not.
+        """
+        db_path = tmp_path / "empty-id.db"
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+        assert memory.project_id is None
+
+        try:
+            memory_id = memory.save(
+                {"context": "EMPTY-ID", "project_id": ""}, sync_to_claude=False
+            )
+        except ProjectScopeDisagreementError:
+            memory_id = None
+
+        if memory_id is None:
+            # Refused before the store was initialized, so the database file
+            # may not exist at all. "No row" is asserted without creating one.
+            if db_path.exists():
+                with db_connection(db_path) as conn:
+                    table = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name='memories'"
+                    ).fetchone()
+                    count = (
+                        conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                        if table
+                        else 0
+                    )
+                assert count == 0, "a refused empty-id save still wrote a row"
+            return
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None
+        assert row[0] not in (None, ""), (
+            "an empty-string payload project was accepted silently; the row "
+            "has no project identity and no later read can attribute it"
+        )
 
 
 class TestUnresolvedIdentityScopesReads:
@@ -1378,3 +1461,36 @@ class TestIssueCriterionALiteralShape:
             f"verify; captured: {messages!r}"
         )
         assert "could not be resolved" in messages
+
+    def test_a_corrupt_identity_record_after_removal_declines(
+        self, layout_root, monkeypatch, caplog
+    ):
+        """The corrupt branch, exercised AFTER removal.
+
+        The reader returns {} for a corrupt record exactly as it does for an
+        absent one, so this arm first proves the record PATH is the reader's
+        (a valid record is read back), then corrupts it. Without the first
+        step an unreadable file at the wrong path would pass identically.
+        """
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _plant(worktree, _identity_for(worktree))
+        _enable_record_reading(monkeypatch)
+        assert pact_session.get_worktree_identity_from_session_record(), (
+            "the valid record was not read; the corrupt step would prove nothing"
+        )
+
+        record_path = _record_path(worktree)
+        record_path.write_text("{not json", encoding="utf-8")
+        assert pact_session.get_worktree_identity_from_session_record() == {}, (
+            "the corrupt record was not rejected at the reader"
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(layout_root)
+        _remove_worktree(main, worktree)
+
+        with caplog.at_level(logging.WARNING):
+            assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+        messages = " ".join(r.message for r in caplog.records)
+        assert str(worktree) in messages
