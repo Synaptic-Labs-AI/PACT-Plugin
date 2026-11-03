@@ -156,7 +156,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 1. **`occupant_hash`**, the SHARED identity hash. This is the one runnable copy in this file. Step 3.1 uses the same command and points here.
 
    ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import occupant_hash; print(occupant_hash(sys.argv[1], sys.argv[2]))" "$AGENT" "$TASK_SUBJECT"
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import occupant_hash; print(occupant_hash(sys.argv[1], sys.argv[2]))" "$AGENT" "$TASK_SUBJECT"
    ```
 
    🔴 **THE AGENT AND THE SUBJECT MUST CROSS AS DATA, NEVER AS COMMAND TEXT.** Pass them as separate ARGV entries read through `sys.argv`, or carry them in a JSON payload on STDIN to a command whose text is a FIXED LITERAL — and never interpolate either value into the `-c` string or into an unquoted heredoc body. The author of the task writes its subject, so a subject folded into command text is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the DATA BOUNDARY is what makes it safe, and rewriting the command is enough to remove it. The `occupant_hash` command above uses ARGV; the merge helper uses the STDIN form because its payload carries the two HANDOFF mappings.
@@ -164,7 +164,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 2. **`report_safe`**, the SHARED report sanitiser. Every `report(...)` value that comes from the journal, the task file or the context is interpolated through it:
 
    ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import report_safe; print(report_safe(sys.argv[1]))" "$VALUE"
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import report_safe; print(report_safe(sys.argv[1]))" "$VALUE"
    ```
 
    It strips control characters and every line boundary (so a crafted team name, field name or task id cannot forge a report line) and caps the length. The helper-produced strings — `outcome.report` and the union's `reports` — are already sanitised; this applies to the values THIS step interpolates.
@@ -172,7 +172,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 3. **`emit_side_subject`**, the SHARED sentinel substitution BOTH emit paths apply before they hash:
 
    ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import emit_side_subject; print(emit_side_subject(sys.argv[1] if len(sys.argv) > 1 else None))" "$SUBJECT"
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import emit_side_subject; print(emit_side_subject(sys.argv[1] if len(sys.argv) > 1 else None))" "$SUBJECT"
    ```
 
    STRICT: any value that is not a non-empty stripped string prints `(no subject)`. A present string is returned unchanged.
@@ -180,7 +180,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 4. **`disk_identity`**, the SHARED disk-side identity, `occupant_hash(owner, emit_side_subject(subject))`:
 
    ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import disk_identity; print(disk_identity(sys.argv[1], sys.argv[2]))" "$OWNER" "$SUBJECT"
+   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import disk_identity; print(disk_identity(sys.argv[1], sys.argv[2]))" "$OWNER" "$SUBJECT"
    ```
 
    Use this for the task record's identity; never recompose the hash inline.
@@ -188,7 +188,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 5. **`handoff_content_key`**, the SHARED handoff content digest the OLD-FORMAT classifier compares. Never compare two handoffs with a local equality test:
 
    ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import handoff_content_key; print(handoff_content_key(json.load(sys.stdin)))" < "$HANDOFF_JSON"
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import handoff_content_key; print(handoff_content_key(json.load(sys.stdin)))" < "$HANDOFF_JSON"
    ```
 
    The handoff crosses as DATA on STDIN; `$HANDOFF_JSON` names a file holding one handoff mapping.
@@ -196,7 +196,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 6. **`union_preferring_task_file`**, the SHIPPED union predicate. It takes the two HANDOFF mappings and the task id, and returns the merged mapping plus its per-field report lines. Both mappings are DATA and cross on STDIN:
 
    ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import union_preferring_task_file; p = json.load(sys.stdin); merged, reports = union_preferring_task_file(p['journal'], p['disk'], p['task_id']); print(json.dumps({'handoff': merged, 'reports': reports}))" < "$PAYLOAD_JSON"
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import union_preferring_task_file; p = json.load(sys.stdin); merged, reports = union_preferring_task_file(p['journal'], p['disk'], p['task_id']); print(json.dumps({'handoff': merged, 'reports': reports}))" < "$PAYLOAD_JSON"
    ```
 
    `$PAYLOAD_JSON` names a file holding `{"journal": {...}, "disk": {...}, "task_id": "..."}`. The command text is a FIXED LITERAL; never interpolate either mapping into it.
@@ -226,7 +226,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 8. **`partition_destination(event_team, this_team, from_teams)`**, the NEW-FORMAT route. Returns one of the exported `PARTITION_THIS`, `PARTITION_FROM`, `PARTITION_FOREIGN` and `PARTITION_OLD_FORMAT` labels; compare against those constants, never bare literals. An absent or empty `event_team` returns `PARTITION_OLD_FORMAT`, and callers keep the underivable-`this_team` guard ABOVE it (when `this_team` is empty, every event is OLD-FORMAT before this runs). Pure; never raises.
 
    ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import partition_destination; p = json.load(sys.stdin); print(partition_destination(p['event_team'], p['this_team'], p['from_teams']))" < "$PAYLOAD_JSON"
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import partition_destination; p = json.load(sys.stdin); print(partition_destination(p['event_team'], p['this_team'], p['from_teams']))" < "$PAYLOAD_JSON"
    ```
 
    `$PAYLOAD_JSON` holds `{"event_team": ..., "this_team": "...", "from_teams": ["..."]}`. The values cross as DATA on STDIN; the command text is a FIXED LITERAL.
@@ -234,7 +234,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 9. **`old_format_destination(outcome, this_team)`**, the OLD-FORMAT route. Takes the `OldFormatOutcome` from `mixed_old_format_event` and returns one of `OLD_FORMAT_DEST_MIXED`, `OLD_FORMAT_DEST_FROM` and `OLD_FORMAT_DEST_THIS`: MIXED means discard the event and emit `outcome.report`; FROM means process it under `outcome.team`; THIS covers OWNED_BY this team (no report) and UNMATCHED (emit `outcome.report`). Pure; never raises.
 
    ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import OldFormatOutcome, old_format_destination; p = json.load(sys.stdin); o = OldFormatOutcome(**p['outcome']); print(old_format_destination(o, p['this_team']))" < "$PAYLOAD_JSON"
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import OldFormatOutcome, old_format_destination; p = json.load(sys.stdin); o = OldFormatOutcome(**p['outcome']); print(old_format_destination(o, p['this_team']))" < "$PAYLOAD_JSON"
    ```
 
    `$PAYLOAD_JSON` holds `{"outcome": {"state": "...", "team": "...", "report": "..."}, "this_team": "..."}`.
@@ -242,7 +242,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 10. **`mixed_old_format_event(task_id, event_agent, event_subject, event_handoff, candidate_tasks)`**, the OLD-FORMAT classifier. Returns an `OldFormatOutcome(state, team, report)`: `state` is one of `OLD_FORMAT_MIXED`, `OLD_FORMAT_OWNED` and `OLD_FORMAT_UNMATCHED`; `report` is the line to emit for MIXED and for UNMATCHED, and `None` for OWNED. `candidate_tasks` is the list of `{"team": "...", "task": <parsed task JSON>}` for the named stores. Pure; never raises.
 
    ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import mixed_old_format_event; p = json.load(sys.stdin); o = mixed_old_format_event(p['task_id'], p['agent'], p['subject'], p['handoff'], p['candidates']); print(json.dumps({'state': o.state, 'team': o.team, 'report': o.report}))" < "$PAYLOAD_JSON"
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import mixed_old_format_event; p = json.load(sys.stdin); o = mixed_old_format_event(p['task_id'], p['agent'], p['subject'], p['handoff'], p['candidates']); print(json.dumps({'state': o.state, 'team': o.team, 'report': o.report}))" < "$PAYLOAD_JSON"
    ```
 
    `$PAYLOAD_JSON` holds `{"task_id": "...", "agent": "...", "subject": "...", "handoff": {...}, "candidates": [...]}`.
@@ -269,12 +269,12 @@ Pseudocode for the read. It carries all the selection steps, because a task_id r
 
 ```python
 # The sentinel substitution and the disk identity are NOT restated here. Both
-# are shipped in shared.agent_handoff_marker and called below, so this file
+# are shipped in shared.handoff_merge and called below, so this file
 # cannot carry a stale second copy of either.
 
 
 # The union predicate is NOT restated here. It is the shipped
-# shared.agent_handoff_marker.union_preferring_task_file, called below, so
+# shared.handoff_merge.union_preferring_task_file, called below, so
 # this file cannot carry a stale second copy of its branches.
 
 

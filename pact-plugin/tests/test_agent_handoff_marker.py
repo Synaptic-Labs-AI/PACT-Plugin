@@ -40,17 +40,19 @@ from pathlib import Path
 import pytest
 
 from shared.agent_handoff_marker import (
-    PARTITION_FOREIGN,
-    PARTITION_FROM,
-    PARTITION_OLD_FORMAT,
-    PARTITION_THIS,
     already_emitted,
     handoff_already_emitted,
     is_signal_task,
     occupant_hash,
-    partition_destination,
     sanitize_path_component,
     unclaim,
+)
+from shared.handoff_merge import (
+    PARTITION_FOREIGN,
+    PARTITION_FROM,
+    PARTITION_OLD_FORMAT,
+    PARTITION_THIS,
+    partition_destination,
 )
 
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"

@@ -1,7 +1,8 @@
 """
 Home for the harvest-side reconciliation primitives in
-shared/agent_handoff_marker.py: the emit-side subject sentinel, the disk
-identity, and the task-file-preferred HANDOFF union.
+shared/handoff_merge.py (the disk identity and the task-file-preferred
+HANDOFF union), plus the emit-side subject sentinel they depend on, which
+stays in shared/agent_handoff_marker.py and is re-exported.
 
 The rule is AUTHORED in skills/pact-handoff-harvest/SKILL.md Step 3; these
 tests pin the executable copy so the two cannot drift. The union arms are the
@@ -19,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from shared.agent_handoff_marker import (
+from shared.handoff_merge import (
     OLD_FORMAT_MIXED,
     OLD_FORMAT_OWNED,
     OLD_FORMAT_UNMATCHED,
@@ -485,7 +486,7 @@ class TestUnionPreferringTaskFile:
         mirror the shipped reader; a falsy alias overwriting a falsy
         canonical made it disagree for canonical-first copies. Each case runs
         both orderings, because insertion order was the defect."""
-        from shared.agent_handoff_marker import _field_map
+        from shared.handoff_merge import _field_map
         from shared.handoff_schema import resolve_handoff_field
 
         cases = [
@@ -1453,19 +1454,19 @@ class TestHarvestRuleProse:
         )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
         assert "partition_destination(event_team, this_team, from_teams)" in section
         assert (
-            "from shared.agent_handoff_marker import partition_destination"
+            "from shared.handoff_merge import partition_destination"
             in section
         )
         assert "PARTITION_THIS" in section and "PARTITION_OLD_FORMAT" in section
         assert "old_format_destination(outcome, this_team)" in section
-        assert "from shared.agent_handoff_marker import OldFormatOutcome" in section
+        assert "from shared.handoff_merge import OldFormatOutcome" in section
         assert "OLD_FORMAT_DEST_MIXED" in section
         assert (
             "mixed_old_format_event(task_id, event_agent, event_subject, "
             "event_handoff, candidate_tasks)" in section
         )
         assert (
-            "from shared.agent_handoff_marker import mixed_old_format_event"
+            "from shared.handoff_merge import mixed_old_format_event"
             in section
         )
         assert "HANDOFF_LEGACY_ALIASES" in section
@@ -1590,7 +1591,7 @@ class TestHarvestRuleProse:
             Path(__file__).resolve().parents[1]
             / "hooks"
             / "shared"
-            / "agent_handoff_marker.py"
+            / "handoff_merge.py"
         ).read_text(encoding="utf-8").split('"""', 2)[1]
         assert "partition_destination" in header
         assert "old_format_destination" in header

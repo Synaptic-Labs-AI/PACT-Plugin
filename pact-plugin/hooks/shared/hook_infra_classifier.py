@@ -250,16 +250,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # merge_guard_common now changes this hook's reminder.
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
-        "handoff_schema",  # via agent_handoff_marker's union predicate
         "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
         "task_metadata_snapshot", "task_utils",
     }),  # task_metadata_snapshot reached via the teammate-frame snapshot
          # seam (emit_task_metadata_snapshot); its own transitive edges
          # (agent_handoff_marker, session_journal) were already here.
-         # handoff_schema is a module-level edge of agent_handoff_marker,
-         # which the union predicate imports for the legacy-alias map, the
-         # required field set and the shipped reader.
     "session_init": frozenset({
         "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "backlog_store",
@@ -470,7 +466,6 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # (pin_credit, with claude_md_drift's record key and hash).
     "task_claim_gate": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
-        "handoff_schema",  # via agent_handoff_marker's union predicate
         "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "task_utils",
