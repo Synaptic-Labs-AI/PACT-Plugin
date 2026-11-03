@@ -787,9 +787,9 @@ class TestReportSafeFormatAndSurrogate:
     @pytest.mark.parametrize(
         "char",
         [
-            "​",  # ZERO WIDTH SPACE (Cf)
-            "‮",  # RIGHT-TO-LEFT OVERRIDE (Cf)
-            "﻿",  # ZERO WIDTH NO-BREAK SPACE / BOM (Cf)
+            "\u200b",  # ZERO WIDTH SPACE (Cf)
+            "\u202e",  # RIGHT-TO-LEFT OVERRIDE (Cf)
+            "\ufeff",  # ZERO WIDTH NO-BREAK SPACE / BOM (Cf)
             "\ud800",  # lone high surrogate (Cs)
         ],
     )
