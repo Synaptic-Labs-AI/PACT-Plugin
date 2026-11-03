@@ -171,12 +171,72 @@ def test_the_unmutated_block_passes_every_arm():
     assert not _killed(ast.parse(step3.BLOCK), arms())
 
 
-def test_every_call_in_the_block_yields_a_mutant():
-    calls = [n for n in ast.walk(ast.parse(step3.BLOCK)) if isinstance(n, ast.Call)
-             and any(not (isinstance(a, ast.Constant) and a.value is None)
-                     for a in [*n.args, *(k.value for k in n.keywords)])]
-    arg_mutants = [k for k, _ in mutants() if k.startswith(("arg|", "kw|"))]
-    assert len(arg_mutants) >= len(calls) > 0
+def _expected_mutant_keys() -> list:
+    """The mutant keys the generator MUST produce, derived from the block's
+    AST by this function alone (it shares nothing with `mutants()` but
+    `ast`), so a generator that skips a node, an argument or an operator
+    disagrees with it.
+
+    Scope: the enclosing function's name; outside any function, the last
+    upper-case section comment (`# NAME:` or `# NAME.`) at or above the
+    node, else "top". Identical keys in one scope are numbered in
+    `ast.walk` order."""
+    tree = ast.parse(step3.BLOCK)
+    enclosing = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef):
+            for inner in ast.walk(fn):
+                enclosing.setdefault(inner, fn.name)
+    headers = [
+        (number, m.group(1).strip())
+        for number, line in enumerate(step3.BLOCK.split("\n"), start=1)
+        for m in [re.match(r"\s*#\s([A-Z][A-Z ]+?)[:.]", line)] if m
+    ]
+
+    def scope(node):
+        if node in enclosing:
+            return enclosing[node]
+        found = "top"
+        for number, name in headers:
+            if number <= node.lineno:
+                found = name
+        return found
+
+    def is_none(value):
+        return isinstance(value, ast.Constant) and value.value is None
+
+    bases = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            text = ast.unparse(node)
+            bases += [f"arg|{scope(node)}|{text}|{ast.unparse(a)}"
+                      for a in node.args if not is_none(a)]
+            bases += [f"kw|{scope(node)}|{text}|{k.arg}"
+                      for k in node.keywords if not is_none(k.value)]
+        elif isinstance(node, ast.Compare) and len(node.ops) == 1:
+            bases.append(f"cmp|{scope(node)}|{ast.unparse(node)}|{type(node.ops[0]).__name__}")
+        elif isinstance(node, ast.BoolOp):
+            bases.append(f"bool|{scope(node)}|{ast.unparse(node)}|{type(node.op).__name__}")
+    seen = Counter()
+    keys = []
+    for base in bases:
+        seen[base] += 1
+        keys.append(f"{base}|{seen[base]}")
+    return keys
+
+
+def test_the_generator_covers_every_node_the_block_holds():
+    """Per node, not per count: every call argument, every single-operator
+    comparison and every and/or in the block has exactly the mutant the
+    independent walk expects, and the generator adds nothing else."""
+    expected = _expected_mutant_keys()
+    generated = [key for key, _ in mutants()]
+    kinds = Counter(key.split("|", 1)[0] for key in expected)
+    assert kinds["arg"] and kinds["cmp"] and kinds["bool"], kinds
+    missing = sorted(set(expected) - set(generated))
+    extra = sorted(set(generated) - set(expected))
+    assert not missing and not extra, f"missing: {missing}; extra: {extra}"
+    assert len(generated) == len(expected)
 
 
 def test_every_surviving_mutant_is_a_listed_equivalent():
