@@ -75,6 +75,23 @@ THE CONTRAST RULE'S BOUND, STATED AT ITS REAL WIDTH
         demand is caught. It is not evaluated against demands that the
         detector never recognised as demands at all (see below).
 
+THE RESIDUAL BOUND IS EXECUTABLE, NOT PROSE
+    KNOWN_NOT_CAUGHT below lists every spelling this rule accepts as out of
+    class, with its reason, and each is asserted NOT reported — so the boundary
+    is tested rather than described. What it says, in the same terms as the
+    three parts above:
+      WHOLE-SET WORDING outside {all, every, both, and full|whole|entire|
+        complete + tests/suites}: "the whole test set", "the test set", "the
+        suite as a whole", "all of our checks" — the adjective is covered but
+        a NOUN other than tests/suites is not.
+      FAILING-STATE WORDING with no run verb, no pass predicate and no suite
+        noun: "nothing red", "nothing is red", "no failing tests", "make the
+        tests work", "verify the change is covered".
+    And what is caught WITHOUT any of those markers: "Run the tests in full" —
+    the run verb carries it even though "in full" names no set.
+    This paragraph, the list, and the PR body's limit statement are three
+    statements of ONE boundary; the control reddens when they diverge.
+
 WHAT THE DETECTOR DOES NOT SEE
     The gate predicate covers a tests-pass and a suite-pass form with or
     without a modal, so "tests must pass" IS a candidate and is held OUT only
@@ -450,8 +467,10 @@ PREPR_MARKERS = (
 _UNBOUNDED_SET = re.compile(
     r"(?i)\b(?:all|every|both)\b[^.\n]{0,25}\b(?:tests?|suites?)\b"
     r"|\b(?:tests?|suites?)\b[^.\n]{0,25}\ball\b"
-    r"|\b(?:the\s+)?full\s+(?:tests?|suites?)\b"
-    r"|\bfull[\s-]suites?\b"
+    # "full" was the only whole-set adjective this accepted; "whole", "entire"
+    # and "complete" say the same thing and were a fourth unstated bound.
+    r"|\b(?:the\s+)?(?:full|whole|entire|complete)\s+(?:tests?|suites?)\b"
+    r"|\b(?:full|whole|entire|complete)[\s-]suites?\b"
 )
 _REQUIRED = re.compile(r"(?i)\b(?:required|mandatory|must run|needs? to run)\b")
 
@@ -751,7 +770,7 @@ _FAR = "filler " * 50
 # ACCEPTED — reported as out of class — before the SET-only exclusion and the
 # gate promotion, and each is an unscoped demand: it says WHEN or demands the
 # whole set, and never says WHICH tests.
-UNSCOPED_SHAPES = (
+CAUGHT_SHAPES = (
     "Run the full test suite.",
     "Run the full test suite at every commit boundary.",
     "Run the full test suite before each stage-ready report.",
@@ -781,7 +800,79 @@ UNSCOPED_SHAPES = (
     + "run the full test suite in addition to the affected tests.",
     "In addition to the affected tests, and after " + _FAR + "run the full test suite.",
     "Run the affected tests. " + _FAR + "In addition, run the full test suite.",
+    # Caught DESPITE its wording rather than because of it: "in full" names no
+    # set, but the run verb makes the line a candidate and nothing excludes it.
+    "Run the tests in full before committing.",
+    # Whole-set adjectives other than "full". A contrast phrase sat 30 chars
+    # from a recognised run demand and every documented bound was satisfied, so
+    # the miss was a fourth, unstated bound in the set vocabulary.
+    "Run the affected tests, then in addition the whole test suite.",
+    "Make the entire suite green before commit.",
+    "The complete suite must be green before commit.",
 )
+
+
+# The executable form of the residual bound. Every spelling below defeats the
+# lexical rule TODAY, and each is asserted NOT to be reported — so the boundary
+# is tested rather than described. If a future change starts catching one, this
+# test reddens and the docstring and the PR body are updated together with it.
+# That is the point: three statements of one limit must move as one.
+KNOWN_NOT_CAUGHT = (
+    (
+        "The whole test set must pass before commit.",
+        "'test set' is not a suite noun, so the line is not even a candidate",
+    ),
+    (
+        "The test set must pass before commit.",
+        "same: no suite noun for the demand to attach to",
+    ),
+    (
+        "The suite as a whole must be green before commit.",
+        "no quantifier is present and there is no suite noun: not a candidate",
+    ),
+    (
+        "All of our checks must be green before commit.",
+        "'checks' is not a tests/suites noun, so the quantifier binds nothing",
+    ),
+    (
+        "Nothing red before commit.",
+        "no run verb, no pass predicate and no suite noun: not a candidate",
+    ),
+    (
+        "Nothing is red.",
+        "same: a state with no run verb, pass predicate or suite noun",
+    ),
+    (
+        "No failing tests before commit.",
+        "'no failing tests' is not a tests-pass predicate",
+    ),
+    (
+        "Make the tests work before you commit.",
+        "'work' is not a pass predicate, so the line is not a candidate",
+    ),
+    (
+        "Verify the change is covered.",
+        "no run verb, no pass predicate and no suite noun: not a candidate",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "shape,reason", KNOWN_NOT_CAUGHT, ids=[s[:38] for s, _ in KNOWN_NOT_CAUGHT]
+)
+def test_control_known_not_caught_shapes_stay_uncaught(shape, reason):
+    """The residual bound, asserted rather than described.
+
+    A red here is not a defect — it means the rule grew and the documented
+    boundary is now stale. Update the docstring's bound, this list, and the PR
+    body together.
+    """
+    unlisted = _unlisted([("synthetic/surface.md", 1, shape)], ALLOWLIST)
+    assert unlisted == [], (
+        f"the census now reports {shape!r} ({reason}). The documented bound says it "
+        "does not. Either narrow the rule back, or move this shape to "
+        "CAUGHT_SHAPES and correct the docstring and the PR body in the same change."
+    )
 
 
 def test_control_the_self_reversing_decoy_is_still_reported():
@@ -802,7 +893,7 @@ def test_control_the_self_reversing_decoy_is_still_reported():
     )
 
 
-@pytest.mark.parametrize("line", UNSCOPED_SHAPES, ids=[s[:40] for s in UNSCOPED_SHAPES])
+@pytest.mark.parametrize("line", CAUGHT_SHAPES, ids=[s[:40] for s in CAUGHT_SHAPES])
 def test_control_every_unscoped_shape_is_reported(line):
     unlisted = _unlisted([("synthetic/surface.md", 1, line)], ALLOWLIST)
     assert len(unlisted) == 1, (
