@@ -44,22 +44,29 @@ WHY A BOUNDARY WORD IS NOT A SCOPE
     were discarded silently. _in_class promotes those when the line names an
     unbounded set.
 
-A SET WORD IS ALSO CAMOUFLAGE, IN ONE SHAPE THAT IS DELIBERATELY NOT CLOSED
+A SET WORD IS ALSO CAMOUFLAGE, AND A CONTRAST PHRASE IS WHAT CLOSES IT
     "Run the full test suite in addition to the affected tests." names a set
-    and still demands the whole suite, so the SET rule excludes it. Separating
-    that from a NEGATED mention of the full suite ("The full suite is not part
-    of this boundary.") needs a negation list, and a negation list re-admits
-    the self-reversing decoy "The full suite is not part of this boundary, so
-    run the full test suite now." The decoy is the more dangerous of the two,
-    so the rule stays SET-only and the additive shape is a stated limit.
+    and still demands the whole suite, so a SET marker alone would exempt it.
+    The arm that catches it keys on a CONTRAST phrase ("not just", "not only",
+    "in addition to", "as well as", "then the full suite", "not enough") next
+    to a full-suite run demand, and ignores the SET marker entirely for that
+    line.
+
+    The alternative was a NEGATION rule, and it is deliberately rejected: to
+    decide that "The full suite is not part of this boundary, so run the full
+    test suite now." is still a demand, a negation rule has to work out what
+    the negation scopes over. A phrase list sidesteps that question, and the
+    decoy control below is what proves the decoy is still reported.
 
 WHAT THE DETECTOR DOES NOT SEE
-    A demand phrased without a run verb, without a tests-pass predicate and
-    without a suite noun is not a candidate at all — "tests must pass" with a
-    bare modal, for instance. The merge-boundary value statements in
-    protocols/pact-protocols.md and protocols/pact-s5-policy.md are that shape
-    and are correctly outside the class, but a future obligation phrased the
-    same way would also be outside it.
+    The gate predicate covers a tests-pass and a suite-pass form with or
+    without a modal, so "tests must pass" IS a candidate and is held OUT only
+    because it names no unbounded set — the merge-boundary value statements in
+    protocols/pact-protocols.md and protocols/pact-s5-policy.md classify that
+    way today. What remains outside the detector is a demand phrased with no
+    run verb, no pass predicate and no suite noun at all ("make the tests
+    work before you commit", "verify the change is covered"); such a line is
+    not a candidate, so neither the census nor the controls can see it.
 
 WHAT THIS MODULE CANNOT DO
     It verifies TEXT. Whether a coder or lead now behaves differently is not
@@ -133,6 +140,14 @@ FALLBACK_CLAUSE = (
     "named in the runner's own configuration"
 )
 
+# The other half of the fallback, and named for the same reason: the runner
+# clause covers a suite that cannot be found, this one covers a module that has
+# no suite at all. Identity alone cannot see either being rewritten.
+NO_SUITE_CLAUSE = (
+    "if the module belongs to no suite at all, add a verification test for the "
+    "change, run it, and name it in your HANDOFF"
+)
+
 # (file, line marker, phrases that must appear on that line). Line scoping, not
 # section scoping: a section pin over the CODE phase could not tell its two
 # sites apart, so a site could lose its instruction while the phrase survived
@@ -146,6 +161,7 @@ LINE_PINS = (
             "Smoke Testing: Before each stage-ready report (the commit boundary), "
             "run the tests your change affects",
             FALLBACK_CLAUSE,
+            NO_SUITE_CLAUSE,
             "The full suite is not part of this boundary.",
         ),
     ),
@@ -172,6 +188,7 @@ LINE_PINS = (
         (
             "Before HANDOFF, run the tests your change affects",
             FALLBACK_CLAUSE,
+            NO_SUITE_CLAUSE,
             "The full suite is not part of this boundary.",
         ),
     ),
@@ -181,6 +198,7 @@ LINE_PINS = (
         (
             "Before HANDOFF, run the tests your change affects",
             FALLBACK_CLAUSE,
+            NO_SUITE_CLAUSE,
             "The full suite is not part of this boundary.",
         ),
     ),
@@ -358,7 +376,14 @@ _RUN = re.compile(
     r"(?:tests?|suites?)\b"
 )
 _RUN_BARE = re.compile(r"(?i)\btests?\s+runs?\b")
-_GATE = re.compile(r"(?i)\btests?\s+(?:are\s+)?(?:green|pass(?:ing)?)\b")
+# Covers both a tests-pass and a SUITE-pass predicate, with or without a modal:
+# "tests pass", "tests are green", "the suite must be green", "suites must
+# pass", "a suite passes". The suite half was missing and let the whole
+# suite-predicate family through uncaught.
+_GATE = re.compile(
+    r"(?i)\b(?:tests?|suites?)\s+(?:(?:are|is|must\s+be|must|will|should)\s+)?"
+    r"(?:green|pass(?:es|ing)?)\b"
+)
 _SUITE = re.compile(r"(?i)\b(?:full|test)[\s-]suite\b")
 
 CANDIDATE_PATTERNS = (_RUN, _RUN_BARE, _GATE, _SUITE)
@@ -410,6 +435,34 @@ _REQUIRED = re.compile(r"(?i)\b(?:required|mandatory|must run|needs? to run)\b")
 # it demands nothing, so it is a status description rather than an obligation.
 _SIGNAL_ROW = re.compile(r"\*\*(?:GREEN|YELLOW|RED)\*\*")
 
+# A CONTRAST demand adds the whole suite to a named subset, so the subset
+# marker does not bound it. Kept as a phrase list rather than a negation rule:
+# a negation rule would have to decide whether "not part of this boundary"
+# negates the demand, and that is exactly the shape of the self-reversing
+# decoy the census must keep catching.
+_CONTRAST = re.compile(
+    r"(?i)\b(?:not just|not only|in addition to|as well as|then the full suite|not enough)\b"
+)
+
+# ...and the phrase has to be NEAR the demand it qualifies. An instruction line
+# in these surfaces is one several-thousand-character line, so a bare
+# whole-line search finds a contrast word in an unrelated clause: the two
+# comPACT carriers contain "not only an `Edit` or a `Write`" in the CLAUDE.md
+# prohibition, hundreds of characters from the test-run demand, and a
+# whole-line rule classified both shipped carriers as in-class.
+_CONTRAST_BEFORE = 160
+_CONTRAST_AFTER = 240
+
+
+def _contrast(line: str) -> bool:
+    """A contrast phrase within reach of the run demand it qualifies."""
+    match = _RUN.search(line)
+    if not match:
+        return False
+    lo = max(0, match.start() - _CONTRAST_BEFORE)
+    hi = match.end() + _CONTRAST_AFTER
+    return bool(_CONTRAST.search(line[lo:hi]))
+
 # Standing exemptions, each with the reason it is not the defect class. Keyed by
 # a CONTENT marker rather than a line number: a line number drifts silently,
 # and this list is small enough that every entry should be read on sight.
@@ -458,7 +511,7 @@ ALLOWLIST = (
 # Per file as well as in total: with only a total, one candidate added in one
 # file and one lost in another cancel out, and the operator who sees "38, same
 # as before" has nothing to look at. The failure names the file that moved.
-BASELINE_CANDIDATES = 45
+BASELINE_CANDIDATES = 48
 BASELINE_BY_FILE = {
     "agents/pact-backend-coder.md": 1,
     "agents/pact-database-engineer.md": 1,
@@ -469,8 +522,8 @@ BASELINE_BY_FILE = {
     "commands/comPACT.md": 4,
     "commands/orchestrate.md": 4,
     "protocols/pact-phase-transitions.md": 1,
-    "protocols/pact-protocols.md": 5,
-    "protocols/pact-s5-policy.md": 1,
+    "protocols/pact-protocols.md": 6,
+    "protocols/pact-s5-policy.md": 2,
     "protocols/pact-scope-phases.md": 1,
     "protocols/pact-variety.md": 1,
     "protocols/pact-workflows.md": 1,
@@ -479,7 +532,7 @@ BASELINE_BY_FILE = {
     "skills/pact-coding-standards/SKILL.md": 2,
     "skills/pact-prepare-research/references/api-exploration-template.md": 2,
     "skills/pact-prepare-research/references/requirements-analysis.md": 1,
-    "skills/pact-testing-strategies/SKILL.md": 3,
+    "skills/pact-testing-strategies/SKILL.md": 4,
     "skills/pact-testing-strategies/references/integration-patterns.md": 1,
     "skills/pact-testing-strategies/references/performance-testing.md": 1,
     "skills/pact-testing-strategies/references/test-pyramid.md": 1,
@@ -511,17 +564,23 @@ def _candidates(surfaces):
 def _in_class(line: str) -> bool:
     """IN = a demand to run tests that names no SET and sits at no PR boundary.
 
-    Two ways in: an imperative to run, or a gate/requirement over an unbounded
-    set. The second arm exists because a gate line carries no run verb, so a
-    reworded "All tests passing" would otherwise be discarded silently.
+    Three ways in: an imperative to run, a gate/requirement over an unbounded
+    set, or a CONTRAST demand that names a full-suite run alongside a smaller
+    set. The gate arm exists because a gate line carries no run verb, so a
+    reworded "All tests passing" would otherwise be discarded silently. The
+    contrast arm exists because naming a set is not the same as bounding the
+    demand to it: "run the full test suite, not just the integration tests"
+    names a set and still demands everything.
     """
     lowered = line.lower()
-    if any(marker in lowered for marker in ALL_SCOPE_MARKERS):
-        return False
-    if any(marker in lowered for marker in PREPR_MARKERS):
-        return False
-    if _SIGNAL_ROW.search(line):
-        return False
+    contrast = _contrast(line) and bool(_UNBOUNDED_SET.search(line))
+    if not contrast:
+        if any(marker in lowered for marker in ALL_SCOPE_MARKERS):
+            return False
+        if any(marker in lowered for marker in PREPR_MARKERS):
+            return False
+        if _SIGNAL_ROW.search(line):
+            return False
     if _RUN.search(line):
         return True
     unbounded = bool(_UNBOUNDED_SET.search(line))
@@ -654,7 +713,36 @@ UNSCOPED_SHAPES = (
     "Run the full test suite before each stage-ready report.",
     "- [ ] All tests passing",
     "Full suite required at every commit.",
+    # The suite-pass predicate family: each says the whole set must be green
+    # without running-verb agreement, and each was accepted until the gate
+    # predicate covered a SUITE as well as "tests".
+    "The full suite must be green before commit.",
+    "Make sure the full suite passes before committing.",
+    "All suites must pass before the commit.",
+    # The additive family: each NAMES a set and still demands the whole suite,
+    # so the SET marker must not bound the demand.
+    "Run the full test suite, not just the integration tests you changed.",
+    "Run the full test suite before completing; the affected tests alone are not enough.",
+    "Run the full test suite in addition to the affected tests.",
 )
+
+
+def test_control_the_self_reversing_decoy_is_still_reported():
+    """The control that makes the contrast rule safe rather than merely wider.
+
+    "The full suite is not part of this boundary, so run the full test suite
+    now." uses the fix's own corrective sentence as camouflage. A contrast
+    PHRASE list catches the additive family without deciding whether a
+    negation negates; a NEGATION rule would have had to decide, and would have
+    let this through. If a future edit turns the contrast arm into a negation
+    arm, this is the test that reddens.
+    """
+    decoy = ("The full suite is not part of this boundary, so run the full "
+             "test suite now.")
+    assert len(_unlisted([("synthetic/surface.md", 1, decoy)], ALLOWLIST)) == 1, (
+        "the self-reversing decoy is no longer reported; the contrast rule has "
+        "been widened into a negation rule"
+    )
 
 
 @pytest.mark.parametrize("line", UNSCOPED_SHAPES, ids=[s[:40] for s in UNSCOPED_SHAPES])
