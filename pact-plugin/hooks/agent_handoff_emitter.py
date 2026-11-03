@@ -180,7 +180,12 @@ def main() -> None:
         resolved_task_dir = resolve_task_dir()
         team_name = resolved_task_dir.name if resolved_task_dir else ""
 
-        task_data = read_task_json(task_id, team_name)
+        # A NAMED store reads only its own directory: a file at the bare tasks
+        # base is not this store's task and must never be journaled under
+        # this store's `team`. With no resolved name, the default read stays.
+        task_data = read_task_json(
+            task_id, team_name, base_fallback=not team_name
+        )
 
         # Owner field (set at dispatch) is the authoritative "agent completed
         # this task" signal. Platform-provided teammate_name is fallback for

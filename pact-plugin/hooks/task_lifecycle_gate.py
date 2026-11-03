@@ -1114,7 +1114,12 @@ def _emit_per_write_snapshot(
     """
     try:
         if task is None:
-            task = read_task_json(task_id, team_name) if team_name else {}
+            # Named store only: a bare-base file is not this store's task and
+            # must never be journaled under this store's `team`.
+            task = (
+                read_task_json(task_id, team_name, base_fallback=False)
+                if team_name else {}
+            )
         if not isinstance(task, dict):
             task = {}
         disk_md = (
@@ -1745,7 +1750,12 @@ def evaluate_lifecycle(
         task = tool_response.get("task") if isinstance(tool_response, dict) else None
         if not isinstance(task, dict):
             # Fall back to disk if harness output didn't include the task.
-            task = read_task_json(task_id, team_name) if team_name else {}
+            # Named store only: a bare-base file is not this store's task and
+            # must never be journaled under this store's `team`.
+            task = (
+                read_task_json(task_id, team_name, base_fallback=False)
+                if team_name else {}
+            )
 
         subject = task.get("subject") or ""
         is_teachback = _is_teachback_subject(subject)
@@ -2145,7 +2155,12 @@ def evaluate_lifecycle(
         # non-completed TaskUpdate. Single-pay disk cost across all
         # write-time rules that need task_a's subject + blocks.
         task_id = tool_input.get("taskId", "") or ""
-        task_a = read_task_json(task_id, team_name) if team_name else {}
+        # Named store only: a bare-base file is not this store's task and
+        # must never be journaled under this store's `team`.
+        task_a = (
+            read_task_json(task_id, team_name, base_fallback=False)
+            if team_name else {}
+        )
         if not isinstance(task_a, dict):
             task_a = {}
         subject = task_a.get("subject") or ""

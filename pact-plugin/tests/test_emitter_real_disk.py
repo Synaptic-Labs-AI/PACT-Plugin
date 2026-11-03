@@ -101,10 +101,10 @@ class TestRealDiskRead:
         # Belt-and-suspenders: explicit tasks_base_dir override + HOME
         # monkeypatch route to the same path; intentional defense-in-depth
         # against future fixture-isolation changes.
-        def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None):
+        def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None, **kwargs):
             return original_read(
                 task_id, team_name,
-                tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+                tasks_base_dir=str(tmp_path / ".claude" / "tasks"), **kwargs,
             )
 
         calls: list[dict] = []
@@ -186,10 +186,10 @@ class TestRealDiskRead:
         # Belt-and-suspenders: explicit tasks_base_dir override + HOME
         # monkeypatch route to the same path; intentional defense-in-depth
         # against future fixture-isolation changes.
-        def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None):
+        def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None, **kwargs):
             return original_read(
                 task_id, team_name,
-                tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+                tasks_base_dir=str(tmp_path / ".claude" / "tasks"), **kwargs,
             )
 
         calls: list[dict] = []
