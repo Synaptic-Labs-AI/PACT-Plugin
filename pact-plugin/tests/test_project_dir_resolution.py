@@ -1783,3 +1783,48 @@ class TestDeclinedDeclaration:
             f"half is unproven. captured: {messages!r}"
         )
         assert "could not be resolved" in messages
+
+    def test_a_nul_in_the_session_record_declines_without_crashing(
+        self, tmp_path, monkeypatch
+    ):
+        """The cold review's NUL path, driven through the PUBLIC detector.
+
+        A corrupt session record can carry an embedded NUL. The gone-
+        declaration arm reaches `recorded_main_root` -> `record_resolution` ->
+        `os.path.realpath(declared)`, which raises ValueError. The resolver
+        must catch it at its own boundary and DECLINE — not crash, and not
+        fall back to a basename, which is what a swallow-and-continue fix
+        would produce.
+
+        The record is written with an explicit slug and body so the fixture
+        never runs `project_slug` over the NUL value; the declared field
+        inside the record is what the reader returns.
+        """
+        umbrella = make_umbrella(tmp_path)
+        nul_declaration = str(tmp_path / "corrupt") + "\x00" + "declaration"
+        write_session_context(
+            Path.home() / ".claude",
+            SID,
+            tmp_path / "slug-source",
+            slug="nul-record",
+            body=json.dumps({
+                "team_name": "session-test",
+                "session_id": SID,
+                "project_dir": nul_declaration,
+                "plugin_root": "",
+                "started_at": "2026-01-01T00:00:00Z",
+            }),
+        )
+        enable_record_discovery(monkeypatch, pact_session)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(umbrella.project)
+
+        # Sanity: the record rung really returns the NUL declaration (a
+        # fixture that returned "" would decline for the wrong reason).
+        assert pact_session.get_project_dir_from_session_record() == nul_declaration
+
+        assert PACTMemory._detect_project_id_with_source() == (None, "unresolved"), (
+            "an embedded NUL either crashed the resolver or produced a "
+            "basename instead of the decline"
+        )

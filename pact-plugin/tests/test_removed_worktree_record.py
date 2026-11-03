@@ -1389,6 +1389,33 @@ class TestUnresolvedIdentityRefusesWrites:
             "written empty"
         )
 
+    def test_f2_an_integer_payload_project_is_rejected_by_type(self, tmp_path):
+        """The type half of the payload guard (cold review).
+
+        `not payload_project` alone accepts any TRUTHY value, so 123 passed
+        the falsy guard and was stored, while the refusal message promised a
+        non-empty STRING. Project ids are strings everywhere else in this
+        codebase. This arm asserts the message and the channel, and that the
+        refusal precedes store creation.
+        """
+        db_path = tmp_path / "int-id.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        assert memory.project_id == "detected-b"
+
+        with pytest.raises(ValueError) as excinfo:
+            memory.save(
+                {"context": "INT-ID", "project_id": 123}, sync_to_claude=False
+            )
+
+        assert str(excinfo.value).startswith(
+            "project_id, when supplied, must be a non-empty string; "
+            "omit it to auto-detect the project."
+        ), f"refused for a different reason: {str(excinfo.value)!r}"
+        assert not db_path.exists(), (
+            "the integer-payload refusal created the store; the guard must "
+            "precede _ensure_ready()"
+        )
+
 
 class TestUnresolvedIdentityScopesReads:
     """R1: None means NO records, never every project's records."""
@@ -1612,3 +1639,47 @@ class TestIssueCriterionALiteralShape:
             assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
         messages = " ".join(r.message for r in caplog.records)
         assert str(worktree) in messages
+
+
+# ---------------------------------------------------------------------------
+# The shared record predicate is TOTAL (NUL class)
+# ---------------------------------------------------------------------------
+
+def test_a_nul_bearing_declaration_refuses_rather_than_raising(tmp_path):
+    """A declaration that cannot be canonicalised is REFUSED, not fatal.
+
+    A corrupt session record can carry an embedded NUL, which makes
+    `os.path.realpath` and `Path.resolve` raise ValueError. The
+    working-memory sync guard passes such a declaration to
+    `stays_in_declared_project` (working_memory.py:1944-1954), so before this
+    guard the sync guard CRASHED instead of refusing. Fail-safe here is
+    False: a path that cannot be resolved cannot be shown to stay in the
+    declared project.
+    """
+    declared = Path("/tmp/gone" + "\x00" + "tail")
+    assert (
+        project_scope.stays_in_declared_project(
+            declared, tmp_path, tmp_path / "CLAUDE.md"
+        )
+        is False
+    ), "a NUL-bearing declaration must refuse, never raise"
+
+
+def test_a_nul_bearing_declaration_does_not_name_a_session_record():
+    """The shared predicate is TOTAL: malformed declaration -> False.
+
+    `_record_names_declaration` is the origin `recorded_main_root`,
+    `record_resolution` and `session_memory_root` all reach; a raise here
+    escaped the resolver and the root classifier before the guard.
+    """
+    identity = {
+        "declared": "/tmp/gone",
+        "common_dir": "/tmp/x/.git",
+        "worktree": "/tmp/gone",
+    }
+    assert (
+        project_scope._record_names_declaration(
+            identity, Path("/tmp/gone" + "\x00" + "tail")
+        )
+        is False
+    ), "a malformed declaration must not match a recorded one"
