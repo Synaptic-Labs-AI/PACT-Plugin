@@ -443,11 +443,16 @@ class TestJournalRead:
         inside 4 x SUMMARY_TAIL_BYTES (512KB) is recovered; one just beyond
         it is out of budget and leaves last_phase empty.
 
-        Byte-exact by construction: the padding AFTER the phase line is one
-        filler line whose length IS the distance from end-of-file, so the
-        fixture's own size assertion pins the offset before the scan runs.
+        The budget is pinned ABSOLUTELY (CONTRACT.md documents 512KB), not
+        derived from the constant under test — a fixture derived from
+        journal._PHASE_SCAN_MAX_WINDOWS adapts to a mutation of that constant
+        and stays green through a silent contract change.
         """
-        scan_budget = journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES
+        assert (
+            journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES
+            == 4 * settings.SUMMARY_TAIL_BYTES
+        ), "the documented 512KB scan budget changed; update CONTRACT.md with it"
+        scan_budget = 4 * settings.SUMMARY_TAIL_BYTES
         phase = (
             json.dumps(
                 {"v": 1, "type": "phase_transition", "ts": "2026-01-01T00:00:00Z",
@@ -458,6 +463,7 @@ class TestJournalRead:
         )
         shell_prefix = '{"v":1,"type":"note","pad":"'
         shell_suffix = '"}\n'
+        line_size = 128
 
         def filler_line(total_bytes: int) -> bytes:
             """One valid note line of exactly total_bytes, newline included."""
@@ -467,6 +473,21 @@ class TestJournalRead:
             assert len(line) == total_bytes
             return line
 
+        def filler_bytes(total_bytes: int) -> bytes:
+            """Exactly total_bytes of parseable note lines.
+
+            Many normal-sized lines, not one giant line: the tail reader's
+            window must contain whole parseable lines or summarize_journal
+            skips the last_phase scan entirely (empty tail branch).
+            """
+            remainder = total_bytes % line_size
+            first_len = remainder if remainder >= 64 else remainder + line_size
+            first = filler_line(first_len)
+            count = (total_bytes - len(first)) // line_size
+            data = first + filler_line(line_size) * count
+            assert len(data) == total_bytes
+            return data
+
         front = filler_line(64)
         for distance, expected in (
             (scan_budget - 2048, "ARCHITECT"),  # ~2KB inside the last window
@@ -475,7 +496,7 @@ class TestJournalRead:
             session_dir = tmp_path / f".claude-{distance}"
             path = session_dir / "session-journal.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
-            data = front + phase + filler_line(distance)
+            data = front + phase + filler_bytes(distance)
             path.write_bytes(data)
             assert path.stat().st_size == len(front) + len(phase) + distance
             summary = journal.summarize_journal(path)
