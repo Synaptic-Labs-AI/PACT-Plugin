@@ -65,6 +65,22 @@ TASKS_DIRNAME = "tasks"
 TEAM_CONFIG_FILENAME = "config.json"
 ROSTER_FILENAME = "pact-roster.jsonl"
 
+# Event types that make a run an orchestration rather than a bare session.
+# THE single marker set: the full model's run_kind derivation and the cheap
+# session summary's tail scan both read it, so the two can never disagree
+# about what counts as orchestration (session_end is deliberately absent —
+# every run ends, so it marks nothing).
+ORCHESTRATION_MARKER_TYPES: frozenset[str] = frozenset(
+    {
+        "phase_transition",
+        "agent_dispatch",
+        "checkpoint",
+        "agent_handoff",
+        "dispatch_decision",
+        "commit",
+    }
+)
+
 # --- Time windows -----------------------------------------------------------
 
 # A journal whose mtime is this fresh and which has no session_end is

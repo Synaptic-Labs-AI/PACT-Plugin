@@ -511,6 +511,33 @@ class TestJournalRead:
         assert read.events == []
         assert read.warnings and "byte cap" in read.warnings[0]
 
+    def test_summarize_run_kind_uses_the_shared_marker_set(self, tmp_path):
+        """session_end must not mark orchestration in the cheap summary.
+
+        A bare ended run (session_start + session_end) is a session, matching
+        the full model's marker set; a commit journal IS an orchestration by
+        the same set — the summary and the model must never disagree.
+        """
+        root = make_root(tmp_path)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        bare = [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T00:02:00Z"},
+        ]
+        summary = journal.summarize_journal(
+            write_journal(root, "proj", "bare", bare), now=now
+        )
+        assert summary.run_kind == "session"
+        assert summary.status == "ended"
+        with_commit = bare[:1] + [
+            {"v": 1, "type": "commit", "ts": "2026-01-01T00:01:00Z",
+             "sha": "aaa", "message": "m", "phase": "CODE"},
+        ]
+        summary = journal.summarize_journal(
+            write_journal(root, "proj", "commit", with_commit), now=now
+        )
+        assert summary.run_kind == "orchestrate"
+
 
 # ---------------------------------------------------------------------------
 # Classification
@@ -784,6 +811,39 @@ def build_basic_model(root: Path, tmp_path: Path) -> dict:
 
 
 class TestModelBasics:
+    def test_agent_commit_stats_attributed_to_latest_same_phase_dispatch(
+        self, tmp_path
+    ):
+        """Crew commit counts must be non-zero and correctly attributed.
+
+        Commit events carry no agent; each attributes to the most recent
+        dispatch in the same phase. Before this pass every crew member's
+        stats.commits was permanently 0.
+        """
+        root = make_root(tmp_path)
+        events = [
+            {"v": 1, "type": "session_start", "ts": stamp(0),
+             "project_dir": "/x/proj", "team": "t"},
+            {"v": 1, "type": "agent_dispatch", "ts": stamp(1),
+             "agent": "backend-coder", "task_id": "1", "phase": "CODE",
+             "scope": ["implement"]},
+            {"v": 1, "type": "commit", "ts": stamp(2),
+             "sha": "aaa11111", "message": "one", "phase": "CODE"},
+            {"v": 1, "type": "agent_dispatch", "ts": stamp(3),
+             "agent": "preparer", "task_id": "2", "phase": "PREPARE",
+             "scope": ["research"]},
+            {"v": 1, "type": "commit", "ts": stamp(4),
+             "sha": "bbb22222", "message": "two", "phase": "PREPARE"},
+            {"v": 1, "type": "commit", "ts": stamp(5),
+             "sha": "ccc33333", "message": "three", "phase": "CODE"},
+        ]
+        write_journal(root, "PACT-prompt", "sess-1", events)
+        payload = build_basic_model(root, tmp_path)
+        stats = {agent["name"]: agent["stats"]["commits"] for agent in payload["agents"]}
+        assert stats["backend-coder"] == 2  # both CODE commits
+        assert stats["preparer"] == 1  # the PREPARE commit
+        assert sum(stats.values()) == 3
+
     def test_full_model_shape(self, tmp_path):
         root = make_root(tmp_path)
         write_journal(root, "PACT-prompt", "sess-1", basic_events())

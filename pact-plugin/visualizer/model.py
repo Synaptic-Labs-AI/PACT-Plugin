@@ -39,21 +39,16 @@ from .settings import (
     MAX_WARNINGS,
     VERSION,
     normalize_variety,
+    ORCHESTRATION_MARKER_TYPES,
 )
 
 PHASE_ORDER: tuple[str, ...] = ("PREPARE", "ARCHITECT", "CODE", "TEST")
 
 # Event types that make a run an orchestration rather than a bare session.
-_ORCHESTRATION_TYPES = frozenset(
-    {
-        "phase_transition",
-        "agent_dispatch",
-        "checkpoint",
-        "agent_handoff",
-        "dispatch_decision",
-        "commit",
-    }
-)
+# The set itself lives in settings (ORCHESTRATION_MARKER_TYPES) so the cheap
+# session summary reads the SAME definition; this alias keeps model-internal
+# references readable.
+_ORCHESTRATION_TYPES = ORCHESTRATION_MARKER_TYPES
 
 # Events a lead drives directly: they carry no agent field in the journal, so
 # without this set the lead would look idle while the run it commands is full
@@ -423,6 +418,23 @@ def derive_agents(
                 continue
             if event.get("type") in _LEAD_EVENT_TYPES:
                 lead_accumulator.observe(event)
+
+    # Commit events carry no agent of their own, so attribute each to the
+    # most recent dispatch in the same phase (the documented design): a
+    # commit before any same-phase dispatch stays unattributed rather than
+    # guessing, and a commit without a phase has nothing to key on.
+    latest_dispatch_by_phase: dict[str, str] = {}
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "agent_dispatch":
+            dispatched = event.get("agent")
+            if isinstance(dispatched, str) and dispatched:
+                latest_dispatch_by_phase[str(event.get("phase") or "")] = dispatched
+        elif event_type == "commit" and not event.get("agent"):
+            attributed = latest_dispatch_by_phase.get(str(event.get("phase") or ""))
+            accumulator = accumulators.get(attributed) if attributed else None
+            if accumulator is not None:
+                accumulator.commits += 1
 
     ended = _text(settings_meta.get("status"), 20) == "ended"
     agents: list[dict] = []

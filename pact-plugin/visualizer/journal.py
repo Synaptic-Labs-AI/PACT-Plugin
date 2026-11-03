@@ -26,6 +26,7 @@ from .settings import (
     LIVE_WINDOW_S,
     MAX_JOURNAL_BYTES,
     MAX_WARNINGS,
+    ORCHESTRATION_MARKER_TYPES,
     SUMMARY_HEAD_BYTES,
     SUMMARY_TAIL_BYTES,
 )
@@ -314,18 +315,7 @@ def read_tail_events(path: Path, limit: int = 80) -> list[RawEvent]:
     return events
 
 
-_PHASE_START_TYPES = frozenset(
-    {
-        "phase_transition",
-        "agent_dispatch",
-        "checkpoint",
-        "dispatch_decision",
-        "dispatch_site",
-        "dispatch_variety",
-        "variety_assessed",
-        "session_end",
-    }
-)
+_PHASE_START_TYPES = frozenset(ORCHESTRATION_MARKER_TYPES)
 
 
 def _timestamp_of(value: object) -> str | None:
@@ -418,10 +408,14 @@ def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary
         for event in reversed(tail):
             data = event.data
             event_type = data.get("type")
+            if event_type == "session_end":
+                # session_end marks the run ENDED, never an orchestration:
+                # every run ends, so it says nothing about run kind. Keep
+                # scanning past it for a real marker.
+                ended = True
+                continue
             if event_type in _PHASE_START_TYPES:
                 summary.run_kind = "orchestrate"
-                if event_type == "session_end":
-                    ended = True
                 break
         summary.last_phase = _last_phase_transition(path, summary.size)
         if ended:
