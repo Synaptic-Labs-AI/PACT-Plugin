@@ -766,7 +766,7 @@ class TestHarvestRuleProse:
             "Each partition naming a team the journal realigned FROM"
             in SKILL_TEXT
         )
-        assert "process it in THIS pass under that team's `team={from}` label" in SKILL_TEXT
+        assert "synthesize it under that team's `team={from}` label" in SKILL_TEXT
         # M-2: the P6 CORE guarantee. Flipping "never union it" to "union it"
         # would merge a realigned team's copy into this team's task file.
         assert "never union it with this team's task file" in SKILL_TEXT
@@ -1036,11 +1036,24 @@ class TestHarvestRuleProse:
         assert "gets NO per-group report" in SKILL_TEXT
 
     def test_minor_from_team_has_no_nested_ledger_pass(self):
-        """The from-team partitions are processed in THIS pass. A nested
-        Step 2/Step 8 against the from team's ledger section contradicts
-        Step 8's ban on writing another team's section, and the pseudocode
-        never does it."""
-        assert "Do NOT run a nested Step 2 or Step 8" in SKILL_TEXT
+        """Architect ruling (c): a from-team work unit is PROCESSED AND
+        SYNTHESIZED but NOT entered in this team's ledger. Both wrong answers
+        are stated with their reasons — writing the from team's section
+        contradicts Step 8's section semantics, and recording the id here
+        poisons this team's dedup set because the same id names different
+        tasks in different stores. The repeat guard is Step 6's save-vs-update
+        dedup, so a later pass updates rather than duplicates."""
+        assert "DO NOT RUN STEP 2 OR STEP 8 FOR THEM" in SKILL_TEXT
+        assert (
+            "name team `{from}` as the source in the entry's context"
+            in SKILL_TEXT
+        )
+        assert (
+            "The repeat guard for from-team work units is Step 6's "
+            "save-vs-update dedup" in SKILL_TEXT
+        )
+        assert "would make a later pass skip your OWN task" in SKILL_TEXT
+        assert "Step 8 forbids touching another team's section" in SKILL_TEXT
         assert (
             "run Step 2 and Step 8 for them against a `## team={from}` section"
             not in SKILL_TEXT
