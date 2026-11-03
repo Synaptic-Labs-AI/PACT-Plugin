@@ -29,6 +29,38 @@ WHY THE CANDIDATE PATTERNS INCLUDE "full suite" AND "test run"
     detector that cannot see the sites the fix touched cannot see a new one
     either.
 
+WHY A BOUNDARY WORD IS NOT A SCOPE
+    The class rule excludes a site that names the SET of tests to run. Naming
+    only WHERE — "at every commit boundary", "before each stage-ready report",
+    "at the PR boundary" — leaves the set unbounded, which is the defect. An
+    earlier revision excluded on either kind of phrase and accepted "Run the
+    full test suite at every commit boundary", i.e. it re-admitted the exact
+    defect through the vocabulary the fix itself introduced. Only SET_MARKERS
+    exclude now, and a boundary phrase buys nothing on its own.
+
+    The same asymmetry ran the other way for gate-style lines: a candidate
+    matching a tests-pass predicate or a suite noun was never promoted into the
+    class, so "All tests passing" and "Full suite required at every commit."
+    were discarded silently. _in_class promotes those when the line names an
+    unbounded set.
+
+A SET WORD IS ALSO CAMOUFLAGE, IN ONE SHAPE THAT IS DELIBERATELY NOT CLOSED
+    "Run the full test suite in addition to the affected tests." names a set
+    and still demands the whole suite, so the SET rule excludes it. Separating
+    that from a NEGATED mention of the full suite ("The full suite is not part
+    of this boundary.") needs a negation list, and a negation list re-admits
+    the self-reversing decoy "The full suite is not part of this boundary, so
+    run the full test suite now." The decoy is the more dangerous of the two,
+    so the rule stays SET-only and the additive shape is a stated limit.
+
+WHAT THE DETECTOR DOES NOT SEE
+    A demand phrased without a run verb, without a tests-pass predicate and
+    without a suite noun is not a candidate at all — "tests must pass" with a
+    bare modal, for instance. The merge-boundary value statements in
+    protocols/pact-protocols.md and protocols/pact-s5-policy.md are that shape
+    and are correctly outside the class, but a future obligation phrased the
+    same way would also be outside it.
+
 WHAT THIS MODULE CANNOT DO
     It verifies TEXT. Whether a coder or lead now behaves differently is not
     observable from a static read, and no assertion here should be read as
@@ -37,6 +69,7 @@ WHAT THIS MODULE CANNOT DO
 
 from __future__ import annotations
 
+import collections
 import re
 from pathlib import Path
 
@@ -48,6 +81,10 @@ SURFACE_GLOBS = (
     "commands/*.md",
     "agents/*.md",
     "skills/*/SKILL.md",
+    # A skill's references/ files are opened on demand rather than auto-loaded,
+    # but they still instruct the agent that opens them, so an unscoped demand
+    # there is the same defect one hop later.
+    "skills/*/references/*.md",
     "protocols/*.md",
 )
 
@@ -68,27 +105,15 @@ def _text(rel: str) -> str:
     return (PLUGIN / rel).read_text(encoding="utf-8")
 
 
-def _section(text: str, anchor: str, end: str | None) -> str:
-    """The text from the single occurrence of `anchor` to `end` (or EOF).
+def _line_with(text: str, marker: str) -> str:
+    """The single line containing `marker`.
 
     An anchor that is missing or REPEATED fails. A duplicated anchor would
-    otherwise let the pin read a different section while believing it read
-    this one: "**Before next phase**" occurs three times in orchestrate.md
+    otherwise let the pin read a different site while believing it read this
+    one: "**Before next phase**" occurs three times in orchestrate.md
     (PREPARE, ARCHITECT, CODE), so anchoring a CODE-phase assertion on it
     alone would silently check the PREPARE checklist.
     """
-    count = text.count(anchor)
-    assert count == 1, f"anchor {anchor!r} occurs {count} times, expected 1"
-    start = text.index(anchor)
-    if end is None:
-        return text[start:]
-    stop = text.find(end, start + len(anchor))
-    assert stop != -1, f"end marker {end!r} not found after {anchor!r}"
-    return text[start:stop]
-
-
-def _line_with(text: str, marker: str) -> str:
-    """The single line containing `marker`. Same uniqueness contract as _section."""
     hits = [line for line in text.splitlines() if marker in line]
     assert len(hits) == 1, f"{marker!r} occurs on {len(hits)} lines, expected 1"
     return hits[0]
@@ -98,17 +123,36 @@ def _line_with(text: str, marker: str) -> str:
 # Part (a): per-site positive pins, and the removal pins
 # ---------------------------------------------------------------------------
 
-# (file, section anchor, end marker, phrases that must appear inside the section)
-SITE_PINS = (
+# The fallback that makes the instruction actionable when a module-to-test
+# mapping finds nothing. Named here rather than left to the carrier-identity
+# pin: identity only proves the three carriers AGREE, so a shared rewrite of
+# the fallback would keep every carrier pin green. Measured — the clause was
+# added to all three carriers and this module passed 43/43 without naming it.
+FALLBACK_CLAUSE = (
+    "where the project's runner does not expose tests by file or name, the suite "
+    "named in the runner's own configuration"
+)
+
+# (file, line marker, phrases that must appear on that line). Line scoping, not
+# section scoping: a section pin over the CODE phase could not tell its two
+# sites apart, so a site could lose its instruction while the phrase survived
+# elsewhere in the same section — measured, and every test stayed green.
+LINE_PINS = (
     (
         "commands/orchestrate.md",
-        "### CODE Phase → `pact-*-coder(s)`",
-        "### ATOMIZE Phase (Scoped Orchestration Only)",
+        "Smoke Testing:",
         (
             # orchestrate.md:780 — the coder GUIDELINES dispatch text.
             "Smoke Testing: Before each stage-ready report (the commit boundary), "
             "run the tests your change affects",
+            FALLBACK_CLAUSE,
             "The full suite is not part of this boundary.",
+        ),
+    ),
+    (
+        "commands/orchestrate.md",
+        "- [ ] Scoped test run green",
+        (
             # orchestrate.md:856 — the CODE-phase boundary checklist.
             "Scoped test run green at every commit boundary",
             "the full suite is not a per-commit gate",
@@ -116,22 +160,18 @@ SITE_PINS = (
     ),
     (
         "commands/orchestrate.md",
-        "### TEST Phase → `pact-test-engineer`",
-        "## Agent Stall Detection",
+        "- [ ] Full test suite run once",
         (
             # orchestrate.md:990 — the single pre-PR full run.
             "Full test suite run once — the single pre-PR full run",
         ),
     ),
-)
-
-# (file, line marker, phrases that must appear on that line)
-LINE_PINS = (
     (
         "commands/comPACT.md",
         "comPACT mode (concurrent):",
         (
             "Before HANDOFF, run the tests your change affects",
+            FALLBACK_CLAUSE,
             "The full suite is not part of this boundary.",
         ),
     ),
@@ -140,6 +180,7 @@ LINE_PINS = (
         "comPACT mode: Work directly",
         (
             "Before HANDOFF, run the tests your change affects",
+            FALLBACK_CLAUSE,
             "The full suite is not part of this boundary.",
         ),
     ),
@@ -211,21 +252,6 @@ REMOVED = (
 
 
 @pytest.mark.parametrize(
-    "rel,anchor,end,phrases",
-    SITE_PINS,
-    ids=[f"{rel.split('/')[-1]}:{anchor[:28]}" for rel, anchor, _, _ in SITE_PINS],
-)
-def test_the_scoped_wording_is_in_its_section(rel, anchor, end, phrases):
-    body = _phrase(_section(_text(rel), anchor, end))
-    for phrase in phrases:
-        assert _phrase(phrase) in body, (
-            f"{rel}: {phrase!r} is missing from the {anchor!r} section. This is the "
-            "scoped test-run instruction; if the wording changed on purpose, update "
-            "this pin with it."
-        )
-
-
-@pytest.mark.parametrize(
     "rel,marker,phrases",
     LINE_PINS,
     ids=[f"{rel.split('/')[-1]}:{marker[:28]}" for rel, marker, _ in LINE_PINS],
@@ -273,12 +299,19 @@ def test_the_operational_core_is_identical_across_its_three_carriers():
 
 
 def test_the_operational_core_occurs_exactly_three_times():
-    """A fourth copy, or a lost carrier, must not arrive silently."""
+    """A fourth copy ANYWHERE in the surfaces, or a lost carrier, must not pass.
+
+    Counted over every enumerated surface rather than over the two files the
+    carriers live in: a copy placed in any other instruction surface is a
+    fourth carrier, and scoping the count to the two files would let it
+    through. Measured at the fix: the core occurs exactly three times across
+    all surfaces, so the wider scan costs nothing.
+    """
     core = _phrase(_operational_core(*OPERATIONAL_CARRIERS[0]))
-    combined = _phrase(_text("commands/orchestrate.md") + _text("commands/comPACT.md"))
+    combined = _phrase("".join(_text(rel) for rel in _surface_rels()))
     assert combined.count(core) == 3, (
-        f"the operational core occurs {combined.count(core)} times across "
-        "orchestrate.md + comPACT.md, expected 3 (1 canonical + 2 dispatch carriers)"
+        f"the operational core occurs {combined.count(core)} times across every "
+        "instruction surface, expected 3 (1 canonical + 2 dispatch carriers)"
     )
 
 
@@ -330,11 +363,11 @@ _SUITE = re.compile(r"(?i)\b(?:full|test)[\s-]suite\b")
 
 CANDIDATE_PATTERNS = (_RUN, _RUN_BARE, _GATE, _SUITE)
 
-# A candidate NAMES ITS SCOPE — or sits at the already-correct pre-PR boundary —
-# and is therefore out of the class. Scope markers are either drawn from the
-# fixed instruction text itself or are pre-existing scope-naming phrases; the
-# test below enforces that, so a marker cannot be invented ad hoc to swallow a
-# site that should have been allowlisted visibly.
+# A candidate is out of the class only when it names the SET of tests to run.
+# A phrase that names only WHEN or WHERE ("at every commit boundary", "before
+# each stage-ready report") leaves the set unbounded and must NOT exclude —
+# excluding on it was the defect that let "Run the full test suite at every
+# commit boundary" pass the census.
 SCOPE_MARKERS = (
     "the tests your change affects",
     "the tests the work affects",
@@ -342,12 +375,6 @@ SCOPE_MARKERS = (
     "plus any suite subsets the plan names",
     "the smallest suite that contains",
     "test files that cover the modules",
-    "commit boundary",
-    "stage-ready report",
-    "run the full suite once, as a whole",
-    "single pre-pr full run",
-    "pr/project gate",
-    "not part of this boundary",
 )
 
 PREEXISTING_SCOPE_PHRASES = (
@@ -363,12 +390,25 @@ PREEXISTING_SCOPE_PHRASES = (
 # stricter standard than the phrases that already existed before the fix.
 ALL_SCOPE_MARKERS = SCOPE_MARKERS + PREEXISTING_SCOPE_PHRASES
 
+# The already-correct full-suite boundary. A pass/fail question asked HERE is
+# not the defect class, so it stays out.
 PREPR_MARKERS = (
     "before creating pr",
     "pre-pr",
     "before pr",
     "at the pr boundary",
 )
+
+# A line that demands or gates an UNBOUNDED set without a run verb — the other
+# half of the class, previously a candidate the classifier silently discarded.
+_UNBOUNDED_SET = re.compile(
+    r"(?i)\b(?:all|the full|full)\s+(?:tests?|suites?)\b|\bfull[\s-]suite\b"
+)
+_REQUIRED = re.compile(r"(?i)\b(?:required|mandatory|must run|needs? to run)\b")
+
+# A signal-table row describes a state ("All tests pass, adequate coverage");
+# it demands nothing, so it is a status description rather than an obligation.
+_SIGNAL_ROW = re.compile(r"\*\*(?:GREEN|YELLOW|RED)\*\*")
 
 # Standing exemptions, each with the reason it is not the defect class. Keyed by
 # a CONTENT marker rather than a line number: a line number drifts silently,
@@ -387,6 +427,26 @@ ALLOWLIST = (
         "already run in the same recipe. It is a recovery instruction, not a "
         "commit-boundary obligation.",
     ),
+    (
+        "commands/comPACT.md",
+        "then run the full suite once, as a whole",
+        "The one deliberate full-suite exception: the post-concurrency batch, where "
+        "separately scoped changes first meet. It names itself the integration "
+        "exception and bounds the run to the batch, so the set is not unbounded; it "
+        "is exempt rather than scoped by a SET marker.",
+    ),
+    (
+        "skills/pact-architecture-patterns/references/anti-patterns.md",
+        "npm run test:coverage",
+        "A shell command inside an example block, not an instruction to run a "
+        "boundary gate; it names a package script, not a test set.",
+    ),
+    (
+        "skills/pact-testing-strategies/references/performance-testing.md",
+        "k6 run tests/load/api-load-test.js",
+        "A load-test invocation inside an example block for the k6 tool; it names "
+        "one script path and carries no boundary obligation.",
+    ),
 )
 
 # Measured on the fixed tree. The count is a floor, not a proof: a new candidate
@@ -394,7 +454,36 @@ ALLOWLIST = (
 # it belongs in SCOPE_MARKERS' shape) or an explicit allowlist entry — in both
 # cases this number moves and the operator decides, rather than the new site
 # arriving silently.
-BASELINE_CANDIDATES = 38
+#
+# Per file as well as in total: with only a total, one candidate added in one
+# file and one lost in another cancel out, and the operator who sees "38, same
+# as before" has nothing to look at. The failure names the file that moved.
+BASELINE_CANDIDATES = 45
+BASELINE_BY_FILE = {
+    "agents/pact-backend-coder.md": 1,
+    "agents/pact-database-engineer.md": 1,
+    "agents/pact-devops-engineer.md": 1,
+    "agents/pact-frontend-coder.md": 1,
+    "agents/pact-orchestrator.md": 3,
+    "agents/pact-test-engineer.md": 6,
+    "commands/comPACT.md": 4,
+    "commands/orchestrate.md": 4,
+    "protocols/pact-phase-transitions.md": 1,
+    "protocols/pact-protocols.md": 5,
+    "protocols/pact-s5-policy.md": 1,
+    "protocols/pact-scope-phases.md": 1,
+    "protocols/pact-variety.md": 1,
+    "protocols/pact-workflows.md": 1,
+    "skills/pact-agent-teams/SKILL.md": 2,
+    "skills/pact-architecture-patterns/references/anti-patterns.md": 1,
+    "skills/pact-coding-standards/SKILL.md": 2,
+    "skills/pact-prepare-research/references/api-exploration-template.md": 2,
+    "skills/pact-prepare-research/references/requirements-analysis.md": 1,
+    "skills/pact-testing-strategies/SKILL.md": 3,
+    "skills/pact-testing-strategies/references/integration-patterns.md": 1,
+    "skills/pact-testing-strategies/references/performance-testing.md": 1,
+    "skills/pact-testing-strategies/references/test-pyramid.md": 1,
+}
 
 
 def _surfaces() -> list[Path]:
@@ -404,6 +493,10 @@ def _surfaces() -> list[Path]:
         assert matches, f"surface glob {pattern!r} matched no files"
         found.extend(matches)
     return sorted(set(found))
+
+
+def _surface_rels() -> list[str]:
+    return [path.relative_to(PLUGIN).as_posix() for path in _surfaces()]
 
 
 def _candidates(surfaces):
@@ -416,13 +509,23 @@ def _candidates(surfaces):
 
 
 def _in_class(line: str) -> bool:
-    """IN = an imperative to run tests that names no scope and no PR boundary."""
+    """IN = a demand to run tests that names no SET and sits at no PR boundary.
+
+    Two ways in: an imperative to run, or a gate/requirement over an unbounded
+    set. The second arm exists because a gate line carries no run verb, so a
+    reworded "All tests passing" would otherwise be discarded silently.
+    """
     lowered = line.lower()
     if any(marker in lowered for marker in ALL_SCOPE_MARKERS):
         return False
     if any(marker in lowered for marker in PREPR_MARKERS):
         return False
-    return bool(_RUN.search(line))
+    if _SIGNAL_ROW.search(line):
+        return False
+    if _RUN.search(line):
+        return True
+    unbounded = bool(_UNBOUNDED_SET.search(line))
+    return unbounded and bool(_GATE.search(line) or _REQUIRED.search(line))
 
 
 def _allowlisted(rel: str, line: str, allowlist) -> bool:
@@ -460,11 +563,23 @@ def test_the_surface_enumeration_is_not_empty():
 
 def test_the_candidate_baseline_holds():
     _, candidates, _ = _census()
-    assert len(candidates) == BASELINE_CANDIDATES, (
-        f"candidate lines: {len(candidates)}, baseline {BASELINE_CANDIDATES}. "
-        "If the new line is scoped, extend the scope markers; if it is legitimately "
-        "exempt, add an allowlist entry with a reason; then update the baseline. "
-        "Do not update the baseline on its own."
+    by_file = collections.Counter(rel for rel, _, _ in candidates)
+    moved = [
+        f"  {rel}: {by_file.get(rel, 0)} now, {pinned} pinned"
+        for rel, pinned in sorted(BASELINE_BY_FILE.items())
+        if by_file.get(rel, 0) != pinned
+    ] + [
+        f"  {rel}: {count} now, not in the baseline"
+        for rel, count in sorted(by_file.items()) if rel not in BASELINE_BY_FILE
+    ]
+    assert len(candidates) == BASELINE_CANDIDATES and not moved, (
+        f"candidate lines: {len(candidates)}, baseline {BASELINE_CANDIDATES}.\n"
+        + ("files whose candidate count moved:\n" + "\n".join(moved) + "\n" if moved else "")
+        + "Read the listed file(s): if the new line is scoped, extend the scope "
+        "markers; if it is legitimately exempt, add an allowlist entry with a "
+        "reason; if a candidate was LOST, that may be the classifier no longer "
+        "matching a site still in the class. Then update the baseline. Do not "
+        "update the baseline on its own."
     )
 
 
@@ -527,3 +642,25 @@ def test_control_a_scoped_instruction_is_not_reported():
     scoped = ("Testing: Before each commit boundary, run the tests your change "
               "affects. The full suite is not part of this boundary.")
     assert _unlisted([("synthetic/surface.md", 1, scoped)], ALLOWLIST) == []
+
+
+# Every shape that defeated an earlier revision of this classifier. Each was
+# ACCEPTED — reported as out of class — before the SET-only exclusion and the
+# gate promotion, and each is an unscoped demand: it says WHEN or demands the
+# whole set, and never says WHICH tests.
+UNSCOPED_SHAPES = (
+    "Run the full test suite.",
+    "Run the full test suite at every commit boundary.",
+    "Run the full test suite before each stage-ready report.",
+    "- [ ] All tests passing",
+    "Full suite required at every commit.",
+)
+
+
+@pytest.mark.parametrize("line", UNSCOPED_SHAPES, ids=[s[:40] for s in UNSCOPED_SHAPES])
+def test_control_every_unscoped_shape_is_reported(line):
+    unlisted = _unlisted([("synthetic/surface.md", 1, line)], ALLOWLIST)
+    assert len(unlisted) == 1, (
+        f"the census accepted {line!r}. It names no SET of tests, so it is an "
+        "unscoped demand and must be reported."
+    )
