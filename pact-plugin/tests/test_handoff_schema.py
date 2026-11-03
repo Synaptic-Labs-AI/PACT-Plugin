@@ -10,7 +10,8 @@ Pins:
   - validate_handoff_schema: fires on a missing required key (naming a legacy
     alias when one is present) and stays SILENT on the three shapes the real
     handoff population is made of
-  - resolve_handoff_field: canonical first, legacy alias only as fallback
+  - resolve_handoff_field: canonical first, legacy alias only as fallback,
+    both selected by membership in (None, '', [], {})
 
 THE SILENT ARMS ARE THE LOAD-BEARING ONES. A validator that fires on a
 recommended-field absence, on an extra key, or on a legitimately empty value
@@ -173,28 +174,45 @@ class TestResolveHandoffField:
         for alias, canonical in HANDOFF_LEGACY_ALIASES.items():
             assert resolve_handoff_field({alias: ["v"]}, canonical) == ["v"]
 
-    def test_fallback_keys_on_truthiness_not_on_renderability(self):
+    def test_fallback_keys_on_emptiness_not_on_renderability(self):
         """The shadowing edge, pinned in BOTH directions.
 
-        The docstring specifies fallback "when the canonical key is absent or
-        falsy", so TRUTHINESS is the key -- not whether the value renders as
-        anything. The two rows are the same rule either side of that line, and
-        the second is the one no other arm reaches: test_canonical_wins_over_
-        alias uses a truthy AND renderable canonical, so it cannot show which
-        of the two properties the fallback actually tests.
+        The fallback fires "when the canonical key is absent or empty (None,
+        '', [], {})", so MEMBERSHIP is the key -- not whether the value
+        renders as anything. The second row is the one no other arm reaches:
+        test_canonical_wins_over_alias uses a renderable canonical, so it
+        cannot show which property the fallback actually tests.
         """
-        # Falsy canonical -> falls through to the legacy spelling.
+        # Empty canonical -> falls through to the legacy spelling.
         assert resolve_handoff_field(
             {"decisions": [], "key_decisions": ["legacy"]}, "decisions"
         ) == ["legacy"]
-        # Truthy canonical wins even though it renders as nothing, shadowing a
-        # legacy value that would have rendered. Documented, not a defect.
+        # A non-empty canonical wins even though it renders as nothing,
+        # shadowing a legacy value that would have rendered. Documented, not a
+        # defect.
         assert resolve_handoff_field(
             {"decisions": [""], "key_decisions": ["legacy"]}, "decisions"
         ) == [""]
 
+    def test_zero_and_false_are_content_on_both_spellings(self):
+        """Membership, not truthiness: a canonical 0 or False wins over an
+        alias, and a canonical None yields an alias 0. Kills a truthiness test
+        on either the canonical or the alias side."""
+        assert resolve_handoff_field(
+            {"decisions": None, "key_decisions": 0}, "decisions"
+        ) == 0
+        assert resolve_handoff_field(
+            {"decisions": 0, "key_decisions": "x"}, "decisions"
+        ) == 0
+        assert resolve_handoff_field(
+            {"decisions": False, "key_decisions": "x"}, "decisions"
+        ) is False
+        assert resolve_handoff_field(
+            {"decisions": "", "key_decisions": False}, "decisions"
+        ) is False
+
     def test_empty_canonical_still_reads_empty_without_an_alias(self):
-        """The falsy fallback must not turn a legitimately empty field into a
+        """The empty fallback must not turn a legitimately empty field into a
         missing one — the resume brief's else-branch depends on this."""
         assert resolve_handoff_field({"decisions": []}, "decisions") == []
 

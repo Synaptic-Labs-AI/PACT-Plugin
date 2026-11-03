@@ -35,6 +35,7 @@ from .agent_handoff_marker import (
     report_safe,
 )
 from .handoff_schema import (
+    _EMPTY_VALUES,
     HANDOFF_LEGACY_ALIASES,
     HANDOFF_REQUIRED_FIELDS,
     resolve_handoff_field,
@@ -91,16 +92,8 @@ def disk_identity(owner: str, subject: object) -> str:
     return occupant_hash(owner, emit_side_subject(subject))
 
 
-# The values that count as EMPTY for the union below. Test MEMBERSHIP, not
-# truthiness: `not disk_value` is also TRUE for `0` and for `False`, so a
-# task-file field that deliberately holds one of those would keep the journal
-# value and discard the disk value. KEEP `None` IN THIS SET. Drop it and the
-# narrowing itself opens the erasure it was written to close: a field
-# explicitly holding null would count as CONTENT and overwrite the journal
-# copy with null.
-_EMPTY_VALUES = (None, "", [], {})
-
 _REQUIRED = frozenset(HANDOFF_REQUIRED_FIELDS)
+
 
 def _identity(raw_key: str) -> str:
     """Canonical identity of one raw key.
@@ -117,9 +110,10 @@ def _identity(raw_key: str) -> str:
 def _field_map(handoff: dict) -> dict:
     """canonical identity -> (raw key, value) for one copy.
 
-    VALUE SELECTION MIRRORS `resolve_handoff_field`: the canonical spelling
-    wins when it holds content; when it is FALSY, the first truthy alias
-    spelling wins. Before this alignment the map chose the canonical spelling
+    VALUE SELECTION MIRRORS `resolve_handoff_field`, by MEMBERSHIP in
+    _EMPTY_VALUES (None, '', [], {}), never truthiness: the canonical spelling
+    wins when it is not empty; when it is empty, the first non-empty alias
+    spelling wins; else the canonical value. 0 and False are content. Before this alignment the map chose the canonical spelling
     unconditionally, so a disk copy carrying `decisions: ''` beside
     `key_decisions: [...]` selected the empty canonical: the alias value was
     ignored AND the journal content was dropped — measured content loss on a
@@ -132,17 +126,17 @@ def _field_map(handoff: dict) -> dict:
         if current is None:
             fields[identity] = (raw_key, value)
         elif raw_key == identity:
-            # Canonical spelling: wins when it has content, and supplies the
-            # fallback value when it is falsy and no alias did.
-            if value or not current[1]:
+            # Canonical spelling: wins when it is not empty, and supplies the
+            # fallback value when it is empty and no alias held content.
+            if value not in _EMPTY_VALUES or current[1] in _EMPTY_VALUES:
                 fields[identity] = (raw_key, value)
-        elif value and not current[1]:
-            # Alias spelling with CONTENT beats a falsy canonical. The
-            # truthiness test on `value` is load-bearing: without it a FALSY
-            # alias overwrites a falsy canonical whenever it appears later in
-            # insertion order, and the map disagrees with the shipped reader
+        elif value not in _EMPTY_VALUES and current[1] in _EMPTY_VALUES:
+            # Alias spelling with CONTENT beats an empty canonical. The test
+            # on `value` is load-bearing: without it an EMPTY alias overwrites
+            # an empty canonical whenever it appears later in insertion order,
+            # and the map disagrees with the shipped reader
             # (`resolve_handoff_field` falls back to the canonical value when
-            # no alias is truthy).
+            # no alias holds content).
             fields[identity] = (raw_key, value)
     return fields
 

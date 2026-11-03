@@ -34,6 +34,9 @@ Public surface:
   Same suffix, different relationship to its canonical tuple — check which
   module you are importing from before reusing the name.
 - HANDOFF_LEGACY_ALIASES — legacy spelling -> canonical key, read-side only.
+- _EMPTY_VALUES — the values a HANDOFF field counts as EMPTY: membership in
+  (None, '', [], {}), never falsiness, so 0 and False are content. The single
+  definition; shared/handoff_merge imports it.
 - HANDOFF_SCHEMA_ECHO — reusable human-readable echo of the canonical schema.
   The enumerated names, the recommended marking and both counts are derived
   from the tuples, so they cannot drift from them.
@@ -84,6 +87,11 @@ HANDOFF_LEGACY_ALIASES: dict[str, str] = {
     "areas_of_uncertainty": "uncertainty",
     "integration_points": "integration",
 }
+
+# The values that count as EMPTY in a HANDOFF field. Test MEMBERSHIP, never
+# truthiness: 0 and False are content. KEEP None IN THIS SET: a field that
+# explicitly holds null is empty, not content.
+_EMPTY_VALUES = (None, "", [], {})
 
 # Human-readable echo of the full canonical schema. The field names, the
 # "(recommended)" marking and both counts are derived from the tuples above, so
@@ -142,27 +150,29 @@ def validate_handoff_schema(handoff: object) -> str | None:
 
 def resolve_handoff_field(handoff: object, field: str) -> object:
     """Return handoff[field], falling back to a legacy spelling of that same
-    field when the canonical key is absent or falsy.
+    field when the canonical key is absent or empty (None, '', [], {}).
 
     Read-side repair only. It lets a reader render a handoff written with a
     spelling this repo once taught, without teaching anyone to write one: the
     journal is append-only, so those handoffs are on disk permanently, while
     the write-time advisory pushes the other way at the same time.
 
-    A falsy canonical value falls through to the alias and then returns the
-    canonical value unchanged, so a legitimately empty field still reads as
-    empty rather than as missing.
+    Selection is by MEMBERSHIP in _EMPTY_VALUES, never by truthiness: the
+    canonical value when it is not empty, else the first alias value that is
+    not empty, else the canonical value unchanged, so a legitimately empty
+    field still reads as empty rather than as missing. A canonical 0 or False
+    is content and wins over an alias.
 
     Pure; never raises. Returns None for a non-dict handoff.
     """
     if not isinstance(handoff, dict):
         return None
     value = handoff.get(field)
-    if value:
+    if value not in _EMPTY_VALUES:
         return value
     for alias, canonical in HANDOFF_LEGACY_ALIASES.items():
         if canonical == field:
             alias_value = handoff.get(alias)
-            if alias_value:
+            if alias_value not in _EMPTY_VALUES:
                 return alias_value
     return value

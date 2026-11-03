@@ -359,3 +359,42 @@ class TestParseLedgerTokensWholeText:
 
     def test_a_token_cannot_start_inside_a_path(self):
         assert parse_ledger_tokens("a/b/5#0123abcd") == set()
+
+
+class TestDualSpellingMembershipParity:
+    """_field_map and resolve_handoff_field select a dual-spelled field by
+    MEMBERSHIP in (None, '', [], {}), in both insertion orders, and agree.
+    Kills a truthiness test on either spelling in either function."""
+
+    CASES = [
+        # (canonical value, alias value, expected)
+        (None, 0, 0),
+        (0, "x", 0),
+        (False, "x", False),
+        ("", False, False),
+        ([], 0, 0),
+        (None, "", None),
+        ("", [], ""),
+        ([], "legacy", "legacy"),
+    ]
+
+    def test_both_functions_agree_in_both_orders(self):
+        from shared.handoff_merge import _field_map
+        from shared.handoff_schema import resolve_handoff_field
+
+        for canonical, alias, expected in self.CASES:
+            for pairs in (
+                [("decisions", canonical), ("key_decisions", alias)],
+                [("key_decisions", alias), ("decisions", canonical)],
+            ):
+                handoff = dict(pairs)
+                read = resolve_handoff_field(handoff, "decisions")
+                _, mapped = _field_map(handoff)["decisions"]
+                assert read == expected and type(read) is type(expected), pairs
+                assert mapped == expected and type(mapped) is type(expected), pairs
+
+    def test_empty_values_have_one_definition(self):
+        import shared.handoff_merge as merge
+        import shared.handoff_schema as schema
+
+        assert merge._EMPTY_VALUES is schema._EMPTY_VALUES
