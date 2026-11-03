@@ -1681,13 +1681,38 @@ class TestHarvestRuleProse:
 
     def test_step31_snapshots_are_scoped_to_the_units_arc(self):
         """The snapshot fallback is the other site where one instance could
-        take another instance's siblings: a snapshot carrying a team must
-        carry the unit's arc."""
+        take another instance's siblings. Every snapshot's arc must equal the
+        unit's group arc: a team-less snapshot (null arc) reaches only a
+        team-less unit, and a dated unit takes only its own team and arc."""
+        assert "**THE SNAPSHOT'S ARC MUST EQUAL THE UNIT'S GROUP ARC.**" in SKILL_TEXT
+        assert "with the `arc_of` route" in SKILL_TEXT
         assert (
-            "A snapshot that carries a `team` must also carry the unit's ARC"
+            "a DATED unit, one whose group arc is not null, accepts only a "
+            "snapshot that carries its team and its arc" in SKILL_TEXT
+        )
+        # The pass-through for a team-less snapshot must not come back.
+        assert "A snapshot with NO `team` is OLD-FORMAT and passes" not in SKILL_TEXT
+
+    def test_resweep_claims_are_stated_in_units_and_tokens(self):
+        """The re-sweep paragraph speaks in units and tokens like Step 3 and
+        Incremental: the safety net skips recorded tokens, and a revision
+        that re-emits is collected because its token is new; only a write to
+        the task file alone escapes every trigger."""
+        assert (
+            "the Consolidation Harvest Workflow safety net processes only the "
+            "units whose tokens it lacks" in SKILL_TEXT
+        )
+        assert "reads only tasks that are not in it" not in SKILL_TEXT
+        assert "its unit has a NEW token and the next pass collects it" in SKILL_TEXT
+        assert (
+            "A write to the task file alone — a sibling key, or a handoff edit "
+            "that fires no new emit — leaves the recorded token unchanged"
             in SKILL_TEXT
         )
-        assert "with the `arc_of` route" in SKILL_TEXT
+        assert (
+            "An agent writes content to a task after the pass that recorded "
+            "that task as processed" not in SKILL_TEXT
+        )
 
     def test_population_is_never_framed_as_an_id_delta(self):
         """The population is the units whose tokens the ledger lacks; no

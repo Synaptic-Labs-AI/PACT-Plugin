@@ -179,3 +179,25 @@ def test_named_store_read_never_falls_back_to_the_bare_base(child_env):
     read its store), and a team with no store reads nothing even though a
     same-numbered file sits at the bare tasks directory."""
     assert json.loads(_run("read_task_json", child_env, ["6", OTHER])) == {}
+
+
+def test_a_teamless_snapshot_never_has_a_dated_units_arc(child_env):
+    """The Step 3.1 snapshot rule compares the `arc_of` route's output with
+    the `group_events` route's group arc. Executed: a team-less snapshot's
+    arc is null, so it never equals a dated group's arc, and a teamed
+    snapshot of the same instance carries exactly that arc."""
+    journal = _JOURNAL + [
+        {"type": "task_metadata_snapshot", "task_id": "5", "metadata": {},
+         "subject": "s", "occupant": _IDENTITY, "ts": T1},
+        {"type": "task_metadata_snapshot", "task_id": "5", "metadata": {},
+         "subject": "s", "occupant": _IDENTITY, "team": TEAM, "ts": T1},
+    ]
+    groups = json.loads(_run("group_events", child_env, [],
+                             {"journal": journal, "positions": [1, 2]}))
+    (group_key, _), = groups
+    dated_arc = group_key[1]
+    assert dated_arc is not None
+    teamless = json.loads(_run("arc_of", child_env, [], {"journal": journal, "position": 3}))
+    teamed = json.loads(_run("arc_of", child_env, [], {"journal": journal, "position": 4}))
+    assert teamless is None and teamless != dated_arc
+    assert teamed == dated_arc
