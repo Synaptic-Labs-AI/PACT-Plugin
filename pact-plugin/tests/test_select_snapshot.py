@@ -5,14 +5,8 @@ same task id and occupant, no other team, and an arc equal to the unit's
 group arc. A team-less snapshot has no arc, so it never reaches a dated unit.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
-
-from shared.handoff_merge import disk_identity, select_snapshot  # noqa: E402
+from shared.handoff_merge import disk_identity, select_snapshot
 
 TEAM, OTHER = "session-snap", "session-elsewhere"
 OCC = disk_identity("coder", "s")

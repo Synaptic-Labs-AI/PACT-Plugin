@@ -20,10 +20,9 @@ from pathlib import Path
 
 import pytest
 
-_PLUGIN = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_PLUGIN / "hooks"))
+from shared import handoff_merge as hm
 
-from shared import handoff_merge as hm  # noqa: E402
+_PLUGIN = Path(__file__).resolve().parents[1]
 
 SKILL_TEXT = (
     _PLUGIN / "skills" / "pact-handoff-harvest" / "SKILL.md"
@@ -74,7 +73,7 @@ def _json(expected):
 
 # name: (argv values in placeholder order, stdin object or text, check)
 FIXTURES = {
-    "report_safe": (["a\nb c"], None, lambda out: out == "abc"),
+    "report_safe": (["a\nb\u2028c"], None, lambda out: out == "abc"),
     "disk_identity": (["coder", "s"], None, lambda out: out == _IDENTITY),
     "handoff_content_key": ([], H, lambda out: out == hm.handoff_content_key(H)),
     "union_preferring_task_file": (

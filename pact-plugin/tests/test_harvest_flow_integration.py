@@ -24,13 +24,12 @@ from pathlib import Path
 
 import pytest
 
-_PLUGIN = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_PLUGIN / "hooks"))
+from shared import handoff_merge
+from shared.handoff_merge import disk_identity, handoff_content_key
+from shared.session_journal import make_event
+from shared.task_utils import read_task_json, task_dir_for
 
-from shared import handoff_merge  # noqa: E402
-from shared.handoff_merge import disk_identity, handoff_content_key  # noqa: E402
-from shared.session_journal import make_event  # noqa: E402
-from shared.task_utils import read_task_json, task_dir_for  # noqa: E402
+_PLUGIN = Path(__file__).resolve().parents[1]
 
 SKILL_TEXT = (
     _PLUGIN / "skills" / "pact-handoff-harvest" / "SKILL.md"
@@ -133,7 +132,7 @@ def _read_journal(session_dir):
         [sys.executable, str(_PLUGIN / "hooks" / "shared" / "session_journal.py"),
          "read", "--session-dir", str(session_dir)],
         capture_output=True, text=True, timeout=60,
-        env={"PYTHONDONTWRITEBYTECODE": "1"},
+        env={"HOME": str(session_dir.parent), "PYTHONDONTWRITEBYTECODE": "1"},
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)

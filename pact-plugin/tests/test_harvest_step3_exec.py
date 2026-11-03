@@ -11,17 +11,15 @@ Each arm names the behaviour it protects and the one-line mutant it must
 catch; the mutant evidence is recorded with the change that added the arm.
 """
 
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-_PLUGIN = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_PLUGIN / "hooks"))
+from shared import handoff_merge
+from shared.handoff_merge import handoff_content_key
 
-from shared import handoff_merge  # noqa: E402
-from shared.handoff_merge import handoff_content_key  # noqa: E402
+_PLUGIN = Path(__file__).resolve().parents[1]
 
 SKILL_TEXT = (
     _PLUGIN / "skills" / "pact-handoff-harvest" / "SKILL.md"
