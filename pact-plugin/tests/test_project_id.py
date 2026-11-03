@@ -18,8 +18,8 @@ We replicate the _detect_project_id logic here rather than fighting
 Python's import system, then validate equivalence via a source-check test.
 """
 
+import ast
 import os
-import re
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -227,37 +227,175 @@ def _detect_project_id_under_test():
     return None
 
 
+def _walk_qualified_functions(tree):
+    """Yield (node, qualified_name_parts) for every function in `tree`.
+
+    Qualified names are built by descending through ClassDef nodes, so
+    "PACTMemory._detect_project_id" is addressable and two classes that share
+    a bare method name stay distinguishable. Functions nested inside functions
+    are not descended into: no call site targets one, and walking them would
+    make an inner name collide with its sibling.
+    """
+    stack = [(tree, [])]
+    while stack:
+        node, prefix = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield child, prefix + [child.name]
+            elif isinstance(child, ast.ClassDef):
+                stack.append((child, prefix + [child.name]))
+
+
 def _extract_method_body(source_path, method_name):
-    """Extract the body of a method from a source file for comparison."""
+    """Extract one function body from a source file, by qualified name.
+
+    REPLACES A REGEX-AND-INDENT WALK THAT MEASURED THE WRONG SPAN. That walk
+    sliced from `match.start()`, which lands on the `def` keyword and skips
+    the class indentation, so `base_indent` computed 0 for every method and the
+    "body" ran to end-of-file — 1,238 of memory_api.py's 1,716 lines for
+    `_detect_project_id`. The assertions below therefore matched code anywhere
+    in that tail, including other methods, and passed by accident.
+
+    An AST gives the exact span. `FunctionDef.lineno` is the `def` line, so
+    decorators are excluded; `end_lineno` is the body's last line, so a
+    function that legitimately runs to end-of-file is returned IN FULL rather
+    than truncated — the failure mode a narrower fix would introduce.
+
+    Args:
+        source_path: File to read.
+        method_name: A bare name ("_detect_project_id") or a dotted qualified
+            path ("PACTMemory._detect_project_id"). A bare name that matches
+            more than one definition raises rather than guessing: several
+            methods in this tree share a bare name across classes, and a
+            silent first-match would be the same measures-the-wrong-thing
+            defect one level up.
+
+    Returns:
+        The source segment, stripped, or None when nothing matches.
+    """
     content = source_path.read_text(encoding="utf-8")
-    # Find the method definition
-    pattern = rf'def {method_name}\(.*?\).*?:'
-    match = re.search(pattern, content)
-    if not match:
+    wanted = method_name.split(".")
+    matches = [
+        node
+        for node, qualified in _walk_qualified_functions(ast.parse(content))
+        if qualified[-len(wanted):] == wanted
+    ]
+    if not matches:
         return None
+    if len(matches) > 1:
+        raise AssertionError(
+            f"{method_name!r} is ambiguous in {source_path.name}: "
+            f"{len(matches)} definitions; pass a dotted qualified name"
+        )
+    segment = ast.get_source_segment(content, matches[0])
+    return segment.strip() if segment is not None else None
 
-    start = match.start()
-    # Find the end of the method (next def at same or lower indent, or class-level code)
-    lines = content[start:].split('\n')
-    method_lines = [lines[0]]
-    base_indent = len(lines[0]) - len(lines[0].lstrip())
 
-    for line in lines[1:]:
-        stripped = line.lstrip()
-        if stripped and not line.startswith(' ' * (base_indent + 1)) and not stripped.startswith('#'):
-            # Check if this is a decorator or new method
-            if stripped.startswith('def ') or stripped.startswith('@') or stripped.startswith('class '):
-                break
-        method_lines.append(line)
+class TestMethodBodyExtractor:
+    """The instrument's own controls.
 
-    return '\n'.join(method_lines).strip()
+    The pins in TestSourceEquivalence only mean something if the extractor
+    returns the named method's body and nothing else. Its predecessor did not:
+    it sliced from match.start(), so base_indent was 0 and the body ran to
+    end-of-file. These arms fail if that class of defect returns, and X2's
+    negative half fails if a future narrowing fix truncates a body that
+    legitimately ends at EOF.
+    """
+
+    def test_x1_the_real_extraction_is_narrow(self):
+        """A real method's body contains no sibling def and no file tail."""
+        body = _extract_method_body(_MEMORY_API_PATH, "_detect_project_id")
+        assert body is not None
+        assert "def _detect_project_id_with_source" not in body, (
+            "the extractor returned a sibling method — the body is not narrowed"
+        )
+        assert "# Module-level singleton" not in body, (
+            "the extractor ran to the module tail"
+        )
+        assert len(body.splitlines()) < 20, (
+            f"extracted {len(body.splitlines())} lines for a one-line "
+            "delegation; the span is not the method"
+        )
+
+    def test_x1_qualified_name_addresses_a_class_method(self):
+        """A dotted qualified name reaches a method; a bare one still works."""
+        dotted = _extract_method_body(
+            _MEMORY_API_PATH, "PACTMemory._detect_project_id_with_source"
+        )
+        bare = _extract_method_body(
+            _MEMORY_API_PATH, "_detect_project_id_with_source"
+        )
+        assert dotted is not None and bare is not None
+        assert dotted == bare
+        assert 'os.environ.get("CLAUDE_PROJECT_DIR")' in dotted
+
+    def test_x1_an_ambiguous_bare_name_raises_rather_than_guessing(self, tmp_path):
+        """Two classes sharing a method name must not silently first-match."""
+        module = tmp_path / "ambiguous.py"
+        module.write_text(
+            "class A:\n"
+            "    def run(self):\n"
+            "        return 'a'\n"
+            "\n"
+            "class B:\n"
+            "    def run(self):\n"
+            "        return 'b'\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(AssertionError, match="ambiguous"):
+            _extract_method_body(module, "run")
+
+        # The qualified form resolves the ambiguity rather than raising.
+        assert "return 'b'" in _extract_method_body(module, "B.run")
+
+    def test_x2_a_two_method_fixture_returns_the_first_body_only(self, tmp_path):
+        """POSITIVE: the extractor stops at the end of the first method."""
+        module = tmp_path / "two.py"
+        module.write_text(
+            "def first():\n"
+            "    return 1\n"
+            "\n"
+            "def second():\n"
+            "    return 2\n",
+            encoding="utf-8",
+        )
+        body = _extract_method_body(module, "first")
+        assert body is not None
+        assert "return 1" in body
+        assert "def second" not in body
+        assert "return 2" not in body
+
+    def test_x2_a_body_ending_at_eof_is_returned_in_full(self, tmp_path):
+        """NEGATIVE: over-narrowing must not truncate a legitimate EOF body.
+
+        Without this arm a repair could stop at any dedent and still pass the
+        positive half, trading one blind spot for another.
+        """
+        module = tmp_path / "eof.py"
+        module.write_text(
+            "def only(x):\n"
+            "    y = x + 1\n"
+            "    return y\n",
+            encoding="utf-8",
+        )
+        body = _extract_method_body(module, "only")
+        assert body is not None
+        assert body.splitlines()[-1].strip() == "return y", (
+            f"the final statement was truncated: {body!r}"
+        )
+        assert "y = x + 1" in body
 
 
 class TestSourceEquivalence:
     """Verify the test replica matches the real implementation."""
 
     def test_source_equivalence(self):
-        """The replica logic should match the real _detect_project_id method body.
+        """The replica logic should match the real detector's strategy body.
+
+        Reads _detect_project_id_with_source, NOT _detect_project_id: the
+        latter is a one-line delegation, so the strategy markers and their
+        order live in the former. The delegation itself is pinned separately
+        by test_detect_project_id_still_delegates_with_its_signature.
 
         Verifies key implementation markers are present AND ordered correctly:
         Strategy 1 (env var) before Strategy 1.5 (session record) before
@@ -266,8 +404,12 @@ class TestSourceEquivalence:
         is load-bearing: BELOW env and ABOVE git, because in a multi-repo
         workspace the cwd's git root can be the wrong scope.
         """
-        real_source = _extract_method_body(_MEMORY_API_PATH, "_detect_project_id")
-        assert real_source is not None, "Could not find _detect_project_id in memory_api.py"
+        real_source = _extract_method_body(
+            _MEMORY_API_PATH, "_detect_project_id_with_source"
+        )
+        assert real_source is not None, (
+            "Could not find _detect_project_id_with_source in memory_api.py"
+        )
 
         # Check key implementation lines are present
         assert 'os.environ.get("CLAUDE_PROJECT_DIR")' in real_source
@@ -358,15 +500,37 @@ class TestSourceEquivalence:
         assert "Path(start) if start is not None else Path.cwd()" in helper_body
 
     def test_detect_project_id_does_not_rebind_the_helper_name(self):
-        """No local named main_repo_root inside _detect_project_id.
+        """No local named main_repo_root inside the strategy body.
 
         Rebinding the module-level helper's own name in the method would make
         it local for the whole method and raise UnboundLocalError on the call
-        that produces the value.
+        that produces the value. The strategy body moved to
+        _detect_project_id_with_source when the tuple-returning detector was
+        split out, so the check follows it there.
         """
-        real_source = _extract_method_body(_MEMORY_API_PATH, "_detect_project_id")
+        real_source = _extract_method_body(
+            _MEMORY_API_PATH, "_detect_project_id_with_source"
+        )
         assert real_source is not None
         assert "main_repo_root =" not in real_source
+
+    def test_detect_project_id_still_delegates_with_its_signature(self):
+        """The bare-string detector must survive as a delegation.
+
+        _detect_project_id is a public-shaped seam: outside callers and the
+        precedence pins use it, and they expect a bare string. Re-pointing the
+        strategy pins at _detect_project_id_with_source would otherwise leave
+        this method with NO assertion at all — coverage lost at exactly the
+        moment it stopped containing anything to cover.
+        """
+        real_source = _extract_method_body(_MEMORY_API_PATH, "_detect_project_id")
+        assert real_source is not None, "Could not find _detect_project_id"
+        assert "_detect_project_id_with_source()[0]" in real_source, (
+            "the bare-string detector no longer delegates to the "
+            "tuple-returning detector"
+        )
+        # The strategy logic must NOT have been duplicated back into it.
+        assert 'os.environ.get("CLAUDE_PROJECT_DIR")' not in real_source
 
     def test_find_project_root_exists_in_source(self):
         """The real memory_api.py must define _find_project_root as a class method."""
