@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+import ci_contract
+
 
 class TestEnsureMemoryReady:
     """Tests for ensure_memory_ready() - the main lazy initialization entry point."""
@@ -461,6 +463,37 @@ class TestDependencyDriftIsDetectable:
     _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
     _PYTEST_RE = re.compile(r"\bpytest\b")
 
+    # PROFILES: the ONE (workflow path, job id) pair allowed to run a test
+    # step that is not TEST_CMD. Keying on the pair — rather than admitting a
+    # second global grammar — stops a future workflow from claiming the
+    # exemption for a narrowed suite.
+    _PROFILES = {
+        (".github/workflows/tests.yml", "full-suite"): [
+            (r"^python -m pytest -ra$", 1),
+        ],
+        (".github/workflows/fast-tests.yml", "fast-suite"): [
+            (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
+             r'"\$BASE_SHA" --summary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-summary\.json" --canary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-canary\.json"$', 1),
+            (r'^python \.\./scripts/run_fast_suite\.py --collect-only '
+             r'--base-sha "\$BASE_SHA" --summary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-summary\.json" --canary '
+             r'"\$GITHUB_WORKSPACE/\.fast-suite-canary\.json"$', 1),
+        ],
+    }
+
+    # The generic arm for every OTHER workflow: TEST_CMD only. The
+    # ignore-bearing form is confined to the profiled pair above, so a future
+    # workflow cannot run a narrowed suite while the bracketing rules pass
+    # (the one-pair carve-out).
+    _GENERIC_ALLOWED = re.compile(r"^python -m pytest -ra$")
+
+    # The pinned fast runner. A wrapper invocation names `python` but not
+    # `pytest`, so without this classifier the verify bracket silently does
+    # not bind to it.
+    _FAST_RUNNER_RE = re.compile(r"^python \.\./scripts/run_fast_suite\.py\b")
+
     def _source_repo_root(self):
         """Repo root by a POSITIVE marker, or None when this is not a checkout.
 
@@ -598,14 +631,19 @@ class TestDependencyDriftIsDetectable:
         )
 
     def test_ci_environment_is_verified_around_every_test_run(self):
-        """The runtime check runs in the SAME place as the tests (F1(a), F2).
+        """The runtime check runs in the SAME place as the tests.
 
         For every GOVERNED job (any step whose `run` names pytest, python,
         pip or ruff) in every workflow under .github/workflows/:
           (i) its LAST step runs VERIFY_CMD with `if: always()`;
-          (ii) every step whose `run` names pytest is EXACTLY TEST_CMD and is
-               IMMEDIATELY preceded by a step running VERIFY_CMD;
-          (iii) no verify step and no pytest step carries `env:` or
+          (ii) every TEST STEP is IMMEDIATELY preceded by VERIFY_CMD. A
+               TEST STEP is one whose `run` names pytest OR matches the
+               pinned fast runner path. In a profiled job (exactly one
+               (workflow path, job id) pair per profile) the step must match
+               one of that profile's pinned forms; everywhere else a pytest
+               step must be EXACTLY TEST_CMD, and the fast runner is not
+               allowed at all;
+          (iii) no verify step and no test step carries `env:` or
                `shell:`, and no verify step carries `working-directory:`
                (VERIFY_CMD names the script relative to the repo root).
         Together these make the process pytest runs in the process the
@@ -640,13 +678,42 @@ class TestDependencyDriftIsDetectable:
                     problems.append(
                         f"{where}: the LAST step must run "
                         f"`{self.VERIFY_CMD}` with `if: always()`")
+                profile = self._PROFILES.get((rel, jid))
+                if profile is not None:
+                    for pattern, expected_count in profile:
+                        matched = sum(
+                            1 for run in runs
+                            if re.fullmatch(pattern, run.strip()))
+                        if matched != expected_count:
+                            problems.append(
+                                f"{where}: the pinned form {pattern!r} "
+                                f"matches {matched} step(s), expected "
+                                f"exactly {expected_count}. A renamed step "
+                                f"reddens instead of silently ceasing to be "
+                                f"the test step.")
                 for n, (step, run) in enumerate(zip(steps, runs)):
                     is_verify = run.strip() == self.VERIFY_CMD
-                    is_test = bool(self._PYTEST_RE.search(run))
-                    if is_test and run.strip() != self.TEST_CMD:
-                        problems.append(
-                            f"{where} step {n}: a pytest step must run "
-                            f"exactly `{self.TEST_CMD}`, not {run.strip()!r}")
+                    names_pytest = bool(self._PYTEST_RE.search(run))
+                    names_runner = bool(self._FAST_RUNNER_RE.search(run))
+                    is_test = names_pytest or names_runner
+                    if is_test:
+                        if profile is not None:
+                            if not any(re.fullmatch(pattern, run.strip())
+                                       for pattern, _ in profile):
+                                problems.append(
+                                    f"{where} step {n}: {run.strip()!r} "
+                                    f"matches no pinned profile pattern for "
+                                    f"this job")
+                        elif names_runner:
+                            problems.append(
+                                f"{where} step {n}: the pinned fast runner "
+                                f"is only allowed in the profiled "
+                                f"(fast-tests.yml, fast-suite) pair")
+                        elif not self._GENERIC_ALLOWED.fullmatch(run.strip()):
+                            problems.append(
+                                f"{where} step {n}: a pytest step must run "
+                                f"exactly `{self.TEST_CMD}`, not "
+                                f"{run.strip()!r}")
                     if is_test and (n == 0 or runs[n - 1].strip() != self.VERIFY_CMD):
                         problems.append(
                             f"{where} step {n}: a pytest step must be "
@@ -671,8 +738,10 @@ class TestDependencyDriftIsDetectable:
                             f"would not fail the job)")
                     # The before-check runs unconditionally: an `if:` on it
                     # can skip the check while the tests still run.
-                    if is_verify and n + 1 < len(runs) and \
-                            self._PYTEST_RE.search(runs[n + 1]) and "if" in step:
+                    if is_verify and n + 1 < len(runs) and (
+                            self._PYTEST_RE.search(runs[n + 1])
+                            or self._FAST_RUNNER_RE.search(runs[n + 1])) \
+                            and "if" in step:
                         problems.append(
                             f"{where} step {n}: the before-check may carry no "
                             f"`if:` (it must run before every test run)")
@@ -681,6 +750,31 @@ class TestDependencyDriftIsDetectable:
                         f"{where}: a governed job may not carry "
                         f"`continue-on-error` (its verify failures would not "
                         f"fail the workflow)")
+        assert self._PROFILES, (
+            "PARSE FAILURE: the profile map is empty, so no job can be "
+            "admitted to run a non-TEST_CMD test step. Re-point it; do not "
+            "delete it."
+        )
+        fast_state, fast_present, fast_missing = ci_contract.fast_lane_state(root)
+        for profile_path, profile_job in self._PROFILES:
+            if (profile_path == ".github/workflows/fast-tests.yml"
+                    and fast_state == "absent"):
+                # The whole lane is gone (a supported deletion): the dedicated
+                # tri-state arm skips loudly; the full-workflow checks below
+                # still run. A mixed state is not excused here and fails via
+                # the profile-file assertion.
+                continue
+            profile_file = root / profile_path
+            assert profile_file.is_file(), (
+                f"the pinned profile {profile_path!r} names a workflow that "
+                f"does not exist under {root}. A renamed workflow reddens "
+                f"here instead of silently dropping its admission. "
+                f"Fast-lane state: {fast_state} (present={fast_present}, "
+                f"missing={fast_missing}).")
+            profile_doc = self._load_workflow_yaml(profile_file)
+            assert profile_job in ((profile_doc or {}).get("jobs") or {}), (
+                f"the pinned profile {profile_path!r} names job "
+                f"{profile_job!r}, which that workflow does not declare.")
         assert governed_jobs, (
             "PARSE FAILURE, not placement drift: no workflow job names "
             "pytest/python/pip/ruff, so the placement arm checks nothing. "
@@ -697,7 +791,39 @@ class TestDependencyDriftIsDetectable:
             "settings off those steps."
         )
 
-    # C-LITE TRIPWIRE. Tools whose installs the runtime check cannot see
+    def test_the_fast_lane_is_present_or_wholly_absent(self):
+        """A deleted fast lane is a LOUD skip; a half-deleted one fails.
+
+        The full gate must survive deletion of the fast lane. This is the
+        fast-dependent half: it skips with a reason naming every missing file
+        when the whole lane is absent, and fails when one side is present
+        without the other.
+        """
+        root = self._require_root("the fast lane presence")
+        state, present, missing = ci_contract.fast_lane_state(root)
+        if state == "absent":
+            pytest.skip(
+                "SKIPPED, NOT PASSED — the WHOLE fast lane is absent (all "
+                f"{len(ci_contract.FAST_LANE_FILES)} sentinel files missing): "
+                f"{list(ci_contract.FAST_LANE_FILES)}. This arm checks the "
+                "fast-lane profile and cannot judge a lane that is not there; "
+                "the full gate's independent guards still run. This skip is "
+                "NO INFORMATION about the fast lane."
+            )
+        assert state == "present", (
+            f"FAST LANE PARTIALLY PRESENT: present={present}, "
+            f"missing={missing}. Deleting the whole lane is supported (this "
+            f"arm skips loudly); deleting only part of it is a broken "
+            f"checkout and FAILS."
+        )
+        profile_file = root / ".github/workflows/fast-tests.yml"
+        assert profile_file.is_file()
+        doc = self._load_workflow_yaml(profile_file)
+        assert "fast-suite" in ((doc or {}).get("jobs") or {}), (
+            "the complete fast lane does not declare the fast-suite job the "
+            "governed-workflow profile requires")
+
+    # INSTALL TRIPWIRE. Tools whose installs the runtime check cannot see
     # (isolated environments), the uninstall verb, and the index-redirect
     # belt. Read as WORDS over a fixed text set; no argv parsing.
     _TRIPWIRE_PATTERNS = (
@@ -1119,7 +1245,7 @@ class TestDependencyDriftIsDetectable:
     def test_ruff_target_version_is_bound_to_the_floor(self, tmp_path, monkeypatch):
         """MUTATION ARM (fourth floor statement): a lint leg's
         `--target-version` drifting from the declared floor reddens the
-        floor-literal arm. Before round 7 it was bound to nothing but the
+        floor-literal arm. Without this arm it is bound to nothing but the
         local lint script's byte parity, which moves WITH it. The same arm
         certifies the fifth statement: .cursor/install.sh's
         `PYTHON_FLOOR_MINOR` moved alone reddens it too."""
@@ -1237,7 +1363,7 @@ class TestDependencyDriftIsDetectable:
             extra_files={"constraints-ci.txt": pins.replace(line + "\n", "", 1)})
 
     def test_verify_placement_mutations_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (F1(a), F2): every way the verify steps can stop
+        """MUTATION ARM: every way the verify steps can stop
         bracketing a test run reddens the placement arm; release.yml's job
         is measured NOT governed (it names none of the governed tools)."""
         root = self._require_root("verify-step placement")
@@ -1326,7 +1452,7 @@ class TestDependencyDriftIsDetectable:
             "steps, or the placement arm's governed set needs a decision")
 
     def test_tripwire_families_redden(self, tmp_path, monkeypatch):
-        """MUTATION ARM (C-lite, F6/F7/F8): one shape per token family,
+        """MUTATION ARM (install tripwire): one shape per token family,
         on each surface of the text set; faithful lines stay green."""
         root = self._require_root("the isolated-environment tripwire")
         real = (root / ".github" / "workflows" / "tests.yml").read_text(
@@ -1461,12 +1587,12 @@ class TestVerifyCiEnvironmentScript:
         assert not (verdict.wrong_version or verdict.missing or verdict.shadowed)
         rendered = verdict.render()
         assert "UNEXPECTED" in rendered
-        # F9: the runner-image remedy names where the baseline lives.
+        # The runner-image remedy names where the baseline lives.
         assert "RUNNER_BASELINE" in rendered
         assert "scripts/verify_ci_environment.py" in rendered
 
     def test_shadowed_checks_the_first_copy(self, verify, tmp_path):
-        """F4: the copy Python imports (first on the path) is the one
+        """The copy Python imports (first on the path) is the one
         checked, and any second copy is SHADOWED with every location."""
         first, second = tmp_path / "first", tmp_path / "second"
         self._dist(first, "alpha", "0.9")
@@ -1507,7 +1633,7 @@ class TestVerifyCiEnvironmentScript:
         assert self._check(verify, {"alpha": "1.0"}, tmp_path).unexpected == ("gamma",)
 
     def test_requested_extras_reach_their_dependencies(self, verify, tmp_path):
-        """F5: root -> child[fast] -> grand; extra == "fast" allows grand."""
+        """root -> child[fast] -> grand; extra == "fast" allows grand."""
         self._dist(tmp_path, "root-pkg", "1.0", requires=["child[fast]"])
         self._dist(tmp_path, "child", "1.0", requires=['grand; extra == "fast"'])
         self._dist(tmp_path, "grand", "1.0")
@@ -1567,7 +1693,7 @@ class TestVerifyCiEnvironmentScript:
         assert verify.read_pins(constraints) == {"ruff": "0.17.3"}
 
     def test_interpreter_mismatch_reports_the_unresolved_pair(self, verify, tmp_path, monkeypatch):
-        """F3: a `python3` on PATH in another DIRECTORY than sys.executable
+        """A `python3` on PATH in another DIRECTORY than sys.executable
         is a mismatch, reported unresolved; one in the same directory is
         not; none at all is."""
         elsewhere = tmp_path / "bin" / "python3"
@@ -1613,7 +1739,7 @@ class TestVerifyCiEnvironmentScript:
 
 
 class TestCIEnvironmentBinding:
-    """The session check (F1(b)) in tests/ci_environment_binding.py."""
+    """The session check in tests/ci_environment_binding.py."""
 
     @pytest.fixture
     def binding(self):
@@ -1662,8 +1788,8 @@ class TestCIEnvironmentBinding:
     def test_unexpected_distribution_exit_names_the_runner_baseline(
             self, binding, monkeypatch):
         """A runner-image extra fails LOUD by design; the exit-3 message
-        names RUNNER_BASELINE as the remedy (Bugbot's 'aborts on empty
-        baseline' concern is the intended behaviour, with this remedy)."""
+        names RUNNER_BASELINE as the remedy (aborting on an empty baseline
+        is the intended behaviour, with this remedy)."""
         verify = TestDependencyDriftIsDetectable._verify_script()
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
         stub = self._stub(False, verify.Verdict({}, (), ("image-extra",), {}, None))
