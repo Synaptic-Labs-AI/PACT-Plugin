@@ -240,8 +240,10 @@ def _declared_path_exists(declared_dir: str) -> bool:
 
     - an existing non-directory keeps today's basename behaviour, so the live
       arm stays byte-identical;
-    - a broken symlink is not a usable declaration, so it takes the declined
-      arm, which is also what `record_resolution` concludes for it.
+    - a broken symlink is not a usable declaration: `exists()` follows the
+      link and reports False, so it takes the declined arm. (This predicate
+      makes no claim about what `record_resolution` would conclude; the
+      decline is decided here, before the record is consulted.)
 
     Never raises: an unreadable or invalid path is "does not exist", which
     routes to the record lookup and then to the decline, never to a crash.
@@ -490,17 +492,28 @@ class PACTMemory:
             )
             return declared_main_root.name, source
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
-        # fire AND the declared path is not on disk; a live path never enters
-        # here, so live behaviour stays byte-identical.
+        # fire AND the declared path does not resolve to an existing target —
+        # absent, unreadable, or a broken symlink. A path that exists never
+        # enters here, so live behaviour stays byte-identical.
         if not _declared_path_exists(declared_dir):
             # Function-level: the shared package is importable only after
             # pact_session's sys.path bootstrap has run at module import.
             from shared.project_scope import recorded_main_root
 
-            recorded_root = recorded_main_root(
-                Path(declared_dir),
-                get_worktree_identity_from_session_record(),
-            )
+            # AN INVALID DECLARATION MUST NOT CRASH THE RESOLVER. A corrupt
+            # session record can carry a NUL byte, which `os.path.realpath`
+            # (reached inside `record_resolution`) rejects with ValueError.
+            # Catch it HERE, at the boundary this module owns, so the
+            # never-raises contract holds for the whole method rather than
+            # only for the `resolve()` call above. The outcome is the same as
+            # any other unverifiable record: no recorded root, then decline.
+            try:
+                recorded_root = recorded_main_root(
+                    Path(declared_dir),
+                    get_worktree_identity_from_session_record(),
+                )
+            except (OSError, RuntimeError, ValueError):
+                recorded_root = None
             if recorded_root is not None:
                 logger.debug(
                     "project_id resolved from the worktree identity record for "
@@ -1001,7 +1014,12 @@ class PACTMemory:
         # already envelopes it as invalid input (exit 2), so it cannot read as
         # an env/record disagreement.
         payload_project = memory.get("project_id")
-        if payload_project is not None and not payload_project:
+        if payload_project is not None and (
+            not isinstance(payload_project, str) or not payload_project
+        ):
+            # TYPE AND NON-EMPTINESS BOTH, because the message below promises
+            # both. Truthiness alone accepted an integer id, which every other
+            # project-id consumer in this codebase treats as a string.
             raise ValueError(
                 "project_id, when supplied, must be a non-empty string; omit "
                 "it to auto-detect the project. Nothing was written."
