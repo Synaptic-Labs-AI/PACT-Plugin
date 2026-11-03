@@ -1623,10 +1623,18 @@ class TestDeclinedDeclaration:
         main, worktree, identity = self._removed(tmp_path, plant_record=False)
         umbrella = make_umbrella(tmp_path)
         _enable_record_reading(monkeypatch)
-        assert pact_session.get_worktree_identity_from_session_record() == {}, (
-            "the reader must be LIVE and empty; a guard-blocked reader "
-            "returns the same {} for the wrong reason"
+        # LIVE AND EMPTY, PROVEN. A guard-blocked reader returns {} even with
+        # a valid record planted, so plant one, read it back, remove it, and
+        # only then assert the empty state. Without the read-back the empty
+        # assertion cannot tell the two states apart.
+        record_path = _plant(worktree, identity)
+        assert pact_session.get_worktree_identity_from_session_record().get(
+            "declared"
+        ) == os.path.realpath(worktree), (
+            "the reader is blocked; the empty assertion below would prove nothing"
         )
+        record_path.unlink()
+        assert pact_session.get_worktree_identity_from_session_record() == {}
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
         monkeypatch.chdir(umbrella.project)
         return main, worktree, umbrella

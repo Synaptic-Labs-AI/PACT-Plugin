@@ -5,17 +5,21 @@ Tests cover:
 1. Strategy 1: CLAUDE_PROJECT_DIR env var
 1.5. Strategy 1.5: session-record project_dir (between env and git). NOT
    exercised here: the record discovery refuses test processes, so the real
-   leg is inert in this suite and the replica below stays equivalent without
-   it. The leg's own coverage lives in test_project_dir_resolution.py.
+   leg is inert in this suite. Its own coverage lives in
+   test_project_dir_resolution.py.
 2. Strategy 2: git rev-parse --git-common-dir (worktree-safe repo root)
 3. Strategy 3: Current working directory basename
 4. Fallback ordering when strategies fail
 5. Explicit project_id in constructor overrides detection
 6. Edge cases: subprocess timeout, git not found, OSError
 
-Note: memory_api.py uses relative imports requiring package context.
-We replicate the _detect_project_id logic here rather than fighting
-Python's import system, then validate equivalence via a source-check test.
+These arms call the REAL PACTMemory._detect_project_id() through the
+`scripts.` package route (conftest puts skills/pact-memory on sys.path).
+There is no replica. A hand-maintained copy is what let the detector's new
+decline semantics go untested here while four arms kept asserting the old
+basename behaviour against paths that no longer exist: the replica said
+"my-project" for a directory that was never on disk, and the production
+method returned None.
 """
 
 import ast
@@ -47,7 +51,7 @@ def clean_env_no_claude_project_dir():
 def _isolate_walkup_to(monkeypatch, tmp_path):
     """Confine the walk-up search to the test's tmp_path subtree.
 
-    `_find_project_root_under_test` walks Path.parents up to "/" looking
+    `PACTMemory._find_project_root` walks Path.parents up to "/" looking
     for project markers. On macOS, pytest's tmp_path lives under
     /private/var/folders/.../T/, and unrelated processes can leak markers
     (e.g., a stray `.claude/` dir) into that shared parent. The walk-up
@@ -61,7 +65,7 @@ def _isolate_walkup_to(monkeypatch, tmp_path):
 
     Caveat: patches `Path.exists` and `Path.is_dir` at the CLASS level via
     monkeypatch — affects ALL Path operations in the test's scope, not just
-    `_find_project_root_under_test` walks. Bounded by monkeypatch teardown.
+    `PACTMemory._find_project_root` walks. Bounded by monkeypatch teardown.
     Future test authors extending tests that rely on Path methods for
     non-walk purposes should be aware.
     """
@@ -94,137 +98,6 @@ def _isolate_walkup_to(monkeypatch, tmp_path):
 _MEMORY_API_PATH = (
     Path(__file__).parent.parent / "skills" / "pact-memory" / "scripts" / "memory_api.py"
 )
-
-
-def _find_project_root_under_test(start: Path) -> Path:
-    """
-    Replica of PACTMemory._find_project_root() for isolated testing.
-
-    Walks UP from `start` looking for project markers; returns first match
-    or `start` unchanged if none found.
-    """
-    try:
-        current = start.resolve()
-    except (OSError, RuntimeError):
-        return start
-    for parent in [current] + list(current.parents):
-        if (parent / ".git").exists():
-            return parent
-        if (parent / ".claude").is_dir():
-            return parent
-        if (parent / "CLAUDE.md").exists():
-            return parent
-        if (parent / ".claude" / "CLAUDE.md").exists():
-            return parent
-    return start  # fallback: use original
-
-
-def _detect_project_id_under_test():
-    """
-    Replica of PACTMemory._detect_project_id() for isolated testing.
-
-    This function mirrors the implementation in memory_api.py. The
-    test_source_equivalence test verifies that the source of the real
-    method matches this replica, so any drift will be caught.
-
-    NO RECORD LEG, DELIBERATELY. The real method's Strategy 1.5 consults the
-    session record through pact_session, whose discovery refuses test
-    processes (PYTEST_CURRENT_TEST), so under this suite the leg is inert and
-    the replica is equivalent without it. Do not "repair" the replica by
-    adding one — the leg's coverage lives in test_project_dir_resolution.py.
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-
-    # Strategy 1: Environment variable (original behavior)
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        # When CLAUDE_PROJECT_DIR points below a repo's root (a worktree OR
-        # an in-repo subdirectory), its basename is not the project name and
-        # would fragment the project_id across sessions. Prefer the MAIN
-        # repo's basename so every session of a project shares one key,
-        # aligning this env branch (Strategy 1) with the git-root and
-        # cwd-marker branches (Strategies 2/3), which already resolve to the
-        # repo root. The rewrite fires when git resolves a main repo whose
-        # root differs from the env path; only a repo-root env path or a
-        # non-git path (where the main anchor equals, or cannot be resolved
-        # from, the env path) keeps the env basename — RESOLVED, so a
-        # symlinked project dir names its target. A path that will not
-        # resolve keeps its unresolved basename.
-        try:
-            env_root = Path(project_dir).resolve()
-        except (OSError, RuntimeError):
-            env_root = None
-        try:
-            result = subprocess.run(
-                ["git", "-C", project_dir, "rev-parse", "--git-common-dir"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(result.stdout.strip())
-                if not common_dir.is_absolute():
-                    common_dir = Path(project_dir) / common_dir
-                main_repo_root = common_dir.resolve().parent
-                # Compare via normcase so a case-insensitive filesystem does
-                # not fire the rewrite for paths that differ only in case
-                # (a no-op on case-sensitive systems, where normcase is
-                # identity).
-                if env_root is not None and os.path.normcase(
-                    str(main_repo_root)
-                ) != os.path.normcase(str(env_root)):
-                    logger.debug(
-                        "project_id detected from CLAUDE_PROJECT_DIR worktree main repo: %s",
-                        main_repo_root.name,
-                    )
-                    return main_repo_root.name
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-        project_name = (env_root or Path(project_dir)).name
-        logger.debug("project_id detected from CLAUDE_PROJECT_DIR: %s", project_name)
-        return project_name
-
-    # Strategy 2: Git repository root (worktree-safe)
-    # Uses --git-common-dir instead of --show-toplevel because the latter
-    # returns the worktree path when run inside a worktree, fragmenting
-    # project_id across sessions. --git-common-dir always points to the
-    # shared .git directory; its parent is the main repo root.
-    # git returns this path relative to the invoking directory when run at a
-    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
-    # result against the cwd before taking its parent.
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
-            if not common_dir.is_absolute():
-                common_dir = Path.cwd() / common_dir
-            repo_root = common_dir.resolve().parent
-            project_name = repo_root.name
-            logger.debug("project_id detected from git root: %s", project_name)
-            return project_name
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        # git not installed, not a repo, or command timed out
-        logger.debug("Git detection failed, falling back to cwd")
-
-    # Strategy 3: Current working directory — walk UP to nearest project marker.
-    # Fixes subdirectory invocation (e.g., running CLI from .claude/ or src/
-    # would previously return the subdirectory basename as the project_id).
-    try:
-        cwd_root = _find_project_root_under_test(Path.cwd())
-        cwd_name = cwd_root.name
-        if cwd_name:
-            logger.debug("project_id detected from cwd: %s", cwd_name)
-            return cwd_name
-    except OSError:
-        logger.debug("Failed to detect project_id from cwd")
-
-    return None
 
 
 def _walk_qualified_functions(tree):
@@ -387,7 +260,7 @@ class TestMethodBodyExtractor:
 
 
 class TestSourceEquivalence:
-    """Verify the test replica matches the real implementation."""
+    """Pins on the REAL implementation's source (there is no replica)."""
 
     def test_source_equivalence(self):
         """The replica logic should match the real detector's strategy body.
@@ -552,16 +425,32 @@ class TestDetectProjectId:
 
     # --- Strategy 1: Environment variable ---
 
-    def test_uses_env_var_when_set(self):
-        """Should return basename of CLAUDE_PROJECT_DIR when env var is set."""
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/my-project"}):
-            result = _detect_project_id_under_test()
+    def test_uses_env_var_when_set(self, tmp_path):
+        """Should return basename of CLAUDE_PROJECT_DIR when env var is set.
+
+        The directory must EXIST: a declared path that is gone now DECLINES,
+        which is the production behaviour the old replica did not model.
+        """
+        project = tmp_path / "my-project"
+        project.mkdir()
+        no_repo = MagicMock()
+        no_repo.returncode = 128
+        no_repo.stdout = ""
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}), \
+             patch("subprocess.run", return_value=no_repo):
+            result = PACTMemory._detect_project_id()
         assert result == "my-project"
 
-    def test_env_var_returns_basename_not_full_path(self):
+    def test_env_var_returns_basename_not_full_path(self, tmp_path):
         """Should return only the directory basename, not the full path."""
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/deeply/nested/path/cool-repo"}):
-            result = _detect_project_id_under_test()
+        project = tmp_path / "cool-repo"
+        project.mkdir()
+        no_repo = MagicMock()
+        no_repo.returncode = 128
+        no_repo.stdout = ""
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}), \
+             patch("subprocess.run", return_value=no_repo):
+            result = PACTMemory._detect_project_id()
         assert result == "cool-repo"
 
     def test_env_var_worktree_prefers_main_repo_basename(self):
@@ -578,7 +467,7 @@ class TestDetectProjectId:
 
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/env/var/project"}), \
              patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "repo"
 
     def test_env_var_in_repo_subdir_prefers_main_repo_basename(self):
@@ -595,7 +484,7 @@ class TestDetectProjectId:
 
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/myrepo/src/mod"}), \
              patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
     def test_env_var_worktree_subdir_prefers_main_repo_basename(self):
@@ -612,10 +501,10 @@ class TestDetectProjectId:
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": "/home/user/wt-feature/src/mod"}), \
              patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
-    def test_env_var_repo_root_keeps_env_basename(self):
+    def test_env_var_repo_root_keeps_env_basename(self, tmp_path):
         """At a repo ROOT, --git-common-dir is the relative '.git', which resolves
         back to the root itself, so the rewrite does not fire and the env
         basename is kept.
@@ -624,12 +513,14 @@ class TestDetectProjectId:
         mock_result.returncode = 0
         mock_result.stdout = ".git\n"
 
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/myrepo"}), \
+        project = tmp_path / "myrepo"
+        project.mkdir()
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}), \
              patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
-    def test_env_var_non_git_keeps_env_basename(self):
+    def test_env_var_non_git_keeps_env_basename(self, tmp_path):
         """A non-git env path cannot resolve a main repo (git returns non-zero),
         so the original env basename is returned unchanged.
         """
@@ -637,9 +528,11 @@ class TestDetectProjectId:
         mock_result.returncode = 128
         mock_result.stdout = ""
 
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/tmp/loose-dir"}), \
+        loose = tmp_path / "loose-dir"
+        loose.mkdir()
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(loose)}), \
              patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "loose-dir"
 
     # --- Strategy 2: Git repo root ---
@@ -655,7 +548,7 @@ class TestDetectProjectId:
         mock_result.stdout = "/users/dev/awesome-repo/.git\n"
 
         with patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "awesome-repo"
 
     def test_git_strips_whitespace_from_output(self, clean_env_no_claude_project_dir):
@@ -665,7 +558,7 @@ class TestDetectProjectId:
         mock_result.stdout = "  /path/to/repo/.git  \n"
 
         with patch("subprocess.run", return_value=mock_result):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "repo"
 
     def test_git_nonzero_returncode_falls_through(self, clean_env_no_claude_project_dir):
@@ -676,7 +569,7 @@ class TestDetectProjectId:
 
         with patch("subprocess.run", return_value=mock_result), \
              patch("pathlib.Path.cwd", return_value=Path("/fallback/cwd-dir")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "cwd-dir"
 
     def test_git_empty_stdout_falls_through(self, clean_env_no_claude_project_dir):
@@ -687,7 +580,7 @@ class TestDetectProjectId:
 
         with patch("subprocess.run", return_value=mock_result), \
              patch("pathlib.Path.cwd", return_value=Path("/fallback/from-cwd")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "from-cwd"
 
     # --- Strategy 2 failure modes ---
@@ -696,21 +589,21 @@ class TestDetectProjectId:
         """Should fall back to cwd when git subprocess times out."""
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)), \
              patch("pathlib.Path.cwd", return_value=Path("/timeout/fallback")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "fallback"
 
     def test_git_not_found_falls_back_to_cwd(self, clean_env_no_claude_project_dir):
         """Should fall back to cwd when git binary is not installed."""
         with patch("subprocess.run", side_effect=FileNotFoundError("git not found")), \
              patch("pathlib.Path.cwd", return_value=Path("/no-git/project")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "project"
 
     def test_git_os_error_falls_back_to_cwd(self, clean_env_no_claude_project_dir):
         """Should fall back to cwd on generic OSError from subprocess."""
         with patch("subprocess.run", side_effect=OSError("permission denied")), \
              patch("pathlib.Path.cwd", return_value=Path("/oserror/fallback-proj")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "fallback-proj"
 
     # --- Strategy 3: CWD ---
@@ -719,14 +612,14 @@ class TestDetectProjectId:
         """Should use cwd basename when both env var and git are unavailable."""
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=Path("/home/user/my-cwd-project")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result == "my-cwd-project"
 
     def test_cwd_oserror_returns_none(self, clean_env_no_claude_project_dir):
         """Should return None when even cwd() raises OSError."""
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", side_effect=OSError("cwd deleted")):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
         assert result is None
 
     # --- Subprocess call parameters ---
@@ -738,14 +631,18 @@ class TestDetectProjectId:
         mock_result.stdout = "/some/repo/.git\n"
 
         with patch("subprocess.run", return_value=mock_result) as mock_run:
-            _detect_project_id_under_test()
+            PACTMemory._detect_project_id()
 
-        mock_run.assert_called_once_with(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        assert mock_run.call_count == 1
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["git", "rev-parse", "--git-common-dir"]
+        assert kwargs["capture_output"] is True
+        # BYTES, decoded by os.fsdecode in the production helper: a path can
+        # contain bytes invalid in the locale, and locale decoding would raise.
+        assert kwargs["text"] is False
+        assert kwargs["timeout"] == 5
+        assert "env" in kwargs
+        assert "CLAUDE_PROJECT_DIR" not in kwargs["env"]
 
 
 class TestFindProjectRoot:
@@ -761,7 +658,7 @@ class TestFindProjectRoot:
         # stray .claude/ leaked into macOS /var/folders/.../T/ by an unrelated
         # process) cannot win the walk-up.
         _isolate_walkup_to(monkeypatch, tmp_path)
-        result = _find_project_root_under_test(nested)
+        result = PACTMemory._find_project_root(nested)
         # Walk-up found nothing → falls back to start
         assert result == nested
 
@@ -772,7 +669,7 @@ class TestFindProjectRoot:
         nested.mkdir(parents=True)
         (project / ".git").mkdir()
 
-        result = _find_project_root_under_test(nested)
+        result = PACTMemory._find_project_root(nested)
         assert result == project.resolve()
         assert result.name == "my-project"
 
@@ -783,7 +680,7 @@ class TestFindProjectRoot:
         nested.mkdir(parents=True)
         (project / ".claude").mkdir()
 
-        result = _find_project_root_under_test(nested)
+        result = PACTMemory._find_project_root(nested)
         assert result == project.resolve()
         assert result.name == "cool-repo"
 
@@ -794,7 +691,7 @@ class TestFindProjectRoot:
         nested.mkdir(parents=True)
         (project / "CLAUDE.md").write_text("# project memory\n")
 
-        result = _find_project_root_under_test(nested)
+        result = PACTMemory._find_project_root(nested)
         assert result == project.resolve()
         assert result.name == "legacy-proj"
 
@@ -816,7 +713,7 @@ class TestFindProjectRoot:
         (project / ".claude").mkdir()
         (project / ".claude" / "CLAUDE.md").write_text("# new default\n")
 
-        result = _find_project_root_under_test(nested)
+        result = PACTMemory._find_project_root(nested)
         assert result == project.resolve()
 
     def test_returns_nearest_ancestor_not_farthest(self, tmp_path):
@@ -829,7 +726,7 @@ class TestFindProjectRoot:
         (outer / ".git").mkdir()
         (inner / ".git").mkdir()
 
-        result = _find_project_root_under_test(nested)
+        result = PACTMemory._find_project_root(nested)
         # Should return the nearest (inner), not the farthest (outer)
         assert result == inner.resolve()
         assert result.name == "inner-project"
@@ -840,7 +737,7 @@ class TestFindProjectRoot:
         project.mkdir()
         (project / ".git").mkdir()
 
-        result = _find_project_root_under_test(project)
+        result = PACTMemory._find_project_root(project)
         assert result == project.resolve()
 
 
@@ -862,7 +759,7 @@ class TestCwdSubdirectoryDetection:
 
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=subdir):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
 
         assert result == "my-real-project"
 
@@ -877,7 +774,7 @@ class TestCwdSubdirectoryDetection:
 
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=nested):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
 
         assert result == "deep-project"
 
@@ -891,7 +788,7 @@ class TestCwdSubdirectoryDetection:
 
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=project):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
 
         assert result == "root-project"
 
@@ -910,7 +807,7 @@ class TestCwdSubdirectoryDetection:
 
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=leaf):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
 
         # Walk-up finds nothing → returns start → .name == "orphan-dir"
         assert result == "orphan-dir"
@@ -926,7 +823,7 @@ class TestCwdSubdirectoryDetection:
 
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=subdir):
-            result = _detect_project_id_under_test()
+            result = PACTMemory._detect_project_id()
 
         assert result == "claude-dir-proj"
 

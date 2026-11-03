@@ -990,9 +990,18 @@ class TestTheRecordDecidesProjectIdentityAfterRemoval:
         """The matched negative control: the RECORD decides, not the removal."""
         main = _repo(layout_root / "R", document=True)
         worktree = _worktree(main, main / ".worktrees" / "W")
+        identity = _identity_for(worktree)
         _enable_record_reading(monkeypatch)
-        # LIVE and EMPTY. A guard-blocked reader returns the same {} for the
-        # wrong reason, and this arm would then prove nothing.
+        # LIVE AND EMPTY, PROVEN. A guard-blocked reader returns {} even with a
+        # valid record planted, so plant one, read it back, remove it, and only
+        # then assert the empty state; the read-back is what separates the two.
+        record_path = _plant(worktree, identity)
+        assert pact_session.get_worktree_identity_from_session_record().get(
+            "declared"
+        ) == os.path.realpath(worktree), (
+            "the reader is blocked; the empty assertion below would prove nothing"
+        )
+        record_path.unlink()
         assert pact_session.get_worktree_identity_from_session_record() == {}
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
         monkeypatch.chdir(layout_root)
