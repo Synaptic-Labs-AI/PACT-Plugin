@@ -13,7 +13,8 @@ Summary: SSOT for agent_handoff emission — the shape-agnostic emit-eligibility
          skill calls instead of keeping a second prose copy: the emit-side
          subject sentinel (emit_side_subject), the harvest's disk identity
          (disk_identity), the task-file-preferred union
-         (union_preferring_task_file), and the OLD-FORMAT classification and
+         (union_preferring_task_file), the NEW-FORMAT partition router
+         (partition_destination), and the OLD-FORMAT classification and
          routing (mixed_old_format_event, old_format_destination).
          Imported by BOTH agent_handoff emit paths
          so they derive the SAME emit decision and the SAME marker key and
@@ -440,7 +441,7 @@ def _required_set(fields: dict) -> set:
 
 
 def union_preferring_task_file(
-    journal_handoff: dict, disk_handoff: dict, task_id: str
+    journal_handoff: object, disk_handoff: object, task_id: str
 ) -> tuple[dict, list[str]]:
     """Merge the two HANDOFF copies by their REQUIRED key sets.
 

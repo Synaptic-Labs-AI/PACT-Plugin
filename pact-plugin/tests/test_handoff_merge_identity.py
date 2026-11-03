@@ -13,6 +13,7 @@ whole point is that their expectations changed.
 Not covered elsewhere: no existing test reaches the union — it lived only as
 pseudocode before this module.
 """
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1227,29 +1228,50 @@ class TestHarvestRuleProse:
         )
         assert "falls through to the FIRST TRUTHY alias spelling" in SKILL_TEXT
 
-    def test_minor_how_to_call_covers_every_named_helper(self):
-        """The enumeration claimed to route every name the step and the
-        pseudocode use; `handoff_content_key` and `union_preferring_task_file`
-        had no route at all."""
-        assert (
-            "The step above names `occupant_hash`, `report_safe`, "
-            "`emit_side_subject`, `disk_identity`, `handoff_content_key` and "
-            "`HANDOFF_LEGACY_ALIASES`" in SKILL_TEXT
-        )
-        assert (
-            "the pseudocode below names `union_preferring_task_file`, "
-            "`partition_destination`, `old_format_destination`, "
-            "`mixed_old_format_event` and `latest_by_ts_then_journal_order`"
-            in SKILL_TEXT
-        )
-        assert (
-            "from shared.agent_handoff_marker import handoff_content_key"
-            in SKILL_TEXT
-        )
-        assert (
-            "from shared.agent_handoff_marker import union_preferring_task_file"
-            in SKILL_TEXT
-        )
+    def test_inventory_routes_every_named_helper(self):
+        """M5: the inventory must COVER the helpers the step and pseudocode
+        name, not claim coverage. This parses the inventory's REAL import
+        lines — a pin asserting a sentence about coverage passes while the
+        sentence is wrong, which is exactly how four unrouted helpers
+        survived the previous pass."""
+        section = SKILL_TEXT.split(
+            "**HOW TO CALL THE NAMES THIS STEP USES.**", 1
+        )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
+        import_lines = [
+            line for line in section.splitlines() if " import " in line
+        ]
+        assert import_lines, "the inventory has no import lines"
+        for name in (
+            "occupant_hash",
+            "report_safe",
+            "emit_side_subject",
+            "disk_identity",
+            "handoff_content_key",
+            "union_preferring_task_file",
+            "partition_destination",
+            "old_format_destination",
+            "mixed_old_format_event",
+            "HANDOFF_LEGACY_ALIASES",
+        ):
+            routed = [line for line in import_lines if name in line]
+            assert routed, f"{name} has no import line in the inventory"
+            assert any("python3 -c" in line for line in routed), (
+                f"{name} has no RUNNABLE route"
+            )
+        # `latest_by_ts_then_journal_order` is DEFINED here, so it needs no
+        # import route; the definition itself is the route.
+        assert "def latest_by_ts_then_journal_order(events):" in section
+        # The two label sets the routers return are documented with them.
+        for label in (
+            "PARTITION_THIS",
+            "PARTITION_FROM",
+            "PARTITION_FOREIGN",
+            "PARTITION_OLD_FORMAT",
+            "OLD_FORMAT_DEST_MIXED",
+            "OLD_FORMAT_DEST_FROM",
+            "OLD_FORMAT_DEST_THIS",
+        ):
+            assert label in section
 
     def test_high_from_team_population_bypasses_the_ledger_filter(self):
         """HIGH (commit 24): the from-team population must not pass through
@@ -1375,3 +1397,64 @@ class TestHarvestRuleProse:
         only `metadata.handoff`."""
         assert 'metadata=from_task.get("metadata", {})' in SKILL_TEXT
         assert 'process(disk_handoff, metadata=task.get("metadata", {}))' in SKILL_TEXT
+
+    # ---- amendment items ----
+    def test_minor_partition_chain_fails_closed_on_an_unknown_label(self):
+        """M4: the partition chain needs a final `else` routing an unknown
+        label to FOREIGN — reported, never processed. The OLD-FORMAT chain
+        defaults the other way on purpose (its UNMATCHED case is this team's
+        by identity), so the two default postures must be stated."""
+        assert (
+            "elif destination == PARTITION_FOREIGN:\n"
+            "                foreign.append(e)\n"
+            "            else:\n"
+            "                # An UNKNOWN label fails CLOSED"
+            in SKILL_TEXT
+        )
+        # The sentence wraps across comment lines, so the fragments are
+        # asserted separately rather than as one contiguous phrase.
+        assert "The OLD-FORMAT chain defaults" in SKILL_TEXT
+        assert "the other way on purpose" in SKILL_TEXT
+        # FOREIGN is the list the report loop reads, so an unknown label is
+        # reported, not processed.
+        assert "for e in foreign:" in SKILL_TEXT
+
+    def test_m1_union_annotates_its_inputs_as_object(self):
+        """M1: the annotations said `dict` while the function accepts — and
+        the docstring now promises — non-dict input. The annotation is the
+        contract a reader sees."""
+        params = inspect.signature(union_preferring_task_file).parameters
+        assert params["journal_handoff"].annotation == "object"
+        assert params["disk_handoff"].annotation == "object"
+
+    def test_m2_module_header_names_both_routers(self):
+        """M2: the module summary described one router while the module now
+        carries two."""
+        header = (
+            Path(__file__).resolve().parents[1]
+            / "hooks"
+            / "shared"
+            / "agent_handoff_marker.py"
+        ).read_text(encoding="utf-8").split('"""', 2)[1]
+        assert "partition_destination" in header
+        assert "old_format_destination" in header
+
+    def test_m3_the_router_function_is_authoritative_over_the_prose(self):
+        """M3: the mapping is stated in both the prose and the function; the
+        text must say which one a change belongs in."""
+        assert (
+            "THE FUNCTION IS AUTHORITATIVE; THIS PROSE NAMES THE OUTCOMES "
+            "FOR THE READER" in SKILL_TEXT
+        )
+
+    def test_m6_underivable_report_needs_a_partition(self):
+        """M6: the report fired once per population id, including ids with
+        no journal match and therefore no partition to be underivable
+        about."""
+        guard = SKILL_TEXT.split("if not this_team:", 1)[1].split(
+            "\n    else:", 1
+        )[0]
+        assert "if matches:" in guard
+        assert guard.index("if matches:") < guard.index(
+            "handoff team identity underivable for task"
+        )
