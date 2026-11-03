@@ -18,6 +18,25 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.20: harvest identity, cleared-field revival, and a total union
+
+### Summary
+
+The handoff harvest now keeps two task stores' same-numbered tasks apart, no longer revives a field a later revision cleared, and processes a realigned team's disk-only tasks. The shared merge and routing primitives gained the input totality and the routing extraction their callers already assumed, and the harvest skill's text now says what its code does.
+
+### What landed
+
+- Cross-team identity: every `agent_handoff` journal event records the task store it read, and the harvest groups a task id by that team as well as by agent and subject, so one store's journal copy is never merged with another store's same-numbered task file.
+- Cleared-field revival: the union decides each field by the two copies' required key sets, normalizes legacy spellings before the comparison, and counts an equal set as covering, so a task-file revision that clears a required field is no longer overwritten from the superseded journal copy. Both states report per field, and every report line is carried into the harvested memory entry.
+- From-team disk-only tasks: a realigned team's task whose content lives only in its task file is now processed under that team's section. The from-team population is admitted by census provenance rather than by a matching task number, and a from-store file never silences this team's gap report.
+- Input totality: `union_preferring_task_file` treats a non-dict copy as absent instead of raising, and `_field_map`'s alias fallback now matches `resolve_handoff_field` when every spelling is falsy.
+- Routing extraction: `partition_destination` returns exported labels beside `old_format_destination`, so the skill branches on constants instead of an inline comparison, and an unknown label fails closed.
+- Skill text: the call-route inventory covers every helper the step names, and rule text that could be followed but not implemented was corrected, including the from-team ledger rule and the disk-only application of the no-journal-event rule.
+
+### Why
+
+Two stores can hold different tasks under one number, while the harvest's identity, its ledger and its reports all assumed one store. The fixes move the rule to the store the event names, decide the merge by required key sets rather than by an empty or missing value, and give the from-team half the same two shapes the this-team half already had. The extraction and the text corrections keep one executable rule and one set of instructions from drifting apart.
+
 ## v4.8.19: a worktree lead writes project memory to the main checkout (issue #1653)
 
 ### Summary
