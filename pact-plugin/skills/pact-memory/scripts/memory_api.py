@@ -250,7 +250,12 @@ def _declared_path_exists(declared_dir: str) -> bool:
     """
     try:
         return Path(declared_dir).exists()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError is listed for a contract reason, not a measured one:
+        # `Path.exists()` happens to swallow it on Python 3.12, so this arm is
+        # unreachable today. The "Never raises" guarantee above belongs to
+        # THIS function and must not depend on a library's internal exception
+        # policy, so the type is named here rather than left implicit.
         return False
 
 
