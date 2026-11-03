@@ -766,7 +766,7 @@ class TestHarvestRuleProse:
             "Each partition naming a team the journal realigned FROM"
             in SKILL_TEXT
         )
-        assert "run Step 2 and Step 8 for it against its own `## team={from}` section" in SKILL_TEXT
+        assert "process it in THIS pass under that team's `team={from}` label" in SKILL_TEXT
         # M-2: the P6 CORE guarantee. Flipping "never union it" to "union it"
         # would merge a realigned team's copy into this team's task file.
         assert "never union it with this team's task file" in SKILL_TEXT
@@ -972,3 +972,146 @@ class TestHarvestRuleProse:
 
     def test_data_boundary_sentence_present(self):
         assert "THE AGENT AND THE SUBJECT MUST CROSS AS DATA" in SKILL_TEXT
+
+    # ---- PROSE-REVIEW FIXES. One pin per finding: a prose fix with no pin
+    # is how the earlier divergences survived a green suite. ----
+
+    def test_b1_missing_required_field_is_not_a_proper_subset(self):
+        """B1: 'the task file lacks a required field' does NOT imply D ⊂ J.
+        The old sentence routed that state to the restore branch and told the
+        reader to revive the cleared field — the defect this branch exists to
+        prevent. The measured counterexample must stay in the text."""
+        assert "A MISSING REQUIRED FIELD DOES NOT IMPLY A PROPER SUBSET" in SKILL_TEXT
+        assert (
+            "against disk `{produced, uncertainty, open_questions}`"
+            in SKILL_TEXT
+        )
+        assert (
+            "If the task file lacks any REQUIRED field the journal copy "
+            "carries, `D` is a proper subset of `J`"
+            not in SKILL_TEXT
+        )
+
+    def test_b2_journal_side_is_truthiness_not_membership(self):
+        """B2: the old sentence gave two answers for a falsy journal value.
+        The code gates State A on journal TRUTHINESS and on DISK membership;
+        the text must state the two tests separately."""
+        assert "THE JOURNAL SIDE IS DECIDED BY TRUTHINESS, NOT MEMBERSHIP" in SKILL_TEXT
+        assert "AND THAT TEST APPLIES TO THE TASK-FILE SIDE" in SKILL_TEXT
+        assert (
+            "and a journal value of `0`, `False`, `[]` or `{}` does not "
+            "trigger the present-and-empty state"
+            not in SKILL_TEXT
+        )
+
+    def test_b3_alias_map_is_the_normaliser_not_resolve_handoff_field(self):
+        """B3: `resolve_handoff_field` returns None for absent AND for
+        present-None, so using it to normalise keys collapses the very
+        distinction State A/B rests on. The text must name the alias map."""
+        assert "`resolve_handoff_field` IS NOT A KEY NORMALISER" in SKILL_TEXT
+        assert "HANDOFF_LEGACY_ALIASES` map" in SKILL_TEXT
+        assert (
+            "to their canonical names with the shared `resolve_handoff_field`"
+            not in SKILL_TEXT
+        )
+
+    def test_b4_ownerless_candidate_is_skipped_not_mixed(self):
+        """B4: a content-matching candidate whose record has no owner is
+        SKIPPED, leaving the event UNMATCHED. Read literally as an identity
+        mismatch, the code would discard the realigned team's own HANDOFF."""
+        assert (
+            "A CONTENT-MATCHING CANDIDATE WHOSE OWN RECORD CARRIES NO `owner` "
+            "IS SKIPPED" in SKILL_TEXT
+        )
+        assert "143 of 1421 task records carry no `owner`" in SKILL_TEXT
+
+    def test_sixth_no_stale_per_group_report_pointer(self):
+        """The orphan: the selection rule still pointed at a per-group report
+        message that the once-post-loop rule deleted. It must now say the
+        other group gets NO report."""
+        assert (
+            "report each other group through the report-message rule below"
+            not in SKILL_TEXT
+        )
+        assert "gets NO per-group report" in SKILL_TEXT
+
+    def test_minor_from_team_has_no_nested_ledger_pass(self):
+        """The from-team partitions are processed in THIS pass. A nested
+        Step 2/Step 8 against the from team's ledger section contradicts
+        Step 8's ban on writing another team's section, and the pseudocode
+        never does it."""
+        assert "Do NOT run a nested Step 2 or Step 8" in SKILL_TEXT
+        assert (
+            "run Step 2 and Step 8 for them against a `## team={from}` section"
+            not in SKILL_TEXT
+        )
+        assert (
+            "run Step 2 and Step 8 for it against its own `## team={from}` "
+            "section" not in SKILL_TEXT
+        )
+
+    def test_minor_process_is_defined(self):
+        """The pseudocode called `process` without ever saying what it does;
+        a reader executing the pseudocode had to invent the ingestion step."""
+        assert "`process(handoff, section=None)` = run Steps 4-7" in SKILL_TEXT
+
+    def test_minor_task_file_only_branch_has_a_prose_rule(self):
+        """A task with no journal event and a present task file is a normal
+        population, not a gap; the pseudocode had the branch, the prose did
+        not."""
+        assert (
+            "When the task carries NO `agent_handoff` event in THIS section "
+            "and the task file EXISTS" in SKILL_TEXT
+        )
+
+    def test_minor_from_handled_any_carve_out_is_prose(self):
+        """The all-from-team task has no file in THIS store and must not
+        emit the report-gap line; this was carried only by a pseudocode
+        comment."""
+        assert (
+            "HAS NO TASK FILE IN THIS SECTION'S STORE, AND THE ABSENCE IS NOT "
+            "A GAP" in SKILL_TEXT
+        )
+
+    def test_minor_report_gap_records_the_agent_when_known(self):
+        """The prose required an agent name the call site cannot supply. The
+        rule now says when it is knowable and what to record otherwise, and
+        the call carries the field."""
+        assert (
+            "record the agent as `unknown` rather than omitting the field"
+            in SKILL_TEXT
+        )
+        assert 'report_gap(task_id, agent="unknown")' in SKILL_TEXT
+
+    def test_minor_dual_spelling_value_selection_is_stated(self):
+        """The disk value of a dual-spelled field is chosen by the same rule
+        as `resolve_handoff_field`: truthy canonical, else first truthy
+        alias. Without it a task file carrying `decisions: ''` beside
+        `key_decisions: [...]` reads as empty."""
+        assert (
+            "VALUE SELECTION FOR A DUAL-SPELLED COPY IS A SEPARATE STEP"
+            in SKILL_TEXT
+        )
+        assert "falls through to the FIRST TRUTHY alias spelling" in SKILL_TEXT
+
+    def test_minor_how_to_call_covers_every_named_helper(self):
+        """The enumeration claimed to route every name the step and the
+        pseudocode use; `handoff_content_key` and `union_preferring_task_file`
+        had no route at all."""
+        assert (
+            "The step above names `occupant_hash`, `report_safe`, "
+            "`emit_side_subject`, `disk_identity` and `handoff_content_key`"
+            in SKILL_TEXT
+        )
+        assert (
+            "the pseudocode below names `union_preferring_task_file` and "
+            "`latest_by_ts_then_journal_order`" in SKILL_TEXT
+        )
+        assert (
+            "from shared.agent_handoff_marker import handoff_content_key"
+            in SKILL_TEXT
+        )
+        assert (
+            "from shared.agent_handoff_marker import union_preferring_task_file"
+            in SKILL_TEXT
+        )
