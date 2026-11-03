@@ -34,12 +34,14 @@ the predicate, and it fails in the direction that MANUFACTURES findings.
 
 ONE ADAPTATION, STATED BECAUSE IT BOUNDS THE RESULT: a real journal event
 carries the FULL HANDOFF inline, so the journal arm validates it directly. A
-`handoff` that is the LIST OF KEY NAMES is the historical/defensive shape,
-kept countable by reconstructing {key: None} so the shipped validator can
-grade it too. That reconstruction is exact for a presence-only validator and
-would stop being exact the moment the validator inspects VALUES.
-assert_presence_only() below fails loudly if that ever changes, rather than
-letting the census silently drift into a wrong answer.
+`handoff` that is the LIST OF KEY NAMES is the defensive/historical shape the
+validator must still accept -- not the shape real events carry. The arm keeps
+it countable by reconstructing {key: None}. That reconstruction is exact for a
+presence-only validator and would stop being exact the moment the validator
+inspects VALUES. assert_presence_only() below fails loudly if that ever
+changes, rather than letting the census silently drift into a wrong answer.
+Nothing here makes journal content unrecoverable: a real event carries its
+handoff inline, so the content is one read away.
 """
 
 from __future__ import annotations
