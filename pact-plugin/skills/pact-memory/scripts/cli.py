@@ -557,8 +557,10 @@ def cmd_save(args, db_path=None):
             save_kwargs["claude_md_root"] = Path(claude_md_root)
         memory_id = memory.save(memory_dict, **save_kwargs)
     except ProjectScopeDisagreementError as exc:
-        # A deliberate fail-closed refusal (env vs session record), not bad
-        # input: the message already names both values and the remedy.
+        # A deliberate fail-closed refusal, not bad input: either an
+        # env/session-record DISAGREEMENT or an UNRESOLVED project identity
+        # (`ProjectIdentityUnresolvedError` subclasses this). The message
+        # names the values it observed and the remedy.
         _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
     except ValueError as exc:
         _error(

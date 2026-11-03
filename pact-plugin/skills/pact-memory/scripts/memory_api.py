@@ -466,7 +466,10 @@ class PACTMemory:
         """
         try:
             declared_root = Path(declared_dir).resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
+            # ValueError: a NUL byte (or another embedded invalid value) in a
+            # session record must read as "cannot resolve", not crash the
+            # resolver. Same tuple `main_repo_root` already catches.
             declared_root = None
         # The local name is declared_main_root, NOT main_repo_root: rebinding
         # the module-level helper's own name would make it local for the whole
@@ -625,10 +628,13 @@ class PACTMemory:
         # None here is what makes the miss loud downstream (a refused write,
         # an empty read) instead of a basename-derived bucket nobody looks in.
         if declined_declaration:
+            # The per-declaration warning (naming the path) is emitted by
+            # `_project_name_for_declared_dir`; repeating it here would report
+            # one event twice. This line adds what the helper cannot know: the
+            # git-root rung also failed and the cwd rung was skipped.
             logger.warning(
-                "project_id unresolved: a declared project directory was "
-                "present but could not be resolved, and the git root did not "
-                "answer either. Strategy 3 is skipped for this session."
+                "project_id unresolved: the git root did not answer either, "
+                "so Strategy 3 is skipped and no project scope was derived."
             )
             return None, "unresolved"
 
@@ -849,6 +855,12 @@ class PACTMemory:
         — and it never advises re-exporting the recorded value, because the
         recorded directory may not exist.
         """
+        # THE DISPATCHER IS THE AUTHORITY for which declarations exist and in
+        # what order: `_detect_project_id_with_source` reads the same two
+        # sources to decide precedence. This method re-reads them because the
+        # message must name every declaration that was PRESENT, not only the
+        # first one tried. A THIRD declared rung added to the dispatcher must
+        # be added here too, or the refusal message will silently omit it.
         env_dir = os.environ.get("CLAUDE_PROJECT_DIR") or ""
         record_dir = get_project_dir_from_session_record() or ""
         declarations = []
@@ -988,7 +1000,7 @@ class PACTMemory:
         # be an over-block of a route the disclosure code treats as
         # first-class ("supplied"). The defaulting below runs after this
         # guard, so `memory` still holds the caller's raw value here.
-        if self._project_id is None and memory.get("project_id") is None:
+        if self._project_id is None and not memory.get("project_id"):
             self._last_sync_status = SyncResult.REFUSED
             raise ProjectIdentityUnresolvedError(
                 self._unresolved_identity_message()
@@ -1042,9 +1054,17 @@ class PACTMemory:
 
             # Link files to memory
             if files_to_link:
+                # THE EFFECTIVE ID, NOT THE INSTANCE DEFAULT. The memory row
+                # above was filed under `memory["project_id"]`, which may be a
+                # payload-supplied id on a path where the instance resolved
+                # nothing. Passing `self._project_id` here would then key the
+                # FILE rows NULL while the memory itself is scoped: the memory
+                # becomes invisible to `search_by_file` and to
+                # `graph_stats["files"]` in its own project, and the link is a
+                # cross-scope edge in a table with no project column.
                 link_memory_to_paths(
                     conn, memory_id, files_to_link,
-                    self._project_id, "modified"
+                    memory.get("project_id"), "modified"
                 )
 
             # Store embedding for semantic search
@@ -1837,12 +1857,15 @@ class PACTMemory:
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        # NO IDENTITY MEANS NO STORE READ. Both the memory count and the graph
+        # NO IDENTITY MEANS NO STATUS QUERY. Both the memory count and the graph
         # stats report WHOLE-STORE numbers when the id is None, so an unguarded
         # report would present every project's counts as this session's. The
         # guard sits AFTER _ensure_ready() (capabilities and the catch-up
         # report are process facts and stay meaningful) and BEFORE
-        # db_connection(), so no store read happens.
+        # db_connection(), so THIS METHOD performs no status query and opens
+        # no store connection. It is NOT "no store work": _ensure_ready() runs
+        # first and may do store work itself, including a whole-store
+        # embedding catch-up on the process's first memory surface.
         #
         # WHAT ZERO HERE GUARANTEES: `memory_count`, `graph_stats["files"]` and
         # `graph_stats["memories"]` — the three project-scoped counters.
