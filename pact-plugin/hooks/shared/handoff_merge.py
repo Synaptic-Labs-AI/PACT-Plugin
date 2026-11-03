@@ -760,13 +760,19 @@ def safe_from_teams(
 ) -> tuple[list[str], list[str]]:
     """(teams, reports) from `team_realigned` events.
 
-    Keeps each `from` that is a str passing is_safe_path_component and is not
-    `this_team`, once, in first-seen order. A rejected non-empty value adds
-    one report line. A `from` equal to `this_team` is dropped silently: it is
-    this section.
+    Keeps each `from` that is a str passing is_safe_path_component and does
+    not name `this_team`, once, in first-seen order. NAMES ARE COMPARED BY
+    THE FOLD read_task_json APPLIES (`.strip().lower()`), because that reader
+    tries the folded store first: a case variant of this team would read this
+    team's own file, and two case variants of one team name one store. A
+    rejected non-empty value adds one report line. A `from` exactly equal to
+    `this_team` is dropped silently (it is this section); a case-only variant
+    of it is dropped with a report.
     """
     teams: list[str] = []
     reports: list[str] = []
+    this_fold = _team_fold(this_team)
+    seen_folds: set[str] = set()
     for event in realign_events or ():
         if not isinstance(event, dict):
             continue
@@ -780,10 +786,26 @@ def safe_from_teams(
                 f"read"
             )
             continue
-        if value == this_team or value in teams:
+        if value == this_team:
             continue
+        fold = _team_fold(value)
+        if fold == this_fold:
+            reports.append(
+                f"handoff realign source invalid: team value "
+                f"{report_safe(value)!r} names this team's store under a "
+                f"different case; store not read"
+            )
+            continue
+        if fold in seen_folds:
+            continue
+        seen_folds.add(fold)
         teams.append(value)
     return teams, reports
+
+
+def _team_fold(team: object) -> str | None:
+    """The store-lookup fold read_task_json applies to a team name."""
+    return team.strip().lower() if isinstance(team, str) else None
 
 
 _CONTENT_KEY_RE = re.compile(r"[0-9a-f]{8}")

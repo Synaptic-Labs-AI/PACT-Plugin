@@ -398,3 +398,44 @@ class TestDualSpellingMembershipParity:
         import shared.handoff_schema as schema
 
         assert merge._EMPTY_VALUES is schema._EMPTY_VALUES
+
+
+class TestSafeFromTeamsCaseFold:
+    """safe_from_teams compares team names by the fold read_task_json
+    applies. Kills: comparing raw names when excluding this_team; raw names
+    when deduplicating."""
+
+    def test_case_variant_of_this_team_is_excluded_with_a_report(self):
+        teams, reports = safe_from_teams([{"from": "Session-A"}], "session-a")
+        assert teams == []
+        assert reports == [
+            "handoff realign source invalid: team value 'Session-A' names "
+            "this team's store under a different case; store not read"
+        ]
+
+    def test_exact_this_team_stays_silent(self):
+        assert safe_from_teams([{"from": "session-a"}], "session-a") == ([], [])
+
+    def test_case_variants_of_one_team_dedup_to_the_first(self):
+        events = [{"from": "Team-X"}, {"from": "team-x"}, {"from": "TEAM-X"}]
+        assert safe_from_teams(events, "session-a") == (["Team-X"], [])
+
+    def test_exclusion_agrees_with_what_read_task_json_would_read(self, tmp_path):
+        """The two folds agree: every kept team reads a store OTHER than this
+        team's, and every case variant of this team is not kept."""
+        import json
+        from shared.task_utils import read_task_json
+
+        base = tmp_path / "tasks"
+        (base / "session-a").mkdir(parents=True)
+        (base / "session-a" / "5.json").write_text(json.dumps({"id": "OWN"}))
+        (base / "other").mkdir()
+        (base / "other" / "5.json").write_text(json.dumps({"id": "OTHER"}))
+        names = ["Session-A", "SESSION-A", "session-a", "Other", "other"]
+        kept, _ = safe_from_teams([{"from": n} for n in names], "session-a")
+        for name in names:
+            reads_own = read_task_json(
+                "5", name, tasks_base_dir=str(base), base_fallback=False
+            ).get("id") == "OWN"
+            assert (name in kept) is False if reads_own else True, name
+        assert kept == ["Other"]
