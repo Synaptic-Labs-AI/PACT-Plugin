@@ -1109,7 +1109,10 @@ class TestHarvestRuleProse:
     def test_minor_process_is_defined(self):
         """The pseudocode called `process` without ever saying what it does;
         a reader executing the pseudocode had to invent the ingestion step."""
-        assert "`process(handoff, section=None)` = run Steps 4-7" in SKILL_TEXT
+        assert (
+            "`process(handoff, metadata=None, section=None)` = run Steps 4-7"
+            in SKILL_TEXT
+        )
 
     def test_minor_task_file_only_branch_has_a_prose_rule(self):
         """A task with no journal event and a present task file is a normal
@@ -1142,11 +1145,11 @@ class TestHarvestRuleProse:
         block = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
             "    if task_id not in unprocessed:", 1
         )[0]
-        assert 'process(from_disk, section=f"team={team}")' in block
+        assert 'metadata=from_task.get("metadata", {})' in block
         # The disk-only branch precedes both report branches, so a file with
         # no group cannot fall through to the absent or no-match message.
         assert block.index(
-            'process(from_disk, section=f"team={team}")'
+            'metadata=from_task.get("metadata", {})'
         ) < block.index("handoff divergence check unavailable for task")
 
     def test_high_from_team_membership_is_census_provenance(self):
@@ -1178,10 +1181,10 @@ class TestHarvestRuleProse:
         disk_only = SKILL_TEXT.split("if not from_groups:", 1)[1].split(
             "elif not from_task:", 1
         )[0]
-        assert 'process(from_disk, section=f"team={team}")' in disk_only
+        assert 'metadata=from_task.get("metadata", {})' in disk_only
         assert "from_handled_any = True" not in disk_only
         # The gap line the flag would suppress is still reachable.
-        assert 'report_gap(task_id, agent="unknown")' in SKILL_TEXT
+        assert 'report_gap(task_id, "unknown", gap_ts)' in SKILL_TEXT
 
     def test_from_team_journal_partition_still_sets_handled_any(self):
         """REGRESSION GUARD, GREEN on b9cd8157: a journal event's `team`
@@ -1211,7 +1214,7 @@ class TestHarvestRuleProse:
             "record the agent as `unknown` rather than omitting the field"
             in SKILL_TEXT
         )
-        assert 'report_gap(task_id, agent="unknown")' in SKILL_TEXT
+        assert 'report_gap(task_id, "unknown", gap_ts)' in SKILL_TEXT
 
     def test_minor_dual_spelling_value_selection_is_stated(self):
         """The disk value of a dual-spelled field is chosen by the same rule
@@ -1230,12 +1233,14 @@ class TestHarvestRuleProse:
         had no route at all."""
         assert (
             "The step above names `occupant_hash`, `report_safe`, "
-            "`emit_side_subject`, `disk_identity` and `handoff_content_key`"
-            in SKILL_TEXT
+            "`emit_side_subject`, `disk_identity`, `handoff_content_key` and "
+            "`HANDOFF_LEGACY_ALIASES`" in SKILL_TEXT
         )
         assert (
-            "the pseudocode below names `union_preferring_task_file` and "
-            "`latest_by_ts_then_journal_order`" in SKILL_TEXT
+            "the pseudocode below names `union_preferring_task_file`, "
+            "`partition_destination`, `old_format_destination`, "
+            "`mixed_old_format_event` and `latest_by_ts_then_journal_order`"
+            in SKILL_TEXT
         )
         assert (
             "from shared.agent_handoff_marker import handoff_content_key"
@@ -1279,3 +1284,94 @@ class TestHarvestRuleProse:
             "that number" in SKILL_TEXT
         )
         assert "THIS team's ids only — never a from-team id" in SKILL_TEXT
+
+    # ---- second prose pass: blocking items, each RED on 86f8dd86 ----
+    def test_blocking_b1_how_to_call_routes_the_three_helpers(self):
+        """B1: a mandated call with no route. The step and pseudocode name
+        `partition_destination`, `old_format_destination`,
+        `mixed_old_format_event` and `HANDOFF_LEGACY_ALIASES`; every one must
+        have a runnable or precisely-described entry in HOW TO CALL."""
+        section = SKILL_TEXT.split(
+            "**HOW TO CALL THE NAMES THIS STEP USES.**", 1
+        )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
+        assert "partition_destination(event_team, this_team, from_teams)" in section
+        assert (
+            "from shared.agent_handoff_marker import partition_destination"
+            in section
+        )
+        assert "PARTITION_THIS" in section and "PARTITION_OLD_FORMAT" in section
+        assert "old_format_destination(outcome, this_team)" in section
+        assert "from shared.agent_handoff_marker import OldFormatOutcome" in section
+        assert "OLD_FORMAT_DEST_MIXED" in section
+        assert (
+            "mixed_old_format_event(task_id, event_agent, event_subject, "
+            "event_handoff, candidate_tasks)" in section
+        )
+        assert (
+            "from shared.agent_handoff_marker import mixed_old_format_event"
+            in section
+        )
+        assert "HANDOFF_LEGACY_ALIASES" in section
+        assert "It is a DICT, not a call" in section
+
+    def test_blocking_b2_union_identity_names_disk_identity(self):
+        """B2: the union identity sentence named `occupant_hash`, which skips
+        the `(no subject)` substitution; a subject-less task's identity then
+        never matches a group and the union never runs."""
+        sentence = SKILL_TEXT.split(
+            "4. The task file belongs to at most one group.", 1
+        )[1].split("**A group that does not carry", 1)[0]
+        assert "disk_identity(owner, subject)" in sentence
+        # The OLD call form is the defect; the sentence may still warn
+        # against recomposing the hash by name.
+        assert "occupant_hash(owner, subject)" not in sentence
+        assert "never a recomposed `occupant_hash`" in sentence
+        assert "SUBSTITUTED" in sentence
+
+    def test_blocking_b3_from_team_units_are_saved(self):
+        """B3: "Steps 4-6" excludes Step 7 (Save to pact-memory), so every
+        from-team work unit is extracted, deduped and thrown away."""
+        assert "Steps 4-6" not in SKILL_TEXT
+        assert "Synthesize each of their work units under Steps 4-7" in SKILL_TEXT
+        assert "Steps 4-7" in SKILL_TEXT
+
+    def test_blocking_b4_report_gap_is_defined_and_stamped(self):
+        """B4: `report_gap` was called but never defined, and the call
+        omitted the timestamp the prose requires."""
+        assert "def report_gap(task_id, agent, ts):" in SKILL_TEXT
+        assert "report_safe(agent)" in SKILL_TEXT
+        assert "report_safe(ts)" in SKILL_TEXT
+        assert "gap_ts = datetime.now(timezone.utc).strftime(" in SKILL_TEXT
+        assert 'report_gap(task_id, "unknown", gap_ts)' in SKILL_TEXT
+        assert SKILL_TEXT.index("def report_gap(") < SKILL_TEXT.index(
+            'report_gap(task_id, "unknown", gap_ts)'
+        )
+
+    def test_minor_rule5_carries_its_own_provenance_gate(self):
+        """Minor 5: rule 5 alone must state that the from-team application
+        admits only census ids, and admit them AGGREGATE by id (the census is
+        id-keyed), so a reader does not add a per-file content test."""
+        assert "ADMISSION IS AGGREGATE BY ID" in SKILL_TEXT
+        assert "the census is id-keyed" in SKILL_TEXT
+
+    def test_minor_dual_spelling_sentence_is_qualified(self):
+        """Minor 6: 'the selected raw key is the one the output carries' is
+        false when the journal copy wins a dual-spelled field."""
+        assert (
+            "The selected raw key is the one the output carries WHEN THE TASK "
+            "FILE WINS" in SKILL_TEXT
+        )
+        assert "BOTH spellings survive" in SKILL_TEXT
+
+    def test_minor_three_report_conditions_are_exclusive(self):
+        """Minor 7: absent-file, no-match and gap must be exclusive in one
+        place, not fallbacks for one another."""
+        assert "THE THREE CONDITIONS ARE EXCLUSIVE" in SKILL_TEXT
+        assert "The GAP line requires NO source at all" in SKILL_TEXT
+
+    def test_minor_disk_only_paths_pass_metadata_to_process(self):
+        """Minor 8: rule 5 promises Step 3.1 resolves sibling keys, so the
+        disk-only branches must pass the section's task metadata rather than
+        only `metadata.handoff`."""
+        assert 'metadata=from_task.get("metadata", {})' in SKILL_TEXT
+        assert 'process(disk_handoff, metadata=task.get("metadata", {}))' in SKILL_TEXT
