@@ -1130,8 +1130,20 @@ class TestHarvestRuleProse:
     def test_occupant_hash_is_not_folded_with_team(self):
         assert "DO NOT FOLD THE TEAM INTO `occupant_hash`" in SKILL_TEXT
 
-    def test_resume_coupling_sentence_present(self):
-        assert "(task_id, team, agent, task_subject)" in SKILL_TEXT
+    def test_skill_does_not_describe_the_renderer(self):
+        """The resume renderer applies its own rule and states it in its own
+        code; a description of it in the selection step is a second copy of
+        a rule this file does not own."""
+        step3 = SKILL_TEXT.split("### Step 3: Read All HANDOFFs", 1)[1].split(
+            "### Step 3.1", 1
+        )[0]
+        assert "session_resume" not in step3
+
+    def test_skill_carries_no_measurement_narrative(self):
+        """The skill is instruction: measurements and review history belong
+        in the commit record, not in text every harvest loads."""
+        for phrase in ("MEASURED", "this branch", " of 1421", "Three rounds of review"):
+            assert phrase not in SKILL_TEXT, phrase
 
     def test_data_boundary_sentence_present(self):
         assert "EVERY VALUE CROSSES AS DATA, NEVER AS COMMAND TEXT" in SKILL_TEXT
@@ -1187,7 +1199,6 @@ class TestHarvestRuleProse:
             "A CONTENT-MATCHING CANDIDATE WHOSE OWN RECORD CARRIES NO `owner` "
             "IS SKIPPED" in SKILL_TEXT
         )
-        assert "143 of 1421 task records carry no `owner`" in SKILL_TEXT
 
     def test_sixth_no_stale_per_group_report_pointer(self):
         """The orphan: the selection rule still pointed at a per-group report
@@ -1333,7 +1344,7 @@ class TestHarvestRuleProse:
         sentence about coverage passes while the sentence is wrong."""
         section = SKILL_TEXT.split(
             "**HOW TO CALL THE NAMES THIS STEP USES.**", 1
-        )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
+        )[1].split("🔴 **THE SUBSTITUTION IS CALLED", 1)[0]
         import_lines = [
             line for line in section.splitlines() if " import " in line
         ]
@@ -1423,7 +1434,7 @@ class TestHarvestRuleProse:
         have a runnable or precisely-described entry in HOW TO CALL."""
         section = SKILL_TEXT.split(
             "**HOW TO CALL THE NAMES THIS STEP USES.**", 1
-        )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
+        )[1].split("🔴 **THE SUBSTITUTION IS CALLED", 1)[0]
         assert "partition_destination(event_team, this_team, from_teams)" in section
         assert (
             "from shared.handoff_merge import partition_destination"
