@@ -36,6 +36,17 @@ import pytest
 
 from fixtures.role_frames import teammate_frame
 from scripts import pact_session
+from scripts.memory_api import (
+    PACTMemory,
+    ProjectIdentityUnresolvedError,
+    ProjectScopeDisagreementError,
+)
+from scripts.database import (
+    db_connection,
+    list_memories,
+    search_memories_by_text,
+)
+from scripts.graph import add_file_relation, get_file_id
 from scripts.working_memory import (
     AmbientSyncRefused,
     SyncResult,
@@ -891,3 +902,387 @@ class TestAnOutOfTreePrunedWorktreeAfterContainment:
         # And the save side refuses the retarget it cannot prove.
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
         assert pact_session.env_record_project_dir_disagreement() is not None
+
+
+# ---------------------------------------------------------------------------
+# #1688 — project IDENTITY through the record after the worktree is removed.
+#
+# The arms above prove the record decides a WRITE TARGET. These prove it
+# decides the project's IDENTITY: which store key a save files under and which
+# rows a later sync selects. I1 and I2 are a matched pair; the pair is the
+# control, and each arm alone would prove nothing.
+# ---------------------------------------------------------------------------
+
+_TOKEN = "REMOVED-WORKTREE-ROW-TOKEN"
+
+
+def _row_counts(db_path: Path) -> dict:
+    with db_connection(db_path) as conn:
+        return {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("memories", "files")
+        }
+
+
+def _null_project_rows(db_path: Path, table: str) -> int:
+    with db_connection(db_path) as conn:
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE project_id IS NULL"
+        ).fetchone()[0]
+
+
+class TestTheRecordDecidesProjectIdentityAfterRemoval:
+    """I1, I2, I1e2e and I1b: the acceptance arms."""
+
+    def test_i1_a_save_and_a_later_sync_after_removal_select_the_same_rows(
+        self, layout_root, monkeypatch
+    ):
+        """Acceptance criterion (a), asserted at the store, not the seam."""
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _plant(worktree, _identity_for(worktree))
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        # Strategy 2 runs from the PROCESS cwd even on the decline arm; a
+        # non-repo cwd keeps it from answering for this fixture.
+        monkeypatch.chdir(layout_root)
+
+        planted = pact_session.get_worktree_identity_from_session_record()
+        assert planted.get("declared") == os.path.realpath(worktree), (
+            "the record the fix reads was not live; every assertion below "
+            "would be measuring something other than the mechanism"
+        )
+
+        db_path = layout_root / "store.db"
+        live = PACTMemory(session_id="s", db_path=db_path)
+        assert live.project_id == "R"
+        memory_id = live.save({"context": _TOKEN}, sync_to_claude=False)
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "R", (
+            "the live save did not key the row to the repository"
+        )
+
+        _remove_worktree(main, worktree)
+        assert not worktree.exists()
+
+        after = PACTMemory(session_id="s", db_path=db_path)
+        assert after.project_id == "R", (
+            "re-derivation fell back to the worktree folder name after removal"
+        )
+        assert after._project_id_source == "worktree identity record"
+
+        written = after.sync(claude_md_root=main)
+        assert written == [memory_id], (
+            "the post-removal sync did not select the row saved while the "
+            "worktree was live"
+        )
+        assert after.last_sync_status == SyncResult.WROTE
+        assert _TOKEN in (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+
+    def test_i2_without_a_record_the_same_fixture_declines(
+        self, layout_root, monkeypatch
+    ):
+        """The matched negative control: the RECORD decides, not the removal."""
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _enable_record_reading(monkeypatch)
+        # LIVE and EMPTY. A guard-blocked reader returns the same {} for the
+        # wrong reason, and this arm would then prove nothing.
+        assert pact_session.get_worktree_identity_from_session_record() == {}
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(layout_root)
+
+        db_path = layout_root / "store.db"
+        live = PACTMemory(session_id="s", db_path=db_path)
+        assert live.project_id == "R", "the live half must match I1's fixture"
+        live.save({"context": _TOKEN}, sync_to_claude=False)
+        before = _row_counts(db_path)
+
+        _remove_worktree(main, worktree)
+
+        after = PACTMemory(session_id="s", db_path=db_path)
+        assert after.project_id is None
+        assert after._project_id_source == "unresolved"
+        with pytest.raises(ProjectIdentityUnresolvedError):
+            after.save({"context": "MUST-NOT-LAND"}, sync_to_claude=False)
+        assert after.last_sync_status == SyncResult.REFUSED
+        assert _row_counts(db_path) == before
+        assert _null_project_rows(db_path, "memories") == 0
+        assert _null_project_rows(db_path, "files") == 0
+        assert after.sync(claude_md_root=main) == []
+        assert after.last_sync_status == SyncResult.EMPTY
+
+    def test_i1e2e_the_reader_trusts_a_record_the_REAL_WRITER_produced(
+        self, layout_root, monkeypatch
+    ):
+        """The acceptance arm: drive the writer, not a hand-planted record.
+
+        A hand-planted record proves the READER accepts records shaped the way
+        this test writes them. The property the fix rests on is that the
+        record was write-time verified, and only the real writer proves the
+        writer and the reader have not drifted apart.
+        """
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _enable_record_reading(monkeypatch)
+
+        project_scope._record_worktree_identity(SID, str(worktree))
+        record = pact_session.get_worktree_identity_from_session_record()
+        assert record, "the real writer produced no record for a live linked worktree"
+        assert record.get("declared") == os.path.realpath(worktree)
+        assert record.get("common_dir")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(layout_root)
+        _remove_worktree(main, worktree)
+
+        memory = PACTMemory(session_id="s", db_path=layout_root / "e2e.db")
+        assert memory.project_id == "R"
+        assert memory._project_id_source == "worktree identity record"
+
+    def test_i1b_a_separate_git_dir_record_never_names_the_container(
+        self, layout_root, monkeypatch
+    ):
+        """I1b: the common dir's parent is NOT a checkout in this layout.
+
+        P0 and unconditional. A fix that reduces the recovered root to
+        `common_dir.parent` would name `gitdirs` here, reintroducing the class
+        a prior security fix rejected.
+        """
+        gitdirs = layout_root / "gitdirs"
+        gitdirs.mkdir()
+        sep = gitdirs / "sep.git"
+        main = layout_root / "work"
+        main.mkdir()
+        _git("init", "-q", f"--separate-git-dir={sep}", str(main), cwd=layout_root)
+        (main / "README").write_text("seed\n")
+        _git("add", "README", cwd=main)
+        _git("commit", "-qm", "seed", cwd=main)
+
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        identity = _identity_for(worktree)
+        _plant(worktree, identity)
+        _enable_record_reading(monkeypatch)
+        assert pact_session.get_worktree_identity_from_session_record()
+
+        # The structural reason the record must not be trusted here.
+        assert project_scope.recorded_main_root(Path(worktree), identity) is None
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(layout_root)
+        _remove_worktree(main, worktree)
+
+        memory = PACTMemory(session_id="s", db_path=layout_root / "sep.db")
+        assert memory.project_id is None
+        assert memory._project_id_source == "unresolved"
+        assert memory.project_id != "gitdirs", (
+            "derived the common-dir CONTAINER as the project identity"
+        )
+        assert memory.project_id != "W", (
+            "derived the worktree folder name as the project identity"
+        )
+
+
+class TestUnresolvedIdentityRefusesWrites:
+    """W1: a None identity must refuse, never write a NULL-keyed row."""
+
+    def _prepopulated(self, tmp_path) -> Path:
+        db_path = tmp_path / "store.db"
+        seed = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        seed.save({"context": "SEED"}, sync_to_claude=False)
+        return db_path
+
+    def test_w1_a_refused_save_writes_no_null_row(self, tmp_path, monkeypatch):
+        db_path = self._prepopulated(tmp_path)
+        before = _row_counts(db_path)
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+        assert memory.project_id is None
+
+        with pytest.raises(ProjectIdentityUnresolvedError) as excinfo:
+            memory.save({"context": "MUST-NOT-LAND"}, sync_to_claude=False)
+
+        assert isinstance(excinfo.value, ProjectScopeDisagreementError), (
+            "the subclass must keep existing except-sites working"
+        )
+        assert memory.last_sync_status == SyncResult.REFUSED
+        assert _row_counts(db_path) == before, "a refused save changed the store"
+        assert _null_project_rows(db_path, "memories") == 0
+        assert _null_project_rows(db_path, "files") == 0
+
+    def test_w1_the_refusal_names_the_cause_and_is_not_a_disagreement(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "store.db"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "gone"))
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+
+        with pytest.raises(ProjectIdentityUnresolvedError) as excinfo:
+            memory.save({"context": "x"}, sync_to_claude=False)
+
+        text = str(excinfo.value)
+        assert "no project identity could be resolved" in text
+        assert "Nothing was written" in text
+        assert "disagree" not in text.lower(), (
+            "the refusal reads as the env/record disagreement, which has a "
+            "different cause and a different remedy"
+        )
+
+    def test_w1_the_declined_state_is_reachable_from_a_deleted_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end: the real wrap-up shape, not only a stubbed detector."""
+        cwd = tmp_path / "gone"
+        cwd.mkdir()
+        db_path = tmp_path / "e2e.db"
+        monkeypatch.chdir(cwd)
+        cwd.rmdir()
+        try:
+            memory = PACTMemory(session_id="s", db_path=db_path)
+            assert memory.project_id is None
+            assert memory._project_id_source == "unresolved"
+            with pytest.raises(ProjectIdentityUnresolvedError):
+                memory.save({"context": "x"}, sync_to_claude=False)
+        finally:
+            os.chdir(tmp_path)
+
+    def test_a_payload_supplied_project_still_saves(self, tmp_path, monkeypatch):
+        """The guard must not over-block the documented remedy.
+
+        A caller-supplied project_id is a warrant and produces a non-NULL row,
+        so refusing it would block the obvious remedy in the very state the
+        guard exists for.
+        """
+        db_path = tmp_path / "payload.db"
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+        assert memory.project_id is None
+
+        memory_id = memory.save(
+            {"context": "EXPLICIT", "project_id": "explicitly-elsewhere"},
+            sync_to_claude=False,
+        )
+
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "explicitly-elsewhere"
+        assert memory.last_project_scope["source"] == "supplied"
+
+
+class TestUnresolvedIdentityScopesReads:
+    """R1: None means NO records, never every project's records."""
+
+    def _seed(self, db_path: Path):
+        memory = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        linked = db_path.parent / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        target = db_path.parent / "target.py"
+        target.write_text("y = 2\n", encoding="utf-8")
+        memory_id = memory.save(
+            {"context": _TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
+        with db_connection(db_path) as conn:
+            add_file_relation(
+                conn, str(linked), str(target), "imports", project_id="other-proj-a"
+            )
+        return memory_id, linked
+
+    def _unresolved(self, monkeypatch, db_path: Path) -> PACTMemory:
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+        assert memory.project_id is None
+        return memory
+
+    def test_r1_control_a_scoped_instance_finds_the_seeded_rows(self, tmp_path):
+        """The positive control the other R1 arms rest on.
+
+        Without it an arm can pass because the fixture has nothing findable —
+        the same vacuous-pass class as I2.
+        """
+        db_path = tmp_path / "store.db"
+        memory_id, linked = self._seed(db_path)
+
+        scoped = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        assert [m.id for m in scoped.list()] == [memory_id]
+        assert [m.id for m in scoped.search(_TOKEN, sync_to_claude=False)] == [memory_id]
+        assert [m.id for m in scoped.search_by_file(str(linked))] == [memory_id]
+        status = scoped.get_status()
+        assert status["memory_count"] == 1
+        assert all(
+            status["graph_stats"][key] > 0
+            for key in ("files", "memories", "memory_file_links", "file_relations")
+        ), status["graph_stats"]
+
+    def test_r1_an_unresolved_identity_returns_no_records_from_any_surface(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "store.db"
+        self._seed(db_path)
+        empty = self._unresolved(monkeypatch, db_path)
+
+        assert empty.list() == []
+        assert empty.search(_TOKEN, sync_to_claude=False) == []
+        assert empty.search_by_file(str(db_path.parent / "linked.py")) == []
+
+        status = empty.get_status()
+        assert status["project_id"] is None
+        assert status["memory_count"] == 0
+        assert status["graph_stats"] == {
+            "files": 0,
+            "memories": 0,
+            "memory_file_links": 0,
+            "file_relations": 0,
+        }, status["graph_stats"]
+
+        scoped = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        assert set(status) == set(scoped.get_status()), (
+            "the zeroed envelope hides a key the populated one carries"
+        )
+
+        # The store really holds another project's rows, so [] above is the
+        # guard's doing rather than an empty store.
+        with db_connection(db_path) as conn:
+            assert list_memories(conn, project_id=None)
+            assert search_memories_by_text(conn, _TOKEN, project_id=None)
+
+    def test_r1c_the_file_search_would_surface_a_NULL_keyed_row_unguarded(
+        self, tmp_path, monkeypatch
+    ):
+        """`search_by_file` has a different causal shape: NULL, not all."""
+        db_path = tmp_path / "store.db"
+        linked = db_path.parent / "linked.py"
+        self._seed(db_path)
+        with db_connection(db_path) as conn:
+            file_id = get_file_id(conn, str(linked), "other-proj-a")
+            assert file_id
+            conn.execute("UPDATE files SET project_id = NULL WHERE id = ?", (file_id,))
+            conn.commit()
+        with db_connection(db_path) as conn:
+            assert get_file_id(conn, str(linked), None) == file_id, (
+                "the fixture does not exercise the NULL-keyed shape"
+            )
+
+        empty = self._unresolved(monkeypatch, db_path)
+        assert empty.search_by_file(str(linked)) == []

@@ -53,6 +53,19 @@ from fixtures.project_dir import (
     source_export_line,
     write_session_context,
 )
+# Reused, not re-implemented: the real git add/remove and record-planting
+# vocabulary already lives in one place. Cross-importing between test modules
+# is this suite's established pattern (see
+# test_separate_git_dir_worktree_memory.py's import of test_worktree_git_failure_skip).
+from tests.test_removed_worktree_record import (
+    SID as RECORD_SID,
+    _enable_record_reading,
+    _identity_for,
+    _plant,
+    _remove_worktree,
+    _repo,
+    _worktree,
+)
 # EVERY import here goes through the `scripts.` package route, deliberately.
 # A bare `import working_memory` loads a SECOND module instance whose
 # `from pact_session import ...` binds a second copy of pact_session — with
@@ -1520,3 +1533,179 @@ class TestAVerifiedWorktreeRetargetIsNotADisagreement:
             str(tmp_path / "main"), str(live)
         )
         assert "re-export CLAUDE_PROJECT_DIR to the recorded value" in text
+
+
+# ---------------------------------------------------------------------------
+# #1688 — a DECLINED declaration: terminal states, source labels, and the one
+# arm that separates D10-alone from a surviving Strategy-3 fallthrough.
+# ---------------------------------------------------------------------------
+
+class TestDeclinedDeclaration:
+    """T1/T1n/T2/N1/N2 plus the I3 entry-point sweep."""
+
+    def _removed(self, tmp_path, plant_record=False):
+        """A real in-tree worktree, then removed. Returns (main, path, identity)."""
+        main = _repo(tmp_path / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        identity = _identity_for(worktree)
+        if plant_record:
+            _plant(worktree, identity)
+        _remove_worktree(main, worktree)
+        assert not worktree.exists()
+        return main, worktree, identity
+
+    def _arm_context_record(self, tmp_path, monkeypatch, record_dir):
+        """Make the SESSION record live under the record module's session id.
+
+        The imported record helpers are keyed on RECORD_SID, not this file's
+        SID. `_arm_record` here would rebind CLAUDE_CODE_SESSION_ID to the
+        wrong id, and the identity reader would then look under a session
+        folder the record was never written to — the failure appears as
+        "no verified record" and reads like a product defect.
+        """
+        enable_record_discovery(monkeypatch, pact_session)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", RECORD_SID)
+        write_session_context(Path.home() / ".claude", RECORD_SID, record_dir)
+
+    def _decline(self, tmp_path, monkeypatch):
+        """Arm the no-record decline and neutralize the process cwd.
+
+        Strategy 2 runs from the PROCESS cwd even on the decline arm, so the
+        cwd is a git-less umbrella. Without this every arm below would let
+        `main_repo_root()` answer and would never reach the decline it claims
+        to test.
+        """
+        main, worktree, identity = self._removed(tmp_path, plant_record=False)
+        umbrella = make_umbrella(tmp_path)
+        _enable_record_reading(monkeypatch)
+        assert pact_session.get_worktree_identity_from_session_record() == {}, (
+            "the reader must be LIVE and empty; a guard-blocked reader "
+            "returns the same {} for the wrong reason"
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(umbrella.project)
+        return main, worktree, umbrella
+
+    def test_i3_no_entry_point_returns_the_worktree_basename(
+        self, tmp_path, monkeypatch
+    ):
+        """Criterion (b), swept across every resolution entry point."""
+        main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
+
+        name, label = PACTMemory._project_name_for_declared_dir(str(worktree), "probe")
+        assert name is None, f"the helper derived {name!r} from a removed path"
+        assert label == "probe"
+
+        assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+        assert PACTMemory._detect_project_id() is None
+        assert PACTMemory(session_id="s", db_path=tmp_path / "i3.db").project_id is None
+
+        # The session-record shape declines identically.
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        self._arm_context_record(tmp_path, monkeypatch, worktree)
+        assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+
+    def test_i3_the_record_shape_reports_the_filing_label(self, tmp_path, monkeypatch):
+        """The other source shape: exactly `worktree identity record`."""
+        main = _repo(tmp_path / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _plant(worktree, _identity_for(worktree))
+        _enable_record_reading(monkeypatch)
+        planted = pact_session.get_worktree_identity_from_session_record()
+        assert planted.get("declared") == os.path.realpath(worktree), (
+            "the planted record was not read; the label assertion below would "
+            "be measuring an inert mechanism"
+        )
+        umbrella = make_umbrella(tmp_path)
+        monkeypatch.chdir(umbrella.project)
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        _remove_worktree(main, worktree)
+        assert PACTMemory._detect_project_id_with_source() == (
+            "R",
+            "worktree identity record",
+        )
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        self._arm_context_record(tmp_path, monkeypatch, worktree)
+        assert PACTMemory._detect_project_id_with_source() == (
+            "R",
+            "worktree identity record",
+        )
+
+    def test_t1_a_declined_declaration_never_lands_on_home_scope(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """T1, D10-alone: Strategy 3 is skipped, so HOME is unreachable."""
+        main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
+        home = Path.home().resolve()
+        # If Strategy 3 ran at all it would land here; the arm proves it is
+        # not reached on the declined arm.
+        monkeypatch.setattr(
+            PACTMemory, "_find_project_root", staticmethod(lambda start: home)
+        )
+        with caplog.at_level(logging.WARNING):
+            assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert str(worktree) in messages, (
+            "the decline did not name the declaration it could not verify"
+        )
+        assert "could not be resolved" in messages
+
+    def test_t1n_without_a_declaration_home_scope_is_unchanged(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """T1n, the narrowness proof: no declaration keeps today's HOME path."""
+        make_umbrella(tmp_path)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        assert pact_session.get_project_dir_from_session_record() == ""
+        home = Path.home().resolve()
+        # Strategy 2 must not answer from the suite's own checkout, or this
+        # arm measures the harness instead of the HOME path.
+        def _no_git(*args, **kwargs):
+            raise FileNotFoundError("git unavailable in this arm")
+
+        monkeypatch.setattr("subprocess.run", _no_git)
+        monkeypatch.setattr(
+            PACTMemory, "_find_project_root", staticmethod(lambda start: home)
+        )
+        with caplog.at_level(logging.WARNING):
+            name, label = PACTMemory._detect_project_id_with_source()
+
+        assert (name, label) == (home.name, "cwd"), (
+            "the fix changed the ordinary no-declaration HOME behaviour"
+        )
+        assert any("HOME directory" in r.message for r in caplog.records)
+
+    def test_t2_a_deleted_process_cwd_declines(self, tmp_path, monkeypatch):
+        """T2, the real wrap-up shape: the shell sat in the removed worktree."""
+        main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
+        gone = tmp_path / "deleted-cwd"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        try:
+            assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+        finally:
+            monkeypatch.chdir(tmp_path)
+
+    def test_n1_a_live_git_cwd_still_answers_as_git_root(
+        self, tmp_path, monkeypatch
+    ):
+        """N1: Strategy 2 is legitimate and must not be skipped as collateral."""
+        main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
+        monkeypatch.chdir(umbrella.subrepo)  # a live git repo, non-home
+        assert PACTMemory._detect_project_id_with_source() == ("subrepo", "git root")
+
+    def test_n2_a_non_git_project_marker_cwd_declines(self, tmp_path, monkeypatch):
+        """N2: THE discriminator between D10-alone and a surviving D11.
+
+        If Strategy 3 still ran on this arm it would find `umbrella/CLAUDE.md`
+        and return "umbrella" — a non-home project, which a HOME-only decline
+        (D11) would NOT catch. Only skipping Strategy 3 entirely (D10) passes.
+        """
+        main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
+        monkeypatch.chdir(umbrella.project)  # has CLAUDE.md, no .git
+        assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")

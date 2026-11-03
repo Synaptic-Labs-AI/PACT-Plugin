@@ -49,7 +49,16 @@ from unittest.mock import patch
 import pytest
 
 from scripts import memory_api
+from scripts import pact_session
 from scripts.memory_api import PACTMemory
+from tests.test_removed_worktree_record import (
+    _enable_record_reading,
+    _identity_for,
+    _plant,
+    _remove_worktree,
+    _repo,
+    _worktree,
+)
 
 
 def _save(mem, repo_root, payload=None):
@@ -480,4 +489,37 @@ def test_quick_save_warns_when_it_files_under_a_different_repository(caplog):
     assert "location divergence" in caplog.text, (
         "quick_save filed under 'PACT-prompt' from inside repository 'viable' "
         f"and emitted no divergence warning. Captured: {caplog.text!r}"
+    )
+
+
+# --- the worktree identity record route (#1688) -----------------------------
+
+def test_the_worktree_identity_record_route_is_named(tmp_path, monkeypatch):
+    """The sixth source label, end to end through a real save.
+
+    The record answers only when the declared directory is GONE, so this arm
+    drives a real in-tree worktree through `git worktree remove`. A
+    hand-planted record on a live path would never reach the route.
+    """
+    main = _repo(tmp_path / "R", document=True)
+    worktree = _worktree(main, main / ".worktrees" / "W")
+    _plant(worktree, _identity_for(worktree))
+    _enable_record_reading(monkeypatch)
+    planted = pact_session.get_worktree_identity_from_session_record()
+    assert planted.get("declared") == str(worktree.resolve()), (
+        "the planted record was not read; the label assertion below would be "
+        "measuring an inert mechanism"
+    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    _remove_worktree(main, worktree)
+
+    memory = PACTMemory(session_id="s", db_path=tmp_path / "record.db")
+    assert memory.project_id == "R"
+    assert memory._project_id_source == "worktree identity record"
+
+    scope = _save(memory, None)
+    assert scope["project_id"] == "R"
+    assert scope["source"] == "worktree identity record", (
+        f"the record route disclosed {scope['source']!r}, so a caller cannot "
+        "tell it apart from a live derivation"
     )
