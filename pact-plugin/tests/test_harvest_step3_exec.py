@@ -95,7 +95,7 @@ class Run:
             census={team: set(ids) for team, ids in (census or {}).items()},
             processed_tokens=set(processed),
             forced_ids=set(forced),
-            report=self.reports.append,
+            report=self._report,
             read_task_json=self._reader(stores),
             process=lambda handoff, metadata=None, section=None:
                 self.processed.append((section, handoff, metadata)),
@@ -104,6 +104,12 @@ class Run:
             ns.update(patch)
         exec(CODE, ns)
         self.recorded = ns["recorded_tokens"]
+
+    def _report(self, line):
+        """Strict: a report is a non-empty str, so a `report(None)` mutant
+        raises here instead of hiding behind a fragment count."""
+        assert isinstance(line, str) and line, f"report() got {line!r}"
+        self.reports.append(line)
 
     def _reader(self, stores):
         def read_task_json(task_id, team):
@@ -383,6 +389,169 @@ def test_a_changed_sibling_only_task_is_harvested_again():
     second = Run([], {THIS: {"5": sibling_only("b")}}, census={THIS: {"5"}},
                  processed=first.recorded)
     assert len(second.processed) == 1
+
+
+# ---- A1-A8: every report and every from-team route ------------------------
+
+class _FixedClock:
+    """`datetime` stand-in: answers only for UTC, so a clock read without
+    the UTC zone raises instead of returning local time."""
+
+    @staticmethod
+    def now(tz=None):
+        assert tz is timezone.utc, tz
+        return datetime(2026, 11, 1, 0, 0, 9, tzinfo=timezone.utc)
+
+
+# A1 -- mutant: `matches and not this_team` -> `or`
+def test_a_census_only_id_with_no_team_reports_nothing_underivable():
+    run = Run([], {}, this="", tasklist=["8"])
+    assert run.count("underivable") == 0
+
+
+# A2 -- mutants: the from section's group_events/current_arc arguments -> None
+def test_from_team_instances_split_by_creation_and_the_file_joins_the_current_one():
+    old, new = _handoff("from old instance"), _handoff("from current instance")
+    stores = {FROM: {"5": task(dict(new, reasoning_chain="from disk"), sib="F")}}
+    journal = [created("5", FROM, ts=T0), ev("5", FROM, handoff=old, ts=T1),
+               created("5", FROM, ts=T2), ev("5", FROM, handoff=new, ts=T3)]
+    run = Run(journal, stores)
+    by = {h["produced"]: (s, h, m) for s, h, m in run.processed}
+    assert set(by) == {"from old instance", "from current instance"}
+    assert all(s == f"team={FROM}" for s, _, _ in by.values())
+    _, current, current_meta = by["from current instance"]
+    assert current.get("reasoning_chain") == "from disk" and current_meta["sib"] == "F"
+    _, older, older_meta = by["from old instance"]
+    assert "reasoning_chain" not in older and older_meta is None
+
+
+# A3 -- mutant: union_preferring_task_file(handoff -> None), both sections
+@pytest.mark.parametrize("team", [THIS, FROM])
+def test_a_journal_only_field_survives_the_union(team):
+    journal_copy = _handoff(note="journal only")
+    run = Run([ev("5", team, handoff=journal_copy)], {team: {"5": task(H)}})
+    assert [h.get("note") for _, h, _ in run.processed] == ["journal only"]
+
+
+# A4 -- mutant: the from owner's selection key -> None
+def test_a_from_owner_is_skipped_on_its_token_and_harvested_on_new_content():
+    stores = {FROM: {"5": task(H)}}
+    first = Run([ev("5", FROM)], stores)
+    assert len(first.processed) == 1
+    assert Run([ev("5", FROM)], stores, processed=first.recorded).processed == []
+    revised = _handoff("revised")
+    later = Run([ev("5", FROM, handoff=revised)], {FROM: {"5": task(revised)}},
+                processed=first.recorded)
+    assert [h["produced"] for _, h, _ in later.processed] == ["revised"]
+
+
+# A5 -- mutant: a from non-owner's handoff -> None, and select's task id -> None
+def test_a_from_non_owner_is_processed_from_its_journal_copy():
+    mine, theirs = _handoff("owner's"), _handoff("other occupant's")
+    stores = {FROM: {"5": task(mine, owner="a")}}
+    run = Run([ev("5", FROM, agent="a", handoff=mine),
+               ev("5", FROM, agent="b", handoff=theirs)], stores)
+    by = {h["produced"]: m for _, h, m in run.processed}
+    assert by["other occupant's"] is None
+    assert [h for _, h, _ in run.processed if h["produced"] == "other occupant's"] == [theirs]
+
+
+def test_a_from_group_with_undivided_contents_reports_its_task():
+    run = Run([ev("5", FROM, handoff=_handoff("a"), ts=T1),
+               ev("5", FROM, handoff=_handoff("b"), ts=T2)], {FROM: {"5": task(_handoff("b"))}})
+    assert run.reports.count(
+        "handoff group for task 5 holds 2 distinct contents with no creation "
+        "boundary; the latest was processed; the earlier contents remain in the "
+        "journal") == 1
+
+
+# A6 -- mutants: every from disk-only handle() argument, and `disk or meta`
+def test_a_from_disk_only_unit_keys_on_its_handoff_and_reharvests_on_siblings():
+    stores = {FROM: {"5": task(H, sib="F")}}
+    first = Run([], stores, census={FROM: {"5"}})
+    assert first.processed == [(f"team={FROM}", H, stores[FROM]["5"]["metadata"])]
+    second = Run([ev("5", FROM)], stores, census={FROM: {"5"}}, processed=first.recorded)
+    assert second.processed == []
+
+    def sibling_only(value):
+        return {"owner": "coder", "subject": "s", "metadata": {"audit_summary": value}}
+    before = Run([], {FROM: {"5": sibling_only("a")}}, census={FROM: {"5"}})
+    after = Run([], {FROM: {"5": sibling_only("b")}}, census={FROM: {"5"}},
+                processed=before.recorded)
+    assert len(after.processed) == 1
+
+
+# A7 -- mutant: the from section's `owner is None` negated, and its report sites
+def test_from_store_divergence_reports_once_each():
+    absent = Run([ev("5", FROM)], {})
+    assert absent.reports.count(
+        "handoff divergence check unavailable for task 5: task file absent") == 1
+    stranger = Run([ev("5", FROM, agent="a")], {FROM: {"5": task(owner="b")}})
+    assert stranger.reports.count(
+        "handoff identity mismatch for task 5: task file present, no event group "
+        "carries its identity") == 1
+
+
+# A8 -- every report( site in the block, its EXACT line, with real values
+REPORT_SCENARIOS = [
+    ("realign source rejected", lambda: Run([], {}, realign=("../x",)),
+     "handoff realign source invalid: team value '../x' is not a valid team name; store not read"),
+    ("gap", lambda: Run([], {}, tasklist=["9"], patch={"datetime": _FixedClock}),
+     "handoff gap for task 9: no source resolved; agent unknown; recorded 2026-11-01T00:00:09Z"),
+    ("event skipped", lambda: Run([dict(ev("8", THIS), task_id=7)], {}),
+     "handoff event skipped: task id '7' is not a non-empty string"),
+    ("token unavailable", lambda: Run([], {THIS: {"a b": task()}}, census={THIS: {"a b"}}),
+     "handoff ledger token unavailable for task a b: unit processed, not recorded"),
+    ("undivided contents", lambda: Run([ev("3", THIS, handoff=_handoff("x"), ts=T1),
+                                        ev("3", THIS, handoff=_handoff("y"), ts=T2)], {}),
+     "handoff group for task 3 holds 2 distinct contents with no creation boundary; "
+     "the latest was processed; the earlier contents remain in the journal"),
+    ("underivable", lambda: Run([ev("7", THIS)], {}, this=""),
+     "handoff team identity underivable for task 7: no Task list: directory in context"),
+    ("this file absent", lambda: Run([ev("7", THIS)], {}),
+     "handoff divergence check unavailable for task 7: task file absent"),
+    ("foreign-only at discovery", lambda: Run([ev("9", OTHER)], {}),
+     f"handoff identity mismatch for task 9: journal event names team {OTHER}; this store is team {THIS}"),
+    ("non-str team", lambda: Run([dict(ev("7"), team=5)], {}, tasklist=["7"]),
+     "handoff team value invalid for task 7: event team value '5' is not a valid team name; event not processed"),
+    ("foreign in the loop", lambda: Run([ev("7", OTHER)], {}, tasklist=["7"]),
+     f"handoff identity mismatch for task 7: journal event names team {OTHER}; this store is team {THIS}"),
+    ("this mismatch", lambda: Run([ev("7", THIS, agent="a")], {THIS: {"7": task(owner="b")}}),
+     "handoff identity mismatch for task 7: task file present, no event group carries its identity"),
+    ("old-format mixed", lambda: Run([ev("4", agent="coder")], {FROM: {"4": task(owner="someone-else")}}),
+     f"handoff identity mismatch for task 4: journal content equals team {FROM} task 4, whose identity it does not carry"),
+    ("old-format unmatched", lambda: Run([ev("4")], {}),
+     "handoff cross-team check unavailable for task 4: no other named store carries the identity"),
+    ("from no group, file absent", lambda: Run([], {}, census={FROM: {"5"}}),
+     "handoff divergence check unavailable for task 5: task file absent"),
+    ("from groups, file absent", lambda: Run([ev("5", FROM)], {}),
+     "handoff divergence check unavailable for task 5: task file absent"),
+    ("from mismatch", lambda: Run([ev("5", FROM, agent="a")], {FROM: {"5": task(owner="b")}}),
+     "handoff identity mismatch for task 5: task file present, no event group carries its identity"),
+    ("this union line", lambda: Run([ev("5", THIS, handoff=_handoff(note="j"))], {THIS: {"5": task(H)}}),
+     "handoff field kept from the journal for task 5: field note absent from the task file "
+     "and not a required field; the required key sets do not decide it"),
+    ("from union line", lambda: Run([ev("5", FROM, handoff=_handoff(note="j"))], {FROM: {"5": task(H)}}),
+     "handoff field kept from the journal for task 5: field note absent from the task file "
+     "and not a required field; the required key sets do not decide it"),
+]
+
+
+def _report_sites():
+    import ast
+    return [n for n in ast.walk(ast.parse(BLOCK)) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name) and n.func.id == "report"]
+
+
+def test_every_report_site_has_a_scenario():
+    """A new report( site in the block needs a scenario here."""
+    assert len(REPORT_SCENARIOS) == len(_report_sites()) > 0
+
+
+@pytest.mark.parametrize("label", [label for label, _, _ in REPORT_SCENARIOS])
+def test_every_report_template_is_exact(label):
+    _, scenario, line = next(s for s in REPORT_SCENARIOS if s[0] == label)
+    assert scenario().reports.count(line) == 1
 
 
 @pytest.mark.parametrize("this", ["", None])
