@@ -66,6 +66,7 @@ __all__ = [
     "mixed_old_format_event",
     "occupant_hash",
     "old_format_destination",
+    "owning_group",
     "parse_ledger_tokens",
     "partition_destination",
     "positioned",
@@ -711,6 +712,27 @@ def group_events(events: list, journal: list, epochs: dict) -> dict:
         key = (identity, arc_of(event, journal, epochs))
         groups.setdefault(key, []).append(event)
     return groups
+
+
+def owning_group(
+    groups: dict, disk_id: object, file_arc: object
+) -> tuple | None:
+    """The ONE group key that owns this store's task file, or None.
+
+    1. (disk_id, file_arc) when present: a dated group of the current instance.
+    2. else (disk_id, None) when present: a group that cannot be dated (no
+       team) joins the file only when no dated current-instance group does.
+    3. else None. Never more than one owner.
+    """
+    if not isinstance(groups, dict) or disk_id is None:
+        return None
+    for key in ((disk_id, file_arc), (disk_id, None)):
+        try:
+            if key in groups:
+                return key
+        except TypeError:  # an unhashable file_arc cannot name a group
+            continue
+    return None
 
 
 def undivided_contents(group: list) -> int:

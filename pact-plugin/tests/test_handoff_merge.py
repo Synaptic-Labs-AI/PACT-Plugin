@@ -64,6 +64,7 @@ from shared.handoff_merge import (  # noqa: E402
     current_arc,
     disk_handoff,
     disk_identity,
+    owning_group,
     group_events,
     latest_by_ts_then_journal_order,
     ledger_token,
@@ -306,3 +307,34 @@ class TestLedgerTokens:
 
     def test_non_str_section_is_empty(self):
         assert parse_ledger_tokens(None) == set()
+
+
+class TestOwningGroup:
+    """One owner per task file: the dated current-instance group, else the
+    undatable (team-less) group, else none. Kills: swapping the precedence;
+    dropping either branch."""
+
+    DATED = (1, 4)
+
+    def test_dated_current_group_owns(self):
+        groups = {("id", self.DATED): [], ("other", self.DATED): []}
+        assert owning_group(groups, "id", self.DATED) == ("id", self.DATED)
+
+    def test_teamless_group_owns_when_no_dated_group_does(self):
+        groups = {("id", None): [], ("id", (0, 1)): []}
+        assert owning_group(groups, "id", self.DATED) == ("id", None)
+
+    def test_dated_beats_teamless_with_the_same_identity(self):
+        groups = {("id", None): [], ("id", self.DATED): []}
+        assert owning_group(groups, "id", self.DATED) == ("id", self.DATED)
+
+    def test_no_matching_identity_owns_nothing(self):
+        groups = {("other", None): [], ("other", self.DATED): []}
+        assert owning_group(groups, "id", self.DATED) is None
+
+    def test_no_task_file_owns_nothing(self):
+        assert owning_group({("id", None): []}, None, self.DATED) is None
+
+    def test_malformed_inputs_never_raise(self):
+        assert owning_group(None, "id", self.DATED) is None
+        assert owning_group({("id", None): []}, "id", [1, 2]) == ("id", None)
