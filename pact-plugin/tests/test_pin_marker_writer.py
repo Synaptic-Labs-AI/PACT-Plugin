@@ -55,6 +55,7 @@ from shared.pin_markers import (
     plan_insertion,
 )
 from clock_shift.clock_shift_env import carry_clock_shift
+from helpers import doc_at  # noqa: E402
 
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 HOOK_SCRIPT = HOOKS_DIR / "pin_marker_writer.py"
@@ -91,7 +92,7 @@ def production_skeleton() -> str:
         previous = os.environ.get("CLAUDE_PROJECT_DIR")
         os.environ["CLAUDE_PROJECT_DIR"] = tmp
         try:
-            ensure_project_memory_md()
+            ensure_project_memory_md(doc_at())
             return (Path(tmp) / ".claude" / "CLAUDE.md").read_text(
                 encoding="utf-8"
             )
@@ -1104,11 +1105,14 @@ def run_hook(frame, tmp_path, timeout=600):
     """Drive the REAL script as a subprocess and return (rc, stdout, stderr).
 
     CLAUDE_PROJECT_DIR is pinned to tmp_path so the resolver cannot reach the
-    developer's own CLAUDE.md. Do not remove that.
+    developer's own CLAUDE.md. Do not remove that. HOME is a directory below
+    it, never tmp_path itself: a project at $HOME is user-global (its
+    `.claude/CLAUDE.md` is the default profile's global file), so it has no
+    project memory.
     """
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
-        "HOME": str(tmp_path),
+        "HOME": str(tmp_path / "home"),
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
     }
@@ -1504,7 +1508,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         the collision label now means a complete pair off the writer's rows.
         """
         import pin_marker_writer
-        from staleness import _resolve_project_claude_md_with_base
+        from shared.claude_md_manager import session_document
 
         original = build_claude_md(
             working=(
@@ -1513,8 +1517,8 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         )
         assert START_LINE in original, "FIXTURE INVALID: no own-line copy"
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        resolved, _base = _resolve_project_claude_md_with_base()
-        assert resolved == tmp_path / "CLAUDE.md", (
+        _session, doc = session_document()
+        assert doc is not None and doc.path == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "
             "real CLAUDE.md"
         )
@@ -1532,7 +1536,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         """
         import pin_marker_writer
         import shared.pin_markers as pin_markers
-        from staleness import _resolve_project_claude_md_with_base
+        from shared.claude_md_manager import session_document
 
         original = build_claude_md()
         assert isinstance(plan_insertion(original), Insertion), (
@@ -1544,8 +1548,8 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
 
         monkeypatch.setattr(pin_markers, "apply_insertion", broken_assembly)
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        resolved, _base = _resolve_project_claude_md_with_base()
-        assert resolved == tmp_path / "CLAUDE.md", (
+        _session, doc = session_document()
+        assert doc is not None and doc.path == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "
             "real CLAUDE.md"
         )
@@ -2099,3 +2103,220 @@ class TestACallerInfluencedValueCannotMoveTheWindow:
         )
         refused = plan_insertion(doc)
         assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY
+
+
+# --------------------------------------------------------------------------
+# #1653 B12: a pin command in a worktree writes MAIN's file
+# --------------------------------------------------------------------------
+
+def _git_repo_with_worktree(tmp_path):
+    """A real repo plus a linked worktree, git config isolated in-process."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    git("add", ".", cwd=main)
+    git("commit", "-qm", "seed", cwd=main)
+    worktree = tmp_path / "wt-b12"
+    git("worktree", "add", "-q", str(worktree), "-b", "b12", cwd=main)
+    return main, worktree
+
+
+def _git_repo_with_nested_worktree(tmp_path):
+    """A real repo plus a linked worktree at repo/.worktrees/<branch> -- the
+    layout `pact-plugin/skills/worktree-setup` creates, NESTED in the root."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    git("add", ".", cwd=main)
+    git("commit", "-qm", "seed", cwd=main)
+    (main / ".worktrees").mkdir()
+    worktree = main / ".worktrees" / "wt-nested"
+    git("worktree", "add", "-q", str(worktree), "-b", "nested", cwd=main)
+    return main, worktree
+
+
+def test_b12_pin_markers_from_a_worktree_land_in_main(tmp_path, monkeypatch):
+    """The marker pair goes into MAIN's file even though the worktree holds
+    its own marker-less copy.
+
+    This is the ALWAYS-retarget case: the worktree copy is what a
+    retarget-left-on-the-worktree writer would edit, and it must stay
+    byte-identical. The outcome token proves the writer ran and the
+    destination content proves where the pair landed.
+    """
+    import pin_marker_writer
+    from shared.pin_markers import plan_insertion, Insertion
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    (main / ".claude").mkdir()
+    main_md = main / ".claude" / "CLAUDE.md"
+    main_md.write_text(original, encoding="utf-8")
+    worktree_md = worktree / "CLAUDE.md"
+    worktree_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "written", f"the pin writer did not run: {outcome}"
+    main_text = main_md.read_text(encoding="utf-8")
+    assert START_LINE in main_text, (
+        "the marker pair did not land in MAIN's file"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "the pin writer edited the worktree's own CLAUDE.md"
+    )
+
+
+def test_b12b_a_fallthrough_target_outside_the_memory_root_is_refused(
+    tmp_path, monkeypatch
+):
+    """Bugbot: a first-rung miss must not fall through to the worktree.
+
+    MAIN has NO CLAUDE.md, the worktree has one. The session's managed
+    document is MAIN's create target, which does not exist, so the writer
+    reports `noop_no_file` and the worktree file stays byte-identical. Restore
+    a resolver rung that reaches the worktree copy and this goes red: the
+    outcome becomes `written` and the worktree copy gains the marker pair.
+    """
+    import pin_marker_writer
+    from shared.pin_markers import plan_insertion, Insertion
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    worktree_md = worktree / "CLAUDE.md"
+    worktree_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "noop_no_file", (
+        f"the fall-through target was not refused: {outcome}"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "the pin writer edited the worktree's own CLAUDE.md"
+    )
+    assert not (main / "CLAUDE.md").exists()
+    assert not (main / ".claude" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("env_var", ["worktree", "unset"], ids=["declared", "unset"])
+def test_b12c_a_nested_worktree_target_is_refused(tmp_path, monkeypatch, env_var):
+    """PACT's own layout nests the worktree INSIDE the memory root.
+
+    Ancestor containment passes there, so only the resolver's document rule
+    keeps the worktree copy out: main holds no document, so the writer reports
+    `noop_no_file` both with CLAUDE_PROJECT_DIR declared and with it absent.
+    """
+    import pin_marker_writer
+
+    main, worktree = _git_repo_with_nested_worktree(tmp_path)
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    worktree_md = worktree / "CLAUDE.md"
+    worktree_md.write_text(original, encoding="utf-8")
+
+    if env_var == "worktree":
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    else:
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(worktree)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "noop_no_file", (
+        f"the nested fall-through target was not refused: {outcome}"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "the pin writer edited the nested worktree's own CLAUDE.md"
+    )
+    assert not (main / ".claude" / "CLAUDE.md").exists()
+
+
+def test_b12d_a_nested_worktree_pin_lands_in_main_not_the_worktree(tmp_path, monkeypatch):
+    """CONTROL: with MAIN holding the managed file, the markers still land
+    there and the worktree copy stays byte-identical."""
+    import pin_marker_writer
+
+    main, worktree = _git_repo_with_nested_worktree(tmp_path)
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    (main / ".claude").mkdir()
+    main_md = main / ".claude" / "CLAUDE.md"
+    main_md.write_text(original, encoding="utf-8")
+    worktree_md = worktree / "CLAUDE.md"
+    worktree_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "written", f"the pin writer did not run: {outcome}"
+    assert START_LINE in main_md.read_text(encoding="utf-8"), (
+        "the marker pair did not land in MAIN's file"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "the pin writer edited the nested worktree's own CLAUDE.md"
+    )
+
+
+def test_b12e_a_plain_session_with_no_declared_dir_still_writes(tmp_path, monkeypatch):
+    """CONTROL for the unconditional derivation: an absent variable must not
+    switch the writer off for an ordinary project."""
+    import pin_marker_writer
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    claude_md = plain / "CLAUDE.md"
+    claude_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(plain)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "written", f"the pin writer did not run: {outcome}"
+    assert START_LINE in claude_md.read_text(encoding="utf-8")

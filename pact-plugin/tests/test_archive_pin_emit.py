@@ -72,13 +72,13 @@ def _pin_the_model_cache(monkeypatch):
 
 @pytest.fixture
 def claude_md(tmp_path, monkeypatch):
-    """Write a CLAUDE.md and point the script's resolver at it."""
+    """Write a CLAUDE.md and declare its directory as the session's project,
+    so the script's resolver (the session document) names it."""
     def _write(content):
         path = tmp_path / "CLAUDE.md"
         path.write_text(content, encoding="utf-8")
-        monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: path
-        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         return path
     return _write
 

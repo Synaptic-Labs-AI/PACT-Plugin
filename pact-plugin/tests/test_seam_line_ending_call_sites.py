@@ -30,6 +30,7 @@ that names its misses is worth more than a higher count that does not.
 import ast
 from collections import Counter
 from pathlib import Path
+from helpers import doc_at  # noqa: E402
 
 _MANAGED_START = (
     "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
@@ -196,7 +197,7 @@ class TestCanonicalTwinCallSites:
         before = target.read_bytes()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result and "failed" not in result.lower(), (
             f"the migration did not run, so this arm measured nothing: {result!r}"

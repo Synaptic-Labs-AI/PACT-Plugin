@@ -19,6 +19,7 @@ Risk tier: CRITICAL. These probe CVE-adjacent surfaces.
 
 
 import pytest
+from helpers import doc_for  # noqa: E402
 
 
 class TestPinCapsAdversarial_PathResolution:
@@ -42,8 +43,6 @@ class TestPinCapsAdversarial_PathResolution:
         pact_context()
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
-        import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
         # CWD is worktree root; "CLAUDE.md" there is NOT the tmp path.
         result = _check_tool_allowed({
             "tool_name": "Write",
@@ -69,8 +68,6 @@ class TestPinCapsAdversarial_PathResolution:
         pact_context()
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
-        import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
         result = _check_tool_allowed({
             "tool_name": "Write",
             "tool_input": {"file_path": str(sibling), "content": "x"},
@@ -100,8 +97,6 @@ class TestPinCapsAdversarial_PathResolution:
         pact_context()
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
-        import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
         # ADD-shape Write: new content has 1 pin comment; current file has 0.
         # #878: lead frame (agent_type) so the is_lead-gated DENY path fires.
         result = _check_tool_allowed({
@@ -353,9 +348,6 @@ class TestPinCapsAdversarial_SessionInitReentry:
             "<!-- pinned: 2026-04-20 -->\n### Pin\nbody\n"
         )
         claude_md.write_text(original_content, encoding="utf-8")
-        monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: claude_md
-        )
         for _ in range(5):
-            check_pin_slot_status()
+            check_pin_slot_status(doc_for(claude_md))
         assert claude_md.read_text(encoding="utf-8") == original_content

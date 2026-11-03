@@ -49,24 +49,19 @@ from __future__ import annotations
 
 import datetime as _dt
 import errno
+import io
+import json
 import os
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from helpers import doc_at  # noqa: E402
 
 
 class TestUpdateSessionInfo:
     """Tests for update_session_info() -- session info in project CLAUDE.md."""
-
-    def test_returns_none_when_no_project_dir(self, monkeypatch):
-        """Should return None when CLAUDE_PROJECT_DIR not set."""
-        from shared.session_resume import update_session_info
-
-        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-
-        result = update_session_info("session-123", "pact-session1")
-
-        assert result is None
 
     @pytest.mark.claude_md_ambient  # §11.3.1 (b): create-when-missing arm — no seed can coexist with it
     def test_creates_file_when_missing(self, tmp_path, monkeypatch):
@@ -79,7 +74,7 @@ class TestUpdateSessionInfo:
         assert not new_default.exists()
         assert not legacy.exists()
 
-        result = update_session_info("session-123", "pact-session1")
+        result = update_session_info("session-123", "pact-session1", doc=doc_at())
 
         assert result == "Session info created in new project CLAUDE.md"
         assert new_default.exists()
@@ -116,7 +111,7 @@ class TestUpdateSessionInfo:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         target = tmp_path / ".claude" / "CLAUDE.md"
 
-        update_session_info("session-456", "pact-session2")
+        update_session_info("session-456", "pact-session2", doc=doc_at())
 
         assert target.exists()
         mode = stat.S_IMODE(target.stat().st_mode)
@@ -135,12 +130,7 @@ class TestUpdateSessionInfo:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         target = tmp_path / ".claude" / "CLAUDE.md"
 
-        result = update_session_info(
-            "session-789",
-            "pact-session3",
-            session_dir="/tmp/sessions/abc",
-            plugin_root="/opt/plugins/PACT/3.17.0",
-        )
+        result = update_session_info("session-789", "pact-session3", session_dir="/tmp/sessions/abc", plugin_root="/opt/plugins/PACT/3.17.0", doc=doc_at())
 
         assert result == "Session info created in new project CLAUDE.md"
         content = target.read_text()
@@ -162,7 +152,7 @@ class TestUpdateSessionInfo:
             "## Other Section\n"
         )
 
-        result = update_session_info("new-session-id", "pact-newsess")
+        result = update_session_info("new-session-id", "pact-newsess", doc=doc_at())
 
         assert result == "Session info updated in project CLAUDE.md"
         content = target.read_text()
@@ -179,7 +169,7 @@ class TestUpdateSessionInfo:
         target = tmp_path / "CLAUDE.md"
         target.write_text("# Project\n\n## Retrieved Context\nSome context\n")
 
-        result = update_session_info("sess-abc", "pact-sessabc")
+        result = update_session_info("sess-abc", "pact-sessabc", doc=doc_at())
 
         assert result == "Session info added to project CLAUDE.md"
         content = target.read_text()
@@ -198,7 +188,7 @@ class TestUpdateSessionInfo:
         target = tmp_path / "CLAUDE.md"
         target.write_text("# Project\n\nSome content\n")
 
-        result = update_session_info("sess-xyz", "pact-sessxyz")
+        result = update_session_info("sess-xyz", "pact-sessxyz", doc=doc_at())
 
         assert result == "Session info added to project CLAUDE.md"
         content = target.read_text()
@@ -218,7 +208,7 @@ class TestUpdateSessionInfo:
             Path.home() / ".claude" / "pact-sessions" / "myproject" / "abc-123"
         )
         Path(session_dir).mkdir(parents=True)
-        result = update_session_info("abc-123", "pact-abc123", session_dir)
+        result = update_session_info("abc-123", "pact-abc123", session_dir, doc=doc_at())
         assert result is not None
 
         # Verify Session dir line is present
@@ -226,7 +216,7 @@ class TestUpdateSessionInfo:
         assert "Session dir:" in content
 
         # Roundtrip: _extract_prev_session_dir should recover the same path
-        extracted = _extract_prev_session_dir(str(tmp_path))
+        extracted = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
         assert extracted == session_dir
 
     def test_plugin_root_written_when_provided(self, tmp_path, monkeypatch):
@@ -237,9 +227,7 @@ class TestUpdateSessionInfo:
         target = tmp_path / "CLAUDE.md"
         target.write_text("# Project\n\n## Retrieved Context\n")
 
-        result = update_session_info(
-            "sess-pr1", "pact-pr1", plugin_root="/Users/me/.claude/plugins/cache/PACT/1.0"
-        )
+        result = update_session_info("sess-pr1", "pact-pr1", plugin_root="/Users/me/.claude/plugins/cache/PACT/1.0", doc=doc_at())
         assert result is not None
 
         content = target.read_text()
@@ -255,7 +243,7 @@ class TestUpdateSessionInfo:
 
         home = str(Path.home())
         pr = f"{home}/.claude/plugins/cache/PACT/2.0"
-        update_session_info("sess-pr2", "pact-pr2", plugin_root=pr)
+        update_session_info("sess-pr2", "pact-pr2", plugin_root=pr, doc=doc_at())
 
         content = target.read_text()
         # The full absolute path must appear, NOT a ~-abbreviated version
@@ -284,7 +272,7 @@ class TestUpdateSessionInfo:
 
         home = str(Path.home())
         sd = f"{home}/.claude/pact-sessions/myproject/abc-123"
-        update_session_info("sess-sd1", "pact-sd1", session_dir=sd)
+        update_session_info("sess-sd1", "pact-sd1", session_dir=sd, doc=doc_at())
 
         content = target.read_text()
         # The full absolute path must appear, NOT a ~-abbreviated version.
@@ -300,7 +288,7 @@ class TestUpdateSessionInfo:
         target = tmp_path / "CLAUDE.md"
         target.write_text("# Project\n\n## Retrieved Context\n")
 
-        update_session_info("sess-pr3", "pact-pr3")
+        update_session_info("sess-pr3", "pact-pr3", doc=doc_at())
 
         content = target.read_text()
         assert "Plugin root:" not in content
@@ -326,7 +314,7 @@ class TestUpdateSessionInfoDualLocation:
         dot_claude_file.write_text("# Project\n\n## Retrieved Context\n")
         legacy = tmp_path / "CLAUDE.md"
 
-        result = update_session_info("dc-sess", "pact-dc1")
+        result = update_session_info("dc-sess", "pact-dc1", doc=doc_at())
 
         assert result == "Session info added to project CLAUDE.md"
         # Edit landed at .claude/CLAUDE.md
@@ -343,7 +331,7 @@ class TestUpdateSessionInfoDualLocation:
         legacy.write_text("# Project\n\n## Retrieved Context\n")
         new_default = tmp_path / ".claude" / "CLAUDE.md"
 
-        result = update_session_info("lg-sess", "pact-lg1")
+        result = update_session_info("lg-sess", "pact-lg1", doc=doc_at())
 
         assert result == "Session info added to project CLAUDE.md"
         # Edit landed at the legacy file
@@ -364,7 +352,7 @@ class TestUpdateSessionInfoDualLocation:
         legacy = tmp_path / "CLAUDE.md"
         legacy.write_text("# Legacy untouched\n\n## Retrieved Context\n")
 
-        result = update_session_info("both-sess", "pact-both1")
+        result = update_session_info("both-sess", "pact-both1", doc=doc_at())
 
         assert result == "Session info added to project CLAUDE.md"
         # Preferred file got the edit
@@ -383,7 +371,7 @@ class TestUpdateSessionInfoDualLocation:
         new_default = tmp_path / ".claude" / "CLAUDE.md"
         legacy = tmp_path / "CLAUDE.md"
 
-        result = update_session_info("new-sess", "pact-new1")
+        result = update_session_info("new-sess", "pact-new1", doc=doc_at())
 
         assert result == "Session info created in new project CLAUDE.md"
         assert new_default.exists()
@@ -556,7 +544,7 @@ class TestUpdateSessionInfoErrorPaths:
         target.write_text("# Project\n")
 
         with mock_patch.object(Path, "read_text", side_effect=IOError("disk error")):
-            result = update_session_info("sess-123", "pact-sess123")
+            result = update_session_info("sess-123", "pact-sess123", doc=doc_at())
 
         assert result is not None
         assert "Session info failed:" in result
@@ -617,7 +605,7 @@ class TestUpdateSessionInfoFailureSignal:
 
         project_dir, _target = _unreadable_project(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        result = update_session_info("sess-123", "pact-sess123")
+        result = update_session_info("sess-123", "pact-sess123", doc=doc_at())
 
         assert result is not None
         assert result.startswith(
@@ -647,7 +635,7 @@ class TestUpdateSessionInfoFailureSignal:
         target.write_bytes(b"\xff\xfe bad bytes")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        result = update_session_info("sess-123", "pact-sess123")
+        result = update_session_info("sess-123", "pact-sess123", doc=doc_at())
 
         assert result is not None
         assert "not valid UTF-8" in result and "left unchanged" in result
@@ -684,7 +672,7 @@ class TestUpdateSessionInfoFailureSignal:
 
         project_dir, _target = _unreadable_project(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        result = update_session_info("sess-123", "pact-sess123")
+        result = update_session_info("sess-123", "pact-sess123", doc=doc_at())
 
         assert isinstance(result, str)
         assert result != ""
@@ -721,7 +709,7 @@ class TestUpdateSessionInfoFailureSignal:
 
         project_dir, _target = _unreadable_project(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        result = update_session_info("sess-123", "pact-sess123")
+        result = update_session_info("sess-123", "pact-sess123", doc=doc_at())
 
         assert result is not None
         assert "failed" in result.lower(), (
@@ -812,9 +800,7 @@ class TestUpdateSessionInfoFailureSignal:
         with mock_patch.object(
             session_resume, "_atomic_write_text", side_effect=injected
         ):
-            result = session_resume.update_session_info(
-                "sess-123", "pact-sess123"
-            )
+            result = session_resume.update_session_info("sess-123", "pact-sess123", doc=doc_at())
 
         assert result is not None
         assert "OSError (ENOSPC)" in result
@@ -874,7 +860,7 @@ class TestUpdateSessionInfoLocking:
         def run(index: int, session_id: str, team_name: str) -> None:
             try:
                 barrier.wait(timeout=5)
-                results[index] = update_session_info(session_id, team_name)
+                results[index] = update_session_info(session_id, team_name, doc=doc_at())
             except BaseException as exc:
                 errors.append(exc)
 
@@ -973,7 +959,7 @@ class TestUpdateSessionInfoLocking:
             "Holder thread never acquired the lock"
         )
 
-        result = update_session_info("sess-timeout", "pact-timeout")
+        result = update_session_info("sess-timeout", "pact-timeout", doc=doc_at())
 
         assert result is not None
         # MUST contain "failed" — session_init routes on
@@ -1040,7 +1026,7 @@ class TestUpdateSessionInfoLeafSymlinkAllowed:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
-        result = update_session_info("sess-new", "pact-new")
+        result = update_session_info("sess-new", "pact-new", doc=doc_at())
 
         assert result is not None
         assert "Session info updated" in result
@@ -3175,7 +3161,7 @@ class TestMigrateAndSessionUpdate:
         target.write_text(pre_content)
 
         # Step 1: migrate
-        migrate_result = migrate_to_managed_structure()
+        migrate_result = migrate_to_managed_structure(doc_at())
         assert migrate_result is not None and "Migrated" in migrate_result
         post_migration = target.read_text()
         assert MANAGED_START_MARKER in post_migration
@@ -3185,11 +3171,7 @@ class TestMigrateAndSessionUpdate:
         assert SESSION_END not in post_migration
 
         # Step 2: update_session_info (triggers Case 2 — no SESSION markers)
-        result = update_session_info(
-            "sess-integ-1", "pact-integ1",
-            session_dir="/abs/path/to/session-dir",
-            plugin_root="/abs/path/to/plugin",
-        )
+        result = update_session_info("sess-integ-1", "pact-integ1", session_dir="/abs/path/to/session-dir", plugin_root="/abs/path/to/plugin", doc=doc_at())
         assert result is not None and "failed" not in result.lower()
 
         final_content = target.read_text()
@@ -3278,7 +3260,7 @@ class TestMigrateAndSessionUpdate:
         )
         target.write_text(content)
 
-        result = update_session_info("sess-direct", "pact-direct")
+        result = update_session_info("sess-direct", "pact-direct", doc=doc_at())
         assert result is not None
 
         final = target.read_text()
@@ -3339,7 +3321,7 @@ class TestUpdateSessionInfoMarksTransientFailures:
 
     def _update(self):
         from shared.session_resume import update_session_info
-        return update_session_info("sid", "team", "/tmp/s", "/tmp/p")
+        return update_session_info("sid", "team", "/tmp/s", "/tmp/p", doc=doc_at())
 
     def test_a_lock_timeout_is_transient(self, tmp_path, monkeypatch):
         from shared import session_resume
@@ -3478,3 +3460,138 @@ class TestWrapUpRetiresAPausedClaim:
         _, gh = self._resolve(tmp_path, [paused, self._wrap_up("2026-07-10T13:00:00Z")])
 
         gh.assert_called_once()
+
+
+# ── #1653 B9: a worktree lead reads the previous session dir from MAIN ──────
+
+class TestWorktreeLeadReadsTheMainSessionBlock:
+    """Step 5a must read MAIN's Current Session block for a linked worktree.
+
+    A worktree lead that read its own checkout would get None -- there is no
+    file there -- silently breaking cross-session resume and paused-work
+    detection. The value is asserted where its consumer receives it
+    (`restore_last_session`), and the consumer's own output is marked so a
+    snapshot that never reached the context cannot pass.
+
+    RED evidence: on the pre-#1653 tree step 5a read `project_dir`, found
+    nothing in the worktree, and handed the consumer None.
+    """
+
+    @staticmethod
+    def _git(*args, cwd):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    def test_a_worktree_lead_reads_the_previous_session_dir_from_main(
+        self, tmp_path, monkeypatch
+    ):
+        import session_init
+        from shared.session_resume import update_session_info
+
+        main = tmp_path / "main"
+        main.mkdir()
+        self._git("init", "-q", ".", cwd=main)
+        (main / "README").write_text("seed\n")
+        self._git("add", ".", cwd=main)
+        self._git("commit", "-qm", "seed", cwd=main)
+        worktree = tmp_path / "wt-b9"
+        self._git("worktree", "add", "-q", str(worktree), "-b", "b9", cwd=main)
+
+        # MAIN's block names a previous session whose directory exists, the
+        # shape _extract_prev_session_dir validates and returns.
+        prev_dir = Path.home() / ".claude" / "pact-sessions" / "proj" / "prev-b9"
+        prev_dir.mkdir(parents=True)
+        assert update_session_info("prev-b9", "pact-prev", str(prev_dir), doc=doc_at(str(main))) is not None
+
+        seen = {}
+
+        def spy(prev_session_dir=None):
+            seen["prev"] = prev_session_dir
+            return "SNAPSHOT-FROM-MAIN"
+
+        monkeypatch.setattr(session_init, "restore_last_session", spy)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(worktree)
+        stdin_data = json.dumps({
+            "session_id": "cccccccc-dddd-eeee-ffff-000000000000",
+            "source": "startup",
+            "agent_type": "PACT:pact-orchestrator",
+        })
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        context = json.loads(out.getvalue()).get(
+            "hookSpecificOutput", {}
+        ).get("additionalContext", "")
+
+        assert seen.get("prev") == str(prev_dir), (
+            "step 5a did not hand MAIN's previous session dir to "
+            "restore_last_session; a None silently breaks resume"
+        )
+        assert "SNAPSHOT-FROM-MAIN" in context, (
+            "the snapshot built from the previous session never reached the "
+            "session context"
+        )
+
+
+# ── #53: the restored summary names its source session, neutrally ───────────
+
+class TestRestoredSummaryNamesItsSource:
+    """The restored header names the journal's session as the FACT of where the
+    text came from. It must not say "resumed from" (a predecessor ordering
+    two concurrent leads can falsify) and it computes no liveness state."""
+
+    def test_the_header_names_the_source_session(self, tmp_path):
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import restore_last_session
+
+        session_dir = tmp_path / "prev-session"
+        assert append_event(
+            make_event(
+                "session_start", session_id="abc12345-source",
+                project_dir="/proj", source="startup",
+            ),
+            session_dir=str(session_dir),
+        )
+        assert append_event(
+            make_event(
+                "agent_handoff", agent="coder", task_id="t1",
+                task_subject="CODE: x", handoff={"decisions": ["d"]},
+            ),
+            session_dir=str(session_dir),
+        )
+
+        summary = restore_last_session(str(session_dir))
+
+        assert summary is not None
+        assert "Context from session abc12345-source." in summary, (
+            "the restored summary did not name its source session"
+        )
+        assert "resumed from" not in summary.lower(), (
+            "the header asserted a predecessor ordering"
+        )
+
+    def test_a_thin_journal_still_returns_none(self, tmp_path):
+        """The source line must not turn a too-thin journal into a summary:
+        the None/non-None boundary is unchanged by the header addition."""
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import restore_last_session
+
+        session_dir = tmp_path / "thin-session"
+        assert append_event(
+            make_event(
+                "session_start", session_id="thin-source",
+                project_dir="/proj", source="startup",
+            ),
+            session_dir=str(session_dir),
+        )
+
+        assert restore_last_session(str(session_dir)) is None

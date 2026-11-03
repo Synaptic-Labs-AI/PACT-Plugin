@@ -63,7 +63,7 @@ from shared.task_utils import (
 )
 
 # Import staleness detection (extracted to staleness.py for maintainability).
-# Underscore aliases (_get_project_claude_md_path, _estimate_tokens) and the
+# The underscore alias (_estimate_tokens) and the
 # uppercase constants are re-exported here so test_staleness.py can keep
 # importing them via `from session_init import ...`. Removing these would
 # break the staleness test suite, even though pyright flags them as unused
@@ -73,7 +73,6 @@ from staleness import (  # noqa: F401
     check_pinned_block_signal as _staleness_block_check,
     PINNED_STALENESS_DAYS,
     PINNED_CONTEXT_TOKEN_BUDGET,
-    _get_project_claude_md_path,
     _estimate_tokens,
     locate_pinned,
 )
@@ -123,7 +122,11 @@ from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
-from shared.project_scope import _record_worktree_identity
+from shared.project_scope import (
+    _record_worktree_identity,
+    session_memory_root,
+    unknown_root_status,
+)
 from shared import backlog_store
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -135,9 +138,10 @@ from shared.claude_md_manager import (
     MEMORY_START_MARKER,
     SESSION_END_MARKER,
     SESSION_START_MARKER,
+    ManagedDocument,
     ensure_project_memory_md,
     migrate_to_managed_structure,
-    resolve_project_claude_md_path,
+    resolve_managed_document,
     strip_orphan_kernel_block,
 )
 from shared.merge_guard_common import (
@@ -149,6 +153,8 @@ from shared.session_resume import (
     _extract_prev_session_dir,
     _same_dir,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
+    existing_document,
+    format_project_memory_line,
     format_session_substitutions,
     update_session_info,
     restore_last_session,
@@ -305,18 +311,18 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
     return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
 
-def check_pinned_staleness():
+def check_pinned_staleness(doc: ManagedDocument):
     """
     Thin wrapper around staleness.check_pinned_staleness().
 
-    Resolves the CLAUDE.md path via the module-level _get_project_claude_md_path
-    (which tests can patch on session_init) and passes it to the core function.
+    Marks `doc.path`, the session's one resolved document, when it exists,
+    and returns None otherwise: this check marks an existing file and never
+    creates one.
     """
-    path = _get_project_claude_md_path()
-    return _staleness_check(claude_md_path=path)
+    return _staleness_check(claude_md_path=doc.path) if doc.exists else None
 
 
-def check_pin_slot_status() -> Optional[str]:
+def check_pin_slot_status(doc: ManagedDocument) -> Optional[str]:
     """Return a Tier-0 slot-status line for additionalContext, or None.
 
     Builds "Pin slots: N/12 used, K chars remaining on largest pin" via
@@ -330,11 +336,14 @@ def check_pin_slot_status() -> Optional[str]:
     regression, future parser change that raises outside the pin reader).
     Wrap the full body in a blanket try/except — mirrors the sibling
     check_pin_stale_block_directive pattern above.
+
+    Counts `doc.path`, the session's managed document (MAIN's for a linked
+    worktree), when it exists.
     """
     try:
-        path = _get_project_claude_md_path()
-        if path is None:
+        if not doc.exists:
             return None
+        path = doc.path
 
         try:
             # Read-only: a byte that is not UTF-8 decodes to U+FFFD and the
@@ -347,8 +356,8 @@ def check_pin_slot_status() -> Optional[str]:
         # start that never reaches this line does not load it.
         from shared.claude_md_markers import State, parse
 
-        doc = parse(content)
-        located = locate_pinned(doc)
+        parsed = parse(content)
+        located = locate_pinned(parsed)
         if located.state is State.ABSENT:
             # Missing Pinned Context section — surface 0-used state so the
             # orchestrator sees pin headroom from session start.
@@ -359,7 +368,7 @@ def check_pin_slot_status() -> Optional[str]:
             return None
 
         try:
-            pins = section_pins(doc, located)
+            pins = section_pins(parsed, located)
         except Exception:  # noqa: BLE001 — fail-open by construction
             return None
 
@@ -380,7 +389,7 @@ _SYNC_HEADINGS = (
 _REASON_LINE = re.compile(r"\blines? (\d+)")
 
 
-def check_claude_md_refusals() -> Optional[str]:
+def check_claude_md_refusals(doc: ManagedDocument) -> Optional[str]:
     """Return the per-launch line for a project CLAUDE.md that PACT will not
     update, or None.
 
@@ -394,11 +403,14 @@ def check_claude_md_refusals() -> Optional[str]:
     checked. A missing, unreadable or non-UTF-8
     file gives None: the writers report those themselves. Read-only, and
     fail-open on the SessionStart hot path.
+
+    Reads `doc.path`, the session's managed document (the file PACT writes,
+    MAIN's for a linked worktree), when it exists.
     """
     try:
-        path = _get_project_claude_md_path()
-        if path is None:
+        if not doc.exists:
             return None
+        path = doc.path
         try:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -409,21 +421,21 @@ def check_claude_md_refusals() -> Optional[str]:
         from shared.claude_md_markers import State, parse
 
         refused_states = (State.DUPLICATE, State.MALFORMED, State.UNKNOWN)
-        doc = parse(content)
+        parsed = parse(content)
         # Each lookup, and the names it stands for when it is refused.
-        lookups = [doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER),
-                   doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)]
+        lookups = [parsed.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER),
+                   parsed.find_block(SESSION_START_MARKER, SESSION_END_MARKER)]
         labels: list[tuple[str, ...]] = [("the PACT managed block",), ("Current Session",)]
-        memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+        memory = parsed.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
         # The gate's own Pinned lookup. Outside a found memory block it is the
         # memory block's result, so it is refused exactly when that block is.
-        pinned = locate_pinned(doc, unique=True)
+        pinned = locate_pinned(parsed, unique=True)
         if memory.state is State.FOUND:
             first, last = memory.spans[0]
             interior = (first + 1, last - 1)
             (retrieved_name, retrieved_heading), (working_name, working_heading) = _SYNC_HEADINGS
-            lookups += [doc.find_section(retrieved_heading, None, interior), pinned,
-                        doc.find_section(working_heading, None, interior)]
+            lookups += [parsed.find_section(retrieved_heading, None, interior), pinned,
+                        parsed.find_section(working_heading, None, interior)]
             labels += [(retrieved_name,), ("Pinned Context",), (working_name,)]
         else:
             lookups.append(memory)
@@ -437,7 +449,7 @@ def check_claude_md_refusals() -> Optional[str]:
 
         def line_of(index: int) -> int:
             found = _REASON_LINE.search(lookups[index].reason)
-            return int(found.group(1)) if found else len(doc.lines) + 1
+            return int(found.group(1)) if found else len(parsed.lines) + 1
 
         earliest = lookups[min(refused, key=line_of)]
         names = ", ".join(name for index in refused for name in labels[index])
@@ -454,7 +466,7 @@ def check_claude_md_refusals() -> Optional[str]:
         return None
 
 
-def check_pin_stale_block_directive() -> Optional[str]:
+def check_pin_stale_block_directive(doc: ManagedDocument) -> Optional[str]:
     """Return an unconditional stale-block directive for additionalContext, or None.
 
     Fires only when check_pinned_block_signal reports positive detection.
@@ -473,9 +485,12 @@ def check_pin_stale_block_directive() -> Optional[str]:
     # its own contract, but session_init is on the SessionStart hot path —
     # a regression inside the callee should not propagate out of this
     # surfacing helper. Wrap in fail-open try/except.
+    # Reads `doc.path`, the session's managed document, when it exists; with
+    # no document there is nothing to read.
+    if not doc.exists:
+        return None
     try:
-        path = _get_project_claude_md_path()
-        signal = _staleness_block_check(claude_md_path=path)
+        signal = _staleness_block_check(claude_md_path=doc.path)
     except Exception:  # noqa: BLE001 — fail-open
         return None
 
@@ -610,7 +625,7 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def _extract_session_started(project_dir: str) -> str | None:
+def _extract_session_started(doc: ManagedDocument) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     None when there is no CLAUDE.md, it cannot be read, or the line is not in
@@ -618,14 +633,13 @@ def _extract_session_started(project_dir: str) -> str | None:
     not read). Only the exact shape update_session_info writes is returned, so
     no other text from the file can reach the block it rewrites. Read without
     the sidecar lock: every writer replaces the file whole, so the read sees
-    the old file or the new one.
+    the old file or the new one. `doc` is the session's managed document.
     """
-    if not project_dir:
-        return None
     try:
-        claude_md, source = resolve_project_claude_md_path(project_dir)
-        if source == "new_default":
+        found = existing_document(doc)
+        if found is None:
             return None
+        claude_md, _base = found
         # Read-only, and the pattern takes ASCII digits only, so a replaced
         # byte cannot reach the block.
         content = claude_md.read_text(encoding="utf-8", errors="replace")
@@ -1665,14 +1679,46 @@ def main():
         # share one verdict.
         frame_is_lead = frame_role == "lead"
 
+        # Where this session's project memory lives: ONE observation and ONE
+        # document for every step below. `session_memory_root` applies the one
+        # anchor precedence (the declaration, else the session record, else
+        # the cwd) and the one classifier; `resolve_managed_document` applies
+        # the one document rule (the root's canonical file, else the enclosing
+        # main checkout's, else the create target at the root). A linked
+        # worktree's root is its MAIN checkout, so nothing below plants or
+        # rewrites a copy in the worktree. No step re-derives either answer.
+        session = session_memory_root()
+        memory_unknown = session.cause is not None
+        doc = None if memory_unknown else resolve_managed_document(session.root)
+
+        # THE CREATING WRITERS (steps 3, 3b, 5b) act only on a DECLARED anchor:
+        # a frame the platform handed no project dir creates nothing. Step 4
+        # and the advisory readers act on any known root: they read or mark a
+        # document that already exists and create none.
+        creators_run = frame_is_lead and session.declared and not memory_unknown
+
+        # One user-visible line for the skip; the writers never run below. The
+        # cause and anchor rendered are the ones the guard used.
+        if frame_is_lead and memory_unknown:
+            system_messages.append(
+                unknown_root_status(
+                    "Project CLAUDE.md",
+                    session.cause,
+                    session.anchor,
+                    "this start wrote nothing to either checkout.",
+                )
+            )
+
         # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
         # does. A teammate whose project dir is a worktree would otherwise plant
         # a template there that diverts every CLAUDE.md resolver away from the
         # main repo's file, or rewrite a tracked CLAUDE.md in the worktree; in
         # the lead's own dir the lead has already written it.
-        if frame_is_lead:
-            # 3. Ensure project has CLAUDE.md with memory sections
-            project_md_msg = ensure_project_memory_md()
+        if creators_run:
+            # 3. Ensure project has CLAUDE.md with memory sections. `doc.base`
+            # holds the document when it exists (no create) and is the root
+            # when it does not (create at `doc.path`).
+            project_md_msg = ensure_project_memory_md(doc)
             if project_md_msg:
                 if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
                     system_messages.append(project_md_msg)
@@ -1685,12 +1731,23 @@ def main():
             # already have the new structure, and before staleness checks
             # so the staleness parser sees the migrated layout.
             # Idempotent no-op when PACT_MANAGED_START marker is already present.
-            migration_msg = migrate_to_managed_structure()
+            migration_msg = migrate_to_managed_structure(doc)
             if migration_msg:
                 if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
                     system_messages.append(migration_msg)
                 else:
                     context_parts.append(migration_msg)
+
+            # Step 3 may have created the document: re-probe the SAME root
+            # (no second classification) so every later step sees it.
+            doc = resolve_managed_document(session.root)
+
+        # Name the project memory file in the lead's context, after step 3 so
+        # a file it created is the one named. Every instruction that refers
+        # to the project CLAUDE.md reads this line; on every source,
+        # compaction included, because compaction drops earlier context.
+        if frame_is_lead:
+            context_parts.append(format_project_memory_line(session, doc))
 
         # Step 3c retired in v4.2.15 — orphan-stripper sunset; see git log for context.
 
@@ -1725,19 +1782,30 @@ def main():
         # runs it: a teammate in a worktree would otherwise mark a tracked
         # CLAUDE.md. Failed/skipped diagnostics go to system_messages, the
         # advisory to context.
-        if frame_is_lead:
-            staleness_msg = check_pinned_staleness()
+        #
+        # AN UNKNOWN memory root has no document, so this step and the
+        # advisory readers below do not run. The single "Project CLAUDE.md
+        # skipped" line already appended above covers them; do not add a
+        # second one.
+        if frame_is_lead and doc is not None:
+            staleness_msg = check_pinned_staleness(doc=doc)
             if staleness_msg:
                 if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                     system_messages.append(staleness_msg)
                 else:
                     context_parts.append(staleness_msg)
 
+        # THE THREE ADVISORY READERS FOLLOW THE UNKNOWN ANSWER TOO. They used
+        # to receive the substituted fail-open root and describe the worktree
+        # copy: a start that had just said it wrote nothing to either checkout
+        # still told the user to run /PACT:prune-memory, whose own guard then
+        # refused on the same root. Nothing here reads a target it cannot
+        # identify; the single skip line above already reports the condition.
         # 4d. Name the project CLAUDE.md's blocks and sections PACT will not
         # update, on every launch until the file is fixed. Lead only, beside
         # each writer's own status; a compaction is not a launch.
-        if frame_is_lead and source != "compact":
-            refusal_msg = check_claude_md_refusals()
+        if frame_is_lead and doc is not None and source != "compact":
+            refusal_msg = check_claude_md_refusals(doc=doc)
             if refusal_msg:
                 system_messages.append(refusal_msg)
 
@@ -1745,7 +1813,10 @@ def main():
         # architecturally binding, survives compaction. Fail-open: None
         # when CLAUDE.md cannot be resolved or parsed. m2: lead-only pin
         # telemetry — not surfaced to a teammate frame.
-        slot_status_msg = check_pin_slot_status()
+        slot_status_msg = (
+            check_pin_slot_status(doc=doc)
+            if doc is not None else None
+        )
         if slot_status_msg and frame_role != "teammate":
             context_parts.append(slot_status_msg)
 
@@ -1754,7 +1825,10 @@ def main():
         # /resume per plan key-decisions row 6. m2: the "/PACT:prune-memory"
         # directive is a lead/orchestrator memory action — not surfaced to a
         # teammate frame (the helper's marker side-effect is unchanged).
-        stale_block_msg = check_pin_stale_block_directive()
+        stale_block_msg = (
+            check_pin_stale_block_directive(doc=doc)
+            if doc is not None else None
+        )
         if stale_block_msg and frame_role != "teammate":
             context_parts.append(stale_block_msg)
 
@@ -2007,6 +2081,14 @@ def main():
         # mid-session, and the next SessionStart corrects the record then.
         lead_address = resolve_lead_address()
 
+        # THE SESSION-STATE WRITES REPORT ON THE USER-VISIBLE CHANNEL. Their
+        # own log lines go to hook stderr, which the platform does not show,
+        # and the journal cannot record its own failure. A start that loses
+        # this state otherwise tells the user everything is well while leaving
+        # a session directory that contains nothing. Both writes are tracked
+        # separately because they fail separately.
+        context_state_ok = True
+        journal_state_ok = True
         if not session_id_was_missing:
             try:
                 # SEAM (#877): compose the two halves directly. ALWAYS build +
@@ -2035,10 +2117,16 @@ def main():
                     harness=harness,
                     lead_address=lead_address,
                 )
-                if frame_is_lead and _ctx_result is not None:
-                    persist_context(*_ctx_result)
+                if frame_is_lead:
+                    if _ctx_result is None:
+                        # The context could not even be composed and cached:
+                        # nothing was persisted either.
+                        context_state_ok = False
+                    else:
+                        context_state_ok = persist_context(*_ctx_result)
             except Exception as e:
                 # Fail-open: context file is best-effort; hooks fall back to empty strings
+                context_state_ok = False
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
         # Resolve session_dir early so substitution instructions can include it.
@@ -2077,7 +2165,16 @@ def main():
         # otherwise it reads back the just-written current session dir and
         # silently breaks cross-session resume (step 7) and paused/refreshed-
         # work detection (step 8).
-        prev_session_dir = _extract_prev_session_dir(project_dir)
+        #
+        # An UNKNOWN root has no document, so there is no predecessor to read:
+        # any file this start could name is the copy it cannot verify. Cross-
+        # session restore and resume detection do not run on such a start;
+        # the skip line above names the cause.
+        prev_session_dir = (
+            _extract_prev_session_dir(project_dir, doc=doc)
+            if doc is not None
+            else None
+        )
 
         if not session_id_was_missing:
             # Write session_start event to journal (after build_context_cache so
@@ -2103,7 +2200,7 @@ def main():
                 # startup fire nothing is carried, so this field records
                 # whether CLAUDE_CODE_REMOTE reached the SessionStart hook.
                 _start_fields["lead_address"] = lead_address
-                append_event(
+                journal_state_ok = append_event(
                     make_event(
                         "session_start",
                         team=team_name,
@@ -2114,6 +2211,19 @@ def main():
                         **_start_fields,
                     ),
                 )
+
+        if not context_state_ok or not journal_state_ok:
+            lost = []
+            if not context_state_ok:
+                lost.append("the session context file")
+            if not journal_state_ok:
+                lost.append("the session journal")
+            system_messages.append(
+                "PACT could not write " + " and ".join(lost)
+                + f" in {session_dir}. The session continues, but the state "
+                "recorded there will be missing next time; check that the "
+                "session directory is writable."
+            )
 
         # Build context message based on source (post-collapse: the team always
         # exists — the platform pre-creates exactly one team per session).
@@ -2478,10 +2588,11 @@ def main():
         # CROSS-PROCESS CLOBBER — a teammate/plain frame writing it overwrites
         # the lead's session block in the shared project file. Gate on
         # frame_is_lead in addition to the existing sentinel guard.
-        if frame_is_lead and not _is_unknown_or_missing_session(session_id):
+        if creators_run and not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(
                 session_id, team_name, session_dir, plugin_root,
-                started=_extract_session_started(project_dir) if source == "compact" else None,
+                started=_extract_session_started(doc=doc) if source == "compact" else None,
+                doc=doc,
             )
             if session_msg:
                 if "failed" in session_msg.lower() or "skipped" in session_msg.lower():

@@ -32,6 +32,7 @@ from shared.task_utils import resolve_task_dir
 from test_missed_wake_scan_integration import (  # noqa: F401 (fixture re-export)
     live_task_env,
 )
+from helpers import doc_at  # noqa: E402
 
 SHORT_NAME = "session-1a2b3c4d"
 FULL_UUID = "9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c"
@@ -79,8 +80,7 @@ class TestOneNameAcrossSurfaces:
         resumed lead reads first."""
         aligned = _resolve_aligned_team_name(FULL_UUID)
         assert resolve_task_dir() is not None, "precondition: store resolves"
-        update_session_info(FULL_UUID, aligned, session_dir="/sess",
-                            plugin_root="/root")
+        update_session_info(FULL_UUID, aligned, session_dir="/sess", plugin_root="/root", doc=doc_at())
         # The writer's preferred target is $project/.claude/CLAUDE.md
         # (resolve_project_claude_md_path creates at the preferred path when
         # neither location exists).

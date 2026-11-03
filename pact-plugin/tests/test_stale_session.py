@@ -29,6 +29,7 @@ from shared.stale_session import (
     detect_stale_session_block,
     _RESUME_LINE_RE,
 )
+from helpers import doc_at  # noqa: E402
 
 _LIVE_ID = "11111111-2222-4000-8000-000000000000"
 _RECORDED_DIFFERENT = "99999999-8888-4000-8000-000000000000"
@@ -129,13 +130,58 @@ def test_missing_session_id_key_returns_none(tmp_path, monkeypatch):
 
 
 # =============================================================================
-# None-branch 2: CLAUDE_PROJECT_DIR unset
+# None-branch 2: no document at the session's anchor. With CLAUDE_PROJECT_DIR
+# unset the anchor is the session record, else the cwd.
 # =============================================================================
 
 
-def test_project_dir_unset_returns_none(monkeypatch):
+def test_project_dir_unset_and_no_document_at_the_cwd_returns_none(
+    tmp_path, monkeypatch
+):
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
     assert detect_stale_session_block({"session_id": _LIVE_ID}) is None
+
+
+def test_project_dir_unset_reads_the_cwd_anchors_document(tmp_path, monkeypatch):
+    """The one anchor precedence: no declaration, so the cwd. Revert check:
+    with the detector on CLAUDE_PROJECT_DIR alone this returns None."""
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    _write_claude_md(tmp_path, _RECORDED_DIFFERENT)
+    monkeypatch.chdir(tmp_path)
+
+    result = detect_stale_session_block({"session_id": _LIVE_ID})
+
+    assert result is not None and _RECORDED_DIFFERENT in result
+
+
+def test_a_subdirectory_session_reads_the_toplevel_document(tmp_path, monkeypatch):
+    """The one document rule: a subdirectory of a main checkout with no
+    document of its own uses the checkout's. Revert check: with the detector
+    on the raw root's two paths this returns None.
+
+    The checkout sits BELOW tmp_path: the test home is tmp_path, so a
+    checkout AT tmp_path would hold the user-global CLAUDE.md, which the
+    enclosing-checkout rung never returns."""
+    import os
+    import subprocess
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init", "-q", str(checkout)],
+        env=env, check=True, capture_output=True, timeout=30,
+    )
+    _write_claude_md(checkout, _RECORDED_DIFFERENT)
+    subdir = checkout / "pkg"
+    subdir.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(subdir))
+
+    result = detect_stale_session_block({"session_id": _LIVE_ID})
+
+    assert result is not None and _RECORDED_DIFFERENT in result
 
 
 # =============================================================================
@@ -264,8 +310,33 @@ def test_the_written_resume_line_carries_the_lead_flag_and_parses(
     project = tmp_path / "proj"
     project.mkdir()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
-    update_session_info(_LIVE_ID, "session-11111111")
+    update_session_info(_LIVE_ID, "session-11111111", doc=doc_at())
     written = "".join(p.read_text() for p in project.rglob("CLAUDE.md"))
     assert f"`claude --agent PACT:pact-orchestrator --resume {_LIVE_ID}`" in written
     m = _RESUME_LINE_RE.search(written)
     assert m is not None and m.group(1) == _LIVE_ID
+
+
+@pytest.mark.parametrize("raised", [ValueError, RuntimeError, TypeError])
+def test_a_resolution_that_raises_any_error_is_no_warning(tmp_path, monkeypatch, raised):
+    """The detector is advisory: a resolution failure of ANY kind -- not only
+    OSError -- answers "no warning", because a raise here reaches a consumer's
+    fail-open and suppresses the whole injection, the bootstrap instruction
+    included.
+
+    Revert check: narrowing the handler to `except OSError` lets the error
+    escape the detector, and this goes red.
+    """
+    from shared import claude_md_manager
+
+    _write_claude_md(tmp_path, _RECORDED_DIFFERENT)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    # Control: the same project, resolving normally, does warn.
+    assert detect_stale_session_block({"session_id": _LIVE_ID}) is not None
+
+    def failing_resolution(*_args, **_kwargs):
+        raise raised("resolution failed")
+
+    monkeypatch.setattr(claude_md_manager, "session_document", failing_resolution)
+
+    assert detect_stale_session_block({"session_id": _LIVE_ID}) is None

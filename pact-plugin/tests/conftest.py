@@ -371,7 +371,7 @@ def _scrub_claude_project_dir_env():
        DIRECT assignment (NOT ``monkeypatch.setenv``), so it is never restored
        and LEAKS into later tests — an order-dependent pollution vector that
        redirects ``CLAUDE_PROJECT_DIR``-keyed resolvers (e.g.
-       ``staleness.get_project_claude_md_path``) away from the test's intended
+       ``staleness.resolve_session_claude_md_path``) away from the test's intended
        root. The setup-time POP makes every test start from a
        guaranteed-unset baseline regardless of what an earlier test left
        behind — strictly stronger than the snapshot/restore-only posture this
@@ -562,8 +562,8 @@ def _scrub_claude_env_file_env():
 def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
     """Redirect the Claude Code config/state root to a per-test tmp tree for
     EVERY test (autouse, opt-OUT), via TWO mechanisms: scrub any inherited
-    CLAUDE_CONFIG_DIR, then redirect ``Path.home()`` -> tmp_path. Runs for EVERY
-    test.
+    CLAUDE_CONFIG_DIR, then redirect ``Path.home()`` -> ``tmp_path / "home"``.
+    Runs for EVERY test.
 
     ``get_claude_config_dir()`` (hooks/shared/paths.py) — the single source of
     truth every PACT state writer resolves through — honors ``$CLAUDE_CONFIG_DIR``
@@ -577,10 +577,11 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
        LIVE resolution path. A contributor who exports CLAUDE_CONFIG_DIR (their
        real config) must NOT leak through — exactly the "forgetting is the
        default" gap #1186 exists to close.
-    2. REDIRECT ``Path.home()`` -> tmp_path (``monkeypatch.setattr``, matching
-       the suite's own isolation convention — e.g. test_artifact_paths_durability
-       and the teammate_mode ``_ModeEnv`` harness). In-process,
-       ``get_claude_config_dir()`` now resolves to ``tmp_path / ".claude"``, so
+    2. REDIRECT ``Path.home()`` -> ``tmp_path / "home"`` (``monkeypatch.setattr``,
+       matching the suite's own isolation convention — e.g.
+       test_artifact_paths_durability and the teammate_mode ``_ModeEnv``
+       harness). In-process, ``get_claude_config_dir()`` now resolves to
+       ``tmp_path / "home" / ".claude"``, so
        every SSOT-respecting in-process writer (``agent_handoff_marker._marker_dir``
        = ``get_claude_config_dir() / "teams" / team / namespace``; the registry
        reaper's default root; etc.) lands under the per-test tmp, NEVER the
@@ -619,7 +620,14 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
     a test exercising the marker writer against the live resolver wrote
     test-fixture marker dirs into the operator's real ``~/.claude/teams/`` since
     ~2026-04-05. This fixture inverts opt-in to opt-OUT: every test gets a
-    throwaway ``tmp_path / ".claude"`` root regardless of ambient env.
+    throwaway ``tmp_path / "home" / ".claude"`` root regardless of ambient env.
+
+    THE HOME IS A SUBDIRECTORY OF tmp_path, NOT tmp_path ITSELF. A test that
+    uses tmp_path as its project directory would otherwise be a session started
+    in $HOME, whose canonical CLAUDE.md is the user-global file, and project
+    memory refuses that directory by design. The home directory is NOT created
+    here: nothing in the resolver needs it to exist, and an autouse mkdir
+    collides with tests that patch the filesystem.
 
     A test that ONLY passed against the real ``~/.claude`` (or the operator's
     ambient ``CLAUDE_CONFIG_DIR``) was never isolated — under this fixture it
@@ -632,7 +640,8 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
     """
     _UNSET = object()
     original_cfg = os.environ.pop("CLAUDE_CONFIG_DIR", _UNSET)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
     yield
     if original_cfg is _UNSET:
         os.environ.pop("CLAUDE_CONFIG_DIR", None)

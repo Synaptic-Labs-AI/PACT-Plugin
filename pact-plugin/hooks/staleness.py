@@ -17,9 +17,7 @@ and under the 500-line maintainability limit.
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -35,7 +33,9 @@ from shared.claude_md_manager import (
     SESSION_BOUNDARY_PREFIX,
 )
 from shared.failure_cause import failure_cause
-from shared.project_scope import git_env_without_location
+# The same-file test lives beside the project-memory classifier; re-exported
+# here so every importer and patch point of `staleness.same_path` keeps working.
+from shared.project_scope import same_path  # noqa: F401
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     _PIN_HEADING_ROW,
@@ -167,52 +167,6 @@ _BUDGET_WARNING_ROW = re.compile(_BUDGET_WARNING_SHAPE)
 _BUDGET_WARNING_WHOLE_ROW =re.compile(rf"{_BUDGET_WARNING_HEAD}(?:(?!-->).)*-->\Z")
 
 
-def _existing_anchor(path: Path) -> Tuple[Path, Tuple[str, ...]]:
-    """The deepest ancestor of `path` (itself included) that exists, and the
-    names below it, in order."""
-    rest: List[str] = []
-    while not path.exists() and path.parent != path:
-        rest.append(path.name)
-        path = path.parent
-    return path, tuple(reversed(rest))
-
-
-def _case_insensitive(directory: Path) -> bool:
-    """Whether names are matched without case where `directory` lives: its
-    case-swapped spelling names the same directory. A name with no cased
-    letters cannot be probed and reads as case-sensitive."""
-    swapped = directory.name.swapcase()
-    if swapped == directory.name:
-        return False
-    try:
-        return os.path.samefile(directory, directory.with_name(swapped))
-    except (OSError, ValueError):
-        return False
-
-
-def same_path(a: Path, b: Path) -> bool:
-    """Whether `a` and `b` name the same file, created or not.
-
-    When both exist, `os.path.samefile`. Otherwise the deepest existing
-    ancestor of each must be the same directory, and the names below it must
-    be equal, or equal case-folded where that directory's volume matches names
-    without case. Never raises: an error reads as different paths.
-    """
-    try:
-        if a.exists() and b.exists():
-            return os.path.samefile(a, b)
-        anchor_a, rest_a = _existing_anchor(a)
-        anchor_b, rest_b = _existing_anchor(b)
-        if not os.path.samefile(anchor_a, anchor_b):
-            return False
-        if rest_a == rest_b:
-            return True
-        folded = [name.casefold() for name in rest_a] == [name.casefold() for name in rest_b]
-        return folded and _case_insensitive(anchor_a)
-    except (OSError, ValueError):
-        return False
-
-
 def _find_existing_claude_md(base: Path, assume_present: Optional[Path] = None) -> Optional[Path]:
     """
     Look for an existing project CLAUDE.md under `base`, honoring both
@@ -231,93 +185,17 @@ def _find_existing_claude_md(base: Path, assume_present: Optional[Path] = None) 
     return None
 
 
-def _resolve_project_claude_md_with_base(
-    assume_present: Optional[Path] = None,
-) -> Tuple[Optional[Path], Optional[Path]]:
-    """
-    Resolve the project-level CLAUDE.md AND the trusted base directory it was
-    found under, so a write caller can containment-check the target against the
-    base the resolver actually used (#1247).
-
-    Honors both supported locations:
-      - $base/.claude/CLAUDE.md  (preferred / new default)
-      - $base/CLAUDE.md          (legacy)
-
-    Resolution order for $base:
-      1. CLAUDE_PROJECT_DIR env var
-      2. Git common-dir parent (worktree-safe; --show-toplevel would return
-         the worktree path, which often does not contain CLAUDE.md)
-      3. Current working directory
-
-    The returned `base` is the branch's directory captured BEFORE descending
-    into `.claude` (the arg to `_find_existing_claude_md`), NOT the returned
-    path and NOT a re-derivation -- the trusted pre-resolve anchor that makes
-    the #1247 containment check non-vacuous. `get_project_claude_md_path` is
-    now a thin wrapper returning `[0]`, so read-only callers and the
-    resolver-parity lint are unaffected.
-
-    `assume_present` is counted as an existing file at its place in that
-    order (see `_find_existing_claude_md`). Without it, every caller resolves
-    exactly as before.
-
-    Returns:
-        (path, base) where path is an existing project CLAUDE.md and base is
-        the directory it was found under; (None, None) if none exists.
-    """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        base = Path(project_dir)
-        found = _find_existing_claude_md(base, assume_present)
-        if found is not None:
-            return found, base
-
-    # Fallback: detect git root (worktree-safe)
-    # Uses --git-common-dir instead of --show-toplevel because the latter
-    # returns the worktree path when run inside a worktree, which may not
-    # contain CLAUDE.md. --git-common-dir always points to the shared .git
-    # directory; its parent is the main repo root where CLAUDE.md lives.
-    # git returns this path relative to the invoking directory when run at a
-    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
-    # result against the cwd before taking its parent.
-    # NOTE: Twin pattern in skills/pact-memory/scripts/memory_api.py
-    #       (_detect_project_id) and working_memory.py (_get_claude_md_path)
-    #       -- keep in sync.
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=git_env_without_location(),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
-            if not common_dir.is_absolute():
-                common_dir = Path.cwd() / common_dir
-            repo_root = common_dir.resolve().parent
-            found = _find_existing_claude_md(repo_root, assume_present)
-            if found is not None:
-                return found, repo_root
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-
-    # Last resort: current working directory
-    cwd = Path.cwd()
-    found = _find_existing_claude_md(cwd, assume_present)
-    return (found, cwd) if found is not None else (None, None)
-
-
 def _lexical_base_of(claude_md_path: Path) -> Path:
     """Recover the pre-`.claude` base of a resolver-produced CLAUDE.md path by
-    INVERTING the resolver's construction (base/.claude/CLAUDE.md | base/
+    INVERTING the canonical construction (base/.claude/CLAUDE.md | base/
     CLAUDE.md) -- #1247 option D, for a caller-SUPPLIED path with no separate
     base (session_init's production flow passes the path, not the base).
 
     Purely lexical (pathlib `.parent` never follows symlinks), so an F1
     symlinked-parent `.claude` still escapes on the target's resolve() and is
-    refused. Locked to the resolver's own base by TestStalenessLexicalBaseParity
-    -- if _resolve_project_claude_md_with_base ever grows a third path shape,
-    that test turns this formula's divergence into a RED.
+    refused. Locked to `resolve_managed_document`'s base by
+    TestStalenessLexicalBaseParity -- if the managed-document paths ever grow a
+    third shape, that test turns this formula's divergence into a RED.
 
     Edge (adversarial-only UNDER-block, tolerated per the good-faith model): a
     project dir literally named ".claude" using the LEGACY layout lands one
@@ -328,23 +206,21 @@ def _lexical_base_of(claude_md_path: Path) -> Path:
     return claude_md_path.parent
 
 
-def get_project_claude_md_path() -> Optional[Path]:
+def resolve_session_claude_md_path() -> Optional[Path]:
+    """The SESSION's existing managed project document, or None.
+
+    `session_document()`: the one anchor (the declaration, else the session
+    record, else the cwd), the one root and the one resolver. None when the
+    root is unknown or holds no document; no git or cwd fall-through is ever
+    consulted.
     """
-    Get the path to the project-level CLAUDE.md (path only).
+    # Late-bound: staleness is imported by claude_md_manager's callers.
+    from shared.claude_md_manager import session_document
 
-    Thin wrapper over `_resolve_project_claude_md_with_base` (added for #1247);
-    read-only callers, session_init, and the resolver-parity lint use this
-    Path-only name, while the write caller (check_pinned_staleness) uses the
-    with-base variant to get the containment anchor.
-
-    Returns:
-        Path to an existing project CLAUDE.md if found, None otherwise.
-    """
-    return _resolve_project_claude_md_with_base()[0]
-
-
-# Backward-compatible alias (tests and session_init patch the underscore name)
-_get_project_claude_md_path = get_project_claude_md_path
+    _session, document = session_document()
+    if document is None or not document.exists:
+        return None
+    return document.path
 
 
 def estimate_tokens(text: str) -> int:
@@ -764,7 +640,7 @@ _UNDECODABLE_SKIP = (
 )
 
 
-def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[str]:
+def check_pinned_staleness(claude_md_path: Path) -> Optional[str]:
     """
     Detect stale pinned context entries in the project CLAUDE.md.
 
@@ -783,26 +659,20 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     mutation (apply_staleness_markings) as separate steps for testability.
 
     Args:
-        claude_md_path: Explicit path to CLAUDE.md. If None, resolved via
-            get_project_claude_md_path(). Callers (e.g. session_init.py)
-            may pass the path explicitly so their own resolution can be
-            patched independently in tests.
+        claude_md_path: The session's existing managed document, resolved by
+            the caller (session_init passes `doc.path`). There is no default:
+            this function never resolves a document itself.
 
     Returns:
         Informational message about stale pins found, or None.
     """
     if claude_md_path is None:
-        claude_md_path, project_root = _resolve_project_claude_md_with_base()
-    else:
-        # A caller-supplied path came from a TRUSTED resolver -- session_init
-        # resolves via _get_project_claude_md_path() and PASSES it here, so
-        # production DOES supply the param. Recover its pre-.claude base by
-        # inverting the resolver's construction (see _lexical_base_of): the
-        # SAME base the resolver used, not a re-derived root, and F1-safe
-        # (purely lexical, no symlink follow) + parity-locked.
-        project_root = _lexical_base_of(claude_md_path)
-    if claude_md_path is None:
         return None
+    # The path came from the one resolver. Recover its pre-.claude base by
+    # inverting the canonical construction (see _lexical_base_of): purely
+    # lexical, no symlink follow, so the containment anchor is the base the
+    # resolver used.
+    project_root = _lexical_base_of(claude_md_path)
 
     # Decoded with replacement, so a file that is not UTF-8 is still planned on
     # and gets a valid file's no-op when no pin is due. The text is NEVER
@@ -927,16 +797,13 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
                 # TODAY. A statement about today goes stale in silence. An
                 # instruction about what to do continues to apply.
                 #
-                # `project_root` is typed `Path | None` and this parameter
-                # takes a `Path`. A type checker reports that. No None reaches
-                # this line at this time, and the reason spans THREE HOPS:
-                #   1. `_resolve_project_claude_md_with_base` returns a path
-                #      and a base together, or returns None for the two.
+                # `project_root` must be a `Path` here. No None reaches this
+                # line at this time, and the reason spans TWO HOPS:
+                #   1. The `claude_md_path is None` test above returns first.
                 #   2. `_lexical_base_of` returns a `Path` and returns no None.
-                #   3. The `claude_md_path is None` test above returns first.
-                # A CHAIN OF THREE HOPS CAN BREAK WITH NO LOCAL SIGNAL. Each
-                # hop is correct on its own, and one edit to one of them opens
-                # this line while the other two continue to read as correct.
+                # A CHAIN OF HOPS CAN BREAK WITH NO LOCAL SIGNAL. Each hop is
+                # correct on its own, and one edit to one of them opens this
+                # line while the other continues to read as correct.
                 #
                 # IF YOU ADD A CALLER THAT CAN PASS None HERE, ADD A GUARD AND
                 # CHOOSE ITS DIRECTION ON PURPOSE. THE CHOICE IS NOT FREE.
@@ -980,7 +847,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
 
 
 def check_pinned_block_signal(
-    claude_md_path: Optional[Path] = None,
+    claude_md_path: Path,
 ) -> Optional[CapViolation]:
     """Detect stale-pin overflow that warrants a SessionStart block directive.
 
@@ -994,15 +861,13 @@ def check_pinned_block_signal(
     ONLY fires on positive detection; ambiguous state never blocks.
 
     Args:
-        claude_md_path: Explicit path. If None, resolved via
-            get_project_claude_md_path(). Callers may patch resolution
-            independently from this module.
+        claude_md_path: The session's existing managed document, resolved by
+            the caller. There is no default: this function never resolves a
+            document itself.
 
     Returns:
         CapViolation describing the stale overflow, or None.
     """
-    if claude_md_path is None:
-        claude_md_path = _get_project_claude_md_path()
     if claude_md_path is None:
         return None
 

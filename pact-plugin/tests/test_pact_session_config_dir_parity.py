@@ -69,7 +69,7 @@ def test_context_file_path_honors_tilde_root(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~")
 
-    expected = tmp_path / "pact-sessions" / "proj" / "sid" / "pact-session-context.json"
+    expected = Path.home() / "pact-sessions" / "proj" / "sid" / "pact-session-context.json"
 
     assert pact_session._context_file_path("sid", "/somewhere/proj") == expected
 

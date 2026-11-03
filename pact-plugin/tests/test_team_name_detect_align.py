@@ -654,6 +654,22 @@ class TestColdStartSessionInit:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _known_session_document(monkeypatch, bmw, document):
+    """Stub the writer's one observation: a declared, KNOWN root whose
+    managed document is `document`, existing or not as it is on disk."""
+    from shared.claude_md_manager import ManagedDocument
+    from shared.project_scope import SessionRoot
+
+    root = document.parent
+    monkeypatch.setattr(
+        bmw, "session_memory_root", lambda: SessionRoot(root, True, root, None)
+    )
+    monkeypatch.setattr(
+        bmw, "resolve_managed_document",
+        lambda given: ManagedDocument(document, root, document.exists()),
+    )
+
+
 class TestWriteBackTwoFileConsistency:
     """bootstrap_marker_writer._write_back_aligned_team_name reconciles the
     persisted record to the aligned name. Two files: the context file (load-
@@ -690,13 +706,10 @@ class TestWriteBackTwoFileConsistency:
         monkeypatch.setattr(pc, "write_context", _fake_write_context)
         monkeypatch.setattr(bmw, "update_session_info", _fake_update_session_info)
 
-        # CLAUDE.md is ABSENT: resolve_project_claude_md_path points at a
-        # non-existent file under tmp_path.
+        # CLAUDE.md is ABSENT: the session's document is a non-existent file
+        # under tmp_path at a known root.
         absent_md = tmp_path / "project" / "CLAUDE.md"
-        monkeypatch.setattr(
-            bmw, "resolve_project_claude_md_path",
-            lambda project_dir: (absent_md, "test"),
-        )
+        _known_session_document(monkeypatch, bmw, absent_md)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
 
         bmw._write_back_aligned_team_name({"agent_type": "PACT:pact-orchestrator"})
@@ -734,10 +747,7 @@ class TestWriteBackTwoFileConsistency:
         present_md = tmp_path / "project" / "CLAUDE.md"
         present_md.parent.mkdir(parents=True, exist_ok=True)
         present_md.write_text("# CLAUDE.md\n", encoding="utf-8")
-        monkeypatch.setattr(
-            bmw, "resolve_project_claude_md_path",
-            lambda project_dir: (present_md, "test"),
-        )
+        _known_session_document(monkeypatch, bmw, present_md)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
         # A session_init-recorded lead: with no session_start the CLAUDE.md
         # write is left to bootstrap_prompt_gate.

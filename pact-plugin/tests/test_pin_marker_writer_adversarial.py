@@ -65,18 +65,21 @@ instrument alarm rather than a finding.
 
 SAFETY NOTE FOR ANYONE EDITING THIS FILE. Read this before adding a test.
 
-`staleness._resolve_project_claude_md_with_base` returns on
-`CLAUDE_PROJECT_DIR` ONLY when a file EXISTS there. When the fixture is
-EMPTY it FALLS THROUGH to the parent of `git rev-parse --git-common-dir`,
-and a worktree shares the main checkout's common dir -- so a subprocess whose
-working directory sits inside the repo resolves the DEVELOPER'S OWN
-`CLAUDE.md`, which is gitignored and unrecoverable. The empty fixture is the
+The writer resolves `claude_md_manager.session_document()`. When the
+fixture directory holds no document, that resolver's second rung probes the
+main checkout ENCLOSING the directory, and a missing or unset
+`CLAUDE_PROJECT_DIR` makes the anchor the working directory -- so a
+subprocess whose fixture or working directory sits inside the repo resolves
+the DEVELOPER'S OWN `CLAUDE.md`, which is gitignored and unrecoverable. The empty fixture is the
 commonest shape in a no-op test, so this fires exactly where it is least
 expected. Pinning the environment variable alone does NOT close it.
 
 Every subprocess here therefore pins `CLAUDE_PROJECT_DIR`, `HOME` AND `cwd`
 to a `tmp_path`, and no test process runs with a working directory inside a
-git repository. Do not remove any of the three.
+git repository. Do not remove any of the three. `HOME` is a directory BELOW
+the project, never the project itself: `$HOME/.claude/CLAUDE.md` is the
+default profile's user-global file, so a project at `$HOME` has no project
+memory and every writer would skip it.
 
 USE THE IMPORTED CONSTANTS, NEVER A MARKER LITERAL. `MANAGED_START_MARKER`
 carries a long human-readable suffix. A hand-typed short form parses as a
@@ -777,7 +780,7 @@ def _run_rotation(start_marker: str, marker_above_gap: bool = False) -> dict:
         (fixture_dir / "CLAUDE.md").write_text(content, encoding="utf-8")
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(fixture_dir),
+            "HOME": str(fixture_dir / "home"),
             "CLAUDE_PROJECT_DIR": str(fixture_dir),
             "CLAUDE_CONFIG_DIR": str(fixture_dir / "config"),
             "HOOKS_DIR": str(PLUGIN_ROOT / "hooks"),
@@ -1301,7 +1304,7 @@ def _run_hook_with_journal(pinned_body: str, prompt: str) -> tuple[int, list, st
         session_dir = _write_session_context(fixture_dir, session_id)
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(fixture_dir),
+            "HOME": str(fixture_dir / "home"),
             "CLAUDE_PROJECT_DIR": str(fixture_dir),
             "CLAUDE_CONFIG_DIR": str(fixture_dir / "config"),
         }
@@ -1530,7 +1533,7 @@ class TestNonDenialOverTheEnvironment:
     def _run(self, fixture_dir: Path):
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(fixture_dir),
+            "HOME": str(fixture_dir / "home"),
             "CLAUDE_PROJECT_DIR": str(fixture_dir),
             "CLAUDE_CONFIG_DIR": str(fixture_dir / "config"),
         }

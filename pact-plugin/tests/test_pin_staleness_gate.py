@@ -54,12 +54,6 @@ def gate_env(tmp_path, monkeypatch, pact_context):
         ctx_module, "get_session_dir", lambda: str(session_dir)
     )
 
-    # Patch get_project_claude_md_path so _is_project_claude_md resolves
-    # our tmp CLAUDE.md.
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
 
     def _setup(*, marker_present=True):
         from pin_staleness_gate import PIN_STALENESS_MARKER_NAME
@@ -376,10 +370,6 @@ class TestPinStalenessGate_FailOpen:
 
     def test_claude_md_resolution_none_allows(self, gate_env, monkeypatch):
         env = gate_env(marker_present=True)
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
-        )
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {

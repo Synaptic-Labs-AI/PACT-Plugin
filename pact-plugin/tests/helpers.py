@@ -742,3 +742,75 @@ def point_resolver_at(monkeypatch, project_dir) -> None:
     suite runs in."""
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.chdir(project_dir)
+
+
+def doc_at(project_dir=None):
+    """The ManagedDocument a helper used to resolve itself from a base dir.
+
+    The project-memory helpers take the session's document as a required
+    argument. A test that names a base directory (or relies on
+    CLAUDE_PROJECT_DIR) builds it here exactly as the helpers' former
+    `project_dir` route did: the base's own two canonical paths, the create
+    target `.claude/CLAUDE.md` when neither exists, and the base as the
+    containment anchor. Evaluated at call time, as that route was.
+    """
+    import os
+    from pathlib import Path
+
+    from shared.claude_md_manager import (
+        ManagedDocument,
+        resolve_project_claude_md_path,
+    )
+
+    base = project_dir if project_dir else os.environ.get("CLAUDE_PROJECT_DIR", "")
+    assert base, "doc_at needs a base directory or CLAUDE_PROJECT_DIR"
+    path, source = resolve_project_claude_md_path(base)
+    return ManagedDocument(path, Path(base), source != "new_default")
+
+
+def doc_for(claude_md_path):
+    """The ManagedDocument for an explicit CLAUDE.md path (or None).
+
+    For a reader test that names the file it means: the document is that
+    path, its base the directory the canonical layout puts it under, and it
+    exists when the file does. None (no file) gives a document that does not
+    exist, so a reader answers "nothing to read".
+    """
+    from pathlib import Path
+
+    from shared.claude_md_manager import ManagedDocument
+
+    if claude_md_path is None:
+        missing = Path("/nonexistent-project/.claude/CLAUDE.md")
+        return ManagedDocument(missing, missing.parent.parent, False)
+    path = Path(claude_md_path)
+    base = path.parent.parent if path.parent.name == ".claude" else path.parent
+    return ManagedDocument(path, base, path.exists())
+
+
+def session_doc():
+    """This session's ManagedDocument from `session_document()`, or a
+    document that does not exist when the root is unknown: what a reader's
+    former no-argument call resolved."""
+    from shared.claude_md_manager import session_document
+
+    _session, document = session_document()
+    return document if document is not None else doc_for(None)
+
+
+def known_root(directory):
+    """The KNOWN project-memory root of `directory`, or None when unknown:
+    `project_scope.memory_root_of(directory)[0]`."""
+    from shared.project_scope import memory_root_of
+
+    return memory_root_of(directory)[0]
+
+
+def root_or_input(directory):
+    """The KNOWN root, else `directory` itself as a Path: the classifier's
+    answer with an unknown root folded back to its input, for arms that state
+    the answer as one path."""
+    from pathlib import Path
+
+    root = known_root(directory)
+    return root if root is not None else Path(directory)

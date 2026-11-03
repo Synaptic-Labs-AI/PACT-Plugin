@@ -7,6 +7,8 @@ non-agent / signal-task bypasses. These are the four classes of
 "does this fire emit at all?" — the positive baseline plus three
 negative gates.
 """
+from pathlib import Path
+
 import pytest
 
 from fixtures.emitter import VALID_HANDOFF, _run_main
@@ -195,7 +197,7 @@ class TestProductionShapeMetadataOnly:
         # marker reaches disk while the bare-path assertion still passes.
         # Match the prefix so this leg can go red.
         marker_dir = (
-            tmp_path / ".claude" / "teams" / "pact-test"
+            Path.home() / ".claude" / "teams" / "pact-test"
             / ".agent_handoff_emitted"
         )
         claimed = (

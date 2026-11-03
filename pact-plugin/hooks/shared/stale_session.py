@@ -22,9 +22,7 @@ for bootstrap_prompt_gate, the deny message for dispatch_gate).
 
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 
 import shared.pact_context as pact_context
 
@@ -102,7 +100,8 @@ def detect_stale_session_block(input_data: dict) -> str | None:
          whitespace-only/`unknown-*` sentinel/C0-control chars) — nothing
          trustworthy to compare, and an unvalidated stdin id must never be
          interpolated into the warning text
-      2. CLAUDE_PROJECT_DIR is unset (cannot locate CLAUDE.md)
+      2. the session's project memory root is unknown (its anchor is
+         CLAUDE_PROJECT_DIR, else the session record, else the cwd)
       3. neither CLAUDE.md location exists, or reading raises OSError
          (worktrees: CLAUDE.md is gitignored/absent → silent skip). This
          helper is ADVISORY, so its failure budget is "no warning", never
@@ -116,9 +115,8 @@ def detect_stale_session_block(input_data: dict) -> str | None:
          text → no claim), or reading it raises (an advisory never fails)
       5. recorded session_id equals this session's (healthy resume)
 
-    Stdlib-only two-path read: .claude/CLAUDE.md preferred, legacy
-    ./CLAUDE.md fallback — same existing-file precedence as
-    resolve_project_claude_md_path (parity pinned by test). False
+    The file read is the one `session_document` names, the same document
+    every writer of the block targets. False
     positives: none in healthy flows — session_init rewrites the block
     before the first prompt for every lead it recognises, a resume keeps
     the same session_id, and bootstrap_prompt_gate replaces the block when it
@@ -134,26 +132,25 @@ def detect_stale_session_block(input_data: dict) -> str | None:
     # warning. The predicate is total for any input.
     if pact_context._is_unknown_or_missing_session(raw_id):
         return None
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
     try:
-        content = None
-        for candidate in (
-            Path(project_dir) / ".claude" / "CLAUDE.md",
-            Path(project_dir) / "CLAUDE.md",
-        ):
-            if candidate.exists():
-                # Read-only: a byte that is not UTF-8 (a latin-1 byte from a
-                # wrong-editor save, say) decodes to U+FFFD, so the Resume
-                # line is still compared and nothing raises. A raise here
-                # would reach a consumer's fail-open and suppress the whole
-                # injection, the load-bearing bootstrap instruction included.
-                content = candidate.read_text(encoding="utf-8", errors="replace")
-                break
-        if content is None:
+        # ONE RULE: the session's one managed document, from one observation
+        # (the anchor, the root and the document resolver every writer uses).
+        # A linked-worktree lead's block lives in MAIN, and a worktree copy
+        # nothing manages is never reported. An unknown root, or a known root
+        # with no file, is "nothing to read".
+        from shared.claude_md_manager import session_document
+
+        _session, doc = session_document()
+        if doc is None or not doc.exists:
             return None
-    except OSError:
+        candidate = doc.path
+        # Read-only: a byte that is not UTF-8 (a latin-1 byte from a
+        # wrong-editor save, say) decodes to U+FFFD, so the Resume line is
+        # still compared and nothing raises. A raise here would reach a
+        # consumer's fail-open and suppress the whole injection, the
+        # load-bearing bootstrap instruction included.
+        content = candidate.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — advisory: no resolution means no warning
         return None
     try:
         recorded = recorded_session_id(content)

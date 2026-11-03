@@ -391,9 +391,13 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         from shared.claude_md_manager import (
             SESSION_END_MARKER,
             SESSION_START_MARKER,
-            resolve_project_claude_md_path,
+            resolve_managed_document,
         )
-        from shared.project_scope import _record_worktree_identity
+        from shared.project_scope import (
+            _record_worktree_identity,
+            session_memory_root,
+            unknown_root_status,
+        )
         from shared.session_journal import append_event, make_event
         from shared.session_resume import (
             RESUMPTION_MARKER_MISSING_DIRECTIVE,
@@ -411,23 +415,38 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         session_id = str(input_data["session_id"])
         team = pact_context.get_team_name()
         plugin_root = pact_context.get_plugin_root()
-        # update_session_info writes the file CLAUDE_PROJECT_DIR names, so the
-        # block is looked for there, through the same resolver.
-        env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        project_dir = env_project_dir or os.getcwd()
-
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "") or os.getcwd()
+        # The session's block is read AND rewritten in its ONE managed
+        # document (the main checkout's for a linked worktree), resolved from
+        # ONE observation. Only a DECLARED anchor reads or rewrites a block: a
+        # frame the platform handed no project dir rewrites nothing.
+        #
+        # AN UNKNOWN root means NO block read and NO rewrite, and it is
+        # REPORTED with the cause and anchor of that same observation. The
+        # journal recording below still runs; it is not project memory.
+        session = session_memory_root()
+        doc = None
         claim = None
         prev_session_dir = None
         block_status = None
+        if session.declared:
+            if session.cause is not None:
+                block_status = unknown_root_status(
+                    "Project CLAUDE.md",
+                    session.cause,
+                    session.anchor,
+                    "the session block was not rewritten.",
+                )
+            else:
+                doc = resolve_managed_document(session.root)
         try:
-            if env_project_dir:
-                claude_md, source = resolve_project_claude_md_path(env_project_dir)
+            if doc is not None:
                 # Read-only here (markers and the Resume line are ASCII); the
                 # rewrite below decodes strictly and skips a file that is not
                 # UTF-8, reporting it in its status.
                 content = (
-                    "" if source == "new_default"
-                    else claude_md.read_text(encoding="utf-8", errors="replace")
+                    doc.path.read_text(encoding="utf-8", errors="replace")
+                    if doc.exists else ""
                 )
                 block = parse(content).find_block(
                     SESSION_START_MARKER, SESSION_END_MARKER
@@ -435,7 +454,9 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 if block.state is State.FOUND and (
                     recorded_session_id(content) != session_id
                 ):
-                    prev_session_dir = _extract_prev_session_dir(env_project_dir)
+                    prev_session_dir = _extract_prev_session_dir(
+                        project_dir, doc=doc
+                    )
                     claim = check_resume_state(prev_session_dir, launch=True)
                 if block.state not in (State.FOUND, State.ABSENT):
                     # Not read and not rewritten, and nothing is locked or
@@ -451,7 +472,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     # still returns the claim. A raise up to and inside this
                     # call is caught below and classified like its status.
                     block_status = update_session_info(
-                        session_id, team, session_dir, plugin_root
+                        session_id, team, session_dir, plugin_root, doc=doc,
                     )
         except Exception as e:  # noqa: BLE001 — classified and bounded below
             block_status = session_info_failure(e)

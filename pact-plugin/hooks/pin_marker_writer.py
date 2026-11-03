@@ -228,6 +228,7 @@ def _plan_and_write() -> str:
         from shared.claude_md_manager import (
             _atomic_write_text,
             file_lock,
+            session_document,
         )
         from shared.pin_markers import (
             Insertion,
@@ -235,14 +236,23 @@ def _plan_and_write() -> str:
             certify_expel_nothing,
             plan_insertion,
         )
-        from staleness import _resolve_project_claude_md_with_base
-
-        # Returns (None, None) when no project CLAUDE.md exists, so this
-        # resolver never brings one into being. Creating the file is not this
-        # hook's business under any circumstance.
-        path, base = _resolve_project_claude_md_with_base()
-        if path is None or base is None:
+        # Pin markers are project-memory content: a worktree lead's markers
+        # belong to the session's managed document, which for a linked
+        # worktree is the main checkout's. ONE observation gives the root and
+        # the document. An UNKNOWN root identifies nothing, so write nothing;
+        # the outcome is journaled like every other confirmed invocation,
+        # which is this hook's status surface. The resolver only ever yields
+        # a canonical document under the root or under its verified enclosing
+        # checkout, so a worktree's own copy is never the target: main
+        # without a document while the worktree holds one is `noop_no_file`.
+        # Creating the file is not this hook's business under any
+        # circumstance, so a create target (`exists` False) is also a no-op.
+        _session, doc = session_document()
+        if doc is None:
+            return "noop_memory_root_unknown"
+        if not doc.exists:
             return "noop_no_file"
+        path, base = doc.path, doc.base
 
         # Decoded with replacement, so a file that is not UTF-8 still gets the
         # ladder's own no-op. The text is NEVER WRITTEN as read: the write

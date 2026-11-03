@@ -104,6 +104,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from helpers import doc_at  # noqa: E402
 
 
 _SESSION_ID = "ccdd3344-0000-0000-0000-000000000000"
@@ -380,7 +381,7 @@ class TestProjectMemoryStatusRouting:
         from shared.claude_md_manager import ensure_project_memory_md
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-            message = ensure_project_memory_md()
+            message = ensure_project_memory_md(doc_at())
 
         system_message, context = _route(
             home, project, live="ensure_project_memory_md")
@@ -394,7 +395,7 @@ class TestProjectMemoryStatusRouting:
         from shared.claude_md_manager import ensure_project_memory_md
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-            message = ensure_project_memory_md()
+            message = ensure_project_memory_md(doc_at())
 
         # The status source is a one-time creation. Remove what the capture wrote so
         # main() performs the same creation and returns the same status.
@@ -438,7 +439,7 @@ class TestMigrationStatusRouting:
         from shared.claude_md_manager import migrate_to_managed_structure
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-            message = migrate_to_managed_structure()
+            message = migrate_to_managed_structure(doc_at())
 
         system_message, context = _route(
             home, project, live="migrate_to_managed_structure")
@@ -453,7 +454,7 @@ class TestMigrationStatusRouting:
         from shared.claude_md_manager import migrate_to_managed_structure
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-            message = migrate_to_managed_structure()
+            message = migrate_to_managed_structure(doc_at())
 
         # The migration is idempotent. Restore the unmigrated document so
         # main() performs the same migration and returns the same status.
@@ -707,7 +708,7 @@ class TestProjectMemoryInnerHandlerRouting:
             from shared.claude_md_manager import ensure_project_memory_md
             with patch.dict(os.environ,
                             {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-                message = ensure_project_memory_md()
+                message = ensure_project_memory_md(doc_at())
 
             system_message, context = _route(
                 home, project, live="ensure_project_memory_md")

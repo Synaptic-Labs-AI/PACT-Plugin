@@ -6,15 +6,17 @@ Used by: session_init.py during SessionStart hook to scaffold the project
          PACT_MEMORY-wrapped memory sections) and to migrate legacy project
          CLAUDE.md files into the boundary structure.
 
-Manages the project CLAUDE.md at $CLAUDE_PROJECT_DIR — preferred at
-.claude/CLAUDE.md, legacy at ./CLAUDE.md — with the PACT_MANAGED outer
-boundary, optional SESSION_START/SESSION_END block, and PACT_MEMORY inner
-boundary wrapping memory sections.
+Manages the project CLAUDE.md at the caller's base directory — by default
+$CLAUDE_PROJECT_DIR, but a worktree-lead caller passes the main checkout,
+where project memory lives (#1653) — preferred at .claude/CLAUDE.md, legacy
+at ./CLAUDE.md, with the PACT_MANAGED outer boundary, optional
+SESSION_START/SESSION_END block, and PACT_MEMORY inner boundary wrapping
+memory sections.
 
 Project CLAUDE.md location resolution:
 Claude Code supports two locations for project-level memory:
-  - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md  (preferred / new default)
-  - $CLAUDE_PROJECT_DIR/CLAUDE.md          (legacy)
+  - <base>/.claude/CLAUDE.md  (preferred / new default)
+  - <base>/CLAUDE.md          (legacy)
 The resolve_project_claude_md_path() helper picks whichever exists, with
 .claude/CLAUDE.md taking priority. When neither exists, it returns the new
 default path so creators land at the preferred location.
@@ -39,6 +41,7 @@ from .paths import get_claude_config_dir
 # imports this module, so a module-level import would load it in every hook.
 if TYPE_CHECKING:
     from .claude_md_markers import Document, Line, Located
+    from .project_scope import SessionRoot
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
@@ -1105,6 +1108,19 @@ def extract_managed_region(content: str) -> tuple[str, int] | None:
     return content[region_start:_marker_span(doc, last)[0]], region_start
 
 
+def managed_document_paths(base: str | os.PathLike[str]) -> tuple[Path, Path]:
+    """The two canonical managed-document paths under `base`.
+
+    ONE DEFINITION for the identity rule: gate_target and pin_marker_writer
+    each hand-built `<base>/.claude/CLAUDE.md` and `<base>/CLAUDE.md`, so a
+    third canonical location would have had to be added in every copy without
+    the parity test seeing it. Order is preferred-then-legacy, matching
+    `resolve_project_claude_md_path`.
+    """
+    root = Path(base)
+    return root / _DOT_CLAUDE_RELATIVE, root / _LEGACY_RELATIVE
+
+
 def resolve_project_claude_md_path(
     project_dir: str | os.PathLike[str],
 ) -> tuple[Path, str]:
@@ -1141,6 +1157,128 @@ def resolve_project_claude_md_path(
     return dot_claude, "new_default"
 
 
+class ManagedDocument(NamedTuple):
+    """The session's managed project document.
+
+    `path` is the existing document, or the create target when `exists` is
+    False; `base` is the directory `path` lives under, the containment anchor
+    for every write to it.
+    """
+
+    path: Path
+    base: Path
+    exists: bool
+
+
+def _first_document_under(
+    base: Path, assume_present: Path | None
+) -> Path | None:
+    """The first canonical document under `base` that exists, or that is the
+    same file as `assume_present` (a Write about to create it)."""
+    for candidate in managed_document_paths(base):
+        if candidate.exists():
+            return candidate
+        if assume_present is not None:
+            # Late import: staleness imports this module at its top.
+            from staleness import same_path
+
+            if same_path(candidate, assume_present):
+                return candidate
+    return None
+
+
+class UserGlobalDocumentRefused(RuntimeError):
+    """`resolve_managed_document` was about to return a user-global CLAUDE.md.
+
+    Unreachable through `memory_root_of` and `session_memory_root`, except by
+    a filesystem change between their check and this one. The one SPECIFIC
+    catch is in `session_document`, which maps it to the cause `user_global`
+    (`home_unknown` when no user-global location can be computed) so the
+    readers behind it report a skip. Two broad handlers also absorb
+    it: `gate_target`'s `except RuntimeError` (the gate gets no target) and
+    the working_memory display resolver's `except Exception` (the sync finds
+    no document). Both fail safe: nothing is written. Add no new specific
+    catch anywhere: any other direct caller that trips it has found a route
+    to a root that skipped the user-global check.
+    """
+
+
+def resolve_managed_document(
+    root: str | os.PathLike[str],
+    assume_present: Path | None = None,
+) -> ManagedDocument:
+    """THE ONE DOCUMENT RULE for a KNOWN project-memory root.
+
+    1. The canonical documents at `root` (`.claude/CLAUDE.md`, then
+       `CLAUDE.md`): the first that exists, or is `assume_present`, wins.
+    2. When `root` holds none, the same probe at the main checkout that
+       strictly encloses it (`project_scope.enclosing_main_checkout`): a
+       subdirectory session uses its checkout's document. That function never
+       yields a checkout whose canonical document is the user-global
+       CLAUDE.md.
+    3. Otherwise the create target `<root>/.claude/CLAUDE.md`, never the
+       enclosing checkout's.
+
+    Nothing else is probed: no git toplevel, no common-dir parent and no
+    cwd. The caller passes a root it obtained from `session_memory_root` or
+    `memory_root_of`; an unknown root has no document.
+
+    Raises UserGlobalDocumentRefused when the document it would return, found
+    or create target, is a user-global CLAUDE.md (or that cannot be told).
+    """
+    from .project_scope import is_user_global_document
+
+    document = _resolve_managed_document(Path(root), assume_present)
+    if is_user_global_document(document.path):
+        raise UserGlobalDocumentRefused(
+            f"{document.path} is a user-global CLAUDE.md, not project memory"
+        )
+    return document
+
+
+def _resolve_managed_document(
+    base: Path, assume_present: Path | None
+) -> ManagedDocument:
+    from .project_scope import enclosing_main_checkout
+
+    found = _first_document_under(base, assume_present)
+    if found is not None:
+        return ManagedDocument(found, base, True)
+    enclosing = enclosing_main_checkout(base)
+    if enclosing is not None:
+        found = _first_document_under(enclosing, assume_present)
+        if found is not None:
+            return ManagedDocument(found, enclosing, True)
+    return ManagedDocument(managed_document_paths(base)[0], base, False)
+
+
+def session_document(
+    assume_present: Path | None = None,
+) -> tuple[SessionRoot, ManagedDocument | None]:
+    """This session's root and its managed document, from ONE observation.
+
+    The document is None exactly when the root is unknown; the SessionRoot
+    then carries the cause. Every ambient reader calls this and nothing else.
+    A resolver refusal of a user-global document reads as that unknown root,
+    with cause user_global (home_unknown when no user-global location can be
+    computed), so a reader renders it like any other skip.
+    """
+    from .project_scope import (
+        ROOT_CAUSE_USER_GLOBAL,
+        session_memory_root,
+        user_global_cause,
+    )
+
+    session = session_memory_root()
+    if session.root is None:
+        return session, None
+    try:
+        return session, resolve_managed_document(session.root, assume_present)
+    except UserGlobalDocumentRefused:
+        cause = user_global_cause(session.root) or ROOT_CAUSE_USER_GLOBAL
+        return session._replace(root=None, cause=cause), None
+
+
 def ensure_dot_claude_parent(path: Path) -> None:
     """
     Ensure the parent directory of a `.claude/CLAUDE.md` path exists.
@@ -1175,7 +1313,7 @@ def ensure_dot_claude_parent(path: Path) -> None:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
-def ensure_project_memory_md() -> str | None:
+def ensure_project_memory_md(doc: ManagedDocument) -> str | None:
     """
     Ensure project has a CLAUDE.md with memory sections.
 
@@ -1185,25 +1323,21 @@ def ensure_project_memory_md() -> str | None:
     Pinned Context, Working Memory) if one doesn't exist. These sections
     are project-specific and managed by the pact-memory skill.
 
-    Honors both supported project CLAUDE.md locations:
-      - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md  (preferred / new default)
-      - $CLAUDE_PROJECT_DIR/CLAUDE.md          (legacy)
-    If either exists, no action is taken (preserves existing project
-    configuration). When neither exists, creates the file at the preferred
-    `.claude/CLAUDE.md` location, creating the `.claude/` directory if needed.
+    When the session's document already exists, no action is taken
+    (preserves existing project configuration). Otherwise it creates
+    `doc.path`, the create target `resolve_managed_document` named, creating
+    the `.claude/` directory if needed.
+
+    Args:
+        doc: The session's managed document, resolved by the caller from its
+            one session observation. `doc.base` is the containment anchor.
 
     Returns:
         Status message or None if no action taken.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
+    if doc.exists:
         return None
-
-    target_file, source = resolve_project_claude_md_path(project_dir)
-
-    # Don't overwrite existing project CLAUDE.md (either location)
-    if source != "new_default":
-        return None
+    target_file = doc.path
 
     # Create minimal CLAUDE.md with memory sections at the new default location.
     # Structure (#404): outer PACT_MANAGED boundary wraps all plugin-managed
@@ -1247,9 +1381,7 @@ def ensure_project_memory_md() -> str | None:
             if target_file.exists():
                 return None
             try:
-                _atomic_write_text(
-                    target_file, memory_template, Path(project_dir)
-                )
+                _atomic_write_text(target_file, memory_template, doc.base)
                 return "Created project CLAUDE.md with memory sections"
             except ContainmentError:
                 return "Project CLAUDE.md skipped: path precondition not met."
@@ -1269,7 +1401,7 @@ def ensure_project_memory_md() -> str | None:
         return f"Project CLAUDE.md failed: {failure_cause(e)}"
 
 
-def migrate_to_managed_structure() -> str | None:
+def migrate_to_managed_structure(doc: ManagedDocument) -> str | None:
     """
     One-time migration: wrap existing project CLAUDE.md content in the
     PACT_MANAGED boundary and add PACT_MEMORY markers around memory sections.
@@ -1303,19 +1435,18 @@ def migrate_to_managed_structure() -> str | None:
     preserved verbatim: every marker and heading is located by the
     fence-aware parser, so a fenced copy is never a real memory section.
 
+    Args:
+        doc: The session's managed document, resolved by the caller from its
+            one session observation. `doc.base` is the containment anchor.
+
     Returns:
         Status message on successful migration, None on no-op (already
         migrated or file doesn't exist), or a "failed"/"skipped" string
         on error (routed to systemMessages by session_init.py).
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-
-    target_file, source = resolve_project_claude_md_path(project_dir)
-
-    if source == "new_default":
-        return None  # File doesn't exist; ensure_project_memory_md() handles creation
+    if not doc.exists:
+        return None  # ensure_project_memory_md() handles creation
+    target_file = doc.path
 
     try:
         with file_lock(target_file):
@@ -1353,7 +1484,7 @@ def migrate_to_managed_structure() -> str | None:
 
             try:
                 _atomic_write_text(
-                    target_file, new_content, Path(project_dir)
+                    target_file, new_content, doc.base
                 )
                 return "Migrated project CLAUDE.md to managed structure (#404)"
             except ContainmentError:
@@ -1757,9 +1888,12 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     sets on every session. If CLAUDE_PROJECT_DIR is unset, relative
     input returns None — safer than a silent cwd dependency.
 
-    Worktree-safe: imports `staleness.get_project_claude_md_path` lazily
-    to avoid circular-import and module-load cost on every Edit/Write.
-    That function already handles env-var / git-root / cwd fallbacks.
+    Worktree-safe: imports `staleness.resolve_session_claude_md_path` lazily
+    to avoid circular-import and module-load cost on every Edit/Write. That
+    function returns the SESSION's existing managed document
+    (`session_document`): MAIN's for a linked worktree, and nothing when the
+    root is unknown or holds no document. No git or cwd fall-through is
+    consulted.
 
     Fail-safe: any OSError / RuntimeError while resolving returns None.
     Callers treat None as "not our target; let the tool through."
@@ -1768,11 +1902,14 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
         return None
 
     try:
-        from staleness import get_project_claude_md_path
+        from staleness import resolve_session_claude_md_path
     except ImportError:
         return None
 
-    project_md = get_project_claude_md_path()
+    # The SESSION's managed document: a linked-worktree session matches the
+    # MAIN checkout's file, the document every writer targets, so a pin gate
+    # is not bypassed by a worktree-local copy.
+    project_md = resolve_session_claude_md_path()
     if project_md is None:
         return None
 
@@ -1803,24 +1940,30 @@ class GateTarget(NamedTuple):
     base: Path
 
 
-def gate_target(file_path: str) -> GateTarget | None:
+def gate_target(
+    file_path: str, session: SessionRoot | None = None
+) -> GateTarget | None:
     """The project CLAUDE.md the pin-cap gate checks for this Edit or Write
     `file_path`, or None when it checks none.
 
-    Gated: an absolute path whose name is `claude.md` in any case, which the
-    project resolver returns once the change exists. The resolver runs with
-    the target counted as present, so a Write that creates the file is gated,
-    and a Write to a file the resolver would not return (`./CLAUDE.md` while
-    `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns
-    now, which can be a different file from the target: the other location
-    under the target's base (`./CLAUDE.md` before a Write creates
-    `.claude/CLAUDE.md`), or the main checkout's file for a worktree that has
-    none. A file the resolver finds outside the target's repository (the
-    working directory's repository, when that is another one) is never
-    `before`: the target itself is, or None when it does not exist.
+    Gated: an absolute path named `claude.md` in any case that IS the
+    session's managed document once the change exists, i.e. what
+    `resolve_managed_document(root, assume_present=target)` returns. That
+    resolver only ever yields a canonical path under the root or under its
+    verified enclosing checkout, so a worktree's own copy, a nested
+    checkout's copy or any other `CLAUDE.md` is never gated. A Write that
+    creates the document is gated; a Write to the location the resolver
+    would not return (`./CLAUDE.md` while `.claude/CLAUDE.md` exists) is not.
 
-    A relative path is not gated, and any failure while resolving returns
-    None: a path the gate is unsure of is allowed.
+    `before` is the session's document now, which can be the other location
+    under the same base (`./CLAUDE.md` before a Write creates
+    `.claude/CLAUDE.md`), or None when there is none. `base` is the directory
+    the target resolved under.
+
+    `session` is the caller's one observation of the session root; computed
+    here when None. A relative path is not gated, an unknown root gates
+    nothing, and any failure while resolving returns None: a path the gate is
+    unsure of is allowed.
     """
     if not isinstance(file_path, str) or not file_path:
         return None
@@ -1828,22 +1971,34 @@ def gate_target(file_path: str) -> GateTarget | None:
     if not target.is_absolute() or target.name.casefold() != "claude.md":
         return None
     try:
-        from staleness import _resolve_project_claude_md_with_base, same_path
+        from staleness import same_path
     except ImportError:
         return None
     try:
-        resolved, base = _resolve_project_claude_md_with_base(assume_present=target)
-        if resolved is None or base is None or not same_path(resolved, target):
-            return None
-        before, before_base = _resolve_project_claude_md_with_base()
-        if before_base is not None and not same_path(before_base, base):
-            from .project_scope import same_repository
+        # A TRACKED-CLAUDE.md PROJECT KEEPS THE SAME-RELATIVE-PATH CONSEQUENCE,
+        # RECORDED HERE AND DELIBERATELY NOT GUARDED. The worktree copy sits at
+        # the same repo-relative path, so a commit from the worktree plus a
+        # merge changes MAIN's document without this gate seeing it. ALIASING
+        # IS THE SAME HOLE FROM THE OTHER SIDE: a hardlink or symlink to the
+        # same inode under another path edits the document without passing
+        # through this target either. The cap is session-local hygiene, not a
+        # security boundary; delivery is a human-reviewed merge; and an
+        # inode-identity guard would reintroduce the worktree copy as a
+        # managed artifact in weaker form. Do not build that guard.
+        if session is None:
+            from .project_scope import session_memory_root as _session_root
 
-            if not same_repository(base, before_base):
-                before = target if target.is_file() else None
+            session = _session_root()
+        if session.root is None:
+            return None
+        document = resolve_managed_document(session.root, assume_present=target)
+        if not document.exists or not same_path(document.path, target):
+            return None
+        current = resolve_managed_document(session.root)
+        before = current.path if current.exists else None
     except (OSError, RuntimeError, ValueError):
         return None
-    return GateTarget(target, before, base)
+    return GateTarget(target, before, document.base)
 
 
 # What a team member is told when a change would add pins past the cap, in

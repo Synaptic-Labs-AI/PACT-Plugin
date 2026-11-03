@@ -144,7 +144,8 @@ class Tree:
 
 @pytest.fixture
 def tree(tmp_path):
-    return Tree(tmp_path / ".claude")
+    # The config root the autouse isolation fixture resolves: the per-test home.
+    return Tree(Path.home() / ".claude")
 
 
 def _fill(path, mebibytes):
