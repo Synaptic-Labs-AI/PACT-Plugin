@@ -349,11 +349,12 @@ class TestSkillMdProseSnippetConformance:
 # --- self-complete exemption -----------------------------------------------
 
 class TestKnownReasonsCompletionAddition:
-    def test_awaiting_lead_completion_in_known_reasons(self):
-        from shared.intentional_wait import KNOWN_REASONS
-
-        assert "awaiting_lead_completion" in KNOWN_REASONS
-
+    # test_awaiting_lead_completion_in_known_reasons lived here and asserted
+    # the same literal membership as
+    # TestKnownReasonsLiteralRegressionGuard::test_awaiting_lead_completion_is_present.
+    # Exactly ONE literal pin is kept, in that class: the sibling exact-set
+    # test does not subsume a coordinated edit that removes the reason from
+    # both the production set and EXPECTED_REASONS.
     def test_awaiting_lead_completion_passes_validate_wait(self):
         from shared.intentional_wait import validate_wait
 

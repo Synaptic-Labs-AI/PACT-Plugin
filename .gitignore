@@ -25,3 +25,10 @@ CLAUDE.md
 
 # Sidecar lock files created by file_lock() helper
 .*.lock
+
+# CI gate artifacts written by the fast-suite runner and the full-suite
+# record writers. They belong to one run and must never be committed.
+.fast-suite-summary.json
+.fast-suite-canary.json
+.full-run-record.json
+.full-collection-record.json

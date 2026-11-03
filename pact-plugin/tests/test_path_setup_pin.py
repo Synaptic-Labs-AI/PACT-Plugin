@@ -19,10 +19,12 @@ and tests/conftest.py). This pin keeps it that way:
 Matched mutation forms: sys.path.insert/append/extend calls, slice-assignment
 (sys.path[0:0] = [...]), and augmented assignment (+=) on sys.path — all but
 insert were added after review findings that they dodged every arm while
-being plausible honest-mistake forms, not adversarial constructions.
-ACCEPTED UNDER-BLOCK (adversarial-only, documented boundary): aliasing sys
-(`import sys as s`, `from sys import path`), wholesale rebinding
-(`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string, and
+being plausible honest-mistake forms, not adversarial constructions. `sys`
+means any name the file binds to the sys module (`import sys as X`), and
+`sys.path` also any name bound by `from sys import path [as P]`, in any
+scope of the file.
+ACCEPTED UNDER-BLOCK (adversarial-only, documented boundary): wholesale
+rebinding (`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string, and
 slice-assign/augmented forms with exotic spacing inside codegen strings —
 this pin is an honest-mistake guard, not an adversary-proof one. OUT OF PARTITION (different failure mode): removal
 mutations (remove/pop/clear/del) sabotage conftest setup rather than
@@ -76,6 +78,8 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_working_memory_concurrency_comprehensive.py",
     # codegen strings (subprocess harnesses embed path lines in child code)
     "tests/test_agent_handoff_marker.py",
+    # rig conftest embeds a sys.path line so the copied plugin imports
+    "tests/test_ci_full_run_record.py",
     "tests/test_containment_certification.py",
     "tests/test_embedding_status_contract.py",
     "tests/test_memory_cli.py",
@@ -90,7 +94,13 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_pinned_section_parser_migration.py",
     "tests/test_project_dir_resolution.py",
     "tests/test_sync_result_contract.py",
+    # classifier input data: path-mutation sources it parses, never runs
+    "tests/test_fast_suite_selection.py",
 }
+
+# Keep-set files whose mutation tokens are DATA only: they may carry the
+# tokens in strings, but no real mutation node at any level.
+_DATA_ONLY = {"tests/test_fast_suite_selection.py"}
 
 # Sanctioned path roots, mirroring the two conftests: tests/conftest.py owns
 # tests/, hooks/, skills/pact-memory/, skills/pact-memory/scripts/,
@@ -123,52 +133,79 @@ def _population():
     return [f for f in files if f.name != "conftest.py"]
 
 
-def _is_sys_path(value):
+# (names bound to the sys module, names bound to sys.path)
+_PLAIN_SYS = (frozenset({"sys"}), frozenset())
+
+
+def _sys_names(tree):
+    """Every name a file binds to the sys module (`import sys`, `import sys
+    as X`) or to sys.path (`from sys import path [as P]`), in any scope.
+    Collected file-wide: an alias in one function also counts in another,
+    which can only over-match."""
+    modules, paths = {"sys"}, set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(a.asname or a.name for a in node.names
+                           if a.name == "sys")
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys" and (
+                not node.level):
+            paths.update(a.asname or a.name for a in node.names
+                         if a.name == "path")
+    return frozenset(modules), frozenset(paths)
+
+
+def _is_sys_path(value, names=_PLAIN_SYS):
+    modules, paths = names
+    if isinstance(value, ast.Name):
+        return value.id in paths
     return (
         isinstance(value, ast.Attribute)
         and value.attr == "path"
         and isinstance(value.value, ast.Name)
-        and value.value.id == "sys"
+        and value.value.id in modules
     )
 
 
 _MUTATION_VERBS = frozenset({"insert", "append", "extend"})
 
 
-def _is_mutation_call(node):
+def _is_mutation_call(node, names=_PLAIN_SYS):
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in _MUTATION_VERBS
-        and _is_sys_path(node.func.value)
+        and _is_sys_path(node.func.value, names)
     )
 
 
-def _is_slice_assign(node):
+def _is_slice_assign(node, names=_PLAIN_SYS):
     """An Assign whose target subscripts sys.path (sys.path[0:0] = [...]).
     Insert-equivalent precedence, but not a Call, so the call predicate
     structurally cannot see it. Any subscript target matches (index
     replacement included) — all of them rewrite the search path."""
     return isinstance(node, ast.Assign) and any(
-        isinstance(t, ast.Subscript) and _is_sys_path(t.value) for t in node.targets
+        isinstance(t, ast.Subscript) and _is_sys_path(t.value, names)
+        for t in node.targets
     )
 
 
-def _is_aug_assign(node):
+def _is_aug_assign(node, names=_PLAIN_SYS):
     """An AugAssign whose target is the sys.path attribute (the += form).
     Extend-equivalent, and neither a Call nor an Assign, so both other
     predicates structurally miss it."""
-    return isinstance(node, ast.AugAssign) and _is_sys_path(node.target)
+    return isinstance(node, ast.AugAssign) and _is_sys_path(node.target, names)
 
 
-def _is_path_mutation(node):
-    return _is_mutation_call(node) or _is_slice_assign(node) or _is_aug_assign(node)
+def _is_path_mutation(node, names=_PLAIN_SYS):
+    return (_is_mutation_call(node, names) or _is_slice_assign(node, names)
+            or _is_aug_assign(node, names))
 
 
 def _module_level_mutations(path):
     """Line numbers of path mutations in MODULE scope only (defs/classes
     excluded — a spawn worker's in-function rebuild is not module setup)."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    names = _sys_names(tree)
     lines = []
 
     def walk(node, in_def):
@@ -178,7 +215,7 @@ def _module_level_mutations(path):
             ):
                 walk(child, True)
                 continue
-            if _is_path_mutation(child) and not in_def:
+            if _is_path_mutation(child, names) and not in_def:
                 lines.append(child.lineno)
             walk(child, in_def)
 
@@ -191,8 +228,9 @@ def _any_form_present(path):
     mutation token in a string constant (codegen). Comments are
     AST-invisible and never match."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    names = _sys_names(tree)
     for node in ast.walk(tree):
-        if _is_path_mutation(node):
+        if _is_path_mutation(node, names):
             return True
         if (
             isinstance(node, ast.Constant)
@@ -251,17 +289,41 @@ def test_no_insert_of_any_form_outside_keep_set():
     )
 
 
+def test_data_only_carriers_mutate_nothing():
+    """A data-only keep-set entry exempts strings, not code: a real insert,
+    append, extend, slice-assign or += on sys.path, at any level, still
+    fails here."""
+    assert _DATA_ONLY <= _KEEP_SET
+    real = []
+    for rel in sorted(_DATA_ONLY):
+        tree = ast.parse((PLUGIN_ROOT / rel).read_text(encoding="utf-8"))
+        names = _sys_names(tree)
+        real += [f"{rel}:{node.lineno}" for node in ast.walk(tree)
+                 if _is_path_mutation(node, names)]
+    assert not real, "real path mutation in a data-only carrier: " + ", ".join(real)
+
+
+def test_the_data_only_check_sees_a_function_level_insert():
+    """Pins the arm above: its matcher flags a real function-level insert
+    the module-level arm cannot see."""
+    # Concatenated, like _STR_TOKENS, so this file carries no needle itself.
+    tree = ast.parse("import sys\ndef f():\n    sys.path" + ".insert(0, 'x')\n")
+    assert [node.lineno for node in ast.walk(tree)
+            if _is_path_mutation(node)] == [3]
+
+
 def test_negative_fixture_flags_every_matcher_leg():
     """Pins the pin: the matcher must flag each committed violation line.
 
     The fixture carries one module-level mutation per leg — insert, append,
-    extend (call leg), slice-assign, augmented assign. Exact line numbers
+    extend (call leg), slice-assign, augmented assign — plus one through an
+    alias of sys and one through `from sys import path`. Exact line numbers
     are the assertion: editing the fixture without updating this test fails
     here, so neither silent matcher rot nor silent fixture drift is
     possible. Also pins the exemption to exactly the fixture path."""
     fixture = PLUGIN_ROOT / _NEGATIVE_FIXTURE
     assert fixture.is_file(), f"negative fixture missing: {_NEGATIVE_FIXTURE}"
-    assert _module_level_mutations(fixture) == [18, 19, 20, 21, 22]
+    assert _module_level_mutations(fixture) == [18, 19, 20, 21, 22, 28, 29]
     assert _any_form_present(fixture)
     assert _NEGATIVE_FIXTURE not in _MODULE_ALLOWLIST
     assert _NEGATIVE_FIXTURE not in _KEEP_SET

@@ -236,30 +236,10 @@ class TestTeachbackReminder:
         assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
         assert "TEACHBACK TIMING" in result
 
-    def test_reminder_appended_when_alone(self, tmp_path):
-        from peer_inject import (
-            get_peer_context,
-            _COMPLETION_AUTHORITY_NOTE,
-        )
-
-        team_dir = tmp_path / "teams" / "pact-test"
-        team_dir.mkdir(parents=True)
-        config = {
-            "members": [
-                {"name": "backend-coder", "agentType": "pact-backend-coder"},
-            ]
-        }
-        (team_dir / "config.json").write_text(json.dumps(config))
-
-        result = get_peer_context(
-            agent_type="pact-backend-coder",
-            team_name="pact-test",
-            teams_dir=str(tmp_path / "teams")
-        )
-
-        assert "only active teammate" in result.lower()
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
-
+    # test_reminder_appended_when_alone lived here and was byte-identical to
+    # TestPeerInject::test_alone_message_when_only_member. It asserted no
+    # reminder text at all, so nothing was lost; the survivor was proved by a
+    # removal-safety ablation (changing the alone-message output reddens it).
     def test_reminder_contains_key_instructions(self):
         """The teachback reminder must mention the key instructions:
         - metadata.teachback_submit as the delivery mechanism

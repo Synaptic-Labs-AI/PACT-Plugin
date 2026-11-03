@@ -1,0 +1,154 @@
+# PACT plugin fast PR suite — advisory, measured, explicitly curated.
+#
+# WHAT THIS DOES
+#   Runs a WHOLE-FILE selection of the pytest suite on every pull request
+#   open/synchronize/reopen. The selection is a versioned exclusion manifest:
+#   new and unknown test files are included by default, and an excluded file
+#   comes back when its own module or one of its mapped production seams
+#   changed. The result is ADVISORY. It is never a required check, and it
+#   never certifies a merge.
+#
+# WHY A COLLECTION CANARY RUNS BEFORE THE SUITE
+#   A selector that is wrong in a test proves the TEST, not the LANE. The
+#   canary re-derives the expected file set from the pure selector, collects
+#   the same arguments with pytest itself, and compares FILE SETS. It also
+#   proves every --ignore path exists: measured, pytest silently ignores a
+#   nonexistent --ignore, so a stale path would green a selection that no
+#   longer excludes that file.
+#
+# WHY BOTH RUNNER STEPS ARE PRECEDED BY THE ENVIRONMENT CHECK
+#   `run_fast_suite.py` is the pinned test-step PATH, not a bare pytest line.
+#   A wrapper invocation contains `python` but not the token `pytest`, so a
+#   guard that keyed only on that token would let this job run with no
+#   environment verification anywhere near it. test_memory_init.py therefore
+#   classifies the pinned runner path as a test step, and the before/after
+#   verify bracketing binds to BOTH invocations. Do not add `env:`, `shell:`
+#   or `continue-on-error` to a runner step or a verify step.
+#
+# WHY EVERY ARTIFACT PATH IS ON THE COMMAND LINE
+#   The suite's own tests run the runner and the verifiers in rigs that
+#   inherit GITHUB_WORKSPACE, so a path derived from the environment could
+#   be written by a rig. Each step names its artifacts explicitly. The pytest
+#   run record is the exception on the writer side: the in-band plugin
+#   writes it under GITHUB_WORKSPACE from the outermost session only, and the
+#   verify step names it explicitly to compare its skip sites with the
+#   full-suite skip allowlist, as an advisory that never fails the job.
+#
+# WHY THE FULL CONSTRAINTS INSTALL
+#   scripts/verify_ci_environment.py requires the installed distribution set
+#   to EQUAL the constraints-ci.txt closure. Installing "only what the
+#   selected tests need" would report MISSING pins and fail. The full install
+#   is a correctness requirement, not a convenience.
+#
+# WHY fetch-depth: 0
+#   The selection diffs against the pull request's base commit, which needs
+#   the merge base. Two history-reading certification modules are also in the
+#   retained selection, and they skip their base-vs-HEAD differentials in a
+#   shallow clone -- a silent under-run, not a failure.
+#
+# WHY LINT IS THE SCRIPT, NOT RUFF LINES
+#   test_local_lint_parity.py byte-compares exactly two `ruff check` lines in
+#   tests.yml against scripts/verify-local-lint-gate.sh. A third copy here
+#   would be a second source of truth for the same invocation.
+
+name: fast-tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Minimal privilege: this workflow checks out the repo, reads the base commit
+# locally, and runs pytest. It needs read access to contents and nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: fast-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fast-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # THE BASE SHA TRAVELS THROUGH THE ENVIRONMENT.
+    # It was previously interpolated straight into two `run:` lines. The value
+    # is a GitHub-generated hex SHA today, so it was not attacker-controlled,
+    # but an inline expression is a textual shell sink: one edit that changed
+    # it to a branch name or a ref would make it a live injection point, and
+    # nothing in the workflow would say so. Job level rather than step level
+    # because the governed-step contract forbids `env:` on a test step, and
+    # both runner steps are test steps.
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      # Third-party actions are pinned to a full commit SHA, matching
+      # tests.yml: a moving tag can be repointed to malicious code.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      # Same cache path and key as tests.yml, so the two lanes share one warm
+      # model instead of thrashing independent caches. Restore-only, with the
+      # save gated on a successful warm below: a partial model looks warm and
+      # cannot load.
+      - name: Restore the embedding model cache
+        id: hf_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pact-plugin/skills/pact-memory/scripts/embeddings.py') }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade -c constraints-ci.txt pip
+          python -m pip install -r constraints-ci.txt
+
+      - name: Warm and verify the embedding model
+        working-directory: pact-plugin
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "skills/pact-memory")
+          from scripts.embeddings import MODEL_NAME
+          from model2vec import StaticModel
+          print(f"loading {MODEL_NAME}")
+          m = StaticModel.from_pretrained(MODEL_NAME, force_download=False)
+          v = m.encode(["warm the cache"])
+          assert v.shape[0] == 1, v.shape
+          print(f"model loaded and encoded, dim={v.shape[1]}")
+          PY
+
+      - name: Save the embedding model cache
+        if: steps.hf_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ steps.hf_cache.outputs.cache-primary-key }}
+
+      - name: Import-hygiene lint
+        run: scripts/verify-local-lint-gate.sh
+
+      - name: Verify the CI environment (before the canary)
+        run: python scripts/verify_ci_environment.py
+
+      - name: Canary — prove the selection actually excludes
+        working-directory: pact-plugin
+        run: python ../scripts/run_fast_suite.py --collect-only --base-sha "$BASE_SHA" --summary "$GITHUB_WORKSPACE/.fast-suite-summary.json" --canary "$GITHUB_WORKSPACE/.fast-suite-canary.json"
+
+      - name: Verify the CI environment (before the fast suite)
+        run: python scripts/verify_ci_environment.py
+
+      - name: Run the fast test suite
+        working-directory: pact-plugin
+        run: python ../scripts/run_fast_suite.py --base-sha "$BASE_SHA" --summary "$GITHUB_WORKSPACE/.fast-suite-summary.json" --canary "$GITHUB_WORKSPACE/.fast-suite-canary.json"
+
+      - name: Verify the fast-suite evidence
+        run: python scripts/verify_fast_summary.py --base-sha "$BASE_SHA" --summary "$GITHUB_WORKSPACE/.fast-suite-summary.json" --canary "$GITHUB_WORKSPACE/.fast-suite-canary.json" --run-record "$GITHUB_WORKSPACE/.full-run-record.json"
+
+      - name: Verify the CI environment (after the fast suite)
+        if: always()
+        run: python scripts/verify_ci_environment.py

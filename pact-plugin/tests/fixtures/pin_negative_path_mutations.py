@@ -20,3 +20,10 @@ sys.path.append("/nonexistent-pin-fixture-append")
 sys.path.extend(["/nonexistent-pin-fixture-extend"])
 sys.path[0:0] = ["/nonexistent-pin-fixture-slice"]
 sys.path += ["/nonexistent-pin-fixture-augassign"]
+
+import sys as _sys_alias  # noqa: E402
+from sys import path as _sys_path  # noqa: E402
+
+# The same mutation through an alias of sys, then a from-imported path.
+_sys_alias.path.append("/nonexistent-pin-fixture-alias")
+_sys_path.insert(0, "/nonexistent-pin-fixture-from-import")

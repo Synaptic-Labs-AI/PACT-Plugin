@@ -356,12 +356,12 @@ class TestEmbedPendingMemories:
             ec_module.embed_pending_memories(project_id="test-project")
             mock_get.assert_called_once_with(project_id="test-project", limit=20)
 
-    def test_default_min_ram_mb_uses_constant(self, ec_module):
-        """Default min_ram_mb parameter should equal MIN_CATCHUP_RAM_MB."""
-        from scripts.embeddings import MIN_CATCHUP_RAM_MB
-        sig = inspect.signature(ec_module.embed_pending_memories)
-        default = sig.parameters["min_ram_mb"].default
-        assert default == MIN_CATCHUP_RAM_MB
+    # test_default_min_ram_mb_uses_constant lived here and asserted the same
+    # default-parameter contract as
+    # TestMinCatchupRamMbConstant::test_embed_pending_memories_default_uses_constant.
+    # The constant-contract class owns that question; the duplicate was
+    # removed after a removal-safety ablation (changing MIN_CATCHUP_RAM_MB
+    # reddens the survivor).
 
 
 class TestGetUnembeddedMemories:
