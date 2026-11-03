@@ -40,10 +40,15 @@ from pathlib import Path
 import pytest
 
 from shared.agent_handoff_marker import (
+    PARTITION_FOREIGN,
+    PARTITION_FROM,
+    PARTITION_OLD_FORMAT,
+    PARTITION_THIS,
     already_emitted,
     handoff_already_emitted,
     is_signal_task,
     occupant_hash,
+    partition_destination,
     sanitize_path_component,
     unclaim,
 )
@@ -674,3 +679,45 @@ class TestTaskIdNormalisation:
         occ = occupant_hash("coder", "team bound subject")
         with pytest.raises(AttributeError):
             already_emitted(7, "5", occ)  # type: ignore[arg-type]  # asserts it RAISES
+
+
+class TestPartitionDestination:
+    """The NEW-FORMAT partition router, extracted so the skill branches on
+    exported constants instead of inlining the comparison. One rule, one
+    place — the same shape as `old_format_destination`."""
+
+    def test_absent_or_empty_team_is_old_format(self):
+        for value in (None, ""):
+            assert (
+                partition_destination(value, "session-me", ["session-x"])
+                == PARTITION_OLD_FORMAT
+            )
+
+    def test_this_team(self):
+        assert (
+            partition_destination("session-me", "session-me", ["session-x"])
+            == PARTITION_THIS
+        )
+
+    def test_realigned_from_team(self):
+        assert (
+            partition_destination("session-x", "session-me", ["session-x"])
+            == PARTITION_FROM
+        )
+
+    def test_unknown_team_is_foreign(self):
+        assert (
+            partition_destination("session-z", "session-me", ["session-x"])
+            == PARTITION_FOREIGN
+        )
+
+    def test_the_labels_are_distinct(self):
+        """A caller compares against the constants, so two labels must never
+        collide."""
+        labels = {
+            PARTITION_THIS,
+            PARTITION_FROM,
+            PARTITION_FOREIGN,
+            PARTITION_OLD_FORMAT,
+        }
+        assert len(labels) == 4

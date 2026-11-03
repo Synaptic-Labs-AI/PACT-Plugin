@@ -135,7 +135,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 **SELECTION, because `agent_handoff` is a multi-event family.** Do not take the first match. The first match is the FIRST emit, which is the superseded copy. Use the rule Step 3.1 uses for snapshots:
 
-1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: synthesize it under that team's `team={from}` label and against THAT team's task store, and never union it with this team's task file. **DO NOT RUN STEP 2 OR STEP 8 FOR IT, AND DO NOT RECORD ITS ID IN THIS TEAM'S LEDGER** — the same id names different tasks in different stores, so a recorded foreign id would make a later pass skip your OWN task; the repeat guard is Step 6's save-vs-update dedup. **UNION IT WITH THAT TEAM'S TASK FILE**: read that store's `{task_id}.json` and apply the same union, because each copy can hold content the other lacks. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
+1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **DECIDE EACH ROUTE WITH THE SHARED `partition_destination`, NEVER WITH AN INLINE TEAM COMPARISON:** it returns the exported `PARTITION_*` labels, the same one-rule-one-place shape as `old_format_destination` below. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: synthesize it under that team's `team={from}` label and against THAT team's task store, and never union it with this team's task file. **DO NOT RUN STEP 2 OR STEP 8 FOR IT, AND DO NOT RECORD ITS ID IN THIS TEAM'S LEDGER** — the same id names different tasks in different stores, so a recorded foreign id would make a later pass skip your OWN task; the repeat guard is Step 6's save-vs-update dedup. **UNION IT WITH THAT TEAM'S TASK FILE**: read that store's `{task_id}.json` and apply the same union, because each copy can hold content the other lacks. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`.
 2. Group the match by the `(agent, task_subject)` identity the event carries. Compute that identity with the shared `occupant_hash` function and not with a local reimplementation. An `agent_handoff` event carries no `occupant` field, so compute the identity from the event's own fields. The platform reuses task_ids across arcs, and a reused task_id carries one identity for each arc. When the group count is more than one, process each group as a distinct work unit. Do not pick one group. **DO NOT FOLD THE TEAM INTO `occupant_hash`.** The marker filename and the `task_metadata_snapshot` occupant are `occupant_hash(agent, subject)` alone, so a team inside the hash re-keys every existing marker and breaks every existing snapshot join. The team term routes partitions and is never a term of the group key.
 3. In each group take the **latest `ts`**, and take the **last in journal order on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties. The later line in journal order is the authoritative one, the same tie-break Step 3.1 uses).
 4. The task file belongs to at most one group. Union the task-file copy into the group with the identity `occupant_hash(owner, subject)` computed from the task record. **A group that does not carry that identity is a distinct work unit and gets NO per-group report** — the other group owns the file, so this one has no copy of its own to disagree with, and the divergence report is decided ONCE for the whole group set (see the report rule below).
@@ -310,14 +310,16 @@ for task_id in unprocessed | from_unprocessed:
     else:
         this_team_events, from_events, foreign, old_format = [], {}, [], []
         for e in matches:
-            team = e.get("team")
-            if not team:
+            destination = partition_destination(
+                e.get("team"), this_team, from_teams
+            )
+            if destination == PARTITION_OLD_FORMAT:
                 old_format.append(e)
-            elif team == this_team:
+            elif destination == PARTITION_THIS:
                 this_team_events.append(e)
-            elif team in from_teams:
-                from_events.setdefault(team, []).append(e)
-            else:
+            elif destination == PARTITION_FROM:
+                from_events.setdefault(e.get("team"), []).append(e)
+            elif destination == PARTITION_FOREIGN:
                 foreign.append(e)
     for e in foreign:
         report(f"handoff identity mismatch for task {report_safe(task_id)}: "

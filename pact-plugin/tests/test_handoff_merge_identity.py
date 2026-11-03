@@ -441,6 +441,27 @@ class TestUnionPreferringTaskFile:
         assert merged["key_decisions"] == ["disk alias"]
         assert "decisions" not in merged
 
+    # ---- input totality: a malformed copy is ABSENT, not a crash ----------
+    def test_non_dict_disk_copy_is_treated_as_absent(self):
+        """B-F4, RED before the coercion: a `metadata.handoff` holding a
+        string reaches the union through the harvest's read loop. Raising
+        here makes the whole loop hostage to one bad field; the module's
+        convention is that a malformed copy is absent."""
+        merged, reports = union_preferring_task_file(
+            {"key_decisions": ["x"]}, "not-a-dict", "61"
+        )
+        assert isinstance(merged, dict)
+        assert isinstance(reports, list)
+        assert merged["key_decisions"] == ["x"]
+
+    def test_non_dict_journal_copy_is_treated_as_absent(self):
+        merged, reports = union_preferring_task_file(
+            [], {"produced": "p"}, "61"
+        )
+        assert isinstance(merged, dict)
+        assert isinstance(reports, list)
+        assert merged["produced"] == "p"
+
     def test_drop_removes_every_spelling_of_the_dropped_identity(self):
         journal = {"produced": "p", "decisions": ["d"], "key_decisions": ["d2"]}
         disk = {"produced": "p2", "uncertainty": ["u"]}
@@ -794,6 +815,28 @@ class TestHarvestRuleProse:
         assert "DO NOT ENUMERATE THE TASKS ROOT" in SKILL_TEXT
         # M-2: flipping "discard" to "keep" would process a mixed event.
         assert "discard a mixed event" in SKILL_TEXT
+
+    def test_partition_route_is_called_not_inlined(self):
+        """A-F6: the NEW-FORMAT partition lives in `partition_destination`
+        beside `old_format_destination`, and the skill branches on the
+        exported labels. The inline comparison was the unexecutable half that
+        produced a prose/pseudocode disagreement."""
+        assert (
+            "DECIDE EACH ROUTE WITH THE SHARED `partition_destination`"
+            in SKILL_TEXT
+        )
+        assert "partition_destination(" in SKILL_TEXT
+        for label in (
+            "PARTITION_OLD_FORMAT",
+            "PARTITION_THIS",
+            "PARTITION_FROM",
+            "PARTITION_FOREIGN",
+        ):
+            assert label in SKILL_TEXT
+        # The inline comparison must not come back. (`for team in from_teams`
+        # in the membership loop is a different construct and stays.)
+        assert "elif team == this_team:" not in SKILL_TEXT
+        assert "elif team in from_teams:" not in SKILL_TEXT
 
     def test_old_format_routing_uses_the_structured_outcome(self):
         """The pseudocode must ROUTE on the outcome, not collapse every

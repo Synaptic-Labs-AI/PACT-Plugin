@@ -472,9 +472,20 @@ def union_preferring_task_file(
     proper-subset branch restores in both and reports that it did. Key sets
     cannot separate them; the report is what makes the restore auditable.
 
+    BOTH INPUTS ARE TOTAL. A non-dict argument is treated as an ABSENT copy
+    (`{}`), matching the convention the OLD-FORMAT classifier applies to
+    event and disk handoffs: a malformed copy is missing, not a crash. A
+    wrong-typed `metadata.handoff` reaches this function through the
+    harvest's read loop, and raising here would make that loop hostage to
+    one bad field.
+
     Pure; no I/O; returns a fresh dict and one report line per divergent
     field. Both inputs are left unmutated.
     """
+    if not isinstance(journal_handoff, dict):
+        journal_handoff = {}
+    if not isinstance(disk_handoff, dict):
+        disk_handoff = {}
     merged = dict(journal_handoff)
     reports: list[str] = []
     report_task = report_safe(task_id)
@@ -584,6 +595,15 @@ OLD_FORMAT_DEST_MIXED = "mixed"
 OLD_FORMAT_DEST_FROM = "from"
 OLD_FORMAT_DEST_THIS = "this"
 
+# Route labels `partition_destination` returns for a team-carrying event.
+# EXPORTED for the same cause as the OLD_FORMAT_DEST_* set: a bare literal
+# drifted into an else bucket silently misroutes a realigned team's work
+# unit into THIS team.
+PARTITION_THIS = "this"
+PARTITION_FROM = "from"
+PARTITION_FOREIGN = "foreign"
+PARTITION_OLD_FORMAT = "old-format"
+
 
 class OldFormatOutcome(NamedTuple):
     """Structured result of classifying one OLD-FORMAT journal event.
@@ -621,6 +641,32 @@ def old_format_destination(outcome: OldFormatOutcome, this_team: str) -> str:
     if outcome.state == OLD_FORMAT_OWNED and outcome.team != this_team:
         return OLD_FORMAT_DEST_FROM
     return OLD_FORMAT_DEST_THIS
+
+
+def partition_destination(
+    event_team: object, this_team: str, from_teams: list[str]
+) -> str:
+    """Where a team-carrying `agent_handoff` event belongs.
+
+    Returns one of the EXPORTED PARTITION_* labels; callers compare against
+    those constants, never against bare literals.
+      - PARTITION_OLD_FORMAT — the event carries NO team (absent or empty):
+        the OLD-FORMAT rule decides it.
+      - PARTITION_THIS — the event names THIS team.
+      - PARTITION_FROM — the event names a team the journal realigned FROM.
+      - PARTITION_FOREIGN — it names neither; do not process it.
+
+    Callers handle an underivable `this_team` BEFORE partitioning — every
+    event is OLD-FORMAT then — so this function compares the names as given.
+    Pure; never raises.
+    """
+    if not event_team:
+        return PARTITION_OLD_FORMAT
+    if event_team == this_team:
+        return PARTITION_THIS
+    if event_team in from_teams:
+        return PARTITION_FROM
+    return PARTITION_FOREIGN
 
 
 def mixed_old_format_event(
