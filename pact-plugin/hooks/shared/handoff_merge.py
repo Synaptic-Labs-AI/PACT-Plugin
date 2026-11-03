@@ -42,6 +42,7 @@ from .handoff_schema import (
 )
 from .session_journal import _ts_supersedes
 from .session_state import is_safe_path_component
+from .task_utils import fold_team_name
 
 __all__ = [
     "OLD_FORMAT_DEST_FROM",
@@ -762,16 +763,17 @@ def safe_from_teams(
 
     Keeps each `from` that is a str passing is_safe_path_component and does
     not name `this_team`, once, in first-seen order. NAMES ARE COMPARED BY
-    THE FOLD read_task_json APPLIES (`.strip().lower()`), because that reader
-    tries the folded store first: a case variant of this team would read this
-    team's own file, and two case variants of one team name one store. A
+    task_utils.fold_team_name, THE FOLD read_task_json APPLIES, because that
+    reader tries the folded store first: a case variant of this team would
+    read this team's own file, and two case variants of one team name one
+    store. A
     rejected non-empty value adds one report line. A `from` exactly equal to
     `this_team` is dropped silently (it is this section); a case-only variant
     of it is dropped with a report.
     """
     teams: list[str] = []
     reports: list[str] = []
-    this_fold = _team_fold(this_team)
+    this_fold = fold_team_name(this_team)
     seen_folds: set[str] = set()
     for event in realign_events or ():
         if not isinstance(event, dict):
@@ -788,7 +790,7 @@ def safe_from_teams(
             continue
         if value == this_team:
             continue
-        fold = _team_fold(value)
+        fold = fold_team_name(value)
         if fold == this_fold:
             reports.append(
                 f"handoff realign source invalid: team value "
@@ -802,10 +804,6 @@ def safe_from_teams(
         teams.append(value)
     return teams, reports
 
-
-def _team_fold(team: object) -> str | None:
-    """The store-lookup fold read_task_json applies to a team name."""
-    return team.strip().lower() if isinstance(team, str) else None
 
 
 _CONTENT_KEY_RE = re.compile(r"[0-9a-f]{8}")

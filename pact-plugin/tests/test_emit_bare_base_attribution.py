@@ -152,3 +152,79 @@ class TestPerWriteSnapshotRead:
         snaps = [e for e in journal if e["type"] == "task_metadata_snapshot"]
         assert snaps and snaps[0]["metadata"].get("audit_summary") == "OWN"
         assert snaps[0].get("team") == TEAM
+
+
+# =============================================================================
+# The gate's own rules: a bare-base-only file under a named store is NOT this
+# task's record, so every rule that reads the record sees {} — the same state
+# as a missing file. Controls show a named-store record still reaches them.
+# =============================================================================
+def _rules(advisories):
+    return {rule for rule, _ in advisories}
+
+
+TEACHBACK_RECORD = dict(
+    subject="preparer: TEACHBACK for foo",
+    owner="preparer",
+    status="pending",
+    blocks=[],
+)
+
+
+class TestWriteTimeRulesReadOnlyTheNamedStore:
+    """task_a (the write-time read). Kills: deleting its base_fallback=False."""
+
+    def _wiring_payload(self):
+        return {
+            "tool_name": "TaskUpdate",
+            "agent_type": LEAD,
+            "tool_input": {
+                "taskId": "A",
+                "owner": "pact-preparer",
+                "metadata": {"teachback_submit": {"understanding": "u"}},
+            },
+            "tool_response": {},
+        }
+
+    def test_bare_base_record_reaches_no_teachback_rule(self, home):
+        _write(home, "bare", "A", **TEACHBACK_RECORD)
+        rules = _rules(tlg.evaluate_lifecycle(self._wiring_payload()))
+        assert "teachback_addblocks_missing" not in rules
+        assert "variety_acknowledgment_missing" not in rules
+
+    def test_control_named_store_record_reaches_both_rules(self, home):
+        _write(home, "named", "A", **TEACHBACK_RECORD)
+        rules = _rules(tlg.evaluate_lifecycle(self._wiring_payload()))
+        assert "teachback_addblocks_missing" in rules
+        assert "variety_acknowledgment_missing" in rules
+
+
+class TestCompletionRulesReadOnlyTheNamedStore:
+    """The completion disk fallback. Kills: deleting its base_fallback=False."""
+
+    RECORD = dict(
+        subject="preparer: TEACHBACK for foo",
+        owner="preparer",
+        status="completed",
+        metadata={"handoff": {"produced": "only one field"}},
+    )
+
+    def _payload(self):
+        return {
+            "tool_name": "TaskUpdate",
+            "agent_type": LEAD,
+            "tool_input": {"taskId": "B", "status": "completed"},
+            "tool_response": {},
+        }
+
+    def test_bare_base_record_reaches_no_completion_rule(self, home, journal):
+        _write(home, "bare", "B", **self.RECORD)
+        rules = _rules(tlg.evaluate_lifecycle(self._payload()))
+        assert "teachback_submit_missing" not in rules
+        assert "handoff_schema_invalid_at_completion" not in rules
+
+    def test_control_named_store_record_reaches_both_rules(self, home, journal):
+        _write(home, "named", "B", **self.RECORD)
+        rules = _rules(tlg.evaluate_lifecycle(self._payload()))
+        assert "teachback_submit_missing" in rules
+        assert "handoff_schema_invalid_at_completion" in rules

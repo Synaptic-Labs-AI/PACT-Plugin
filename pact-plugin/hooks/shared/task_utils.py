@@ -609,6 +609,16 @@ def iter_team_task_jsons(
         return
 
 
+def fold_team_name(team_name: object) -> str:
+    """The store-lookup fold of a team name: stripped and lowercased.
+
+    read_task_json tries the folded store first, so two names with one fold
+    address one store. Every caller that compares team names for "is this
+    the same store" uses this one fold. A non-str name folds to "".
+    """
+    return team_name.strip().lower() if isinstance(team_name, str) else ""
+
+
 def read_task_json(
     task_id: str,
     team_name: str | None,
@@ -675,7 +685,7 @@ def read_task_json(
     # read, preserving the fail-open {} contract.
     raw_team_dir = task_dir_for(team_name, tasks_base_dir=tasks_base_dir)
     if isinstance(team_name, str):
-        folded_name = team_name.strip().lower()
+        folded_name = fold_team_name(team_name)
         if folded_name and folded_name != team_name.strip():
             folded_dir = task_dir_for(folded_name, tasks_base_dir=tasks_base_dir)
             if folded_dir is not None:
