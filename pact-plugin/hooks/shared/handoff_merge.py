@@ -74,6 +74,7 @@ __all__ = [
     "positioned",
     "report_safe",
     "safe_from_teams",
+    "select_snapshot",
     "store_epochs",
     "task_metadata",
     "undivided_contents",
@@ -739,6 +740,61 @@ def undivided_contents(group: list) -> int:
             if isinstance(event, dict)
         }
     )
+
+
+def _as_arc(arc: object) -> tuple | None:
+    """An arc as `arc_of` returns it: a tuple, or None. A JSON list becomes a
+    tuple; any other shape is not an arc and becomes None."""
+    if isinstance(arc, (list, tuple)):
+        return tuple(arc)
+    return None
+
+
+def select_snapshot(
+    journal: list, task_id: object, occupant: object, team: object, arc: object
+) -> tuple[dict | None, list[str]]:
+    """The one `task_metadata_snapshot` a work unit may take its siblings from.
+
+    `journal` is the whole Step 1 journal list in order; `occupant` is the
+    unit's group identity, `team` the team of the section the unit is
+    processed under, and `arc` the unit's group arc (None for a team-less
+    group). A snapshot qualifies when its `task_id` and `occupant` match, it
+    names no team other than `team`, and its arc EQUALS `arc`: a team-less
+    snapshot has a None arc, so it reaches only a team-less unit, and a dated
+    unit takes only a snapshot carrying its team and its arc. Among the
+    qualifying snapshots the latest instant wins, the later journal line on
+    an equal instant.
+
+    Returns (snapshot or None, report lines). A snapshot that names another
+    team is reported once; a snapshot of another instance is dropped
+    silently. Pure; never raises.
+    """
+    positions = positioned(journal if isinstance(journal, list) else [])
+    epochs = store_epochs(positions)
+    want_arc = _as_arc(arc)
+    reports: list[str] = []
+    qualifying = []
+    for event in positions:
+        if event.get("type") != "task_metadata_snapshot":
+            continue
+        if event.get("task_id") != task_id or event.get("occupant") != occupant:
+            continue
+        snapshot_team = event.get("team")
+        if snapshot_team not in (None, "") and snapshot_team != team:
+            reports.append(
+                f"handoff snapshot identity mismatch for task "
+                f"{report_safe(task_id)}: snapshot names team "
+                f"{report_safe(snapshot_team)}; this section is team "
+                f"{report_safe(team)}"
+            )
+            continue
+        if arc_of(event, positions, epochs) != want_arc:
+            continue
+        qualifying.append(event)
+    winner = latest_by_ts_then_journal_order(qualifying)
+    if winner is not None:
+        winner = {k: v for k, v in winner.items() if k != "_pos"}
+    return winner, reports
 
 
 def task_metadata(task: object) -> dict:

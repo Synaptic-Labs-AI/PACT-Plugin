@@ -94,6 +94,17 @@ FIXTURES = {
     "arc_of": ([], {"journal": _JOURNAL + [
         {"type": "task_created", "task_id": "5", "team": TEAM, "ts": T1},
         _ev(H)], "position": 4}, _json([1, 3])),
+    # Two snapshots of task 5: a team-less one and one of this team's dated
+    # instance. A dated unit must take the dated one and never the other.
+    "select_snapshot": (
+        [], {"journal": _JOURNAL + [
+            {"type": "task_metadata_snapshot", "task_id": "5", "occupant": _IDENTITY,
+             "metadata": {"label": "legacy"}, "ts": T1},
+            {"type": "task_metadata_snapshot", "task_id": "5", "occupant": _IDENTITY,
+             "team": TEAM, "metadata": {"label": "dated"}, "ts": T1}],
+            "task_id": "5", "occupant": _IDENTITY, "team": TEAM, "arc": [0, 0]},
+        lambda out: json.loads(out)["snapshot"]["metadata"] == {"label": "dated"}
+        and json.loads(out)["reports"] == []),
     "owning_group": (
         [], {"groups": [[_IDENTITY, None], [_IDENTITY, [0, 0]]],
              "disk_id": _IDENTITY, "file_arc": [0, 0]},

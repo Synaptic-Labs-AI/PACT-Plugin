@@ -1358,6 +1358,7 @@ class TestHarvestRuleProse:
             "group_events",
             "current_arc",
             "arc_of",
+            "select_snapshot",
             "owning_group",
             "undivided_contents",
             "partition_destination",
@@ -1686,6 +1687,10 @@ class TestHarvestRuleProse:
         team-less unit, and a dated unit takes only its own team and arc."""
         assert "**THE SNAPSHOT'S ARC MUST EQUAL THE UNIT'S GROUP ARC.**" in SKILL_TEXT
         assert "with the `arc_of` route" in SKILL_TEXT
+        assert (
+            "**Select with the `select_snapshot` route in Step 3, under HOW TO "
+            "CALL THE NAMES THIS STEP USES, and never by hand:**" in SKILL_TEXT
+        )
         assert (
             "a DATED unit, one whose group arc is not null, accepts only a "
             "snapshot that carries its team and its arc" in SKILL_TEXT
