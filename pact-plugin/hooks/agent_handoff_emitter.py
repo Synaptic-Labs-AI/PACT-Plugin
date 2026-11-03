@@ -302,6 +302,21 @@ def main() -> None:
             and not same_store
             and subjects_differ
         ):
+            # A deliberate suppression must be MARKED, not silent: the stderr
+            # line below is not shown by the platform, so this journal event
+            # is the durable record that the task's handoff was withheld.
+            # Best effort — a write failure must not break the suppression
+            # path or the exit-0 contract.
+            try:
+                append_event(
+                    make_event(
+                        "handoff_emit_suppressed",
+                        task_id=task_id,
+                        cause="mixed_store",
+                    )
+                )
+            except Exception:
+                pass
             print(
                 f"agent_handoff_emitter: resolved store "
                 f"{report_safe(resolved_team)!r} is not the payload team "

@@ -305,7 +305,15 @@ def report_gap(task_id, agent, ts):
 # the partition guard below turns into OLD-FORMAT. The guard checks the
 # DERIVED NAME, not whether the directory can be read.
 this_team = Path(task_list_dir).name if task_list_dir else ""
-from_teams = [e["from"] for e in realign_events]
+# A realigned team name is JOURNAL-SUPPLIED: keep only non-empty STRINGS.
+# A non-str `from` (a list) would reach a dict key downstream — the event
+# whose `team` is the same value matches PARTITION_FROM and raises
+# `unhashable type` at `from_events.setdefault(e.get("team"), [])`.
+from_teams = [
+    event["from"]
+    for event in realign_events
+    if isinstance(event.get("from"), str) and event["from"]
+]
 
 
 def group_by_identity(events):

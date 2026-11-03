@@ -312,7 +312,16 @@ class TestEmitTeamUncertaintyGuard:
             create_payload_store=True,
         )
         assert code == 0
-        assert calls == []
+        # No HANDOFF event, but one durable suppression MARK (S5): the
+        # stderr line is not shown by the platform, so a silent write would
+        # leave the loss with no trace.
+        assert [e for e in calls if e.get("type") == "agent_handoff"] == []
+        marks = [
+            e for e in calls if e.get("type") == "handoff_emit_suppressed"
+        ]
+        assert len(marks) == 1
+        assert marks[0]["task_id"] == "12"
+        assert marks[0]["cause"] == "mixed_store"
         assert (
             "resolved store 'session-old' is not the payload team "
             "'session-live'" in err
@@ -337,8 +346,9 @@ class TestEmitTeamUncertaintyGuard:
             snapshot_calls=snapshot_calls,
         )
         assert code == 0
-        assert calls == []           # handoff suppressed
+        assert [e for e in calls if e.get("type") == "agent_handoff"] == []
         assert snapshot_calls == []  # snapshot suppressed too
+        assert [e for e in calls if e.get("type") == "handoff_emit_suppressed"]
         assert "suppressing mixed handoff for task 12" in err
 
     def test_non_mixed_task_still_emits_the_snapshot(

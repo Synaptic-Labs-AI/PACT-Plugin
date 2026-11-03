@@ -1216,6 +1216,13 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         "",
     )
     if source_session:
+        # The session id is JOURNAL-SUPPLIED data rendered inside the
+        # plugin's own template: a value carrying a line boundary or a
+        # format character would forge a new line in the agent's context.
+        # Same predicate, same neutral substitution as the other template
+        # sites (format_project_memory_line / format_session_substitutions).
+        if not _safe_for_line(source_session):
+            source_session = "not a safe name"
         lines.append(f"Context from session {source_session}.")
         lines.append("")
 
@@ -1234,58 +1241,74 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     #
     # The supersession is applied at THIS renderer's own grain: occupant
     # identity first, then one latest event per team partition. A team-less
-    # (OLD-FORMAT) partition is dropped ONLY when the group holds exactly ONE
-    # attributed team AND the team-less copy is strictly older — compared as
-    # PARSED instants, never as strings (`_parse_ts`; the lexical compare
-    # lets a fractional `...T07:00:00.123456Z` sort BEFORE `...T07:00:00Z`
-    # while naming the later instant). An unparseable or missing timestamp
-    # never drops: an unknown instant cannot establish "strictly older".
-    # With two or more attributed teams there is no single candidate whose
-    # supersession it would be (the copy could belong to any of them, or to
-    # a third store), and a team-less copy NEWER than the attributed one is
-    # the current revision — writers omit `team` whenever the resolver fails
-    # closed, which can happen at any time. A visible duplicate is
-    # recoverable; showing a stale handoff as current is not. Two DIFFERENT
+    # (OLD-FORMAT) partition is NEVER deleted: agent and subject are not
+    # unique across teams, so a team-less copy may be a DIFFERENT store's
+    # real work — the exact collision this branch exists to protect. It is
+    # ANNOTATED as superseded only in the ordinary case: exactly ONE
+    # attributed team, and the team-less copy strictly older by PARSED
+    # instants (`_parse_ts`; the lexical compare lets a fractional
+    # `...T07:00:00.123456Z` sort BEFORE `...T07:00:00Z` while naming the
+    # later instant). An unparseable or missing timestamp never annotates:
+    # an unknown instant cannot establish "strictly older". No annotation
+    # when two or more teams exist, or when the team-less copy is newer.
+    # Visibility beats deletion: showing a stale handoff as current is the
+    # harm; a marked duplicate is readable and recoverable. Two DIFFERENT
     # teams are two distinct tasks that merely share a number: both render
     # rather than collapsing.
+    def _key_str(value: object) -> str:
+        """A journal-supplied value safe to use as a dict key: a non-string
+        becomes "" (the renderer's absent sentinel). A raw list would raise
+        `unhashable type` and kill the whole brief."""
+        return value if isinstance(value, str) else ""
+
     by_occupant: dict[tuple, dict] = {}
     for h in handoffs:
         occupant = (
-            h.get("task_id", ""),
-            h.get("agent", "unknown"),
-            h.get("task_subject", ""),
+            _key_str(h.get("task_id")),
+            _key_str(h.get("agent")) or "unknown",
+            _key_str(h.get("task_subject")),
         )
         partitions = by_occupant.setdefault(occupant, {})
-        team = h.get("team", "")
+        team = _key_str(h.get("team"))
         # `>=` keeps the LATER journal line on an equal ts. Same tie-break.
         current = partitions.get(team)
         if current is None or h.get("ts", "") >= current.get("ts", ""):
             partitions[team] = h
-    rendered: list[dict] = []
+    rendered: list[tuple[dict, str]] = []
     for partitions in by_occupant.values():
         teamless = partitions.get("")
         attributed = {
             team: event for team, event in partitions.items() if team != ""
         }
+        teamless_mark = ""
         if teamless is not None and len(attributed) == 1:
-            candidate = next(iter(attributed.values()))
+            candidate_team, candidate = next(iter(attributed.items()))
             try:
                 older = _parse_ts(teamless.get("ts")) < _parse_ts(
                     candidate.get("ts")
                 )
             except (ValueError, TypeError):
                 # Missing / empty / malformed on either side: an unknown
-                # instant cannot establish "strictly older". Keep the copy.
+                # instant cannot establish "strictly older".
                 older = False
             if older:
-                # Exactly one candidate, and the team-less copy is strictly
-                # older: the superseded pre-field document.
-                del partitions[""]
-        rendered.extend(partitions.values())
+                # ANNOTATE, never delete: agent and subject are not unique
+                # across teams, so a team-less copy may be a DIFFERENT
+                # store's real work. The annotation marks the ordinary
+                # superseded case without hiding content.
+                safe_team = (
+                    candidate_team
+                    if _safe_for_line(candidate_team)
+                    else "not a safe name"
+                )
+                teamless_mark = f" [superseded by team {safe_team}]"
+        if teamless is not None:
+            rendered.append((teamless, teamless_mark))
+        rendered.extend((event, "") for event in attributed.values())
     handoffs = rendered
     if handoffs:
         lines.append("## Completed Work")
-        for h in handoffs:
+        for h, annotation in handoffs:
             agent = h.get("agent", "unknown")
             subject = h.get("task_subject", "")
             handoff_data = h.get("handoff")
@@ -1300,9 +1323,9 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
                 resolve_handoff_field(handoff_data, "decisions")
             )
             if summary:
-                lines.append(f"- {agent}: {subject} -> {summary}")
+                lines.append(f"- {agent}: {subject} -> {summary}{annotation}")
             else:
-                lines.append(f"- {agent}: {subject}")
+                lines.append(f"- {agent}: {subject}{annotation}")
         lines.append("")
 
     # Extract phase progress. Use .get("phase") with a safe default so a

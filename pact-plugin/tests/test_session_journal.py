@@ -3632,6 +3632,12 @@ class TestValidateEventSchemaPerType:
             "task_subject": "CODE: thing",
             "handoff": {"decisions": ["x"]},
         },
+        # The mixed-store guard's deliberate-withholding mark. `cause` is a
+        # vocabulary; `mixed_store` is its only value today.
+        "handoff_emit_suppressed": {
+            "task_id": "1",
+            "cause": "mixed_store",
+        },
         "handoff_refusal_degraded": {
             "agent_type": "pact-backend-coder",
             "detail": "PACT Handoff Refusal: missing produced",

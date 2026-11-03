@@ -463,6 +463,23 @@ class TestUnionPreferringTaskFile:
         assert isinstance(reports, list)
         assert merged["produced"] == "p"
 
+    def test_malformed_copy_is_reported(self):
+        """R2: the coercion is NOT silent. `{}` journal + a truthy non-dict
+        disk returned ({}, []) with zero reports; the only copy that could
+        have carried content was the malformed one, and the harvest would
+        process the task and record it as done."""
+        merged, reports = union_preferring_task_file({}, "oops", "7")
+        assert merged == {}
+        assert len(reports) == 1
+        assert "task-file copy was not a mapping" in reports[0]
+        # Mirror: the journal side, with a real disk copy still merged.
+        merged, reports = union_preferring_task_file(
+            [], {"produced": "p"}, "7"
+        )
+        assert merged["produced"] == "p"
+        assert len(reports) == 1
+        assert "journal copy was not a mapping" in reports[0]
+
     def test_field_map_agrees_with_resolve_handoff_field_on_all_orders(self):
         """FIX 1b: a BEHAVIOURAL arm, not a sentence. `_field_map` claims to
         mirror the shipped reader; a falsy alias overwriting a falsy
@@ -598,6 +615,49 @@ class TestMixedOldFormatEvent:
             "handoff cross-team check unavailable for task 57: no other "
             "named store carries the identity"
         )
+
+    def test_ownerless_content_match_reports_its_own_state(self):
+        """R3a: a candidate that CARRIES the content but has no owner, so its
+        identity cannot be compared, must be distinguishable from no
+        candidate carrying the content — the two states call for different
+        actions."""
+        outcome = self._classify(
+            "review-backend",
+            "NEW subject",
+            [{"team": "session-old", "task": self._task(None, "OLD subject")}],
+        )
+        assert outcome.state == OLD_FORMAT_UNMATCHED
+        assert outcome.report == (
+            "handoff cross-team check unavailable for task 57: a candidate "
+            "carries the content but its record has no owner; its identity "
+            "could not be compared"
+        )
+        assert "no other named store carries the identity" not in outcome.report
+
+    def test_no_candidate_still_reports_the_generic_line(self):
+        """CONTROL for R3a: with no candidate at all the generic bound line
+        is unchanged."""
+        outcome = self._classify("review-backend", "NEW subject", [])
+        assert outcome.state == OLD_FORMAT_UNMATCHED
+        assert "no other named store carries the identity" in outcome.report
+        assert "its record has no owner" not in outcome.report
+
+    def test_ownerless_skip_does_not_settle_an_event_another_candidate_owns(self):
+        """R3a rationale: the skip removes one candidate; a later candidate
+        that owns the event still decides it."""
+        outcome = self._classify(
+            "review-backend",
+            "NEW subject",
+            [
+                {"team": "session-old", "task": self._task(None, "OLD subject")},
+                {
+                    "team": "session-this",
+                    "task": self._task("review-backend", "NEW subject"),
+                },
+            ],
+        )
+        assert outcome.state == OLD_FORMAT_OWNED
+        assert outcome.team == "session-this"
 
     def test_an_identity_match_wins_over_an_earlier_content_match(self):
         """The two-pass scan: the CONTENT match comes FIRST, so a classifier
@@ -1587,3 +1647,13 @@ class TestHarvestRuleProse:
             "SETTLE THE EVENT" in SKILL_TEXT
         )
         assert "Skipping leaves the event UNMATCHED" not in SKILL_TEXT
+
+    def test_s3_realign_team_names_are_filtered_to_strings(self):
+        """S3 (pseudocode-level): `from_teams` is built from journal-supplied
+        `team_realigned` `from` fields. A non-str entry (a list) matches
+        PARTITION_FROM and then raises `unhashable type` at the
+        `from_events.setdefault` key. Only non-empty strings enter the list,
+        so a non-str can never reach a dict key."""
+        assert 'isinstance(event.get("from"), str)' in SKILL_TEXT
+        assert "for event in realign_events" in SKILL_TEXT
+        assert "unhashable type" in SKILL_TEXT

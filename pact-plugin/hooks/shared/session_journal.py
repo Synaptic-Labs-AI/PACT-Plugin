@@ -216,6 +216,16 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_subject": str,
         "handoff": dict,
     },
+    # hooks/agent_handoff_emitter.py emits handoff_emit_suppressed when the
+    # b1 mixed-store guard deliberately withholds BOTH the agent_handoff event
+    # and its snapshot. DELIBERATELY NOT journal_emit_skipped: that type
+    # records a journal WRITE that did not land, and its `cause` separates
+    # RAISED from RETURNED-FALSE — a deliberate suppression is a THIRD origin,
+    # and folding it in would rebuild the ambiguity that distinction exists to
+    # remove. The stderr line the guard also prints is not shown by the
+    # platform, so this event is the durable trace that a loss happened.
+    # `cause` is a small vocabulary; today the only value is mixed_store.
+    "handoff_emit_suppressed": {"task_id": str, "cause": str},
     # hooks/validate_handoff.py emits handoff_refusal_degraded when the
     # stop_hook_active loop guard degrades a HANDOFF refusal to a
     # systemMessage warning — with refusal as the default, degrade events are

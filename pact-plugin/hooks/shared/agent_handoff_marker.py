@@ -483,18 +483,30 @@ def union_preferring_task_file(
     event and disk handoffs: a malformed copy is missing, not a crash. A
     wrong-typed `metadata.handoff` reaches this function through the
     harvest's read loop, and raising here would make that loop hostage to
-    one bad field.
+    one bad field. THE COERCION IS REPORTED, once per call: it names which
+    side was not a mapping, because a silently empty merge processes the
+    task and records its id as done, so the loss is never retried and
+    nothing says why.
 
     Pure; no I/O; returns a fresh dict and one report line per divergent
     field. Both inputs are left unmutated.
     """
-    if not isinstance(journal_handoff, dict):
-        journal_handoff = {}
-    if not isinstance(disk_handoff, dict):
-        disk_handoff = {}
-    merged = dict(journal_handoff)
     reports: list[str] = []
     report_task = report_safe(task_id)
+    bad_copies: list[str] = []
+    if not isinstance(journal_handoff, dict):
+        bad_copies.append("journal")
+        journal_handoff = {}
+    if not isinstance(disk_handoff, dict):
+        bad_copies.append("task-file")
+        disk_handoff = {}
+    if bad_copies:
+        reports.append(
+            f"handoff copy not a mapping for task {report_task}: the "
+            f"{' and '.join(bad_copies)} copy was not a mapping; treated as "
+            f"absent"
+        )
+    merged = dict(journal_handoff)
 
     journal_fields = _field_map(journal_handoff)
     disk_fields = _field_map(disk_handoff)
@@ -704,13 +716,15 @@ def mixed_old_format_event(
       - OLD_FORMAT_MIXED: a store's content key matches while its identity
         does not. The content came from a store whose identity the event does
         not carry; discard it and report `report`.
-      - OLD_FORMAT_UNMATCHED: no named store carries the content. Keep the
-        identity match as this team's, and report the unavailable check —
-        a store no realignment event names is out of reach, and guessing is
-        worse than reporting the bound. The report travels ON THE OUTCOME
-        because this state is the COMMON path (every pre-field event whose
-        content matches no named store), and a caller that had to invent the
-        line would be free to choose silently instead.
+      - OLD_FORMAT_UNMATCHED: NO other candidate decides the event — either
+        no named store carries the content, or the only content-carrying
+        candidate could not have its identity compared (see the owner
+        exception below). Keep the identity match as this team's, and report
+        the unavailable check — a store no realignment event names is out of
+        reach, and guessing is worse than reporting the bound. The report
+        travels ON THE OUTCOME because this state is the COMMON path, and a
+        caller that had to invent the line would be free to choose silently
+        instead. The two causes carry DIFFERENT lines.
 
     ONE DELIBERATE EXCEPTION TO THE MIXED RULE: a content-matching candidate
     whose own record carries no non-empty `owner` is SKIPPED, not treated as
@@ -721,6 +735,10 @@ def mixed_old_format_event(
     DOES NOT SETTLE THE EVENT: another named candidate may still return
     OWNED_BY that team or MIXED, and the event is routed or discarded
     accordingly; it is UNMATCHED only when no other candidate decides it.
+    When the skip leaves the event UNMATCHED, the returned report says a
+    candidate CARRIED the content but its identity could not be compared —
+    distinct from the no-candidate line, because the two states call for
+    different actions.
 
     A non-dict / empty event handoff is UNMATCHED: there is no content to
     compare. Pure; no I/O; never raises.
@@ -740,6 +758,7 @@ def mixed_old_format_event(
         event_agent if isinstance(event_agent, str) else "", event_subject
     )
     content_matches: list[tuple[str, dict]] = []
+    skipped_ownerless = False
     for candidate in candidate_tasks or ():
         if not isinstance(candidate, dict):
             continue
@@ -761,14 +780,30 @@ def mixed_old_format_event(
             # owner, and the task record cannot reproduce that name. Comparing
             # identities here would MANUFACTURE a mismatch and report this
             # team's own event as MIXED, discarding content that was never
-            # foreign. Skipping the candidate leaves the event UNMATCHED, so
-            # it is kept as this team's.
+            # foreign. The skip removes THIS CANDIDATE from consideration; it
+            # does NOT settle the event — another candidate may still return
+            # OWNED_BY or MIXED, and the event is UNMATCHED only when none
+            # does. `skipped_ownerless` makes that state reportable.
+            skipped_ownerless = True
             continue
         file_identity = disk_identity(owner, task.get("subject"))
         if file_identity == event_identity:
             return OldFormatOutcome(OLD_FORMAT_OWNED, team=team)
         content_matches.append((team, task))
     if not content_matches:
+        if skipped_ownerless:
+            # Distinguishable from "no named store carried the content": a
+            # reader must be able to tell a check that found nothing from a
+            # check that found the content but could not compare identity.
+            return OldFormatOutcome(
+                OLD_FORMAT_UNMATCHED,
+                report=(
+                    f"handoff cross-team check unavailable for task "
+                    f"{report_safe(task_id)}: a candidate carries the "
+                    f"content but its record has no owner; its identity "
+                    f"could not be compared"
+                ),
+            )
         return unmatched
     team, _ = content_matches[0]
     report_task = report_safe(task_id)
