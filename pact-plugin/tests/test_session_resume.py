@@ -3601,12 +3601,17 @@ _ABSENT = object()  # sentinel: the event carries NO `team` key
 
 
 class TestBuildJournalResumeOccupantDedup:
-    """Bugbot: an OLD-FORMAT event carries no `team` and keyed as "", so a
-    later attributed event for the same occupant rendered as a SECOND entry
-    beside the superseded copy. The renderer applies the selection at its own
-    grain: occupant identity first, then one latest event per team partition.
-    A team-less copy in a group that also holds an attributed event is
-    superseded (the field was added later in time). Two different teams are
+    """Bugbot, second pass: the renderer first dropped a team-less
+    (OLD-FORMAT) partition whenever ANY attributed event shared the occupant —
+    including a NEWER team-less revision, and including a copy that might
+    belong to a THIRD store. The rule is now two-condition: drop ONLY when
+    exactly ONE attributed team exists AND the team-less copy is strictly
+    older. Writers omit `team` whenever the resolver fails closed, at any
+    time; A VISIBLE DUPLICATE IS RECOVERABLE, A STALE HANDOFF SHOWN AS
+    CURRENT IS NOT.
+
+    The renderer applies the selection at its own grain: occupant identity
+    first, then one latest event per team partition. Two different teams are
     two distinct same-numbered tasks and BOTH render."""
 
     @pytest.fixture
@@ -3642,6 +3647,8 @@ class TestBuildJournalResumeOccupantDedup:
     def test_old_format_copy_is_superseded_by_an_attributed_one(
         self, session_dir, journal_file
     ):
+        """ARM a: ONE attributed team + an OLDER team-less copy -> the
+        team-less copy is the superseded pre-field document; one line."""
         from shared.session_resume import _build_journal_resume
 
         self._write_raw_events(journal_file, [
@@ -3655,6 +3662,58 @@ class TestBuildJournalResumeOccupantDedup:
         assert "old copy" not in result
         # Exactly ONE bullet for the occupant.
         assert result.count("- coder: CODE: dedup") == 1
+
+    def test_newer_teamless_copy_is_not_dropped(
+        self, session_dir, journal_file
+    ):
+        """ARM b (RED on the one-condition rule): a team-less revision NEWER
+        than the attributed event is the CURRENT one — the resolver can fail
+        closed at any time. Dropping it rendered the stale attributed copy as
+        current."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event(
+                "attributed old", "2026-01-01T00:00:01Z", team="session-a"
+            ),
+            self._event("teamless new", "2026-01-01T00:00:02Z"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "teamless new" in result
+        assert "attributed old" in result
+        assert result.count("- coder: CODE: dedup") == 2
+
+    @pytest.mark.parametrize("position", ["first", "middle", "last"])
+    def test_two_teams_plus_a_teamless_copy_all_render(
+        self, session_dir, journal_file, position
+    ):
+        """ARM c (RED on the one-condition rule): with TWO attributed teams
+        there is no single candidate whose supersession the team-less copy
+        would be — it could belong to either team, or to a third store. Every
+        ordering renders all three."""
+        from shared.session_resume import _build_journal_resume
+
+        team_a = self._event(
+            "team a work", "2026-01-01T00:00:01Z", team="session-a"
+        )
+        team_b = self._event(
+            "team b work", "2026-01-01T00:00:02Z", team="session-b"
+        )
+        teamless = self._event("unattributed work", "2026-01-01T00:00:03Z")
+        order = {
+            "first": [teamless, team_a, team_b],
+            "middle": [team_a, teamless, team_b],
+            "last": [team_a, team_b, teamless],
+        }[position]
+        self._write_raw_events(journal_file, order)
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        for text in ("team a work", "team b work", "unattributed work"):
+            assert text in result
+        assert result.count("- coder: CODE: dedup") == 3
 
     def test_old_format_only_still_renders(self, session_dir, journal_file):
         """CONTROL: the drop must not remove a legitimate old-format entry."""

@@ -1234,10 +1234,16 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     #
     # The supersession is applied at THIS renderer's own grain: occupant
     # identity first, then one latest event per team partition. A team-less
-    # OLD-FORMAT event is superseded by any attributed event for the same
-    # occupant (the field was added later in time, so the team-less copy is
-    # necessarily older). Two DIFFERENT teams are two distinct tasks that
-    # merely share a number: both render rather than collapsing.
+    # (OLD-FORMAT) partition is dropped ONLY when the group holds exactly ONE
+    # attributed team AND the team-less copy is strictly older: then it is
+    # the superseded pre-field document. With two or more attributed teams
+    # there is no single candidate whose supersession it would be (the copy
+    # could belong to any of them, or to a third store), and a team-less copy
+    # NEWER than the attributed one is the current revision — writers omit
+    # `team` whenever the resolver fails closed, which can happen at any
+    # time. A visible duplicate is recoverable; showing a stale handoff as
+    # current is not. Two DIFFERENT teams are two distinct tasks that merely
+    # share a number: both render rather than collapsing.
     by_occupant: dict[tuple, dict] = {}
     for h in handoffs:
         occupant = (
@@ -1253,7 +1259,18 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             partitions[team] = h
     rendered: list[dict] = []
     for partitions in by_occupant.values():
-        if "" in partitions and len(partitions) > 1:
+        teamless = partitions.get("")
+        attributed = {
+            team: event for team, event in partitions.items() if team != ""
+        }
+        if (
+            teamless is not None
+            and len(attributed) == 1
+            and teamless.get("ts", "")
+            < next(iter(attributed.values())).get("ts", "")
+        ):
+            # Exactly one candidate, and the team-less copy is strictly
+            # older: the superseded pre-field document.
             del partitions[""]
         rendered.extend(partitions.values())
     handoffs = rendered
