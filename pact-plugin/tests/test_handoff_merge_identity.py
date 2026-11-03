@@ -463,6 +463,42 @@ class TestUnionPreferringTaskFile:
         assert isinstance(reports, list)
         assert merged["produced"] == "p"
 
+    def test_field_map_agrees_with_resolve_handoff_field_on_all_orders(self):
+        """FIX 1b: a BEHAVIOURAL arm, not a sentence. `_field_map` claims to
+        mirror the shipped reader; a falsy alias overwriting a falsy
+        canonical made it disagree for canonical-first copies. Each case runs
+        both orderings, because insertion order was the defect."""
+        from shared.agent_handoff_marker import _field_map
+        from shared.handoff_schema import resolve_handoff_field
+
+        cases = [
+            # all-falsy pair: the canonical spelling must win, both orders
+            ([("decisions", ""), ("key_decisions", [])], "decisions", ""),
+            ([("key_decisions", []), ("decisions", "")], "decisions", ""),
+            ([("decisions", 0), ("key_decisions", False)], "decisions", 0),
+            ([("key_decisions", False), ("decisions", 0)], "decisions", 0),
+            # truthy alias control
+            ([("decisions", ""), ("key_decisions", ["x"])],
+             "key_decisions", ["x"]),
+            ([("key_decisions", ["x"]), ("decisions", "")],
+             "key_decisions", ["x"]),
+            # canonical-truthy control
+            ([("decisions", ["d"]), ("key_decisions", ["k"])],
+             "decisions", ["d"]),
+            ([("key_decisions", ["k"]), ("decisions", ["d"])],
+             "decisions", ["d"]),
+        ]
+        for pairs, expected_key, expected_value in cases:
+            handoff = dict(pairs)
+            key, value = _field_map(handoff)["decisions"]
+            assert value == resolve_handoff_field(handoff, "decisions"), (
+                f"map and reader disagree for {pairs!r}: {value!r}"
+            )
+            assert value == expected_value
+            assert key == expected_key, (
+                f"wrong raw key for {pairs!r}: {key!r}"
+            )
+
     def test_drop_removes_every_spelling_of_the_dropped_identity(self):
         journal = {"produced": "p", "decisions": ["d"], "key_decisions": ["d2"]}
         disk = {"produced": "p2", "uncertainty": ["u"]}
@@ -1499,18 +1535,21 @@ class TestHarvestRuleProse:
             "that is no longer recoverable" in SKILL_TEXT
         )
 
-    def test_item5_all_falsy_dual_spelling_selects_the_canonical_key(self):
-        """Item 5: the all-falsy case was unstated."""
-        assert (
-            "When the canonical spelling is falsy AND no alias spelling is "
-            "truthy, the CANONICAL raw key is the one selected" in SKILL_TEXT
-        )
-
     def test_item6_emit_side_subject_claim_is_true_as_a_calling_claim(self):
-        """Item 6: "the step never reaches for it directly" was false as a
-        NAMING claim — the step names it; it is only CALLED through
-        `disk_identity`."""
+        """FIX 3: the sentence said the step "names" the helper; the step's
+        region had zero occurrences. The true claim is about CALLING: the
+        step describes the substitution, and calls only `disk_identity`."""
         assert (
-            "the step names it but calls only `disk_identity`, which applies "
-            "the substitution" in SKILL_TEXT
+            "the step DESCRIBES the substitution but calls only "
+            "`disk_identity`, which applies it" in SKILL_TEXT
         )
+        # The old, false NAMING claim must not come back.
+        assert "the step names it but calls only" not in SKILL_TEXT
+
+    def test_classifier_docstring_states_the_ownerless_skip(self):
+        """FIX 2: the skill states the no-owner skip; the module is the only
+        surface that did not, while its code implements it."""
+        doc = " ".join((mixed_old_format_event.__doc__ or "").split())
+        assert "no non-empty `owner` is SKIPPED" in doc
+        assert "would manufacture a MISMATCH" in doc
+        assert "UNMATCHED — kept as this team's" in doc

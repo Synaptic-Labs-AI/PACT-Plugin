@@ -423,8 +423,13 @@ def _field_map(handoff: dict) -> dict:
             # fallback value when it is falsy and no alias did.
             if value or not current[1]:
                 fields[identity] = (raw_key, value)
-        elif not current[1]:
-            # Alias spelling with content beats a falsy canonical.
+        elif value and not current[1]:
+            # Alias spelling with CONTENT beats a falsy canonical. The
+            # truthiness test on `value` is load-bearing: without it a FALSY
+            # alias overwrites a falsy canonical whenever it appears later in
+            # insertion order, and the map disagrees with the shipped reader
+            # (`resolve_handoff_field` falls back to the canonical value when
+            # no alias is truthy).
             fields[identity] = (raw_key, value)
     return fields
 
@@ -706,6 +711,14 @@ def mixed_old_format_event(
         because this state is the COMMON path (every pre-field event whose
         content matches no named store), and a caller that had to invent the
         line would be free to choose silently instead.
+
+    ONE DELIBERATE EXCEPTION TO THE MIXED RULE: a content-matching candidate
+    whose own record carries no non-empty `owner` is SKIPPED, not treated as
+    an identity mismatch. The emit path substitutes the platform teammate name
+    for an empty owner and the record cannot reproduce it, so comparing
+    identities would manufacture a MISMATCH and discard content that was
+    never foreign. Skipping leaves the event UNMATCHED — kept as this team's
+    and reported through `report`.
 
     A non-dict / empty event handoff is UNMATCHED: there is no content to
     compare. Pure; no I/O; never raises.
