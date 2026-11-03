@@ -772,3 +772,38 @@ class TestPartitionDestination:
             partition_destination("session-nope", "session-me", ["session-x"])
             == PARTITION_FOREIGN
         )
+
+
+# =============================================================================
+# report_safe — format and surrogate characters, and the uncapped option
+# =============================================================================
+
+
+class TestReportSafeFormatAndSurrogate:
+    """report_safe strips categories Cf and Cs as well as the line
+    boundaries: an invisible format character can hide or reorder a report
+    line's text, and a lone surrogate cannot be encoded by a consumer."""
+
+    @pytest.mark.parametrize(
+        "char",
+        [
+            "​",  # ZERO WIDTH SPACE (Cf)
+            "‮",  # RIGHT-TO-LEFT OVERRIDE (Cf)
+            "﻿",  # ZERO WIDTH NO-BREAK SPACE / BOM (Cf)
+            "\ud800",  # lone high surrogate (Cs)
+        ],
+    )
+    def test_format_and_surrogate_characters_are_stripped(self, char):
+        from shared.agent_handoff_marker import report_safe
+
+        assert report_safe("a" + char + "b") == "ab"
+
+    def test_limit_none_means_no_cap(self):
+        from shared.agent_handoff_marker import report_safe
+
+        assert report_safe("x" * 500, limit=None) == "x" * 500
+
+    def test_default_cap_still_applies(self):
+        from shared.agent_handoff_marker import report_safe
+
+        assert len(report_safe("x" * 500)) == 128

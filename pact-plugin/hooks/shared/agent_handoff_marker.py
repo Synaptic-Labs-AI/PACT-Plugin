@@ -330,34 +330,34 @@ def emit_side_subject(subject: object) -> str:
 _REPORT_VALUE_MAX = 128
 
 # Unicode categories stripped from report values: Cc = control (C0, DEL and
-# C1, including NEL U+0085), Zl = line separator (U+2028), Zp = paragraph
-# separator (U+2029).
-_REPORT_STRIP_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+# C1, including NEL U+0085), Cf = format (zero-width and bidi controls such as
+# U+200B, U+202E, U+FEFF), Cs = surrogate (a lone surrogate), Zl = line
+# separator (U+2028), Zp = paragraph separator (U+2029).
+_REPORT_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
-def report_safe(value: object, limit: int = _REPORT_VALUE_MAX) -> str:
+def report_safe(value: object, limit: int | None = _REPORT_VALUE_MAX) -> str:
     """Make a value safe to interpolate into a ONE-LINE report (CWE-117).
 
     Report lines are read by an agent that may act on them, and field names
     come from the task file and the append-only journal — both outside this
     module's control. A value would forge or split a report line at ANY
-    boundary the consumer treats as a line break.
+    boundary the consumer treats as a line break, or hide or reorder its text
+    with an invisible format character.
 
     STRIP BY UNICODE CATEGORY, NOT BY AN ENUMERATED CLASS. Every character
-    whose category is Cc, Zl or Zp is removed. An enumeration is only as
-    complete as the list someone thought of — this function has already been
-    widened once, after an ASCII-only class was found to miss NEL U+0085,
-    LINE SEPARATOR U+2028 and PARAGRAPH SEPARATOR U+2029 — while the category
-    filter is complete over the standard's own classification and stays
-    complete if Unicode adds another separator. The result is length-capped
-    so one value cannot swallow the line.
+    whose category is Cc, Cf, Cs, Zl or Zp is removed; the category filter
+    stays complete if Unicode adds another character to one of those
+    categories. The result is capped at `limit` characters so one value
+    cannot swallow the line; `limit=None` means no cap, for a caller that
+    bounds the value upstream.
     """
     text = "".join(
         ch
         for ch in str(value)
         if unicodedata.category(ch) not in _REPORT_STRIP_CATEGORIES
     )
-    return text[:limit]
+    return text[:limit]  # a None limit slices the whole string
 
 
 def _handoff_marker_discriminator(occupant: str, content_key: str) -> str:
