@@ -79,6 +79,11 @@ if TYPE_CHECKING:
 # Maximum characters for decision summaries in journal resume output
 _DECISION_TRUNCATION_LIMIT = 80
 
+# Partition key for an agent_handoff whose `team` is present but not a
+# str. A unique object, so it never equals any team name or the
+# team-less "" key.
+_INVALID_TEAM = object()
+
 # Staleness horizon for a session_refreshed checkpoint. A refresh is meant
 # to be consumed within minutes (refresh → /compact → bootstrap); past this
 # horizon the prompt gets an informational STALE prefix. Downgrade ONLY —
@@ -1241,10 +1246,9 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     # each DISTINCT handoff content, so a revised HANDOFF reaches the journal
     # adjacent to the copy it replaced. Rendering one bullet for each event shows
     # the superseded copy and the current one together, indistinguishable.
-    # THIS IS A CONSUMER OF THE SELECTION RULE, NOT A SECOND STATEMENT OF IT.
-    # The rule is authored in skills/pact-handoff-harvest/SKILL.md, Step 3,
-    # in the SELECTION block. Read it there. If it changes, change this WITH it: the
-    # two are coupled and nothing compares them.
+    # This renderer applies its own rule: latest per (task_id, agent, subject)
+    # and team partition; it does not union task files and does not implement
+    # the harvest's selection.
     #
     # The supersession is applied at THIS renderer's own grain: occupant
     # identity first, then one latest event per team partition. A team-less
@@ -1279,16 +1283,26 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             _key_str(h.get("task_subject")),
         )
         partitions = by_occupant.setdefault(occupant, {})
-        team = _key_str(h.get("team"))
-        # `>=` keeps the LATER journal line on an equal ts. Same tie-break.
+        raw_team = h.get("team")
+        if raw_team is None or raw_team == "":
+            team = ""
+        elif isinstance(raw_team, str):
+            team = raw_team
+        else:
+            # A malformed team is neither a team nor team-less: it must not
+            # merge with a genuine team-less copy, nor count as attributed.
+            team = _INVALID_TEAM
+        # Parsed instants; an equal instant keeps the LATER journal line, and
+        # a non-str or unparseable ts never displaces a valid one.
         current = partitions.get(team)
-        if current is None or h.get("ts", "") >= current.get("ts", ""):
+        if current is None or _ts_supersedes(h.get("ts"), current.get("ts")):
             partitions[team] = h
     rendered: list[tuple[dict, str]] = []
     for partitions in by_occupant.values():
         teamless = partitions.get("")
         attributed = {
-            team: event for team, event in partitions.items() if team != ""
+            team: event for team, event in partitions.items()
+            if isinstance(team, str) and team != ""
         }
         teamless_mark = ""
         if teamless is not None and len(attributed) == 1:
@@ -1316,6 +1330,8 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         if teamless is not None:
             rendered.append((teamless, teamless_mark))
         rendered.extend((event, "") for event in attributed.values())
+        if _INVALID_TEAM in partitions:
+            rendered.append((partitions[_INVALID_TEAM], ""))
     handoffs = rendered
     if handoffs:
         lines.append("## Completed Work")

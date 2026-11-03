@@ -3883,7 +3883,7 @@ class TestBuildJournalResumeOccupantDedup:
     ):
         """S2 (RED on d0cb4b03): a `team: []` used as a dict key raised
         `unhashable type`; the outer wrapper swallowed it and the whole
-        brief became None. A non-str team coerces to "" (the absent key)."""
+        brief became None. A non-str team takes its own partition."""
         from shared.session_resume import _build_journal_resume
 
         self._write_raw_events(journal_file, [
@@ -3895,6 +3895,56 @@ class TestBuildJournalResumeOccupantDedup:
         assert result is not None
         assert "normal work" in result
         assert "list team" in result
+
+    def test_fractional_later_stamp_wins_within_a_partition(
+        self, session_dir, journal_file
+    ):
+        """The later INSTANT wins. Lexically `...00.5Z` sorts before
+        `...00Z`, so a string compare keeps the older revision."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("revision 1", "2026-01-01T00:00:00Z", team="session-a"),
+            self._event("revision 2", "2026-01-01T00:00:00.5Z", team="session-a"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "revision 2" in result
+        assert "revision 1" not in result
+
+    def test_int_ts_does_not_kill_the_brief(self, session_dir, journal_file):
+        """A non-str ts never raises and never displaces a valid one."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("valid stamp", "2026-01-01T00:00:01Z", team="session-a"),
+            self._event("int stamp", 5, team="session-a"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "valid stamp" in result
+        assert "int stamp" not in result
+
+    def test_non_str_team_stays_apart_from_a_teamless_copy(
+        self, session_dir, journal_file
+    ):
+        """A malformed team is not team-less: folding it into the "" key
+        would drop the genuine team-less copy as superseded."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("teamless work", "2026-01-01T00:00:01Z"),
+            self._event("bad team work", "2026-01-01T00:00:02Z", team=7),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "teamless work" in result
+        assert "bad team work" in result
+        assert result.count("- coder: CODE: dedup") == 2
+        assert "[older than team" not in result
 
     def test_unhashable_occupant_field_does_not_kill_the_brief(
         self, session_dir, journal_file
