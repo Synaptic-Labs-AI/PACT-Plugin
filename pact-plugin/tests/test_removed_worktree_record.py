@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -43,6 +44,7 @@ from scripts.working_memory import (
 from shared.pact_context import _build_session_path, project_slug
 from shared.paths import get_claude_config_dir
 import shared.project_scope as project_scope
+from helpers import known_root  # noqa: E402
 
 # claude_md_ambient (module-wide): the worktree-identity escape-guard
 # exemption is this module's subject; it needs the ambient resolution the
@@ -139,6 +141,11 @@ def _enable_record_reading(monkeypatch) -> None:
     )
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+    # Reset the discovery cache: it is module-level, and a parametrized arm
+    # would otherwise read the PREVIOUS parameter's session record.
+    monkeypatch.setattr(
+        project_scope, "_discovered_record", project_scope._DISCOVERY_UNSET
+    )
 
 
 def _guard(monkeypatch, declared: Path, resolved_root: Path) -> None:
@@ -182,19 +189,27 @@ def _worktree_under_main_removed(root: Path):
 
 class TestARecordAdmitsTheRemovedWorktreeItNames:
 
-    def test_a_sibling_worktree_removed_from_outside_still_admits_its_own_project(
+    def test_an_out_of_tree_worktree_is_not_resolved_from_the_record(
         self, layout_root, monkeypatch
     ):
+        """SUPPORTED-SHAPE NARROWING, not a regression. The declared worktree
+        lives OUTSIDE the recorded checkout, so the record cannot prove it
+        belongs to that repository -- and after `git worktree prune` a genuine
+        out-of-tree worktree is indistinguishable from a forged redirect. The
+        record is therefore not trusted, the guard falls through, and it
+        refuses. PACT's own `$REPO/.worktrees/{branch}` layout is unaffected.
+        """
         main, worktree, identity = _sibling_worktree_removed(layout_root)
         _plant(worktree, identity)
 
-        _guard(monkeypatch, worktree, main)
+        with pytest.raises(AmbientSyncRefused):
+            _guard(monkeypatch, worktree, main)
 
     def test_a_worktree_subdirectory_session_removed_still_admits_its_project(
         self, layout_root, monkeypatch
     ):
         main = _repo(layout_root / "R", document=True)
-        worktree = _worktree(main, layout_root / "W")
+        worktree = _worktree(main, main / ".worktrees" / "W")
         subdirectory = worktree / "sub"
         subdirectory.mkdir()
         _plant(subdirectory, _identity_for(subdirectory))
@@ -209,7 +224,7 @@ class TestARecordAdmitsTheRemovedWorktreeItNames:
         the entry point and not only called directly."""
         import scripts.working_memory as wm
 
-        main, worktree, identity = _sibling_worktree_removed(layout_root)
+        main, worktree, identity = _worktree_under_main_removed(layout_root)
         _plant(worktree, identity)
         document = main / ".claude" / "CLAUDE.md"
         before = document.read_bytes()
@@ -231,17 +246,19 @@ class TestARecordAdmitsTheRemovedWorktreeItNames:
 
 class TestARecordDecidesOnlyForItsDeclaration:
 
-    def test_an_identity_naming_another_repository_is_refused(
+    def test_an_identity_naming_another_repository_admits_only_the_containing_one(
         self, layout_root, monkeypatch
     ):
-        """The layout the ancestor walk admits without a record, so the refusal
-        can only come from the record."""
+        """A record naming repository B must never admit B. With containment it
+        is not trusted at all, so a resolution into B is refused and a
+        resolution into the declaration's own checkout is admitted by the
+        ancestor rule -- not by the record."""
         main, worktree, identity = _worktree_under_main_removed(layout_root)
         other = _repo(layout_root / "other")
         _plant(worktree, dict(identity, common_dir=os.path.realpath(other / ".git")))
 
-        with pytest.raises(AmbientSyncRefused):
-            _guard(monkeypatch, worktree, main)
+        assert _admitted(monkeypatch, worktree, other) is False
+        assert _admitted(monkeypatch, worktree, main) is True
 
     def test_a_subdirectory_recorded_under_a_nested_repository_is_refused_in_the_enclosing_one(
         self, layout_root, monkeypatch
@@ -258,8 +275,11 @@ class TestARecordDecidesOnlyForItsDeclaration:
         _plant(subdirectory, _identity_for(subdirectory))
         _remove_worktree(nested, inner)
 
-        with pytest.raises(AmbientSyncRefused):
-            _guard(monkeypatch, subdirectory, enclosing)
+        # The record names N, which does not contain the declaration: it must
+        # never admit N. The enclosing repository is admitted by the ancestor
+        # rule, without the record's help.
+        assert _admitted(monkeypatch, subdirectory, nested) is False
+        assert _admitted(monkeypatch, subdirectory, enclosing) is True
 
     def test_a_record_from_another_session_is_refused(self, layout_root, monkeypatch):
         main, worktree, identity = _sibling_worktree_removed(layout_root)
@@ -454,7 +474,7 @@ class TestSessionStartWritesTheRecord:
         self, layout_root, monkeypatch, tmp_path
     ):
         main_repo = _repo(layout_root / "R", document=True)
-        worktree = _worktree(main_repo, layout_root / "W")
+        worktree = _worktree(main_repo, main_repo / ".worktrees" / "W")
         _start_session(monkeypatch, tmp_path, worktree)
         _remove_worktree(main_repo, worktree)
 
@@ -474,7 +494,7 @@ class TestArchivePinReadsTheRecordToo:
     ):
         import archive_pin
 
-        main, worktree, identity = _sibling_worktree_removed(layout_root)
+        main, worktree, identity = _worktree_under_main_removed(layout_root)
         _plant(worktree, identity)
         _enable_record_reading(monkeypatch)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
@@ -484,15 +504,17 @@ class TestArchivePinReadsTheRecordToo:
 
         assert Path(path).resolve() == (main / ".claude" / "CLAUDE.md").resolve()
 
-    def test_archive_pin_refuses_a_record_naming_another_repository(
+    def test_archive_pin_never_resolves_a_record_naming_another_repository(
         self, layout_root, monkeypatch
     ):
-        """The layout archive_pin admits without a record, so the refusal can
-        only come from the record."""
+        """Never B. The record is not trusted and there is no cwd rung, so
+        the archive refuses with the missing cause rather than resolving any
+        document -- neither the other repository's nor, through the cwd,
+        main's."""
         import archive_pin
 
         main, worktree, identity = _worktree_under_main_removed(layout_root)
-        other = _repo(layout_root / "other")
+        other = _repo(layout_root / "other", document=True)
         _plant(worktree, dict(identity, common_dir=os.path.realpath(other / ".git")))
         _enable_record_reading(monkeypatch)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
@@ -500,4 +522,372 @@ class TestArchivePinReadsTheRecordToo:
 
         with pytest.raises(archive_pin._Unevaluable) as excinfo:
             archive_pin.resolve_claude_md()
-        assert "different project" in excinfo.value.reason, excinfo.value.reason
+
+        reason = excinfo.value.reason
+        assert "no longer exists" in reason, reason
+        assert str(other) not in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# #114: the record resolves all THREE call sites after `git worktree prune`
+# ---------------------------------------------------------------------------
+
+def _pruned_worktree(root: Path):
+    """R holds the document; W is a linked worktree removed by rmtree+prune.
+
+    `git worktree prune` deletes the listing entry AND the admin dir, and it
+    is the normal cleanup path. A record verified against the worktree LISTING
+    would be rejected here, which is the shape this class exists for.
+    """
+    main = _repo(root / "R", document=True)
+    worktree = _worktree(main, main / ".worktrees" / "feature")
+    identity = _identity_for(worktree)
+    shutil.rmtree(worktree)
+    _git("worktree", "prune", cwd=main)
+    listing = _git("worktree", "list", "--porcelain", cwd=main).stdout
+    assert str(worktree) not in listing, "the prune left the worktree listed"
+    return main, worktree, identity
+
+
+def _outside_the_repository(root: Path) -> Path:
+    """A cwd that is not in any checkout, so the fall-through cannot answer."""
+    path = root / "elsewhere"
+    path.mkdir()
+    probe = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode != 0, probe.stdout
+    return path
+
+
+class TestTheRecordResolvesAllThreeSites:
+    """One prune shape, three call sites, the record as the only answer.
+
+    The cwd is OUTSIDE the repository in every arm, so the #113 fall-through
+    cannot resolve MAIN. What is measured is the record fallback itself.
+    """
+
+    def test_the_archive_resolves_main(self, tmp_path, monkeypatch):
+        import archive_pin
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        _plant(removed, identity)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        path, base = archive_pin.resolve_claude_md()
+
+        assert Path(path).resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+        assert Path(base).resolve() == main.resolve()
+
+    def test_the_sync_writes_main(self, tmp_path, monkeypatch):
+        from scripts import working_memory as wm
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        _plant(removed, identity)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        result = wm.sync_to_claude_md(
+            {"context": "record-arm", "goal": "record-arm"}, memory_id="0" * 32
+        )
+
+        assert result == wm.SyncResult(wm.SyncResult.WROTE), result
+        assert "record-arm" in (main / ".claude" / "CLAUDE.md").read_text()
+
+    def test_the_pin_cap_gate_is_live_on_mains_document(self, tmp_path, monkeypatch):
+        from shared.claude_md_manager import gate_target
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        _plant(removed, identity)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        target = gate_target(str(main / ".claude" / "CLAUDE.md"))
+
+        assert target is not None, "the pin cap is DARK on the removed-worktree shape"
+        assert target.target.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+
+
+class TestTheRecordCannotBeTrusted:
+    def test_an_absent_record_names_the_removed_worktree(self, tmp_path, monkeypatch):
+        """No record: the archive refuses, and the message says the declared
+        directory is gone rather than describing a git failure."""
+        import archive_pin
+
+        _main, removed, _identity = _pruned_worktree(tmp_path / "layout")
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        with pytest.raises(archive_pin._Unevaluable) as excinfo:
+            archive_pin.resolve_claude_md()
+
+        assert "no longer exists" in excinfo.value.reason, excinfo.value.reason
+        assert "session record" in excinfo.value.reason, excinfo.value.reason
+
+    def test_a_forged_record_refuses_and_never_redirects(self, tmp_path, monkeypatch):
+        """A record naming this declaration whose common dir is not a checkout
+        verifies nothing: the archive refuses with the missing cause and
+        names the record, never falling through to the cwd's checkout."""
+        import archive_pin
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        not_a_checkout = tmp_path / "not-a-checkout"
+        not_a_checkout.mkdir()
+        _plant(
+            removed,
+            dict(identity, common_dir=str(not_a_checkout / ".git")),
+        )
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(main)
+
+        with pytest.raises(archive_pin._Unevaluable) as excinfo:
+            archive_pin.resolve_claude_md()
+
+        assert "did not verify" in excinfo.value.reason, excinfo.value.reason
+
+    def test_the_pin_gate_advisory_names_the_removed_worktree(
+        self, tmp_path, monkeypatch
+    ):
+        from pin_caps_gate import _gate
+
+        main, removed, _identity = _pruned_worktree(tmp_path / "layout")
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(main)
+
+        decision = _gate({
+            "tool_name": "Write",
+            "agent_type": "pact-orchestrator",
+            "tool_input": {
+                "file_path": str(main / ".claude" / "CLAUDE.md"),
+                "content": "# notes\n",
+            },
+        })
+
+        assert decision is not None
+        assert decision.verdict == "ALLOW_ADVISORY"
+        assert "no longer exists" in decision.reason, decision.reason
+        assert "session record" in decision.reason, decision.reason
+
+    def test_the_save_admits_the_resolved_main_end_to_end(
+        self, tmp_path, monkeypatch, memory_store
+    ):
+        """THE RUNTIME LANE'S REFUSAL, driven through the same child the
+        archive launches: the child's CLAUDE_PROJECT_DIR is pinned to MAIN
+        while the session record names the removed worktree. Resolution alone
+        is not the claim; the SAVE must not answer SCOPE_DISAGREEMENT."""
+        import archive_pin
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        # THE CHILD NEEDS A CONFIG ROOT IT CAN SEE. The autouse redirect
+        # patches `Path.home` IN THIS PROCESS only; a spawned child reads the
+        # operator's real home unless CLAUDE_CONFIG_DIR names the sandbox. With
+        # the default redirect the child found no record and this arm passed
+        # without exercising the admission at all.
+        config_root = tmp_path / "config"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_root))
+        session_dir = _record_path(removed).parent
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": SID,
+            "project_dir": str(removed),
+        }))
+        (session_dir / "worktree-identity.json").write_text(json.dumps(identity))
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        _path, base = archive_pin.resolve_claude_md()
+        assert Path(base).resolve() == main.resolve()
+
+        rc, _stdout, stderr = archive_pin._run_memory_cli(
+            ["save", "--stdin"],
+            db_path=str(memory_store("mem.db")),
+            stdin_data=json.dumps(
+                {"context": "record-arm", "goal": "record-arm"}
+            ),
+            cwd=base,
+        )
+
+        assert rc == 0, (rc, stderr)
+        assert "SCOPE_DISAGREEMENT" not in stderr, stderr
+        assert "disagrees with this session" not in stderr, stderr
+
+
+# ---------------------------------------------------------------------------
+# The redirect: a record naming another repository must never be trusted
+# ---------------------------------------------------------------------------
+
+class TestARecordNamingAnotherRepositoryRedirectsNothing:
+    """The record names a REAL repository, its candidate self-reports, and it
+    does not contain the declaration. Before containment every read surface
+    trusted it; these arms pin "never B" from three working directories."""
+
+    @pytest.mark.parametrize("where", ["repo_a", "repo_b", "outside"])
+    def test_no_surface_resolves_repository_b(self, layout_root, monkeypatch, where):
+        import archive_pin
+        import scripts.working_memory as wm
+        from shared.project_scope import session_memory_root
+        from helpers import known_root
+
+        main, worktree, identity = _worktree_under_main_removed(layout_root)
+        other = _repo(layout_root / "other", document=True)
+        _plant(worktree, dict(identity, common_dir=os.path.realpath(other / ".git")))
+        session_dir = _record_path(worktree).parent
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": SID,
+            "project_dir": str(worktree),
+        }))
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+
+        if where == "repo_a":
+            cwd = main
+        elif where == "repo_b":
+            cwd = other
+        else:
+            cwd = tmp_path_for_outside(layout_root)
+        monkeypatch.chdir(cwd)
+        other_doc = (other / ".claude" / "CLAUDE.md").resolve()
+        before_other = other_doc.read_bytes()
+
+        # Synchronous surfaces never hand back B.
+        assert session_memory_root().root != other.resolve()
+        assert known_root(str(other)) is not None  # B is real
+        try:
+            resolved, _base = archive_pin.resolve_claude_md()
+        except archive_pin._Unevaluable:
+            resolved = None
+        assert resolved is None or Path(resolved).resolve() != other_doc
+
+        try:
+            wm.sync_to_claude_md(
+                {"context": "redirect", "goal": "redirect"},
+                memory_id="0" * 32,
+            )
+        except wm.AmbientSyncRefused:
+            pass
+        assert other_doc.read_bytes() == before_other, "sync wrote repository B"
+
+        # The save side: env naming B must disagree with the record.
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(other))
+        assert pact_session.env_record_project_dir_disagreement() is not None
+
+
+def tmp_path_for_outside(layout_root: Path) -> Path:
+    path = layout_root / "outside"
+    path.mkdir(exist_ok=True)
+    probe = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode != 0, probe.stdout
+    return path
+
+
+class TestTheRecordIsVerifiedWhenItIsWritten:
+    """WRITE-TIME VERIFICATION. The relationship is provable while the
+    declaration exists; `git worktree prune` removes the evidence, so a forged
+    record must be refused at the only moment it can be caught."""
+
+    def test_a_forged_gitfile_does_not_get_a_record(self, layout_root, monkeypatch):
+        from shared.project_scope import (
+            _record_worktree_identity,
+        )
+
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        admin = next((main / ".git" / "worktrees").iterdir())
+        forged = layout_root / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n")
+
+        _record_worktree_identity(SID, str(forged))
+
+        assert not _record_path(forged).exists(), (
+            "a record was written for a directory git does not list"
+        )
+        assert known_root(str(forged)) is None, (
+            "the forged directory became a known root"
+        )
+        assert worktree.exists()
+
+    def test_a_genuine_in_tree_worktree_writes_the_record_it_reads_back(
+        self, layout_root, monkeypatch
+    ):
+        from shared.project_scope import (
+            RECORD_CONTAINED,
+            _record_worktree_identity,
+            get_worktree_identity_from_session_record,
+            record_resolution,
+        )
+
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _record_worktree_identity(SID, str(worktree))
+        assert _record_path(worktree).exists(), "no record written"
+
+        _remove_worktree(main, worktree)
+        _enable_record_reading(monkeypatch)
+
+        identity = get_worktree_identity_from_session_record()
+        status, root = record_resolution(worktree, identity)
+        assert status == RECORD_CONTAINED, (status, identity)
+        assert root.resolve() == main.resolve()
+
+
+class TestAnOutOfTreePrunedWorktreeAfterContainment:
+    def test_every_surface_refuses_and_the_gate_still_reports(
+        self, layout_root, monkeypatch
+    ):
+        """The narrowing, stated on each surface: the record cannot prove an
+        out-of-tree worktree belonged to the repository, so nothing is trusted
+        and each surface either refuses or reports. The gate must REPORT, not
+        fall silent."""
+        import archive_pin
+        import scripts.working_memory as wm
+        from pin_caps_gate import _gate
+
+        main, worktree, identity = _sibling_worktree_removed(layout_root)
+        _plant(worktree, identity)
+        session_dir = _record_path(worktree).parent
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": SID,
+            "project_dir": str(worktree),
+        }))
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(main)
+
+        with pytest.raises(archive_pin._Unevaluable):
+            archive_pin.resolve_claude_md()
+        # The sync reports the missing root rather than resolving anything,
+        # so the escape guard never has a resolution to refuse.
+        result = wm.sync_to_claude_md(
+            {"context": "oot", "goal": "oot"}, memory_id="0" * 32
+        )
+        assert result == wm.SyncResult(wm.SyncResult.ROOT_UNKNOWN), result
+        decision = _gate({
+            "tool_name": "Write",
+            "agent_type": "pact-orchestrator",
+            "tool_input": {
+                "file_path": str(main / ".claude" / "CLAUDE.md"),
+                "content": "# notes\n",
+            },
+        })
+        assert decision is not None, "the gate went dark and said nothing"
+        assert decision.verdict == "ALLOW_ADVISORY"
+        assert "no longer exists" in decision.reason, decision.reason
+
+        # And the save side refuses the retarget it cannot prove.
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+        assert pact_session.env_record_project_dir_disagreement() is not None

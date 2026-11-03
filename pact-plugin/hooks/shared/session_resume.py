@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,11 +43,12 @@ from shared.claude_md_manager import (
     ContainmentError,
     _atomic_write_text,
     _read_replaced,
+    ManagedDocument,
     ensure_dot_claude_parent,
     file_lock,
-    resolve_project_claude_md_path,
 )
 from shared.failure_cause import failure_cause
+from shared.project_scope import SessionRoot, unknown_root_reason
 from shared.handoff_schema import resolve_handoff_field
 from shared.pact_context import (
     LEAD_ADDRESS_LOCAL,
@@ -353,6 +355,8 @@ def update_session_info(
     session_dir: str | None = None,
     plugin_root: str | None = None,
     started: str | None = None,
+    *,
+    doc: ManagedDocument,
 ) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
@@ -373,20 +377,15 @@ def update_session_info(
             can locate hook scripts without symlink traversal.
         started: The "Started" value to write; None writes now. A compaction is
             not a session start, so session_init passes the value already there.
+        doc: The session's managed document, resolved by the caller from
+            its one session observation. Writes `doc.path` (creating it when
+            `doc.exists` is False) with `doc.base` as the containment anchor.
 
     Returns:
         Status message or None if no action taken. A failure that may clear on
         its own returns a TransientSessionInfoFailure.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-
-    # Honor both supported project CLAUDE.md locations.
-    # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
-    # if neither exists, the resolver returns the new default
-    # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
-    target_file, _source = resolve_project_claude_md_path(project_dir)
+    target_file, base = doc.path, doc.base
 
     timestamp = started or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -398,7 +397,21 @@ def update_session_info(
     # first guarantees the parent gets the intended 0o700 mode. The call is
     # idempotent, so concurrent callers are safe: whichever thread creates
     # the directory wins with 0o700, others see `parent.exists()` and no-op.
-    ensure_dot_claude_parent(target_file)
+    #
+    # #1653/F8: A PERMISSION FAILURE HERE IS A WRITE FAILURE, NOT A CRASH.
+    # The parent now belongs to the project-memory root, which for a worktree
+    # lead is the MAIN checkout — a checkout this process may not be able to
+    # write. An OSError escaping here used to abort the rest of SessionStart
+    # through the caller's safety net; it returns the writer's own status
+    # instead, like every other failure below. The call stays OUTSIDE
+    # `file_lock` because the 0o700 guarantee above depends on it, so the
+    # failure is caught here rather than by the lock-acquisition handler
+    # further down, whose message would misreport a mkdir failure as a lock
+    # failure.
+    try:
+        ensure_dot_claude_parent(target_file)
+    except OSError as e:
+        return session_info_failure(e)
 
     # Concurrency guard: serialize read-mutate-write so two concurrent
     # session_init hooks on the same project CLAUDE.md cannot interleave
@@ -444,7 +457,7 @@ def update_session_info(
                         "\n"
                         f"{MANAGED_END_MARKER}\n"
                     )
-                    _atomic_write_text(target_file, new_content, Path(project_dir))
+                    _atomic_write_text(target_file, new_content, base)
                     return "Session info created in new project CLAUDE.md"
 
                 content = target_file.read_text(encoding="utf-8")
@@ -460,7 +473,7 @@ def update_session_info(
                     content, session_id, team_name, session_dir, plugin_root, timestamp
                 )
                 if new_content is not None:
-                    _atomic_write_text(target_file, new_content, Path(project_dir))
+                    _atomic_write_text(target_file, new_content, base)
                 return status
 
             except ContainmentError:
@@ -556,7 +569,16 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def read_session_started(project_dir: str) -> str | None:
+def existing_document(doc: ManagedDocument) -> tuple[Path, Path] | None:
+    """The existing document to READ and the base it was found under, or None.
+
+    `(doc.path, doc.base)` when the caller's document exists, else None.
+    Nothing is created.
+    """
+    return (doc.path, doc.base) if doc.exists else None
+
+
+def read_session_started(doc: ManagedDocument) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     Pass it as update_session_info's ``started`` to rewrite the block without
@@ -564,14 +586,14 @@ def read_session_started(project_dir: str) -> str | None:
     read, or the line is not in a Current Session block the parser finds (a
     copy in a fenced example is not read). Only the exact shape
     update_session_info writes is returned. Read without the sidecar lock:
-    every writer replaces the file whole. Never raises.
+    every writer replaces the file whole. Never raises. `doc` is the
+    session's managed document.
     """
     try:
-        if not project_dir:
+        found = existing_document(doc)
+        if found is None:
             return None
-        claude_md, source = resolve_project_claude_md_path(project_dir)
-        if source == "new_default":
-            return None
+        claude_md, _base = found
         # Read-only, and the pattern takes ASCII digits only, so a replaced
         # byte cannot reach the block.
         content = claude_md.read_text(encoding="utf-8", errors="replace")
@@ -615,12 +637,17 @@ def _validate_under_pact_sessions(path: str) -> str | None:
         candidate = Path(path).resolve(strict=False)
         if candidate == sessions_root or sessions_root in candidate.parents:
             return path
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, RuntimeError):
+        # RuntimeError: a symlink loop, on Pythons before 3.13.
         pass
     return None
 
 
-def _extract_prev_session_dir(project_dir: str) -> str | None:
+def _extract_prev_session_dir(
+    project_dir: str | os.PathLike[str] | None = None,
+    *,
+    doc: ManagedDocument,
+) -> str | None:
     """
     Extract the previous session's directory path from the project CLAUDE.md.
 
@@ -628,14 +655,18 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     and extracts the session dir from lines like
     "- Session dir: `~/.claude/pact-sessions/PACT-Plugin/abc12345-...`".
 
-    Honors both supported project CLAUDE.md locations
-    ($project_dir/.claude/CLAUDE.md preferred, $project_dir/CLAUDE.md legacy).
+    Reads the session's managed document (`doc`) when it exists.
 
     Falls back to deriving the path from the Resume line's session_id +
     the resolved project slug if the Session dir line is absent (backward
     compat with sessions that wrote team name but not session dir) or names
     a directory that is no longer there (the line was written before the
-    directory moved to the resolved slug).
+    directory moved to the resolved slug). The fallback ASSUMES the previous
+    session ran from the same project directory as this one: it rebuilds
+    that session's directory from THIS session's slug. That holds when a
+    session resumes in place; a block last written by a lead in a different
+    worktree (or subdirectory) names a directory under another slug, and the
+    rebuilt path does not match it.
 
     Both extracted paths (primary and fallback) are validated against the
     canonical pact-sessions prefix via _validate_under_pact_sessions before
@@ -647,19 +678,22 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     pact-sessions tree.
 
     Args:
-        project_dir: CLAUDE_PROJECT_DIR path
+        project_dir: The session's project directory (CLAUDE_PROJECT_DIR,
+            else the cwd): the source of the fallback slug, exactly as the
+            session-directory writers derive it.
+        doc: The session's managed document, read when it exists. Its base
+            is NOT a slug source: for a worktree or subdirectory session it
+            is the main checkout, whose slug no writer used.
 
     Returns:
         Previous session directory path string, or None if not found
     """
-    if not project_dir:
-        return None
-
     try:
-        claude_md, source = resolve_project_claude_md_path(project_dir)
-        # source == "new_default" means neither location exists -- nothing to read
-        if source == "new_default":
+        found = existing_document(doc)
+        # None means no document exists -- nothing to read
+        if found is None:
             return None
+        claude_md, _base = found
 
         # No lock. Every writer of the project CLAUDE.md replaces it whole
         # (_atomic_write_text: a temp file, then os.replace), so this read
@@ -710,11 +744,13 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         # The Resume pattern reads both the current line and one written
         # before the `--agent` flag was added.
         session_id = recorded_session_id(content)
-        if session_id:
-            # Same slug derivation and sanitisation as every session path,
-            # so the fallback lands on the directory the writers used.
+        if session_id and project_dir:
+            # The slug comes from the session's project directory, the same
+            # source session_init and pact_context.init use, so the fallback
+            # lands on the directory the writers used. project_slug never
+            # normalises to the main checkout, so neither may this.
             derived = str(
-                _build_session_path(project_slug(project_dir), session_id)
+                _build_session_path(project_slug(str(project_dir)), session_id)
             )
             return _validate_under_pact_sessions(derived)
 
@@ -751,6 +787,53 @@ def _is_set(value: object) -> bool:
     an empty string. Separates "not set" from "set but failed the check" in
     the unavailable wording of format_session_substitutions."""
     return value is not None and value != ""
+
+
+# Unicode categories refused in the project memory line: control (Cc, line
+# feeds included), format (Cf: bidi overrides, zero-width), line and
+# paragraph separators (Zl, Zp) and lone surrogates (Cs: undecodable bytes).
+_UNSAFE_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp", "Cs"))
+_PROJECT_MEMORY_FILE_UNAVAILABLE = (
+    "Project memory file unavailable ({}). Do not create or edit a project "
+    "CLAUDE.md this session."
+)
+
+
+def _safe_for_line(text: str) -> bool:
+    """True when `text` can sit in a backtick span on one context line: no
+    backtick and no character in _UNSAFE_LINE_CATEGORIES."""
+    return "`" not in text and not any(
+        unicodedata.category(char) in _UNSAFE_LINE_CATEGORIES for char in text
+    )
+
+
+def format_project_memory_line(
+    session: SessionRoot, doc: ManagedDocument | None
+) -> str:
+    """The SessionStart context line naming this session's project memory
+    file, the one every instruction that refers to the project CLAUDE.md
+    reads.
+
+    Known root: the document's absolute path, whether or not it exists yet.
+    Unknown root: the unavailable form with the cause. A path, or a cause
+    that carries the anchor path, holding a backtick, a control or format
+    character or a line break is reported as "not a safe path" and never
+    interpolated.
+    """
+    if session.cause is not None:
+        reason = unknown_root_reason(session.cause, session.anchor)
+        if not _safe_for_line(reason):
+            reason = "not a safe path"
+        return _PROJECT_MEMORY_FILE_UNAVAILABLE.format(reason)
+    if doc is None:
+        raise ValueError("a known root needs its document")
+    path = str(doc.path)
+    if not _safe_for_line(path):
+        return _PROJECT_MEMORY_FILE_UNAVAILABLE.format("not a safe path")
+    return (
+        f"Project memory file: `{path}`. Use this file wherever a command "
+        "refers to the project CLAUDE.md."
+    )
 
 
 def format_session_substitutions(
@@ -1116,6 +1199,26 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
 
     lines = ["Previous session summary (from journal -- read-only reference):", ""]
 
+    # NAME THE SOURCE SESSION NEUTRALLY. "Context from session X" states where
+    # this text came from; "resumed from" would assert a predecessor ordering
+    # that two concurrent leads can falsify, and NO liveness predicate is
+    # computed -- a session killed before writing session_end would read as
+    # live forever (the lineage assessment's crash case). Omitted when the
+    # journal carries no session_start, so the header is unchanged there.
+    source_session = next(
+        (
+            event.get("session_id")
+            for event in all_events
+            if event.get("type") == "session_start"
+            and isinstance(event.get("session_id"), str)
+            and event.get("session_id")
+        ),
+        "",
+    )
+    if source_session:
+        lines.append(f"Context from session {source_session}.")
+        lines.append("")
+
     # Extract completed handoffs. Every field access is guarded with
     # .get() and type checks — `decisions[0]` is the single historical
     # crash site (BugF1 secondary), now funneled through the helper.
@@ -1229,8 +1332,10 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         lines.append(f"**Warning**: {warning}")
         lines.append("")
 
-    # Minimal output check
-    if len(lines) <= 2:
+    # Minimal output check. The source line adds two rows, counted out here so
+    # a journal that was too thin to summarize BEFORE #53 still returns None —
+    # the None/non-None boundary must not move with a header addition.
+    if len(lines) <= (4 if source_session else 2):
         return None
 
     return "\n".join(lines)

@@ -28,6 +28,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from helpers import doc_at  # noqa: E402
 
 # A path fragment no rendering may carry. Distinctive so a partial leak is
 # still caught by the `/` assertion below.
@@ -134,7 +135,7 @@ class TestRoutedProducersEmitNoPath:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         with patch.object(cmm, "_atomic_write_text", side_effect=_oserror()):
-            result = cmm.ensure_project_memory_md()
+            result = cmm.ensure_project_memory_md(doc_at())
         _assert_convention(result, "PermissionError (EACCES)")
         assert result.startswith("Project CLAUDE.md failed:")
 
@@ -150,7 +151,7 @@ class TestRoutedProducersEmitNoPath:
         target.write_text("# Project Memory\n\n## Retrieved Context\n")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         with patch.object(cmm, "_atomic_write_text", side_effect=_oserror()):
-            result = cmm.migrate_to_managed_structure()
+            result = cmm.migrate_to_managed_structure(doc_at())
         _assert_convention(result, "PermissionError (EACCES)")
         assert result.startswith("Migration failed:")
 
@@ -229,7 +230,7 @@ class TestRoutedProducersEmitNoPath:
         target = tmp_path / ".claude" / "CLAUDE.md"
         target.mkdir(parents=True)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        result = update_session_info("sess-1", "team-1")
+        result = update_session_info("sess-1", "team-1", doc=doc_at())
         _assert_convention(result, "IsADirectoryError (EISDIR)")
         assert result.startswith("Session info failed:")
 

@@ -244,7 +244,7 @@ class TestClassBGateBypassFlip:
 
         monkeypatch.setattr(g.pact_context, "init", lambda _d: None)
         reached = {"hit": False}
-        def _sentinel(_path):
+        def _sentinel(_path, _session=None):
             reached["hit"] = True
             return None  # no gate target → gate ultimately returns None
         monkeypatch.setattr(manager, "gate_target", _sentinel)

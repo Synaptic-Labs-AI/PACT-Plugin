@@ -122,8 +122,12 @@ def enable_record_discovery(monkeypatch, pact_session_module) -> None:
         "operator's live session directory"
     )
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    # The record cache lives in project_scope (pact_session re-exports its
+    # reader); reset it there so an arm never reads an earlier record.
+    from shared import project_scope
+
     monkeypatch.setattr(
-        pact_session_module, "_discovered_record", pact_session_module._DISCOVERY_UNSET
+        project_scope, "_discovered_record", project_scope._DISCOVERY_UNSET
     )
     assert not os.environ.get("PYTEST_CURRENT_TEST"), (
         "the pytest marker is still set — the refusal will fire and every "

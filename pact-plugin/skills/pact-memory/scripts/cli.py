@@ -26,6 +26,8 @@ Commands:
                          Ambiguous prefix is refused.
     status               Show memory system status
     setup                Initialize/verify memory system
+    project-file         Print this session's project memory file path, or
+                         `unavailable: <reason>` (exit 3). Writes nothing.
 """
 
 from __future__ import annotations
@@ -647,14 +649,15 @@ def cmd_search(args, db_path=None):
     # PROPERTY. As of 2026-08-04 this call passes `sync_to_claude=False`
     # unconditionally, so no sync can happen on the search path. The sync
     # `search` would otherwise perform is `sync_retrieved_to_claude_md`, the
-    # SIBLING writer, AND THE GAP THERE IS IN THE CONSUMER RATHER THAN IN THE
-    # PRODUCER. That function is annotated `-> SyncResult` and all six of its
-    # returns are `SyncResult`, so the reason IS produced. Its one caller,
-    # `PACTMemory.search`, discards the returned object, so the reason feeds
-    # no channel and reaches nobody. Both facts can change. If this argument
-    # ever becomes caller-controlled, or that caller keeps what it is handed,
-    # this envelope needs the field too. Do not read its absence as
-    # "search never syncs".
+    # SIBLING writer. That function is annotated `-> SyncResult` and all six of
+    # its returns are `SyncResult`, so the reason IS produced, and
+    # `PACTMemory.search` now keeps it on `last_sync_status` instead of
+    # discarding it. THIS ENVELOPE STILL HAS NO `sync_status` FIELD because the
+    # call below cannot sync at all: with `sync_to_claude=False` the writer is
+    # never reached, so the field would report a write that was suppressed by
+    # the caller for every invocation. If that argument ever becomes
+    # caller-controlled, this envelope needs the field too. Do not read its
+    # absence as "search never syncs".
     # Conditional kwarg, for the reason `cmd_save` states two functions up: an
     # unflagged call must stay BYTE-IDENTICAL, not merely equivalent, because
     # the suite pins these calls exactly. Passing `claude_md_root=None`
@@ -852,6 +855,36 @@ def cmd_sync(args, db_path=None):
     })
 
 
+def cmd_project_file(args, db_path=None) -> NoReturn:
+    """Handle the 'project-file' subcommand: print ONE line and exit.
+
+    The line is this session's project memory file as the SessionStart hook
+    names it: the same `session_document()` call, so the same anchor, root
+    and resolver. A known root prints the document's absolute path whether or
+    not the file exists yet (exit 0). An unknown root prints
+    `unavailable: <cause>` (exit 3). A path or cause holding a backtick, a
+    control or format character or a line break prints
+    `unavailable: not a safe path` (exit 3), the hook line's rule, so the
+    output is always one line. Reads no store and writes nothing.
+    """
+    from shared.claude_md_manager import session_document
+    from shared.project_scope import unknown_root_reason
+    from shared.session_resume import _safe_for_line
+
+    session, doc = session_document()
+    if doc is None:
+        text = unknown_root_reason(session.cause, session.anchor)
+    else:
+        text = str(doc.path)
+        if _safe_for_line(text):
+            print(text)
+            sys.exit(0)
+    if not _safe_for_line(text):
+        text = "not a safe path"
+    print(f"unavailable: {text}")
+    sys.exit(3)
+
+
 def cmd_delete(args, db_path=None):
     """Handle the 'delete' subcommand.
 
@@ -941,6 +974,7 @@ def build_parser():
         "update": f'python3 "{prog}" update <memory-id> --stdin',
         "delete": f'python3 "{prog}" delete <memory-id>',
         "sync": f'python3 "{prog}" sync',
+        "project-file": f'python3 "{prog}" project-file',
     }
 
     parser = _TeachParser(
@@ -1155,6 +1189,21 @@ def build_parser():
         ),
     )
 
+    # project-file
+    project_file_parser = subparsers.add_parser(
+        "project-file",
+        help="Print this session's project memory file path",
+        description=(
+            "Print one line: the absolute path of this session's project "
+            "memory file (exit 0), or 'unavailable: <reason>' (exit 3). The "
+            "path is the one the SessionStart context names, whether or not "
+            "the file exists yet. Reads no store and writes nothing."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-file"]),
+    )
+    project_file_parser._teach_example = examples["project-file"]
+
     return parser
 
 
@@ -1169,7 +1218,12 @@ _COMMANDS = {
     "update": cmd_update,
     "delete": cmd_delete,
     "sync": cmd_sync,
+    "project-file": cmd_project_file,
 }
+
+# The commands that never open a store. They run before every store guard
+# and scope below, and take no `--db-path`.
+_COMMANDS_WITHOUT_A_STORE = frozenset({"project-file"})
 
 # THE COMMANDS THAT MAY BRING A STORE INTO EXISTENCE AT A CALLER PATH.
 #
@@ -1203,6 +1257,9 @@ def main(argv=None):
     handler = _COMMANDS.get(args.command)
     if handler is None:
         _error("UNKNOWN_COMMAND", f"Unknown command: {args.command}")
+
+    if args.command in _COMMANDS_WITHOUT_A_STORE:
+        handler(args)
 
     db_path = Path(args.db_path) if args.db_path else None
 

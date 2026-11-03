@@ -30,6 +30,7 @@ from shared.claude_md_manager import (
     SESSION_END_MARKER,
     SESSION_START_MARKER,
 )
+from helpers import session_doc  # noqa: E402
 
 SB = f"{SESSION_START_MARKER}\n## Current Session\n- Resume: `x`\n{SESSION_END_MARKER}\n"
 SECTIONS = (
@@ -74,7 +75,7 @@ def _names(report):
 ])
 def test_a_file_pact_can_update_gives_no_report(project, text):
     _write(project, text)
-    assert check_claude_md_refusals() is None
+    assert check_claude_md_refusals(session_doc()) is None
 
 
 def test_a_memory_block_missing_only_its_end_marker_is_named(project):
@@ -83,7 +84,7 @@ def test_a_memory_block_missing_only_its_end_marker_is_named(project):
     text = _managed().replace(MEMORY_END_MARKER + "\n", "", 1)
     start_line = text.splitlines().index(MEMORY_START_MARKER) + 1
     path = _write(project, text)
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and report.startswith(f"PACT could not update {path}: ")
     assert f"line {start_line} has no end marker" in report
     assert _names(report) == list(MEMORY_SECTIONS)
@@ -92,7 +93,7 @@ def test_a_memory_block_missing_only_its_end_marker_is_named(project):
 
 def test_an_unclosed_fence_before_the_markers_names_every_block(project):
     path = _write(project, "# Notes\n```\nopen\n" + _managed())
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and report.startswith(f"PACT could not update {path}: line 2 ")
     assert _names(report) == ["the PACT managed block", "Current Session", *MEMORY_SECTIONS]
     assert report.endswith(CAP_OFF)
@@ -100,7 +101,7 @@ def test_an_unclosed_fence_before_the_markers_names_every_block(project):
 
 def test_two_session_blocks_name_only_the_session_block(project):
     _write(project, _managed(session=SB + "\n" + SB))
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and "lines 4, 9" in report
     assert _names(report) == ["Current Session"]
     assert not report.endswith(CAP_OFF)
@@ -110,7 +111,7 @@ def test_a_file_with_no_memory_block_reports_without_the_cap_clause(project):
     # Only the session block is refused; with no memory block the Pinned
     # section is absent, not unlocatable.
     _write(project, f"# Notes\n\n{SB}\n{SB}")
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and "lines 3, 8" in report
     assert _names(report) == ["Current Session"]
     assert not report.endswith(CAP_OFF)
@@ -129,7 +130,7 @@ def test_a_file_with_no_memory_block_reports_without_the_cap_clause(project):
 ])
 def test_a_refused_section_inside_the_memory_block_is_named_alone(project, body, name, line):
     _write(project, _managed(memory_body=body))
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and line in report
     assert _names(report) == [name]
     # A Pinned section the gate cannot locate turns the cap off; an absent one does not.
@@ -138,7 +139,7 @@ def test_a_refused_section_inside_the_memory_block_is_named_alone(project, body,
 
 def test_an_unclosed_fence_inside_the_memory_block_names_the_block_and_its_sections(project):
     _write(project, _managed(memory_body="## Pinned Context\n### a\n```\nopen\n"))
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and "line 12 starts an uncertain region" in report
     assert _names(report) == ["the PACT managed block", *MEMORY_SECTIONS]
     assert report.endswith(CAP_OFF)
@@ -151,7 +152,7 @@ def test_the_earliest_reason_is_reported(project):
     pinned = "## Pinned Context\n### a\n\n## Pinned Context\n### b\n"
     _write(project, (f"{MANAGED_START_MARKER}\n{MANAGED_TITLE}\n\n{MEMORY_START_MARKER}\n{pinned}"
                      f"{MEMORY_END_MARKER}\n\n{SB}\n{SB}{MANAGED_END_MARKER}\n"))
-    report = check_claude_md_refusals()
+    report = check_claude_md_refusals(session_doc())
     assert report is not None and "lines 5, 8" in report and "lines 12, 17" not in report
     assert _names(report) == ["Current Session", "Pinned Context"]
 
@@ -168,9 +169,9 @@ def test_the_report_matches_the_sync_headings_as_the_syncs_do():
 
 
 def test_a_missing_unreadable_or_non_utf8_file_gives_no_report(project):
-    assert check_claude_md_refusals() is None
+    assert check_claude_md_refusals(session_doc()) is None
     (project / ".claude" / "CLAUDE.md").write_bytes(b"caf\xe9\n```\nopen\n")
-    assert check_claude_md_refusals() is None
+    assert check_claude_md_refusals(session_doc()) is None
 
 
 # --- the SessionStart message ---------------------------------------------------

@@ -1,3 +1,4 @@
+from helpers import doc_at  # noqa: E402
 """The session block reaches CLAUDE.md literally, not through an escape grammar.
 
 WHY THESE ARMS SIT AT `update_session_info` AND NOT AT A PURE FUNCTION.
@@ -58,9 +59,7 @@ def _seed_first_pass(root):
     from shared.session_resume import update_session_info
 
     target = root / ".claude" / "CLAUDE.md"
-    result = update_session_info(
-        "session-alpha", "team-alpha", session_dir="/tmp/ordinary/alpha"
-    )
+    result = update_session_info("session-alpha", "team-alpha", session_dir="/tmp/ordinary/alpha", doc=doc_at())
     assert result == _CREATED, (
         "the fixture did not reach the create path, so the arm below would "
         f"test a different branch. got: {result!r}"
@@ -98,7 +97,7 @@ class TestSessionBlockSubstitutionIsLiteral:
         assert "\\n" in payload
         assert "## INJECTED" in payload
 
-        result = update_session_info("session-beta", "team-beta", session_dir=payload)
+        result = update_session_info("session-beta", "team-beta", session_dir=payload, doc=doc_at())
 
         assert result == _UPDATED, (
             f"the second pass did not rewrite the block. got: {result!r}"
@@ -141,9 +140,7 @@ class TestSessionBlockSubstitutionIsLiteral:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
         target = _seed_first_pass(world)
 
-        result = update_session_info(
-            "session-beta", "team-beta", session_dir="/tmp/dir\\dtail"
-        )
+        result = update_session_info("session-beta", "team-beta", session_dir="/tmp/dir\\dtail", doc=doc_at())
 
         assert result == _UPDATED, (
             "the invalid escape did not crash, and that is the point: it "
@@ -177,9 +174,7 @@ class TestSessionBlockSubstitutionIsLiteral:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
         target = _seed_first_pass(world)
 
-        result = update_session_info(
-            "session-beta", "team-beta", session_dir="/tmp/dir\\g<0>tail"
-        )
+        result = update_session_info("session-beta", "team-beta", session_dir="/tmp/dir\\g<0>tail", doc=doc_at())
 
         assert result == _UPDATED, f"got: {result!r}"
         content = target.read_text(encoding="utf-8")
@@ -210,9 +205,7 @@ class TestSessionBlockSubstitutionIsLiteral:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
         target = _seed_first_pass(world)
 
-        result = update_session_info(
-            "session-beta", "team-beta", session_dir="/tmp/ordinary/beta"
-        )
+        result = update_session_info("session-beta", "team-beta", session_dir="/tmp/ordinary/beta", doc=doc_at())
 
         assert result == _UPDATED, f"got: {result!r}"
         content = target.read_text(encoding="utf-8")

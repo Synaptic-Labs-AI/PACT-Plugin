@@ -21,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from helpers import doc_at  # noqa: E402
 
 # The session id every hook frame carries. It never changes across a resume.
 OLD_SID = "0001639f-a74f-41c4-bd0b-93d9d206e7f7"
@@ -183,8 +184,7 @@ def write_session_block(session_id, team_name, session_dir, plugin_root):
     """Write the project CLAUDE.md session block through the production
     writer (``CLAUDE_PROJECT_DIR`` must already point at the tmp project)."""
     from shared.session_resume import update_session_info
-    return update_session_info(session_id, team_name, str(session_dir),
-                               str(plugin_root))
+    return update_session_info(session_id, team_name, str(session_dir), str(plugin_root), doc=doc_at())
 
 
 def team_line(claude_md: Path) -> str:

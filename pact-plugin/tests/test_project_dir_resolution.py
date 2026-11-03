@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -157,14 +158,18 @@ class TestSessionRecordReader:
         umbrella = make_umbrella(tmp_path)
         _arm_record(monkeypatch, tmp_path, umbrella.project)
 
+        # The record reader lives in project_scope; its disk lookup is the
+        # call that must run once.
+        from shared import project_scope
+
         calls = []
-        real = pact_session._context_record_on_disk
+        real = project_scope._session_record_on_disk
 
-        def counting(env_session):
-            calls.append(1)
-            return real(env_session)
+        def counting(env_session, filename):
+            calls.append(filename)
+            return real(env_session, filename)
 
-        monkeypatch.setattr(pact_session, "_context_record_on_disk", counting)
+        monkeypatch.setattr(project_scope, "_session_record_on_disk", counting)
         first = pact_session.get_project_dir_from_session_record()
         second = pact_session.get_project_dir_from_session_record()
         assert first == second == str(umbrella.project)
@@ -492,7 +497,6 @@ class TestWorkingMemoryRecordRung:
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
 
-        assert wm._get_claude_md_path() == claude_md
         path, base = wm._resolve_display_claude_md_with_base()
         assert path == claude_md
         assert base == umbrella.project, (
@@ -500,10 +504,12 @@ class TestWorkingMemoryRecordRung:
             "recorded dir — not a re-derivation"
         )
 
-    def test_record_without_a_claude_md_falls_through_to_git(self, tmp_path, monkeypatch):
-        """The existence coupling is preserved: a record naming a dir with no
-        CLAUDE.md does NOT end resolution (this resolver never creates the
-        file); the git anchor answers as before."""
+    def test_record_without_a_claude_md_does_not_fall_through_to_the_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """The record names the session's root: a record naming a dir with no
+        CLAUDE.md resolves nothing, and the cwd checkout's document is never
+        named (this resolver never creates the file, and has no cwd rung)."""
         umbrella = make_umbrella(tmp_path)  # has ./CLAUDE.md at the root...
         (umbrella.project / "CLAUDE.md").unlink()  # ...remove it: record probe must miss
         _arm_record(monkeypatch, tmp_path, umbrella.project)
@@ -512,7 +518,8 @@ class TestWorkingMemoryRecordRung:
         git_file = seed_claude_md(repo)
         monkeypatch.chdir(repo)
 
-        assert wm._get_claude_md_path() == git_file
+        assert git_file.exists(), "FIXTURE INVALID: the cwd checkout has no document"
+        assert wm._resolve_display_claude_md_path() is None
 
 
 class TestWorkingMemoryDisagreementGuard:
@@ -773,7 +780,7 @@ class TestR2SubRepoCwd:
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(umbrella.subrepo)
-        assert wm._get_claude_md_path() == umbrella_md
+        assert wm._resolve_display_claude_md_path() == umbrella_md
 
     def test_r2_subprocess_save_from_the_subrepo_scopes_the_umbrella(self, tmp_path):
         umbrella = make_umbrella(tmp_path)
@@ -880,8 +887,10 @@ class TestR4BimodalGit:
         parent_answer = PACTMemory._detect_project_id()
 
         store = tmp_path / "memory.db"
+        # The child reads the record `_arm_record` wrote in-process, under the
+        # autouse fixture's home.
         env = child_env(
-            umbrella.config_root, home=tmp_path, session_id=SID,
+            Path.home() / ".claude", home=Path.home(), session_id=SID,
             memory_dir=tmp_path / "memdir",
         )
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
@@ -1353,3 +1362,161 @@ class TestWarrantedSyncProceedsUnderDisagreement:
         assert "WARRANT-TOKEN" not in umbrella_md.read_text(encoding="utf-8"), (
             "the projection reached the record-scoped file despite the warrant"
         )
+
+
+# ---------------------------------------------------------------------------
+# A worktree writer's retarget is a DISAGREEMENT BY TEXT and ONE PROJECT BY
+# IDENTITY. The archive resolves MAIN and pins it; the record holds the
+# worktree path. Measured on the live shape as well as the removed one.
+# ---------------------------------------------------------------------------
+
+class TestAVerifiedWorktreeRetargetIsNotADisagreement:
+    _ENV = None
+
+    @staticmethod
+    def _git_env():
+        return {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+        }
+
+    def _git(self, *args, cwd):
+        subprocess.run(
+            ["git", "-c", "user.email=t@e.invalid", "-c", "user.name=t", *args],
+            cwd=str(cwd), env=self._git_env(), check=True,
+            capture_output=True, timeout=30,
+        )
+
+    def _committed_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        self._git("init", "-q", ".", cwd=path)
+        (path / "README").write_text("seed\n")
+        self._git("add", "README", cwd=path)
+        self._git("commit", "-qm", "seed", cwd=path)
+        return path
+
+    def _rev(self, directory: Path, flag: str) -> str:
+        out = subprocess.run(
+            ["git", "rev-parse", flag], cwd=str(directory),
+            env=self._git_env(), capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return os.path.realpath(os.path.join(str(directory), out))
+
+    def _worktree_session(self, tmp_path, monkeypatch, *, removed: bool,
+                          identity_override=None, record_for=None):
+        main = self._committed_repo(tmp_path / "main")
+        worktree = main / ".worktrees" / "feature"
+        self._git("worktree", "add", "-q", str(worktree), "-b", "feature",
+                  cwd=main)
+        identity = {
+            "session_id": SID,
+            "declared": os.path.realpath(worktree),
+            "worktree": self._rev(worktree, "--show-toplevel"),
+            "common_dir": self._rev(worktree, "--git-common-dir"),
+        }
+        if identity_override:
+            identity.update(identity_override)
+        if removed:
+            shutil.rmtree(worktree)
+            self._git("worktree", "prune", cwd=main)
+            assert not worktree.exists()
+
+        enable_record_discovery(monkeypatch, pact_session)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+        recorded = record_for if record_for is not None else worktree
+        context = write_session_context(Path.home() / ".claude", SID, recorded)
+        (context.parent / "worktree-identity.json").write_text(
+            json.dumps(identity)
+        )
+        return main, worktree
+
+    def test_a_live_worktree_retarget_is_not_a_disagreement(
+        self, tmp_path, monkeypatch
+    ):
+        main, _worktree = self._worktree_session(
+            tmp_path, monkeypatch, removed=False
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+
+        assert pact_session.env_record_project_dir_disagreement() is None
+
+    def test_a_removed_worktree_retarget_is_not_a_disagreement(
+        self, tmp_path, monkeypatch
+    ):
+        main, _worktree = self._worktree_session(
+            tmp_path, monkeypatch, removed=True
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+
+        assert pact_session.env_record_project_dir_disagreement() is None
+
+    def test_a_symlinked_spelling_still_disagrees(self, tmp_path, monkeypatch):
+        """The admission is identity, not reconciliation: env must BE the
+        verified main root, not resolve to it."""
+        main, _worktree = self._worktree_session(
+            tmp_path, monkeypatch, removed=False
+        )
+        alias = tmp_path / "alias"
+        os.symlink(main, alias)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(alias))
+
+        assert pact_session.env_record_project_dir_disagreement() is not None
+
+    def test_an_unverified_record_still_disagrees(self, tmp_path, monkeypatch):
+        not_a_checkout = tmp_path / "not-a-checkout"
+        not_a_checkout.mkdir()
+        main, _worktree = self._worktree_session(
+            tmp_path, monkeypatch, removed=True,
+            identity_override={
+                "common_dir": str(not_a_checkout / ".git"),
+            },
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+
+        assert pact_session.env_record_project_dir_disagreement() is not None
+
+    def test_a_verified_record_does_not_admit_a_different_checkout(
+        self, tmp_path, monkeypatch
+    ):
+        """The admission requires the env to BE the verified main root, not
+        merely that some verified record exists: a second, real checkout must
+        still disagree."""
+        main, _worktree = self._worktree_session(
+            tmp_path, monkeypatch, removed=False
+        )
+        other = self._committed_repo(tmp_path / "other")
+        assert os.path.realpath(other) != os.path.realpath(main)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(other))
+
+        assert pact_session.env_record_project_dir_disagreement() is not None
+
+    def test_a_record_for_another_declaration_still_disagrees(
+        self, tmp_path, monkeypatch
+    ):
+        other = tmp_path / "other"
+        other.mkdir()
+        main, _worktree = self._worktree_session(
+            tmp_path, monkeypatch, removed=True, record_for=other
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+
+        assert pact_session.env_record_project_dir_disagreement() is not None
+
+    def test_the_remedy_does_not_send_the_user_to_a_deleted_directory(
+        self, tmp_path
+    ):
+        gone = tmp_path / "deleted-project"
+        text = pact_session.format_project_dir_disagreement(
+            str(tmp_path / "main"), str(gone)
+        )
+        assert "no longer exists" in text
+        assert "re-export CLAUDE_PROJECT_DIR to the recorded value" not in text
+
+    def test_the_live_remedy_still_offers_the_re_export(self, tmp_path):
+        live = tmp_path / "live-project"
+        live.mkdir()
+        text = pact_session.format_project_dir_disagreement(
+            str(tmp_path / "main"), str(live)
+        )
+        assert "re-export CLAUDE_PROJECT_DIR to the recorded value" in text

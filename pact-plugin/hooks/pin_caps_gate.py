@@ -889,16 +889,58 @@ def _gate(input_data: dict):
 
     pact_context.init(input_data)
     from shared.claude_md_manager import gate_frame, gate_target
+    from shared.project_scope import session_memory_root
 
     frame = gate_frame(input_data)
     if frame is None:
         return None
 
-    target = gate_target(file_path)
+    # ONE OBSERVATION: the gate's target and the advisory's cause come from
+    # the same SessionRoot, so the advisory never describes a state the gate
+    # did not act on.
+    session = session_memory_root()
+    target = gate_target(file_path, session)
     if target is None:
-        return None
+        return _unknown_root_decision(tool_name, session)
     decision = _decide(target, tool_name, tool_input, input_data, frame)
     return _member_reason(decision) if frame == "member" else decision
+
+
+def _unknown_root_decision(tool_name: str, session):
+    """The advisory when a target was NOT gated because the session's memory
+    root is unknown, or None when that is not the reason.
+
+    THE CAP IS OFF AND THE GATE MUST SAY SO. `gate_target` returns None for
+    several ordinary reasons (a worktree copy, the non-preferred of the two
+    canonical paths), and those stay silent. An unknown root is different: no
+    document can be identified for the whole session, so every later edit
+    passes unchecked. The sibling `check_claude_md_refusals` names this
+    condition on the SessionStart channel; this is the PreToolUse channel.
+
+    `session` is the SessionRoot the gate passed to `gate_target`; the cause
+    is rendered from it, never from a second resolution.
+    """
+    if session.cause is None:
+        return None
+    try:
+        from shared.project_scope import ROOT_CAUSE_MISSING, unknown_root_reason
+
+        clause = unknown_root_reason(session.cause, session.anchor)
+    except Exception:  # noqa: BLE001 — fail-open: report nothing
+        return None
+    from shared.pin_growth import PinDecision
+
+    if session.cause == ROOT_CAUSE_MISSING and session.anchor is not None:
+        # THE REMOVED-WORKTREE SHAPE NAMES ITSELF: record recovery already ran
+        # for a missing anchor and did not verify a main checkout, which is
+        # the only reason the cause survived. A None anchor (a vanished cwd
+        # nothing names) never reaches record recovery, so it names no record.
+        clause += " and the session record did not verify a main checkout for it"
+    reason = (
+        f"PACT could not identify this session's project memory: {clause}, "
+        f"so the pin cap was not checked for this {tool_name}."
+    )
+    return PinDecision("ALLOW_ADVISORY", 0, 0, None, "unknown_root", reason)
 
 
 def _decide(target, tool_name: str, tool_input: dict, input_data: Optional[dict] = None,

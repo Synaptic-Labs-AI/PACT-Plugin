@@ -10,8 +10,8 @@ is updated, its siblings must stay in sync.
 
 Resolvers under test:
 1. shared.claude_md_manager.resolve_project_claude_md_path  -- canonical
-2. staleness.get_project_claude_md_path                      -- hooks/
-3. working_memory._get_claude_md_path                        -- skills/
+2. staleness.resolve_session_claude_md_path                  -- hooks/
+3. working_memory._resolve_display_claude_md_path            -- skills/
 4. memory_api.PACTMemory._find_project_root                  -- skills/ (walks UP)
 5. worktree_guard inline probe                                -- hooks/ (inline)
 """
@@ -71,19 +71,19 @@ def resolver_claude_md_manager(tmp: Path, monkeypatch) -> str:
 
 
 def resolver_staleness(tmp: Path, monkeypatch) -> str:
-    """Public entry exercises env-var short-circuit + git fallback chain."""
-    from staleness import get_project_claude_md_path
+    """The session reader, driven through the declared directory."""
+    from staleness import resolve_session_claude_md_path
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp))
-    return _classify_path(get_project_claude_md_path(), tmp)
+    return _classify_path(resolve_session_claude_md_path(), tmp)
 
 
 def resolver_working_memory(tmp: Path, monkeypatch) -> str:
-    """Mirror of staleness; same env-var-driven resolution strategy."""
-    from scripts.working_memory import _get_claude_md_path
+    """The sync's display resolver, driven through the declared directory."""
+    from scripts.working_memory import _resolve_display_claude_md_path
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp))
-    return _classify_path(_get_claude_md_path(), tmp)
+    return _classify_path(_resolve_display_claude_md_path(), tmp)
 
 
 def resolver_memory_api(tmp: Path, monkeypatch) -> str:
@@ -232,18 +232,18 @@ class TestClaudeMdResolverParity:
 
 # --- Display-resolver parity invariant ---------------------------------------
 #
-# The lint above drives every resolver through the CLAUDE_PROJECT_DIR branch,
-# so it never exercises the git-topology branches -- and it covers
-# _get_claude_md_path, which has NO production callers, while omitting
-# _resolve_display_claude_md_path, which determines every real sync write
-# target. This class pins the specific invariant _resolve_display_claude_md_path's
-# docstring asserts: it and _get_claude_md_path differ ONLY in the
-# worktree-root branch, so in a non-worktree checkout they resolve identically.
-#
-# It must run with CLAUDE_PROJECT_DIR UNSET -- the env branch short-circuits
-# before the git branches and would make the equivalence hold trivially,
-# testing nothing. Re-pointing the 5-way lint at the live resolver and deleting
-# the dead sibling is a separate follow-up, not this pin.
+# The lint above drives every resolver through the CLAUDE_PROJECT_DIR branch.
+# This class drives the git topologies with CLAUDE_PROJECT_DIR UNSET (the cwd
+# anchor) and pins that the sync's display resolver and the hooks' session
+# document name the SAME file: one resolver, two channels.
+
+
+def _session_document_path() -> Optional[Path]:
+    """The hooks' ambient answer: the session document when it exists."""
+    from shared.claude_md_manager import session_document
+
+    _session, doc = session_document()
+    return doc.path if doc is not None and doc.exists else None
 
 
 def _pgit(cwd: Path, *args: str) -> None:
@@ -281,42 +281,17 @@ def _init_repo_with_claude_md(root: Path) -> Path:
 
 
 class TestDisplayResolverParityInvariant:
-    """Pin the docstring claim Option C revised (working_memory:_resolve_display_...).
-
-    _resolve_display_claude_md_path anchors branch 2 on the WORKTREE root
-    (--show-toplevel) and falls back on the MAIN repo root (--git-common-dir)
-    in branch 3; _get_claude_md_path uses only the main-repo anchor. The claim:
-    they differ ONLY in that worktree-root branch.
-
-    Three cases together demonstrate the "only". Two of them predate Option C
-    and pin the CONTEXT that gives "only" its meaning; one is the actual
-    Option-C regression guard:
-
-      - coincide_in_non_worktree  -- CONTEXT (branch-3-independent): both
-        resolvers already coincided outside a worktree before Option C.
-      - diverge_when_worktree_owns_a_file -- CONTEXT (branch-3-independent):
-        the single legitimate divergence, in the worktree-root branch.
-      - coincide_in_pact_worktree_without_own_file -- LOAD-BEARING: this case
-        DIVERGED before Option C (display -> None, main -> the main file) and
-        COINCIDES after, purely because branch 3 was added. Deleting branch 3
-        flips only this case red; the other two stay green. It is the sole
-        member of this class that guards the Option-C change.
-
-    A sibling BEHAVIOURAL guard for the same case lives in
-    test_working_memory_worktree_sync.py: that one asserts the concrete main
-    file comes out AND that branch 3 fired. This class asserts the two
-    resolvers AGREE -- the resolver-relationship axis this parity file owns.
-    Different axis, different file, both fail on a branch-3 regression:
-    defence in depth, not duplication.
+    """Pin that the sync's display resolver and the hooks' session document
+    agree on every topology: a plain checkout, a linked worktree that owns a
+    CLAUDE.md (both name MAIN's), and a worktree without one (both name
+    MAIN's). Each arm also pins the concrete file, so agreement on a WRONG
+    file still fails.
     """
 
     def test_non_worktree_checkout_resolvers_coincide(self, tmp_path, monkeypatch):
         """In a plain (non-worktree) checkout the two resolvers return the SAME
-        existing path -- the equivalence the docstring promises."""
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        existing path."""
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "plainrepo"
         expected = _init_repo_with_claude_md(repo)
@@ -325,7 +300,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(repo)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = _session_document_path()
 
         # Both must resolve to the real file (a shared None would be vacuously
         # "equal" while proving nothing), and to the SAME file.
@@ -333,18 +308,12 @@ class TestDisplayResolverParityInvariant:
         assert os.path.realpath(display) == os.path.realpath(expected)
         assert os.path.realpath(display) == os.path.realpath(main)
 
-    def test_worktree_divergence_is_confined_to_the_worktree_root_branch(
+    def test_worktree_own_file_no_longer_diverges_from_the_main_resolver(
         self, tmp_path, monkeypatch
     ):
-        """Non-vacuity guard for the test above: the two resolvers CAN diverge,
-        and do so only in the worktree-root branch. A worktree that owns a
-        CLAUDE.md resolves the display path to its OWN file (branch 2) while the
-        main-repo resolver still points at the main file -- so the coincidence
-        above is a real property of the non-worktree case, not a constant."""
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        """A worktree owning a CLAUDE.md does not make either resolver return
+        it: both resolve MAIN's file."""
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "mainrepo"
         main_file = _init_repo_with_claude_md(repo)
@@ -359,37 +328,18 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(worktree)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = _session_document_path()
 
         assert display is not None and main is not None
-        # Display follows the worktree's OWN file (branch 2, --show-toplevel);
-        # the main-repo resolver stays on the main file (--git-common-dir).
-        assert os.path.realpath(display) == os.path.realpath(wt_file)
+        # Both resolvers stay on the MAIN file; the worktree copy is not it.
+        assert os.path.realpath(display) == os.path.realpath(main_file)
         assert os.path.realpath(main) == os.path.realpath(main_file)
-        assert os.path.realpath(display) != os.path.realpath(main)
+        assert os.path.realpath(display) != os.path.realpath(wt_file)
 
     def test_coincide_in_pact_worktree_without_own_file(self, tmp_path, monkeypatch):
-        """LOAD-BEARING: the one case Option C changed, and the only test in this
-        class that a branch-3 regression turns red.
-
-        A PACT-convention worktree has no CLAUDE.md of its own, so branch 2
-        (--show-toplevel) finds nothing. BEFORE Option C the display resolver
-        then fell through to cwd and returned None, while _get_claude_md_path
-        returned the main-repo file -- they DIVERGED. Option C's branch 3
-        (--git-common-dir) now sends the display resolver to that same main file,
-        so the two AGREE. Delete branch 3 and this assertion fails (display -> None
-        != main); the other two cases in this class stay green. That is the
-        proof this pin actually guards the change, not merely the docstring's
-        wording.
-
-        The sibling BEHAVIOURAL guard (concrete file + branch-3-fired) lives in
-        test_working_memory_worktree_sync.py; this asserts only that the two
-        resolvers converge, which is the invariant this parity file exists for.
-        """
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        """A PACT-convention worktree has no CLAUDE.md of its own: both
+        resolvers name MAIN's file."""
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "mainrepo"
         main_file = _init_repo_with_claude_md(repo)
@@ -401,7 +351,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(worktree)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = _session_document_path()
 
         assert display is not None and main is not None
         assert os.path.realpath(display) == os.path.realpath(main)
@@ -442,7 +392,7 @@ class TestWritePathResolverIdentity:
 
         recorded = []
 
-        def _spy():
+        def _spy(_session=None):
             recorded.append(1)
             return (seeded_path, tmp_path)
 

@@ -281,11 +281,15 @@ reports** — not "the project's CLAUDE.md". That field names the file the
 archival run actually read, and editing anything else breaks the one link that
 makes the verdict mean something about the file you are about to change.
 
-The two are not reliably the same file. Resolution falls back through
-`CLAUDE_PROJECT_DIR`, then the git common dir's parent, then the working
-directory, so the file that gets read is not always the one the invocation
-seems to name. **If `claude_md_path` is not the project you expected, STOP and
-report it; do not edit.**
+The two are not reliably the same file: the archive resolves this session's
+project memory file, which for a linked worktree is the main checkout's, so
+the file it reads is not always the one the invocation seems to name. The
+expected file is the path on the `Project memory file:` line of the SessionStart
+context; if that line is gone, it is the path printed by
+`python3 "${CLAUDE_PLUGIN_ROOT}/skills/pact-memory/scripts/cli.py" project-file`.
+If either source says the file is unavailable, STOP and report it; do not edit.
+Compare resolved paths (`realpath` of both). **If `claude_md_path` is not the
+expected file, STOP and report it; do not edit.**
 
 The script refuses one case for you and cannot refuse the other. A fall-through
 that lands **outside** the starting directory's repository is refused outright —

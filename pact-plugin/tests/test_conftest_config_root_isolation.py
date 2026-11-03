@@ -123,11 +123,14 @@ class TestAutouseConfigRootIsolationPinned:
             "ambient value leaking through) — #1186's destructive leak would "
             "resume silently under a green suite."
         )
-        # (2) Specifically the .claude leaf (the HOME-fallthrough shape), not
-        # some other tmp-rooted path — pins the exact resolution contract.
-        assert resolved == tmp_path / ".claude", (
-            f"expected tmp_path / '.claude', got {resolved!r}"
+        # (2) Specifically the .claude leaf of the per-test home, which is a
+        # SUBDIRECTORY of tmp_path and not tmp_path itself: a test using
+        # tmp_path as its project must not be a session started in $HOME,
+        # whose canonical CLAUDE.md is the user-global file.
+        assert resolved == tmp_path / "home" / ".claude", (
+            f"expected tmp_path / 'home' / '.claude', got {resolved!r}"
         )
+        assert Path.home() != tmp_path
 
     def test_scrub_leaves_claude_config_dir_absent_during_body(self, tmp_path):
         """Companion observability for the scrub half of the closure: after the
@@ -147,7 +150,7 @@ class TestAutouseConfigRootIsolationPinned:
             "fixture's setup scrub did not fire; a contributor env exporting it "
             "would leak through and shadow the HOME fallthrough (precedence-1)."
         )
-        assert get_claude_config_dir() == tmp_path / ".claude"
+        assert get_claude_config_dir() == tmp_path / "home" / ".claude"
 
     def test_scrub_removes_an_ambient_session_id(self):
         """Pin the SECOND autouse scrub, ``_scrub_session_id_from_test_env``.

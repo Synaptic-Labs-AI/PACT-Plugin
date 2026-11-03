@@ -834,8 +834,8 @@ class PinDecision(NamedTuple):
     growth: int | None  # None when the rule did not run
     # None for a plain verdict. Otherwise this decision's "not_found",
     # "size_bound", "error", "count" or "size", or the pin-cap gate's own
-    # "override" or "unreadable". On "size_bound" the check stopped before it
-    # could count, so pins_before and pins_after are 0.
+    # "override", "unreadable" or "unknown_root". On "size_bound" the check
+    # stopped before it could count, so pins_before and pins_after are 0.
     cause: str | None
     reason: str | None  # the advisory or the deny text
     # On a count denial, the size cap's own deny text when the change crosses it

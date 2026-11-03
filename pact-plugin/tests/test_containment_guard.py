@@ -33,6 +33,8 @@ import os
 from pathlib import Path
 
 import pytest
+from helpers import doc_at  # noqa: E402
+from helpers import doc_for  # noqa: E402
 
 # claude_md_ambient (module-wide): these tests force containment refusal via
 # a deliberately wrong base; the suite-wide tmp redirect would change the
@@ -88,7 +90,7 @@ class TestSite6EnsureProjectMemoryMd:
         _mount_symlinked_parent_escape(project, outside)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         # Refused with the opaque skip; NO file created through the escaping link.
         assert result == "Project CLAUDE.md skipped: path precondition not met."
@@ -101,7 +103,7 @@ class TestSite6EnsureProjectMemoryMd:
         target = _mount_benign_dot_claude(project)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = ensure_project_memory_md()
+        result = ensure_project_memory_md(doc_at())
 
         # Allowed: the in-project file is created (over-block cert for this site).
         assert result == "Created project CLAUDE.md with memory sections"
@@ -132,7 +134,7 @@ class TestSite7MigrateToManagedStructure:
         outside_before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result == "Migration skipped: project CLAUDE.md path precondition not met."
         # The out-of-project victim is byte-unchanged — no write-through.
@@ -147,7 +149,7 @@ class TestSite7MigrateToManagedStructure:
         target.write_text(self._LEGACY, encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = migrate_to_managed_structure()
+        result = migrate_to_managed_structure(doc_at())
 
         assert result == "Migrated project CLAUDE.md to managed structure (#404)"
         assert "PACT_MANAGED_START" in target.read_text(encoding="utf-8")
@@ -178,10 +180,7 @@ class TestSite1StalenessParentAndMultiHop:
         managed.write_text(_STALE, encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        from unittest.mock import patch
-        with patch("session_init._get_project_claude_md_path", return_value=managed), \
-             patch("staleness._get_project_claude_md_path", return_value=managed):
-            result = check_pinned_staleness()
+        result = check_pinned_staleness(doc_for(managed))
 
         # Lexical base = proj (parent.name=='.claude' -> parent.parent); target
         # resolves into `outside` -> escapes -> opaque refuse, victim untouched.
@@ -205,10 +204,7 @@ class TestSite1StalenessParentAndMultiHop:
         managed.write_text(_STALE, encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        from unittest.mock import patch
-        with patch("session_init._get_project_claude_md_path", return_value=managed), \
-             patch("staleness._get_project_claude_md_path", return_value=managed):
-            result = check_pinned_staleness()
+        result = check_pinned_staleness(doc_for(managed))
 
         assert result == "Pinned staleness skipped: path precondition not met."
         assert (outside / "CLAUDE.md").read_text(encoding="utf-8") == before
@@ -216,9 +212,11 @@ class TestSite1StalenessParentAndMultiHop:
 
 # ---------------------------------------------------------------------------
 # Sites 8-9 — display sync OVER-BLOCK CERT (the load-bearing anchor-identity
-# test). External worktree ALLOWS on its own --show-toplevel base; the SAME
-# write REFUSES when the anchor is swapped to the main-repo root (--git-common-
-# dir). Proves the anchor is the resolver's own base, not a re-derivation.
+# test). An external worktree with no CLAUDE_PROJECT_DIR WRITES the MAIN
+# checkout's file -- the project-memory root (#1653) -- and the SAME write
+# REFUSES when the anchor is swapped to the worktree root. Proves the anchor is
+# the resolver's own base, not a re-derivation from the target, and that
+# following the memory root does not over-block the worktree session.
 # ---------------------------------------------------------------------------
 
 def _git(*args, cwd):
@@ -248,16 +246,25 @@ class TestSites89DisplayOverBlockAnchorIdentity:
         )
         return main, worktree
 
-    def test_external_worktree_allows_on_own_base(self, tmp_path, monkeypatch):
+    def test_external_worktree_writes_the_main_checkout(self, tmp_path, monkeypatch):
         import scripts.working_memory as wm
 
         main, worktree = self._external_worktree(tmp_path)
+        main_md = main / ".claude" / "CLAUDE.md"
+        main_md.parent.mkdir()
+        main_md.write_text(
+            "# MAIN\n\n## Working Memory\n<!-- Auto-managed by pact-memory skill. -->\n",
+            encoding="utf-8",
+        )
+        worktree_md = worktree / ".claude" / "CLAUDE.md"
+        worktree_before = worktree_md.read_text(encoding="utf-8")
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         prev = Path.cwd()
         os.chdir(str(worktree))
         try:
-            # Real resolver: --show-toplevel base = the worktree root -> the
-            # worktree target is contained -> ALLOWED (the over-block cert).
+            # Real resolver, no env: the --show-toplevel base is retargeted to
+            # the project-memory root (#1653), so MAIN's document is the
+            # session's target and the write is contained -> ALLOWED.
             result = wm.sync_to_claude_md(
                 {"context": "external worktree entry"}, None, "id1"
             )
@@ -267,33 +274,39 @@ class TestSites89DisplayOverBlockAnchorIdentity:
         # The ALLOW decision is what this cert is about, so name the outcome
         # rather than only asking whether it is truthy.
         assert result.reason == wm.SyncResult.WROTE
-        wt_text = (worktree / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-        assert "external worktree entry" in wt_text
+        assert "external worktree entry" in main_md.read_text(encoding="utf-8")
+        # The worktree copy is not the managed document: untouched.
+        assert worktree_md.read_text(encoding="utf-8") == worktree_before
 
-    def test_anchor_swap_to_main_root_would_refuse(self, tmp_path, monkeypatch):
-        """MUTATION cert: swap the resolver's base from the worktree root to the
-        MAIN-repo root. The SAME contained write now escapes the wrong anchor and
-        is REFUSED. This is what proves the anchor is load-bearing rather than
-        vacuous — anchoring on --git-common-dir (main root) over-blocks an
-        external worktree's own legitimate write."""
+    def test_anchor_swap_to_worktree_root_would_refuse(self, tmp_path, monkeypatch):
+        """MUTATION cert: swap the resolver's base from the project-memory root
+        (MAIN) to the worktree root. The SAME contained write now escapes the
+        wrong anchor and is REFUSED. This is what proves the anchor is
+        load-bearing rather than vacuous -- anchoring on the worktree root
+        would refuse the write the session is supposed to make."""
         import scripts.working_memory as wm
 
         main, worktree = self._external_worktree(tmp_path)
-        target = worktree / ".claude" / "CLAUDE.md"
+        target = main / ".claude" / "CLAUDE.md"
+        target.parent.mkdir()
+        target.write_text(
+            "# MAIN\n\n## Working Memory\n<!-- Auto-managed by pact-memory skill. -->\n",
+            encoding="utf-8",
+        )
         before = target.read_text(encoding="utf-8")
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
-        # Swap the base to the MAIN repo root (the wrong anchor). The worktree
-        # target's parent chain never walks up to main's inode -> the ancestry
-        # walk reaches the filesystem root without matching -> ContainmentError.
-        def _wrong_base():
-            return (target, main)
+        # Swap the base to the worktree root (the wrong anchor). MAIN's target
+        # never walks up to the worktree's inode -> the ancestry walk reaches
+        # the filesystem root without matching -> ContainmentError.
+        def _wrong_base(_session=None):
+            return (target, worktree)
         monkeypatch.setattr(wm, "_resolve_display_claude_md_with_base", _wrong_base)
 
         result = wm.sync_to_claude_md({"context": "should be refused"}, None, "id2")
 
         # sync swallows the ContainmentError inside its degradation handler, so
-        # the write is skipped and the worktree file is byte-unchanged. Pin the
+        # the write is skipped and MAIN's file is byte-unchanged. Pin the
         # REASON, not just the falsiness: `failed` says the write was attempted
         # and refused, which is the whole point of this mutation arm. A bare
         # falsy result would also be satisfied by `unresolved` or `missing` --
@@ -315,7 +328,7 @@ class TestSites234UpdateSessionInfo:
         _mount_symlinked_parent_escape(project, outside)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = update_session_info("sid-123", "PACT-team")
+        result = update_session_info("sid-123", "PACT-team", doc=doc_at())
 
         # Refused: nothing written through the escaping link.
         assert not (outside / "CLAUDE.md").exists(), "session write escaped the project"
@@ -328,7 +341,7 @@ class TestSites234UpdateSessionInfo:
         _mount_benign_dot_claude(project)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        result = update_session_info("sid-123", "PACT-team")
+        result = update_session_info("sid-123", "PACT-team", doc=doc_at())
 
         target = project / ".claude" / "CLAUDE.md"
         assert target.exists()

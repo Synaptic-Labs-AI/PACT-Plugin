@@ -53,6 +53,14 @@ from .claude_md_markers import State, parse
 from .paths import get_claude_config_dir
 
 _BASE_CACHE = "claude-md-base.json"
+# Bump when the cached value's MEANING changes. v1 cached whatever the old
+# resolver returned (including a worktree directory or None); v2 caches only
+# the PROJECT-MEMORY root. A v1 entry must be REBUILT, not accepted: a session
+# resumed after an upgrade would otherwise keep watching the worktree copy (or
+# nothing) while the writers update MAIN. v3 caches the root AND the main
+# checkout enclosing it (or null), the two directories the session document
+# resolver probes, so a cached answer is re-probed without git.
+_BASE_CACHE_VERSION = 3
 _LAST_SEEN_DIR = "claude-md-last-seen"
 _BASELINE = "claude-md-baseline.json"
 _RECORD_KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -337,34 +345,74 @@ def _write_baseline(session_dir: Path, base: Path, path: Path, digest: str,
                  "state": state})
 
 
-def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
-    """The project CLAUDE.md and its base directory, the resolver's answer,
-    starting git at most once per session.
+def _first_existing_document(bases: list[Path]) -> tuple[Path | None, Path | None]:
+    """The first canonical document under the first base that holds one, with
+    that base: the session document resolver's two rungs, without git. A base
+    whose canonical documents include a user-global CLAUDE.md is skipped
+    whole, as `session_memory_root` refuses such a root: a cache written
+    before that rule could name $HOME, and its legacy CLAUDE.md is no
+    project's memory either."""
+    from shared.claude_md_manager import managed_document_paths
+    from shared.project_scope import names_user_global_document
 
-    The resolver's first step, CLAUDE_PROJECT_DIR, needs no git, so it is
-    checked on every call and wins whatever is cached. Otherwise the cached
-    base is used with the two-file check, and a cached "no file" stays the
-    answer until a file appears under CLAUDE_PROJECT_DIR."""
-    from staleness import _find_existing_claude_md, _resolve_project_claude_md_with_base
+    for base in bases:
+        if names_user_global_document(base):
+            continue
+        for candidate in managed_document_paths(base):
+            if candidate.exists():
+                return candidate, base
+    return None, None
+
+
+def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
+    """The project CLAUDE.md and its base directory, the session document's
+    answer, starting git at most once per session.
+
+    The document is the one `claude_md_manager.session_document()` names:
+    for a linked worktree the MAIN checkout's file, the one every writer
+    targets, and never the worktree's own copy. Resolving needs git, so it is
+    paid only when the cache is built. THE CACHE STORES DIRECTORIES, NOT A
+    FILE ANSWER: the root and the main checkout strictly enclosing it (null
+    when there is none), the two places that resolver probes. Every later
+    call re-probes them in order with no git, so a document that appears
+    later in the session is picked up. Within one session the declaration is
+    stable, so a changed CLAUDE_PROJECT_DIR is picked up by the next session.
+
+    AN UNKNOWN MEMORY ROOT IS NOT PROBED AND NOT CACHED. A transient git
+    failure would otherwise pin a guess for the whole session: answer
+    "nothing" now, and let the next check, when git answers, take the real
+    base."""
+    from shared.project_scope import enclosing_main_checkout, session_memory_root
 
     cache_path = session_dir / _BASE_CACHE
     cached = _read_json(cache_path)
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            if cached is None or cached.get("base") != project_dir:
-                _write_json(cache_path, {"base": project_dir})
-            return found, Path(project_dir)
-    if cached is not None and "base" in cached:
-        base = cached["base"]
-        if not isinstance(base, str):
+    if (
+        isinstance(cached, dict)
+        and cached.get("version") == _BASE_CACHE_VERSION
+        and "base" in cached
+    ):
+        base, enclosing = cached["base"], cached.get("enclosing")
+        if not isinstance(base, str) or not isinstance(enclosing, (str, type(None))):
             return None, None
-        found = _find_existing_claude_md(Path(base))
-        return (found, Path(base)) if found is not None else (None, None)
-    path, base = _resolve_project_claude_md_with_base()
-    _write_json(cache_path, {"base": str(base) if base is not None else None})
-    return path, base
+        return _first_existing_document(
+            [Path(base)] + ([Path(enclosing)] if enclosing else [])
+        )
+    # A LEGACY/UNVERSIONED CACHE IS IGNORED, NOT ACCEPTED. An older version
+    # may hold a worktree directory, null, or a directory with a different
+    # meaning; it is rebuilt from the session root below.
+
+    session = session_memory_root()
+    if session.root is None:
+        return None, None
+    enclosing = enclosing_main_checkout(session.root)
+    _write_json(
+        cache_path,
+        {"version": _BASE_CACHE_VERSION, "base": str(session.root),
+         "enclosing": str(enclosing) if enclosing is not None else None},
+    )
+    return _first_existing_document(
+        [session.root] + ([enclosing] if enclosing is not None else [])
+    )
 
 
 def _session_dir(frame: dict) -> Path | None:

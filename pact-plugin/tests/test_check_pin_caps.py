@@ -37,13 +37,13 @@ from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 @pytest.fixture
 def patched_claude_md(tmp_path, monkeypatch):
-    """Write a CLAUDE.md and patch get_project_claude_md_path resolution."""
+    """Write a CLAUDE.md and point the session resolver at it."""
     def _write(content):
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(content, encoding="utf-8")
         import check_pin_caps
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+            check_pin_caps, "resolve_session_claude_md_path", lambda: claude_md
         )
         return claude_md
     return _write
@@ -140,13 +140,11 @@ class TestCheckPinCaps_Advisory_FailOpen:
     """
 
     def test_no_claude_md_fails_open(self, monkeypatch):
-        import staleness
         import check_pin_caps
+        # #1653/D2: the listing resolves through the one-rule helper, so the
+        # seam to stub is that helper.
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
-        )
-        monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "resolve_session_claude_md_path", lambda *a, **k: None
         )
         rc, payload = _run_cli(["--status"])
         assert rc == 0
@@ -508,13 +506,9 @@ class TestCheckPinCaps_Advisory_NeverExit2:
         assert rc != 2
 
     def test_exit_never_2_on_fail_open(self, monkeypatch):
-        import staleness
         import check_pin_caps
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
-        )
-        monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "resolve_session_claude_md_path", lambda: None
         )
         rc, _ = _run_cli(["--status"])
         assert rc != 2

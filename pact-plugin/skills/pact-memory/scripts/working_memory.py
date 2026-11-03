@@ -19,7 +19,6 @@ import fcntl
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -975,234 +974,52 @@ def _resolve_write_scope(doc: Document) -> tuple[int, int] | None:
     return None
 
 
-def _find_existing_claude_md(base: Path) -> Optional[Path]:
-    """
-    Return the first existing CLAUDE.md under `base`, checking both
-    supported locations in priority order.
-
-    Claude Code accepts project memory at either `.claude/CLAUDE.md` (new
-    default) or `./CLAUDE.md` (legacy). This helper checks `.claude/CLAUDE.md`
-    first, then falls back to `./CLAUDE.md`, returning the first match or
-    None if neither exists.
-
-    Args:
-        base: Directory to probe for CLAUDE.md.
-
-    Returns:
-        Path to the existing CLAUDE.md, or None if neither location exists.
-    """
-    dot_claude = base / ".claude" / "CLAUDE.md"
-    if dot_claude.exists():
-        return dot_claude
-    legacy = base / "CLAUDE.md"
-    if legacy.exists():
-        return legacy
-    return None
-
-
-def _get_claude_md_path() -> Optional[Path]:
-    """
-    Get the path to CLAUDE.md in the project root.
-
-    Uses CLAUDE_PROJECT_DIR environment variable if set, then the session
-    record's project_dir, then git worktree/repo root detection, then the
-    current working directory. At each level, checks both `.claude/CLAUDE.md`
-    (new default) and `./CLAUDE.md` (legacy) in priority order.
-
-    Note: This mirrors the resolution strategy in hooks/staleness.py
-    (get_project_claude_md_path). Kept as a local copy: importing staleness
-    would require the sys.path bootstrap pact_session.py in this directory
-    carries, and the drift-noted twin remains the chosen mechanism here.
-
-    Returns:
-        Path to CLAUDE.md if it exists, None otherwise.
-    """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            return found
-
-    # Session-record rung: the directory session_init recorded at SessionStart,
-    # discovered via the CLAUDE_CODE_SESSION_ID glob in pact_session. Below env
-    # (a present declaration wins), ABOVE the git/cwd derivations — in a
-    # multi-repo workspace the cwd's git root can be the WRONG scope. The
-    # existence coupling is preserved: the record supplies the base to PROBE,
-    # and a miss falls through exactly like an env miss (this resolver never
-    # creates CLAUDE.md).
-    record_dir = get_project_dir_from_session_record()
-    if record_dir:
-        found = _find_existing_claude_md(Path(record_dir))
-        if found is not None:
-            return found
-
-    # Fallback: detect git root (worktree-safe)
-    # Uses --git-common-dir instead of --show-toplevel because the latter
-    # returns the worktree path when run inside a worktree, which may not
-    # contain CLAUDE.md. --git-common-dir always points to the shared .git
-    # directory; its parent is the main repo root where CLAUDE.md lives.
-    # git returns this path relative to the invoking directory when run at a
-    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
-    # result against the cwd before taking its parent.
-    # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
-    #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
-    # Function-level: the shared package is importable only after
-    # pact_session's sys.path bootstrap has run at module import.
-    from shared.project_scope import git_env_without_location
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=git_env_without_location(),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
-            if not common_dir.is_absolute():
-                common_dir = Path.cwd() / common_dir
-            repo_root = common_dir.resolve().parent
-            found = _find_existing_claude_md(repo_root)
-            if found is not None:
-                return found
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-
-    # Last resort: current working directory
-    return _find_existing_claude_md(Path.cwd())
-
-
-def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
+def _resolve_display_claude_md_with_base(
+    session=None,
+) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the display CLAUDE.md AND the trusted base directory it was found
     under, so a write caller can containment-check the target against the base
     the resolver actually used (#1247).
 
-    Same resolution order as `_resolve_display_claude_md_path` (which is now a
-    thin wrapper returning `[0]`):
-      1. CLAUDE_PROJECT_DIR env var, if set -> that dir's .claude/CLAUDE.md
-         (preferred) or ./CLAUDE.md (legacy).
-      1.5. Session record — the project_dir session_init recorded at
-         SessionStart -> the same probe under the recorded dir. Below env
-         (a present declaration wins), above the git derivations: in a
-         multi-repo workspace the cwd's git root can be the WRONG scope. The
-         existence coupling is preserved — the record supplies the base to
-         PROBE and a miss falls through; this resolver never creates
-         CLAUDE.md. (Numbered 1.5, matching memory_api's Strategy 1.5, so the
-         long-standing branch-2/branch-3 references to the git anchors below
-         keep their meaning.)
-      2. Git worktree root via `git rev-parse --show-toplevel` -> the same
-         .claude/-then-legacy probe under the worktree root.
-      3. Main repo root via `git rev-parse --git-common-dir`.parent -> the
-         same probe. Reached only when the worktree is NOT a session root
-         (branch 2 found nothing): under the PACT `.worktrees/` convention no
-         session is rooted in the worktree, so the file the session reads is
-         the main repo's. Without this branch that write is lost (returns
-         None); with it the write lands where the session reads.
-      4. Current working directory -> the same probe.
+    The document is the session's managed document
+    (`claude_md_manager.resolve_managed_document` on the session's
+    project-memory root): the canonical file at the root, else at the main
+    checkout that strictly encloses it. For a linked worktree that is the
+    MAIN checkout's file, never the worktree's own copy. There is no git or
+    cwd fall-through, so an unknown root resolves nothing.
 
-    Branch 2 anchors the WORKTREE root (--show-toplevel) so a worktree that IS
-    a session root updates its OWN display file; branch 3 falls back to
-    _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
-    case where it is not. Because branch 2 precedes branch 3, the two resolvers
-    now differ ONLY in that worktree-root branch: in a non-worktree checkout
-    both branches resolve the same directory, so the [0] of this result is
-    identical to _get_claude_md_path's.
+    `session` is the caller's `project_scope.SessionRoot`; the sync writers
+    pass the one they also give the cause renderer, so the verdict and the
+    path come from one observation. When omitted it is computed here.
 
-    The returned `base` is the branch's directory captured BEFORE descending
-    into `.claude` (the arg passed to `_find_existing_claude_md`), NOT the
-    returned path and NOT a re-derivation. That is the trusted pre-resolve
-    anchor that makes the #1247 containment check non-vacuous: an F1
-    symlinked-parent `.claude` perturbs the target's resolve() but not the
-    base's, so containment catches the escape.
+    `base` is the directory the document was found under (the root or the
+    enclosing checkout), captured before descending into `.claude`: the
+    trusted pre-resolve anchor that makes the #1247 containment check
+    non-vacuous.
 
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one.
 
     Returns:
         (path, base) where path is the existing display CLAUDE.md and base is
-        the directory it was found under; (None, None) if none exists.
+        the directory it was found under; (None, None) if none exists or the
+        root is unknown.
     """
-    # Resolution must never raise into the sync path; on any failure (a bad
-    # CLAUDE_PROJECT_DIR value, an inaccessible probe target, or a deleted cwd)
-    # return (None, None) so the caller skips the sync and the save still succeeds.
+    # Resolution must never raise into the sync path; on any failure return
+    # (None, None) so the caller skips the sync and the save still succeeds.
     try:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-        if project_dir:
-            base = Path(project_dir)
-            found = _find_existing_claude_md(base)
-            if found is not None:
-                return found, base
-
-        # Branch 1.5: session record (see the docstring's ordering). Same probe
-        # shape as the env branch; a miss falls through to the git anchors.
-        record_dir = get_project_dir_from_session_record()
-        if record_dir:
-            base = Path(record_dir)
-            found = _find_existing_claude_md(base)
-            if found is not None:
-                return found, base
-
-        # Worktree root: --show-toplevel returns the worktree directory when run
-        # inside a worktree (and the main repo root otherwise), matching the
-        # directory session_init/session_resume target for the session's CLAUDE.md.
         # Function-level: the shared package is importable only after
         # pact_session's sys.path bootstrap has run at module import.
-        from shared.project_scope import git_env_without_location
+        from shared.claude_md_manager import resolve_managed_document
+        from shared.project_scope import session_memory_root
 
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                worktree_root = Path(result.stdout.strip())
-                found = _find_existing_claude_md(worktree_root)
-                if found is not None:
-                    return found, worktree_root
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-        # Main-repo root via --git-common-dir. Under the PACT `.worktrees/`
-        # convention no session is ever rooted in the worktree, so branch 2
-        # found nothing and the file the session actually reads is the MAIN
-        # repo's. --git-common-dir points at the shared .git dir whether run
-        # from the main repo or a linked worktree, so its parent is the main
-        # repo root in both. This is _get_claude_md_path's exact anchor.
-        #
-        # The is_absolute() guard is load-bearing, not decoration: git returns
-        # a RELATIVE path (".git", "../.git") when run at a repo root or subdir,
-        # and _find_existing_claude_md does a bare `base / "CLAUDE.md"` with no
-        # normalisation, so a relative base would yield a cwd-relative Path and
-        # a cwd-relative lock sidecar (the exact divergence D2 just closed).
-        # Reused verbatim from _get_claude_md_path.
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(result.stdout.strip())
-                if not common_dir.is_absolute():
-                    common_dir = Path.cwd() / common_dir
-                repo_root = common_dir.resolve().parent
-                found = _find_existing_claude_md(repo_root)
-                if found is not None:
-                    return found, repo_root
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-        # Last resort: current working directory
-        cwd = Path.cwd()
-        found = _find_existing_claude_md(cwd)
-        return (found, cwd) if found is not None else (None, None)
+        if session is None:
+            session = session_memory_root()
+        if session.root is None:
+            return None, None
+        doc = resolve_managed_document(session.root)
+        return (doc.path, doc.base) if doc.exists else (None, None)
     except Exception as e:
         logger.debug("display CLAUDE.md resolution failed, skipping sync: %s", e)
         return None, None
@@ -1222,6 +1039,32 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
         Path to the existing display CLAUDE.md, or None if none exists.
     """
     return _resolve_display_claude_md_with_base()[0]
+
+
+def _session_root():
+    """This session's `project_scope.SessionRoot`: ONE observation per sync,
+    passed to the cause renderer and the display resolver alike."""
+    # Function-level: the shared package is importable only after
+    # pact_session's sys.path bootstrap has run at module import.
+    from shared.project_scope import session_memory_root
+
+    return session_memory_root()
+
+
+def _display_root_unknown_reason(session) -> Optional[str]:
+    """WHY the session's project-memory root is UNKNOWN, as the phrase the
+    warning renders, or None when the root is known.
+
+    `session` is the caller's `project_scope.SessionRoot`, the same one it
+    passes to the display resolver, so the verdict and the sentence reporting
+    it are one observation. The cause is rendered by
+    `project_scope.unknown_root_reason`; this function never resolves.
+    """
+    if session.cause is None:
+        return None
+    from shared.project_scope import unknown_root_reason
+
+    return unknown_root_reason(session.cause, session.anchor)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -1973,6 +1816,12 @@ class SyncResult:
     REFUSED = "refused"          # guard declined; raised, then caught upstream
     SUPPRESSED = "suppressed"    # caller passed sync_to_claude=False
     UNRESOLVED = "unresolved"    # no CLAUDE.md resolved
+    # The AMBIENT ROOT is UNKNOWN: a declared base exists but git could not
+    # answer, so the resolver refused to probe it (its fail-open answer may be
+    # a worktree copy the one-rule change keeps out of project memory).
+    # Distinct from UNRESOLVED: "no file exists" and "cannot tell where the
+    # file is" are different facts, and only this one is an environment fault.
+    ROOT_UNKNOWN = "root_unknown"
     MISSING = "missing"          # resolved a path that does not exist
     FAILED = "failed"            # the write itself raised
     EMPTY = "empty"              # nothing to write; caller passed no entries
@@ -1988,12 +1837,13 @@ class SyncResult:
     # From `sync_to_claude_md` it reaches `sync_status` on the structured
     # channel with no handler change, because `PACTMemory.save` assigns the
     # reason to `last_sync_status` and `cmd_save` puts that field in the
-    # success envelope. From `sync_retrieved_to_claude_md` IT REACHES NOBODY:
-    # its one caller, `PACTMemory.search`, discards the returned object, so
-    # the reason is produced and dropped. THAT IS A PROPERTY OF THE CALLER
-    # AND NOT OF THIS ENUM, so it holds for each reason here rather than for
-    # this one alone. Do not read the first sentence as covering the two
-    # writers together.
+    # success envelope. `sync_retrieved_to_claude_md` is reached only from
+    # `PACTMemory.search`, which now assigns the reason to `last_sync_status`
+    # too; before that it discarded the object, so every reason here was
+    # produced and dropped. THAT WAS A PROPERTY OF THE CALLER AND NOT OF THIS
+    # ENUM, so it held for each reason here rather than for this one alone.
+    # The search CLI passes `sync_to_claude=False`, so that channel is for a
+    # caller that enables the sync, not for the shipped CLI path.
     NO_WINDOW = "no_window"      # no write window resolved; see _resolve_write_scope
     # The window resolved, but the parser cannot say with certainty where the
     # section goes: its only heading is inside an HTML comment. The reason,
@@ -2109,10 +1959,16 @@ def _refuse_ambient_sync_on_declared_scope_escape(
         worktree_identity=get_worktree_identity_from_session_record(),
     ):
         return
+    removed_note = (
+        "The declared directory no longer exists, so only a session record "
+        "could have identified its main checkout. "
+        if not os.path.lexists(declared) else ""
+    )
     raise AmbientSyncRefused(
         f"the declared project scope ({declared}) resolved to a CLAUDE.md "
         f"under a different project ({resolved_root}); the projection was "
-        "refused. Point CLAUDE_PROJECT_DIR at the project you mean, or pass "
+        f"refused. {removed_note}"
+        "Point CLAUDE_PROJECT_DIR at the project you mean, or pass "
         "an explicit target= / claude_md_root= to name the destination."
     )
 
@@ -2187,8 +2043,8 @@ def _target_is_inside_the_declared_project_dir(resolved_target: Path) -> bool:
     to a git anchor that pointed at a checkout nobody had named.
 
     THE CHECK IS CONTAINMENT, NEVER THE PRESENCE OF THE VARIABLE. A set variable
-    is a PROXY and a wrong one: `_find_existing_claude_md` probes that directory
-    and CONTINUES when it finds nothing, so resolution can begin at a declared
+    is a PROXY and a wrong one: a resolver can probe that directory and
+    CONTINUE when it finds nothing, so resolution can begin at a declared
     root and finish somewhere else entirely. Presence would exempt exactly that
     escape. Comparing the RESOLVED path against the declared root reports what
     resolution did rather than what the caller intended.
@@ -2204,7 +2060,8 @@ def _target_is_inside_the_declared_project_dir(resolved_target: Path) -> bool:
         return False
     try:
         Path(resolved_target).resolve().relative_to(Path(declared).resolve())
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
+        # RuntimeError: a symlink loop, on Pythons before 3.13.
         return False
     return True
 
@@ -2235,10 +2092,12 @@ def _refuse_ambient_sync_from_a_redirected_store(
 
     THE CROSSING IS THE DEFECT, NOT THE RESOLUTION. Do NOT read this as a rule
     against the main-repo resolution branch. That branch is deliberate: a
-    session that runs in a worktree reads the MAIN checkout's CLAUDE.md, so the
-    branch is how an ordinary save reaches the file the session displays.
-    Refusing it would lose every worktree save projection, which is the
-    over-block this guard is shaped to avoid.
+    worktree session reads the MAIN checkout's file -- the display resolver
+    and the session-start writers both resolve the session document, so they
+    agree -- and it is how an ordinary
+    save reaches the file the session displays. Refusing it would lose every
+    worktree save projection, which is the over-block this guard is shaped to
+    avoid.
 
     SCOPE, mirroring the sibling guard deliberately rather than inventing a
     second shape:
@@ -2430,11 +2289,18 @@ def sync_to_claude_md(
     _refuse_ambient_target_under_pytest(target, claude_md_root)
     _refuse_ambient_sync_on_project_dir_disagreement(target, claude_md_root)
 
+    # THE VERDICT, ITS TEXT AND THE PATH ARE ONE OBSERVATION: one SessionRoot
+    # feeds the cause renderer and the resolver. A second resolution could see
+    # a different state and turn ROOT_UNKNOWN into UNRESOLVED, silencing the
+    # skip.
     if target is not None:
         claude_md_path = Path(target)
         resolved_root = _project_root_of(claude_md_path)
+        unknown_reason = None
     else:
-        claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
+        session = _session_root()
+        unknown_reason = _display_root_unknown_reason(session)
+        claude_md_path, resolved_root = _resolve_display_claude_md_with_base(session)
     # Escape guard runs AFTER resolution because it needs the resolved
     # root; the guards above run before because they need only the
     # declaration. Same ordering in the sibling.
@@ -2461,8 +2327,7 @@ def sync_to_claude_md(
 
     # BOTH HALVES, BECAUSE THE PAIRING IS THE RESOLVER'S PROMISE AND NOT THIS
     # FUNCTION'S. `_resolve_display_claude_md_with_base` returns either two
-    # paths or two Nones -- every one of its five exits is guarded by an
-    # `if found is not None` -- so today `project_root` cannot be None once
+    # paths or two Nones -- each of its exits pairs them -- so today `project_root` cannot be None once
     # `claude_md_path` is not. MEASURED, and it is the ONLY reason the anchor
     # below is safe.
     #
@@ -2474,6 +2339,14 @@ def sync_to_claude_md(
     # silently anchors on a directory named `None` if one ever exists. Naming
     # both halves here costs one condition and depends on nobody's promise.
     if claude_md_path is None or project_root is None:
+        if unknown_reason is not None:
+            # No write: the resolver could not identify the project's file.
+            logger.warning(
+                "Not syncing memory to CLAUDE.md: %s, so the project memory "
+                "target is unknown",
+                unknown_reason,
+            )
+            return SyncResult(SyncResult.ROOT_UNKNOWN)
         logger.debug("CLAUDE.md not found, skipping working memory sync")
         return SyncResult(SyncResult.UNRESOLVED)
 
@@ -2848,7 +2721,11 @@ def sync_retrieved_to_claude_md(
     # in production today; it protects the path's future re-enablement).
     _refuse_ambient_sync_on_project_dir_disagreement(None, claude_md_root)
 
-    claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
+    # Same single observation as the sibling: one SessionRoot feeds the
+    # cause renderer and the resolver.
+    session = _session_root()
+    unknown_reason = _display_root_unknown_reason(session)
+    claude_md_path, resolved_root = _resolve_display_claude_md_with_base(session)
     _refuse_ambient_sync_on_declared_scope_escape(
         None, claude_md_root, resolved_root, claude_md_path
     )
@@ -2861,6 +2738,13 @@ def sync_retrieved_to_claude_md(
     )
 
     if claude_md_path is None or project_root is None:
+        if unknown_reason is not None:
+            logger.warning(
+                "Not syncing retrieved memories to CLAUDE.md: %s, so the "
+                "project memory target is unknown",
+                unknown_reason,
+            )
+            return SyncResult(SyncResult.ROOT_UNKNOWN)
         logger.debug("CLAUDE.md not found, skipping retrieved context sync")
         return SyncResult(SyncResult.UNRESOLVED)
 

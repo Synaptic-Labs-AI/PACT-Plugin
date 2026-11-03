@@ -1,15 +1,15 @@
 """The REAL CLAUDE.md resolution path for archive_pin — driven, not mocked.
 
 THIS FILE EXISTS BECAUSE NOTHING ELSE EXERCISES THE ACTUAL RESOLVER.
-`get_project_claude_md_path` is monkeypatched in both places it appears
+The session resolver is monkeypatched in both places it appears
 (test_check_pin_caps.py's `patched_claude_md`, test_archive_pin.py's
 `claude_md` fixture), so every existing test hands the code a path it already
 decided on. That is precisely why a resolver defect survived PREPARE,
 ARCHITECT, CODE, TEST and three reviews: no test could see it, because no
 test ever asked the resolver a question.
 
-So nothing here patches `get_project_claude_md_path`, `resolve_claude_md`, or
-`_resolve_project_claude_md_with_base`. The tests set `CLAUDE_PROJECT_DIR`
+So nothing here patches the session resolver or `resolve_claude_md`. The
+tests set `CLAUDE_PROJECT_DIR`
 and the working directory — the two real inputs — and let resolution run.
 
 THE DEFECT UNDER TEST. Resolution order is CLAUDE_PROJECT_DIR -> git
@@ -124,8 +124,9 @@ class TestResolutionIsDriven:
 
 
 class TestCrossProjectFallthroughIsRefused:
-    """THE F-B GUARD. Fails on the pre-fix code, which returned project_a's
-    file for an invocation that named project_b."""
+    """THE F-B GUARD. The pre-fix code returned project_a's file (the cwd's)
+    for an invocation that named project_b. The session document has no cwd
+    rung, so a declared project holding no document is refused outright."""
 
     def test_cross_project_fallthrough_raises(self, isolated, monkeypatch):
         a = _make_project(isolated / "project_a", "PIN A")
@@ -141,36 +142,85 @@ class TestCrossProjectFallthroughIsRefused:
         with pytest.raises(archive_pin._Unevaluable) as exc:
             archive_pin.resolve_claude_md()
         reason = exc.value.reason
-        assert str(b) in reason, "refusal must name the directory that was set"
-        assert "different project" in reason
-        assert "project_a" in reason, (
-            "refusal must name the file it would otherwise have used, or the "
-            "curator cannot tell what was about to happen"
-        )
+        assert reason == (
+            f"CLAUDE.md not found: neither .claude/CLAUDE.md nor CLAUDE.md "
+            f"exists in {b}; nothing was archived"
+        ), reason
+        assert "project_a" not in reason
 
-    def test_the_fallthrough_target_really_was_reachable(
+    def test_the_other_project_really_was_resolvable(
         self, isolated, monkeypatch
     ):
         """NON-VACUITY CONTROL for the test above.
 
-        The refusal is only meaningful if resolution WOULD have succeeded on
-        the wrong file. Drive the underlying resolver directly — the one
-        `resolve_claude_md` wraps — and confirm it happily returns project_a
-        while the environment names project_b. If this ever stops returning a
-        path, the test above would pass because nothing resolved at all,
-        which is a different and much safer world.
+        The refusal is only meaningful if the fixture CAN resolve a document:
+        declaring project_a resolves its file. If this stopped returning a
+        path, the test above would pass because nothing resolves at all.
         """
         a = _make_project(isolated / "project_a", "PIN A")
-        b = _make_project(isolated / "project_b", None)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(b))
-        monkeypatch.chdir(a)
+        _make_project(isolated / "project_b", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(a))
+        monkeypatch.chdir(isolated / "project_b")
 
-        path, _base = archive_pin._resolve_project_claude_md_with_base()
-        assert path is not None, "no fall-through occurred — refusal is moot"
-        assert "PIN A" in path.read_text(encoding="utf-8"), (
-            "the unguarded resolver did NOT return the other project's file, "
-            "so this suite is no longer testing the defect it was written for"
+        path, _base = archive_pin.resolve_claude_md()
+        assert "PIN A" in path.read_text(encoding="utf-8")
+
+
+class TestTheRefusalsSayWhatWasChecked:
+    """Exact text of the archive's not-found and unknown-root refusals."""
+
+    def test_not_found_names_the_enclosing_checkout_it_also_searched(
+        self, isolated, monkeypatch
+    ):
+        repo = isolated / "repo"
+        repo.mkdir()
+        init = subprocess.run(["git", "init", "-q", str(repo)],
+                              capture_output=True, text=True, timeout=30)
+        assert init.returncode == 0, init.stderr
+        sub = repo / "pkg"
+        sub.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+        monkeypatch.chdir(sub)
+
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+
+        assert exc.value.reason == (
+            f"CLAUDE.md not found: neither .claude/CLAUDE.md nor CLAUDE.md "
+            f"exists in {sub} or its enclosing checkout {repo}; nothing was "
+            f"archived"
+        ), exc.value.reason
+
+    @pytest.mark.parametrize("anchored", [True, False], ids=["anchor", "no-anchor"])
+    def test_the_record_is_named_only_when_there_was_an_anchor(
+        self, isolated, monkeypatch, anchored
+    ):
+        """A missing anchor went through record recovery, so the refusal says
+        the record did not verify. A None anchor (a vanished cwd nothing
+        names) never consulted a record, so it must not mention one."""
+        import shared.project_scope as project_scope
+
+        gone = isolated / "gone"
+        anchor = gone if anchored else None
+        monkeypatch.setattr(
+            project_scope, "session_memory_root",
+            lambda: project_scope.SessionRoot(
+                anchor, anchored, None, project_scope.ROOT_CAUSE_MISSING
+            ),
         )
+
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+
+        clause = (
+            f"the project directory {gone} no longer exists and the session "
+            "record did not verify a main checkout for it"
+            if anchored else "the working directory no longer exists"
+        )
+        assert exc.value.reason == (
+            f"project memory root unknown: {clause}, so the project CLAUDE.md "
+            "cannot be identified; nothing was archived"
+        ), exc.value.reason
 
 
 class TestSameRepositoryFallthroughIsAllowed:
@@ -548,6 +598,27 @@ class TestArchivedDeleteUnsafe:
         assert verdict["occurrences"] == 2
 
 
+def _fail_only_memory_cli(monkeypatch, make_exc):
+    """Make the MEMORY CLI call raise `make_exc()`, and let every other
+    `subprocess.run` through.
+
+    The seam is still `subprocess.run` (stubbing `_run_memory_cli` would bypass
+    the branch under test), but the stub must be SELECTIVE: git also runs
+    through this seam, and since #1653 task #57 the archive asks git for the
+    project-memory root BEFORE it resolves. A blanket stub would fail that
+    guard and report "root unknown" instead of the CLI failure under test.
+    """
+    real_run = subprocess.run
+
+    def _fail(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", ())
+        if str(archive_pin._MEMORY_CLI) in [str(part) for part in argv]:
+            raise make_exc()
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fail)
+
+
 class TestPostResolutionFailuresKeepPinContext:
     """A failure AFTER the pin resolved must not report LESS than one before.
 
@@ -566,7 +637,10 @@ class TestPostResolutionFailuresKeepPinContext:
     that depended on the contract rather than trusting it.
 
     Patched at the SUBPROCESS seam, not at `_run_memory_cli`: stubbing the
-    function under test would bypass the branch under test.
+    function under test would bypass the branch under test. The stub is
+    selective (`_fail_only_memory_cli`): it fails the CLI's argv and passes git
+    through, because since #1653 task #57 git runs first to identify the
+    project-memory root.
     """
 
     def _project(self, isolated, monkeypatch, name):
@@ -607,20 +681,17 @@ class TestPostResolutionFailuresKeepPinContext:
     def test_cli_timeout_keeps_context(self, isolated, monkeypatch):
         self._project(isolated, monkeypatch, "t1")
 
-        def _boom(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="save", timeout=1)
-
-        monkeypatch.setattr(subprocess, "run", _boom)
+        _fail_only_memory_cli(
+            monkeypatch,
+            lambda: subprocess.TimeoutExpired(cmd="save", timeout=1),
+        )
         self._assert_full_context(archive_pin.build_verdict(0, db_path=None), "timeout",
                                   "timed out")
 
     def test_cli_launch_failure_keeps_context(self, isolated, monkeypatch):
         self._project(isolated, monkeypatch, "t2")
 
-        def _boom(*a, **k):
-            raise OSError("cannot launch")
-
-        monkeypatch.setattr(subprocess, "run", _boom)
+        _fail_only_memory_cli(monkeypatch, lambda: OSError("cannot launch"))
         self._assert_full_context(archive_pin.build_verdict(0, db_path=None), "launch",
                                   "could not launch")
 

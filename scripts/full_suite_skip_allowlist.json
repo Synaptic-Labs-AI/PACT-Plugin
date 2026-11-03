@@ -81,6 +81,12 @@
       "allowed": 1
     },
     {
+      "file": "tests/test_user_global_root.py",
+      "reason": "the tmp volume matches names with case",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
       "file": "tests/test_variety_scorer_fuzz.py",
       "reason": "Already at max dimension",
       "match": "exact",

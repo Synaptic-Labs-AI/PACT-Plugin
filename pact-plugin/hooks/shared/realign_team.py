@@ -37,6 +37,7 @@ from shared import (
     claude_md_manager,
     pact_context,
     paths,
+    project_scope,
     session_journal,
     session_resume,
     session_state,
@@ -107,18 +108,35 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     bootstrap_marker_writer: the file must already exist (update_session_info
     creates one when it is absent), and the journal must already hold a
     session_start (until then bootstrap_prompt_gate owns the block)."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir or not session_dir:
+    if not session_dir:
         return
-    target_file, _source = claude_md_manager.resolve_project_claude_md_path(
-        project_dir
-    )
-    if (target_file.exists()
+    # ONE observation: the session's anchor, root and cause; the exists
+    # guard and the write use the SAME ManagedDocument. Only a DECLARED
+    # anchor writes the block. An UNKNOWN root writes nothing; stderr is this
+    # command's problem surface (the exit contract stays 0 -- a skip is not a
+    # refusal).
+    session = project_scope.session_memory_root()
+    if not session.declared:
+        return
+    if session.cause is not None:
+        print(
+            project_scope.unknown_root_status(
+                "realign_team: project CLAUDE.md",
+                session.cause,
+                session.anchor,
+                "nothing was written to either checkout.",
+            ),
+            file=sys.stderr,
+        )
+        return
+    doc = claude_md_manager.resolve_managed_document(session.root)
+    if (doc.exists
             and session_journal.read_last_event_from(
                 session_dir, "session_start") is not None):
         session_resume.update_session_info(
             session_id, team_name, session_dir, plugin_root,
-            started=session_resume.read_session_started(project_dir),
+            started=session_resume.read_session_started(doc=doc),
+            doc=doc,
         )
 
 

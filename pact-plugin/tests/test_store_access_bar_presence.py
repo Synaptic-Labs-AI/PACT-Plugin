@@ -350,6 +350,30 @@ ALPHABET_FLOOR = frozenset(path for path in DECLARED_CARRIERS if path.endswith("
 # it, so it is a NON-MEMBER by a correct predicate.
 POPULATION_EXEMPTIONS: dict = {}
 
+# EXACT INVOCATIONS THAT NAME A ROUTE TOKEN AND DO NOT REACH THE STORE.
+# Each is removed from a file's text before `ROUTE_TOKENS` is matched, so it
+# selects nothing on its own, and every OTHER mention in the same file still
+# selects. This is a carve-out by VERB, not by file: a whole-file exemption
+# would also hide a store-reaching call added to that file later.
+#
+# Matching is the same flatten-and-casefold read `carries` uses, and the
+# invocation must end at a word boundary, so a longer verb that shares the
+# prefix (`project-files`, `project-file-x`) is NOT removed and still selects.
+# Add an entry only for a verb that opens no store, and state that cause.
+NON_ROUTE_INVOCATIONS: dict = {
+    'skills/pact-memory/scripts/cli.py" project-file': (
+        "prints this session's project memory file path and opens no store"
+    ),
+}
+
+
+def without_non_route_invocations(text: str) -> str:
+    """`text`, flattened and casefolded, with each NON_ROUTE_INVOCATIONS entry removed."""
+    text = normalised(text)
+    for invocation in NON_ROUTE_INVOCATIONS:
+        text = re.sub(re.escape(normalised(invocation)) + r"(?![\w-])", " ", text)
+    return text
+
 # A FLOOR ON THE SIZE OF THE SOURCE REGION, and it closes a hole in arm 1.
 # EMPTY REGIONS AGREE WITH EACH OTHER. An edit that empties the block in each
 # carrier, or a marker pair placed around nothing, passes the fidelity arm over
@@ -691,6 +715,7 @@ def files_reaching_the_store(root: Path, tokens: dict, ignore_bar: bool = False)
         text = path.read_text(encoding="utf-8", errors="replace")
         if ignore_bar:
             text = strip_marked_regions(text)
+        text = without_non_route_invocations(text)
         hits = sorted(token for token in tokens if carries(text, token))
         if hits:
             selected[relative_name(path, root)] = hits
@@ -1159,6 +1184,23 @@ class TestEachStoreReachingSurfaceCarriesTheBar:
         """An entry with no cause is a name, and a name goes stale in silence."""
         bare = sorted(k for k, v in POPULATION_EXEMPTIONS.items() if not str(v).strip())
         assert not bare, f"these exemption entries state no cause: {bare}."
+
+    def test_each_non_route_invocation_can_do_work_and_states_a_cause(self):
+        """An entry no instruction surface names is a dead carve-out waiting
+        for a future match; an entry with no cause cannot be reviewed."""
+        texts = [
+            normalised(p.read_text(encoding="utf-8", errors="replace"))
+            for p in population_files(PLUGIN_DIR)
+        ]
+        idle = sorted(
+            inv for inv in NON_ROUTE_INVOCATIONS
+            if not any(normalised(inv) in text for text in texts)
+        )
+        bare = sorted(
+            k for k, v in NON_ROUTE_INVOCATIONS.items() if not str(v).strip()
+        )
+        assert not idle, f"no instruction surface names these: {idle}."
+        assert not bare, f"these entries state no cause: {bare}."
 
 
 class TestTheAlphabetDoesNotSelectItself:
@@ -1704,6 +1746,59 @@ class TestArmThreeGoesRed:
         assert store_reaching_files_without_the_bar(root, ROUTE_TOKENS, exempt) == [
             "agents/pact-other.md"
         ]
+
+    _PROJECT_FILE = (
+        'Run `python3 "{plugin_root}/skills/pact-memory/scripts/cli.py" '
+        "project-file`.\n"
+    )
+
+    def test_a_file_naming_only_the_project_file_verb_is_not_selected(
+        self, tmp_path
+    ):
+        """The print-a-path verb opens no store. Without the carve-out its
+        `cli.py` and scripts path select the file and arm 3 demands the bar."""
+        root = _model_tree(tmp_path)
+        _write(root, "agents/pact-pathonly.md", self._PROJECT_FILE)
+        assert "agents/pact-pathonly.md" not in files_reaching_the_store(
+            root, ROUTE_TOKENS
+        )
+        assert (
+            store_reaching_files_without_the_bar(
+                root, ROUTE_TOKENS, POPULATION_EXEMPTIONS
+            )
+            == []
+        )
+
+    def test_another_cli_verb_beside_the_project_file_verb_still_selects(
+        self, tmp_path
+    ):
+        """The carve-out removes the one invocation, not the file: a second
+        `cli.py` verb in the same file is still a route to the store."""
+        root = _model_tree(tmp_path)
+        _write(
+            root,
+            "agents/pact-both.md",
+            self._PROJECT_FILE
+            + 'Then run `python3 "{plugin_root}/skills/pact-memory/scripts/'
+            'cli.py" search "auth"`.\n',
+        )
+        assert store_reaching_files_without_the_bar(
+            root, ROUTE_TOKENS, POPULATION_EXEMPTIONS
+        ) == ["agents/pact-both.md"]
+
+    def test_a_longer_verb_sharing_the_prefix_still_selects(self, tmp_path):
+        """The invocation must end at a word boundary, or any verb spelled
+        `project-file<suffix>` would ride the carve-out."""
+        root = _model_tree(tmp_path)
+        _write(
+            root,
+            "agents/pact-longer.md",
+            'Run `python3 "{plugin_root}/skills/pact-memory/scripts/cli.py" '
+            "project-files`.\n",
+        )
+        assert store_reaching_files_without_the_bar(
+            root, ROUTE_TOKENS, POPULATION_EXEMPTIONS
+        ) == ["agents/pact-longer.md"]
 
     def test_an_alphabet_that_narrows_reddens_the_floor(self, tmp_path):
         """Unique coverage of the alphabet floor, measured rather than claimed."""

@@ -28,6 +28,7 @@ from shared.claude_md_manager import (
     PINNED_START_MARKER,
 )
 from shared.claude_md_markers import Kind, State, parse
+from helpers import session_doc  # noqa: E402
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 FENCE = "```"
@@ -178,16 +179,15 @@ class TestReadersStaySilentOnAnUncertainSection:
 
         path = tmp_path / "CLAUDE.md"
         path.write_text(UNCLOSED, encoding="utf-8")
-        monkeypatch.setattr(session_init, "_get_project_claude_md_path", lambda: path)
-        assert session_init.check_pin_slot_status() is None
+        assert session_init.check_pin_slot_status(session_doc()) is None
         path.write_text(_doc("", working=""), encoding="utf-8")
-        assert session_init.check_pin_slot_status() == "Pin slots: 0/12 used"
+        assert session_init.check_pin_slot_status(session_doc()) == "Pin slots: 0/12 used"
 
     def test_the_pin_status_cli_names_the_line_it_cannot_read(self, tmp_path, monkeypatch):
         import check_pin_caps
         path = tmp_path / "CLAUDE.md"
         path.write_text(UNCLOSED, encoding="utf-8")
-        monkeypatch.setattr(check_pin_caps, "get_project_claude_md_path", lambda: path)
+        monkeypatch.setattr(check_pin_caps, "resolve_session_claude_md_path", lambda: path)
         pins, reason = check_pin_caps._resolve_pins()
         assert pins == [] and reason is not None
         assert reason.startswith("pinned section unreadable: ")

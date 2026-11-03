@@ -275,6 +275,7 @@ field instead.
 | `sync` | Rebuild CLAUDE.md's Working Memory from this project's newest 3 memories (replaces the section; `--claude-md-root` bounds the write) | `{"sync_status": "wrote", "projected": 3, "memory_ids": [...], "project_id": "..."}` |
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
+| `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
 
 ### Exit Codes
 
@@ -283,6 +284,7 @@ field instead.
 | 0 | Success |
 | 1 | User error (bad args, invalid JSON, not found) |
 | 2 | Validation error (unknown field name, unknown sub-object key) — the error envelope includes an `allowed_fields` list |
+| 3 | `project-file` only: this session's project memory file is unavailable; the printed line names why |
 
 ### Update Semantics
 

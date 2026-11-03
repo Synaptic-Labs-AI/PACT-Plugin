@@ -30,7 +30,7 @@ from fixtures.emitter import (
 
 class TestIdempotency:
     def test_second_fire_for_same_team_task_is_suppressed(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_data = {
             "status": "completed",
@@ -48,7 +48,7 @@ class TestIdempotency:
         assert len(calls) == 1, "O_EXCL marker must deduplicate re-fires"
 
     def test_different_task_ids_each_emit_once(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls = []
         task_data = {
             "status": "completed",
@@ -66,7 +66,7 @@ class TestIdempotency:
         assert len(calls) == 2
 
     def test_marker_file_created_at_expected_path(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         from shared.agent_handoff_marker import occupant_hash
 
         calls = []
@@ -89,7 +89,7 @@ class TestIdempotency:
         # ("probe"); recompute via the SSOT to assert the exact path.
         occ = occupant_hash("probe-agent", "probe")
         marker = (
-            tmp_path / ".claude" / "teams" / "pact-test" / ".agent_handoff_emitted"
+            Path.home() / ".claude" / "teams" / "pact-test" / ".agent_handoff_emitted"
             / f"marker-probe-{occ}-{VALID_HANDOFF_CONTENT_KEY}"
         )
         assert marker.exists(), "fire-once marker must be created at team-scoped path"
@@ -108,7 +108,7 @@ class TestMarkerFailOpen:
     """
 
     def test_marker_dir_mkdir_permission_denied_still_emits(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls: list[dict] = []
 
         import agent_handoff_emitter  # noqa: F401  # ensure-loaded seam: first-import must precede the Path.mkdir patch below so the injected PermissionError fires at marker-write time, not at module import inside _run_main
@@ -145,7 +145,7 @@ class TestMarkerFailOpen:
         journal write. `os.open` raises OSError(errno=ENOSPC); the marker
         layer's already_emitted (shared.agent_handoff_marker) returns False
         on any non-EEXIST OSError, allowing the fire-OPEN path."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         calls: list[dict] = []
 
         original_os_open = os.open
@@ -210,7 +210,7 @@ class TestMarkerFailOpen:
         TestUnexpectedExceptionSuppression; here we exercise the NON-exception
         False return.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         from agent_handoff_emitter import main
         from shared.agent_handoff_marker import occupant_hash
         from shared.paths import get_claude_config_dir as _config_root
@@ -267,7 +267,7 @@ class TestMarkerFailOpen:
         )
         occ = occupant_hash("probe-agent", "journal write fails silently")
         marker = (
-            tmp_path / ".claude" / "teams" / "pact-test"
+            Path.home() / ".claude" / "teams" / "pact-test"
             / ".agent_handoff_emitted"
             / f"journal-fail-probe-{occ}-{VALID_HANDOFF_CONTENT_KEY}"
         )
@@ -325,13 +325,13 @@ class TestMarkerDirSymlinkGuard:
         """A pre-planted symlink at the marker_dir path must be detected
         and short-circuited. The function returns False (fail-open emit)
         and creates no file at the symlink target."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         from shared.agent_handoff_marker import already_emitted
 
         team = "pact-test"
         task_id = "t1"
 
-        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir = Path.home() / ".claude" / "teams" / team
         team_dir.mkdir(parents=True)
         attacker_target = tmp_path / "attacker_target"
         attacker_target.mkdir()
@@ -360,14 +360,14 @@ class TestMarkerDirSymlinkGuard:
         second call observes the marker via O_EXCL EEXIST (returns
         True). Confirms the guard discriminates symlink vs ordinary
         dir rather than treating any pre-existing dir as hostile."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         from shared.agent_handoff_marker import already_emitted
 
         team = "pact-test"
         task_id = "t1"
 
         marker_dir_path = (
-            tmp_path / ".claude" / "teams" / team / ".agent_handoff_emitted"
+            Path.home() / ".claude" / "teams" / team / ".agent_handoff_emitted"
         )
         marker_dir_path.mkdir(parents=True)
 
@@ -403,7 +403,7 @@ class TestConcurrentFireRace:
     """
 
     def test_concurrent_already_emitted_exactly_one_false(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(Path.home()))
         from shared.agent_handoff_marker import already_emitted
 
         team = "pact-race"
@@ -439,7 +439,7 @@ class TestConcurrentFireRace:
         )
         # The marker file exists on disk after the race.
         marker = (
-            tmp_path / ".claude" / "teams" / team / ".agent_handoff_emitted"
+            Path.home() / ".claude" / "teams" / team / ".agent_handoff_emitted"
             / f"{task_id}-occ"
         )
         assert marker.exists(), "race winner must have created the marker file"

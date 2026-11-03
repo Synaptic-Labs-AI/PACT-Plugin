@@ -194,13 +194,16 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
         result = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=5,
             env=git_env_without_location(),
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
-        common_dir = Path(result.stdout.strip())
+        # os.fsdecode, never subprocess's locale decoding: a path may contain
+        # bytes invalid in the locale, and UnicodeDecodeError would escape this
+        # reader (#1653 F1 twin site).
+        common_dir = Path(os.fsdecode(result.stdout).strip())
         if not common_dir.is_absolute():
             # git returns this path RELATIVE TO THE DIRECTORY IT RAN IN, at any
             # depth — measured in the main checkout: ".git" at the root,
@@ -218,9 +221,11 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             base = Path(start) if start is not None else Path.cwd()
             common_dir = base / common_dir
         return common_dir.resolve().parent
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        # git not installed, not a repo, command timed out, or the path could
-        # not be resolved.
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        # git not installed, not a repo, command timed out, a subprocess-level
+        # refusal (ValueError: e.g. an embedded NUL), or the path could not be
+        # resolved. NOT an undecodable answer: stdout is bytes and decoded by
+        # os.fsdecode, which cannot raise.
         return None
 
 
@@ -490,12 +495,10 @@ class PACTMemory:
         # two share one derivation of the path exactly as they already share
         # one derivation of the name. Passing no `start` runs git in the cwd,
         # which is this strategy's base.
-        # NOTE: Twin pattern in working_memory.py (_get_claude_md_path) and
-        #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
-        #       Those two couple the resolution to a CLAUDE.md existence check
-        #       and return the root only when one is found there, so they need
-        #       restructuring rather than substitution and are deliberately not
-        #       migrated onto this helper.
+        # The project CLAUDE.md is NOT located this way: its resolver
+        # classifies the session's root through project_scope.memory_root_of,
+        # which verifies the main checkout rather than trusting the common
+        # dir's parent. This derivation names the project for its id only.
         repo_root = main_repo_root()
         if repo_root is not None:
             project_name = repo_root.name
@@ -606,13 +609,15 @@ class PACTMemory:
 
     @property
     def last_sync_status(self) -> Optional[str]:
-        """Outcome of the most recent save() or sync() CLAUDE.md write.
+        """Outcome of the most recent save(), sync() or search() CLAUDE.md write.
 
         One of `SyncResult`'s reasons: `wrote`, `refused`, `suppressed`,
         `unresolved`, `missing`, `failed`, `no_window` or `uncertain`, plus
         `empty` on the sync() path (this project has no records; the file was
-        not touched).
-        None means neither has run yet on this instance.
+        not touched) and `root_unknown` when a retrieved-context sync could
+        not identify the project's memory root.
+        None means no such write has run yet on this instance, or the most
+        recent search did not sync (no results, or `sync_to_claude=False`).
 
         THIS LIST IS THE REACHABLE SET AND NOT THE FULL ENUM. `empty` never
         arrives from a save, and `suppressed` never arrives from a sync. A
@@ -1231,11 +1236,20 @@ class PACTMemory:
                 memory_dicts = [r.to_dict() for r in results]
                 memory_ids = [r.id for r in results]
                 # graph_enhanced_search doesn't return scores, so pass None
-                sync_retrieved_to_claude_md(
+                #
+                # KEEP THE RESULT (F5). This call used to discard it, so the
+                # reason it produced -- including ROOT_UNKNOWN, "git could not
+                # answer, so the project memory target is unknown" -- reached
+                # no reader. Clearing first mirrors save(): a status left from
+                # an earlier write must not be read as this one's.
+                self._last_sync_status = None
+                result = sync_retrieved_to_claude_md(
                     memory_dicts, query, None, memory_ids,
                     claude_md_root=claude_md_root
                 )
+                self._last_sync_status = result.reason
             except Exception as e:
+                self._last_sync_status = SyncResult.FAILED
                 logger.warning(f"Failed to sync retrieved context to CLAUDE.md: {e}")
 
         return results

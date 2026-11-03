@@ -1997,7 +1997,12 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        # A REAL DIRECTORY: a nonexistent declaration is now correctly UNKNOWN
+        # and step 5b is skipped, so update_session_info would never be called
+        # and this arm would measure the skip instead of the session-id path.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         real_session_id = "aabb1122-0000-0000-0000-000000000000"
@@ -2475,7 +2480,7 @@ class TestExtractPrevSessionDirDualLocation:
         """Returns None when neither .claude/CLAUDE.md nor ./CLAUDE.md exists."""
         from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result is None
 
@@ -2483,7 +2488,7 @@ class TestExtractPrevSessionDirDualLocation:
         """Returns None when project_dir is the empty string."""
         from session_init import _extract_prev_session_dir
 
-        assert _extract_prev_session_dir("") is None
+        assert _extract_prev_session_dir("", doc=doc_at("")) is None
 
     def test_absent_session_dir_line_falls_through_to_derived_path(
         self, tmp_path, monkeypatch
@@ -2500,7 +2505,7 @@ class TestExtractPrevSessionDirDualLocation:
             self._make_content(sid, absent), encoding="utf-8"
         )
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == str(sessions_root / tmp_path.name / sid)
         assert result != absent
@@ -2522,7 +2527,7 @@ class TestExtractPrevSessionDirDualLocation:
             self._make_content(sid, absent_raw), encoding="utf-8"
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result == str(sanitised)
 
@@ -2550,7 +2555,7 @@ class TestExtractPrevSessionDirDualLocation:
         # Legacy must NOT exist for this case
         assert not (tmp_path / "CLAUDE.md").exists()
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == expected
 
@@ -2572,7 +2577,7 @@ class TestExtractPrevSessionDirDualLocation:
         # .claude/ must NOT exist for this case
         assert not (tmp_path / ".claude").exists()
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == expected
 
@@ -2607,7 +2612,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path), doc=doc_at(str(tmp_path)))
 
         assert result == preferred
         assert result != legacy
@@ -2645,7 +2650,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         expected = str(
             (tmp_path / "home") / ".claude" / "pact-sessions"
@@ -2698,7 +2703,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         # (a) Fallback path still resolves the session dir — behavior unchanged.
         expected = str(
@@ -2747,7 +2752,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result == expected
         captured = capsys.readouterr()
@@ -2784,7 +2789,7 @@ class TestExtractPrevSessionDirDualLocation:
 
         monkeypatch.setattr(Path, "read_text", raising_read_text)
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is None
 
@@ -2817,7 +2822,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is None
 
@@ -2856,7 +2861,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is None
 
@@ -2899,7 +2904,7 @@ class TestExtractPrevSessionDirDualLocation:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         # Fallback derives a path that IS under pact-sessions, so the validator
         # passes it through. Asserting the round-trip works confirms the
@@ -3037,7 +3042,7 @@ class TestCurrentSessionReadersTakeNoLock:
             encoding="utf-8",
         )
 
-        result = _extract_prev_session_dir(str(project_dir))
+        result = _extract_prev_session_dir(str(project_dir), doc=doc_at(str(project_dir)))
 
         assert result is not None and result.endswith("abc12345")
         assert sorted(p.name for p in project_dir.iterdir()) == ["CLAUDE.md"]
@@ -3054,7 +3059,7 @@ class TestCurrentSessionReadersTakeNoLock:
             encoding="utf-8",
         )
 
-        result = _extract_session_started(str(project_dir))
+        result = _extract_session_started(doc_at(str(project_dir)))
 
         assert result == "2026-01-02 03:04:05 UTC"
         assert sorted(p.name for p in project_dir.iterdir()) == ["CLAUDE.md"]
@@ -3766,6 +3771,7 @@ def _run_session_init_compact(
 
 
 from contextlib import ExitStack
+from helpers import doc_at  # noqa: E402
 
 
 def _nested(*context_managers):
@@ -4018,7 +4024,9 @@ class TestSessionInitSlotAIntegration:
         """
         import session_init as _session_init
 
-        monkeypatch.setattr(_session_init, "check_pin_slot_status", lambda: None)
+        monkeypatch.setattr(
+            _session_init, "check_pin_slot_status", lambda *args, **kwargs: None
+        )
 
         plugin_root = tmp_path / "installed-cache"
         additional = self._run_main(
@@ -5682,7 +5690,14 @@ class TestM2TeammateAdvisoryGating:
 
         monkeypatch.setattr(pact_context, "_context_path", None)
         monkeypatch.setattr(pact_context, "_cache", None)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        # A REAL DIRECTORY: this class's subject is the m2 frame gate. A
+        # nonexistent declaration is now correctly UNKNOWN and skips the three
+        # advisory steps the lead arm asserts on (and would make the teammate
+        # arm's absence assertions pass for the wrong reason). The old path
+        # classified as a known root only because a missing one used to.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -6019,7 +6034,13 @@ class TestMainExceptionSafetyNet:
         team-lead can reuse it instead of creating a new one."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        # A REAL DIRECTORY: a nonexistent declaration is now correctly UNKNOWN
+        # and step 5b is skipped, so the late failure this arm injects would
+        # never fire. The old path was a known root only because a missing one
+        # used to be.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # #877: lead frame so the is_lead-gated update_session_info runs and the
@@ -7639,7 +7660,7 @@ class TestCompactionSeats:
         session_dir = self._session_dir(tmp_path)
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / "compact-summary.txt").write_text("A STALE SUMMARY", encoding="utf-8")
-        transcripts = tmp_path / ".claude" / "projects" / "-cmp-lead"
+        transcripts = Path.home() / ".claude" / "projects" / "-cmp-lead"
         transcripts.mkdir(parents=True)
         lead = transcripts / f"{self.SID}.jsonl"
         lead.write_text("", encoding="utf-8")

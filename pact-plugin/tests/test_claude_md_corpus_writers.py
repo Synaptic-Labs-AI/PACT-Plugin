@@ -51,6 +51,7 @@ from shared.pin_markers import Insertion, Refusal, SkipReason, apply_insertion, 
 from shared.session_resume import _plan_session_block, _session_block_text
 from shared.stale_session import recorded_session_id
 from staleness import check_pinned_staleness, locate_pinned
+from helpers import doc_at  # noqa: E402
 
 _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
@@ -149,7 +150,7 @@ def test_the_started_reader_reads_only_a_found_block(case, tmp_path):
 
     text = _text(case)
     (tmp_path / "CLAUDE.md").write_bytes(text.encode("utf-8"))
-    got = _extract_session_started(str(tmp_path))
+    got = _extract_session_started(doc_at(str(tmp_path)))
     if _state(case, "SESSION") != "FOUND":
         assert got is None
         return
@@ -159,7 +160,7 @@ def test_the_started_reader_reads_only_a_found_block(case, tmp_path):
     alone.mkdir()
     (alone / "CLAUDE.md").write_bytes(
         "".join(text[line.start:line.end] for line in doc.lines[first:last + 1]).encode("utf-8"))
-    assert got == _extract_session_started(str(alone))
+    assert got == _extract_session_started(doc_at(str(alone)))
 
 
 def test_a_written_block_is_read_back_by_the_reader():
@@ -280,7 +281,7 @@ def test_the_started_reader_reads_most_found_blocks(tmp_path):
             project = tmp_path / case
             project.mkdir()
             (project / "CLAUDE.md").write_bytes(_text(case).encode("utf-8"))
-            read += _extract_session_started(str(project)) is not None
+            read += _extract_session_started(doc_at(str(project))) is not None
     assert read >= 30
 
 
@@ -441,7 +442,9 @@ def _verdict(raw, index):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "CLAUDE.md"
         path.write_bytes(raw)
-        with mock.patch.object(archive_pin, "get_project_claude_md_path", lambda: path), \
+        # Declare the temporary directory as the session's project: the
+        # archive's resolver (the session document) then names `path`.
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": directory}), \
                 mock.patch.object(archive_pin, "_run_memory_cli", memory_cli):
             return archive_pin.build_verdict(index, db_path=None)
 
@@ -548,7 +551,8 @@ def test_the_archive_refuses_the_exposed_corpus_file_through_the_real_memory_cli
     raw = (_CORPUS / "hidden_declaration_closed_by_prose_ending_gt.md").read_bytes()
     path = tmp_path / "CLAUDE.md"
     path.write_bytes(raw)
-    monkeypatch.setattr(archive_pin, "get_project_claude_md_path", lambda: path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     for key, value in hf_cache_env().items():
         monkeypatch.setenv(key, value)
     verdict = archive_pin.build_verdict(0, db_path=str(memory_store("archive.db")))

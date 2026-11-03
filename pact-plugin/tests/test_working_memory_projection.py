@@ -224,7 +224,7 @@ class TestProjectionRunsThroughTheSameWriteSite:
         before = target.read_bytes()
         monkeypatch.setattr(
             wm, "_resolve_display_claude_md_with_base",
-            lambda: (target, elsewhere),
+            lambda *_: (target, elsewhere),
         )
 
         result = project_memories_to_claude_md([_record("2026-01-01 00:00:00", "a")])
@@ -353,16 +353,19 @@ class TestSyncVerbReachesTheGuards:
         self, project, memory_store, tmp_path
     ):
         """Second guard, the incident shape: a built environment with no
-        PYTEST_CURRENT_TEST, a declared directory holding no CLAUDE.md, so
-        resolution continues to the working directory's file, outside it.
+        PYTEST_CURRENT_TEST, a declared directory holding no CLAUDE.md, and a
+        working directory whose file lies outside it. The display resolver has
+        no cwd rung, so it resolves nothing: `unresolved`, and the working
+        directory's file is byte-identical.
 
         THE RECORD IS SAVED UNDER THE SAME DECLARED DIRECTORY. The project id
         derives from it, and `sync` projects only this project's records; a
         record saved under another id leaves nothing to project, and the
         `empty` return precedes the PYTEST_CURRENT_TEST refusal and the
         redirected-store refusal. That is correct, and it would
-        make this arm pass without reaching the guard, so the store is
-        stocked under the escaping id and the envelope is pinned to `refused`.
+        make this arm pass without reaching resolution, so the store is
+        stocked under the escaping id and the envelope is pinned to
+        `unresolved`.
         """
         escaped = tmp_path / "declared-but-empty"
         escaped.mkdir()
@@ -392,7 +395,7 @@ class TestSyncVerbReachesTheGuards:
         expected_id = _run_cli(env, tmp_path, "status", "--db-path", str(db))["project_id"]
         assert expected_id, "status reported no project id; the pin below is vacuous"
         assert result == {
-            "sync_status": "refused", "projected": 0, "memory_ids": [],
+            "sync_status": "unresolved", "projected": 0, "memory_ids": [],
             "project_id": expected_id,
         }
         assert (project / "CLAUDE.md").read_bytes() == before
@@ -468,7 +471,11 @@ _GUARDED_RESOLVERS = (
     ),
     (
         "scripts/archive_pin.py",
-        "get_project_claude_md_path",
+        # The census follows the call the code makes: the archive resolves
+        # the session document. Pinning that call keeps
+        # `_KNOWN_GUARDED_CALLERS` loud if `resolve_claude_md` ever stops
+        # resolving through it.
+        "session_document",
         "_stays_in_declared_project",
         frozenset(),
     ),

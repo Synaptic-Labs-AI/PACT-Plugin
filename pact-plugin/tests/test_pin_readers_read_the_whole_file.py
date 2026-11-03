@@ -61,7 +61,7 @@ def _reader_views(text, tmp_path, monkeypatch):
     blocks = [archive_pin.extract_pin_block(doc, first, last, i, pins) for i in range(len(pins))]
     claude_md = tmp_path / "CLAUDE.md"
     claude_md.write_text(text, encoding="utf-8")
-    monkeypatch.setattr(check_pin_caps, "get_project_claude_md_path", lambda: claude_md)
+    monkeypatch.setattr(check_pin_caps, "resolve_session_claude_md_path", lambda: claude_md)
     caps_pins, _reason = check_pin_caps._resolve_pins()
     return {
         "pins": [p.heading for p in pins],
@@ -119,7 +119,7 @@ def test_every_reader_declines_where_the_whole_file_cannot_read_the_section(
     assert staleness.check_pinned_staleness(claude_md) is None
     assert staleness.check_pinned_block_signal(claude_md) is None
     assert claude_md.read_text(encoding="utf-8") == text
-    monkeypatch.setattr(check_pin_caps, "get_project_claude_md_path", lambda: claude_md)
+    monkeypatch.setattr(check_pin_caps, "resolve_session_claude_md_path", lambda: claude_md)
     assert check_pin_caps._resolve_pins() == ([], (
         "pinned section unreadable: line 2 starts an uncertain region: "
         "an HTML block is never closed"))

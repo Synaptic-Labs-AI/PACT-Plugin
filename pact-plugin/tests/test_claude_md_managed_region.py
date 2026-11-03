@@ -33,6 +33,7 @@ from shared.claude_md_manager import (
     strip_orphan_kernel_block,
 )
 from shared.claude_md_markers import Document, Located, State, parse
+from helpers import doc_at  # noqa: E402
 
 KS, KE = "<!-- PACT_START: v3.16 -->", "<!-- PACT_END -->"
 KERNEL = f"{KS}\nstale persona\n{KE}"
@@ -199,11 +200,11 @@ def test_a_div_wrapped_real_block_reads_absent_and_gets_one_fresh_block(project_
         f"<div>\n\n```\n{MANAGED_START_MARKER}\n{MANAGED_TITLE}\n\n{MEMORY_START_MARKER}\n"
         f"## Pinned Context\n{MEMORY_END_MARKER}\n{MANAGED_END_MARKER}\n```\n\n</div>\n")
     project_file.write_text(wrapped, encoding="utf-8")
-    assert migrate_to_managed_structure() is not None
+    assert migrate_to_managed_structure(doc_at()) is not None
     first = project_file.read_text(encoding="utf-8")
     assert _states(first)[:2] == (State.FOUND, State.FOUND)
     assert first.endswith(wrapped)
-    assert migrate_to_managed_structure() is None
+    assert migrate_to_managed_structure(doc_at()) is None
     assert project_file.read_text(encoding="utf-8") == first
 
 
@@ -213,7 +214,7 @@ def test_a_migrated_file_with_an_unclosed_fence_below_is_left_alone(project_file
         f"## Pinned Context\n{MEMORY_END_MARKER}\n\n{MANAGED_END_MARKER}\n\nnotes\n```\nopen\n")
     project_file.write_text(text, encoding="utf-8")
     for _ in range(2):
-        assert migrate_to_managed_structure() is None
+        assert migrate_to_managed_structure(doc_at()) is None
         assert project_file.read_text(encoding="utf-8") == text
 
 
@@ -232,7 +233,7 @@ def test_an_unmigrated_file_with_an_unclosed_fence_is_refused_with_the_notice(
         project_file, text, line):
     project_file.write_text(text, encoding="utf-8")
     for _ in range(2):
-        status = _str(migrate_to_managed_structure())
+        status = _str(migrate_to_managed_structure(doc_at()))
         assert status.startswith("Migration skipped: ")
         assert f"{line} starts an uncertain region" in status
         assert project_file.read_text(encoding="utf-8") == text
@@ -247,7 +248,7 @@ def test_an_unmigrated_file_with_an_unclosed_fence_is_refused_with_the_notice(
 ])
 def test_the_migration_refuses_a_pair_it_cannot_place(project_file, text, line):
     project_file.write_text(text, encoding="utf-8")
-    status = _str(migrate_to_managed_structure())
+    status = _str(migrate_to_managed_structure(doc_at()))
     assert status.startswith("Migration skipped: ") and line in status
     assert project_file.read_text(encoding="utf-8") == text
 
@@ -304,7 +305,7 @@ def test_the_migration_skip_path_plans_on_the_replace_decoded_copy(project_file,
                         lambda content: seen.append(content) or real(content))
     raw = b"caf\xe9\n## Working Memory\n"
     project_file.write_bytes(raw)
-    assert "not valid UTF-8" in _str(migrate_to_managed_structure())
+    assert "not valid UTF-8" in _str(migrate_to_managed_structure(doc_at()))
     assert seen and seen[-1].startswith("caf�\n")
     assert project_file.read_bytes() == raw
 
@@ -312,7 +313,7 @@ def test_the_migration_skip_path_plans_on_the_replace_decoded_copy(project_file,
 def test_the_migration_skip_path_reports_nothing_for_a_migrated_file(project_file):
     project_file.write_bytes(
         f"{MANAGED_START_MARKER}\n# caf".encode() + b"\xe9\n" + f"{MANAGED_END_MARKER}\n".encode())
-    assert migrate_to_managed_structure() is None
+    assert migrate_to_managed_structure(doc_at()) is None
 
 
 # --- a memory block with no managed region -------------------------------------
@@ -326,7 +327,7 @@ def test_the_migration_skip_path_reports_nothing_for_a_migrated_file(project_fil
 def test_a_memory_block_without_a_managed_region_migrates_to_one_memory_block(
         project_file, text, has_session):
     project_file.write_text(text, encoding="utf-8")
-    assert migrate_to_managed_structure() is not None
+    assert migrate_to_managed_structure(doc_at()) is not None
     out = project_file.read_text(encoding="utf-8")
     session = f"\n{SB}\n" if has_session else ""
     assert out == (
@@ -335,14 +336,14 @@ def test_a_memory_block_without_a_managed_region_migrates_to_one_memory_block(
         "## Pinned Context\n### pin1\nbody\n\n"
         f"## Working Memory\n{WORKING_MEMORY_COMMENT}\n### 2026-01-01 a\n"
         f"{MEMORY_END_MARKER}\n\n{MANAGED_END_MARKER}\n")
-    assert migrate_to_managed_structure() is None
+    assert migrate_to_managed_structure(doc_at()) is None
     assert project_file.read_text(encoding="utf-8") == out
 
 
 def test_text_between_the_memory_start_row_and_its_first_heading_moves_below(project_file):
     project_file.write_text(
         f"{MEMORY_START_MARKER}\nloose note\n{SECTIONS}{MEMORY_END_MARKER}\n", encoding="utf-8")
-    migrate_to_managed_structure()
+    migrate_to_managed_structure(doc_at())
     out = project_file.read_text(encoding="utf-8")
     assert out.endswith(f"{MANAGED_END_MARKER}\n\nloose note\n")
     assert _states(out) == (State.FOUND, State.FOUND, State.ABSENT)

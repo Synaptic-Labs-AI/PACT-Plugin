@@ -52,7 +52,7 @@ def curator_env(tmp_path, monkeypatch, pact_context):
     point_resolver_at(monkeypatch, tmp_path)
     import check_pin_caps
     monkeypatch.setattr(
-        check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+        check_pin_caps, "resolve_session_claude_md_path", lambda: claude_md
     )
 
     def _reset_state(n_pins, body_chars=4):
