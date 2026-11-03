@@ -58,6 +58,23 @@ A SET WORD IS ALSO CAMOUFLAGE, AND A CONTRAST PHRASE IS WHAT CLOSES IT
     the negation scopes over. A phrase list sidesteps that question, and the
     decoy control below is what proves the decoy is still reported.
 
+THE CONTRAST RULE'S BOUND, STATED AT ITS REAL WIDTH
+    Three limits, not one, and the narrow version of this sentence was itself
+    an overstatement:
+      VOCABULARY — the phrase list is six strings ("not just", "not only",
+        "in addition", "as well as", "then the full suite", "not enough"). A
+        contrast expressed another way ("on top of", "plus the whole suite",
+        "at minimum") is not seen.
+      DISTANCE — the phrase must sit within 500 characters of a run demand.
+        The window is a measured separation, not a derivation: the shapes this
+        catches sit inside 400 characters and the comPACT carriers' unrelated
+        "not only an `Edit` or a `Write`" sits 873 and 971 characters away. A
+        qualifying phrase further out than 500 is not seen.
+      ANCHORING — the window is evaluated from EVERY run-demand match and
+        every contrast match, so a phrase qualifying the second or third
+        demand is caught. It is not evaluated against demands that the
+        detector never recognised as demands at all (see below).
+
 WHAT THE DETECTOR DOES NOT SEE
     The gate predicate covers a tests-pass and a suite-pass form with or
     without a modal, so "tests must pass" IS a candidate and is held OUT only
@@ -376,15 +393,16 @@ _RUN = re.compile(
     r"(?:tests?|suites?)\b"
 )
 _RUN_BARE = re.compile(r"(?i)\btests?\s+runs?\b")
-# Covers both a tests-pass and a SUITE-pass predicate, with or without a modal:
-# "tests pass", "tests are green", "the suite must be green", "suites must
-# pass", "a suite passes". The suite half was missing and let the whole
-# suite-predicate family through uncaught.
+# Covers both a tests-pass and a SUITE-pass predicate, with or without a modal
+# and with or without "be"/"all" inside it: "tests pass", "tests are green",
+# "the suite must be green", "suites must pass", "a suite passes", "the suite
+# should be green", "the suites must all pass".
 _GATE = re.compile(
-    r"(?i)\b(?:tests?|suites?)\s+(?:(?:are|is|must\s+be|must|will|should)\s+)?"
-    r"(?:green|pass(?:es|ing)?)\b"
+    r"(?i)\b(?:tests?|suites?)\s+"
+    r"(?:(?:are|is|will|should|must)(?:\s+be)?\s+)?"
+    r"(?:all\s+)?(?:green|pass(?:es|ing)?)\b"
 )
-_SUITE = re.compile(r"(?i)\b(?:full|test)[\s-]suite\b")
+_SUITE = re.compile(r"(?i)\b(?:full|test)[\s-]suites?\b")
 
 CANDIDATE_PATTERNS = (_RUN, _RUN_BARE, _GATE, _SUITE)
 
@@ -426,8 +444,14 @@ PREPR_MARKERS = (
 
 # A line that demands or gates an UNBOUNDED set without a run verb — the other
 # half of the class, previously a candidate the classifier silently discarded.
+# Both orders: "all of the suites", "both test suites", "every suite", and
+# "the test suites must all pass". A quantifier-only rule in one direction
+# missed every post-nominal form.
 _UNBOUNDED_SET = re.compile(
-    r"(?i)\b(?:all|the full|full)\s+(?:tests?|suites?)\b|\bfull[\s-]suite\b"
+    r"(?i)\b(?:all|every|both)\b[^.\n]{0,25}\b(?:tests?|suites?)\b"
+    r"|\b(?:tests?|suites?)\b[^.\n]{0,25}\ball\b"
+    r"|\b(?:the\s+)?full\s+(?:tests?|suites?)\b"
+    r"|\bfull[\s-]suites?\b"
 )
 _REQUIRED = re.compile(r"(?i)\b(?:required|mandatory|must run|needs? to run)\b")
 
@@ -441,27 +465,35 @@ _SIGNAL_ROW = re.compile(r"\*\*(?:GREEN|YELLOW|RED)\*\*")
 # negates the demand, and that is exactly the shape of the self-reversing
 # decoy the census must keep catching.
 _CONTRAST = re.compile(
-    r"(?i)\b(?:not just|not only|in addition to|as well as|then the full suite|not enough)\b"
+    r"(?i)\b(?:not just|not only|in addition|as well as|then the full suite|not enough)\b"
 )
 
 # ...and the phrase has to be NEAR the demand it qualifies. An instruction line
 # in these surfaces is one several-thousand-character line, so a bare
 # whole-line search finds a contrast word in an unrelated clause: the two
 # comPACT carriers contain "not only an `Edit` or a `Write`" in the CLAUDE.md
-# prohibition, hundreds of characters from the test-run demand, and a
-# whole-line rule classified both shipped carriers as in-class.
-_CONTRAST_BEFORE = 160
-_CONTRAST_AFTER = 240
+# prohibition, 873 and 971 characters from the nearest run demand. Measured
+# margin: the shapes this must catch sit inside 400 characters; the carriers sit
+# beyond 870. 500 is the separation, and it is a measured constant, not a
+# derived one.
+_CONTRAST_WINDOW = 500
 
 
 def _contrast(line: str) -> bool:
-    """A contrast phrase within reach of the run demand it qualifies."""
-    match = _RUN.search(line)
-    if not match:
+    """A contrast phrase within reach of ANY run demand it could qualify.
+
+    Every match is considered, not the first: a line can carry a scoped run
+    near the front and an additive full-suite run far behind it, and anchoring
+    on only the first demand made the later one invisible.
+    """
+    run_starts = [match.start() for match in _RUN.finditer(line)]
+    if not run_starts:
         return False
-    lo = max(0, match.start() - _CONTRAST_BEFORE)
-    hi = match.end() + _CONTRAST_AFTER
-    return bool(_CONTRAST.search(line[lo:hi]))
+    return any(
+        min(abs(contrast.start() - run_start) for run_start in run_starts)
+        <= _CONTRAST_WINDOW
+        for contrast in _CONTRAST.finditer(line)
+    )
 
 # Standing exemptions, each with the reason it is not the defect class. Keyed by
 # a CONTENT marker rather than a line number: a line number drifts silently,
@@ -500,6 +532,13 @@ ALLOWLIST = (
         "A load-test invocation inside an example block for the k6 tool; it names "
         "one script path and carries no boundary obligation.",
     ),
+    (
+        "skills/pact-coding-standards/SKILL.md",
+        "every test green. The import-hygiene check",
+        "Describes a blind spot in behavioural tests — a dead import passes every "
+        "test green. It demands nothing and names no boundary; the quantifier that "
+        "catches it was added for 'every suite must pass', not for prose.",
+    ),
 )
 
 # Measured on the fixed tree. The count is a floor, not a proof: a new candidate
@@ -511,16 +550,17 @@ ALLOWLIST = (
 # Per file as well as in total: with only a total, one candidate added in one
 # file and one lost in another cancel out, and the operator who sees "38, same
 # as before" has nothing to look at. The failure names the file that moved.
-BASELINE_CANDIDATES = 48
+BASELINE_CANDIDATES = 54
 BASELINE_BY_FILE = {
     "agents/pact-backend-coder.md": 1,
     "agents/pact-database-engineer.md": 1,
     "agents/pact-devops-engineer.md": 1,
     "agents/pact-frontend-coder.md": 1,
     "agents/pact-orchestrator.md": 3,
-    "agents/pact-test-engineer.md": 6,
+    "agents/pact-qa-engineer.md": 1,
+    "agents/pact-test-engineer.md": 7,
     "commands/comPACT.md": 4,
-    "commands/orchestrate.md": 4,
+    "commands/orchestrate.md": 6,
     "protocols/pact-phase-transitions.md": 1,
     "protocols/pact-protocols.md": 6,
     "protocols/pact-s5-policy.md": 2,
@@ -532,7 +572,7 @@ BASELINE_BY_FILE = {
     "skills/pact-coding-standards/SKILL.md": 2,
     "skills/pact-prepare-research/references/api-exploration-template.md": 2,
     "skills/pact-prepare-research/references/requirements-analysis.md": 1,
-    "skills/pact-testing-strategies/SKILL.md": 4,
+    "skills/pact-testing-strategies/SKILL.md": 6,
     "skills/pact-testing-strategies/references/integration-patterns.md": 1,
     "skills/pact-testing-strategies/references/performance-testing.md": 1,
     "skills/pact-testing-strategies/references/test-pyramid.md": 1,
@@ -703,6 +743,10 @@ def test_control_a_scoped_instruction_is_not_reported():
     assert _unlisted([("synthetic/surface.md", 1, scoped)], ALLOWLIST) == []
 
 
+# Filler for the distance shapes: long enough to push a contrast phrase past a
+# small window without changing what the line demands.
+_FAR = "filler " * 50
+
 # Every shape that defeated an earlier revision of this classifier. Each was
 # ACCEPTED — reported as out of class — before the SET-only exclusion and the
 # gate promotion, and each is an unscoped demand: it says WHEN or demands the
@@ -724,6 +768,19 @@ UNSCOPED_SHAPES = (
     "Run the full test suite, not just the integration tests you changed.",
     "Run the full test suite before completing; the affected tests alone are not enough.",
     "Run the full test suite in addition to the affected tests.",
+    # Adjacent vocabulary in the suite-predicate family: quantifiers other than
+    # "all", a "be" inside the modal, and the plural "suites".
+    "Every suite must pass before the commit.",
+    "Both test suites must pass before the commit.",
+    "All of the suites must pass before the commit.",
+    "The full suite should be green before commit.",
+    "The test suites must all pass before the commit.",
+    # Demands that a first-match-only contrast scan missed: the qualifying
+    # phrase sits far from the FIRST run demand, or before the second one.
+    _FAR + "Run the tests your change affects, then " + _FAR
+    + "run the full test suite in addition to the affected tests.",
+    "In addition to the affected tests, and after " + _FAR + "run the full test suite.",
+    "Run the affected tests. " + _FAR + "In addition, run the full test suite.",
 )
 
 
