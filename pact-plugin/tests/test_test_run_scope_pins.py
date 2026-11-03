@@ -238,6 +238,50 @@ def test_the_scoped_wording_is_on_its_line(rel, marker, phrases):
         )
 
 
+# The operational core is duplicated VERBATIM in the three dispatch carriers,
+# because each is a separate string injected into a specialist's prompt and a
+# reference would not reach the reader. Presence pins alone cannot keep them
+# aligned — three carriers could each contain the fragments while drifting in
+# the middle — so the span itself is compared.
+CORE_START = "run the tests your change affects"
+CORE_END = "The full suite is not part of this boundary."
+OPERATIONAL_CARRIERS = (
+    ("commands/orchestrate.md", "Smoke Testing:"),
+    ("commands/comPACT.md", "comPACT mode (concurrent):"),
+    ("commands/comPACT.md", "comPACT mode: Work directly"),
+)
+
+
+def _operational_core(rel: str, marker: str) -> str:
+    line = _line_with(_text(rel), marker)
+    assert line.count(CORE_START) == 1, f"{rel}: {CORE_START!r} occurs {line.count(CORE_START)}x on the carrier line"
+    assert line.count(CORE_END) == 1, f"{rel}: {CORE_END!r} occurs {line.count(CORE_END)}x on the carrier line"
+    start = line.index(CORE_START)
+    end = line.index(CORE_END) + len(CORE_END)
+    return line[start:end]
+
+
+def test_the_operational_core_is_identical_across_its_three_carriers():
+    cores = [_phrase(_operational_core(rel, marker)) for rel, marker in OPERATIONAL_CARRIERS]
+    distinct = set(cores)
+    assert len(distinct) == 1, (
+        "the three dispatch carriers no longer share one operational statement; "
+        f"found {len(distinct)} variants:\n"
+        + "\n".join(f"  {rel} [{marker[:28]}]: {len(core)} chars"
+                    for (rel, marker), core in zip(OPERATIONAL_CARRIERS, cores))
+    )
+
+
+def test_the_operational_core_occurs_exactly_three_times():
+    """A fourth copy, or a lost carrier, must not arrive silently."""
+    core = _phrase(_operational_core(*OPERATIONAL_CARRIERS[0]))
+    combined = _phrase(_text("commands/orchestrate.md") + _text("commands/comPACT.md"))
+    assert combined.count(core) == 3, (
+        f"the operational core occurs {combined.count(core)} times across "
+        "orchestrate.md + comPACT.md, expected 3 (1 canonical + 2 dispatch carriers)"
+    )
+
+
 def test_the_protocol_extract_and_its_ssot_mirror_are_identical():
     left, right = (_phrase(_line_with(_text(rel), "**Run the affected tests**"))
                    for rel in PROTOCOL_PAIR)
