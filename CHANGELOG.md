@@ -39,6 +39,12 @@ The handoff harvest now keeps two task stores' same-numbered tasks apart, no lon
 - One owning group per task file: the task file is unioned with exactly one group, the dated group of the store's current task instance or, when none exists, the team-less group with the same identity, so a journal written before events carried a team still unions with its task file.
 - Ledger tokens are found anywhere in a section, not only on lines that start with the `Processed task IDs` label, because each token identifies itself.
 - `0` and `False` count as content when a field carries both its canonical name and a legacy alias, in the shared reader and in the merge alike, so a canonical `0` or `False` now wins over the alias.
+- A task file's sibling metadata reaches only the group that owns it. Other groups take their siblings from a snapshot chosen by `select_snapshot`, which requires the snapshot's occupant, team and arc to match the unit and refuses a malformed arc instead of reading it as team-less.
+- A disk-only unit keys its ledger token on its task-file handoff, so the same content seen first on disk and later in the journal records one token.
+- The emitter and the lifecycle gate never attribute a task file found only at the bare tasks directory to a named store, and team names are case-folded by one shared function wherever a store is looked up or a realigned team is excluded.
+- Journal events with a non-string task id are skipped and reported at discovery instead of breaking the harvest's sorts.
+- The resume brief keeps every other section when the report helper cannot be imported; only Completed Work falls back to the local sanitiser.
+- Structural guards for the harvest skill: a sweep mutates the Step 3 block and fails unless every surviving mutant is a listed equivalent; other guards fail when the block calls a helper with no route, when a route's documented payload differs from the keys its command reads, when the skill reads the journal filtered to a type the helpers need in full, or when prose names an identifier or quotes a report the code does not define.
 
 ### Why
 
