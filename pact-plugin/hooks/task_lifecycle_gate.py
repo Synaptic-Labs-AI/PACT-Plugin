@@ -1642,13 +1642,34 @@ def evaluate_lifecycle(
         # launched with no --agent flag, and that frame DOES write the canonical
         # journal.
         if pact_context.is_canonical_journal_frame(input_data):
+            new_task_id = _created_task_id(tool_response, tool_input)
+            # task_created: one event per creation, independent of any
+            # variety stamp. The harvest separates two instances of one task
+            # id by the creation that opened each. It stays inside this frame
+            # gate: a tmux teammate's persisted team can be stale, and a
+            # creation journaled under the wrong team would split that team's
+            # revisions. Empty team and subject are omitted, never written.
+            if new_task_id:
+                created_fields = {"task_id": new_task_id}
+                if isinstance(team_name, str) and team_name.strip():
+                    created_fields["team"] = team_name
+                created_subject = tool_input.get("subject")
+                if isinstance(created_subject, str) and created_subject.strip():
+                    created_fields["subject"] = created_subject
+                try:
+                    append_event_checked(
+                        make_event("task_created", **created_fields),
+                        "task_created",
+                        new_task_id,
+                    )
+                except Exception:
+                    pass  # fail-open: emit failure never breaks the gate
             create_variety = (
                 incoming_metadata.get("variety")
                 if isinstance(incoming_metadata, dict)
                 else None
             )
             if isinstance(create_variety, dict) and create_variety:
-                new_task_id = _created_task_id(tool_response, tool_input)
                 if new_task_id:
                     # §Per-Dispatch Variety Stamping-fidelity projection:
                     # mirror ONLY the 4 dimensions + total, dropping the

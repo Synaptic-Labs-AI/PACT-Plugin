@@ -3638,6 +3638,8 @@ class TestValidateEventSchemaPerType:
             "task_id": "1",
             "cause": "mixed_store",
         },
+        # A canonical-frame creation; team and subject are optional.
+        "task_created": {"task_id": "1"},
         "handoff_refusal_degraded": {
             "agent_type": "pact-backend-coder",
             "detail": "PACT Handoff Refusal: missing produced",
@@ -4965,6 +4967,35 @@ class TestValidateOptionalFieldTypes:
             f"optional field '{field}' for type 'task_metadata_snapshot' "
             f"must be {expected_name}, got {got_name}"
         )
+
+    def test_task_created_optionals_declared(self):
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("task_created") == {
+            "team": str,
+            "subject": str,
+        }
+
+    def test_task_created_full_optional_payload_passes(self):
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "task_created", task_id="9", team="session-abc", subject="x: y"
+        )
+        assert _validate_event_schema(event) == (True, "ok")
+
+    @pytest.mark.parametrize("field", ["team", "subject"])
+    @pytest.mark.parametrize("bad_value", [42, "", "  "],
+                             ids=["int", "empty", "whitespace"])
+    def test_task_created_bad_optional_rejected(self, field, bad_value):
+        """A wrong type and a present empty value are both rejected, which
+        is why the writer omits an empty team or subject."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("task_created", task_id="9", **{field: bad_value})
+        ok, reason = _validate_event_schema(event)
+        assert ok is False, f"{field}={bad_value!r} should be rejected"
+        assert f"'{field}'" in reason and "'task_created'" in reason
 
     def test_cleanup_summary_all_fields_pass(self):
         """cleanup_summary happy path — all declared fields with correct types.

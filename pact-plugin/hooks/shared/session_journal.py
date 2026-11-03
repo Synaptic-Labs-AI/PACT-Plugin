@@ -195,6 +195,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # task_id is the source task; metadata is the size-bounded sibling-key
     # payload (SNAPSHOT_EXCLUDE'd, truncation-marked — see the substrate module).
     "task_metadata_snapshot": {"task_id": str, "metadata": dict},
+    # hooks/task_lifecycle_gate.py writes task_created on the TaskCreate leg,
+    # canonical journal frames only (lead, in-process teammate), when the
+    # create response carries a real task id. Consumer: the handoff harvest's
+    # arc term (shared/handoff_merge), which separates two instances of one
+    # task id by the creation that opened each, and reads a store reset from
+    # a creation whose id is at or below one already journaled for its team.
+    "task_created": {"task_id": str},
     # commands/orchestrate.md + comPACT.md write phase_transition with
     # phase + status (both quoted strings). session_resume._build_journal_resume
     # subscripts `p["phase"]` — this schema check is the defensive bulwark
@@ -492,6 +499,11 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # a second "task_metadata_snapshot" key here is silently overwritten by
     # that later dict literal.
     "agent_handoff": {"team": str},
+    # task_created's `team` is the RESOLVED task-store name the creation
+    # landed in, and `subject` is the created task's subject. The writer
+    # OMITS each when it is empty: the optional-str contract rejects a
+    # present empty value, and a rejected append loses the creation event.
+    "task_created": {"team": str, "subject": str},
     # session_start's optional `source`: hooks/session_init.py writes the
     # stdin source when it is one of startup, resume, compact, clear or fork
     # ("startup" when stdin has none) and "unknown" for any other value,
