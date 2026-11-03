@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import shutil
 import stat
@@ -34,6 +35,7 @@ from unittest.mock import patch
 
 import pytest
 
+from fixtures.project_dir import write_session_context
 from fixtures.role_frames import teammate_frame
 from scripts import pact_session
 from scripts.memory_api import (
@@ -1286,3 +1288,93 @@ class TestUnresolvedIdentityScopesReads:
 
         empty = self._unresolved(monkeypatch, db_path)
         assert empty.search_by_file(str(linked)) == []
+
+
+class TestIssueCriterionALiteralShape:
+    """Issue #1688 criterion (a) in the shape it actually names.
+
+    Every other arm reaches the store through CLAUDE_PROJECT_DIR, or reaches
+    the session-record rung only up to resolution. This one uses the SESSION
+    RECORD as the declaration, leaves the env var unset, and syncs AMBIENTLY —
+    the production shape that rendered the Working Memory block empty.
+    """
+
+    def test_criterion_a_session_record_declaration_end_to_end(
+        self, layout_root, monkeypatch
+    ):
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _enable_record_reading(monkeypatch)
+        # The DECLARATION under test is the session context record, written
+        # while the worktree is live. The identity record is produced by the
+        # REAL writer, so the writer and the reader are exercised together.
+        write_session_context(Path.home() / ".claude", SID, worktree)
+        project_scope._record_worktree_identity(SID, str(worktree))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(main)
+
+        # Positive control: both records were READ, and the declaration the
+        # detector will use is the live worktree.
+        assert pact_session.get_project_dir_from_session_record() == str(worktree)
+        identity = pact_session.get_worktree_identity_from_session_record()
+        assert identity.get("declared") == os.path.realpath(worktree)
+
+        db_path = layout_root / "store.db"
+        live = PACTMemory(session_id="s", db_path=db_path)
+        assert live.project_id == "R", (
+            "the session-record declaration did not resolve to the repository"
+        )
+        memory_id = live.save({"context": _TOKEN}, sync_to_claude=False)
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "R"
+
+        _remove_worktree(main, worktree)
+
+        after = PACTMemory(session_id="s", db_path=db_path)
+        assert after.project_id == "R"
+        assert after._project_id_source == "worktree identity record"
+
+        # AMBIENT: no claude_md_root warrant. This is the call whose empty
+        # projection was the issue's symptom.
+        written = after.sync()
+        assert after.last_sync_status == SyncResult.WROTE, (
+            "the ambient sync did not write; status was "
+            f"{after.last_sync_status!r}. The scope guard refusing here is a "
+            "finding, not a reason to fall back to the warrant."
+        )
+        assert written == [memory_id], (
+            "the ambient sync did not select the row saved while the "
+            "worktree was live"
+        )
+        assert _TOKEN in (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+
+    def test_the_session_record_decline_is_loud(
+        self, layout_root, monkeypatch, caplog
+    ):
+        """Criterion (b)'s session-record variant: the warning names the path.
+
+        The value assertion lives in test_project_dir_resolution.py; this arm
+        captures the WARNING for the SESSION-RECORD declaration, which that
+        sweep asserts only by value.
+        """
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _enable_record_reading(monkeypatch)
+        write_session_context(Path.home() / ".claude", SID, worktree)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        _remove_worktree(main, worktree)
+        # Strategy 2 runs from the process cwd even on the decline arm.
+        monkeypatch.chdir(layout_root)
+
+        with caplog.at_level(logging.WARNING):
+            assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert str(worktree) in messages, (
+            "the session-record decline did not name the path it could not "
+            f"verify; captured: {messages!r}"
+        )
+        assert "could not be resolved" in messages
