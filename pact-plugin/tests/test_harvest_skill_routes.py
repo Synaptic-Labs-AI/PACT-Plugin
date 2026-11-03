@@ -324,36 +324,66 @@ def test_every_route_documents_exactly_the_payload_and_argv_it_reads():
     assert payload_routes >= 5, "the payload parse found too few routes to check"
 
 
+STEP1_HEADING = "### Step 1: Task Discovery"
+ORPHAN_HEADING = "## Orphaned Handoff Recovery"
+
+
 def _journal_reads():
-    """(type or None) for every `session_journal.py read` command in the skill."""
+    """(section heading, form, type or None) for every journal read in the
+    skill. `form` is "cli" for `session_journal.py read` and the function
+    name for `read_events(...)` / `read_events_from(...)`. A MENTION is not
+    a read and is skipped: a CLI form with no `--session-dir`, and a call
+    whose arguments are a `...` placeholder."""
     joined = re.sub(r"\\\n\s*", " ", SKILL_TEXT)
-    reads = []
+    reads, section = [], ""
     for line in joined.splitlines():
+        if re.match(r"#{2,3}\s", line):
+            section = line.strip()
         for match in re.finditer(r"session_journal\.py\"?\s+read\b([^`)]*)", line):
+            if "--session-dir" not in match.group(1):
+                continue  # a prose mention of the subcommand, not a command
             typed = re.search(r"--type\s+(\w+)", match.group(1))
-            reads.append(typed.group(1) if typed else None)
-        # The Python reader form: read_events(...) / read_events_from(...),
-        # with the type as its first (read_events) or second (_from)
-        # positional argument, or as event_type=.
-        for match in re.finditer(r"\bread_events(_from)?\(([^)]*)\)", line):
+            reads.append((section, "cli", typed.group(1) if typed else None))
+        # read_events(type) / read_events_from(session_dir, type), or event_type=.
+        for match in re.finditer(r"\b(read_events(?:_from)?)\(([^)]*)\)", line):
             args = [a.strip() for a in match.group(2).split(",") if a.strip()]
+            if args == ["..."]:
+                continue
             keyword = [a for a in args if a.startswith("event_type=")]
             positional = [a for a in args if "=" not in a]
             if keyword:
                 value = keyword[0].split("=", 1)[1]
             else:
-                index = 1 if match.group(1) else 0
+                index = 1 if match.group(1) == "read_events_from" else 0
                 value = positional[index] if len(positional) > index else None
-            value = value.strip("'\"") if value else None
-            reads.append(None if value in (None, "...") else value)
+            reads.append((section, match.group(1), value.strip("'\"") if value else None))
     return reads
+
+
+def _unfiltered_reads_in(heading: str, form: str) -> list:
+    assert heading in SKILL_TEXT.splitlines(), (
+        f"heading {heading!r} moved: update the G-B2 section name, "
+        f"do not drop the check"
+    )
+    return [r for r in _journal_reads() if r[0] == heading and r[1] == form and r[2] is None]
 
 
 def test_no_journal_read_filters_a_type_the_journal_helpers_need():
     """G-B2: the journal-taking helpers need the WHOLE journal (positions and
     store epochs), so no read in the skill may filter to one of their types."""
     reads = _journal_reads()
-    assert None in reads, "the one unfiltered Step 1 read is missing"
-    assert any(reads), "no typed read found: the parse is not reading commands"
-    filtered = [t for t in reads if t in hm.JOURNAL_EVENT_TYPES]
+    assert any(r[2] for r in reads), "no typed read found: the parse is not reading commands"
+    filtered = [r for r in reads if r[2] in hm.JOURNAL_EVENT_TYPES]
     assert not filtered, filtered
+
+
+def test_step1_reads_the_whole_journal():
+    """The Step 3 block's `journal` input is Step 1's one unfiltered CLI read."""
+    assert _unfiltered_reads_in(STEP1_HEADING, "cli"), (
+        "Step 1 has no unfiltered `session_journal.py read`")
+
+
+def test_orphan_recovery_reads_the_whole_journal():
+    """Orphan Recovery feeds the block a prior session's WHOLE journal."""
+    assert _unfiltered_reads_in(ORPHAN_HEADING, "read_events_from"), (
+        "Orphaned Handoff Recovery has no unfiltered `read_events_from`")
