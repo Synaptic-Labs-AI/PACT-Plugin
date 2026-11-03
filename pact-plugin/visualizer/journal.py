@@ -427,6 +427,17 @@ def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary
         age = max(0.0, current.timestamp() - summary.mtime)
         summary.status = "live" if age <= LIVE_WINDOW_S else "ended"
 
+    if summary.run_kind != "orchestrate" and head:
+        # A long wrap-up tail can bury every orchestration marker older than
+        # the tail window; the head window (already loaded for started_at)
+        # carries the run's opening markers, so an ended orchestration still
+        # lists as orchestrate. Still bounded: markers between the two
+        # windows remain invisible to the cheap summary.
+        for event in head:
+            if event.data.get("type") in _PHASE_START_TYPES:
+                summary.run_kind = "orchestrate"
+                break
+
     if summary.updated_at is None:
         summary.updated_at = _iso_from_mtime(summary.mtime)
     summary.is_live = summary.status == "live"

@@ -538,6 +538,35 @@ class TestJournalRead:
         )
         assert summary.run_kind == "orchestrate"
 
+    def test_summarize_finds_early_markers_despite_markerless_wrapup_tail(
+        self, tmp_path
+    ):
+        """An ended orchestration with a long markerless tail lists orchestrate.
+
+        The run's only markers sit near the journal's start; a wrap-up tail of
+        non-marker events pushes them out of the tail window, so the head
+        window (already loaded) must carry the verdict.
+        """
+        root = make_root(tmp_path)
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        events = [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "started", "ts": "2026-01-01T00:01:00Z"},
+        ]
+        events += [
+            {"v": 1, "type": "lifecycle_decision",
+             "ts": f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z",
+             "tool_name": "X", "verdict": "allow"}
+            for index in range(120)
+        ]
+        events.append({"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"})
+        summary = journal.summarize_journal(
+            write_journal(root, "proj", "wrapup", events), now=now
+        )
+        assert summary.run_kind == "orchestrate"
+        assert summary.status == "ended"
+
 
 # ---------------------------------------------------------------------------
 # Classification

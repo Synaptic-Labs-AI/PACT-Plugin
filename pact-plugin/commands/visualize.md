@@ -8,7 +8,7 @@ Mission Control renders a PACT run from its session journal: phases, the special
 
 ## Parse the argument
 
-- Empty or `live` — the newest live run in the default config root; if no run is live, the newest run. Use `<project>` to target another project.
+- Empty or `live` — this session's project: pass `--project` with the basename of the session's working directory, and open that project's newest live run; if no run of that project is live, its newest run. Use `<project>` to target another project.
 - `demo` — a deterministic built-in training run; available even with no journals on disk.
 - `<project>` — a project slug from the session list; open its newest run.
 - `stop` — stop the Mission Control server this session launched.
@@ -19,7 +19,7 @@ Run exactly one of these, from any directory:
 
 | Argument | Command |
 |---|---|
-| empty / `live` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open` |
+| empty / `live` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project <basename of the session's working directory>` |
 | `demo` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --demo` |
 | `<project>` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project <slug>` |
 | `stop` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --stop` |
