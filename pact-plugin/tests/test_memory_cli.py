@@ -335,8 +335,8 @@ class TestProjectFileCommand:
         main = tmp_path / "main"
         main.mkdir()
         _git_quiet("init", "-q", ".", cwd=main)
-        (main / "README").write_text("seed\n", encoding="utf-8")
-        _git_quiet("add", "README", cwd=main)
+        (main / "seed.txt").write_text("seed\n", encoding="utf-8")
+        _git_quiet("add", "seed.txt", cwd=main)
         _git_quiet("commit", "-qm", "seed", cwd=main)
         worktree = tmp_path / "wt"
         _git_quiet("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
