@@ -6,7 +6,12 @@ Summary: Reader-side HANDOFF reconciliation for the pact-handoff-harvest
          task-file-preferred union (union_preferring_task_file), the
          NEW-FORMAT partition router (partition_destination), and the
          OLD-FORMAT classification and routing (mixed_old_format_event,
-         old_format_destination).
+         old_format_destination), the journal selection and arc grouping
+         (latest_by_ts_then_journal_order, positioned, store_epochs, arc_of,
+         current_arc, group_events, undivided_contents), the total task
+         accessors (task_metadata, disk_handoff), the realign-source filter
+         (safe_from_teams), and the processed-ledger tokens (ledger_token,
+         unit_token, parse_ledger_tokens).
 Used by: skills/pact-handoff-harvest/SKILL.md (every `python3 -c` route
          imports from this module, including the re-exported emit-side names
          below) and the harvest test suites. NO HOOK IMPORTS THIS MODULE: it
@@ -20,6 +25,7 @@ are re-exported here, so the skill has ONE import path.
 
 from __future__ import annotations
 
+import re
 from typing import NamedTuple
 
 from .agent_handoff_marker import (
@@ -33,6 +39,8 @@ from .handoff_schema import (
     HANDOFF_REQUIRED_FIELDS,
     resolve_handoff_field,
 )
+from .session_journal import _ts_supersedes
+from .session_state import is_safe_path_component
 
 __all__ = [
     "OLD_FORMAT_DEST_FROM",
@@ -46,15 +54,28 @@ __all__ = [
     "PARTITION_FROM",
     "PARTITION_OLD_FORMAT",
     "PARTITION_THIS",
+    "arc_of",
+    "current_arc",
+    "disk_handoff",
     "disk_identity",
     "emit_side_subject",
+    "group_events",
     "handoff_content_key",
+    "latest_by_ts_then_journal_order",
+    "ledger_token",
     "mixed_old_format_event",
     "occupant_hash",
     "old_format_destination",
+    "parse_ledger_tokens",
     "partition_destination",
+    "positioned",
     "report_safe",
+    "safe_from_teams",
+    "store_epochs",
+    "task_metadata",
+    "undivided_contents",
     "union_preferring_task_file",
+    "unit_token",
 ]
 
 
@@ -520,3 +541,291 @@ def mixed_old_format_event(
             f"identity it does not carry"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Journal selection and arc grouping. Every function below is pure, never
+# raises, and takes plain dicts. Positions come from ONE unfiltered journal
+# read (`positioned`); arcs are never assigned by `ts`, because the journal
+# stamps whole seconds and a same-second re-creation would tie.
+# ---------------------------------------------------------------------------
+
+# Event types whose (team, task_id) pair feeds the store-epoch maximum.
+_EPOCH_EVENT_TYPES = frozenset(
+    {"agent_handoff", "task_created", "task_metadata_snapshot"}
+)
+
+
+def latest_by_ts_then_journal_order(events: list) -> dict | None:
+    """The authoritative event of ONE group, given in journal order.
+
+    The later instant wins and an equal instant keeps the LATER journal line.
+    Instants are parsed (`_ts_supersedes`), never compared as strings, and an
+    unparseable `ts` never beats a valid one. None for an empty group.
+    """
+    winner = None
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        if winner is None or _ts_supersedes(event.get("ts"), winner.get("ts")):
+            winner = event
+    return winner
+
+
+def positioned(journal: list) -> list[dict]:
+    """Shallow copies of every dict event with `_pos` = its journal index.
+
+    Read the journal ONCE with no type filter and position that list: a
+    filtered read renumbers, and positions from two reads do not compare.
+    """
+    return [
+        dict(event, _pos=index)
+        for index, event in enumerate(journal or ())
+        if isinstance(event, dict)
+    ]
+
+
+def _pos(event: dict, fallback: int) -> int:
+    pos = event.get("_pos")
+    return pos if isinstance(pos, int) and not isinstance(pos, bool) else fallback
+
+
+def _team(event: dict) -> str | None:
+    team = event.get("team")
+    return team if isinstance(team, str) and team else None
+
+
+def _numeric_id(task_id: object) -> int | None:
+    """An ASCII-decimal string task id as an int, else None. An int-typed
+    or whitespace-padded id is not a platform id and opens no boundary."""
+    if isinstance(task_id, str) and task_id.isascii() and task_id.isdecimal():
+        return int(task_id)
+    return None
+
+
+def store_epochs(journal: list) -> dict[str, list[int]]:
+    """{team: [boundary positions]} — where each team's task store was recreated.
+
+    Walk the journal in order. For each non-empty str `team`, track the
+    highest numeric `task_id` over its agent_handoff, task_created and
+    task_metadata_snapshot events. A `task_created` whose id is AT OR BELOW
+    that maximum opens a new epoch at its position and resets the maximum to
+    its id: a store numbers upward until it is removed and recreated, so a
+    reissued number means a new store. Non-numeric ids never open a boundary.
+    """
+    maxima: dict[str, int] = {}
+    boundaries: dict[str, list[int]] = {}
+    for index, event in enumerate(journal or ()):
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") not in _EPOCH_EVENT_TYPES:
+            continue
+        team = _team(event)
+        number = _numeric_id(event.get("task_id"))
+        if team is None or number is None:
+            continue
+        current = maxima.get(team)
+        if (
+            event.get("type") == "task_created"
+            and current is not None
+            and number <= current
+        ):
+            boundaries.setdefault(team, []).append(_pos(event, index))
+            maxima[team] = number
+        elif current is None or number > current:
+            maxima[team] = number
+    return boundaries
+
+
+def _arc_at(
+    team: str | None, task_id: object, pos: int, journal: list, epochs: dict
+) -> tuple | None:
+    if team is None:
+        return None
+    team_bounds = [b for b in (epochs or {}).get(team, ()) if b <= pos]
+    epoch = len(team_bounds)
+    epoch_start = team_bounds[-1] if team_bounds else -1
+    created_pos = None
+    # Linear scan per event: O(events x creations). Index creations by
+    # (team, task_id) if journals grow large.
+    for index, event in enumerate(journal or ()):
+        if not isinstance(event, dict):
+            continue
+        event_pos = _pos(event, index)
+        if event_pos > pos:
+            break
+        if (
+            event_pos >= epoch_start
+            and event.get("type") == "task_created"
+            and event.get("task_id") == task_id
+            and _team(event) == team
+        ):
+            created_pos = event_pos
+    return (epoch, created_pos)
+
+
+def arc_of(event: dict, journal: list, epochs: dict) -> tuple | None:
+    """(epoch, created_pos) for one positioned event, or None.
+
+    None when the event carries no non-empty str `team` or no `_pos`.
+    `epoch` counts the event team's boundaries at or before its position;
+    `created_pos` is the position of the latest `task_created` with the same
+    `task_id` and team, inside that epoch, at or before the event, else None.
+    """
+    if not isinstance(event, dict):
+        return None
+    pos = event.get("_pos")
+    if not isinstance(pos, int) or isinstance(pos, bool):
+        return None
+    return _arc_at(_team(event), event.get("task_id"), pos, journal, epochs)
+
+
+def current_arc(
+    team: object, task_id: object, journal: list, epochs: dict
+) -> tuple | None:
+    """`arc_of` evaluated at the END of the journal for (team, task_id): the
+    arc the live task file belongs to."""
+    team_name = team if isinstance(team, str) and team else None
+    end = max(
+        (_pos(e, i) for i, e in enumerate(journal or ()) if isinstance(e, dict)),
+        default=-1,
+    ) + 1
+    return _arc_at(team_name, task_id, end, journal, epochs)
+
+
+def group_events(events: list, journal: list, epochs: dict) -> dict:
+    """{(identity, arc): [events in the given order]} for one task's events.
+
+    identity = disk_identity(agent, task_subject), THE ONLY identity
+    derivation for an event, so an empty subject and the "(no subject)"
+    sentinel land in one group. arc = arc_of(event, journal, epochs).
+    """
+    groups: dict = {}
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        agent = event.get("agent")
+        identity = disk_identity(
+            agent if isinstance(agent, str) else "", event.get("task_subject")
+        )
+        key = (identity, arc_of(event, journal, epochs))
+        groups.setdefault(key, []).append(event)
+    return groups
+
+
+def undivided_contents(group: list) -> int:
+    """How many distinct handoff contents one group holds."""
+    return len(
+        {
+            handoff_content_key(event.get("handoff"))
+            for event in group or ()
+            if isinstance(event, dict)
+        }
+    )
+
+
+def task_metadata(task: object) -> dict:
+    """task['metadata'] when task and that value are both dicts, else {}."""
+    if isinstance(task, dict):
+        metadata = task.get("metadata")
+        if isinstance(metadata, dict):
+            return metadata
+    return {}
+
+
+def disk_handoff(task: object) -> dict:
+    """task_metadata(task)['handoff'] when it is a non-empty dict, else {}."""
+    handoff = task_metadata(task).get("handoff")
+    return handoff if isinstance(handoff, dict) and handoff else {}
+
+
+def safe_from_teams(
+    realign_events: list, this_team: object
+) -> tuple[list[str], list[str]]:
+    """(teams, reports) from `team_realigned` events.
+
+    Keeps each `from` that is a str passing is_safe_path_component and is not
+    `this_team`, once, in first-seen order. A rejected non-empty value adds
+    one report line. A `from` equal to `this_team` is dropped silently: it is
+    this section.
+    """
+    teams: list[str] = []
+    reports: list[str] = []
+    for event in realign_events or ():
+        if not isinstance(event, dict):
+            continue
+        value = event.get("from")
+        if value is None or value == "":
+            continue
+        if not is_safe_path_component(value):
+            reports.append(
+                f"handoff realign source invalid: team value "
+                f"{report_safe(value)!r} is not a valid team name; store not "
+                f"read"
+            )
+            continue
+        if value == this_team or value in teams:
+            continue
+        teams.append(value)
+    return teams, reports
+
+
+_CONTENT_KEY_RE = re.compile(r"[0-9a-f]{8}")
+_UNSERIALIZABLE = "unserializable"
+_LEDGER_LABEL = "Processed task IDs"
+
+
+def ledger_token(
+    task_id: object, content_key: object, from_team: object = None
+) -> str | None:
+    """'{id}#{key}' for this team's unit, '{from}/{id}#{key}' for a realigned
+    team's unit, or None when a part is not safe to record.
+
+    The id (a str, or an int) and `from_team` must pass
+    is_safe_path_component; the key must be 8 lowercase hex or
+    'unserializable' (handoff_content_key's two shapes).
+    """
+    if isinstance(task_id, bool) or not isinstance(task_id, (str, int)):
+        return None
+    task = str(task_id)
+    if not is_safe_path_component(task):
+        return None
+    if not isinstance(content_key, str) or not (
+        content_key == _UNSERIALIZABLE or _CONTENT_KEY_RE.fullmatch(content_key)
+    ):
+        return None
+    if from_team is None:
+        return f"{task}#{content_key}"
+    if not is_safe_path_component(from_team):
+        return None
+    return f"{from_team}/{task}#{content_key}"
+
+
+def unit_token(
+    task_id: object, selection_key: object, from_team: object = None
+) -> str | None:
+    """ledger_token for a unit: the key is handoff_content_key(selection_key)."""
+    return ledger_token(task_id, handoff_content_key(selection_key), from_team)
+
+
+def parse_ledger_tokens(section_text: object) -> set[str]:
+    """Every unit token on every 'Processed task IDs' line of a section.
+
+    Takes the text after the line's first ':', splits on commas and strips
+    each item. Keeps only items containing '#': a legacy bare id matches no
+    unit, so its task is read again rather than skipped.
+    """
+    tokens: set[str] = set()
+    if not isinstance(section_text, str):
+        return tokens
+    for line in section_text.splitlines():
+        if not line.startswith(_LEDGER_LABEL):
+            continue
+        _, sep, items = line.partition(":")
+        if not sep:
+            continue
+        for item in items.split(","):
+            item = item.strip()
+            if "#" in item:
+                tokens.add(item)
+    return tokens
