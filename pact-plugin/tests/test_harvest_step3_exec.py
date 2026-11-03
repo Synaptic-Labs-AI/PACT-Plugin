@@ -358,6 +358,35 @@ def test_a_non_string_task_id_is_skipped_and_reported_once(bad_id):
     assert run.count("handoff event skipped: task id") == 1
 
 
+# 24 -- mutant: a disk-only unit keys on its whole metadata
+def test_a_disk_only_unit_and_its_later_journal_copy_share_one_token():
+    store = {THIS: {"5": task(H)}}
+    first = Run([], store, census={THIS: {"5"}})
+    assert len(first.processed) == 1
+    second = Run([ev("5", THIS)], store, census={THIS: {"5"}},
+                 processed=first.recorded)
+    assert second.processed == []
+
+
+# 25 -- mutant: a disk-only unit keys on its whole metadata
+def test_a_sibling_added_beside_a_handoff_does_not_reharvest_the_unit():
+    first = Run([], {THIS: {"5": task(H)}}, census={THIS: {"5"}})
+    second = Run([], {THIS: {"5": task(H, post_completion_verification="ok")}},
+                 census={THIS: {"5"}}, processed=first.recorded)
+    assert second.processed == []
+
+
+# 26 -- mutant: a disk-only unit keys on its handoff alone
+def test_a_changed_sibling_only_task_is_harvested_again():
+    def sibling_only(value):
+        return {"owner": "coder", "subject": "s", "metadata": {"audit_summary": value}}
+    first = Run([], {THIS: {"5": sibling_only("a")}}, census={THIS: {"5"}})
+    assert len(first.processed) == 1
+    second = Run([], {THIS: {"5": sibling_only("b")}}, census={THIS: {"5"}},
+                 processed=first.recorded)
+    assert len(second.processed) == 1
+
+
 @pytest.mark.parametrize("this", ["", None])
 def test_an_underivable_team_routes_every_event_old_format(this):
     """Control for the guard: no `Task list:` makes every event OLD-FORMAT

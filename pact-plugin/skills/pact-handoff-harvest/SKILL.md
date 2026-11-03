@@ -271,7 +271,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
     `$PAYLOAD_JSON` holds `{"realign_events": [...], "this_team": "..."}`.
 
-16. **`unit_token`**, a work unit's ledger token: `{id}#{key}`, or `{from}/{id}#{key}` when the third argument names a realigned team. The selection key crosses on STDIN: the selected journal handoff for a journal group, or the task's whole `metadata` for a disk-only unit. An empty line means a part was not a valid name; process the unit, do not record it, and report it as the pseudocode does:
+16. **`unit_token`**, a work unit's ledger token: `{id}#{key}`, or `{from}/{id}#{key}` when the third argument names a realigned team. The selection key crosses on STDIN: the selected journal handoff for a journal group; for a disk-only unit, its task-file handoff, or its whole `metadata` when it carries no handoff. An empty line means a part was not a valid name; process the unit, do not record it, and report it as the pseudocode does:
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import unit_token; print(unit_token(sys.argv[1], json.load(sys.stdin), sys.argv[2] or None) or '')" "$TASK_ID" "$FROM_TEAM" < "$SELECTION_KEY_JSON"
@@ -494,7 +494,7 @@ for task_id in sorted(ids):
             from_handled_any = True
         if not groups:
             if from_task and (team, task_id) in candidates:
-                handle(team, task_id, disk, meta, meta)   # rule 5, from store
+                handle(team, task_id, disk, meta, disk or meta)   # rule 5, from store
             elif not from_task:
                 report(f"handoff divergence check unavailable for task "
                        f"{report_safe(task_id)}: task file absent")
@@ -518,7 +518,7 @@ for task_id in sorted(ids):
         current_arc(this_team, task_id, journal, epochs)) if task else None
     if not groups:
         if task:
-            handle(None, task_id, disk, meta, meta)       # rule 5
+            handle(None, task_id, disk, meta, disk or meta)       # rule 5
         elif not from_handled_any:
             report_gap(task_id, "unknown",
                        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))

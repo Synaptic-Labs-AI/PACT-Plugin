@@ -1262,9 +1262,9 @@ class TestHarvestRuleProse:
         )
         disk_only = self._from_disk_only_branch()
         assert "read_task_json" not in disk_only
-        assert "handle(team, task_id, disk, meta, meta)" in disk_only
+        assert "handle(team, task_id, disk, meta, disk or meta)" in disk_only
         block = self._from_section()
-        assert block.index("handle(team, task_id, disk, meta, meta)") < block.index(
+        assert block.index("handle(team, task_id, disk, meta, disk or meta)") < block.index(
             "handoff divergence check unavailable for task"
         )
 
@@ -1290,7 +1290,7 @@ class TestHarvestRuleProse:
         disk-only branch must not set the flag — otherwise a drained
         this-team discovery vanishes with no gap report."""
         disk_only = self._from_disk_only_branch()
-        assert "handle(team, task_id, disk, meta, meta)" in disk_only
+        assert "handle(team, task_id, disk, meta, disk or meta)" in disk_only
         assert "from_handled_any = True" not in disk_only
         # The gap line the flag would suppress is still reachable.
         assert 'report_gap(task_id, "unknown",' in SKILL_TEXT
@@ -1515,8 +1515,8 @@ class TestHarvestRuleProse:
     def test_minor_disk_only_paths_pass_metadata_to_process(self):
         """Rule 5 promises Step 3.1 resolves sibling keys, so the disk-only
         branches pass the section's task metadata, not only its handoff."""
-        assert "handle(team, task_id, disk, meta, meta)" in SKILL_TEXT
-        assert "handle(None, task_id, disk, meta, meta)" in SKILL_TEXT
+        assert "handle(team, task_id, disk, meta, disk or meta)" in SKILL_TEXT
+        assert "handle(None, task_id, disk, meta, disk or meta)" in SKILL_TEXT
         assert "meta = task_metadata(from_task)" in SKILL_TEXT
         assert "meta = task_metadata(task)" in SKILL_TEXT
 
