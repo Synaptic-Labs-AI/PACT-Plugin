@@ -794,7 +794,12 @@ def safe_from_teams(
 
 _CONTENT_KEY_RE = re.compile(r"[0-9a-f]{8}")
 _UNSERIALIZABLE = "unserializable"
-_LEDGER_LABEL = "Processed task IDs"
+# A unit token identifies itself: '{id}#{key}' or '{from}/{id}#{key}', with no
+# token character glued on either side.
+_LEDGER_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_/-])(?:[A-Za-z0-9_-]+/)?[A-Za-z0-9_-]+"
+    r"#(?:[0-9a-f]{8}|unserializable)(?![A-Za-z0-9_-])"
+)
 
 
 def ledger_token(
@@ -831,23 +836,12 @@ def unit_token(
 
 
 def parse_ledger_tokens(section_text: object) -> set[str]:
-    """Every unit token on every 'Processed task IDs' line of a section.
+    """Every unit token anywhere in a ledger section's text.
 
-    Takes the text after the line's first ':', splits on commas and strips
-    each item. Keeps only items containing '#': a legacy bare id matches no
-    unit, so its task is read again rather than skipped.
+    Tokens identify themselves, so the whole text is scanned rather than only
+    lines that start with the label. A legacy bare id matches nothing, so its
+    task is read again rather than skipped.
     """
-    tokens: set[str] = set()
     if not isinstance(section_text, str):
-        return tokens
-    for line in section_text.splitlines():
-        if not line.startswith(_LEDGER_LABEL):
-            continue
-        _, sep, items = line.partition(":")
-        if not sep:
-            continue
-        for item in items.split(","):
-            item = item.strip()
-            if "#" in item:
-                tokens.add(item)
-    return tokens
+        return set()
+    return set(_LEDGER_TOKEN_RE.findall(section_text))

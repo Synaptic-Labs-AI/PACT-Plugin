@@ -338,3 +338,24 @@ class TestOwningGroup:
     def test_malformed_inputs_never_raise(self):
         assert owning_group(None, "id", self.DATED) is None
         assert owning_group({("id", None): []}, "id", [1, 2]) == ("id", None)
+
+
+class TestParseLedgerTokensWholeText:
+    """Tokens are found anywhere in the section text, and only whole tokens.
+    Kills: reading label-start lines only; dropping either boundary guard;
+    dropping the `{from}/` prefix."""
+
+    def test_mid_line_token_in_narrative_is_found(self):
+        text = "Note: re-read 5#0123abcd after the drain; see above."
+        assert parse_ledger_tokens(text) == {"5#0123abcd"}
+
+    def test_from_token_is_found_whole(self):
+        text = "- session-x/7#unserializable was recorded late"
+        assert parse_ledger_tokens(text) == {"session-x/7#unserializable"}
+
+    def test_non_tokens_are_rejected(self):
+        for text in ("3", "#123", "abc#XYZ", "5#deadbeefx", "5#0123ABCD"):
+            assert parse_ledger_tokens(text) == set(), text
+
+    def test_a_token_cannot_start_inside_a_path(self):
+        assert parse_ledger_tokens("a/b/5#0123abcd") == set()
