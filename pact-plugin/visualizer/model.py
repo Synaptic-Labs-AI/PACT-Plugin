@@ -30,6 +30,7 @@ from .settings import (
     MAX_FIELD_CHARS,
     MAX_FINDINGS,
     MAX_GATE_RULES,
+    MAX_GATE_TOOLS,
     MAX_HANDOFFS,
     MAX_HEALTH_FAILURES,
     MAX_REVIEWS,
@@ -37,6 +38,7 @@ from .settings import (
     MAX_VARIETY_HISTORY,
     MAX_WARNINGS,
     VERSION,
+    normalize_variety,
 )
 
 PHASE_ORDER: tuple[str, ...] = ("PREPARE", "ARCHITECT", "CODE", "TEST")
@@ -535,7 +537,7 @@ def _task_from_seed(seed: Mapping[str, Any]) -> dict | None:
             "phase": _normalize_phase(seed.get("phase")),
             "status": roster.normalize_status(seed.get("status")),
             "kind": _text(seed.get("kind"), 40) or "task",
-            "variety": classify.normalize_variety(seed.get("variety")),
+            "variety": normalize_variety(seed.get("variety")),
             "teachback": bool(seed.get("teachback")),
             "handoff": bool(seed.get("handoff")),
             "updated_at": _text(seed.get("updated_at"), 64),
@@ -635,7 +637,7 @@ def derive_tasks(
                 if owner:
                     task["owner"] = owner
                 metadata = _mapping(data.get("metadata"))
-                variety = classify.normalize_variety(metadata.get("variety"))
+                variety = normalize_variety(metadata.get("variety"))
                 if variety is not None:
                     task["variety"] = variety
                 if metadata.get("teachback_submit"):
@@ -651,7 +653,7 @@ def derive_tasks(
                         task["status"] = normalized
                 task["updated_at"] = ts or task["updated_at"]
         elif event_type in {"variety_assessed", "dispatch_variety", "dispatch_site"}:
-            variety = classify.normalize_variety(data.get("variety"))
+            variety = normalize_variety(data.get("variety"))
             if variety is not None:
                 task = ensure(task_id)
                 if task is not None:
@@ -748,11 +750,6 @@ def derive_commits(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], int
         data = _mapping(event.get("raw"))
         sha = _text(data.get("sha"), 60)
         message = _text(data.get("message"), 240)
-        if not sha:
-            message_field = _text(event.get("title"), 240)
-            if message_field.startswith("Commit "):
-                remainder = message_field[len("Commit "):]
-                sha, _, message = remainder.partition(" · ")
         commits.append(
             {
                 "seq": event.get("seq"),
@@ -878,7 +875,7 @@ def derive_checkpoints(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict],
                     if _normalize_phase(phase)
                 ],
                 "active_agents": active_agents,
-                "variety": classify.normalize_variety(data.get("variety")),
+                "variety": normalize_variety(data.get("variety")),
             }
         )
     total = len(checkpoints)
@@ -893,7 +890,8 @@ def derive_gates(events: Sequence[Mapping[str, Any]]) -> dict:
              advisory rules, lists gate_health failures (hook/stage/error), and
              counts the two telemetry loss signals (journal_emit_skipped and
              handoff_refusal_degraded). Counters are full-journal totals; the
-             health_failures list is bounded.
+             health_failures list is bounded and by_tool carries at most
+             MAX_GATE_TOOLS tools (by_tool_total keeps the honest count).
     Used by: derive_model, tests.
     """
     allowed = 0
@@ -940,10 +938,19 @@ def derive_gates(events: Sequence[Mapping[str, Any]]) -> dict:
         {"rule": rule, "count": count}
         for rule, count in sorted(rule_counts.items(), key=lambda item: (-item[1], item[0]))
     ][:MAX_GATE_RULES]
+    by_tool_total = len(by_tool)
+    if by_tool_total > MAX_GATE_TOOLS:
+        by_tool = dict(
+            sorted(
+                by_tool.items(),
+                key=lambda item: (-sum(item[1].values()), item[0]),
+            )[:MAX_GATE_TOOLS]
+        )
     return {
         "allowed": allowed,
         "advisory": advisory,
         "by_tool": by_tool,
+        "by_tool_total": by_tool_total,
         "top_rules": top_rules,
         "health_failures": health_failures,
         "telemetry": telemetry,
@@ -978,7 +985,7 @@ def derive_variety(
         }:
             continue
         data = _mapping(event.get("raw"))
-        variety = classify.normalize_variety(data.get("variety"))
+        variety = normalize_variety(data.get("variety"))
         if variety is None:
             continue
         if event_type == "variety_assessed":

@@ -898,3 +898,124 @@ class TestDemoModelDirect:
         assert payload["meta"]["event_count"] == len(payload["events"])
         assert journal.make_etag(payload["source"]["mtime"], payload["source"]["size"]) == "0-0"
         assert model.PHASE_ORDER == ("PREPARE", "ARCHITECT", "CODE", "TEST")
+
+
+def _host_request(port: int, path: str, host: str, timeout: float = 5.0) -> HttpResponse:
+    """One request carrying an explicit Host header (rebinding probe shape)."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.putrequest("GET", path, skip_host=True)
+        connection.putheader("Host", host)
+        connection.endheaders()
+        response = connection.getresponse()
+        body = response.read()
+        headers = {name.lower(): value for name, value in response.getheaders()}
+        return HttpResponse(response.status, headers, body)
+    finally:
+        connection.close()
+
+
+class TestHostHeaderAndErrorContract:
+    """A Host other than the loopback names is refused before any route runs."""
+
+    def test_foreign_host_is_403_with_security_headers(self, live_server):
+        srv, _root = live_server
+        response = _host_request(srv.server_port, "/api/health", "attacker.example")
+        assert response.status == 403
+        assert response.json() == {"ok": False, "error": "forbidden host"}
+        assert "content-security-policy" in response.headers
+
+    def test_missing_host_is_refused(self, live_server):
+        srv, _root = live_server
+        response = _host_request(srv.server_port, "/api/health", "")
+        assert response.status == 403
+
+    def test_loopback_and_localhost_hosts_pass(self, live_server):
+        srv, _root = live_server
+        for host in (f"127.0.0.1:{srv.server_port}", "localhost", "LOCALHOST:80"):
+            response = _host_request(srv.server_port, "/api/health", host)
+            assert response.status == 200, host
+            assert response.json()["ok"] is True
+
+    def test_malformed_request_line_gets_json_and_security_headers(self):
+        """The stdlib send_error path must honor the every-response contract.
+
+        BaseHTTPRequestHandler answers an unparseable request line with a
+        plain HTML body and no security headers; the server routes that path
+        through its JSON error shape instead.
+        """
+        srv = server_module.create_server([])
+        try:
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            with socket.create_connection(("127.0.0.1", srv.server_port), timeout=5) as sock:
+                sock.sendall(b"GARBAGE\r\n\r\n")
+                chunks = []
+                try:
+                    while True:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                except socket.timeout:
+                    pass
+            raw = b"".join(chunks)
+            assert b"HTTP/1.1 400" in raw
+            assert b"content-security-policy" in raw.lower()
+            assert b'"ok":false' in raw
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_allow_reuse_address_is_posix_only(self):
+        assert server_module.MissionControlServer.allow_reuse_address == (
+            sys.platform != "win32"
+        )
+
+
+class TestReuseAndStopGuards:
+    """cmd_stop must not clear a replacement instance's state (M2) and reuse
+    must refuse when the running instance serves a different request (M5)."""
+
+    def test_clear_state_if_instance_leaves_a_replacement_alone(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A"})
+        cli.write_state(state_dir, {"pid": 2, "port": 2, "url": "u", "instance_id": "B"})
+        # The stale-A clear must not delete instance B's state file.
+        cli._clear_state_if_instance(state_dir, "A")
+        assert cli.read_state(state_dir)["instance_id"] == "B"
+        # Clearing for B itself (file gone → None → clear) still works.
+        cli._clear_state_if_instance(state_dir, "B")
+        assert cli.read_state(state_dir) is None
+
+    def test_detach_refuses_reuse_for_different_roots(self, tmp_path):
+        root_a = make_root(tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        state_dir = tmp_path / "state"
+        args_a = ["--detach", "--root", str(root_a), "--state-dir", str(state_dir), "--port", "0"]
+        try:
+            started = _run_cli(args_a, tmp_path)
+            assert started.returncode == 0, started.stderr
+            url = _parse_url(started.stdout)
+            port = int(url.split(":")[-1].rstrip("/"))
+            assert _https_ok(port)
+
+            # Same request reuses (control arm).
+            again = _run_cli(args_a, tmp_path)
+            assert again.returncode == 0, again.stderr
+            assert "reusing" in again.stdout
+
+            # A different root must be refused with the stop hint, not
+            # silently answered with the old instance's URL.
+            mismatch = _run_cli(
+                ["--detach", "--root", str(other), "--state-dir", str(state_dir)],
+                tmp_path,
+            )
+            assert mismatch.returncode == 1
+            assert "different roots" in mismatch.stderr
+            assert "--stop" in mismatch.stderr
+        finally:
+            if settings.state_file(state_dir).exists():
+                _run_cli(["--stop", "--state-dir", str(state_dir)], tmp_path)

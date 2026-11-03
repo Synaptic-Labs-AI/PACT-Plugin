@@ -26,17 +26,6 @@ visualizer/
   static/js/{api,dom,app,sprites,stage,panels,timeline,charts,audio,achievements}.js
 ```
 
-Lead owns: `CONTRACT.md`, `static/index.html`, `static/css/base.css`,
-`static/js/{api,dom,app}.js`, `static/dev-demo.json`, integration fixes.
-Data teammate owns: all other `visualizer/*.py`, `bin/pact-viz`,
-`tests/test_visualizer_{data,server}.py`.
-Stage teammate owns: `static/js/{sprites,stage}.js`, `static/css/stage.css`.
-Panels teammate owns: `static/js/{panels,timeline,charts,audio,achievements}.js`,
-`static/css/panels.css`.
-Docs/QA teammate owns: `commands/visualize.md`, `visualizer/README.md`,
-`plugin.json`, root/plugin README edits, gate-test edits,
-`tests/test_visualizer_{assets,command}.py`, hero capture.
-
 ## HTTP API
 
 All responses are JSON, `Content-Type: application/json; charset=utf-8`.
@@ -86,7 +75,9 @@ Errors are `{"ok": false, "error": "<short reason>"}` with 400/404/405.
 ```
 
 List entries are deliberately cheap: no full journal parse. `started_at` may be
-null when unavailable. Sorted newest `updated_at` first, capped by `limit`.
+null when unavailable. `last_phase` reflects the last `phase_transition` within
+512KB of the journal's end; older transitions yield `""`. Sorted newest
+`updated_at` first, capped by `limit`.
 
 ### GET /api/session?root=…&slug=…&session_id=…&since=…
 
@@ -283,7 +274,7 @@ Available even when no real sessions exist. Deterministic except base time.
   containment and MIME rules. These are aliases only; no other root path is
   served.
 - Anything else → 404.
-- Headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-cache`.
+- Headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-cache`.
 
 ## DOM shell (Lead-owned index.html)
 
@@ -342,10 +333,6 @@ export async function sessions();
 export async function session({root, slug, session_id, since}); // 304-equivalent -> {unchanged,etag}
 export async function demo({since});
 ```
-
-Mock mode reads `./dev-demo.json` for `demo()` and `session()` and synthesizes
-one `sessions()` entry from its meta. This is what stage/panels use while the
-Python server is being built.
 
 ### stage.js (Stage teammate)
 

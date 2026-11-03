@@ -24,6 +24,7 @@ from typing import Iterator
 from .settings import (
     JOURNAL_FILENAME,
     LIVE_WINDOW_S,
+    MAX_JOURNAL_BYTES,
     MAX_WARNINGS,
     SUMMARY_HEAD_BYTES,
     SUMMARY_TAIL_BYTES,
@@ -189,14 +190,22 @@ def read_journal(path: Path) -> JournalRead:
              index. Blank lines are skipped silently; malformed JSON,
              non-object values, missing/blank type, non-UTF-8 bytes and a
              partially written final line are skipped with one bounded
-             warning each (counted, not enumerated forever). A missing or
-             unreadable file yields an empty read with the stat zeroed.
+             warning each (counted, not enumerated forever). A missing,
+             unreadable, or larger-than-MAX_JOURNAL_BYTES file yields an
+             empty read with the stat zeroed.
     Used by: model.build_model, server, tests.
     """
     read = JournalRead()
     stat = journal_stat(path)
     if stat is not None:
         read.mtime, read.size = stat
+    if stat is not None and stat[1] > MAX_JOURNAL_BYTES:
+        _add_warning(
+            read.warnings,
+            f"journal is {stat[1]} bytes (over the {MAX_JOURNAL_BYTES} "
+            "byte cap); refusing the full parse",
+        )
+        return read
     try:
         data = path.read_bytes()
     except OSError:
@@ -324,6 +333,47 @@ def _timestamp_of(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# How many tail-sized windows the last-phase scan will walk backward before
+# giving up: 4 x SUMMARY_TAIL_BYTES. A phase_transition older than that from
+# the end leaves last_phase empty — the bound keeps the cheap summary path
+# cheap instead of parsing the whole file.
+_PHASE_SCAN_MAX_WINDOWS = 4
+
+
+def _last_phase_transition(path: Path, size: int) -> str:
+    """Bounded backward scan for the most recent phase_transition's phase.
+
+    Location: journal._last_phase_transition.
+    Summary: Walks tail-sized windows from the end of the file toward the
+             start (at most _PHASE_SCAN_MAX_WINDOWS of them) and returns the
+             phase of the newest phase_transition found; "" when none is
+             within the scanned budget. The first line of each window may be
+             a byte-boundary fragment and is skipped by the tolerant parser.
+    Used by: summarize_journal.
+    """
+    offset = size
+    for _ in range(_PHASE_SCAN_MAX_WINDOWS):
+        if offset <= 0:
+            break
+        window = min(offset, SUMMARY_TAIL_BYTES)
+        start = offset - window
+        data = _read_window(path, start, window)
+        for _, raw_line in reversed(list(_iter_lines(data))):
+            if not raw_line.strip():
+                continue
+            text = decode_line(raw_line)
+            if text is None:
+                continue
+            value = _parse_object(text)
+            if value is None or value.get("type") != "phase_transition":
+                continue
+            phase = value.get("phase")
+            if isinstance(phase, str) and phase:
+                return phase
+        offset = start
+    return ""
+
+
 def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary:
     """Build the cheap /api/sessions summary from bounded head/tail reads.
 
@@ -373,13 +423,7 @@ def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary
                 if event_type == "session_end":
                     ended = True
                 break
-        for event in reversed(tail):
-            data = event.data
-            if data.get("type") == "phase_transition":
-                phase = data.get("phase")
-                if isinstance(phase, str) and phase:
-                    summary.last_phase = phase
-                break
+        summary.last_phase = _last_phase_transition(path, summary.size)
         if ended:
             summary.status = "ended"
         else:

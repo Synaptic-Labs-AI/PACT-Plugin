@@ -49,6 +49,7 @@ MAX_COMMITS = 2000
 MAX_CHECKPOINTS = 500
 MAX_HEALTH_FAILURES = 200
 MAX_GATE_RULES = 12
+MAX_GATE_TOOLS = 40
 MAX_AGENTS = 200
 MAX_VARIETY_HISTORY = 500
 MAX_REVIEWERS = 40
@@ -80,7 +81,7 @@ SUMMARY_TAIL_BYTES = 128 * 1024
 
 CSP = (
     "default-src 'self'; img-src 'self' data:; "
-    "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+    "style-src 'self'; script-src 'self'; "
     "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
 )
 SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
@@ -110,6 +111,59 @@ STATIC_MIME_TYPES: dict[str, str] = {
 
 JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 
+# A journal larger than this is refused a full parse (read_journal answers an
+# empty read with a warning) so a runaway multi-GB journal cannot balloon the
+# server's RSS; summaries keep their own smaller head/tail windows below.
+MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+
+
+def _variety_int(value: object) -> int | None:
+    """Best-effort int for a variety dimension (rejects bools and text)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def normalize_variety(value: object) -> dict | None:
+    """Project a variety payload onto the four dimensions plus total.
+
+    Location: settings.normalize_variety.
+    Summary: Accepts {"novelty","scope","uncertainty","risk","total"}; missing
+             dimensions stay 0, a missing total is the dimension sum. Returns
+             None unless the payload carries at least one dimension or total,
+             so a UI can distinguish "no assessment" from "zero".
+    Used by: classify (variety renderers), model (tasks, checkpoints, variety
+             block), roster (task-store records).
+    """
+    if not isinstance(value, Mapping):
+        return None
+    dims = ("novelty", "scope", "uncertainty", "risk")
+    projected: dict[str, int] = {}
+    found = False
+    for name in dims:
+        number = _variety_int(value.get(name))
+        if number is None:
+            projected[name] = 0
+        else:
+            projected[name] = max(0, min(99, number))
+            found = True
+    total = _variety_int(value.get("total"))
+    if total is None:
+        total = sum(projected[name] for name in dims)
+    projected["total"] = max(0, min(999, total))
+    if not found and not projected["total"]:
+        return None
+    return {name: projected[name] for name in (*dims, "total")}
+
 
 @dataclass(frozen=True)
 class RootSpec:
@@ -138,17 +192,6 @@ class RootSpec:
             "journals": 0,
             "default": self.default,
         }
-
-
-def statically_servable(name: str) -> bool:
-    """True when a file name has an allowlisted static extension.
-
-    Location: settings.statically_servable.
-    Summary: The static route serves only these extensions; anything else is a
-             404, so an unexpected file dropped into static/ cannot be served.
-    Used by: server.
-    """
-    return Path(name).suffix.lower() in STATIC_MIME_TYPES
 
 
 def python_version_ok(version_info: object = sys.version_info) -> bool:
@@ -211,30 +254,6 @@ def _root_spec(path: Path, home: Path, default: bool) -> RootSpec:
         path=_normalise(path),
         default=default,
     )
-
-
-def config_root(
-    root_args: Sequence[str | os.PathLike[str]] = (),
-    *,
-    env: Mapping[str, str] | None = None,
-    home: Path | None = None,
-) -> Path:
-    """The primary config root: first --root, else $CLAUDE_CONFIG_DIR, else ~/.claude.
-
-    Location: settings.config_root.
-    Summary: Mirrors the discovery precedence exactly, without the --all-roots
-             expansion. Used to locate the default state directory even when
-             the server reads several roots.
-    Used by: cli.
-    """
-    environment = os.environ if env is None else env
-    home_dir = Path.home() if home is None else home
-    if root_args:
-        return _expanded(root_args[0], home_dir)
-    env_root = environment.get("CLAUDE_CONFIG_DIR", "")
-    if env_root:
-        return _expanded(env_root, home_dir)
-    return _normalise(home_dir / ".claude")
 
 
 def resolve_roots(

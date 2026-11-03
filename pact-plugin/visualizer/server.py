@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -74,7 +75,9 @@ class MissionControlServer(ThreadingHTTPServer):
     """
 
     daemon_threads = True
-    allow_reuse_address = True
+    # SO_REUSEADDR on win32 lets a second bind steal the first server's port;
+    # gate it to POSIX where it only shortens TIME_WAIT waits.
+    allow_reuse_address = sys.platform != "win32"
 
     def __init__(
         self,
@@ -120,6 +123,11 @@ class MissionControlHandler(BaseHTTPRequestHandler):
     sys_version = ""
     protocol_version = "HTTP/1.1"
 
+    # Set by _send_headers once the status line and headers are on the wire.
+    # A crash after this point must close the connection, never write a
+    # second status line into the stream.
+    _headers_sent: bool = False
+
     # -- lifecycle -------------------------------------------------------
 
     @property
@@ -134,6 +142,7 @@ class MissionControlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Route one GET request."""
+        self._headers_sent = False
         try:
             self._route_get()
         except (BrokenPipeError, ConnectionResetError):
@@ -141,7 +150,38 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 — a handler crash must still answer JSON
             if getattr(self.mission_server, "verbose", False):
                 self.log_error("unhandled request error: %s", self.path)
+            if self._headers_sent:
+                # Headers are already on the wire: an error body here would
+                # corrupt the stream, so the connection just ends.
+                self.close_connection = True
+                return
             self._send_json(500, {"ok": False, "error": "internal error"})
+
+    def send_error(  # noqa: A002 — stdlib passes message/explain kwargs
+        self, code, message=None, explain=None
+    ) -> None:
+        """Answer stdlib error paths (malformed request lines) with the contract.
+
+        BaseHTTPRequestHandler reports an unparseable request line or a bad
+        HTTP version through send_error BEFORE do_GET ever runs, and its stock
+        implementation answers with an HTML body that carries none of the
+        security headers; routing it through _send_json keeps the
+        every-response contract intact.
+        """
+        self.close_connection = True
+        # A failed parse leaves request_version at the HTTP/0.9 default, which
+        # makes stdlib response helpers write a bare body with no status line
+        # or headers; answer as HTTP/1.1 so the JSON error carries the full
+        # contract.
+        self.request_version = "HTTP/1.1"
+        short = message
+        if not isinstance(short, str) or not short:
+            entry = self.responses.get(int(code)) if hasattr(self, "responses") else None
+            short = (entry[0] if entry else str(code)).replace("\r", " ").replace("\n", " ")
+        try:
+            self._send_json(int(code), {"ok": False, "error": short})
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def _method_not_allowed(self) -> None:
         """Answer any non-GET method with the contract's 405 JSON body."""
@@ -158,6 +198,9 @@ class MissionControlHandler(BaseHTTPRequestHandler):
 
     def _route_get(self) -> None:
         """Split the URL and dispatch to one route (percent-decoded once)."""
+        if not _host_allowed(self.headers.get("Host", "")):
+            self._send_error(403, "forbidden host")
+            return
         split = urlsplit(self.path)
         # Decode EXACTLY ONCE here so every route (static, aliases, traversal
         # checks) sees the same effective path; nothing decodes again later,
@@ -202,6 +245,7 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         for name, value in extra_headers:
             self.send_header(name, value)
         self.end_headers()
+        self._headers_sent = True
 
     def _send_json(
         self,
@@ -397,14 +441,29 @@ def _alias_relative_path(path: str) -> str | None:
 
 
 def _first_param(params: Mapping[str, list[str]], key: str) -> str | None:
-    """First non-empty value for a query parameter, or None."""
+    """First non-empty value for a query parameter, or None (all-blank is None)."""
     values = params.get(key)
     if not values:
         return None
     for value in values:
         if value != "":
             return value
-    return values[0]
+    return None
+
+
+def _host_allowed(host: str) -> bool:
+    """True when the Host header names this loopback server.
+
+    Location: server._host_allowed.
+    Summary: Accepts a host portion of exactly ``127.0.0.1`` or ``localhost``
+             with an optional ``:port``; anything else (an attacker domain
+             from a DNS-rebinding page, a missing Host) is refused by the
+             router with a 403 before any route runs.
+    Used by: MissionControlHandler._route_get.
+    """
+    host = host.strip()
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return name.lower() in {"127.0.0.1", "localhost"}
 
 
 def _parse_limit(value: str) -> int | None:

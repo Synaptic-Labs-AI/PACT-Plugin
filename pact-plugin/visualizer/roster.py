@@ -18,13 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .classify import normalize_variety
 from .discovery import valid_component
 from .settings import (
     ROSTER_FILENAME,
     TASKS_DIRNAME,
     TEAMS_DIRNAME,
     TEAM_CONFIG_FILENAME,
+    normalize_variety,
 )
 
 MAX_STATE_FILE_BYTES = 512 * 1024

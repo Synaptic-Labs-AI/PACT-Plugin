@@ -393,6 +393,37 @@ class TestJournalRead:
         summary = journal.summarize_journal(path, now=future)
         assert summary.status == "ended"
 
+    def test_summarize_finds_last_phase_beyond_the_tail_window(self, tmp_path):
+        """A phase_transition earlier than the tail window still reports.
+
+        The summary's last_phase used to read only the final tail window, so
+        a long tail of non-phase events erased the phase. The bounded
+        backward scan must recover it without parsing the whole file.
+        """
+        root = make_root(tmp_path)
+        events = [
+            {"v": 1, "type": "phase_transition", "ts": "2026-01-01T00:00:00Z",
+             "phase": "ARCHITECT", "status": "started"},
+        ]
+        filler = [
+            {"v": 1, "type": "commit", "ts": "2026-01-01T00:30:00Z",
+             "sha": f"{index:08x}", "message": "m" * 400, "phase": "CODE"}
+            for index in range(400)
+        ]
+        path = write_journal(root, "proj", "sess", events + filler)
+        assert path.stat().st_size > settings.SUMMARY_TAIL_BYTES
+        summary = journal.summarize_journal(path)
+        assert summary.last_phase == "ARCHITECT"
+
+    def test_read_journal_refuses_oversize_file(self, tmp_path, monkeypatch):
+        """A journal over the read cap yields an empty read with a warning."""
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", basic_events()[:4])
+        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", 10)
+        read = journal.read_journal(path)
+        assert read.events == []
+        assert read.warnings and "byte cap" in read.warnings[0]
+
 
 # ---------------------------------------------------------------------------
 # Classification
@@ -455,6 +486,19 @@ class TestClassify:
         fields = classify.extract_handoff_fields(
             {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
         )
+        assert classify.handoff_schema_complete(fields) is True
+
+    def test_handoff_list_valued_fields_are_joined_not_dropped(self):
+        """The handoff schema is presence-only, so a field may carry a list.
+
+        open_questions is commonly list-shaped in real handoffs; coercing it
+        to None would badge a schema-valid handoff incomplete (the same
+        failure class the reasoning_chain carve-out exists to prevent).
+        """
+        payload = {name: name.upper() for name in classify.HANDOFF_REQUIRED_FIELDS}
+        payload["open_questions"] = ["one question", "another question"]
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["open_questions"] == "one question · another question"
         assert classify.handoff_schema_complete(fields) is True
 
     def test_handoff_schema_complete_allows_missing_recommended_reasoning_chain(self):
@@ -868,6 +912,25 @@ class TestPhasesRerunSkip:
 
 
 class TestCaps:
+    def test_gates_by_tool_is_capped_with_an_honest_total(self):
+        """by_tool must not grow without bound with distinct tool names."""
+        events = [
+            {
+                "type": "lifecycle_decision",
+                "seq": index,
+                "raw": {"tool_name": f"tool{index}", "verdict": "allow"},
+            }
+            for index in range(settings.MAX_GATE_TOOLS + 20)
+        ]
+        gates = model.derive_gates(events)
+        assert len(gates["by_tool"]) == settings.MAX_GATE_TOOLS
+        assert gates["by_tool_total"] == settings.MAX_GATE_TOOLS + 20
+        # the kept tools are the busiest, deterministically ordered
+        kept = list(gates["by_tool"])
+        assert kept == sorted(
+            kept, key=lambda name: (-sum(gates["by_tool"][name].values()), name)
+        )
+
     def test_event_cap_keeps_most_recent_and_marks_truncated(self, tmp_path):
         root = make_root(tmp_path)
         total = settings.MAX_EVENTS + 250

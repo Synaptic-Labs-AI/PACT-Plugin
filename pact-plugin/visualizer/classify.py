@@ -23,6 +23,7 @@ from .settings import (
     MAX_DETAIL_CHARS,
     MAX_FIELD_CHARS,
     MAX_TITLE_CHARS,
+    normalize_variety,
 )
 
 # Canonical handoff fields, in the order the PACT templates teach them. Kept
@@ -175,44 +176,16 @@ def as_str_list(value: Any, limit: int = 40) -> list[str]:
     return out
 
 
-def normalize_variety(value: Any) -> dict | None:
-    """Project a variety payload onto the four dimensions plus total.
-
-    Location: classify.normalize_variety.
-    Summary: Accepts {"novelty","scope","uncertainty","risk","total"}; missing
-             dimensions stay 0, a missing total is the dimension sum. Returns
-             None unless the payload is a mapping with at least one dimension
-             so a UI can distinguish "no assessment" from "zero".
-    Used by: model (tasks, checkpoints, variety section), demo.
-    """
-    if not isinstance(value, Mapping):
-        return None
-    dims = ("novelty", "scope", "uncertainty", "risk")
-    projected: dict[str, int] = {}
-    found = False
-    for name in dims:
-        number = as_int(value.get(name), None)
-        if number is None:
-            projected[name] = 0
-        else:
-            projected[name] = max(0, min(99, number))
-            found = True
-    total = as_int(value.get("total"), None)
-    if total is None:
-        total = sum(projected[name] for name in dims)
-    projected["total"] = max(0, min(999, total))
-    if not found and not projected["total"]:
-        return None
-    return {name: projected[name] for name in (*dims, "total")}
-
-
 def trim_text(value: str, limit: int) -> str:
     """Bound a text field to exactly ``limit`` chars or fewer.
 
     Location: classify.trim_text.
     Summary: When truncation is needed the ellipsis is included INSIDE the
              cap (limit-1 chars + one ellipsis) so the contract's 240/500
-             bounds are upper bounds on the rendered string.
+             bounds are upper bounds on the rendered string. The renderer
+             inputs are already bounded by as_text, so the ellipsis branch is
+             DEFENSIVE: it fires only for a future caller that hands trim_text
+             an unbounded string, not on today's classify_event path.
     Used by: classify_event.
     """
     if len(value) <= limit:
@@ -260,6 +233,22 @@ def _trim_mapping(data: Mapping[str, Any], depth: int) -> dict:
     return out
 
 
+def _handoff_field_text(value: Any) -> str:
+    """Render one handoff field value as bounded text.
+
+    Location: classify._handoff_field_text.
+    Summary: The handoff schema is presence-only, so a field may legitimately
+             carry a LIST (open_questions is commonly list-shaped); as_text
+             alone would coerce it to "" and a schema-valid handoff would read
+             as incomplete. Lists are therefore joined with a middle dot, each
+             item bounded like any other field value.
+    Used by: extract_handoff_fields.
+    """
+    if isinstance(value, list):
+        return " · ".join(part for part in as_str_list(value, 40) if part)
+    return as_text(value, MAX_FIELD_CHARS)
+
+
 def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
     """Project a handoff payload onto the six canonical fields.
 
@@ -268,6 +257,7 @@ def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
              empty value is None (the renderer shows a dash). The canonical
              spelling wins; a falsy canonical value falls through to its legacy
              alias so a handoff written under an old spelling still reads.
+             List-valued fields (schema-valid) are joined, not dropped.
     Used by: model (handoffs array), demo, tests.
     """
     result: dict[str, str | None] = {}
@@ -279,7 +269,7 @@ def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
                 if canonical == field:
                     value = source.get(alias)
                     break
-        text = as_text(value, MAX_FIELD_CHARS) if value else ""
+        text = _handoff_field_text(value) if value else ""
         result[field] = text or None
     return result
 

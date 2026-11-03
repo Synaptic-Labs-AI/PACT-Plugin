@@ -151,11 +151,6 @@ def _state_dir(args: argparse.Namespace) -> Path:
     return settings.default_state_dir()
 
 
-def _default_state_dir_for_env() -> Path:
-    """State directory from the ambient environment (used by tests)."""
-    return settings.default_state_dir()
-
-
 def read_state(state_dir: Path) -> dict | None:
     """Read and validate the server state file, or None.
 
@@ -240,6 +235,21 @@ def clear_state(state_dir: Path) -> None:
                 path.unlink(missing_ok=True)
         except OSError:
             continue
+
+
+def _clear_state_if_instance(state_dir: Path, instance_id: str) -> None:
+    """Clear the state file only when it still names ``instance_id``.
+
+    Location: cli._clear_state_if_instance.
+    Summary: The guard serve_foreground's shutdown path has always had: a
+             concurrent ``--detach`` that overwrote the state file between the
+             read and the clear must not lose ITS state file, or its server
+             runs on with no record to stop it.
+    Used by: cmd_stop (both clear sites).
+    """
+    current = read_state(state_dir)
+    if current is None or current.get("instance_id") == instance_id:
+        clear_state(state_dir)
 
 
 def health_check(port: int, timeout: float = 1.0) -> dict | None:
@@ -450,7 +460,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
              SAME random instance token recorded in the state file — a stale
              pid that the OS reused for an unrelated process is never killed.
              SIGTERM is followed by a bounded wait and a SIGKILL only if the
-             process is still alive; the state file is removed either way. On
+             process is still alive; the state file is removed either way,
+             unless a concurrent detach already replaced it with a different
+             instance's state. On
              success prints ``Stop: stopped pid N``; when nothing is running it
              prints ``Stop: not running`` and exits 0.
     Used by: main, tests.
@@ -465,7 +477,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     instance_id = str(state["instance_id"])
     pid = int(state["pid"])
     if _health_for_instance(port, instance_id) is None:
-        clear_state(state_dir)
+        _clear_state_if_instance(state_dir, instance_id)
         print("Stop: not running")
         print("PACT Mission Control: not running (stale state file cleaned)")
         return 0
@@ -477,7 +489,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
         except (ProcessLookupError, PermissionError):
             pass
         stopped = _wait_until_stopped(port, instance_id, pid, 2.0)
-    clear_state(state_dir)
+    _clear_state_if_instance(state_dir, instance_id)
     print(f"Stop: stopped pid {pid}")
     if not stopped:
         print("PACT Mission Control: stop was signalled but the process did not confirm exit")
@@ -486,13 +498,28 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
-def _reuse_if_running(state_dir: Path, args: argparse.Namespace) -> bool:
-    """Print the existing healthy instance's URL and reuse it; True on reuse."""
+def _reuse_if_running(
+    state_dir: Path, args: argparse.Namespace, roots: Sequence[RootSpec]
+) -> bool:
+    """Print the existing healthy instance's URL and reuse it; True on reuse.
+
+    Location: cli._reuse_if_running.
+    Summary: Reuses only when the running instance serves EXACTLY what this
+             invocation asked for — same root ids in the same order, a
+             compatible port (an explicit --port must match; 0 accepts any),
+             and the same --project/--session filters. A mismatched request
+             refuses with a CliError pointing at --stop, because silently
+             printing the old instance's URL would show the user the wrong
+             data. The state file records the filters so the comparison is
+             honest across restarts.
+    Used by: serve_foreground, detach, tests.
+    """
     state = read_state(state_dir)
     if state is None:
         return False
     if _health_for_instance(int(state["port"]), str(state["instance_id"])) is None:
         return False
+    _refuse_on_reuse_mismatch(state, args, roots)
     url = str(state["url"])
     if getattr(args, "demo", False):
         url = _demo_url(url)
@@ -502,6 +529,37 @@ def _reuse_if_running(state_dir: Path, args: argparse.Namespace) -> bool:
     if getattr(args, "open_browser", False):
         open_browser(url)
     return True
+
+
+def _refuse_on_reuse_mismatch(
+    state: dict, args: argparse.Namespace, roots: Sequence[RootSpec]
+) -> None:
+    """Raise CliError when the running instance does not serve this request."""
+    wanted_roots = [root.id for root in roots]
+    running_roots = [str(item) for item in state.get("roots", [])]
+    if wanted_roots != running_roots:
+        raise CliError(
+            "a running instance serves different roots "
+            f"({', '.join(running_roots) or 'unknown'}) than requested "
+            f"({', '.join(wanted_roots) or 'unknown'}); stop it first with "
+            f"{_stop_hint(args)}"
+        )
+    wanted_port = int(getattr(args, "port", 0) or 0)
+    if wanted_port and wanted_port != int(state["port"]):
+        raise CliError(
+            f"a running instance is on port {state['port']} but port "
+            f"{wanted_port} was requested; stop it first with {_stop_hint(args)}"
+        )
+    running_filters = state.get("filters") or {}
+    for key in ("project", "session"):
+        wanted = str(getattr(args, key, None) or "")
+        running = str(running_filters.get(key, "") or "")
+        if wanted != running:
+            raise CliError(
+                f"a running instance was started with --{key} "
+                f"{running or '(none)'} but --{key} {wanted or '(none)'} was "
+                f"requested; stop it first with {_stop_hint(args)}"
+            )
 
 
 def serve_foreground(
@@ -519,7 +577,7 @@ def serve_foreground(
              shutdown that removes only this instance's state file).
     Used by: main, tests.
     """
-    if _reuse_if_running(state_dir, args):
+    if _reuse_if_running(state_dir, args, roots):
         return 0
     port = int(getattr(args, "port", 0) or 0)
     filters = _filters(args)
@@ -547,6 +605,7 @@ def serve_foreground(
         "started_at": _utc_now_iso(),
         "demo": demo_mode,
         "roots": [root.id for root in roots],
+        "filters": dict(filters),
     }
     try:
         write_state(state_dir, state_payload)
@@ -647,7 +706,7 @@ def detach(
              Stop lines.
     Used by: main, tests.
     """
-    if _reuse_if_running(state_dir, args):
+    if _reuse_if_running(state_dir, args, roots):
         return 0
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -713,6 +772,11 @@ def detach(
             message += f"; last log lines from {log_path}:\n{tail}"
         raise CliError(message)
     url = _demo_url(reused_url) if bool(getattr(args, "demo", False)) else reused_url
+    # Reap the child without blocking: this process returns immediately, but a
+    # long-lived caller (a test harness, an embedding script) would otherwise
+    # carry a zombie when the detached server eventually exits. A blocking
+    # wait() here would hang the CLI until the server stops.
+    threading.Thread(target=process.wait, daemon=True).start()
     print(f"{APP_LABEL} {VERSION} · detached")
     _print_url(url)
     _print_stop_line(args)

@@ -225,6 +225,17 @@ def find_session(
     root = find_root(roots, root_id)
     if root is None:
         return None
+    # Same symlink policy as the listing (_safe_dirs skips symlinks): a
+    # symlinked slug or session directory is not a session here either, so a
+    # session cannot be fetchable via /api/session while invisible in
+    # /api/sessions.
+    slug_dir = root.path / PACT_SESSIONS_DIRNAME / str(slug)
+    session_dir = slug_dir / str(session_id)
+    try:
+        if slug_dir.is_symlink() or session_dir.is_symlink():
+            return None
+    except OSError:
+        return None
     expected = (
         root.path
         / PACT_SESSIONS_DIRNAME
