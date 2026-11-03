@@ -29,6 +29,7 @@ The command and protocol text now names, at every site that demands a test run, 
 - `commands/orchestrate.md`: the coder dispatch guidelines carry the scoped-run mechanism (module-to-test mapping by import or name, plan-named subsets, the smallest enclosing suite as fallback, named in the HANDOFF); the CODE-to-TEST checklist names the scoped run plus the PR-boundary full run, and the TEST-phase checklist owns the single pre-PR full run.
 - `commands/comPACT.md`: the concurrent and single-specialist dispatch templates carry the same operational core, the post-concurrency step keeps the full run and labels it the integration exception, and the lead's pre-commit step runs the affected tests.
 - `protocols/pact-workflows.md` and its `protocols/pact-protocols.md` mirror: the pre-commit step runs the affected tests and names the full suite as the PR/project gate.
+- `tests/test_test_run_scope_pins.py`: two-sided pins for each rewritten site (a presence assertion plus a file-level count-to-zero on each removed sentence, so a half-fix cannot pass), carrier-consistency pins across the three duplicated dispatch templates, and an enumerate-and-assert census with an exact counted baseline and three discrimination controls.
 - Release metadata and this changelog moved to 4.8.21.
 
 ### Why
