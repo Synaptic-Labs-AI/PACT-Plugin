@@ -439,3 +439,34 @@ class TestSafeFromTeamsCaseFold:
             ).get("id") == "OWN"
             assert (name in kept) is False if reads_own else True, name
         assert kept == ["Other"]
+
+
+class TestDiskIdentityOwnerCoercion:
+    """A non-str owner is the empty owner, so `.get("owner")` returning None
+    and `.get("owner", "")` give one identity. Kills: removing the coercion
+    (None then hashes as the string 'None')."""
+
+    def test_non_str_owner_equals_the_empty_owner(self):
+        for owner in (None, 7, ["x"]):
+            assert disk_identity(owner, "s") == disk_identity("", "s"), owner
+
+    def test_str_owner_is_untouched(self):
+        from shared.agent_handoff_marker import occupant_hash
+
+        assert disk_identity("coder", "s") == occupant_hash("coder", "s")
+        assert disk_identity("  ", "s") == occupant_hash("  ", "s")
+        assert disk_identity("None", "s") != disk_identity(None, "s")
+
+
+class TestJournalEventTypesExport:
+    """The types the journal-taking helpers read, exported for the skill
+    guard. Kills: dropping the export or the __all__ entry."""
+
+    def test_export_is_the_set_the_helpers_walk(self):
+        import shared.handoff_merge as merge
+
+        assert "JOURNAL_EVENT_TYPES" in merge.__all__
+        assert merge.JOURNAL_EVENT_TYPES == frozenset(
+            {"agent_handoff", "task_created", "task_metadata_snapshot"}
+        )
+        assert merge.JOURNAL_EVENT_TYPES is merge._EPOCH_EVENT_TYPES

@@ -55,6 +55,7 @@ __all__ = [
     "PARTITION_FOREIGN",
     "PARTITION_FROM",
     "PARTITION_OLD_FORMAT",
+    "JOURNAL_EVENT_TYPES",
     "PARTITION_THIS",
     "arc_of",
     "current_arc",
@@ -83,15 +84,19 @@ __all__ = [
 ]
 
 
-def disk_identity(owner: str, subject: object) -> str:
+def disk_identity(owner: object, subject: object) -> str:
     """occupant_hash(owner, emit_side_subject(subject)) — the harvest's disk identity.
 
     The harvest computes a task file's group identity from the RECORD
     (owner, subject), while the emit computed it from the value it had at emit
     time. Routing both through this one function is what keeps the two in
-    agreement on the sentinel substitution.
+    agreement on the sentinel substitution. A non-str owner is the empty
+    owner, so a missing owner read as None and one read as "" give one
+    identity.
     """
-    return occupant_hash(owner, emit_side_subject(subject))
+    return occupant_hash(
+        owner if isinstance(owner, str) else "", emit_side_subject(subject)
+    )
 
 
 _REQUIRED = frozenset(HANDOFF_REQUIRED_FIELDS)
@@ -551,6 +556,10 @@ def mixed_old_format_event(
 _EPOCH_EVENT_TYPES = frozenset(
     {"agent_handoff", "task_created", "task_metadata_snapshot"}
 )
+# The event types the journal-taking helpers (positioned, store_epochs,
+# arc_of, select_snapshot, group_events) read. A journal read narrowed to
+# one of these types renumbers positions and starves the helpers.
+JOURNAL_EVENT_TYPES = _EPOCH_EVENT_TYPES
 
 
 def latest_by_ts_then_journal_order(events: list) -> dict | None:
