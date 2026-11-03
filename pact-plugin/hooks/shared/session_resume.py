@@ -1235,15 +1235,19 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     # The supersession is applied at THIS renderer's own grain: occupant
     # identity first, then one latest event per team partition. A team-less
     # (OLD-FORMAT) partition is dropped ONLY when the group holds exactly ONE
-    # attributed team AND the team-less copy is strictly older: then it is
-    # the superseded pre-field document. With two or more attributed teams
-    # there is no single candidate whose supersession it would be (the copy
-    # could belong to any of them, or to a third store), and a team-less copy
-    # NEWER than the attributed one is the current revision — writers omit
-    # `team` whenever the resolver fails closed, which can happen at any
-    # time. A visible duplicate is recoverable; showing a stale handoff as
-    # current is not. Two DIFFERENT teams are two distinct tasks that merely
-    # share a number: both render rather than collapsing.
+    # attributed team AND the team-less copy is strictly older — compared as
+    # PARSED instants, never as strings (`_parse_ts`; the lexical compare
+    # lets a fractional `...T07:00:00.123456Z` sort BEFORE `...T07:00:00Z`
+    # while naming the later instant). An unparseable or missing timestamp
+    # never drops: an unknown instant cannot establish "strictly older".
+    # With two or more attributed teams there is no single candidate whose
+    # supersession it would be (the copy could belong to any of them, or to
+    # a third store), and a team-less copy NEWER than the attributed one is
+    # the current revision — writers omit `team` whenever the resolver fails
+    # closed, which can happen at any time. A visible duplicate is
+    # recoverable; showing a stale handoff as current is not. Two DIFFERENT
+    # teams are two distinct tasks that merely share a number: both render
+    # rather than collapsing.
     by_occupant: dict[tuple, dict] = {}
     for h in handoffs:
         occupant = (
@@ -1263,15 +1267,20 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         attributed = {
             team: event for team, event in partitions.items() if team != ""
         }
-        if (
-            teamless is not None
-            and len(attributed) == 1
-            and teamless.get("ts", "")
-            < next(iter(attributed.values())).get("ts", "")
-        ):
-            # Exactly one candidate, and the team-less copy is strictly
-            # older: the superseded pre-field document.
-            del partitions[""]
+        if teamless is not None and len(attributed) == 1:
+            candidate = next(iter(attributed.values()))
+            try:
+                older = _parse_ts(teamless.get("ts")) < _parse_ts(
+                    candidate.get("ts")
+                )
+            except (ValueError, TypeError):
+                # Missing / empty / malformed on either side: an unknown
+                # instant cannot establish "strictly older". Keep the copy.
+                older = False
+            if older:
+                # Exactly one candidate, and the team-less copy is strictly
+                # older: the superseded pre-field document.
+                del partitions[""]
         rendered.extend(partitions.values())
     handoffs = rendered
     if handoffs:

@@ -3630,7 +3630,7 @@ class TestBuildJournalResumeOccupantDedup:
             for event in events:
                 f.write(json.dumps(event) + "\n")
 
-    def _event(self, decisions, ts, team=_ABSENT):
+    def _event(self, decisions, ts=_ABSENT, team=_ABSENT):
         event = {
             "v": 1,
             "type": "agent_handoff",
@@ -3638,8 +3638,9 @@ class TestBuildJournalResumeOccupantDedup:
             "task_id": "1",
             "task_subject": "CODE: dedup",
             "handoff": {"decisions": [decisions]},
-            "ts": ts,
         }
+        if ts is not _ABSENT:
+            event["ts"] = ts
         if team is not _ABSENT:
             event["team"] = team
         return event
@@ -3683,6 +3684,91 @@ class TestBuildJournalResumeOccupantDedup:
         assert result is not None
         assert "teamless new" in result
         assert "attributed old" in result
+        assert result.count("- coder: CODE: dedup") == 2
+
+    def test_fractional_newer_teamless_is_not_dropped(
+        self, session_dir, journal_file
+    ):
+        """ARM 1 (RED on the lexical compare): `...T07:00:00.123456Z` names
+        the LATER instant than `...T07:00:00Z`, but `.` (0x2E) sorts before
+        `Z` (0x5A), so a string compare calls the newer copy older and drops
+        it — rendering the stale attributed handoff as current."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event(
+                "attributed base", "2026-01-01T07:00:00Z", team="session-a"
+            ),
+            self._event("fractional newer", "2026-01-01T07:00:00.123456Z"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "fractional newer" in result
+        assert "attributed base" in result
+        assert result.count("- coder: CODE: dedup") == 2
+
+    def test_equal_instant_with_a_different_suffix_is_not_dropped(
+        self, session_dir, journal_file
+    ):
+        """ARM 2: equal instants written as `Z` and `+00:00` are not
+        "strictly older", so both render. On the lexical compare this
+        ordering was already kept ('Z' 0x5A > '+' 0x2B) — the arm guards the
+        equal-instant case rather than reproducing the old failure."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event(
+                "attributed suffix", "2026-01-01T07:00:00+00:00",
+                team="session-a",
+            ),
+            self._event("teamless suffix", "2026-01-01T07:00:00Z"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "attributed suffix" in result
+        assert "teamless suffix" in result
+        assert result.count("- coder: CODE: dedup") == 2
+
+    def test_teamless_without_a_ts_is_not_dropped(
+        self, session_dir, journal_file
+    ):
+        """ARM 3 (RED on the lexical compare): a missing `ts` became "" and
+        sorted before every real stamp, so the copy was dropped. An unknown
+        instant cannot establish "strictly older"."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event(
+                "attributed stamped", "2026-01-01T07:00:00Z", team="session-a"
+            ),
+            self._event("teamless unstamped"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "teamless unstamped" in result
+        assert "attributed stamped" in result
+        assert result.count("- coder: CODE: dedup") == 2
+
+    def test_malformed_ts_is_not_dropped(self, session_dir, journal_file):
+        """ARM 4 (RED on the lexical compare): "!!!" sorts before any digit,
+        so the malformed copy was dropped. A malformed timestamp cannot
+        establish "strictly older"."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event(
+                "attributed valid ts", "2026-01-01T07:00:00Z", team="session-a"
+            ),
+            self._event("teamless malformed ts", "!!!"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "teamless malformed ts" in result
+        assert "attributed valid ts" in result
         assert result.count("- coder: CODE: dedup") == 2
 
     @pytest.mark.parametrize("position", ["first", "middle", "last"])
