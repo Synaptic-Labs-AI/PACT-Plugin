@@ -195,6 +195,11 @@ LINE_PINS = (
             "Scoped test run green at every commit boundary",
             "the tests the change affects",
             "the full suite is not a per-commit gate",
+            # The obligation clause, not just the opening phrases: the whole
+            # tail was unpinned, so a rewrite of it left every pin green.
+            "it is owed once at the PR boundary",
+            "the TEST-phase checklist below owns it",
+            "if TEST is skipped, the lead runs it once before opening the PR",
         ),
     ),
     (
@@ -903,6 +908,11 @@ KNOWN_NOT_CAUGHT = (
     (
         "Run the full test suite on top of the affected tests.",
         "contrast: 'on top of' is not one of the six contrast strings, so the named set bounds the demand",
+    ),
+    (
+        "Run the whole test suite, not just the integration tests you changed.",
+        "contrast: 'not just' IS one of the six, but 'run the whole test suite' is not a "
+        "recognised run-demand form, so the contrast arm has no demand to anchor to",
     ),
 )
 
