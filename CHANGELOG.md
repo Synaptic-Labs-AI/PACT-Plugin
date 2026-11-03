@@ -18,6 +18,38 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.20: harvest identity, cleared-field revival, and a total union
+
+### Summary
+
+The handoff harvest now keeps two task stores' same-numbered tasks apart, no longer revives a field a later revision cleared, and processes a realigned team's disk-only tasks. The shared merge and routing primitives gained the input totality and the routing extraction their callers already assumed, and the harvest skill's text now says what its code does.
+
+### What landed
+
+- Cross-team identity: every `agent_handoff` journal event records the task store it read, and the harvest groups a task id by that team as well as by agent and subject, so one store's journal copy is never merged with another store's same-numbered task file.
+- Cleared-field revival: the union decides each field by the two copies' required key sets, normalizes legacy spellings before the comparison, and counts an equal set as covering, so a task-file revision that clears a required field is no longer overwritten from the superseded journal copy. Both states report per field, and every report line is carried into the harvested memory entry.
+- From-team disk-only tasks: a realigned team's task whose content lives only in its task file is now processed under that team's section. The from-team population is admitted by census provenance rather than by a matching task number, and a from-store file never silences this team's gap report.
+- Input totality: `union_preferring_task_file` treats a non-dict copy as absent instead of raising, and `_field_map` selects a dual-spelled field the same way `resolve_handoff_field` does on every ordering of its spellings.
+- Routing extraction: `partition_destination` returns exported labels beside `old_format_destination`, so the skill branches on constants instead of an inline comparison, and an unknown label fails closed.
+- Skill text: the call-route inventory covers every helper the step names, and rule text that could be followed but not implemented was corrected, including the from-team ledger rule and the disk-only application of the no-journal-event rule.
+- Work-unit ledger: the harvest records each processed work unit as a token of its task id and content key, prefixed by its store when it came from a realigned team, and skips a unit only when that exact token is recorded. A reused task number with new content is harvested, a realigned team's work is recorded instead of re-read on every pass, and journal events are routed to their store before any ledger check.
+- Task creations are journaled: a `task_created` event, together with the store reset it reveals when a task number restarts, lets the harvest separate two instances of one task id that share agent and subject, assigning instances by journal order.
+- The reader helpers moved to `hooks/shared/handoff_merge.py`; emit hooks no longer load the handoff schema. The harvest's Step 3 pseudocode and every skill command route are executed by tests.
+- Report and resume text strips control, format, separator and surrogate characters; resume orders handoffs by parsed instant and keeps a malformed team apart from a team-less copy.
+- One owning group per task file: the task file is unioned with exactly one group, the dated group of the store's current task instance or, when none exists, the team-less group with the same identity, so a journal written before events carried a team still unions with its task file.
+- Ledger tokens are found anywhere in a section, not only on lines that start with the `Processed task IDs` label, because each token identifies itself.
+- `0` and `False` count as content when a field carries both its canonical name and a legacy alias, in the shared reader and in the merge alike, so a canonical `0` or `False` now wins over the alias.
+- A task file's sibling metadata reaches only the group that owns it. Other groups take their siblings from a snapshot chosen by `select_snapshot`, which requires the snapshot's occupant, team and arc to match the unit and refuses a malformed arc instead of reading it as team-less.
+- A disk-only unit keys its ledger token on its task-file handoff, so the same content seen first on disk and later in the journal records one token.
+- The emitter and the lifecycle gate never attribute a task file found only at the bare tasks directory to a named store, and team names are case-folded by one shared function wherever a store is looked up or a realigned team is excluded.
+- Journal events with a non-string task id are skipped and reported at discovery instead of breaking the harvest's sorts.
+- The resume brief keeps every other section when the report helper cannot be imported; only Completed Work falls back to the local sanitiser.
+- Structural guards for the harvest skill: a sweep mutates the Step 3 block and fails unless every surviving mutant is a listed equivalent; other guards fail when the block calls a helper with no route, when a route's documented payload differs from the keys its command reads, when the skill reads the journal filtered to a type the helpers need in full, or when prose names an identifier or quotes a report the code does not define.
+
+### Why
+
+Two stores can hold different tasks under one number, while the harvest's identity, its ledger and its reports all assumed one store. The fixes move the rule to the store the event names, decide the merge by required key sets rather than by an empty or missing value, and give the from-team half the same two shapes the this-team half already had. The extraction and the text corrections keep one executable rule and one set of instructions from drifting apart. The ledger keyed sameness on the task number, which two stores and a recreated store both reuse.
+
 ## v4.8.19: a worktree lead writes project memory to the main checkout (issue #1653)
 
 ### Summary

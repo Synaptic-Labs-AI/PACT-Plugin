@@ -20,8 +20,11 @@ Cells:
     tasks, non-lead frames and empty stores stay silent; the BOTH-DISAGREE
     substrate fails closed at the hook (suppress, never a false alarm).
   agent_handoff_emitter — a completed task with a handoff in the UUID store
-    emits the journal agent_handoff event and lands its O_EXCL marker under
-    teams/<uuid>/ (the #1658 "silent HANDOFF-harvest loss" cell).
+    emits the journal agent_handoff event, with `team` set to the resolved
+    store, and lands its O_EXCL marker under teams/<uuid>/ (the #1658 "silent
+    HANDOFF-harvest loss" cell); a payload naming a second live store with a
+    differing record subject withholds the event and journals
+    handoff_emit_suppressed (cause mixed_store).
   handoff_ordering_gate — the gate resolves the task through the seam on the
     UUID substrate: a valid on-disk handoff produces NO warn; a completed
     task WITHOUT one still warns (positive control, so the no-warn cell is
@@ -204,11 +207,41 @@ class TestHandoffEmitNonTtySubstrate:
             "store; got %d events" % len(events)
         )
         assert events[0]["task_id"] == "42"
+        assert events[0]["team"] == FULL_UUID, (
+            "the event's team must be the store the real resolver read, not "
+            "the persisted short name or the inert stdin value"
+        )
         marker_ns = (non_tty_env.home / ".claude" / "teams" / FULL_UUID
                      / ".agent_handoff_emitted")
         assert marker_ns.is_dir() and any(marker_ns.iterdir()), (
             "the O_EXCL marker must live under teams/<uuid>/ on this substrate"
         )
+
+    def test_mixed_store_payload_writes_the_suppression_event(
+            self, non_tty_env, monkeypatch):
+        """The payload names a SECOND existing store and the resolved
+        store's record carries a different subject: the handoff is withheld,
+        and the withholding is recorded as handoff_emit_suppressed with
+        cause mixed_store rather than left silent."""
+        other_team = "session-0ther000"
+        non_tty_env.dir_for(other_team).mkdir(parents=True, exist_ok=True)
+        task = _write_task(non_tty_env.dir_for(FULL_UUID), task_id="44",
+                           owner="backend-coder", subject="a different task",
+                           status="completed", with_wait=False)
+        task["metadata"]["handoff"] = VALID_HANDOFF
+        (non_tty_env.dir_for(FULL_UUID) / "44.json").write_text(
+            json.dumps(task), encoding="utf-8")
+        payload = json.loads(self._stdin("44").getvalue())
+        payload["team_name"] = other_team
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        with pytest.raises(SystemExit) as exit_info:
+            emitter.main()
+        assert exit_info.value.code == 0
+        assert read_events("agent_handoff") == []
+        suppressed = read_events("handoff_emit_suppressed")
+        assert len(suppressed) == 1
+        assert suppressed[0]["cause"] == "mixed_store"
+        assert suppressed[0]["task_id"] == "44"
 
     def test_ambiguous_substrate_suppresses_the_emit(self, non_tty_env, monkeypatch):
         """The fail-closed leg AT a consumer: on the BOTH-DISAGREE substrate

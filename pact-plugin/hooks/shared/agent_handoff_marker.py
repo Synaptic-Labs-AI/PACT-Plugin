@@ -9,6 +9,9 @@ Summary: SSOT for agent_handoff emission — the shape-agnostic emit-eligibility
          the O_EXCL test-and-set (already_emitted) + the compensating-unclaim
          rollback (unclaim, #901) that removes a marker whose journal write
          failed, both resolving the marker path via one SSOT derivation.
+         It also carries the emit-side subject sentinel (emit_side_subject)
+         and the one-line report sanitiser (report_safe).
+         Reader-side reconciliation lives in shared/handoff_merge.py.
          Imported by BOTH agent_handoff emit paths
          so they derive the SAME emit decision and the SAME marker key and
          dedup to one agent_handoff event for each distinct (team, task_id,
@@ -17,8 +20,11 @@ Summary: SSOT for agent_handoff emission — the shape-agnostic emit-eligibility
              dispatches this on every matching owner — "b1")
            - task_lifecycle_gate.py   (the lead's TaskUpdate(completed)
              acceptance-commit; closes the #869 never-fires gap — "b2")
-Used by: agent_handoff_emitter.py, task_lifecycle_gate.py, and the emitter
-         idempotency / path-sanitization test suites.
+Used by: agent_handoff_emitter.py, task_lifecycle_gate.py,
+         task_claim_gate.py, validate_handoff.py,
+         shared/task_metadata_snapshot.py, shared/handoff_merge.py,
+         shared/session_resume.py, and the emitter idempotency /
+         path-sanitization test suites.
 
 Coupling rationale: this module is the SSOT for the marker key + test-and-set.
 The two emit paths MUST import the same occupant_hash() + already_emitted()
@@ -68,6 +74,7 @@ import errno
 import hashlib
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 from .canonical_json import canonical_bytes
@@ -191,6 +198,10 @@ def occupant_hash(teammate_name: str, task_subject: str) -> str:
     """
     Return a stable occupant-identity hash for the marker key.
 
+    THE TEAM IS A ROUTER, NEVER A TERM OF THIS HASH. Adding a team to the
+    payload would re-key every existing marker and break every existing
+    snapshot join; the harvest partitions on the event's `team` field instead.
+
     The "occupant" of a task is (teammate_name, task_subject). Keying the
     marker on the occupant — rather than on task_id alone — is the #887 fix:
 
@@ -284,6 +295,69 @@ def handoff_content_key(handoff: object) -> str:
     except Exception:
         return _UNSERIALIZABLE_CONTENT_KEY
     return hashlib.sha256(canonical).hexdigest()[:_CONTENT_HASH_LEN]
+
+
+NO_SUBJECT_SENTINEL = "(no subject)"
+
+
+def emit_side_subject(subject: object) -> str:
+    """Both emit paths' sentinel substitution. ANY value that is not a
+    non-empty stripped STRING -> "(no subject)".
+
+    The EXECUTABLE copy of the substitution both emit paths apply BEFORE they
+    hash, and BOTH emit paths call it: a non-str subject (an int, a mapping)
+    becomes the sentinel rather than reaching the journal schema, which would
+    reject it after the marker was claimed and lose the event. It also gives
+    the gate's previous `subject.strip()` a safe shape — that raised on a
+    non-str.
+
+    A present string is returned UNCHANGED (not str-coerced, whitespace kept):
+    occupant_hash stringifies it in its own f-string.
+
+    The harvest's disk identity must hash the SUBSTITUTED value, because that
+    is what the emit hashed; without this mirror, a substituted task's
+    identity can never equal its group and the union does not run on the
+    tasks it exists to protect.
+    """
+    if isinstance(subject, str) and subject.strip():
+        return subject
+    return NO_SUBJECT_SENTINEL
+
+
+# Longest raw value allowed into a report line. Reports name a task id and a
+# field name; neither is legitimately long, and an unbounded value is a
+# line-swallowing vector.
+_REPORT_VALUE_MAX = 128
+
+# Unicode categories stripped from report values: Cc = control (C0, DEL and
+# C1, including NEL U+0085), Cf = format (zero-width and bidi controls such as
+# U+200B, U+202E, U+FEFF), Cs = surrogate (a lone surrogate), Zl = line
+# separator (U+2028), Zp = paragraph separator (U+2029).
+_REPORT_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def report_safe(value: object, limit: int | None = _REPORT_VALUE_MAX) -> str:
+    """Make a value safe to interpolate into a ONE-LINE report (CWE-117).
+
+    Report lines are read by an agent that may act on them, and field names
+    come from the task file and the append-only journal — both outside this
+    module's control. A value would forge or split a report line at ANY
+    boundary the consumer treats as a line break, or hide or reorder its text
+    with an invisible format character.
+
+    STRIP BY UNICODE CATEGORY, NOT BY AN ENUMERATED CLASS. Every character
+    whose category is Cc, Cf, Cs, Zl or Zp is removed; the category filter
+    stays complete if Unicode adds another character to one of those
+    categories. The result is capped at `limit` characters so one value
+    cannot swallow the line; `limit=None` means no cap, for a caller that
+    bounds the value upstream.
+    """
+    text = "".join(
+        ch
+        for ch in str(value)
+        if unicodedata.category(ch) not in _REPORT_STRIP_CATEGORIES
+    )
+    return text[:limit]  # a None limit slices the whole string
 
 
 def _handoff_marker_discriminator(occupant: str, content_key: str) -> str:

@@ -11,6 +11,7 @@ Per-file co-located helpers (NOT lifted here):
   ``test_emitter_real_disk.py`` — single-file consumers.
 """
 
+import contextlib
 import io
 import json
 from unittest.mock import patch
@@ -63,6 +64,7 @@ def _run_main(
     append_calls,
     journal_path=WRITABLE_TEST_JOURNAL,
     context_team_name=_USE_STDIN_TEAM_NAME,
+    snapshot_calls=None,
 ):
     """Invoke agent_handoff_emitter.main() with patched IO/deps.
 
@@ -95,6 +97,12 @@ def _run_main(
     only way to demonstrate the post-rebind containment property that the stdin
     ``team_name`` is INERT (a hostile stdin value cannot reach the marker key
     when the authoritative context team_name is path-safe).
+
+    ``snapshot_calls`` (optional list) replaces the
+    ``agent_handoff_emitter.emit_task_metadata_snapshot`` symbol with a
+    recorder, so an arm can assert whether a task emitted a
+    ``task_metadata_snapshot`` at all. Pass a list to observe; omit it to
+    leave the real writer in place.
     """
     # Lazy import: sys.path is configured in conftest.py before this module loads.
     # Do not hoist to module-level — sys.path coupling depends on conftest load order.
@@ -165,11 +173,21 @@ def _run_main(
             )
         )
 
+    _snapshot_ctx = (
+        patch(
+            "agent_handoff_emitter.emit_task_metadata_snapshot",
+            side_effect=lambda *args, **kwargs: snapshot_calls.append(args),
+        )
+        if snapshot_calls is not None
+        else contextlib.nullcontext()
+    )
+
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
          patch("agent_handoff_emitter.get_journal_path", return_value=journal_path), \
          patch("agent_handoff_emitter.pact_context.get_pact_context", return_value=_ctx), \
-         patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
+         patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))), \
+         _snapshot_ctx:
         for _p in _extra_patches:
             _p.start()
         try:

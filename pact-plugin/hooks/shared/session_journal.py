@@ -195,6 +195,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # task_id is the source task; metadata is the size-bounded sibling-key
     # payload (SNAPSHOT_EXCLUDE'd, truncation-marked — see the substrate module).
     "task_metadata_snapshot": {"task_id": str, "metadata": dict},
+    # hooks/task_lifecycle_gate.py writes task_created on the TaskCreate leg,
+    # canonical journal frames only (lead, in-process teammate), when the
+    # create response carries a real task id. Consumer: the handoff harvest's
+    # arc term (shared/handoff_merge), which separates two instances of one
+    # task id by the creation that opened each, and reads a store reset from
+    # a creation whose id is at or below one already journaled for its team.
+    "task_created": {"task_id": str},
     # commands/orchestrate.md + comPACT.md write phase_transition with
     # phase + status (both quoted strings). session_resume._build_journal_resume
     # subscripts `p["phase"]` — this schema check is the defensive bulwark
@@ -216,6 +223,16 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_subject": str,
         "handoff": dict,
     },
+    # hooks/agent_handoff_emitter.py emits handoff_emit_suppressed when the
+    # b1 mixed-store guard deliberately withholds BOTH the agent_handoff event
+    # and its snapshot. DELIBERATELY NOT journal_emit_skipped: that type
+    # records a journal WRITE that did not land, and its `cause` separates
+    # RAISED from RETURNED-FALSE — a deliberate suppression is a THIRD origin,
+    # and folding it in would rebuild the ambiguity that distinction exists to
+    # remove. The stderr line the guard also prints is not shown by the
+    # platform, so this event is the durable trace that a loss happened.
+    # `cause` is a small vocabulary; today the only value is mixed_store.
+    "handoff_emit_suppressed": {"task_id": str, "cause": str},
     # hooks/validate_handoff.py emits handoff_refusal_degraded when the
     # stop_hook_active loop guard degrades a HANDOFF refusal to a
     # systemMessage warning — with refusal as the default, degrade events are
@@ -470,6 +487,23 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
 # happy-path + wrong-type case to TestValidateOptionalFieldTypes in
 # test_session_journal.py.
 _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
+    # `team` on agent_handoff: the RESOLVED task-store directory name the
+    # writer READ its task file from (agent_handoff_emitter.main,
+    # task_lifecycle_gate._emit_lead_side_agent_handoff). It lets a journal
+    # that outlives a team realignment attribute each event to the store its
+    # content came from. Writers OMIT the key entirely when the resolver
+    # fails closed: the optional-str contract below REJECTS a present empty
+    # value, append_event then returns False, and the compensating unclaim
+    # turns that into a LOST event rather than a missing attribution.
+    # The sibling family's `team` is registered at ITS existing entry below —
+    # a second "task_metadata_snapshot" key here is silently overwritten by
+    # that later dict literal.
+    "agent_handoff": {"team": str},
+    # task_created's `team` is the RESOLVED task-store name the creation
+    # landed in, and `subject` is the created task's subject. The writer
+    # OMITS each when it is empty: the optional-str contract rejects a
+    # present empty value, and a rejected append loses the creation event.
+    "task_created": {"team": str, "subject": str},
     # session_start's optional `source`: hooks/session_init.py writes the
     # stdin source when it is one of startup, resume, compact, clear or fork
     # ("startup" when stdin has none) and "unknown" for any other value,
@@ -677,6 +711,11 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_type": str,
         "truncated": bool,
         "occupant": str,
+        # `team`: the RESOLVED task-store name this snapshot's task file was
+        # read from. Same omit-when-empty rule as agent_handoff — a present
+        # empty value is rejected here, and the rejected append would lose
+        # the snapshot rather than only its attribution.
+        "team": str,
     },
     # commands/peer-review.md writes remediation with an optional task_id —
     # the fixer's Task-B task id. It is no longer a Q5 term: Q5's population is

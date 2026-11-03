@@ -67,20 +67,24 @@ Output: {"suppressOutput": true} on every path; exit 0.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import shared.pact_context as pact_context
 from shared.agent_handoff_marker import (
+    NO_SUBJECT_SENTINEL,
+    emit_side_subject,
     handoff_already_emitted,
     handoff_content_key,
     handoff_unclaim,
     is_signal_task,
     occupant_hash,
+    report_safe,
     sanitize_path_component,
 )
 from shared.session_journal import append_event, get_journal_path, make_event
 from shared.task_metadata_snapshot import emit_task_metadata_snapshot
-from shared.task_utils import read_task_json, resolve_task_dir
+from shared.task_utils import read_task_json, resolve_task_dir, task_dir_for
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -137,20 +141,18 @@ def main() -> None:
         # marker, then FAIL append_event — the claim-without-write poison the
         # writability gate only NARROWED. Substituting the sentinel here makes
         # the subject deterministically schema-valid before the claim.
-        # The "(no subject)" sentinel is MIRRORED IN PROSE by the harvest,
-        # which derives its disk-side identity for the same position — do not
-        # change this substitution without the paired edit to Step 3 of
-        # skills/pact-handoff-harvest/SKILL.md. The harvest reads the task
-        # RECORD while this path reads the platform payload, so the two must
-        # agree by convention: nothing enforces the mirror, and a divergence
-        # makes the harvest report an identity mismatch on a present file.
+        # THE SUBSTITUTION IS THE SHARED HELPER, not a local copy. It is
+        # STRICT: any value that is not a non-empty stripped STRING becomes
+        # the sentinel. That covers the non-str case the old local test let
+        # through — a non-str subject passed it, then FAILED the journal
+        # schema after the marker was claimed, and the event was LOST. The
+        # same helper is called by the lead-side emit and by the harvest's
+        # disk identity, so the three cannot drift.
         task_subject_was_missing = not (
-            raw_task_subject and str(raw_task_subject).strip()
+            isinstance(raw_task_subject, str) and raw_task_subject.strip()
         )
         task_id = raw_task_id or "unknown"
-        task_subject = (
-            raw_task_subject if not task_subject_was_missing else "(no subject)"
-        )
+        task_subject = emit_side_subject(raw_task_subject)
 
         # task_id (from stdin) is sanitized for the two filesystem sinks it
         # feeds: read_task_json for the status read, and the marker join inside
@@ -178,7 +180,12 @@ def main() -> None:
         resolved_task_dir = resolve_task_dir()
         team_name = resolved_task_dir.name if resolved_task_dir else ""
 
-        task_data = read_task_json(task_id, team_name)
+        # A NAMED store reads only its own directory: a file at the bare tasks
+        # base is not this store's task and must never be journaled under
+        # this store's `team`. With no resolved name, the default read stays.
+        task_data = read_task_json(
+            task_id, team_name, base_fallback=not team_name
+        )
 
         # Owner field (set at dispatch) is the authoritative "agent completed
         # this task" signal. Platform-provided teammate_name is fallback for
@@ -229,9 +236,110 @@ def main() -> None:
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
+        # TEAM-UNCERTAINTY GUARD (b1 only). Suppress ONLY on two independent,
+        # provable signals, because no single source is trustworthy for "the
+        # session's own team": the persisted context is what goes stale in
+        # this failure, and the resolver cannot see the platform's claim.
+        #   1. the payload's stdin team_name names an EXISTING task store (the
+        #      LIVE-CLAIM GATE), the resolved store name is non-empty, and the
+        #      two address DIFFERENT stores — compared by STORE IDENTITY, not
+        #      by the raw strings, because task_dir_for strips surrounding
+        #      whitespace before joining and two spellings can name one store;
+        #   2. the resolved store's record carries a non-empty subject that
+        #      DIFFERS from the payload's task_subject.
+        # Both together prove the content read (owner, handoff) belongs to a
+        # DIFFERENT task: subject from the payload, content from the store.
+        #
+        # THE LIVE-CLAIM GATE, and why signal 1 needs it: on the non-TTY
+        # substrate stdin carries the deprecated inert SHORT_NAME while the
+        # resolver correctly lands on the FULL_UUID store. Comparing an inert
+        # legacy value against a real store name fires on EVERY emit, and with
+        # a differing subject it suppresses a legitimate write. A stdin value
+        # is an independent claim only when a store of that name exists.
+        #
+        # COVERAGE: this suppresses ONLY the both-stores-exist case. When the
+        # payload's store does not exist, the event is emitted with `team` =
+        # the store actually read; the harvest rejects it as foreign and the
+        # live team's task file remains authoritative. Weaker prevention, no
+        # false-suppression mode — and that trade is deliberate.
+        #
+        # The subject comparison is what stops a stale stdin value from
+        # suppressing a legitimate event, and the store comparison is what
+        # stops a re-scoped subject from doing the same. Signal 2 applies ONLY
+        # when the payload actually carried a subject: task_subject is the
+        # emitter's own sentinel when it did not, and a sentinel-vs-record
+        # comparison would manufacture the disagreement and suppress the very
+        # event the sentinel exists to preserve. b2 is deliberately excluded:
+        # it has no independent platform claim and its content is internally
+        # consistent.
+        payload_team = str(input_data.get("team_name") or "")
+        resolved_team = resolved_task_dir.name if resolved_task_dir else ""
+        # task_dir_for validates and anchors the caller-supplied name; it
+        # makes no existence claim, so the live-claim test is the is_dir().
+        payload_store = task_dir_for(payload_team) if payload_team else None
+        payload_team_is_live = bool(payload_store and payload_store.is_dir())
+        # Compare STORE IDENTITY, not the raw names: task_dir_for strips
+        # surrounding whitespace before joining, so "team " and "team" address
+        # one store and must not count as a difference.
+        same_store = False
+        if payload_store is not None and resolved_task_dir is not None:
+            try:
+                same_store = os.path.samefile(payload_store, resolved_task_dir)
+            except OSError:
+                same_store = False
+        record_subject = task_data.get("subject")
+        # Signal 2 normalises BOTH sides through the SAME substitution, so a
+        # missing subject on EITHER side is the sentinel and cannot manufacture
+        # a disagreement. It fires only when both values are genuine (not the
+        # sentinel) and differ: a payload with no subject, or a record whose
+        # subject is absent, must not suppress the event the sentinel exists
+        # to preserve.
+        record_subject_norm = emit_side_subject(record_subject)
+        payload_subject_norm = emit_side_subject(raw_task_subject)
+        subjects_differ = (
+            record_subject_norm != NO_SUBJECT_SENTINEL
+            and payload_subject_norm != NO_SUBJECT_SENTINEL
+            and record_subject_norm != payload_subject_norm
+        )
+        if (
+            payload_team_is_live
+            and resolved_team
+            and not same_store
+            and subjects_differ
+        ):
+            # A deliberate suppression must be MARKED, not silent: the stderr
+            # line below is not shown by the platform, so this journal event
+            # is the durable record that the task's handoff was withheld.
+            # Best effort — a write failure must not break the suppression
+            # path or the exit-0 contract.
+            try:
+                append_event(
+                    make_event(
+                        "handoff_emit_suppressed",
+                        task_id=task_id,
+                        cause="mixed_store",
+                    )
+                )
+            except Exception:
+                pass
+            print(
+                f"agent_handoff_emitter: resolved store "
+                f"{report_safe(resolved_team)!r} is not the payload team "
+                f"{report_safe(payload_team)!r} and its record subject differs "
+                f"from the payload subject; suppressing mixed handoff for task "
+                f"{report_safe(task_id)}",
+                file=sys.stderr,
+            )
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
         # task_metadata_snapshot seam — teammate-frame twin (hermetic; own
-        # gates in the substrate). Positioned immediately AFTER the
-        # transition gate and BEFORE the signal-task bypass: the hardened
+        # gates in the substrate). Positioned AFTER the transition gate and
+        # the MIXED-STORE guard, and BEFORE the signal-task bypass. The
+        # mixed guard is ABOVE this emit deliberately: a task whose metadata
+        # belongs to another store must write NEITHER event, and evaluating
+        # that guard after this call left the snapshot in the journal under
+        # the payload subject while the handoff was suppressed. The hardened
         # exits below (signal gate, handoff-presence gate, writability gate,
         # marker gate) would make an after-the-emit call unreachable for
         # exactly the tasks whose seam coverage matters here — self-completed
@@ -353,11 +461,20 @@ def main() -> None:
             )
 
         # Journal-write — the sole purpose of this hook.
-        # DO NOT forward additional stdin fields beyond these 4 — the
-        # journal event payload contract is intentionally minimal, and
+        # DO NOT forward additional CALLER-SUPPLIED stdin fields beyond these
+        # 4 — the journal event payload contract is intentionally minimal, and
         # TestStdinShapePin asserts no leakage of session_id /
         # transcript_path / cwd / hook_event_name / team_name /
         # teammate_name / task_description into the event.
+        #
+        # `team` is NOT one of those stdin fields. It is `team_name` above —
+        # the RESOLVER-derived task-store directory name, i.e. the store this
+        # hook READ its task file from, which is the attribution the harvest
+        # needs to tell two teams' same-numbered tasks apart. It is OMITTED
+        # entirely when the resolver fails closed: a registered optional `str`
+        # rejects a present empty value, append_event then returns False, and
+        # the compensating unclaim turns that into a LOST event rather than a
+        # missing attribution.
         #
         # #917 R1 (compensating-unclaim): we OWN the marker here (already_emitted
         # returned False = a fresh O_EXCL claim). If the write returns False
@@ -367,16 +484,17 @@ def main() -> None:
         # permanently suppressed by the poisoned marker. Best-effort + fail-safe:
         # worst case the marker persists (today's pre-R1 behavior). F3 twin:
         # mirror this in task_lifecycle_gate._emit_lead_side_agent_handoff.
+        fields = {
+            "agent": teammate_name,
+            "task_id": task_id,
+            "task_subject": task_subject,
+            "handoff": handoff,
+        }
+        # Omit, never write "": see the omit-when-empty rationale above.
+        if isinstance(team_name, str) and team_name.strip():
+            fields["team"] = team_name
         try:
-            written = append_event(
-                make_event(
-                    "agent_handoff",
-                    agent=teammate_name,
-                    task_id=task_id,
-                    task_subject=task_subject,
-                    handoff=handoff,
-                ),
-            )
+            written = append_event(make_event("agent_handoff", **fields))
         except Exception:
             written = False
         if not written:
