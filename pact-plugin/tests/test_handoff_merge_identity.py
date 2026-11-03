@@ -1078,42 +1078,19 @@ class TestHarvestRuleProse:
         )
 
     def test_from_team_disk_only_task_is_processed(self):
-        """HIGH (commit 25): the from-team half had only a JOURNAL path, so a
-        from-store task whose content lives only on disk entered the loop via
-        the commit-24 census split and was never processed. Rule 5's
-        counterpart applies per store: the file is processed under
-        `## team={from}`, and the store produces NEITHER the absent-file NOR
-        the no-match report."""
+        """The from-team half has rule 5's disk-only path: the file is
+        processed under `## team={from}`, and the store produces NEITHER the
+        absent-file NOR the no-match report. GREEN on b9cd8157 — this is the
+        regression guard for the path itself."""
         assert "THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES" in SKILL_TEXT
         assert (
             "it produces NEITHER the absent-file report NOR the no-match report"
             in SKILL_TEXT
         )
-        assert (
-            "A present file with NO `metadata.handoff` IS NOT A FROM-TEAM WORK "
-            "UNIT" in SKILL_TEXT
-        )
         # The store set is built from BOTH shapes, not from journal events
         # alone.
         assert "from_stores = set(from_events)" in SKILL_TEXT
         assert "from_stores.add(team)" in SKILL_TEXT
-        # MEMBERSHIP REQUIRES CONTENT, NOT PRESENCE. `read_task_json` is
-        # fail-open and truthy for ANY present file; a same-numbered stranger
-        # with no handoff would then be synthesized as an empty work unit and
-        # would set from_handled_any, silencing a real gap.
-        prelude = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
-            "for team in sorted(from_stores):", 1
-        )[0]
-        assert 'get("handoff")' in prelude
-        assert "if candidate_handoff:" in prelude
-        assert prelude.index('get("handoff")') < prelude.index(
-            "from_stores.add(team)"
-        )
-        # Bare file-presence membership is the defect; it must not come back.
-        assert "if read_task_json(task_id, team):" not in prelude
-        # The membership test is the SOLE gate: nothing else adds a store, and
-        # the disk-only branch re-tests neither presence nor content — it runs
-        # only for stores the handoff gate admitted.
         assert SKILL_TEXT.count("from_stores.add(team)") == 1
         disk_only = SKILL_TEXT.split("if not from_groups:", 1)[1].split(
             "elif not from_task:", 1
@@ -1128,6 +1105,51 @@ class TestHarvestRuleProse:
         assert block.index(
             'process(from_disk, section=f"team={team}")'
         ) < block.index("handoff divergence check unavailable for task")
+
+    def test_high_from_team_membership_is_census_provenance(self):
+        """Bugbot 2, RED on the content-gated membership: the disk shape is
+        admitted by PROVENANCE, not by a content test. The from census admits
+        a task by ANY agent-authored key (an auditor carries `audit_summary`
+        and no `handoff`), so a sibling-key-only file must enter and Step 3.1
+        resolve it. An id that is ONLY this team's must never admit a
+        same-numbered stranger's file."""
+        prelude = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
+            "for team in sorted(from_stores):", 1
+        )[0]
+        assert "if task_id in from_unprocessed:" in prelude
+        assert "if read_task_json(task_id, team):" in prelude
+        assert "candidate_handoff" not in SKILL_TEXT
+        # A content gate here re-narrows the census population: a task whose
+        # only content is a sibling key would be dropped.
+        assert 'get("handoff")' not in prelude
+        assert prelude.index("if task_id in from_unprocessed:") < prelude.index(
+            "from_stores.add(team)"
+        )
+
+    def test_high_disk_only_from_branch_never_sets_handled_any(self):
+        """Bugbot 1, RED on b9cd8157: `from_handled_any`'s only consumer is
+        THIS team's report-gap line, which runs only for a ledger-uncovered
+        this-team id. A from-store file is not evidence about this team's
+        task, so the disk-only branch must not set the flag — otherwise a
+        drained this-team discovery vanishes with no gap report."""
+        disk_only = SKILL_TEXT.split("if not from_groups:", 1)[1].split(
+            "elif not from_task:", 1
+        )[0]
+        assert 'process(from_disk, section=f"team={team}")' in disk_only
+        assert "from_handled_any = True" not in disk_only
+        # The gap line the flag would suppress is still reachable.
+        assert 'report_gap(task_id, agent="unknown")' in SKILL_TEXT
+
+    def test_from_team_journal_partition_still_sets_handled_any(self):
+        """REGRESSION GUARD, GREEN on b9cd8157: a journal event's `team`
+        field is an explicit store claim, so the journal-partition branch
+        keeps setting the flag; the all-from-team-work-units carve-out
+        depends on it."""
+        loop_body = SKILL_TEXT.split(
+            "for identity, group in from_groups.items():", 1
+        )[1].split("if not from_groups:", 1)[0]
+        assert "from_handled_any = True" in loop_body
+        assert "if not from_handled_any:" in SKILL_TEXT
 
     def test_minor_from_handled_any_carve_out_is_prose(self):
         """The all-from-team task has no file in THIS store and must not

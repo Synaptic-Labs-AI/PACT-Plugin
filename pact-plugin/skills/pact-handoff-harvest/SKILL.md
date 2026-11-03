@@ -128,7 +128,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 🔴 **DO NOT restate this as a blanket prefer-the-non-empty-side rule.** The rule is per-field and per-state, and a blanket rule makes the journal the default winner while the task file is the freshest copy, which inverts the precedence this step is built on.
 4. **When the task file is ABSENT, report `handoff divergence check unavailable for task N: task file absent`** and use the journal copy alone. Do not skip in silence. A drained task file is a reportable gap and not a clean single-source read.
-5. **When the task carries NO `agent_handoff` event in a SECTION and that SECTION's task file EXISTS**, process that task-file HANDOFF alone: there is no second copy to union and no divergence to report. This is a normal population — the census exists because a completion hook may not fire — and it is not a gap. **THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES:** apply it per store to THIS team's store and to each `team={from}` store, labelling a from-team application `## team={from}` in the output. A from-team task whose task file CARRIES a HANDOFF and has no journal group is processed exactly as this team's is, and it produces NEITHER the absent-file report NOR the no-match report. **A present file with NO `metadata.handoff` IS NOT A FROM-TEAM WORK UNIT:** it may be an unrelated task that merely shares the number, so it must not enter the from-team population, must not be synthesized, and must not count as handled.
+5. **When the task carries NO `agent_handoff` event in a SECTION and that SECTION's task file EXISTS**, process that task-file HANDOFF alone: there is no second copy to union and no divergence to report. This is a normal population — the census exists because a completion hook may not fire — and it is not a gap. **THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES:** apply it per store to THIS team's store and to each `team={from}` store, labelling a from-team application `## team={from}` in the output. A from-team task with a task file and no journal group is processed exactly as this team's is — whatever the file carries, a `handoff` or a sibling key Step 3.1 resolves — and it produces NEITHER the absent-file report NOR the no-match report. **THE FROM-TEAM DISK SHAPE IS ADMITTED BY PROVENANCE, NEVER BY A NUMBER MATCH:** a from store's file is in scope only when the id came from the from-store CENSUS; a same-numbered file in a from store is NOT evidence about THIS team's task, so it must never be processed as one and must never make this team's gap report silent.
 6. **Report gap**: If no source resolves, report the gap to the lead. Record the task_id, the timestamp, and the agent name WHEN A SOURCE CARRIES ONE — a task can reach this branch with no journal event and no task file, so its agent may be unknowable; record the agent as `unknown` rather than omitting the field.
 
 **A TASK WHOSE WORK UNITS WERE ALL FROM-TEAM PARTITIONS HAS NO TASK FILE IN THIS SECTION'S STORE, AND THE ABSENCE IS NOT A GAP.** The from-team section processed it against THAT team's store; do not emit the report-gap line for it. That line fires only when NO source resolves — no journal group in this section, no task file here, and no from-team partition processed.
@@ -358,12 +358,17 @@ for task_id in unprocessed | from_unprocessed:
     # journal partition, and a task file with no journal event (rule 5's
     # counterpart). Iterating `from_events` alone drops a census id whose
     # content lives only on disk, so the store set is the union of both.
+    # A from store joins the DISK shape only for a CENSUS-ADMITTED id
+    # (`from_unprocessed`). File presence is the right test there: the census
+    # admits a task by ANY agent-authored key, so a sibling-key-only file
+    # must enter and Step 3.1 resolve it. An id that is ONLY this team's
+    # never admits a from store at all — the same number names a different
+    # task, and that stranger is not this team's work.
     from_stores = set(from_events)
-    for team in from_teams:
-        candidate = read_task_json(task_id, team)
-        candidate_handoff = (candidate.get("metadata", {}) or {}).get("handoff")
-        if candidate_handoff:
-            from_stores.add(team)
+    if task_id in from_unprocessed:
+        for team in from_teams:
+            if read_task_json(task_id, team):
+                from_stores.add(team)
     for team in sorted(from_stores):
         events = from_events.get(team, [])
         from_task = read_task_json(task_id, team)
@@ -385,16 +390,20 @@ for task_id in unprocessed | from_unprocessed:
                     report(line)
                 handoff = merged
             process(handoff, section=f"team={team}")
+            # A journal event's `team` field names the store EXPLICITLY, so
+            # this IS evidence the work unit is real; the all-from-team
+            # carve-out depends on it.
             from_handled_any = True
         if not from_groups:
-            # RULE 5, FROM-TEAM APPLICATION: a HANDOFF-CARRYING task file with
+            # RULE 5, FROM-TEAM APPLICATION: a census-admitted task file with
             # no journal group is a normal population, processed from the file
             # alone under this section's label. No absent-file report and no
-            # no-match report. A store reaches `from_stores` through a journal
-            # partition or a non-empty `metadata.handoff`, so this branch
-            # always has content to process.
+            # no-match report. It does NOT set `from_handled_any`: this branch
+            # has no explicit team claim (the store was admitted by census
+            # provenance), and the flag's only consumer is THIS team's gap
+            # line — a from-store file must never silence a gap for this
+            # team's id.
             process(from_disk, section=f"team={team}")
-            from_handled_any = True
         # ONE report for THIS store's whole group set, decided AFTER the loop
         # on the same rule as this section's: a per-group report repeats the
         # line once per work unit. A group that lost to another matching
