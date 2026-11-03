@@ -21,6 +21,7 @@ import pytest
 from fixtures.emitter import VALID_HANDOFF, _run_main
 
 from shared.session_journal import _validate_event_schema
+from shared.task_utils import task_dir_for
 
 EMITTER_STDIN = {
     "session_id": "",
@@ -42,7 +43,10 @@ TASK_DATA = {
 
 
 def _run_emitter(tmp_path, monkeypatch, context_team_name="session-abc"):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    # HOME is NOT set here: the suite-wide autouse fixture patches Path.home()
+    # to its own tmp tree, so an os.environ HOME would be inert in-process.
+    # CLAUDE_CONFIG_DIR is scrubbed by that fixture too; the delenv stays for
+    # the no-inherited-override contract this helper documents.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     calls: list[dict] = []
     code = _run_main(
@@ -202,15 +206,22 @@ class TestEmitTeamUncertaintyGuard:
     def _run(self, tmp_path, monkeypatch, capsys, payload_team, payload_subject,
              context_team, create_payload_store=False,
              record_subject="OLD subject", snapshot_calls=None):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        # HOME is NOT set here: the suite-wide autouse fixture patches
+        # Path.home() to tmp_path / "home", so a hand-built tmp_path / ".claude"
+        # store would never be the one the gate tests with is_dir(). Resolve
+        # the store through the SAME production seam the gate uses, so this
+        # fixture cannot drift from the check when the config root moves.
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         if create_payload_store:
             # The live-claim gate requires the payload's store to EXIST. The
             # harness materialises only the context team's store, so the
             # both-stores fixture creates this one explicitly.
-            (tmp_path / ".claude" / "tasks" / payload_team).mkdir(
-                parents=True, exist_ok=True
-            )
+            store = task_dir_for(payload_team)
+            # A name the production join rejects (a line boundary, a
+            # traversal shape) addresses NO store. That is the property the
+            # forge arms exercise, so no directory is created for it.
+            if store is not None:
+                store.mkdir(parents=True, exist_ok=True)
         calls: list[dict] = []
         payload = {
             **EMITTER_STDIN,
