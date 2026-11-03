@@ -21,12 +21,12 @@ export function el(tag, props = {}, children = []) {
         if (av === false || av === undefined || av === null) continue;
         node.setAttribute(ak, av === true ? "" : String(av));
       }
-    } else if (key === "html") {
-      // Deliberately unsupported. Present so a mistaken call fails loudly
-      // in development rather than silently injecting markup.
-      throw new Error("dom.el: 'html' is not supported; use text or nodes");
+    } else if (key === "value") {
+      node.value = value;
     } else {
-      node[key] = value;
+      // Unknown props fail loudly: a generic node[key] = value fallback
+      // would let a markup property slip past review instead of throwing.
+      throw new Error(`dom.el: unsupported prop '${key}'; use class, text, style, dataset, on, attrs, or value`);
     }
   }
   append(node, children);

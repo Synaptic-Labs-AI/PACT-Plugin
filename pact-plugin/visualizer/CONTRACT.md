@@ -319,7 +319,7 @@ the header. They only render their own roots and call callbacks.
 ### dom.js (Lead)
 
 ```js
-export function el(tag, props = {}, children = []); // props: class, text, attrs, on
+export function el(tag, props = {}, children = []); // props: class, text, attrs, on, style, dataset, value (unknown props throw)
 export function clear(node);
 export function text(node, value);
 export function fmtClock(seconds);   // "01:23:45"

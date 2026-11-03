@@ -786,6 +786,8 @@ function toggleDisco(on) {
 function frame(now) {
   const dt = state.lastFrame ? Math.min(0.5, (now - state.lastFrame) / 1000) : 0;
   state.lastFrame = now;
+  // Idle gating: when nothing is playing there is no loop work — the clock
+  // only changes via setCursor/applyModel, which already call updateClock.
   if (state.playing && state.model) {
     state.acc += dt * SPEEDS[state.speed];
     const step = Math.floor(state.acc);
@@ -799,10 +801,10 @@ function frame(now) {
         if (state.mode !== "demo") setModeLabel();
       }
     }
-  }
-  if (now - state.lastClock > 250) {
-    state.lastClock = now;
-    updateClock();
+    if (now - state.lastClock > 250) {
+      state.lastClock = now;
+      updateClock();
+    }
   }
   state.raf = requestAnimationFrame(frame);
 }

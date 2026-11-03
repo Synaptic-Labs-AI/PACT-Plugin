@@ -139,6 +139,7 @@ export function createTimeline(root, options = {}) {
       setModel() {},
       setCursor() {},
       setMode() {},
+      destroy() {},
     };
   }
   const callbacks = {
@@ -162,6 +163,7 @@ export function createTimeline(root, options = {}) {
   let drawHeight = 0;
   let drawQueued = false;
   let resizeObserver = null;
+  let destroyed = false;
 
   /* Build the recorder shell once; setters update it in place. */
   const shell = el("div", { class: "rec-shell" });
@@ -466,11 +468,11 @@ export function createTimeline(root, options = {}) {
   }
 
   function queueDraw() {
-    if (drawQueued) return;
+    if (destroyed || drawQueued) return;
     drawQueued = true;
     const run = () => {
       drawQueued = false;
-      drawMarkers();
+      if (!destroyed) drawMarkers();
     };
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
     else setTimeout(run, 16);
@@ -520,6 +522,7 @@ export function createTimeline(root, options = {}) {
   /* --- public interface -------------------------------------------------- */
 
   function setModel(model) {
+    if (destroyed) return;
     state.model = model && typeof model === "object" ? model : null;
     state.hover = null;
     const total = eventTotal();
@@ -532,6 +535,7 @@ export function createTimeline(root, options = {}) {
   }
 
   function setCursor(cursor) {
+    if (destroyed) return;
     const total = eventTotal();
     state.cursor = clamp(Math.round(Number(cursor) || 0), 0, total);
     updateCursorDom();
@@ -558,13 +562,32 @@ export function createTimeline(root, options = {}) {
   resizeCanvas();
   queueDraw();
 
+  let usedWindowResize = false;
   if (typeof ResizeObserver !== "undefined") {
     resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(track);
   } else if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    usedWindowResize = true;
     window.addEventListener("resize", handleResize);
   }
-  void resizeObserver;
 
-  return { setModel, setCursor, setMode };
+  /* Mirrors Stage.destroy: stop observation, drop the fallback listener,
+   * drop the built shell, and make later setters no-ops. Element listeners
+   * on the shell die with the removed nodes. */
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+    if (resizeObserver) {
+      try { resizeObserver.disconnect(); } catch (err) { /* ignore */ }
+      resizeObserver = null;
+    }
+    if (usedWindowResize && typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("resize", handleResize);
+    }
+    clear(root);
+    state.model = null;
+    state.hover = null;
+  }
+
+  return { setModel, setCursor, setMode, destroy };
 }
