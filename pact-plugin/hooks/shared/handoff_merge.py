@@ -751,12 +751,23 @@ def undivided_contents(group: list) -> int:
     )
 
 
-def _as_arc(arc: object) -> tuple | None:
-    """An arc as `arc_of` returns it: a tuple, or None. A JSON list becomes a
-    tuple; any other shape is not an arc and becomes None."""
-    if isinstance(arc, (list, tuple)):
-        return tuple(arc)
-    return None
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _as_arc(arc: object) -> tuple[bool, tuple | None]:
+    """(well formed, arc). None is the team-less arc. A dated arc is a
+    2-sequence of an int epoch and an int or None creation position, as
+    `arc_of` returns it; a JSON list is accepted and becomes a tuple.
+    Anything else is MALFORMED and must never be read as the team-less arc,
+    which would hand a dated unit another instance's team-less snapshot."""
+    if arc is None:
+        return True, None
+    if isinstance(arc, (list, tuple)) and len(arc) == 2:
+        epoch, created = arc
+        if _is_int(epoch) and (created is None or _is_int(created)):
+            return True, (epoch, created)
+    return False, None
 
 
 def select_snapshot(
@@ -776,11 +787,18 @@ def select_snapshot(
 
     Returns (snapshot or None, report lines). A snapshot that names another
     team is reported once; a snapshot of another instance is dropped
-    silently. Pure; never raises.
+    silently. A malformed `arc` (neither None nor a dated arc) selects
+    nothing and is reported once. Pure; never raises.
     """
+    well_formed, want_arc = _as_arc(arc)
+    if not well_formed:
+        return None, [
+            f"handoff snapshot selection refused for task "
+            f"{report_safe(task_id)}: unit arc {report_safe(arc)!r} is not a "
+            f"valid arc"
+        ]
     positions = positioned(journal if isinstance(journal, list) else [])
     epochs = store_epochs(positions)
-    want_arc = _as_arc(arc)
     reports: list[str] = []
     qualifying = []
     for event in positions:

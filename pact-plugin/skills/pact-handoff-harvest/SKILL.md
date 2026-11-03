@@ -223,7 +223,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import select_snapshot; p = json.load(sys.stdin); s, reports = select_snapshot(p['journal'], p['task_id'], p['occupant'], p['team'], p['arc']); print(json.dumps({'snapshot': s, 'reports': reports}))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` holds `{"journal": [...], "task_id": "...", "occupant": "<the unit's group identity>", "team": "<this section's team>", "arc": <the unit's group arc, or null>}`. It prints the chosen snapshot, or `null`, and the report lines.
+   `$PAYLOAD_JSON` holds `{"journal": [...], "task_id": "...", "occupant": "<the unit's group identity>", "team": "<this section's team>", "arc": <the arc element of the unit's group key exactly as the `group_events` route printed it: a list, or null for a team-less group>}`. A malformed arc selects nothing and is reported. It prints the chosen snapshot, or `null`, and the report lines.
 
 10. **`owning_group`**, the ONE group that owns a store's task file: the group with the record's identity and the store's current arc, else the group with that identity and no arc, else none:
 

@@ -93,4 +93,20 @@ def test_the_returned_snapshot_carries_no_position_field():
 
 @pytest.mark.parametrize("journal", [None, "x", [None, 3, "e"], [{"type": "task_metadata_snapshot"}]])
 def test_malformed_input_never_raises(journal):
-    assert select_snapshot(journal, "5", OCC, TEAM, "not an arc") == (None, [])
+    assert select_snapshot(journal, "5", OCC, TEAM, None) == (None, [])
+
+
+@pytest.mark.parametrize("arc", ["not an arc", 0, [], [0], [0, 1, 2], ["0", 0], [True, 0],
+                                 [0, "1"], {"epoch": 0}, (0.5, None)])
+def test_a_malformed_arc_selects_nothing_and_is_reported_once(arc):
+    """A malformed arc is NOT the team-less arc: read as None it would take a
+    team-less snapshot that belongs to another instance."""
+    journal = [snap("legacy"), created(), snap("dated", team=TEAM)]
+    chosen, reports = select_snapshot(journal, "5", OCC, TEAM, arc)
+    assert chosen is None
+    assert len(reports) == 1 and "not a valid arc" in reports[0]
+
+
+@pytest.mark.parametrize("arc", [(0, None), [1, 3], (2, 0)])
+def test_a_well_formed_arc_is_not_reported(arc):
+    assert select_snapshot([created()], "5", OCC, TEAM, arc)[1] == []
