@@ -151,7 +151,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 1. **Subject term.** When the record subject is missing, empty, or whitespace-only, substitute the literal `(no subject)` before hashing. The two emit paths both apply this.
 2. **Agent term.** When the record owner is missing, empty, or whitespace-only, the `TaskCompleted` emit path hashes the platform teammate name for that task in place of the owner. The task record does not carry that name, so this one is NOT reproducible from the record. Report such a task through the report-message rule below and do not read it as a drain.
 
-**HOW TO CALL THE NAMES THIS STEP USES.** This step and the pseudocode below name these shared functions. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.** Every route imports from `shared.handoff_merge`, except `read_task_json` (`shared.task_utils`) and `HANDOFF_LEGACY_ALIASES` (`shared.handoff_schema`). The block also names `positioned` and `store_epochs`, which the `group_events` and `current_arc` routes apply for you, and `task_metadata` and `disk_handoff`: a task's `metadata` when it is a mapping, else `{}`, and that mapping's `handoff` when it is a non-empty mapping, else `{}`.
+**HOW TO CALL THE NAMES THIS STEP USES.** This step and the pseudocode below name these shared functions. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.** Every route imports from `shared.handoff_merge`, except `read_task_json` (`shared.task_utils`) and `HANDOFF_LEGACY_ALIASES` (`shared.handoff_schema`). The block also names `positioned` and `store_epochs`, which the `group_events` and `current_arc` routes apply for you,.
 
 🔴 **EVERY VALUE CROSSES AS DATA, NEVER AS COMMAND TEXT.** Pass a value as a separate ARGV entry read through `sys.argv`, or carry it in a JSON payload on STDIN to a command whose text is a FIXED LITERAL — and never interpolate a value into the `-c` string or into an unquoted heredoc body. The author of a task writes its subject, so a subject folded into command text is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the DATA BOUNDARY is what makes it safe, and rewriting the command is enough to remove it.
 
@@ -183,7 +183,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import union_preferring_task_file; p = json.load(sys.stdin); merged, reports = union_preferring_task_file(p['journal'], p['disk'], p['task_id']); print(json.dumps({'handoff': merged, 'reports': reports}))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` names a file holding `{"journal": {...}, "disk": {...}, "task_id": "..."}`.
+   `$PAYLOAD_JSON` holds `{"journal": {...}, "disk": {...}, "task_id": "..."}`.
 
 5. **`latest_by_ts_then_journal_order`**, the group's authoritative event: the latest parsed instant, and the later journal line on an equal instant. It takes the events of ONE group, in journal order:
 
@@ -199,7 +199,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import group_events, positioned, store_epochs; p = json.load(sys.stdin); j = positioned(p['journal']); g = group_events([j[i] for i in p['positions']], j, store_epochs(j)); print(json.dumps([[list(k), [e['_pos'] for e in v]] for k, v in g.items()]))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` holds `{"journal": [...], "positions": [...]}`. It prints one `[key, positions]` pair per group, each group's positions in journal order.
+   `$PAYLOAD_JSON` holds `{"journal": <the whole Step 1 journal list>, "positions": [...]}`. It prints one `[key, positions]` pair per group, each group's positions in journal order.
 
 7. **`current_arc`**, the arc of the task a store holds now, for the task-file join:
 
@@ -207,7 +207,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import current_arc, positioned, store_epochs; p = json.load(sys.stdin); j = positioned(p['journal']); print(json.dumps(current_arc(p['team'], p['task_id'], j, store_epochs(j))))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` holds `{"journal": [...], "team": "...", "task_id": "..."}`.
+   `$PAYLOAD_JSON` holds `{"journal": <the whole Step 1 journal list>, "team": "...", "task_id": "..."}`.
 
 8. **`arc_of`**, the arc of ONE journal event, for the Step 3.1 snapshot selection. It takes the whole journal list from Step 1 and the event's position in it:
 
@@ -215,7 +215,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import arc_of, positioned, store_epochs; p = json.load(sys.stdin); j = positioned(p['journal']); print(json.dumps(arc_of(j[p['position']], j, store_epochs(j))))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` holds `{"journal": [...], "position": <index>}`. It prints the arc, or `null` for an event with no `team`.
+   `$PAYLOAD_JSON` holds `{"journal": <the whole Step 1 journal list>, "position": <index>}`. It prints the arc, or `null` for an event with no `team`.
 
 9. **`select_snapshot`**, the ONE snapshot a work unit may take its siblings from (Step 3.1): matching task id and occupant, no other team, and an arc equal to the unit's group arc; the latest instant wins, the later line on a tie:
 
@@ -223,7 +223,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import select_snapshot; p = json.load(sys.stdin); s, reports = select_snapshot(p['journal'], p['task_id'], p['occupant'], p['team'], p['arc']); print(json.dumps({'snapshot': s, 'reports': reports}))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` holds `{"journal": [...], "task_id": "...", "occupant": "<the unit's group identity>", "team": "<this section's team>", "arc": <the arc element of the unit's group key exactly as the `group_events` route printed it: a list, or null for a team-less group>}`. A malformed arc selects nothing and is reported. It prints the chosen snapshot, or `null`, and the report lines.
+   `$PAYLOAD_JSON` holds `{"journal": <the whole Step 1 journal list>, "task_id": "...", "occupant": "<the unit's group identity>", "team": "<this section's team>", "arc": <the arc element of the unit's group key exactly as the `group_events` route printed it: a list, or null for a team-less group>}`. A malformed arc selects nothing and is reported. It prints the chosen snapshot, or `null`, and the report lines.
 
 10. **`owning_group`**, the ONE group that owns a store's task file: the group with the record's identity and the store's current arc, else the group with that identity and no arc, else none:
 
@@ -233,13 +233,27 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
    `$PAYLOAD_JSON` holds `{"groups": [<keys the group_events route printed>], "disk_id": "...", "file_arc": <the current_arc route's output>}`. It prints the owning key, or `null`.
 
-11. **`undivided_contents`**, the count of distinct contents in ONE group, for the no-boundary report:
+11. **`task_metadata`**, a task's `metadata` when it is a mapping, else `{}`:
+
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import task_metadata; print(json.dumps(task_metadata(json.load(sys.stdin))))" < "$TASK_JSON"
+    ```
+
+    `$TASK_JSON` names a file holding the task JSON the `read_task_json` route printed.
+
+12. **`disk_handoff`**, a task's `metadata.handoff` when it is a non-empty mapping, else `{}`:
+
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import disk_handoff; print(json.dumps(disk_handoff(json.load(sys.stdin))))" < "$TASK_JSON"
+    ```
+
+13. **`undivided_contents`**, the count of distinct contents in ONE group, for the no-boundary report:
 
    ```bash
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import undivided_contents; print(undivided_contents(json.load(sys.stdin)))" < "$EVENTS_JSON"
    ```
 
-12. **`partition_destination(event_team, this_team, from_teams)`**, the NEW-FORMAT route. Returns one of the exported `PARTITION_THIS`, `PARTITION_FROM`, `PARTITION_FOREIGN` and `PARTITION_OLD_FORMAT` labels; compare against those constants, never bare literals. An absent or empty `event_team` returns `PARTITION_OLD_FORMAT`, and callers keep the underivable-`this_team` guard ABOVE it (when `this_team` is empty, every event is OLD-FORMAT before this runs). Pure; never raises.
+14. **`partition_destination(event_team, this_team, from_teams)`**, the NEW-FORMAT route. Returns one of the exported `PARTITION_THIS`, `PARTITION_FROM`, `PARTITION_FOREIGN` and `PARTITION_OLD_FORMAT` labels; compare against those constants, never bare literals. An absent or empty `event_team` returns `PARTITION_OLD_FORMAT`, and callers keep the underivable-`this_team` guard ABOVE it (when `this_team` is empty, every event is OLD-FORMAT before this runs). Pure; never raises.
 
    ```bash
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import partition_destination; p = json.load(sys.stdin); print(partition_destination(p['event_team'], p['this_team'], p['from_teams']))" < "$PAYLOAD_JSON"
@@ -247,7 +261,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
    `$PAYLOAD_JSON` holds `{"event_team": ..., "this_team": "...", "from_teams": ["..."]}`.
 
-13. **`old_format_destination(outcome, this_team)`**, the OLD-FORMAT route. Takes the `OldFormatOutcome` from `mixed_old_format_event` and returns one of `OLD_FORMAT_DEST_MIXED`, `OLD_FORMAT_DEST_FROM` and `OLD_FORMAT_DEST_THIS`: MIXED means discard the event and emit `outcome.report`; FROM means process it under `outcome.team`; THIS covers OWNED_BY this team (no report) and UNMATCHED (emit `outcome.report`). Pure; never raises.
+15. **`old_format_destination(outcome, this_team)`**, the OLD-FORMAT route. Takes the `OldFormatOutcome` from `mixed_old_format_event` and returns one of `OLD_FORMAT_DEST_MIXED`, `OLD_FORMAT_DEST_FROM` and `OLD_FORMAT_DEST_THIS`: MIXED means discard the event and emit `outcome.report`; FROM means process it under `outcome.team`; THIS covers OWNED_BY this team (no report) and UNMATCHED (emit `outcome.report`). Pure; never raises.
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import OldFormatOutcome, old_format_destination; p = json.load(sys.stdin); o = OldFormatOutcome(**p['outcome']); print(old_format_destination(o, p['this_team']))" < "$PAYLOAD_JSON"
@@ -255,7 +269,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
     `$PAYLOAD_JSON` holds `{"outcome": {"state": "...", "team": "...", "report": "..."}, "this_team": "..."}`.
 
-14. **`mixed_old_format_event(task_id, event_agent, event_subject, event_handoff, candidate_tasks)`**, the OLD-FORMAT classifier. Returns an `OldFormatOutcome(state, team, report)`: `state` is one of `OLD_FORMAT_MIXED`, `OLD_FORMAT_OWNED` and `OLD_FORMAT_UNMATCHED`; `report` is the line to emit for MIXED and for UNMATCHED, and `None` for OWNED. `candidate_tasks` is the list of `{"team": "...", "task": <parsed task JSON>}` for the named stores. Pure; never raises.
+16. **`mixed_old_format_event(task_id, event_agent, event_subject, event_handoff, candidate_tasks)`**, the OLD-FORMAT classifier. Returns an `OldFormatOutcome(state, team, report)`: `state` is one of `OLD_FORMAT_MIXED`, `OLD_FORMAT_OWNED` and `OLD_FORMAT_UNMATCHED`; `report` is the line to emit for MIXED and for UNMATCHED, and `None` for OWNED. `candidate_tasks` is the list of `{"team": "...", "task": <parsed task JSON>}` for the named stores. Pure; never raises.
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import mixed_old_format_event; p = json.load(sys.stdin); o = mixed_old_format_event(p['task_id'], p['agent'], p['subject'], p['handoff'], p['candidates']); print(json.dumps({'state': o.state, 'team': o.team, 'report': o.report}))" < "$PAYLOAD_JSON"
@@ -263,7 +277,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
     `$PAYLOAD_JSON` holds `{"task_id": "...", "agent": "...", "subject": "...", "handoff": {...}, "candidates": [...]}`.
 
-15. **`safe_from_teams`**, the from-team list: each `team_realigned` event's `from` that is a valid team name and is not this team, once, plus one report line per rejected value:
+17. **`safe_from_teams`**, the from-team list: each `team_realigned` event's `from` that is a valid team name and is not this team, once, plus one report line per rejected value:
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import safe_from_teams; p = json.load(sys.stdin); teams, reports = safe_from_teams(p['realign_events'], p['this_team']); print(json.dumps({'teams': teams, 'reports': reports}))" < "$PAYLOAD_JSON"
@@ -271,7 +285,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
     `$PAYLOAD_JSON` holds `{"realign_events": [...], "this_team": "..."}`.
 
-16. **`unit_token`**, a work unit's ledger token: `{id}#{key}`, or `{from}/{id}#{key}` when the third argument names a realigned team. The selection key crosses on STDIN: the selected journal handoff for a journal group; for a disk-only unit, its task-file handoff, or its whole `metadata` when it carries no handoff. An empty line means a part was not a valid name; process the unit, do not record it, and report it as the pseudocode does:
+18. **`unit_token`**, a work unit's ledger token: `{id}#{key}`, or `{from}/{id}#{key}` when the third argument names a realigned team. The selection key crosses on STDIN: the selected journal handoff for a journal group; for a disk-only unit, its task-file handoff, or its whole `metadata` when it carries no handoff. An empty line means a part was not a valid name; process the unit, do not record it, and report it as the pseudocode does:
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import unit_token; print(unit_token(sys.argv[1], json.load(sys.stdin), sys.argv[2] or None) or '')" "$TASK_ID" "$FROM_TEAM" < "$SELECTION_KEY_JSON"
@@ -279,7 +293,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
     Pass an empty `$FROM_TEAM` for this team's units.
 
-17. **`parse_ledger_tokens`**, the processed token set of one ledger section:
+19. **`parse_ledger_tokens`**, the processed token set of one ledger section:
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import parse_ledger_tokens; print(json.dumps(sorted(parse_ledger_tokens(sys.stdin.read()))))" < "$SECTION_TEXT"
@@ -287,13 +301,13 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
     `$SECTION_TEXT` names a file holding the `awk` extract of your section.
 
-18. **`read_task_json`**, a named store's task file. Read a named store's task file with this route only; it never reads a file outside that store:
+20. **`read_task_json`**, a named store's task file. Read a named store's task file with this route only; it never reads a file outside that store:
 
     ```bash
     python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.task_utils import read_task_json; print(json.dumps(read_task_json(sys.argv[1], sys.argv[2], base_fallback=False)))" "$TASK_ID" "$TEAM"
     ```
 
-19. **`HANDOFF_LEGACY_ALIASES`**, the SHARED legacy-spelling map. It is a DICT, not a call: derive a raw key's canonical identity with `HANDOFF_LEGACY_ALIASES.get(raw_key, raw_key)`. It carries exactly three entries — `key_decisions`→`decisions`, `areas_of_uncertainty`→`uncertainty`, `integration_points`→`integration`.
+21. **`HANDOFF_LEGACY_ALIASES`**, the SHARED legacy-spelling map. It is a DICT, not a call: derive a raw key's canonical identity with `HANDOFF_LEGACY_ALIASES.get(raw_key, raw_key)`. It carries exactly three entries — `key_decisions`→`decisions`, `areas_of_uncertainty`→`uncertainty`, `integration_points`→`integration`.
 
     ```bash
     python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_schema import HANDOFF_LEGACY_ALIASES; print(HANDOFF_LEGACY_ALIASES)"
@@ -551,14 +565,7 @@ Read all HANDOFFs before proceeding to extraction.
 A HANDOFF may reference sibling metadata keys on its task (verification records, parked analyses, teachback history, variety rationales). Those siblings die with the task file when the task store drains — but every completed task's non-handoff metadata is also mirrored into the journal as a `task_metadata_snapshot` event. Resolve sibling keys through this fallback:
 
 1. **Task file** (freshest, and it can be drained): use ONLY the `metadata` Step 3 passed for this unit. When Step 3 passed none, skip this item and use the snapshot fallback; do not read the task file. Only the group that owns the task file ever reads its siblings: a same-numbered task file of another occupant, or of another instance of this task, is never this unit's sibling source.
-2. **Snapshot fallback** (GC-proof): read the mirrored snapshots via the existing subcommand (explicit `--session-dir`, masked-read-safe):
-
-   ```bash
-   SNAPSHOTS=$(python3 "{plugin_root}/hooks/shared/session_journal.py" read \
-                 --session-dir "$SESSION_DIR" --type task_metadata_snapshot)
-   ```
-
-   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `disk_identity(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **THE SNAPSHOT'S ARC MUST EQUAL THE UNIT'S GROUP ARC.** Compute the snapshot's arc with the `arc_of` route at its position in the Step 1 journal list, and drop every snapshot whose arc is not the unit's. A snapshot with NO `team` has a null arc, so it reaches only a team-less unit; a DATED unit, one whose group arc is not null, accepts only a snapshot that carries its team and its arc. One instance of a task never takes another instance's siblings. **Select with the `select_snapshot` route in Step 3, under HOW TO CALL THE NAMES THIS STEP USES, and never by hand:** it applies the occupant, team and arc rules above and the tie-break below, and returns the report lines to emit. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
+2. **Snapshot fallback** (GC-proof): the mirrored snapshots are the `task_metadata_snapshot` events in the Step 1 journal list; do not read the journal again. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `disk_identity(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **THE SNAPSHOT'S ARC MUST EQUAL THE UNIT'S GROUP ARC.** Compute the snapshot's arc with the `arc_of` route at its position in the Step 1 journal list, and drop every snapshot whose arc is not the unit's. A snapshot with NO `team` has a null arc, so it reaches only a team-less unit; a DATED unit, one whose group arc is not null, accepts only a snapshot that carries its team and its arc. One instance of a task never takes another instance's siblings. **Select with the `select_snapshot` route in Step 3, under HOW TO CALL THE NAMES THIS STEP USES, and never by hand:** it applies the occupant, team and arc rules above and the tie-break below, and returns the report lines to emit. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
 3. **Graceful degrade**: neither source resolves → record the gap (task_id, key, timestamp) exactly as Step 3's report-gap tier does; never invent content.
 
 **SIBLING KEY NAMES CARRY NO ORDER.** A task commonly carries a family of related sibling keys, and their names do not record which one is newest. A key that names itself `final` can be the earlier of two. Do not sort sibling keys by name, and do not read a name as a position. **ONE NAME DOES CARRY A RELATION, and it is not a position: a sibling key that amends, corrects or withdraws HANDOFF content SUPERSEDES what it addresses, whatever its date. Synthesize from the amended state, and never bank a claim an amendment withdrew.** Resolve the order of the rest in this priority:

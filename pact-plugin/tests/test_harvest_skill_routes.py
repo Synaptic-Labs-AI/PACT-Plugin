@@ -104,6 +104,8 @@ FIXTURES = {
             "task_id": "5", "occupant": _IDENTITY, "team": TEAM, "arc": [0, 0]},
         lambda out: json.loads(out)["snapshot"]["metadata"] == {"label": "dated"}
         and json.loads(out)["reports"] == []),
+    "task_metadata": ([], {"metadata": {"sib": 1}}, _json({"sib": 1})),
+    "disk_handoff": ([], {"metadata": {"handoff": H, "sib": 1}}, _json(H)),
     "owning_group": (
         [], {"groups": [[_IDENTITY, None], [_IDENTITY, [0, 0]]],
              "disk_id": _IDENTITY, "file_arc": [0, 0]},
@@ -211,3 +213,133 @@ def test_a_teamless_snapshot_never_has_a_dated_units_arc(child_env):
     teamed = json.loads(_run("arc_of", child_env, [], {"journal": journal, "position": 4}))
     assert teamless is None and teamless != dated_arc
     assert teamed == dated_arc
+
+
+
+# ---- class guards: the skill's routes agree with the code they describe ----
+
+import ast  # noqa: E402
+import builtins  # noqa: E402
+
+import test_harvest_step3_exec as step3  # noqa: E402
+
+# Names the block calls that the harness supplies itself, not a route.
+_ACTIONS = {"report", "process", "read_task_json", "Path", "datetime", "timezone"}
+
+
+def _block_call_names():
+    """Names the Step 3 block CALLS that it does not bind itself."""
+    tree = ast.parse(step3.BLOCK)
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            bound.add(node.name)
+            bound.update(a.arg for a in node.args.args)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+    called = {
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    return called - bound - set(dir(builtins)) - _ACTIONS
+
+
+def _route_imported_names():
+    names = set()
+    for line in SKILL_TEXT.splitlines():
+        for match in _IMPORT.finditer(line):
+            names.update(n.strip() for n in match.group(1).split(","))
+    return names
+
+
+def test_every_name_the_block_calls_is_routed_exported_and_in_the_harness():
+    """G-A2: a helper the block starts calling must have a route (the agent
+    can call it), be exported (the route can import it) and be in the exec
+    harness (the block's arms can run it)."""
+    called = _block_call_names()
+    assert called, "the block parse found no helper calls"
+    assert called <= _route_imported_names(), called - _route_imported_names()
+    harness_callables = {n for n in step3.HELPERS if not n.isupper()}
+    assert called == harness_callables, called ^ harness_callables
+    assert called <= set(hm.__all__), called - set(hm.__all__)
+
+
+def _top_level_keys(payload: str) -> set:
+    """The keys of the outermost mapping in a documented payload."""
+    keys, depth, i = set(), 0, 0
+    while i < len(payload):
+        ch = payload[i]
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        elif ch == '"' and depth == 1:
+            end = payload.index('"', i + 1)
+            if re.match(r"\s*:", payload[end + 1:]):
+                keys.add(payload[i + 1:end])
+            i = end
+        i += 1
+    return keys
+
+
+def _route_docs():
+    """(name, command line, documented payload or None) for every route."""
+    lines = SKILL_TEXT.splitlines()
+    out = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("python3 -c") and "from shared." in stripped):
+            continue
+        names = [n.strip() for n in _IMPORT.search(stripped).group(1).split(",")]
+        name = [n for n in names if n not in _SUPPORT][0]
+        payload = None
+        for after in lines[index + 1:index + 6]:
+            found = re.search(r"`\$PAYLOAD_JSON` holds `(\{.*\})`", after)
+            if found:
+                payload = found.group(1)
+                break
+        out.append((name, stripped, payload))
+    return out
+
+
+def test_every_route_documents_exactly_the_payload_and_argv_it_reads():
+    """G-B1: the documented `$PAYLOAD_JSON` keys equal the `p['key']`
+    subscripts the command reads, and the argv the command reads equals the
+    `$VAR` arguments the line passes."""
+    docs = _route_docs()
+    assert len(docs) == len(ROUTES)
+    payload_routes = 0
+    for name, command, payload in docs:
+        read_keys = set(re.findall(r"p\['(\w+)'\]", command))
+        if read_keys:
+            payload_routes += 1
+            assert payload is not None, f"{name} reads {read_keys} and documents no payload"
+            assert _top_level_keys(payload) == read_keys, (name, payload, read_keys)
+        tokens = shlex.split(command)
+        rest = tokens[3:]
+        if "<" in rest:
+            rest = rest[:rest.index("<")]
+        indices = {int(i) for i in re.findall(r"sys\.argv\[(\d+)\]", tokens[2])}
+        assert len(rest) == (max(indices) if indices else 0), (name, rest, indices)
+    assert payload_routes >= 5, "the payload parse found too few routes to check"
+
+
+def _journal_reads():
+    """(type or None) for every `session_journal.py read` command in the skill."""
+    joined = re.sub(r"\\\n\s*", " ", SKILL_TEXT)
+    reads = []
+    for line in joined.splitlines():
+        for match in re.finditer(r"session_journal\.py\"?\s+read\b([^`)]*)", line):
+            typed = re.search(r"--type\s+(\w+)", match.group(1))
+            reads.append(typed.group(1) if typed else None)
+    return reads
+
+
+def test_no_journal_read_filters_a_type_the_journal_helpers_need():
+    """G-B2: the journal-taking helpers need the WHOLE journal (positions and
+    store epochs), so no read in the skill may filter to one of their types."""
+    reads = _journal_reads()
+    assert None in reads, "the one unfiltered Step 1 read is missing"
+    assert any(reads), "no typed read found: the parse is not reading commands"
+    filtered = [t for t in reads if t in hm.JOURNAL_EVENT_TYPES]
+    assert not filtered, filtered
