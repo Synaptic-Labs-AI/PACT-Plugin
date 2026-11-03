@@ -1242,22 +1242,16 @@ class TestUnresolvedIdentityRefusesWrites:
             memory_id = memory.save(
                 {"context": "EMPTY-ID", "project_id": ""}, sync_to_claude=False
             )
-        except ProjectIdentityUnresolvedError as exc:
-            # CATCHING THE SUBCLASS PROVES THE CHANNEL; THE MESSAGE PROVES THE
-            # CAUSE, and the two fail differently. A refusal from any other
-            # ProjectScopeDisagreementError site now propagates and errors the
-            # arm instead of satisfying it, and a same-class refusal for a
-            # different reason fails the assertion below.
-            assert "no project identity could be resolved" in str(exc), (
-                "the empty-id save was refused by ProjectIdentityUnresolvedError "
-                f"for a cause other than the unresolved identity: {str(exc)!r}"
-            )
-            memory_id = None
         except ValueError as exc:
-            # The payload-validation channel. An empty supplied id is invalid
-            # input regardless of whether an instance identity resolved, and
-            # this guard runs first, so both routes may report it here. Also
-            # cause-specific: an unrelated ValueError fails the message check.
+            # THE ONLY REACHABLE CHANNEL FOR AN EMPTY SUPPLIED ID. The coder's
+            # falsy-payload guard is unconditional and runs before the
+            # identity guard, so an empty string never reaches
+            # ProjectIdentityUnresolvedError — the earlier subclass branch was
+            # unreachable and asserted nothing. That channel IS covered, by
+            # `test_w1_a_refused_save_writes_no_null_row` (unresolved instance,
+            # NO payload id), which is the input that actually reaches it.
+            # A refusal from any other ProjectScopeDisagreementError site
+            # propagates and errors this arm instead of satisfying it.
             assert str(exc).startswith(
                 "project_id, when supplied, must be a non-empty string; "
                 "omit it to auto-detect the project."
@@ -1302,9 +1296,11 @@ class TestUnresolvedIdentityRefusesWrites:
         instance can ever address those rows.
 
         The contract is the same as the unresolved arm: refuse for a
-        cause-specific reason, or write a non-empty id. An unrelated
-        ProjectScopeDisagreementError is NOT caught here on purpose — it
-        propagates and errors the arm.
+        cause-specific reason, or write a non-empty id. Neither an unrelated
+        ProjectScopeDisagreementError nor ProjectIdentityUnresolvedError is
+        caught here: the latter's "no project identity could be resolved" is
+        FALSE on a resolved instance, so accepting it would let a misnamed
+        cause pass. Both propagate and error the arm.
         """
         db_path = tmp_path / "resolved-empty-id.db"
         memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
@@ -1318,14 +1314,13 @@ class TestUnresolvedIdentityRefusesWrites:
                 files=[str(linked)],
                 sync_to_claude=False,
             )
-        except ProjectIdentityUnresolvedError as exc:
-            assert "no project identity could be resolved" in str(exc), (
-                f"refused for an unrelated identity cause: {str(exc)!r}"
-            )
-            memory_id = None
         except ValueError as exc:
             # The payload-validation channel: an empty supplied id is invalid
-            # input, not a project-scope disagreement.
+            # input, not a project-scope disagreement. `ProjectIdentityUnresolvedError`
+            # is deliberately NOT caught here: on a RESOLVED instance its
+            # message ("no project identity could be resolved") is false, so
+            # accepting it would let a misnamed cause pass. The no-identity
+            # channel is covered by W1, where that statement is true.
             assert str(exc).startswith(
                 "project_id, when supplied, must be a non-empty string; "
                 "omit it to auto-detect the project."
