@@ -4,7 +4,7 @@ WHY DISCLOSURE RATHER THAN A WARNING. A warning must decide something is wrong,
 and the resolver cannot: nothing in a save payload asserts what a record is
 ABOUT, so "is this filed correctly" is not decidable here. Disclosure makes no
 such judgement. It reports which project the record was filed under and which
-of the five sources decided it, on every save, and therefore has no
+of the six sources decided it, on every save, and therefore has no
 false-positive rate BY CONSTRUCTION.
 
 IT IS NOT PERSISTED, AND THIS DOCSTRING USED TO IMPLY IT WAS. The old wording
@@ -74,7 +74,7 @@ def mem(tmp_path):
 # --- the source is named ----------------------------------------------------
 
 def test_supplied_project_id_is_named_as_its_own_source(mem):
-    """`supplied` is the least-checked of the five sources, so it must be named.
+    """`supplied` is the least-checked of the six sources, so it must be named.
 
     A payload project_id short-circuits detection AND is invisible to the
     env/record scope guard, which takes no arguments and never sees a payload.
@@ -85,9 +85,14 @@ def test_supplied_project_id_is_named_as_its_own_source(mem):
     assert scope["source"] == "supplied", f"source was {scope['source']!r}"
 
 
-def test_detected_project_names_the_winning_strategy():
+def test_detected_project_names_the_winning_strategy(tmp_path):
     """A detected project reports WHICH strategy won, not merely that one did."""
-    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/tmp/some-project"}):
+    # A REAL directory: a declaration that does not exist now declines rather
+    # than yielding its basename (issue #1688), so the fixture must exist for
+    # Strategy 1 to be the route under test.
+    declared = tmp_path / "some-project"
+    declared.mkdir()
+    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(declared)}):
         project_id, source = PACTMemory._detect_project_id_with_source()
     assert source == "CLAUDE_PROJECT_DIR", f"source was {source!r}"
     assert project_id == "some-project"
@@ -104,7 +109,11 @@ def test_save_discloses_a_DETECTED_source_not_just_a_supplied_one(tmp_path):
     makes the right and wrong implementations disagree, so this one resolves
     its project by detection instead.
     """
-    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/tmp/detected-project"}):
+    # A REAL directory, so Strategy 1 still wins under the #1688 decline
+    # semantics. Only the fixture path changed; the assertions are untouched.
+    declared = tmp_path / "detected-project"
+    declared.mkdir()
+    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(declared)}):
         mem = PACTMemory(session_id="s", db_path=tmp_path / "detected.db")
     assert mem._project_id == "detected-project", "fixture did not detect"
 
@@ -129,7 +138,11 @@ def test_a_PAYLOAD_supplied_project_is_disclosed_as_supplied(tmp_path):
     A reader who sees `CLAUDE_PROJECT_DIR` believes the environment chose this
     project and that the guard therefore vetted it. Neither is true here.
     """
-    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/tmp/detected-project"}):
+    # A REAL directory, so Strategy 1 still wins under the #1688 decline
+    # semantics. Only the fixture path changed; the assertions are untouched.
+    declared = tmp_path / "detected-project"
+    declared.mkdir()
+    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(declared)}):
         mem = PACTMemory(session_id="s", db_path=tmp_path / "payload.db")
     assert mem._project_id_source == "CLAUDE_PROJECT_DIR", "fixture did not detect"
 
@@ -145,7 +158,7 @@ def test_a_PAYLOAD_supplied_project_is_disclosed_as_supplied(tmp_path):
     )
 
 
-def test_the_string_only_detector_still_returns_a_bare_string():
+def test_the_string_only_detector_still_returns_a_bare_string(tmp_path):
     """The long-standing signature is preserved for its external callers.
 
     `_detect_project_id` is called by the precedence pins in
@@ -153,7 +166,12 @@ def test_the_string_only_detector_still_returns_a_bare_string():
     there would break them, which is why the richer variant was added beside it
     rather than replacing it.
     """
-    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/tmp/some-project"}):
+    # A REAL directory: a declaration that does not exist now declines rather
+    # than yielding its basename (issue #1688), so the fixture must exist for
+    # Strategy 1 to be the route under test.
+    declared = tmp_path / "some-project"
+    declared.mkdir()
+    with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(declared)}):
         result = PACTMemory._detect_project_id()
     assert isinstance(result, str), f"expected a bare str, got {type(result)}"
     assert result == "some-project"

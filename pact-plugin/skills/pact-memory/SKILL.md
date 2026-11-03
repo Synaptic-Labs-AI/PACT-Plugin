@@ -233,6 +233,15 @@ separate `files=` parameter of `MemoryAPI.save()` — never a payload key.
 To record which files a memory concerns, name them in an entity's `notes`
 field instead.
 
+### `save` refuses when no project identity resolves
+
+If no project identity can be resolved, `save` refuses with
+`ProjectIdentityUnresolvedError`, a `ProjectScopeDisagreementError`
+subclass. The CLI surfaces it as exit 1 with `SCOPE_DISAGREEMENT` on stderr,
+and nothing is written.
+
+To proceed, supply `project_id` explicitly in the payload.
+
 ### Task Format
 ```python
 {"task": "Implement token refresh", "status": "in_progress", "priority": "high"}
