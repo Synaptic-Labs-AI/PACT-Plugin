@@ -32,10 +32,17 @@ The handoff harvest now keeps two task stores' same-numbered tasks apart, no lon
 - Input totality: `union_preferring_task_file` treats a non-dict copy as absent instead of raising, and `_field_map`'s alias fallback now matches `resolve_handoff_field` when every spelling is falsy.
 - Routing extraction: `partition_destination` returns exported labels beside `old_format_destination`, so the skill branches on constants instead of an inline comparison, and an unknown label fails closed.
 - Skill text: the call-route inventory covers every helper the step names, and rule text that could be followed but not implemented was corrected, including the from-team ledger rule and the disk-only application of the no-journal-event rule.
+- Work-unit ledger: the harvest records each processed work unit as a token of its task id and content key, prefixed by its store when it came from a realigned team, and skips a unit only when that exact token is recorded. A reused task number with new content is harvested, a realigned team's work is recorded instead of re-read on every pass, and journal events are routed to their store before any ledger check.
+- Task creations are journaled: a `task_created` event, together with the store reset it reveals when a task number restarts, lets the harvest separate two instances of one task id that share agent and subject, assigning instances by journal order.
+- The reader helpers moved to `hooks/shared/handoff_merge.py`; emit hooks no longer load the handoff schema. The harvest's Step 3 pseudocode and every skill command route are executed by tests.
+- Report and resume text strips control, format, separator and surrogate characters; resume orders handoffs by parsed instant and keeps a malformed team apart from a team-less copy.
+- One owning group per task file: the task file is unioned with exactly one group, the dated group of the store's current task instance or, when none exists, the team-less group with the same identity, so a journal written before events carried a team still unions with its task file.
+- Ledger tokens are found anywhere in a section, not only on lines that start with the `Processed task IDs` label, because each token identifies itself.
+- `0` and `False` count as content when a field carries both its canonical name and a legacy alias, in the shared reader and in the merge alike, so a canonical `0` or `False` now wins over the alias.
 
 ### Why
 
-Two stores can hold different tasks under one number, while the harvest's identity, its ledger and its reports all assumed one store. The fixes move the rule to the store the event names, decide the merge by required key sets rather than by an empty or missing value, and give the from-team half the same two shapes the this-team half already had. The extraction and the text corrections keep one executable rule and one set of instructions from drifting apart.
+Two stores can hold different tasks under one number, while the harvest's identity, its ledger and its reports all assumed one store. The fixes move the rule to the store the event names, decide the merge by required key sets rather than by an empty or missing value, and give the from-team half the same two shapes the this-team half already had. The extraction and the text corrections keep one executable rule and one set of instructions from drifting apart. The ledger keyed sameness on the task number, which two stores and a recreated store both reuse.
 
 ## v4.8.19: a worktree lead writes project memory to the main checkout (issue #1653)
 
