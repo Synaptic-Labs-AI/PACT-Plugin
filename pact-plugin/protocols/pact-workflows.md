@@ -182,7 +182,7 @@ See the [Concurrent Audit Protocol](pact-audit.md) for full details.
 
 1. **Receive handoff** from specialist(s)
 2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
-3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
+3. **Run the affected tests** — the tests the work affects, plus any suite subsets the plan names; if a mapping is unclear, run the smallest suite that contains the changed code. If tests fail → return to specialist for fixes before committing. The full suite is the PR/project gate, not this boundary.
 4. **Create atomic commit(s)** — stage and commit before proceeding
 5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
