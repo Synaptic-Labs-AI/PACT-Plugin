@@ -1325,14 +1325,35 @@ class TestHarvestRuleProse:
 
     def test_minor_dual_spelling_value_selection_is_stated(self):
         """The disk value of a dual-spelled field is chosen by the same rule
-        as `resolve_handoff_field`: truthy canonical, else first truthy
-        alias. Without it a task file carrying `decisions: ''` beside
+        as `resolve_handoff_field`: a non-empty canonical, else the first
+        non-empty alias, where empty is membership in (None, '', [], {}). Without it a task file carrying `decisions: ''` beside
         `key_decisions: [...]` reads as empty."""
         assert (
             "VALUE SELECTION FOR A DUAL-SPELLED COPY IS A SEPARATE STEP"
             in SKILL_TEXT
         )
-        assert "falls through to the FIRST TRUTHY alias spelling" in SKILL_TEXT
+        assert "an EMPTY canonical falls through to the FIRST alias spelling whose value is not EMPTY" in SKILL_TEXT
+        assert "TRUTHY" not in SKILL_TEXT
+
+    def test_prose_contradictions_from_the_human_read_stay_fixed(self):
+        """Each phrase contradicted the code it describes: a truthiness value
+        rule (the code selects by membership), an arc called a creation stamp
+        (it is the store epoch plus a journal position), a direct store read
+        (stores are read through the route), a claim that every journal event
+        predates the team field, an artifact mark the token ledger does not
+        have, and a NEWEST `Last processed` that no step compares."""
+        for phrase in (
+            "FALSY canonical", "FIRST TRUTHY", "creation stamp",
+            "`{that store}/{task_id}.json` directly",
+            "every event already in a journal predates the `team` field",
+            "extends to mark a `(workflow, feature)` artifact as read",
+            "the NEWEST `Last processed`", "no processed IDs",
+            "apply for you,.",
+        ):
+            assert phrase not in SKILL_TEXT, phrase
+        assert "the store epoch and the journal POSITION of the `task_created` event" in SKILL_TEXT
+        assert "Read that store's task file with the `read_task_json` route" in SKILL_TEXT
+        assert "WITH THE `disk_identity` ROUTE, NEVER BY HAND" in SKILL_TEXT
 
     def test_inventory_routes_every_listed_helper(self):
         """Every helper in this test's LITERAL list has a runnable import
