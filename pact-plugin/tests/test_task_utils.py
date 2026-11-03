@@ -787,3 +787,42 @@ class TestReadTaskJsonResolverEnvSet:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
 
         assert read_task_json("999", "pact-relocated") == {}
+
+
+class TestReadTaskJsonBaseFallback:
+    """`base_fallback=False` confines the read to the named store: a file at
+    the bare base directory is never returned for a named team. The default
+    keeps the bare-base fallback for every existing caller."""
+
+    def _bare_base_only(self, tmp_path):
+        base = tmp_path / "tasks"
+        (base / "team-a").mkdir(parents=True)
+        (base / "5.json").write_text(
+            json.dumps({"id": "5", "subject": "BARE"}), encoding="utf-8"
+        )
+        return base
+
+    def test_default_still_reads_the_bare_base(self, tmp_path):
+        from task_utils import read_task_json
+        base = self._bare_base_only(tmp_path)
+        result = read_task_json("5", "team-a", tasks_base_dir=str(base))
+        assert result.get("subject") == "BARE"
+
+    def test_no_fallback_returns_empty_for_a_named_store(self, tmp_path):
+        from task_utils import read_task_json
+        base = self._bare_base_only(tmp_path)
+        result = read_task_json(
+            "5", "team-a", tasks_base_dir=str(base), base_fallback=False
+        )
+        assert result == {}
+
+    def test_no_fallback_still_reads_the_named_store(self, tmp_path):
+        from task_utils import read_task_json
+        base = self._bare_base_only(tmp_path)
+        (base / "team-a" / "5.json").write_text(
+            json.dumps({"id": "5", "subject": "OWN"}), encoding="utf-8"
+        )
+        result = read_task_json(
+            "5", "team-a", tasks_base_dir=str(base), base_fallback=False
+        )
+        assert result.get("subject") == "OWN"

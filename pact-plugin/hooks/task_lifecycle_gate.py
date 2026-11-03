@@ -290,6 +290,7 @@ try:
     )
     from shared.agent_handoff_marker import (
         already_emitted,
+        emit_side_subject,
         handoff_already_emitted,
         handoff_content_key,
         handoff_unclaim,
@@ -1024,21 +1025,17 @@ def _emit_lead_side_agent_handoff(
         handoff = task_metadata.get("handoff")
         if not isinstance(handoff, dict) or not handoff:
             return
-        # #917 R2 (validate-before-claim): substitute the sentinel for a
-        # whitespace-only / empty subject (mirrors b1's falsy+whitespace
-        # substitution) so a degenerate subject is schema-valid BEFORE the
-        # claim rather than poisoning the marker. _is_teachback_subject above
-        # already ran on the original subject (a blank subject is not a
-        # teachback), so substituting here does not change the teachback gate.
-        #
-        # The "(no subject)" sentinel is MIRRORED IN PROSE by the harvest,
-        # which derives its disk-side identity for the same position — do not
-        # change this substitution without the paired edit to Step 3 of
-        # skills/pact-handoff-harvest/SKILL.md. Nothing enforces the mirror,
-        # and a divergence makes the harvest skip its union and report an
-        # identity mismatch on a task file that is present.
-        if not subject or not subject.strip():
-            subject = "(no subject)"
+        # #917 R2 (validate-before-claim): THE SUBSTITUTION IS THE SHARED
+        # HELPER, not a local copy. It is STRICT — any value that is not a
+        # non-empty stripped STRING becomes the sentinel — so a non-str
+        # subject can no longer raise here (the old `subject.strip()` did, and
+        # this function's fail-open handler turned that into a silent
+        # no-emit). The TaskCompleted emit and the harvest's disk identity
+        # call the same helper, so the three cannot drift.
+        # _is_teachback_subject above already ran on the original subject (a
+        # blank subject is not a teachback), so substituting here does not
+        # change the teachback gate.
+        subject = emit_side_subject(subject)
         # #917 symmetry: same writability precondition as b1
         # (agent_handoff_emitter). In the lead's gate process this is a no-op
         # (the lead's context is persisted -> get_journal_path() resolves), but
@@ -1067,16 +1064,23 @@ def _emit_lead_side_agent_handoff(
         # fire can re-emit instead of being permanently suppressed by the
         # poisoned marker. Best-effort + fail-safe (worst case reverts to
         # today's behavior). F3 twin of agent_handoff_emitter.main.
+        # `team` is the RESOLVED task-store name this emit read its task from
+        # (the `team_name` parameter, derived by the same resolver as b1). It
+        # is OMITTED entirely when the resolver fails closed: a registered
+        # optional `str` rejects a present empty value, append_event then
+        # returns False, and the compensating unclaim turns that into a LOST
+        # event rather than a missing attribution. Twin shape: the b1 emit in
+        # agent_handoff_emitter.main.
+        fields = {
+            "agent": owner,
+            "task_id": task_id,
+            "task_subject": subject,
+            "handoff": handoff,
+        }
+        if isinstance(team_name, str) and team_name.strip():
+            fields["team"] = team_name
         try:
-            written = append_event(
-                make_event(
-                    "agent_handoff",
-                    agent=owner,
-                    task_id=task_id,
-                    task_subject=subject,
-                    handoff=handoff,
-                )
-            )
+            written = append_event(make_event("agent_handoff", **fields))
         except Exception:
             written = False
         if not written:
@@ -1110,7 +1114,12 @@ def _emit_per_write_snapshot(
     """
     try:
         if task is None:
-            task = read_task_json(task_id, team_name) if team_name else {}
+            # Named store only: a bare-base file is not this store's task and
+            # must never be journaled under this store's `team`.
+            task = (
+                read_task_json(task_id, team_name, base_fallback=False)
+                if team_name else {}
+            )
         if not isinstance(task, dict):
             task = {}
         disk_md = (
@@ -1638,13 +1647,34 @@ def evaluate_lifecycle(
         # launched with no --agent flag, and that frame DOES write the canonical
         # journal.
         if pact_context.is_canonical_journal_frame(input_data):
+            new_task_id = _created_task_id(tool_response, tool_input)
+            # task_created: one event per creation, independent of any
+            # variety stamp. The harvest separates two instances of one task
+            # id by the creation that opened each. It stays inside this frame
+            # gate: a tmux teammate's persisted team can be stale, and a
+            # creation journaled under the wrong team would split that team's
+            # revisions. Empty team and subject are omitted, never written.
+            if new_task_id:
+                created_fields = {"task_id": new_task_id}
+                if isinstance(team_name, str) and team_name.strip():
+                    created_fields["team"] = team_name
+                created_subject = tool_input.get("subject")
+                if isinstance(created_subject, str) and created_subject.strip():
+                    created_fields["subject"] = created_subject
+                try:
+                    append_event_checked(
+                        make_event("task_created", **created_fields),
+                        "task_created",
+                        new_task_id,
+                    )
+                except Exception:
+                    pass  # fail-open: emit failure never breaks the gate
             create_variety = (
                 incoming_metadata.get("variety")
                 if isinstance(incoming_metadata, dict)
                 else None
             )
             if isinstance(create_variety, dict) and create_variety:
-                new_task_id = _created_task_id(tool_response, tool_input)
                 if new_task_id:
                     # §Per-Dispatch Variety Stamping-fidelity projection:
                     # mirror ONLY the 4 dimensions + total, dropping the
@@ -1720,7 +1750,12 @@ def evaluate_lifecycle(
         task = tool_response.get("task") if isinstance(tool_response, dict) else None
         if not isinstance(task, dict):
             # Fall back to disk if harness output didn't include the task.
-            task = read_task_json(task_id, team_name) if team_name else {}
+            # Named store only: a bare-base file is not this store's task and
+            # must never be journaled under this store's `team`.
+            task = (
+                read_task_json(task_id, team_name, base_fallback=False)
+                if team_name else {}
+            )
 
         subject = task.get("subject") or ""
         is_teachback = _is_teachback_subject(subject)
@@ -2120,7 +2155,12 @@ def evaluate_lifecycle(
         # non-completed TaskUpdate. Single-pay disk cost across all
         # write-time rules that need task_a's subject + blocks.
         task_id = tool_input.get("taskId", "") or ""
-        task_a = read_task_json(task_id, team_name) if team_name else {}
+        # Named store only: a bare-base file is not this store's task and
+        # must never be journaled under this store's `team`.
+        task_a = (
+            read_task_json(task_id, team_name, base_fallback=False)
+            if team_name else {}
+        )
         if not isinstance(task_a, dict):
             task_a = {}
         subject = task_a.get("subject") or ""

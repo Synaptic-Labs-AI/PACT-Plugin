@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -1417,14 +1418,18 @@ def _sanitize_prompt_field(
     this); this docstring is allowed to differ. Change either copy and you
     change both in the SAME commit.
 
-    Collapses control characters to single spaces, strips, and bounds the
-    length. Callers MUST sanitize BEFORE they test the value for
+    Collapses control characters to single spaces, drops format and
+    surrogate characters (zero-width and bidi controls), strips, and bounds
+    the length. Callers MUST sanitize BEFORE they test the value for
     truthiness: an internal failure returns ``""`` so the caller drops that
     field's LINE, and a test of the RAW value would emit the field label
     with an empty value instead.
     """
     try:
-        cleaned = _PROMPT_CONTROL_CHARS_RE.sub(" ", value).strip()
+        cleaned = "".join(
+            ch for ch in _PROMPT_CONTROL_CHARS_RE.sub(" ", value)
+            if unicodedata.category(ch) not in ("Cf", "Cs")
+        ).strip()
         if len(cleaned) > limit:
             cleaned = cleaned[:limit - 3] + "..."
         return cleaned

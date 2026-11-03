@@ -131,7 +131,7 @@ def _run_b1(frame: dict, task_data: dict, append_calls, monkeypatch) -> None:
     append_event end-to-end (byte-faithful journal write/loss). The REAL marker
     mechanism always runs.
     """
-    monkeypatch.setattr(b1, "read_task_json", lambda tid, tn: task_data)
+    monkeypatch.setattr(b1, "read_task_json", lambda tid, tn, **_: task_data)
     if append_calls is not None:
         monkeypatch.setattr(b1, "append_event", lambda e: append_calls.append(e) or True)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_strip_meta(frame))))
@@ -146,7 +146,7 @@ def _run_b2(frame: dict, task_data: dict, append_calls, monkeypatch) -> None:
     (natural resolution); read_task_json supplies the disk-fallback task.
     ``append_calls`` is a spy list, or None to use the REAL append_event.
     """
-    monkeypatch.setattr(tlg, "read_task_json", lambda tid, tn: task_data)
+    monkeypatch.setattr(tlg, "read_task_json", lambda tid, tn, **_: task_data)
     if append_calls is not None:
         monkeypatch.setattr(tlg, "append_event", lambda e: append_calls.append(e) or True)
     tlg.evaluate_lifecycle(_strip_meta(frame))

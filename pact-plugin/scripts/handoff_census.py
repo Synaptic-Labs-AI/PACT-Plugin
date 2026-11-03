@@ -32,13 +32,16 @@ and the alias map come from the shipped module, so a re-run stays comparable
 when the schema changes. A re-implemented predicate measures your reading of
 the predicate, and it fails in the direction that MANUFACTURES findings.
 
-ONE ADAPTATION, STATED BECAUSE IT BOUNDS THE RESULT: a journal event stores
-`handoff` as the LIST OF KEY NAMES, not the handoff itself, so the journal arm
-calls the shipped validator on a key-set reconstruction ({key: None}). That is
-exact for a presence-only validator and would stop being exact the moment the
-validator inspects VALUES. assert_presence_only() below fails loudly if that
-ever changes, rather than letting the census silently drift into a wrong
-answer.
+ONE ADAPTATION, STATED BECAUSE IT BOUNDS THE RESULT: a real journal event
+carries the FULL HANDOFF inline, so the journal arm validates it directly. A
+`handoff` that is the LIST OF KEY NAMES is the defensive/historical shape the
+validator must still accept -- not the shape real events carry. The arm keeps
+it countable by reconstructing {key: None}. That reconstruction is exact for a
+presence-only validator and would stop being exact the moment the validator
+inspects VALUES. assert_presence_only() below fails loudly if that ever
+changes, rather than letting the census silently drift into a wrong answer.
+Nothing here makes journal content unrecoverable: a real event carries its
+handoff inline, so the content is one read away.
 """
 
 from __future__ import annotations
@@ -77,7 +80,8 @@ def config_roots(home: Path) -> list[Path]:
 
 
 def journal_handoffs(root: Path):
-    """Yield {key: None} reconstructions of each agent_handoff event."""
+    """Yield each event's inline handoff; reconstruct {key: None} only for the
+    historical list-of-keys shape."""
     for journal in root.glob("pact-sessions/*/*/session-journal.jsonl"):
         try:
             lines = journal.read_text(encoding="utf-8", errors="ignore").splitlines()

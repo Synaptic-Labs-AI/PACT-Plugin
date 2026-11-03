@@ -386,6 +386,68 @@ class TestDispatchVarietySite:
         )
 
 
+class TestTaskCreatedSite:
+    """`task_created`, in the TaskCreate branch. It fires on every creation
+    with a real id, with or without a variety stamp."""
+
+    FRAME_EXTRA = {
+        "tool_name": "TaskCreate",
+        "tool_input": {"subject": "devops: implement"},
+        "tool_response": {"task": {"id": "42"}},
+    }
+
+    def test_arm_b_lead_without_agent_flag_emits(self, frame_rig):
+        drive = frame_rig(_arm_b(**self.FRAME_EXTRA))
+        assert len(drive.typed("task_created")) == 1, (
+            "A lead launched with no --agent flag writes the canonical "
+            "journal, so its creation must be recorded."
+        )
+
+    def test_arm_c_in_process_teammate_emits(self, frame_rig):
+        drive = frame_rig(_arm_c(**self.FRAME_EXTRA))
+        assert len(drive.typed("task_created")) == 1, (
+            "An in-process teammate shares the lead session, so its "
+            "creation lands in the canonical journal."
+        )
+
+    def test_arm_d_tmux_teammate_stays_silent(self, frame_rig):
+        """Scoped to this record kind, like the dispatch_variety arm D."""
+        drive = frame_rig(_arm_d(**self.FRAME_EXTRA))
+        assert drive.typed("task_created") == [], (
+            "A tmux teammate's persisted team can be stale; a creation "
+            "journaled under the wrong team splits that team's revisions."
+        )
+
+    def test_event_carries_id_team_and_subject(self, frame_rig):
+        (event,) = frame_rig(_arm_b(**self.FRAME_EXTRA)).typed("task_created")
+        assert event["task_id"] == "42"
+        assert event["team"] == TEAM
+        assert event["subject"] == "devops: implement"
+
+    def test_emits_without_a_variety_stamp(self, frame_rig):
+        """Independent of dispatch_variety: the frame above carries no
+        metadata at all, and the creation is still recorded."""
+        drive = frame_rig(_arm_b(**self.FRAME_EXTRA))
+        assert drive.typed("dispatch_variety") == []
+        assert len(drive.typed("task_created")) == 1
+
+    def test_no_created_id_writes_nothing(self, frame_rig):
+        frame = dict(self.FRAME_EXTRA, tool_response={})
+        drive = frame_rig(_arm_b(**frame))
+        assert drive.typed("task_created") == []
+        # No attempt either: an id-less append is a schema rejection, and a
+        # rejected checked write leaves a journal_emit_skipped record.
+        assert [r for r in drive.typed("journal_emit_skipped")
+                if r.get("skipped_type") == "task_created"] == []
+
+    def test_empty_subject_is_omitted_not_written(self, frame_rig):
+        """A present empty subject fails the optional-str contract, so the
+        append would be rejected and the creation lost."""
+        frame = dict(self.FRAME_EXTRA, tool_input={"subject": "  "})
+        (event,) = frame_rig(_arm_b(**frame)).typed("task_created")
+        assert "subject" not in event
+
+
 class TestLeadSideAgentHandoffSite:
     """The lead-side `agent_handoff` emit at the acceptance-commit.
 
@@ -807,6 +869,30 @@ class TestSubprocessOrderingPin:
 
     def test_in_process_teammate_emits_through_a_real_hook_process(
             self, tmp_path):
+        home, records, stderr = self._run_hook(
+            tmp_path, TestLeadSideAgentHandoffSite.FRAME_EXTRA)
+        assert [r for r in records if r.get("type") == "agent_handoff"], (
+            "An in-process teammate frame emitted NOTHING through the real "
+            "hook process. Two causes give this one empty result and each "
+            "is a defect: the frame gate answered on ROLE, or "
+            "pact_context.init() no longer runs before evaluate_lifecycle() "
+            "so the topology leg could not resolve and the gate degraded "
+            "silently to is_lead.\nstderr: " + stderr
+        )
+
+    def test_task_created_carries_the_resolved_team_through_a_real_hook_process(
+            self, tmp_path):
+        """The team on a creation event is the store the real resolver
+        finds, not a fixture-seeded global."""
+        _home, records, stderr = self._run_hook(
+            tmp_path, TestTaskCreatedSite.FRAME_EXTRA)
+        created = [r for r in records if r.get("type") == "task_created"]
+        assert len(created) == 1, "stderr: " + stderr
+        assert created[0]["team"] == TEAM
+        assert created[0]["task_id"] == "42"
+
+    @staticmethod
+    def _run_hook(tmp_path, frame_extra):
         home = tmp_path / "home"
         slug = Path(PROJECT_DIR).name
         session_dir = home / ".claude" / "pact-sessions" / slug / SESSION_ID
@@ -834,7 +920,7 @@ class TestSubprocessOrderingPin:
         tasks.joinpath("7.json").write_text(
             json.dumps(_completed_task(metadata={})), encoding="utf-8"
         )
-        frame = dict(TestLeadSideAgentHandoffSite.FRAME_EXTRA)
+        frame = dict(frame_extra)
         frame["agent_type"] = TEAMMATE_AGENT_TYPE
         frame["session_id"] = SESSION_ID
         frame["team_name"] = TEAM
@@ -857,13 +943,4 @@ class TestSubprocessOrderingPin:
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
-
-        records = _journal_records(home)
-        assert [r for r in records if r.get("type") == "agent_handoff"], (
-            "An in-process teammate frame emitted NOTHING through the real "
-            "hook process. Two causes give this one empty result and each "
-            "is a defect: the frame gate answered on ROLE, or "
-            "pact_context.init() no longer runs before evaluate_lifecycle() "
-            "so the topology leg could not resolve and the gate degraded "
-            "silently to is_lead.\nstderr: " + result.stderr
-        )
+        return home, _journal_records(home), result.stderr

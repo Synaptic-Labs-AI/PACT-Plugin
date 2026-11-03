@@ -47,6 +47,13 @@ from shared.agent_handoff_marker import (
     sanitize_path_component,
     unclaim,
 )
+from shared.handoff_merge import (
+    PARTITION_FOREIGN,
+    PARTITION_FROM,
+    PARTITION_OLD_FORMAT,
+    PARTITION_THIS,
+    partition_destination,
+)
 
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 
@@ -674,3 +681,129 @@ class TestTaskIdNormalisation:
         occ = occupant_hash("coder", "team bound subject")
         with pytest.raises(AttributeError):
             already_emitted(7, "5", occ)  # type: ignore[arg-type]  # asserts it RAISES
+
+
+class TestPartitionDestination:
+    """The NEW-FORMAT partition router, extracted so the skill branches on
+    exported constants instead of inlining the comparison. One rule, one
+    place — the same shape as `old_format_destination`."""
+
+    def test_absent_or_empty_team_is_old_format(self):
+        for value in (None, ""):
+            assert (
+                partition_destination(value, "session-me", ["session-x"])
+                == PARTITION_OLD_FORMAT
+            )
+
+    def test_this_team(self):
+        assert (
+            partition_destination("session-me", "session-me", ["session-x"])
+            == PARTITION_THIS
+        )
+
+    def test_realigned_from_team(self):
+        assert (
+            partition_destination("session-x", "session-me", ["session-x"])
+            == PARTITION_FROM
+        )
+
+    def test_unknown_team_is_foreign(self):
+        assert (
+            partition_destination("session-z", "session-me", ["session-x"])
+            == PARTITION_FOREIGN
+        )
+
+    def test_the_labels_are_distinct(self):
+        """A caller compares against the constants, so two labels must never
+        collide."""
+        labels = {
+            PARTITION_THIS,
+            PARTITION_FROM,
+            PARTITION_FOREIGN,
+            PARTITION_OLD_FORMAT,
+        }
+        assert len(labels) == 4
+
+    def test_a_non_str_team_is_foreign_even_when_the_list_holds_it(self):
+        """HARDENING: `["x"]` matched a non-str element of `from_teams` and
+        returned FROM, reopening the unhashable-key path for any caller that
+        passes raw journal values. A non-str is never a valid team name."""
+        assert (
+            partition_destination(["x"], "session-abc", [["x"]])
+            == PARTITION_FOREIGN
+        )
+        # An int is equally invalid, even when the list stringifies to it.
+        assert (
+            partition_destination(7, "session-abc", ["7"]) == PARTITION_FOREIGN
+        )
+
+    def test_non_str_containers_are_foreign_not_absent(self):
+        """A falsy non-str is still a non-str: `{}` and `[]` must not slip
+        into the absent/empty OLD-FORMAT branch. Only `None` means absent."""
+        assert partition_destination({}, "session-abc", []) == PARTITION_FOREIGN
+        assert partition_destination([], "session-abc", []) == PARTITION_FOREIGN
+
+    def test_none_still_means_absent_and_is_old_format(self):
+        assert (
+            partition_destination(None, "session-abc", [])
+            == PARTITION_OLD_FORMAT
+        )
+
+    def test_string_routes_are_unchanged(self):
+        """CONTROL for the guard: every legitimate string route is exactly
+        as before. Padded and case-varied names are DIFFERENT names."""
+        assert (
+            partition_destination("session-me", "session-me", [])
+            == PARTITION_THIS
+        )
+        assert (
+            partition_destination("session-x", "session-me", ["session-x"])
+            == PARTITION_FROM
+        )
+        assert (
+            partition_destination(" session-me", "session-me", [])
+            == PARTITION_FOREIGN
+        )
+        assert (
+            partition_destination("SESSION-ME", "session-me", [])
+            == PARTITION_FOREIGN
+        )
+        assert (
+            partition_destination("session-nope", "session-me", ["session-x"])
+            == PARTITION_FOREIGN
+        )
+
+
+# =============================================================================
+# report_safe — format and surrogate characters, and the uncapped option
+# =============================================================================
+
+
+class TestReportSafeFormatAndSurrogate:
+    """report_safe strips categories Cf and Cs as well as the line
+    boundaries: an invisible format character can hide or reorder a report
+    line's text, and a lone surrogate cannot be encoded by a consumer."""
+
+    @pytest.mark.parametrize(
+        "char",
+        [
+            "\u200b",  # ZERO WIDTH SPACE (Cf)
+            "\u202e",  # RIGHT-TO-LEFT OVERRIDE (Cf)
+            "\ufeff",  # ZERO WIDTH NO-BREAK SPACE / BOM (Cf)
+            "\ud800",  # lone high surrogate (Cs)
+        ],
+    )
+    def test_format_and_surrogate_characters_are_stripped(self, char):
+        from shared.agent_handoff_marker import report_safe
+
+        assert report_safe("a" + char + "b") == "ab"
+
+    def test_limit_none_means_no_cap(self):
+        from shared.agent_handoff_marker import report_safe
+
+        assert report_safe("x" * 500, limit=None) == "x" * 500
+
+    def test_default_cap_still_applies(self):
+        from shared.agent_handoff_marker import report_safe
+
+        assert len(report_safe("x" * 500)) == 128
