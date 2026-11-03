@@ -1,8 +1,7 @@
 # PACT Mission Control — build contract
 
-This file is the interface contract for parallel work on the visualizer. It is
-the source of truth for the HTTP payloads, DOM shell, and JS module boundaries.
-If an implementation needs to deviate, the Lead updates this file first.
+This file is the interface contract for the visualizer. It is the source of
+truth for the HTTP payloads, DOM shell, and JS module boundaries.
 
 ## Product boundaries
 
@@ -276,12 +275,12 @@ Available even when no real sessions exist. Deterministic except base time.
 - Anything else → 404.
 - Headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-cache`.
 
-## DOM shell (Lead-owned index.html)
+## DOM shell (index.html)
 
 IDs and their owners:
 
 ```
-#topbar                  static frame (Lead)
+#topbar                  static frame
   #root-select           app.js populates
   #project-select        app.js populates
   #session-select        app.js populates
@@ -293,7 +292,7 @@ IDs and their owners:
   #stage-shell
     #stage-frame > canvas#stage    stage.js draws
     #stage-caption       stage.js or app.js sets text
-    #stage-legend        static legend (Lead)
+    #stage-legend        static legend
   #right-rail            panels.js renders
 #recorder                timeline.js renders
 #modal-root              panels.js renders, hidden when empty
@@ -307,7 +306,7 @@ the header. They only render their own roots and call callbacks.
 
 ## JS module interfaces
 
-### dom.js (Lead)
+### dom.js
 
 ```js
 export function el(tag, props = {}, children = []); // props: class, text, attrs, on, style, dataset, value (unknown props throw)
@@ -324,7 +323,7 @@ export function on(node, type, fn);  // adds listener
 `el` must set text/attributes without innerHTML. Children may be strings,
 nodes, or arrays; strings become text nodes.
 
-### api.js (Lead)
+### api.js
 
 ```js
 export const USE_MOCK; // true when location.search has mock=1
@@ -334,7 +333,7 @@ export async function session({root, slug, session_id, since}); // 304-equivalen
 export async function demo({since});
 ```
 
-### stage.js (Stage teammate)
+### stage.js
 
 ```js
 export class Stage {
@@ -353,7 +352,7 @@ derive room/agent state; `setModel` + `setCursor` are the only state inputs.
 Canvas is internally laid out at 960×440 logical pixels and scaled by CSS; use
 devicePixelRatio for sharpness. It owns `#stage-caption` text.
 
-### panels.js (Panels teammate)
+### panels.js
 
 ```js
 export class Panels {
@@ -376,7 +375,7 @@ right rail (feed controls + feed list), and the full modal/debrief. It listens
 to its own rendered nodes and invokes the callbacks. It must not query header
 elements.
 
-### timeline.js (Panels teammate)
+### timeline.js
 
 ```js
 export function createTimeline(root, {onSeek, onPlayPause, onSpeed, onToggleLive});
@@ -386,14 +385,14 @@ export function createTimeline(root, {onSeek, onPlayPause, onSpeed, onToggleLive
 Renders transport controls, phase bands, event markers, cursor, and mission
 time into `#recorder`.
 
-### charts.js (Panels teammate)
+### charts.js
 
 ```js
 export function drawRadar(canvas, dims, opts = {});
 export function drawSparkline(canvas, values, opts = {});
 ```
 
-### audio.js (Panels teammate)
+### audio.js
 
 ```js
 export function createAudio();
@@ -402,7 +401,7 @@ export function createAudio();
 // WebAudio only; must be silent and allocation-free until enabled.
 ```
 
-### achievements.js (Panels teammate)
+### achievements.js
 
 ```js
 export function createAchievements(storageKey, onUnlock);
@@ -413,7 +412,7 @@ Achievements from real metrics only: first handoff, 5+ gate advisories,
 3+ findings, first commit, pr_ready, all four phases completed, first alert,
 500+ events, wrap-up MERGED. Persist per session in `localStorage`.
 
-### app.js (Lead)
+### app.js
 
 Wires everything. It owns:
 - root/project/session selects and header buttons;
