@@ -1547,9 +1547,22 @@ class TestHarvestRuleProse:
         assert "the step names it but calls only" not in SKILL_TEXT
 
     def test_classifier_docstring_states_the_ownerless_skip(self):
-        """FIX 2: the skill states the no-owner skip; the module is the only
-        surface that did not, while its code implements it."""
+        """FIX 2, QUALIFIED: the skip removes ONE candidate; another named
+        candidate can still decide the event. The earlier wording claimed the
+        skip left the event UNMATCHED, which is false beside a second
+        candidate that returns OWNED_BY or MIXED."""
         doc = " ".join((mixed_old_format_event.__doc__ or "").split())
         assert "no non-empty `owner` is SKIPPED" in doc
         assert "would manufacture a MISMATCH" in doc
-        assert "UNMATCHED — kept as this team's" in doc
+        assert (
+            "THE SKIP REMOVES THIS CANDIDATE FROM CONSIDERATION AND DOES NOT "
+            "SETTLE THE EVENT" in doc
+        )
+        assert "is UNMATCHED only when no other candidate decides it" in doc
+        # The unqualified claim must not come back, on either surface.
+        assert "Skipping leaves the event UNMATCHED" not in doc
+        assert (
+            "SKIPPING REMOVES THIS CANDIDATE FROM CONSIDERATION; IT DOES NOT "
+            "SETTLE THE EVENT" in SKILL_TEXT
+        )
+        assert "Skipping leaves the event UNMATCHED" not in SKILL_TEXT

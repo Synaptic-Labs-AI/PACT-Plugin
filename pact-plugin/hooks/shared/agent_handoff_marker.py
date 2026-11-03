@@ -717,8 +717,10 @@ def mixed_old_format_event(
     an identity mismatch. The emit path substitutes the platform teammate name
     for an empty owner and the record cannot reproduce it, so comparing
     identities would manufacture a MISMATCH and discard content that was
-    never foreign. Skipping leaves the event UNMATCHED — kept as this team's
-    and reported through `report`.
+    never foreign. THE SKIP REMOVES THIS CANDIDATE FROM CONSIDERATION AND
+    DOES NOT SETTLE THE EVENT: another named candidate may still return
+    OWNED_BY that team or MIXED, and the event is routed or discarded
+    accordingly; it is UNMATCHED only when no other candidate decides it.
 
     A non-dict / empty event handoff is UNMATCHED: there is no content to
     compare. Pure; no I/O; never raises.
