@@ -438,6 +438,49 @@ class TestJournalRead:
         summary = journal.summarize_journal(path)
         assert summary.last_phase == "ARCHITECT"
 
+    def test_summarize_phase_scan_boundary_is_four_windows(self, tmp_path):
+        """The backward scan's bound, at its edge: a phase_transition just
+        inside 4 x SUMMARY_TAIL_BYTES (512KB) is recovered; one just beyond
+        it is out of budget and leaves last_phase empty.
+
+        Byte-exact by construction: the padding AFTER the phase line is one
+        filler line whose length IS the distance from end-of-file, so the
+        fixture's own size assertion pins the offset before the scan runs.
+        """
+        scan_budget = journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES
+        phase = (
+            json.dumps(
+                {"v": 1, "type": "phase_transition", "ts": "2026-01-01T00:00:00Z",
+                 "phase": "ARCHITECT", "status": "started"},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        shell_prefix = '{"v":1,"type":"note","pad":"'
+        shell_suffix = '"}\n'
+
+        def filler_line(total_bytes: int) -> bytes:
+            """One valid note line of exactly total_bytes, newline included."""
+            pad_chars = total_bytes - len(shell_prefix) - len(shell_suffix)
+            assert pad_chars >= 0
+            line = (shell_prefix + "x" * pad_chars + shell_suffix).encode("utf-8")
+            assert len(line) == total_bytes
+            return line
+
+        front = filler_line(64)
+        for distance, expected in (
+            (scan_budget - 2048, "ARCHITECT"),  # ~2KB inside the last window
+            (scan_budget + 2048, ""),            # ~2KB beyond the scan budget
+        ):
+            session_dir = tmp_path / f".claude-{distance}"
+            path = session_dir / "session-journal.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = front + phase + filler_line(distance)
+            path.write_bytes(data)
+            assert path.stat().st_size == len(front) + len(phase) + distance
+            summary = journal.summarize_journal(path)
+            assert summary.last_phase == expected, distance
+
     def test_read_journal_refuses_oversize_file(self, tmp_path, monkeypatch):
         """A journal over the read cap yields an empty read with a warning."""
         root = make_root(tmp_path)
@@ -522,6 +565,19 @@ class TestClassify:
         payload["open_questions"] = ["one question", "another question"]
         fields = classify.extract_handoff_fields(payload)
         assert fields["open_questions"] == "one question · another question"
+        assert classify.handoff_schema_complete(fields) is True
+
+    def test_handoff_empty_list_field_counts_as_present(self):
+        """An explicit empty list is PRESENT under the presence-only schema.
+
+        The real-world shape (measured by qa): all five required keys carry
+        values and open_questions is an empty list. Dropping it to None would
+        badge a valid handoff incomplete; it renders "(none)" instead.
+        """
+        payload = {name: name.upper() for name in classify.HANDOFF_REQUIRED_FIELDS}
+        payload["open_questions"] = []
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["open_questions"] == "(none)"
         assert classify.handoff_schema_complete(fields) is True
 
     def test_handoff_schema_complete_allows_missing_recommended_reasoning_chain(self):

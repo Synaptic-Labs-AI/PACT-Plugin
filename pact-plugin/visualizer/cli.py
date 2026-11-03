@@ -237,19 +237,40 @@ def clear_state(state_dir: Path) -> None:
             continue
 
 
-def _clear_state_if_instance(state_dir: Path, instance_id: str) -> None:
+def _clear_state_if_instance(state_dir: Path, instance_id: str) -> bool:
     """Clear the state file only when it still names ``instance_id``.
 
     Location: cli._clear_state_if_instance.
     Summary: The guard serve_foreground's shutdown path has always had: a
              concurrent ``--detach`` that overwrote the state file between the
              read and the clear must not lose ITS state file, or its server
-             runs on with no record to stop it.
+             runs on with no record to stop it. Returns True when the state
+             dir was cleared (ours or already empty) — the caller then also
+             removes the detached server's log residue.
     Used by: cmd_stop (both clear sites).
     """
     current = read_state(state_dir)
     if current is None or current.get("instance_id") == instance_id:
         clear_state(state_dir)
+        return True
+    return False
+
+
+def _remove_server_log(state_dir: Path) -> None:
+    """Remove the detached server's log; never raises.
+
+    Location: cli._remove_server_log.
+    Summary: detach creates ``server.log`` for its child's stderr; after a
+             stop the file is residue (usually 0 bytes). Unlinking after the
+             bounded stop wait is safe: the writer has exited, and even in the
+             unconfirmed-exit case an unlink only orphans the child's open fd
+             rather than corrupting anything. A later detach recreates it.
+    Used by: cmd_stop (after a guarded clear).
+    """
+    try:
+        (state_dir / _LOG_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def health_check(port: int, timeout: float = 1.0) -> dict | None:
@@ -460,9 +481,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
              SAME random instance token recorded in the state file — a stale
              pid that the OS reused for an unrelated process is never killed.
              SIGTERM is followed by a bounded wait and a SIGKILL only if the
-             process is still alive; the state file is removed either way,
-             unless a concurrent detach already replaced it with a different
-             instance's state. On
+             process is still alive; the state file and the detached server's
+             log are removed either way, unless a concurrent detach already
+             replaced the state with a different instance's. On
              success prints ``Stop: stopped pid N``; when nothing is running it
              prints ``Stop: not running`` and exits 0.
     Used by: main, tests.
@@ -477,7 +498,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
     instance_id = str(state["instance_id"])
     pid = int(state["pid"])
     if _health_for_instance(port, instance_id) is None:
-        _clear_state_if_instance(state_dir, instance_id)
+        if _clear_state_if_instance(state_dir, instance_id):
+            _remove_server_log(state_dir)
         print("Stop: not running")
         print("PACT Mission Control: not running (stale state file cleaned)")
         return 0
@@ -489,7 +511,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
         except (ProcessLookupError, PermissionError):
             pass
         stopped = _wait_until_stopped(port, instance_id, pid, 2.0)
-    _clear_state_if_instance(state_dir, instance_id)
+    if _clear_state_if_instance(state_dir, instance_id):
+        _remove_server_log(state_dir)
     print(f"Stop: stopped pid {pid}")
     if not stopped:
         print("PACT Mission Control: stop was signalled but the process did not confirm exit")

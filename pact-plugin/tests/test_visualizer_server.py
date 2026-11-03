@@ -750,6 +750,8 @@ class TestDetachedLifecycle:
             else:  # pragma: no cover - only on a real leak
                 pytest.fail(f"listener on {port} survived --stop")
             assert not settings.state_file(state_dir).exists()
+            # The detached run leaves no log residue either.
+            assert not (state_dir / "server.log").exists()
             # The stopped child may need a moment to fully exit after its
             # listener closes (shutdown thread + interpreter teardown), so
             # poll for the pid to disappear rather than asserting instantly.
@@ -1040,12 +1042,34 @@ class TestReuseAndStopGuards:
         state_dir.mkdir()
         cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A"})
         cli.write_state(state_dir, {"pid": 2, "port": 2, "url": "u", "instance_id": "B"})
-        # The stale-A clear must not delete instance B's state file.
-        cli._clear_state_if_instance(state_dir, "A")
+        # The stale-A clear must not delete instance B's state file, and must
+        # report that it declined so the caller keeps B's log too.
+        assert cli._clear_state_if_instance(state_dir, "A") is False
         assert cli.read_state(state_dir)["instance_id"] == "B"
         # Clearing for B itself (file gone → None → clear) still works.
-        cli._clear_state_if_instance(state_dir, "B")
+        assert cli._clear_state_if_instance(state_dir, "B") is True
         assert cli.read_state(state_dir) is None
+
+    def test_stop_removes_the_server_log_residue(self, tmp_path):
+        """--stop leaves no 0-byte server.log behind when the state is ours."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log = state_dir / "server.log"
+        log.write_text("")
+        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A"})
+        assert cli._clear_state_if_instance(state_dir, "A") is True
+        cli._remove_server_log(state_dir)
+        assert not log.exists()
+
+    def test_foreign_state_keeps_the_log(self, tmp_path):
+        """When the guard declines (foreign state), the log must survive."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log = state_dir / "server.log"
+        log.write_text("still running\n")
+        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "B"})
+        assert cli._clear_state_if_instance(state_dir, "A") is False
+        assert log.exists()
 
     def test_detach_refuses_reuse_for_different_roots(self, tmp_path):
         root_a = make_root(tmp_path)

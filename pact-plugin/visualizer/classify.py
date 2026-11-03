@@ -241,11 +241,14 @@ def _handoff_field_text(value: Any) -> str:
              carry a LIST (open_questions is commonly list-shaped); as_text
              alone would coerce it to "" and a schema-valid handoff would read
              as incomplete. Lists are therefore joined with a middle dot, each
-             item bounded like any other field value.
+             item bounded like any other field value. An explicitly empty list
+             renders "(none)": the key IS present under the presence-only
+             rule, so it must count for schema completeness.
     Used by: extract_handoff_fields.
     """
     if isinstance(value, list):
-        return " · ".join(part for part in as_str_list(value, 40) if part)
+        joined = " · ".join(part for part in as_str_list(value, 40) if part)
+        return joined or "(none)"
     return as_text(value, MAX_FIELD_CHARS)
 
 
@@ -254,16 +257,22 @@ def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
 
     Location: classify.extract_handoff_fields.
     Summary: Every canonical key is always present in the result; an absent or
-             empty value is None (the renderer shows a dash). The canonical
-             spelling wins; a falsy canonical value falls through to its legacy
-             alias so a handoff written under an old spelling still reads.
-             List-valued fields (schema-valid) are joined, not dropped.
+             empty scalar value is None (the renderer shows a dash). The
+             canonical spelling wins; a falsy canonical value falls through to
+             its legacy alias so a handoff written under an old spelling still
+             reads. List-valued fields (schema-valid) are joined, not dropped —
+             including an explicit empty list, which renders "(none)".
     Used by: model (handoffs array), demo, tests.
     """
     result: dict[str, str | None] = {}
     source: Mapping[str, Any] = handoff if isinstance(handoff, Mapping) else {}
     for field in HANDOFF_CANONICAL_FIELDS:
         value = source.get(field)
+        if isinstance(value, list):
+            # Present-as-list wins over the legacy alias: the schema is
+            # presence-only and the canonical key is right here.
+            result[field] = _handoff_field_text(value)
+            continue
         if not value:
             for alias, canonical in HANDOFF_LEGACY_ALIASES.items():
                 if canonical == field:
