@@ -128,7 +128,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 🔴 **DO NOT restate this as a blanket prefer-the-non-empty-side rule.** The rule is per-field and per-state, and a blanket rule makes the journal the default winner while the task file is the freshest copy, which inverts the precedence this step is built on.
 4. **When the task file is ABSENT, report `handoff divergence check unavailable for task N: task file absent`** and use the journal copy alone. Do not skip in silence. A drained task file is a reportable gap and not a clean single-source read.
-5. **When the task carries NO `agent_handoff` event in THIS section and the task file EXISTS**, process the task-file HANDOFF alone: there is no second copy to union and no divergence to report. This is a normal population — the census exists because a completion hook may not fire — and it is not a gap.
+5. **When the task carries NO `agent_handoff` event in a SECTION and that SECTION's task file EXISTS**, process that task-file HANDOFF alone: there is no second copy to union and no divergence to report. This is a normal population — the census exists because a completion hook may not fire — and it is not a gap. **THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES:** apply it per store to THIS team's store and to each `team={from}` store, labelling a from-team application `## team={from}` in the output. A from-team task whose task file CARRIES a HANDOFF and has no journal group is processed exactly as this team's is, and it produces NEITHER the absent-file report NOR the no-match report. **A present file with NO `metadata.handoff` IS NOT A FROM-TEAM WORK UNIT:** it may be an unrelated task that merely shares the number, so it must not enter the from-team population, must not be synthesized, and must not count as handled.
 6. **Report gap**: If no source resolves, report the gap to the lead. Record the task_id, the timestamp, and the agent name WHEN A SOURCE CARRIES ONE — a task can reach this branch with no journal event and no task file, so its agent may be unknowable; record the agent as `unknown` rather than omitting the field.
 
 **A TASK WHOSE WORK UNITS WERE ALL FROM-TEAM PARTITIONS HAS NO TASK FILE IN THIS SECTION'S STORE, AND THE ABSENCE IS NOT A GAP.** The from-team section processed it against THAT team's store; do not emit the report-gap line for it. That line fires only when NO source resolves — no journal group in this section, no task file here, and no from-team partition processed.
@@ -354,7 +354,18 @@ for task_id in unprocessed | from_unprocessed:
     # produce a false "task file absent" report for a task that lives in the
     # from store.
     from_handled_any = False
-    for team, events in from_events.items():
+    # THE FROM-TEAM POPULATION HAS THE SAME TWO SHAPES AS THIS TEAM'S: a
+    # journal partition, and a task file with no journal event (rule 5's
+    # counterpart). Iterating `from_events` alone drops a census id whose
+    # content lives only on disk, so the store set is the union of both.
+    from_stores = set(from_events)
+    for team in from_teams:
+        candidate = read_task_json(task_id, team)
+        candidate_handoff = (candidate.get("metadata", {}) or {}).get("handoff")
+        if candidate_handoff:
+            from_stores.add(team)
+    for team in sorted(from_stores):
+        events = from_events.get(team, [])
         from_task = read_task_json(task_id, team)
         from_disk = (
             from_task.get("metadata", {}).get("handoff") if from_task else None
@@ -375,12 +386,21 @@ for task_id in unprocessed | from_unprocessed:
                 handoff = merged
             process(handoff, section=f"team={team}")
             from_handled_any = True
+        if not from_groups:
+            # RULE 5, FROM-TEAM APPLICATION: a HANDOFF-CARRYING task file with
+            # no journal group is a normal population, processed from the file
+            # alone under this section's label. No absent-file report and no
+            # no-match report. A store reaches `from_stores` through a journal
+            # partition or a non-empty `metadata.handoff`, so this branch
+            # always has content to process.
+            process(from_disk, section=f"team={team}")
+            from_handled_any = True
         # ONE report for THIS store's whole group set, decided AFTER the loop
         # on the same rule as this section's: a per-group report repeats the
         # line once per work unit. A group that lost to another matching
         # group stays silent — that group owns the file. BOTH states report:
         # a drained store is a reportable gap here exactly as it is below.
-        if not from_task:
+        elif not from_task:
             report(f"handoff divergence check unavailable for task "
                    f"{report_safe(task_id)}: task file absent")
         elif from_disk_id not in from_groups:

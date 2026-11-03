@@ -778,7 +778,7 @@ class TestHarvestRuleProse:
         content, and reading THIS team's store produced a false 'task file
         absent' report for a task that lives in the from store."""
         block = SKILL_TEXT.split(
-            "for team, events in from_events.items():", 1
+            "for team in sorted(from_stores):", 1
         )[1].split("    # STEP 2", 1)[0]
         assert "read_task_json(task_id, team)" in block
         assert "union_preferring_task_file(" in block
@@ -849,7 +849,7 @@ class TestHarvestRuleProse:
         # and BOTH states report — a drained from store is a reportable gap
         # exactly as it is in the this-team partition.
         from_block = SKILL_TEXT.split(
-            "for team, events in from_events.items():", 1
+            "for team in sorted(from_stores):", 1
         )[1].split("    # STEP 2", 1)[0]
         assert "from_groups = group_by_identity(events)" in from_block
         assert "if not from_task:" in from_block
@@ -1073,9 +1073,61 @@ class TestHarvestRuleProse:
         population, not a gap; the pseudocode had the branch, the prose did
         not."""
         assert (
-            "When the task carries NO `agent_handoff` event in THIS section "
-            "and the task file EXISTS" in SKILL_TEXT
+            "When the task carries NO `agent_handoff` event in a SECTION and "
+            "that SECTION's task file EXISTS" in SKILL_TEXT
         )
+
+    def test_from_team_disk_only_task_is_processed(self):
+        """HIGH (commit 25): the from-team half had only a JOURNAL path, so a
+        from-store task whose content lives only on disk entered the loop via
+        the commit-24 census split and was never processed. Rule 5's
+        counterpart applies per store: the file is processed under
+        `## team={from}`, and the store produces NEITHER the absent-file NOR
+        the no-match report."""
+        assert "THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES" in SKILL_TEXT
+        assert (
+            "it produces NEITHER the absent-file report NOR the no-match report"
+            in SKILL_TEXT
+        )
+        assert (
+            "A present file with NO `metadata.handoff` IS NOT A FROM-TEAM WORK "
+            "UNIT" in SKILL_TEXT
+        )
+        # The store set is built from BOTH shapes, not from journal events
+        # alone.
+        assert "from_stores = set(from_events)" in SKILL_TEXT
+        assert "from_stores.add(team)" in SKILL_TEXT
+        # MEMBERSHIP REQUIRES CONTENT, NOT PRESENCE. `read_task_json` is
+        # fail-open and truthy for ANY present file; a same-numbered stranger
+        # with no handoff would then be synthesized as an empty work unit and
+        # would set from_handled_any, silencing a real gap.
+        prelude = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
+            "for team in sorted(from_stores):", 1
+        )[0]
+        assert 'get("handoff")' in prelude
+        assert "if candidate_handoff:" in prelude
+        assert prelude.index('get("handoff")') < prelude.index(
+            "from_stores.add(team)"
+        )
+        # Bare file-presence membership is the defect; it must not come back.
+        assert "if read_task_json(task_id, team):" not in prelude
+        # The membership test is the SOLE gate: nothing else adds a store, and
+        # the disk-only branch re-tests neither presence nor content — it runs
+        # only for stores the handoff gate admitted.
+        assert SKILL_TEXT.count("from_stores.add(team)") == 1
+        disk_only = SKILL_TEXT.split("if not from_groups:", 1)[1].split(
+            "elif not from_task:", 1
+        )[0]
+        assert "read_task_json" not in disk_only
+        block = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
+            "    if task_id not in unprocessed:", 1
+        )[0]
+        assert 'process(from_disk, section=f"team={team}")' in block
+        # The disk-only branch precedes both report branches, so a file with
+        # no group cannot fall through to the absent or no-match message.
+        assert block.index(
+            'process(from_disk, section=f"team={team}")'
+        ) < block.index("handoff divergence check unavailable for task")
 
     def test_minor_from_handled_any_carve_out_is_prose(self):
         """The all-from-team task has no file in THIS store and must not
