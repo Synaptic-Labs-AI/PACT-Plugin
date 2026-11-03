@@ -8,7 +8,7 @@ Mission Control renders a PACT run from its session journal: phases, the special
 
 ## Parse the argument
 
-- Empty or `live` — the current session's run when its journal exists, else the newest run in the default config root.
+- Empty or `live` — the newest live run in the default config root; if no run is live, the newest run. Use `<project>` to target another project.
 - `demo` — a deterministic built-in training run; available even with no journals on disk.
 - `<project>` — a project slug from the session list; open its newest run.
 - `stop` — stop the Mission Control server this session launched.

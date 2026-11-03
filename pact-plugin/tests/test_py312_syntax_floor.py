@@ -148,9 +148,10 @@ class TestDiscoveryFloor:
         # the day it was written.
         #
         # SLACK IS NOT A PROPERTY THIS COMMENT CAN PIN: it is today's count
-        # minus 106, and it WIDENS on its own as files are added. The wider
-        # the slack, the more of a root can disappear unnoticed. Re-measure
-        # and raise the floor when it has drifted.
+        # minus the current floor assertion (117 today), and it WIDENS on its
+        # own as files are added. The wider the slack, the more of a root can
+        # disappear unnoticed. Re-measure and raise the floor when it has
+        # drifted.
         #
         # LIMIT, stated rather than implied: a count floor cannot protect a
         # SMALL root. Losing one whose file count is under the current slack

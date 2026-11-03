@@ -39,6 +39,19 @@ HANDOFF_CANONICAL_FIELDS: tuple[str, ...] = (
     "open_questions",
 )
 
+# Mirrors hooks/shared/handoff_schema.HANDOFF_RECOMMENDED_FIELDS. The PACT
+# template surfaces mark reasoning_chain recommended, not required, so a
+# five-key handoff is well-formed. Never fold it into the required set: real
+# handoffs omit it and the debrief badge would then report a valid record as
+# incomplete.
+HANDOFF_RECOMMENDED_FIELDS: tuple[str, ...] = ("reasoning_chain",)
+
+# Derived, like the SSOT's HANDOFF_REQUIRED_FIELDS: canonical minus recommended.
+HANDOFF_REQUIRED_FIELDS: tuple[str, ...] = tuple(
+    field for field in HANDOFF_CANONICAL_FIELDS
+    if field not in HANDOFF_RECOMMENDED_FIELDS
+)
+
 # The read-side legacy spellings the PACT protocol docs once taught. Mirrors
 # hooks/shared/handoff_schema.HANDOFF_LEGACY_ALIASES; never written, only read.
 HANDOFF_LEGACY_ALIASES: dict[str, str] = {
@@ -272,8 +285,12 @@ def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
 
 
 def handoff_schema_complete(fields: Mapping[str, str | None]) -> bool:
-    """True when all six canonical handoff fields carry a value."""
-    return all(fields.get(field) for field in HANDOFF_CANONICAL_FIELDS)
+    """True when every REQUIRED handoff field carries a value.
+
+    reasoning_chain is recommended in the PACT handoff schema, so its absence
+    does not make a handoff incomplete. Mirrors the SSOT's required set.
+    """
+    return all(fields.get(field) for field in HANDOFF_REQUIRED_FIELDS)
 
 
 def classify_event(

@@ -457,6 +457,27 @@ class TestClassify:
         )
         assert classify.handoff_schema_complete(fields) is True
 
+    def test_handoff_schema_complete_allows_missing_recommended_reasoning_chain(self):
+        """The SSOT marks reasoning_chain recommended, not required.
+
+        A five-key handoff is well-formed and must not be labelled incomplete
+        in the debrief just because the optional field is absent.
+        """
+        payload = {
+            name: name.upper() for name in classify.HANDOFF_REQUIRED_FIELDS
+        }
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["reasoning_chain"] is None
+        assert classify.handoff_schema_complete(fields) is True
+
+    def test_handoff_schema_required_set_excludes_the_recommended_field(self):
+        assert "reasoning_chain" not in classify.HANDOFF_REQUIRED_FIELDS
+        assert classify.HANDOFF_REQUIRED_FIELDS == tuple(
+            field
+            for field in classify.HANDOFF_CANONICAL_FIELDS
+            if field not in classify.HANDOFF_RECOMMENDED_FIELDS
+        )
+
     def test_normalize_variety(self):
         assert classify.normalize_variety({"novelty": 2, "scope": 3}) == {
             "novelty": 2,

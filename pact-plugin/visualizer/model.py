@@ -708,7 +708,8 @@ def derive_handoffs(
     Summary: One row per agent_handoff event, in seq order. ``fields`` always
              carries the six canonical keys (None when absent), legacy
              spellings are resolved server-side, and schema_complete is True
-             only when all six carry a value.
+             when every required field (all but recommended reasoning_chain)
+             carries a value.
     Used by: derive_model, tests.
     """
     handoffs: list[dict] = []

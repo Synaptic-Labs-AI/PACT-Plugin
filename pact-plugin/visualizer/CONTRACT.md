@@ -260,6 +260,9 @@ Field rules:
   `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`, `raw`).
 - `handoffs[].fields` always carries all six canonical keys; absent values are
   `null` (renderer shows a dash). Legacy spellings are resolved server-side.
+  `schema_complete` is true when the five REQUIRED keys are present;
+  `reasoning_chain` is recommended in the PACT schema, so a five-key handoff is
+  complete.
 - `wrapup` is `null` unless a wrap-up `session_end` (or explicit PR state)
   exists.
 - `warnings` is a short bounded list; never crash on malformed input.
