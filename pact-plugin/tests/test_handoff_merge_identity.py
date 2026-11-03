@@ -1228,12 +1228,15 @@ class TestHarvestRuleProse:
         )
         assert "falls through to the FIRST TRUTHY alias spelling" in SKILL_TEXT
 
-    def test_inventory_routes_every_named_helper(self):
-        """M5: the inventory must COVER the helpers the step and pseudocode
-        name, not claim coverage. This parses the inventory's REAL import
-        lines — a pin asserting a sentence about coverage passes while the
-        sentence is wrong, which is exactly how four unrouted helpers
-        survived the previous pass."""
+    def test_inventory_routes_every_listed_helper(self):
+        """Every helper in this test's LITERAL list has a runnable import
+        route in the inventory. The list is a literal, not derived from the
+        skill text: a new helper used by the step must be added BOTH to the
+        inventory and to this list, or this pin cannot see it.
+
+        This parses the inventory's REAL import lines — a pin asserting a
+        sentence about coverage passes while the sentence is wrong, which is
+        exactly how four unrouted helpers survived an earlier pass."""
         section = SKILL_TEXT.split(
             "**HOW TO CALL THE NAMES THIS STEP USES.**", 1
         )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
@@ -1457,4 +1460,57 @@ class TestHarvestRuleProse:
         assert "if matches:" in guard
         assert guard.index("if matches:") < guard.index(
             "handoff team identity underivable for task"
+        )
+
+    # ---- final text-accuracy pass: items 1-6 ----
+    def test_item1_underivable_report_needs_a_journal_match(self):
+        """Item 1: the prose said "every partition" unconditionally while
+        the pseudocode gates the report on `matches`."""
+        assert (
+            "THE REPORT FIRES ONCE PER TASK AND ONLY WHEN A JOURNAL MATCH "
+            "EXISTS" in SKILL_TEXT
+        )
+        assert "a census-only id has no partition to be underivable about" in SKILL_TEXT
+
+    def test_item2_gap_counts_only_from_team_journal_partitions(self):
+        """Item 2: a reader could count the disk-only from-team application
+        as a source and wrongly silence this team's gap."""
+        assert "no from-team JOURNAL PARTITION processed" in SKILL_TEXT
+        assert (
+            "The disk-only from-team application does NOT count as a source "
+            "for this line" in SKILL_TEXT
+        )
+
+    def test_item3_admitted_id_reads_every_from_store_file(self):
+        """Item 3: "that store's whole task file" had no referent under a
+        flat id set; the pseudocode reads every from store with a file."""
+        assert (
+            "the whole task file of EVERY from store that has one for that id"
+            in SKILL_TEXT
+        )
+
+    def test_item4_gap_agent_is_unknown_when_unrecoverable(self):
+        """Item 4: the agent is `unknown` when no source STILL IN SCOPE
+        carries one; a file drained after discovery had an owner that is no
+        longer recoverable."""
+        assert "WHEN A SOURCE STILL IN SCOPE CARRIES ONE" in SKILL_TEXT
+        assert (
+            "a task file drained between discovery and Step 3 had an owner "
+            "that is no longer recoverable" in SKILL_TEXT
+        )
+
+    def test_item5_all_falsy_dual_spelling_selects_the_canonical_key(self):
+        """Item 5: the all-falsy case was unstated."""
+        assert (
+            "When the canonical spelling is falsy AND no alias spelling is "
+            "truthy, the CANONICAL raw key is the one selected" in SKILL_TEXT
+        )
+
+    def test_item6_emit_side_subject_claim_is_true_as_a_calling_claim(self):
+        """Item 6: "the step never reaches for it directly" was false as a
+        NAMING claim — the step names it; it is only CALLED through
+        `disk_identity`."""
+        assert (
+            "the step names it but calls only `disk_identity`, which applies "
+            "the substitution" in SKILL_TEXT
         )
