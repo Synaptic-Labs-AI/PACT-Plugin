@@ -58,49 +58,37 @@ A SET WORD IS ALSO CAMOUFLAGE, AND A CONTRAST PHRASE IS WHAT CLOSES IT
     the negation scopes over. A phrase list sidesteps that question, and the
     decoy control below is what proves the decoy is still reported.
 
-THE CONTRAST RULE'S BOUND, STATED AT ITS REAL WIDTH
-    Three limits, not one, and the narrow version of this sentence was itself
-    an overstatement:
-      VOCABULARY — the phrase list is six strings ("not just", "not only",
-        "in addition", "as well as", "then the full suite", "not enough"). A
-        contrast expressed another way ("on top of", "plus the whole suite",
-        "at minimum") is not seen.
-      DISTANCE — the phrase must sit within 500 characters of a run demand.
-        The window is a measured separation, not a derivation: the shapes this
-        catches sit inside 400 characters and the comPACT carriers' unrelated
-        "not only an `Edit` or a `Write`" sits 873 and 971 characters away. A
-        qualifying phrase further out than 500 is not seen.
-      ANCHORING — the window is evaluated from EVERY run-demand match and
-        every contrast match, so a phrase qualifying the second or third
-        demand is caught. It is not evaluated against demands that the
-        detector never recognised as demands at all (see below).
+THE BOUND, IN THREE PARTS — the statement of record for the whole detector
+    The PR body's limit statement uses this decomposition, and so does this
+    module. KNOWN_NOT_CAUGHT below asserts what the whole DETECTOR cannot see,
+    so it has to be stated against the detector's vocabulary rather than
+    against one arm's.
+      VOCABULARY — a line is considered at all only if it carries a run verb, a
+        tests/suites pass predicate, or a suite noun. A demand phrased outside
+        all three ("make the tests work", "verify the change is covered") is
+        not even a candidate. The pass predicate covers both nouns with or
+        without a modal, so "tests must pass" IS a candidate and is held out
+        only because it names no unbounded set — the merge-boundary value rows
+        in protocols/pact-protocols.md and protocols/pact-s5-policy.md classify
+        that way today.
+      UNBOUNDEDNESS — a candidate is in-class only when it names an unbounded
+        set: "all", "every" or "both" in either position relative to the noun,
+        or the pre-nominal "full", "whole", "entire" or "complete" with
+        "tests"/"suites".
+      CONTRAST — a line that names a set is still in-class when a contrast
+        phrase from a six-string list ("not just", "not only", "in addition",
+        "as well as", "then the full suite", "not enough") sits within 500
+        characters of any recognised run demand. The 500 is a measured
+        separation, not a derivation: the shapes this catches sit inside 400
+        characters and the comPACT carriers' unrelated "not only an `Edit` or
+        a `Write`" sits 873 and 971 characters away.
 
-THE RESIDUAL BOUND IS EXECUTABLE, NOT PROSE
-    KNOWN_NOT_CAUGHT below lists every spelling this rule accepts as out of
-    class, with its reason, and each is asserted NOT reported — so the boundary
-    is tested rather than described. What it says, in the same terms as the
-    three parts above:
-      WHOLE-SET WORDING outside {all, every, both, and full|whole|entire|
-        complete + tests/suites}: "the whole test set", "the test set", "the
-        suite as a whole", "all of our checks" — the adjective is covered but
-        a NOUN other than tests/suites is not.
-      FAILING-STATE WORDING with no run verb, no pass predicate and no suite
-        noun: "nothing red", "nothing is red", "no failing tests", "make the
-        tests work", "verify the change is covered".
-    And what is caught WITHOUT any of those markers: "Run the tests in full" —
-    the run verb carries it even though "in full" names no set.
-    This paragraph, the list, and the PR body's limit statement are three
-    statements of ONE boundary; the control reddens when they diverge.
-
-WHAT THE DETECTOR DOES NOT SEE
-    The gate predicate covers a tests-pass and a suite-pass form with or
-    without a modal, so "tests must pass" IS a candidate and is held OUT only
-    because it names no unbounded set — the merge-boundary value statements in
-    protocols/pact-protocols.md and protocols/pact-s5-policy.md classify that
-    way today. What remains outside the detector is a demand phrased with no
-    run verb, no pass predicate and no suite noun at all ("make the tests
-    work before you commit", "verify the change is covered"); such a line is
-    not a candidate, so neither the census nor the controls can see it.
+    KNOWN_NOT_CAUGHT below is this bound made executable: every entry is a
+    spelling one of the three parts predicts will be missed, each asserted NOT
+    caught. A red there is not a defect — it means the rule grew and the
+    documented boundary is stale, so the docstring, the list and the PR body
+    move together. This paragraph, that list, and the PR body's limit are three
+    statements of ONE boundary.
 
 WHAT THIS MODULE CANNOT DO
     It verifies TEXT. Whether a coder or lead now behaves differently is not
@@ -820,41 +808,68 @@ CAUGHT_SHAPES = (
 KNOWN_NOT_CAUGHT = (
     (
         "The whole test set must pass before commit.",
-        "'test set' is not a suite noun, so the line is not even a candidate",
+        "vocabulary: 'test set' is not a suite noun, so the line is not even a candidate",
     ),
     (
         "The test set must pass before commit.",
-        "same: no suite noun for the demand to attach to",
+        "vocabulary: no suite noun for the demand to attach to",
     ),
     (
         "The suite as a whole must be green before commit.",
-        "no quantifier is present and there is no suite noun: not a candidate",
+        "vocabulary: a bare 'suite' is neither an accepted suite noun nor followed by a modal, so the line is not even a candidate",
     ),
     (
         "All of our checks must be green before commit.",
-        "'checks' is not a tests/suites noun, so the quantifier binds nothing",
+        "vocabulary: 'checks' is not a tests/suites noun, so the quantifier binds nothing",
     ),
     (
         "Nothing red before commit.",
-        "no run verb, no pass predicate and no suite noun: not a candidate",
+        "vocabulary: no run verb, no pass predicate and no suite noun, so it is not a candidate",
     ),
     (
         "Nothing is red.",
-        "same: a state with no run verb, pass predicate or suite noun",
+        "vocabulary: a state with no run verb, pass predicate or suite noun",
     ),
     (
         "No failing tests before commit.",
-        "'no failing tests' is not a tests-pass predicate",
+        "vocabulary: 'no failing tests' is not a tests-pass predicate",
     ),
     (
         "Make the tests work before you commit.",
-        "'work' is not a pass predicate, so the line is not a candidate",
+        "vocabulary: 'work' is not a pass predicate, so the line is not a candidate",
     ),
     (
         "Verify the change is covered.",
-        "no run verb, no pass predicate and no suite noun: not a candidate",
+        "vocabulary: no run verb, no pass predicate and no suite noun, so it is not a candidate",
+    ),
+    # One witness per remaining part, so the list exercises the bound it states
+    # rather than only its first clause.
+    (
+        "Make sure the tests are green before committing.",
+        "unboundedness: 'the tests' is a bare definite plural, not one of the quantifier or whole-set forms, so the demand reads as bounded",
+    ),
+    (
+        "Run the full test suite on top of the affected tests.",
+        "contrast: 'on top of' is not one of the six contrast strings, so the named set bounds the demand",
     ),
 )
+
+
+BOUND_PARTS = ("vocabulary", "unboundedness", "contrast")
+
+
+def test_every_residual_entry_names_the_part_of_the_bound_it_fails():
+    """The residual list is expressed against the three-part bound, not free prose.
+
+    Every reason leads with the part it belongs to, so the list and the
+    docstring cannot drift into describing different boundaries.
+    """
+    for shape, reason in KNOWN_NOT_CAUGHT:
+        part = reason.split(":", 1)[0]
+        assert part in BOUND_PARTS, (
+            f"{shape!r}: the reason does not start with one of {BOUND_PARTS}: "
+            f"{reason!r}"
+        )
 
 
 @pytest.mark.parametrize(
