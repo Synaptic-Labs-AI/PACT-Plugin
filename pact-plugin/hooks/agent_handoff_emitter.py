@@ -231,68 +231,6 @@ def main() -> None:
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
-        # task_metadata_snapshot seam — teammate-frame twin (hermetic; own
-        # gates in the substrate). Positioned immediately AFTER the
-        # transition gate and BEFORE the signal-task bypass: the hardened
-        # exits below (signal gate, handoff-presence gate, writability gate,
-        # marker gate) would make an after-the-emit call unreachable for
-        # exactly the tasks whose seam coverage matters here — self-completed
-        # tasks with sibling metadata but no/malformed handoff, and signal
-        # tasks (which DO snapshot; the agent_handoff suppression below is
-        # untouched). Isolation from the handoff path is carried by the
-        # hermetic try/except, the substrate's read-only payload build and
-        # never-raise contract, and the SEPARATE marker namespace — not by
-        # ordering; this block must not touch any variable the handoff path
-        # consumes below (task_metadata, handoff, occupant, marker state).
-        # The transition gate above IS the stdin-primary/disk-fallback
-        # discipline — the snapshot inherits it by position and adds NO disk
-        # status requirement of its own (the disk write can be mid-flight at
-        # TaskCompleted fire-time). The metadata read is the already-
-        # performed read_task_json result, best-effort: an empty read yields
-        # an empty payload and a clean no-emit. An unresolvable teammate
-        # frame defers inside the substrate (writability precondition — no
-        # claim, no write); the lead-frame seams cover it.
-        try:
-            emit_task_metadata_snapshot(
-                team_name,
-                task_id,
-                task_subject,
-                teammate_name,
-                task_data.get("metadata") or {},
-            )
-        except Exception:
-            pass
-
-        # `or {}` handles explicit JSON null in addition to missing key —
-        # .get("metadata", {}) returns None when the key is present with a
-        # null value, which would crash the subsequent .get("type") call
-        # and violate the exit-0 invariant.
-        task_metadata = task_data.get("metadata") or {}
-
-        # Signal-task bypass: blocker/algedonic tasks MUST NOT emit a phantom
-        # agent_handoff event (would pollute read_events("agent_handoff") +
-        # mis-route secretary harvest). Shared predicate (SSOT) — the #869
-        # lead-side emit in task_lifecycle_gate.py applies the same exclusion.
-        if is_signal_task(task_metadata):
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-
-        # Handoff-presence + type gate. Suppress emission AND skip marker
-        # creation when `metadata.handoff` is absent, empty, or NOT A DICT.
-        # Required so that a fire arriving before the teammate has stored
-        # handoff cannot claim the O_EXCL marker with empty content; the
-        # substantive completion (with handoff populated) claims it instead.
-        # M1: the journal schema requires handoff to be a dict, so a
-        # truthy-but-non-dict handoff (str/list) would pass a bare presence
-        # check, claim the marker, then FAIL append_event's schema validation
-        # — an orphaned/poisoned marker (the same failure class the #917
-        # writability gate below closes for the unwritable case). isinstance
-        # makes a malformed handoff DEFER (claim nothing) too.
-        handoff = task_metadata.get("handoff")
-        if not isinstance(handoff, dict) or not handoff:
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-
         # TEAM-UNCERTAINTY GUARD (b1 only). Suppress ONLY on two independent,
         # provable signals, because no single source is trustworthy for "the
         # session's own team": the persisted context is what goes stale in
@@ -372,6 +310,72 @@ def main() -> None:
                 f"{report_safe(task_id)}",
                 file=sys.stderr,
             )
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
+        # task_metadata_snapshot seam — teammate-frame twin (hermetic; own
+        # gates in the substrate). Positioned AFTER the transition gate and
+        # the MIXED-STORE guard, and BEFORE the signal-task bypass. The
+        # mixed guard is ABOVE this emit deliberately: a task whose metadata
+        # belongs to another store must write NEITHER event, and evaluating
+        # that guard after this call left the snapshot in the journal under
+        # the payload subject while the handoff was suppressed. The hardened
+        # exits below (signal gate, handoff-presence gate, writability gate,
+        # marker gate) would make an after-the-emit call unreachable for
+        # exactly the tasks whose seam coverage matters here — self-completed
+        # tasks with sibling metadata but no/malformed handoff, and signal
+        # tasks (which DO snapshot; the agent_handoff suppression below is
+        # untouched). Isolation from the handoff path is carried by the
+        # hermetic try/except, the substrate's read-only payload build and
+        # never-raise contract, and the SEPARATE marker namespace — not by
+        # ordering; this block must not touch any variable the handoff path
+        # consumes below (task_metadata, handoff, occupant, marker state).
+        # The transition gate above IS the stdin-primary/disk-fallback
+        # discipline — the snapshot inherits it by position and adds NO disk
+        # status requirement of its own (the disk write can be mid-flight at
+        # TaskCompleted fire-time). The metadata read is the already-
+        # performed read_task_json result, best-effort: an empty read yields
+        # an empty payload and a clean no-emit. An unresolvable teammate
+        # frame defers inside the substrate (writability precondition — no
+        # claim, no write); the lead-frame seams cover it.
+        try:
+            emit_task_metadata_snapshot(
+                team_name,
+                task_id,
+                task_subject,
+                teammate_name,
+                task_data.get("metadata") or {},
+            )
+        except Exception:
+            pass
+
+        # `or {}` handles explicit JSON null in addition to missing key —
+        # .get("metadata", {}) returns None when the key is present with a
+        # null value, which would crash the subsequent .get("type") call
+        # and violate the exit-0 invariant.
+        task_metadata = task_data.get("metadata") or {}
+
+        # Signal-task bypass: blocker/algedonic tasks MUST NOT emit a phantom
+        # agent_handoff event (would pollute read_events("agent_handoff") +
+        # mis-route secretary harvest). Shared predicate (SSOT) — the #869
+        # lead-side emit in task_lifecycle_gate.py applies the same exclusion.
+        if is_signal_task(task_metadata):
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
+        # Handoff-presence + type gate. Suppress emission AND skip marker
+        # creation when `metadata.handoff` is absent, empty, or NOT A DICT.
+        # Required so that a fire arriving before the teammate has stored
+        # handoff cannot claim the O_EXCL marker with empty content; the
+        # substantive completion (with handoff populated) claims it instead.
+        # M1: the journal schema requires handoff to be a dict, so a
+        # truthy-but-non-dict handoff (str/list) would pass a bare presence
+        # check, claim the marker, then FAIL append_event's schema validation
+        # — an orphaned/poisoned marker (the same failure class the #917
+        # writability gate below closes for the unwritable case). isinstance
+        # makes a malformed handoff DEFER (claim nothing) too.
+        handoff = task_metadata.get("handoff")
+        if not isinstance(handoff, dict) or not handoff:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 

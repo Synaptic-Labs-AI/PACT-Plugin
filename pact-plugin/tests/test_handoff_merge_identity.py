@@ -1128,3 +1128,37 @@ class TestHarvestRuleProse:
             "from shared.agent_handoff_marker import union_preferring_task_file"
             in SKILL_TEXT
         )
+
+    def test_high_from_team_population_bypasses_the_ledger_filter(self):
+        """HIGH (commit 24): the from-team population must not pass through
+        THIS team's ledger filter. Discovery folds both populations into one
+        list today, so a from-store task whose NUMBER this team already
+        recorded never reaches the from-team partition and that HANDOFF is
+        silently dropped. The split is at DISCOVERY, before any ledger
+        comparison, and the pseudocode carries it as a separate set."""
+        assert (
+            "ROUTE THESE IDS TO THE FROM-TEAM PARTITION AT DISCOVERY, BEFORE "
+            "ANY LEDGER COMPARISON" in SKILL_TEXT
+        )
+        assert "THE FILTER APPLIES TO THIS TEAM'S IDS ONLY" in SKILL_TEXT
+        assert (
+            "the from-team population is routed at Standard Harvest Step 1 "
+            "source 4 and is NEVER subtracted by this ledger" in SKILL_TEXT
+        )
+        assert "for task_id in unprocessed | from_unprocessed:" in SKILL_TEXT
+        assert "if task_id not in unprocessed:" in SKILL_TEXT
+        # The pre-fix single-population loop must not come back.
+        assert "for task_id in unprocessed:\n" not in SKILL_TEXT
+
+    def test_high_ledger_never_records_a_from_team_id(self):
+        """HIGH (commit 24), second half: the ledger write must exclude
+        from-team ids. Recording one under this team's section recreates the
+        same skip on the NEXT pass, so the discovery split alone is not
+        enough. The rule is stated at Step 8 (the writer) and inherited by
+        the incremental writer."""
+        assert "WRITE THIS TEAM'S IDS ONLY — NEVER A FROM-TEAM ID" in SKILL_TEXT
+        assert (
+            "recording it here would make a later pass skip your OWN task of "
+            "that number" in SKILL_TEXT
+        )
+        assert "THIS team's ids only — never a from-team id" in SKILL_TEXT

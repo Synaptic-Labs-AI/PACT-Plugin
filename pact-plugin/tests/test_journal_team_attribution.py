@@ -201,7 +201,7 @@ class TestEmitTeamUncertaintyGuard:
 
     def _run(self, tmp_path, monkeypatch, capsys, payload_team, payload_subject,
              context_team, create_payload_store=False,
-             record_subject="OLD subject"):
+             record_subject="OLD subject", snapshot_calls=None):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         if create_payload_store:
@@ -227,6 +227,7 @@ class TestEmitTeamUncertaintyGuard:
             task_data=task,
             append_calls=calls,
             context_team_name=context_team,
+            snapshot_calls=snapshot_calls,
         )
         return code, calls, capsys.readouterr().err
 
@@ -306,6 +307,48 @@ class TestEmitTeamUncertaintyGuard:
             "'session-live'" in err
         )
         assert "suppressing mixed handoff for task 12" in err
+
+    def test_both_stores_exist_suppresses_the_snapshot_too(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """MEDIUM: the mixed-store guard ran AFTER the snapshot emit, so a
+        suppressed task still landed the resolved store's metadata in the
+        journal under the payload subject and a stale `team`. The guard is
+        now evaluated BEFORE the snapshot, so a mixed task emits NEITHER
+        event. Moving the guard back below the snapshot reddens this arm."""
+        snapshot_calls = []
+        code, calls, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-live",
+            payload_subject="LIVE subject",
+            context_team="session-old",
+            create_payload_store=True,
+            snapshot_calls=snapshot_calls,
+        )
+        assert code == 0
+        assert calls == []           # handoff suppressed
+        assert snapshot_calls == []  # snapshot suppressed too
+        assert "suppressing mixed handoff for task 12" in err
+
+    def test_non_mixed_task_still_emits_the_snapshot(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CONTROL for the arm above: the same recorder sees the snapshot on
+        a task the guard does not suppress. Without this, an empty
+        snapshot_calls list cannot distinguish 'suppressed' from 'the patch
+        never reached the emit'."""
+        snapshot_calls = []
+        code, calls, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            payload_team="session-abc",
+            payload_subject="collect the arms",
+            context_team="session-abc",
+            snapshot_calls=snapshot_calls,
+        )
+        assert code == 0
+        assert len(calls) == 1
+        assert len(snapshot_calls) == 1
+        assert "suppressing mixed handoff" not in err
 
     def test_payload_team_cannot_forge_a_report_line(
         self, tmp_path, monkeypatch, capsys
