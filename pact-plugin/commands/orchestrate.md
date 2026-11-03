@@ -853,7 +853,7 @@ Pass through whatever the coder's stage-ready message claimed about the staged w
 
 **Before next phase**:
 - [ ] Implementation complete
-- [ ] Scoped test run green at every commit boundary (the tests the change affects, plus plan-named subsets; fix any tests your changes break); the full suite is not a per-commit gate — run it once before the PR, whole rather than a subset of paths, or defer to the project's required full-suite gate once the PR exists
+- [ ] Scoped test run green at every commit boundary (the tests the change affects, plus plan-named subsets; fix any tests your changes break); the full suite is not a per-commit gate — it is owed once at the PR boundary, and the TEST-phase checklist below owns it; if TEST is skipped, the lead runs it once before opening the PR
 - [ ] Specialist HANDOFF(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + `SendMessage` "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the team-lead works through the commit sequence; CLEAR on the team-lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
