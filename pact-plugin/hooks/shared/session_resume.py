@@ -30,7 +30,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from shared.agent_handoff_marker import report_safe
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
     MANAGED_START_MARKER,
@@ -1335,6 +1334,12 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             rendered.append((partitions[_INVALID_TEAM], ""))
     handoffs = rendered
     if handoffs:
+        # Imported here, not at module level: shared/__init__ imports this
+        # module, and the shared package must import without
+        # agent_handoff_marker (the lifecycle gate's crash handler relies on
+        # it when that module is broken).
+        from shared.agent_handoff_marker import report_safe
+
         lines.append("## Completed Work")
         for h, annotation in handoffs:
             agent = h.get("agent", "unknown")
@@ -1966,8 +1971,9 @@ def _sanitize_prompt_field(
     (a sanitizer error must not become a new suppress path).
     """
     try:
-        cleaned = report_safe(
-            _PROMPT_CONTROL_CHARS_RE.sub(" ", value), limit=None
+        cleaned = "".join(
+            ch for ch in _PROMPT_CONTROL_CHARS_RE.sub(" ", value)
+            if unicodedata.category(ch) not in ("Cf", "Cs")
         ).strip()
         if len(cleaned) > limit:
             cleaned = cleaned[:limit - 3] + "..."
