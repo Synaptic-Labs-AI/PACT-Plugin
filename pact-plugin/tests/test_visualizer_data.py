@@ -239,6 +239,29 @@ class TestRoots:
         assert len(roots) == 1
 
 
+class TestDefaultStateDir:
+    """The bare `pact-viz --stop` path resolves its state dir through
+    default_state_dir (no --state-dir flag), so detach and stop must agree
+    on `<config>/pact-viz`. Injected env/home only; never the real config."""
+
+    def test_env_config_dir_defines_the_state_root(self, tmp_path):
+        env_root = tmp_path / "zed"
+        state = settings.default_state_dir(
+            env={"CLAUDE_CONFIG_DIR": str(env_root)}, home=tmp_path
+        )
+        assert state == env_root / "pact-viz"
+
+    def test_home_fallback_without_env(self, tmp_path):
+        state = settings.default_state_dir(env={}, home=tmp_path)
+        assert state == tmp_path / ".claude" / "pact-viz"
+
+    def test_empty_env_var_falls_back_to_home(self, tmp_path):
+        state = settings.default_state_dir(
+            env={"CLAUDE_CONFIG_DIR": ""}, home=tmp_path
+        )
+        assert state == tmp_path / ".claude" / "pact-viz"
+
+
 class TestDiscovery:
     def test_exact_depth_only(self, tmp_path):
         root = make_root(tmp_path)
@@ -1011,6 +1034,70 @@ class TestCaps:
         handoff = build_basic_model(root, tmp_path)["handoffs"][0]
         assert len(handoff["fields"]["produced"]) == settings.MAX_FIELD_CHARS
         assert len(handoff["fields"]["decisions"]) <= settings.MAX_FIELD_CHARS
+
+
+class TestReviewsPayload:
+    """derive_reviews feeds payload["reviews"] and metrics reviews_total;
+    until these tests nothing pinned its field mapping or its cap."""
+
+    def test_field_mapping_and_only_review_dispatch_is_collected(self):
+        events = [
+            {"type": "phase_transition", "seq": 0, "raw": {"phase": "TEST"}},
+            {
+                "type": "review_dispatch",
+                "seq": 1,
+                "ts": "2026-11-01T10:00:00Z",
+                "raw": {
+                    "pr_number": 1697,
+                    "pr_url": "https://example.invalid/pull/1697",
+                    "reviewers": ["security-engineer", "test-engineer"],
+                },
+            },
+            {
+                "type": "review_dispatch",
+                "seq": 2,
+                "ts": "2026-11-01T11:30:00Z",
+                "raw": {},
+            },
+        ]
+        reviews, total = model.derive_reviews(events)
+        assert total == 2
+        assert reviews == [
+            {
+                "seq": 1,
+                "ts": "2026-11-01T10:00:00Z",
+                "pr_number": 1697,
+                "pr_url": "https://example.invalid/pull/1697",
+                "reviewers": ["security-engineer", "test-engineer"],
+            },
+            {"seq": 2, "ts": "2026-11-01T11:30:00Z",
+             "pr_number": None, "pr_url": "", "reviewers": []},
+        ]
+
+    def test_cap_keeps_the_tail_with_an_honest_total(self):
+        count = settings.MAX_REVIEWS + 20
+        events = [
+            {
+                "type": "review_dispatch",
+                "seq": index,
+                "ts": stamp(index // 60, index % 60),
+                "raw": {
+                    "pr_number": 1700 + index,
+                    "pr_url": f"https://example.invalid/pull/{1700 + index}",
+                    "reviewers": [f"reviewer-{index}"],
+                },
+            }
+            for index in range(count)
+        ]
+        reviews, total = model.derive_reviews(events)
+        assert total == count
+        assert len(reviews) == settings.MAX_REVIEWS
+        assert reviews[0]["seq"] == 20
+        assert reviews[-1]["seq"] == count - 1
+        kept = reviews[-1]
+        assert kept["pr_number"] == 1700 + count - 1
+        assert kept["pr_url"] == f"https://example.invalid/pull/{1700 + count - 1}"
+        assert kept["reviewers"] == [f"reviewer-{count - 1}"]
 
 
 class TestSessionsListAndHealth:

@@ -212,6 +212,40 @@ class TestSweptTreeIsClean:
         )
 
 
+class TestVisualizerIsStdlibOnly:
+    """The scope claim at the top of this file says the visualizer stays
+    stdlib-only (it ships to consumers and runs on their machine). This arm
+    makes that claim enforceable: a third-party top-level import reddens.
+    Relative imports (the package's own modules) are exempt by construction."""
+
+    def test_every_visualizer_absolute_import_is_stdlib(self):
+        offenders = []
+        for path in TARGET_DIR_SETS["visualizer"]():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    roots = {alias.name.split(".")[0] for alias in node.names}
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level:  # `from . import x` — the package itself
+                        continue
+                    if node.module is None:  # unreachable for level==0, guarded
+                        continue
+                    roots = {node.module.split(".")[0]}
+                else:
+                    continue
+                offenders.extend(
+                    f"{path.relative_to(PLUGIN_ROOT)}: {root}"
+                    for root in roots
+                    if root not in sys.stdlib_module_names
+                )
+        assert not offenders, (
+            "visualizer/ must import stdlib only (it ships with the plugin "
+            "and runs on the consumer's machine with no dependency install); "
+            "non-stdlib top-level imports found:\n"
+            + "\n".join(f"  - {line}" for line in offenders)
+        )
+
+
 class TestTestsSurfaceEnforcement:
     """Counter-tests proving the tests/ surface is genuinely enforced —
     each asserts POSITIVE membership in the live TARGET_DIR_SETS surface —

@@ -915,6 +915,64 @@ def _host_request(port: int, path: str, host: str, timeout: float = 5.0) -> Http
         connection.close()
 
 
+class TestLateCrashWindow:
+    """A handler crash AFTER the status line is on the wire must end the
+    connection, never attempt a second response (stream corruption)."""
+
+    def test_crash_between_headers_and_body_closes_the_connection(
+        self, tmp_path, monkeypatch
+    ):
+        """Fault injection for the headers-sent guard: the route sends a 200
+        status line announcing Content-Length 1000, then dies before any body.
+
+        The client must see a truncated response (IncompleteRead), and the
+        handler must make EXACTLY ONE send attempt — a second _send_json call
+        here would write a fresh status line into a stream that already has
+        one, corrupting the HTTP framing.
+        """
+        root = make_root(tmp_path)
+        roots = roots_for(root, tmp_path)
+        send_calls: list[int] = []
+        real_send_json = server_module.MissionControlHandler._send_json
+        real_send_headers = server_module.MissionControlHandler._send_headers
+
+        def send_headers_then_die(self, status, content_type, length, extra_headers=()):
+            real_send_headers(self, 200, "application/json", 1000, ())
+            raise RuntimeError("mid-body crash (injected)")
+
+        def counting_send_json(self, status, payload, extra_headers=()):
+            send_calls.append(status)
+            if payload.get("ok") is True and status == 200:
+                # The route's own send: fault between headers and body.
+                send_headers_then_die(self, status, None, None)
+            return real_send_json(self, status, payload, extra_headers)
+
+        monkeypatch.setattr(
+            server_module.MissionControlHandler, "_send_json", counting_send_json
+        )
+        srv = server_module.create_server(roots)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=5)
+            try:
+                connection.request("GET", "/api/health")
+                response = connection.getresponse()
+                assert response.status == 200
+                with pytest.raises(http.client.IncompleteRead):
+                    response.read()
+            finally:
+                connection.close()
+            assert send_calls == [200], (
+                f"expected exactly one send attempt, saw {send_calls}; a second "
+                "status line after headers are on the wire corrupts the stream"
+            )
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
+
+
 class TestHostHeaderAndErrorContract:
     """A Host other than the loopback names is refused before any route runs."""
 
