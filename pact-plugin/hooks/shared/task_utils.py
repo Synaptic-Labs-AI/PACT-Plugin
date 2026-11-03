@@ -613,18 +613,23 @@ def read_task_json(
     task_id: str,
     team_name: str | None,
     tasks_base_dir: str | None = None,
+    *,
+    base_fallback: bool = True,
 ) -> dict:
     """
     Read the raw task JSON from disk, safe against path traversal.
 
     Locates the task file in the team directory first, then falls back to
-    the base directory. Hoisted from handoff_gate.py so non-hook callers
+    the base directory unless `base_fallback` is False. Hoisted from handoff_gate.py so non-hook callers
     (agent_handoff_emitter.py) can consume the same reader.
 
     Args:
         task_id: Task identifier. Sanitized to strip `/`, `\\`, and `..`.
         team_name: Team name for scoped task lookup (may be None).
         tasks_base_dir: Override for tasks base directory (testing).
+        base_fallback: When False, never read the bare base directory: a
+            caller naming a store gets that store's file or {}, never a file
+            outside it.
 
     Returns:
         Full task dict from the JSON file, or empty dict on any failure
@@ -677,7 +682,8 @@ def read_task_json(
                 task_dirs.append(folded_dir)
     if raw_team_dir is not None:
         task_dirs.append(raw_team_dir)
-    task_dirs.append(base)
+    if base_fallback:
+        task_dirs.append(base)
 
     for task_dir in task_dirs:
         task_file = task_dir / f"{task_id}.json"
