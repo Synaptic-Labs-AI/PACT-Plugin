@@ -735,8 +735,38 @@ class TestPartitionDestination:
             partition_destination(7, "session-abc", ["7"]) == PARTITION_FOREIGN
         )
 
+    def test_non_str_containers_are_foreign_not_absent(self):
+        """A falsy non-str is still a non-str: `{}` and `[]` must not slip
+        into the absent/empty OLD-FORMAT branch. Only `None` means absent."""
+        assert partition_destination({}, "session-abc", []) == PARTITION_FOREIGN
+        assert partition_destination([], "session-abc", []) == PARTITION_FOREIGN
+
     def test_none_still_means_absent_and_is_old_format(self):
         assert (
             partition_destination(None, "session-abc", [])
             == PARTITION_OLD_FORMAT
+        )
+
+    def test_string_routes_are_unchanged(self):
+        """CONTROL for the guard: every legitimate string route is exactly
+        as before. Padded and case-varied names are DIFFERENT names."""
+        assert (
+            partition_destination("session-me", "session-me", [])
+            == PARTITION_THIS
+        )
+        assert (
+            partition_destination("session-x", "session-me", ["session-x"])
+            == PARTITION_FROM
+        )
+        assert (
+            partition_destination(" session-me", "session-me", [])
+            == PARTITION_FOREIGN
+        )
+        assert (
+            partition_destination("SESSION-ME", "session-me", [])
+            == PARTITION_FOREIGN
+        )
+        assert (
+            partition_destination("session-nope", "session-me", ["session-x"])
+            == PARTITION_FOREIGN
         )

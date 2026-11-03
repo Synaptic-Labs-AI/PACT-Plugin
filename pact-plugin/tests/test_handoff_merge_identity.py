@@ -1657,3 +1657,24 @@ class TestHarvestRuleProse:
         assert 'isinstance(event.get("from"), str)' in SKILL_TEXT
         assert "for event in realign_events" in SKILL_TEXT
         assert "unhashable type" in SKILL_TEXT
+
+    def test_foreign_non_str_team_reports_a_schema_line(self):
+        """A non-str team is a SCHEMA violation wearing a routing label: the
+        event is not a real team name to route away from. The two states must
+        not share the identity-mismatch line. Pseudocode-level pin (the
+        harvest is prose-executed)."""
+        block = SKILL_TEXT.split("for e in foreign:", 1)[1].split(
+            "# OLD-FORMAT events carry", 1
+        )[0]
+        assert "isinstance(team_value, str)" in block
+        assert "handoff team value invalid for task" in block
+        # The sentence wraps across two adjacent f-string literals; assert
+        # the fragments rather than a phrase no line contains.
+        schema_branch = block.split(
+            "if not isinstance(team_value, str):", 1
+        )[1].split("else:", 1)[0]
+        assert "is not a valid team name" in schema_branch
+        assert "event not processed" in schema_branch
+        # The genuine foreign-STRING branch keeps the identity line.
+        assert "journal event names team" in block
+        assert "identity mismatch" not in schema_branch

@@ -388,9 +388,19 @@ for task_id in unprocessed | from_unprocessed:
                 # fall into this team.
                 foreign.append(e)
     for e in foreign:
-        report(f"handoff identity mismatch for task {report_safe(task_id)}: "
-               f"journal event names team {report_safe(e.get('team'))}; this "
-               f"store is team {report_safe(this_team)}")
+        team_value = e.get("team")
+        if not isinstance(team_value, str):
+            # A NON-STR team is a SCHEMA violation, not a routing fact: the
+            # writer (or a hand-crafted journal) is at fault, and a reader
+            # must not mistake it for a real team name to route away from.
+            report(f"handoff team value invalid for task "
+                   f"{report_safe(task_id)}: event team value "
+                   f"{report_safe(team_value)!r} is not a valid team name; "
+                   f"event not processed")
+        else:
+            report(f"handoff identity mismatch for task {report_safe(task_id)}: "
+                   f"journal event names team {report_safe(team_value)}; this "
+                   f"store is team {report_safe(this_team)}")
     # OLD-FORMAT events carry no `team`; content decides them against the
     # NAMED stores only. The classifier names a MIXED event's source store,
     # an OWNED event's owner, and leaves the rest UNMATCHED (this team's by
