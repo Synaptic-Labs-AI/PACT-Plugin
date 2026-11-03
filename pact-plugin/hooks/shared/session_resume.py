@@ -1231,21 +1231,32 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
     # The rule is authored in skills/pact-handoff-harvest/SKILL.md, Step 3,
     # in the SELECTION block. Read it there. If it changes, change this WITH it: the
     # two are coupled and nothing compares them.
-    latest = {}
+    #
+    # The supersession is applied at THIS renderer's own grain: occupant
+    # identity first, then one latest event per team partition. A team-less
+    # OLD-FORMAT event is superseded by any attributed event for the same
+    # occupant (the field was added later in time, so the team-less copy is
+    # necessarily older). Two DIFFERENT teams are two distinct tasks that
+    # merely share a number: both render rather than collapsing.
+    by_occupant: dict[tuple, dict] = {}
     for h in handoffs:
-        # `task_id` and `team` are part of the key so two tasks (or two
-        # teams' same-numbered tasks) that share an occupant stay separate.
-        # An OLD-FORMAT event has no `team` and keys on "".
-        key = (
+        occupant = (
             h.get("task_id", ""),
-            h.get("team", ""),
             h.get("agent", "unknown"),
             h.get("task_subject", ""),
         )
+        partitions = by_occupant.setdefault(occupant, {})
+        team = h.get("team", "")
         # `>=` keeps the LATER journal line on an equal ts. Same tie-break.
-        if key not in latest or h.get("ts", "") >= latest[key].get("ts", ""):
-            latest[key] = h
-    handoffs = list(latest.values())
+        current = partitions.get(team)
+        if current is None or h.get("ts", "") >= current.get("ts", ""):
+            partitions[team] = h
+    rendered: list[dict] = []
+    for partitions in by_occupant.values():
+        if "" in partitions and len(partitions) > 1:
+            del partitions[""]
+        rendered.extend(partitions.values())
+    handoffs = rendered
     if handoffs:
         lines.append("## Completed Work")
         for h in handoffs:

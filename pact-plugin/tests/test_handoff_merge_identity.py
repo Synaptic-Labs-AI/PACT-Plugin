@@ -938,11 +938,11 @@ class TestHarvestRuleProse:
         assert from_block.count(': task file absent")') == 1
         from_loop = from_block.split(
             "for identity, group in from_groups.items():", 1
-        )[1].split('process(handoff, section=f"team={team}")', 1)[0]
+        )[1].split("            process(", 1)[0]
         assert "carries its identity" not in from_loop
         assert "task file absent" not in from_loop
         assert from_block.index("if not from_task:") > from_block.index(
-            'process(handoff, section=f"team={team}")'
+            "            process("
         )
 
         # THIS partition: neither divergence message may sit inside the loop.
@@ -952,12 +952,12 @@ class TestHarvestRuleProse:
         assert tail.count('f"group carries its identity")') == 1
         this_loop = tail.split(
             "for identity, events in groups.items():", 1
-        )[1].split("        process(handoff)", 1)[0]
+        )[1].split("        process(handoff, metadata=", 1)[0]
         assert "carries its identity" not in this_loop
         assert "task file absent" not in this_loop
-        assert tail.index("        process(handoff)\n") < tail.index(
-            "elif not disk_group_matches:"
-        )
+        assert tail.index(
+            '        process(handoff, metadata=task.get("metadata", {}))\n'
+        ) < tail.index("elif not disk_group_matches:")
 
     def test_divergence_report_rule_prose_states_the_once_rule(self):
         """The rule text must carry the once-post-loop instruction and the
@@ -1436,6 +1436,27 @@ class TestHarvestRuleProse:
         only `metadata.handoff`."""
         assert 'metadata=from_task.get("metadata", {})' in SKILL_TEXT
         assert 'process(disk_handoff, metadata=task.get("metadata", {}))' in SKILL_TEXT
+
+    def test_journal_paths_pass_their_own_store_metadata_to_process(self):
+        """FIX 1 (pseudocode-level arm): every `process` call must hand Step
+        3.1 the metadata of the store it actually READ. The modelled input is
+        a from-team journal unit and THIS team's store holding conflicting
+        sibling keys for one number: the from entry must carry the FROM
+        store's sibling, and this team's entry its own — never the reverse.
+
+        Both from-side calls (journal + disk) read `from_task`; both
+        this-side calls (journal + disk) read `task`."""
+        assert SKILL_TEXT.count('metadata=from_task.get("metadata", {})') == 2
+        assert SKILL_TEXT.count('metadata=task.get("metadata", {})') == 2
+        # The journal calls, not only the disk-only branches.
+        assert (
+            'process(handoff, metadata=task.get("metadata", {}))' in SKILL_TEXT
+        )
+        from_block = SKILL_TEXT.split(
+            "for team in sorted(from_stores):", 1
+        )[1].split("    # STEP 2", 1)[0]
+        assert 'metadata=from_task.get("metadata", {})' in from_block
+        assert 'section=f"team={team}"' in from_block
 
     # ---- amendment items ----
     def test_minor_partition_chain_fails_closed_on_an_unknown_label(self):

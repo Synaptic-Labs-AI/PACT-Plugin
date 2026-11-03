@@ -449,7 +449,11 @@ for task_id in unprocessed | from_unprocessed:
                 for line in reports:
                     report(line)
                 handoff = merged
-            process(handoff, section=f"team={team}")
+            process(
+                handoff,
+                metadata=from_task.get("metadata", {}),
+                section=f"team={team}",
+            )
             # A journal event's `team` field names the store EXPLICITLY, so
             # this IS evidence the work unit is real; the all-from-team
             # carve-out depends on it.
@@ -555,7 +559,7 @@ for task_id in unprocessed | from_unprocessed:
             for line in reports:
                 report(line)
             handoff = merged
-        process(handoff)
+        process(handoff, metadata=task.get("metadata", {}))
 
     # ONE divergence report for the WHOLE group set, decided AFTER the loop.
     # Inside the loop it would fire once per work unit, and "no event group

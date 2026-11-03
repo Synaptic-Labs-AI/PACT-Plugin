@@ -3595,3 +3595,108 @@ class TestRestoredSummaryNamesItsSource:
         )
 
         assert restore_last_session(str(session_dir)) is None
+
+
+_ABSENT = object()  # sentinel: the event carries NO `team` key
+
+
+class TestBuildJournalResumeOccupantDedup:
+    """Bugbot: an OLD-FORMAT event carries no `team` and keyed as "", so a
+    later attributed event for the same occupant rendered as a SECOND entry
+    beside the superseded copy. The renderer applies the selection at its own
+    grain: occupant identity first, then one latest event per team partition.
+    A team-less copy in a group that also holds an attributed event is
+    superseded (the field was added later in time). Two different teams are
+    two distinct same-numbered tasks and BOTH render."""
+
+    @pytest.fixture
+    def session_dir(self, tmp_path):
+        sd = tmp_path / ".claude" / "pact-sessions" / "test" / "occupant-dedup"
+        sd.mkdir(parents=True, exist_ok=True)
+        return str(sd)
+
+    @pytest.fixture
+    def journal_file(self, session_dir):
+        return Path(session_dir) / "session-journal.jsonl"
+
+    def _write_raw_events(self, journal_file: Path, events: list) -> None:
+        import json
+        with open(str(journal_file), "a") as f:
+            for event in events:
+                f.write(json.dumps(event) + "\n")
+
+    def _event(self, decisions, ts, team=_ABSENT):
+        event = {
+            "v": 1,
+            "type": "agent_handoff",
+            "agent": "coder",
+            "task_id": "1",
+            "task_subject": "CODE: dedup",
+            "handoff": {"decisions": [decisions]},
+            "ts": ts,
+        }
+        if team is not _ABSENT:
+            event["team"] = team
+        return event
+
+    def test_old_format_copy_is_superseded_by_an_attributed_one(
+        self, session_dir, journal_file
+    ):
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("old copy", "2026-01-01T00:00:01Z"),
+            self._event("new copy", "2026-01-01T00:00:02Z", team="session-a"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "new copy" in result
+        assert "old copy" not in result
+        # Exactly ONE bullet for the occupant.
+        assert result.count("- coder: CODE: dedup") == 1
+
+    def test_old_format_only_still_renders(self, session_dir, journal_file):
+        """CONTROL: the drop must not remove a legitimate old-format entry."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("only copy", "2026-01-01T00:00:01Z"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "only copy" in result
+        assert result.count("- coder: CODE: dedup") == 1
+
+    def test_two_teams_render_both(self, session_dir, journal_file):
+        """CONTROL: two stores' same-numbered tasks are distinct work units;
+        collapsing them would lose one."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("team a work", "2026-01-01T00:00:01Z", team="session-a"),
+            self._event("team b work", "2026-01-01T00:00:02Z", team="session-b"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "team a work" in result
+        assert "team b work" in result
+        assert result.count("- coder: CODE: dedup") == 2
+
+    def test_latest_within_one_team_partition_wins(self, session_dir, journal_file):
+        """CONTROL: the second level still keeps only the latest event of a
+        team partition."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            self._event("revision 1", "2026-01-01T00:00:01Z", team="session-a"),
+            self._event("revision 2", "2026-01-01T00:00:02Z", team="session-a"),
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "revision 2" in result
+        assert "revision 1" not in result
+        assert result.count("- coder: CODE: dedup") == 1
