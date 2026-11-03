@@ -1333,26 +1333,13 @@ class TestUnresolvedIdentityRefusesWrites:
             memory_id = None
 
         if memory_id is None:
-            # No row may survive with an empty or NULL id — in `memories` OR
-            # in `files`, because the file row keying is new in this fix.
-            if db_path.exists():
-                with db_connection(db_path) as conn:
-                    empty_ids = 0
-                    for table in ("memories", "files"):
-                        present = conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' "
-                            "AND name=?",
-                            (table,),
-                        ).fetchone()
-                        if present:
-                            empty_ids += conn.execute(
-                                f"SELECT COUNT(*) FROM {table} "
-                                "WHERE project_id IS NULL OR project_id = ''"
-                            ).fetchone()[0]
-                assert empty_ids == 0, (
-                    "a refused falsy-payload save left empty or NULL project "
-                    "ids in the store"
-                )
+            # The guard precedes `_ensure_ready()`, so a refusal must not even
+            # create the store file. If that ever stops being true, this arm
+            # should say so rather than silently accepting an empty database.
+            assert not db_path.exists(), (
+                "the falsy-payload refusal created the store; the guard must "
+                "precede _ensure_ready()"
+            )
             return
 
         with db_connection(db_path) as conn:
