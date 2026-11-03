@@ -877,6 +877,42 @@ class TestHarvestRuleProse:
         assert "filter" not in selection.lower()
         assert "filter" not in snapshot_step.lower()
 
+    def test_group_key_states_its_arc_limit(self):
+        """The group key is the occupant identity, and it cannot separate two
+        arcs sharing BOTH terms. The superseded text asserted that a reused
+        task_id carries one identity per arc — false for exactly that case:
+        the two events collapse into one group and only the latest is
+        processed."""
+        assert (
+            "THE KEY CANNOT SEPARATE TWO ARCS THAT SHARE AGENT AND SUBJECT"
+            in SKILL_TEXT
+        )
+        assert (
+            "a reused id whose two arcs share BOTH terms collapses into ONE group"
+            in SKILL_TEXT
+        )
+        # What closes it is an ARC field used as a GROUP term, never inside the
+        # marker key (which would re-key every existing marker).
+        assert (
+            "an ARC field on the `agent_handoff` event used as a GROUP term"
+            in SKILL_TEXT
+        )
+        assert "never inside the marker key" in SKILL_TEXT
+        # The unearned claim is gone from the instruction surface.
+        assert "carries one identity for each arc" not in SKILL_TEXT
+
+    def test_renderer_source_does_not_restate_the_arc_claim(self):
+        """The renderer is the executable twin of the harvest. A copy of the
+        claim there would be a second, unverified statement of the assertion
+        the skill now states with its limit."""
+        renderer = (
+            Path(__file__).resolve().parents[1]
+            / "hooks"
+            / "shared"
+            / "session_resume.py"
+        ).read_text(encoding="utf-8")
+        assert "carries one identity for each arc" not in renderer
+
     def test_from_team_route_present(self):
         """P6: a filter-shaped fix fails here — the realigned earlier team is
         routed to its own section, not dropped."""

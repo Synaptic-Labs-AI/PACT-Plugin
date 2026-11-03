@@ -7,9 +7,9 @@ the next session. These arms build a fixture corpus under tmp_path, where the
 expected counts are known by construction, and assert the instrument reports
 what was planted.
 
-The one arm that touches the shipped code rather than the fixture is
-test_key_set_reconstruction_is_faithful: it guards the adaptation the journal
-arm depends on.
+The arms that touch the shipped code rather than the fixture guard what the
+journal arm's confidence rests on: the presence-only reconstruction, and the
+inline handoff passing through unchanged.
 """
 
 from __future__ import annotations
@@ -63,10 +63,23 @@ def _corpus(home: Path) -> None:
 
 
 def test_key_set_reconstruction_is_faithful():
-    """The journal arm stands a key list in for the handoff. That is exact
-    only while the validator is presence-only, and this is the guard that
-    fails loudly rather than letting the census drift into a wrong answer."""
+    """The historical list-of-keys shape is reconstructed as {key: None}. That
+    is exact only while the validator is presence-only, and this is the guard
+    that fails loudly rather than letting the census drift into a wrong
+    answer."""
     hc.assert_presence_only()  # raises SystemExit if the validator inspects values
+
+
+def test_journal_reader_passes_an_inline_handoff_through_unchanged(tmp_path):
+    """The real shape: a current event carries the full handoff dict. It must
+    be yielded as written, not reconstructed from its keys."""
+    journal = tmp_path / ".claude" / "pact-sessions" / "proj" / "sess"
+    journal.mkdir(parents=True)
+    (journal / "session-journal.jsonl").write_text(
+        json.dumps({"type": "agent_handoff", "handoff": CANONICAL}) + "\n",
+        encoding="utf-8",
+    )
+    assert list(hc.journal_handoffs(tmp_path / ".claude")) == [CANONICAL]
 
 
 def test_tally_counts_the_planted_shapes():
