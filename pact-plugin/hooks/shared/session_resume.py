@@ -1337,8 +1337,14 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         # Imported here, not at module level: shared/__init__ imports this
         # module, and the shared package must import without
         # agent_handoff_marker (the lifecycle gate's crash handler relies on
-        # it when that module is broken).
-        from shared.agent_handoff_marker import report_safe
+        # it when that module is broken). If the import fails, only this
+        # section degrades: the local sanitiser keeps each value on one line
+        # and every other section still renders.
+        try:
+            from shared.agent_handoff_marker import report_safe
+        except Exception:
+            def report_safe(value, limit=None):
+                return _sanitize_prompt_field(str(value), limit=sys.maxsize)
 
         lines.append("## Completed Work")
         for h, annotation in handoffs:

@@ -3995,6 +3995,52 @@ class TestBuildJournalResumeOccupantDedup:
             assert ch not in result
         assert "xFORGEDLINERTL" in bullets[0]
 
+    def _degradable_journal(self, journal_file):
+        rlo, ls = chr(0x202E), chr(0x2028)
+        self._write_raw_events(journal_file, [
+            {"v": 1, "type": "session_start", "session_id": "sid-degrade",
+             "project_dir": "/proj", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "agent_handoff", "agent": "coder",
+             "task_id": "1", "task_subject": "CODE: a\nb" + ls + "c" + rlo,
+             "handoff": {"decisions": ["d"]}, "ts": "2026-01-01T00:00:01Z",
+             "team": "session-a"},
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "completed", "ts": "2026-01-01T00:00:02Z"},
+        ])
+
+    def test_brief_survives_an_unimportable_report_helper(
+        self, session_dir, journal_file, monkeypatch
+    ):
+        """One section's helper failing to import must not discard the
+        whole brief: the other sections render, and Completed Work falls
+        back to the local sanitiser, one line per bullet."""
+        import sys
+        from shared.session_resume import _build_journal_resume
+
+        self._degradable_journal(journal_file)
+        monkeypatch.setitem(sys.modules, "shared.agent_handoff_marker", None)
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "Context from session sid-degrade." in result
+        assert "Completed phases: CODE" in result
+        bullets = [line for line in result.splitlines()
+                   if line.startswith("- coder")]
+        assert bullets == ["- coder: CODE: a b c -> d"]
+        assert chr(0x202E) not in result and chr(0x2028) not in result
+
+    def test_normal_path_uses_report_safe(self, session_dir, journal_file):
+        """CONTROL for the arm above: with the helper importable, a newline
+        is REMOVED (report_safe) rather than turned into a space (the
+        fallback), so the two arms see different bytes."""
+        from shared.session_resume import _build_journal_resume
+
+        self._degradable_journal(journal_file)
+        result = _build_journal_resume(session_dir)
+        bullets = [line for line in result.splitlines()
+                   if line.startswith("- coder")]
+        assert bullets == ["- coder: CODE: abc -> d"]
+
     def test_sanitize_prompt_field_drops_format_characters(self):
         from shared.session_resume import _sanitize_prompt_field
 

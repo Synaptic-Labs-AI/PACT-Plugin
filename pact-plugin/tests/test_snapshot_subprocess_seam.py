@@ -11,11 +11,14 @@ Summary: REAL-PROCESS end-to-end coverage for the task_metadata_snapshot
          (CLAUDE_PROJECT_DIR + stdin session_id) are never exercised
          together on one code path. Here they are.
 
-         Also closes the harvest read seam as a real CLI subprocess: the
-         skill's documented command (session_journal.py read --session-dir
-         --type task_metadata_snapshot) is run verbatim against the journal
-         the hook subprocess produced — a full produce -> register ->
-         consume round-trip through real entrypoints (a missed
+         Also closes the journal read seam as a real CLI subprocess: a
+         typed read (session_journal.py read --session-dir --type
+         task_metadata_snapshot) runs against the journal the hook
+         subprocess produced — a full produce -> register -> consume
+         round-trip through real entrypoints. The harvest skill itself
+         reads the whole Step 1 journal once, with no --type filter, and
+         takes the snapshots from that list; the typed read here exercises
+         the same subcommand and the same written events (a missed
          _REQUIRED_FIELDS_BY_TYPE registration cannot pass this green:
          append_event validates per-type only for registered types, and the
          CLI read returns the typed events only if the write landed).
@@ -198,8 +201,10 @@ def _seed_team_config(home: Path, *, lead_session_id: str) -> None:
 
 
 def _cli_read_snapshots(session_dir: Path, home: Path) -> list[dict]:
-    """The harvest skill's documented consumer command, run verbatim as a
-    real CLI subprocess."""
+    """A typed `session_journal.py read` of the snapshot events, run as a
+    real CLI subprocess. The harvest skill reads the whole Step 1 journal
+    unfiltered and selects snapshots from it; this read uses the same
+    subcommand on the same journal."""
     env = os.environ.copy()
     env["HOME"] = str(home)
     result = subprocess.run(
