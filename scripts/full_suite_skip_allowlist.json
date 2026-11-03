@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "about": "Every skip the certifying full-suite run may report, keyed on the file and the verbatim reason the -ra summary prints (never on a line number). scripts/verify_full_run.py fails on a skip site missing from this list or on more skips at a site than 'allowed'; scripts/verify_fast_summary.py reports the same comparison for the fast lane as a warning. To admit a new legitimate skip, add its entry in the SAME commit that adds the skip. 'match' is 'exact', or 'prefix' when the reason embeds variable text (key on the stable leading part and say so in the entry). 'allowed' is the most skips at the site, an integer of at least 1.",
+  "entries": [
+    {
+      "file": "tests/test_conftest_config_root_isolation.py",
+      "reason": "no ambient CLAUDE_CODE_SESSION_ID was present at collection, so this cell cannot discriminate a working scrub from an absent input — it is meaningful only when the suite runs under a session that exports one",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_conftest_config_root_isolation.py",
+      "reason": "no ambient CLAUDE_PROJECT_DIR was present at collection, so this cell cannot discriminate a working scrub from an absent input — it is meaningful only when the suite runs under a shell that exports one",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_conftest_remote_scrub.py",
+      "reason": "runs only inside the meta-test's child pytest",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_containment_certification.py",
+      "reason": "case-sensitive volume: the variant anchor does not exist",
+      "match": "exact",
+      "allowed": 2
+    },
+    {
+      "file": "tests/test_containment_certification.py",
+      "reason": "volume does not normalise NFC/NFD to one name",
+      "match": "exact",
+      "allowed": 2
+    },
+    {
+      "file": "tests/test_harness_aware_bootstrap.py",
+      "reason": "POST-MERGE deferred manual Desktop validation — documentation only; this CLI/CI substrate cannot exercise the real Desktop harness. Skipped (not passed) so a doc carrier never inflates the green coverage count.",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_pin_caps_gate_paths.py",
+      "reason": "the tmp volume matches names with case, so a case-variant spelling names another file",
+      "match": "exact",
+      "allowed": 5
+    },
+    {
+      "file": "tests/test_pin_growth_populations.py",
+      "reason": "set PACT_PIN_GROWTH_REAL_FILES to CLAUDE.md paths, separated by ':', to replay real files",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_pin_growth_populations.py",
+      "reason": "the trimming differential is a one-off run over the full sweep: set PACT_PIN_GROWTH_TRIM_DIFFERENTIAL=1",
+      "match": "exact",
+      "allowed": 7
+    },
+    {
+      "file": "tests/test_plugin_root_allowlist.py",
+      "reason": "the environment cannot hold a NUL",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_requires_non_root_marker.py",
+      "reason": "runs only inside the wiring test's child pytest",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_session_registry_trust_partition.py",
+      "reason": "real-tmux production-register pre-merge gate — requires a live tmux teammate spawn (executed under a live tmux flip, not in the in-process suite)",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_skills_structure.py",
+      "reason": "pact-orchestrator is carved out from F20 — orchestrator persona delivered via --agent flag, not spawn",
+      "match": "exact",
+      "allowed": 1
+    },
+    {
+      "file": "tests/test_variety_scorer_fuzz.py",
+      "reason": "Already at max dimension",
+      "match": "exact",
+      "allowed": 2
+    }
+  ]
+}

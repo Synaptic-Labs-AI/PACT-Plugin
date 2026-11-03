@@ -1268,12 +1268,12 @@ class TestAdversarialCommandDetection:
 
         assert is_dangerous_command("$(gh pr merge 42)")
 
-    def test_command_after_semicolon(self):
-        """Dangerous command after semicolon is caught."""
-        from merge_guard_pre import is_dangerous_command
-
-        assert is_dangerous_command("echo hello; gh pr merge 42")
-
+    # test_command_after_semicolon lived here and asserted the same input as
+    # TestFalsePositivePrevention::test_semicolon_after_echo_still_detected.
+    # The false-positive-prevention copy is kept because an echo-then-danger
+    # command is that class's question; the duplicate was removed after a
+    # removal-safety ablation (disabling semicolon chaining reddens the
+    # survivor).
     def test_command_after_pipe(self):
         """Dangerous command after pipe is caught."""
         from merge_guard_pre import is_dangerous_command

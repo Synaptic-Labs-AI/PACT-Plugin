@@ -50,7 +50,7 @@ set -u
 
 if [ "$#" -ne 0 ]; then
     printf 'usage: verify-local-lint-gate.sh\n' >&2
-    printf '  This script takes no arguments; it lints pact-plugin/ from the repository root.\n' >&2
+    printf '  This script takes no arguments; it lints pact-plugin/ and scripts/ from the repository root.\n' >&2
     exit 1
 fi
 
@@ -78,8 +78,8 @@ if ! command -v ruff >/dev/null 2>&1; then
     printf '  A missing linter must not read as a pass. Install the ruff version CI pins, from the repo root:\n' >&2
     printf '    python3 -m pip install -c constraints-ci.txt ruff\n' >&2
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
-    printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/\n' >&2
-    printf '    ruff check --select F821 --target-version py312 pact-plugin/\n' >&2
+    printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/ scripts/\n' >&2
+    printf '    ruff check --select F821 --target-version py312 pact-plugin/ scripts/\n' >&2
     exit 2
 fi
 
@@ -105,7 +105,7 @@ fi
 # CI's two import-hygiene legs, verbatim and in order. The stripped form of
 # these exact lines is byte-compared against the workflow by
 # pact-plugin/tests/test_local_lint_parity.py.
-ruff check --select F401,F821 --target-version py312 pact-plugin/
+ruff check --select F401,F821 --target-version py312 pact-plugin/ scripts/
 status=$?
 if [ "$status" -gt 1 ]; then
     printf 'LINT-GATE-LEG-1-ERROR exit %s\n' "$status" >&2
@@ -116,7 +116,7 @@ if [ "$status" -eq 1 ]; then
     exit "$status"
 fi
 
-ruff check --select F821 --target-version py312 pact-plugin/
+ruff check --select F821 --target-version py312 pact-plugin/ scripts/
 status=$?
 if [ "$status" -gt 1 ]; then
     printf 'LINT-GATE-LEG-2-ERROR exit %s\n' "$status" >&2
