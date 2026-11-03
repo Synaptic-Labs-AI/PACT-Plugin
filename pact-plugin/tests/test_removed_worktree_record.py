@@ -1258,9 +1258,10 @@ class TestUnresolvedIdentityRefusesWrites:
             # input regardless of whether an instance identity resolved, and
             # this guard runs first, so both routes may report it here. Also
             # cause-specific: an unrelated ValueError fails the message check.
-            assert "non-empty string" in str(exc), (
-                f"refused for an unrelated ValueError reason: {str(exc)!r}"
-            )
+            assert str(exc).startswith(
+                "project_id, when supplied, must be a non-empty string; "
+                "omit it to auto-detect the project."
+            ), f"refused for an unrelated ValueError reason: {str(exc)!r}"
             memory_id = None
 
         if memory_id is None:
@@ -1325,9 +1326,10 @@ class TestUnresolvedIdentityRefusesWrites:
         except ValueError as exc:
             # The payload-validation channel: an empty supplied id is invalid
             # input, not a project-scope disagreement.
-            assert "non-empty string" in str(exc), (
-                f"refused for an unrelated reason: {str(exc)!r}"
-            )
+            assert str(exc).startswith(
+                "project_id, when supplied, must be a non-empty string; "
+                "omit it to auto-detect the project."
+            ), f"refused for an unrelated reason: {str(exc)!r}"
             memory_id = None
 
         if memory_id is None:
@@ -1365,6 +1367,35 @@ class TestUnresolvedIdentityRefusesWrites:
         assert file_row is not None and file_row[0] not in (None, ""), (
             "the resolved-instance save wrote a file row with an empty or "
             "NULL project id"
+        )
+
+    def test_f2_a_NULL_payload_project_is_omission_not_an_empty_id(
+        self, tmp_path
+    ):
+        """The boundary the falsy-payload guard must not cross.
+
+        JSON null means "omit and auto-detect". The guard rejects `""` but
+        must leave `None` alone, so a resolved instance fills the row from its
+        own identity. Getting this wrong in either direction is a bug: a
+        rejected None breaks every caller that explicitly passes null, and a
+        defaulted `""` writes an unaddressable row.
+        """
+        db_path = tmp_path / "null-id.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        assert memory.project_id == "detected-b"
+
+        memory_id = memory.save(
+            {"context": "NULL-ID", "project_id": None}, sync_to_claude=False
+        )
+
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "detected-b", (
+            "a None payload project was not treated as omission; it should "
+            "default to the instance's detected id, not be refused and not "
+            "written empty"
         )
 
 
