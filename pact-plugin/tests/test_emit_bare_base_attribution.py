@@ -228,3 +228,32 @@ class TestCompletionRulesReadOnlyTheNamedStore:
         rules = _rules(tlg.evaluate_lifecycle(self._payload()))
         assert "teachback_submit_missing" in rules
         assert "handoff_schema_invalid_at_completion" in rules
+
+
+class TestArtifactRuleReadsOnlyTheNamedStore:
+    """artifact_paths_emit_missing keys on the record's phase subject; the
+    completion disk fallback must not take it from a bare-base file.
+    Kills: deleting the completion fallback's base_fallback=False."""
+
+    RECORD = dict(subject="PREPARE: bare-base-probe", owner="preparer",
+                  status="completed", metadata={})
+
+    def _payload(self):
+        return {
+            "tool_name": "TaskUpdate",
+            "agent_type": LEAD,
+            "tool_input": {"taskId": "C", "status": "completed"},
+            "tool_response": {},
+        }
+
+    def test_bare_base_record_does_not_fire_the_artifact_rule(self, home, journal):
+        _write(home, "bare", "C", **self.RECORD)
+        assert "artifact_paths_emit_missing" not in _rules(
+            tlg.evaluate_lifecycle(self._payload())
+        )
+
+    def test_control_named_store_record_fires_the_artifact_rule(self, home, journal):
+        _write(home, "named", "C", **self.RECORD)
+        assert "artifact_paths_emit_missing" in _rules(
+            tlg.evaluate_lifecycle(self._payload())
+        )

@@ -708,3 +708,39 @@ class TestRealJournalSeam:
         site_events = [e for e in self._journal_lines(env)
                        if e.get("type") == "dispatch_site"]
         assert len(site_events) == 1
+
+
+class TestBareBaseRecordIsNotThisStoresTask:
+    """The dispatch_site ladder reads task_a for the teachback carve-out and
+    the variety projection. A record that exists only at the BARE tasks base
+    is not this store's task, so the site is decided exactly as for a drained
+    store: one site, no variety, no carve-out. Kills: deleting task_a's
+    base_fallback=False."""
+
+    def _bare(self, tmp_path, **fields):
+        base = tmp_path / ".claude" / "tasks"
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "42.json").write_text(json.dumps({"id": "42", **fields}),
+                                      encoding="utf-8")
+
+    def test_bare_base_record_is_decided_as_a_drained_store(self, env, events):
+        self._bare(env, subject="backend-coder: TEACHBACK for x",
+                   owner="backend-coder", metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring())
+        assert sites(events) == [
+            e for e in sites(events) if "variety" not in e
+        ] and len(sites(events)) == 1
+
+    def test_control_drained_store_gives_the_same_site(self, env, events):
+        tlg.evaluate_lifecycle(wiring())
+        assert len(sites(events)) == 1 and "variety" not in sites(events)[0]
+
+    def test_control_named_store_subject_is_read(self, env, events):
+        seed(env, subject="backend-coder: TEACHBACK for x")
+        tlg.evaluate_lifecycle(wiring())
+        assert sites(events) == []
+
+    def test_control_named_store_variety_is_read(self, env, events):
+        seed(env, metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring())
+        assert [set(e.get("variety", {})) for e in sites(events)] == [CANONICAL]
