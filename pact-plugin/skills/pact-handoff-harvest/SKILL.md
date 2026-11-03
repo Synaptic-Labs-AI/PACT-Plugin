@@ -52,7 +52,7 @@ When reviewing multiple HANDOFFs, read ALL of them before saving any memories. T
 
 ### Step 0: Resolve the Session Directory (do this once)
 
-Resolve the absolute session directory **before any journal read**, and reuse that one value (`$SESSION_DIR`) for every journal read below (Step 1 `agent_handoff`, Step 3.5 `artifact_paths`, and Step 10 `variety_assessed`). **Every journal read in this skill MUST pass this explicit `--session-dir`** — never a path-less read.
+Resolve the absolute session directory **before any journal read**, and reuse that one value (`$SESSION_DIR`) for every journal read below (Step 1's one unfiltered read, Step 3.5 `artifact_paths`, and Step 10 `variety_assessed`). **Every journal read in this skill MUST pass this explicit `--session-dir`** — never a path-less read.
 
 **Why this is load-bearing (not optional):** you run **off-lead** (a `pact-secretary` teammate). The implicit-path read (`read_events(...)` with no `--session-dir`) derives its path via `pact_context.get_session_dir()`, which **false-returns `''` in a teammate frame** (no persisted lead session context) → the read silently returns **0 events**. Off-lead, that would make the entire harvest — HANDOFF discovery, artifact recovery, and calibration — a silent no-op. Passing an explicit `--session-dir` is frame-independent and masked-read-safe.
 
@@ -75,18 +75,20 @@ fi
 
 You have several sources for finding completed agent tasks. Sources 1 and 2 find tasks that emitted a HANDOFF; source 3 is required for coverage:
 
-1. **Session journal** (primary, GC-proof): `$SESSION_DIR/session-journal.jsonl` (the `$SESSION_DIR` resolved in Step 0) — read `agent_handoff` events via the existing `session_journal.py read` subcommand (explicit `--session-dir`, masked-read-safe):
+1. **Session journal** (primary, GC-proof): `$SESSION_DIR/session-journal.jsonl` (the `$SESSION_DIR` resolved in Step 0). Read it ONCE, with no `--type` filter, via the existing `session_journal.py read` subcommand (explicit `--session-dir`, masked-read-safe):
 
    ```bash
-   EVENTS=$(python3 "{plugin_root}/hooks/shared/session_journal.py" read \
-              --session-dir "$SESSION_DIR" --type agent_handoff)
+   JOURNAL=$(python3 "{plugin_root}/hooks/shared/session_journal.py" read \
+               --session-dir "$SESSION_DIR")
    ```
 
-   `read` prints a **JSON ARRAY** to stdout (`[ {...}, {...} ]`), NOT one JSON object per line. So parse the whole stdout once — `json.loads(EVENTS)` → a list of event dicts — then iterate the list (do **not** iterate line-by-line). Each event is `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "team": "<task-store name>", "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. `team` names the task-store directory the emitting path read its task file from. It is ABSENT on an event written before that field existed; such an event is OLD-FORMAT, and the SELECTION rule below decides it. **Deduplicate**: extract unique task_ids only.
+   `read` prints a **JSON ARRAY** to stdout (`[ {...}, {...} ]`), NOT one JSON object per line. So parse the whole stdout once — `json.loads(JOURNAL)` → a list of event dicts — then iterate the list (do **not** iterate line-by-line). **KEEP THAT LIST IN JOURNAL ORDER: it is the `journal` input of the Step 3 block, and Step 3 reads its `agent_handoff`, `task_created` and `task_metadata_snapshot` events from it.** Assign arcs from this one list's order; never from `ts`, which ties within a second. An `agent_handoff` event is `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "team": "<task-store name>", "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. `team` names the task-store directory the emitting path read its task file from. It is ABSENT on an event written before that field existed; such an event is OLD-FORMAT, and the SELECTION rule below decides it. A `task_created` event records one creation of a task: `{"type": "task_created", "task_id": "...", "team": "...", "subject": "..."}`.
+
+   **Route each `agent_handoff` event at discovery with `partition_destination`, and collect `(section, task_id)` pairs, never bare ids.** `PARTITION_THIS` and `PARTITION_OLD_FORMAT` add `(this team, id)`; `PARTITION_FROM` adds `({team}, id)` for the event's own team; `PARTITION_FOREIGN` and any unknown label add nothing — report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>` once per id whose ONLY events are foreign. When `this_team` is empty, every event is OLD-FORMAT and adds `(this team, id)`.
 2. **`TaskList`** (supplementary): Read `TaskList` for completed tasks owned by agents. Useful as a cross-reference and for catching tasks where the completion hook didn't fire. Note: the platform garbage-collects older task files during long sessions, so `TaskList` may be incomplete.
 3. **Task-file metadata census** (required for coverage): list the team's task files under the task-list directory named in your context (`Task list: <abs>`) and read the **metadata key set** of every completed task. A task is in scope when it carries ANY agent-authored key — `handoff`, `handoff_amendment`, `handoff_addendum`, `teachback_submit`, `post_completion_verification`, `audit_summary`, `audit_summary_authored`, or any key not on this list. **Enumerate the keys each task carries; never test for one key.** A task whose content sits only in a non-`handoff` key emits no `agent_handoff` event, so sources 1 and 2 cannot see it — resolving `handoff` alone finds nothing on that task and reports success. An auditor carries its findings in `audit_summary`, mirrored to `audit_summary_authored`, and its task carries no `handoff` key at all, so a census that resolves `handoff` reports an auditor as having produced nothing.
 
-4. **Earlier team's task store** (required when the journal names one): read `team_realigned` events the same way as source 1 (`--type team_realigned`). For each event, run the source 3 census as well on the directory of team `{from}`, the event's `from` field: the `Task list:` path in your context with its last component replaced by `{from}`. Those task ids belong to team `{from}`, not to your team: the same id can name a different task in each store. Synthesize each of their work units under Steps 4-7, and name team `{from}` as the source in the entry's context so the record is not read as this team's. DO NOT RUN STEP 2 OR STEP 8 FOR THEM. The ledger records the ids THIS harvest has deduped, and Step 8 forbids touching another team's section: entering a from-team id under `## team={your team_id}` would make a later pass skip your OWN task of the same number, and writing a `## team={from}` section would modify another team's ledger. The repeat guard for from-team work units is Step 6's save-vs-update dedup, which compares against the entries already in memory, so a later pass that reads the same from-store again updates rather than duplicates. **ROUTE THESE IDS TO THE FROM-TEAM PARTITION AT DISCOVERY, BEFORE ANY LEDGER COMPARISON.** They form the from-team population, and this team's processed set NEVER subtracts them: the same number names a different task in the two stores, so a ledger hit here is evidence about a DIFFERENT task and must not skip this one. Step 2's filter applies to THIS team's ids only.
+4. **Earlier team's task store** (required when the journal names one): read `team_realigned` events the same way as source 1 (`--type team_realigned`). Build the from-team list with the `safe_from_teams` route: it keeps each `from` that is a valid team name and is not this team, once. Never join a `from` that route rejected into a path, and report each rejection it returns. For each kept team `{from}`, run the source 3 census on its directory — the `Task list:` path in your context with its last component replaced by `{from}` — and add `({from}, id)` for each id that store's census admits. Those task ids belong to team `{from}`, not to your team: the same id can name a different task in each store. **Admission is per store: an id admitted in one from store never admits another store's file of the same number.** Synthesize each of their work units under Steps 4-7, and name team `{from}` as the source in the entry's context so the record is not read as this team's. Step 3 records each of their units under a `{from}/` token, so a later pass skips them and never mistakes them for this team's task of the same number.
 
 Scope the census by the keys a task **carries**, never by a key family you expect. A census scoped to one key family fails the same way as one scoped to a single key.
 
@@ -94,14 +96,14 @@ If none of these sources have completed agent tasks, report "No pending HANDOFFs
 
 ### Step 2: Dedup Check (Processed Tasks)
 
-**A dispatch does not narrow this list.** The census finds which tasks carry content; only this ledger says where the last pass stopped, so the delta against it is the population — discard any scope the dispatch suggested. Read your processed task list from your team's section of `session_processed_tasks.md`, in the agent-memory directory the platform gave you — use the path you are given, never one built from your agent type. The file is namespaced by team — locate **only** your own `## team={your team_id}` section with the **Step 8 rule's existence decision**: the `grep -c` header count, what each of its outcomes means for whether your section exists, and the `awk` extract on the `1` branch (Step 8 also carries the file-format contract). **The write actions inside those branches — appending, creating a section — belong to the step that writes, not to this one.** Do NOT restate that rule here, and do NOT decide the section exists by searching what you read — a ledger past the read cap hides your section while the file is intact, and a pass that concludes "no processed IDs" reprocesses everything. **Your processed set is the UNION of every `Processed task IDs` line in that section.** A section carries many; taking the newest line alone under-reports the set and reprocesses work already done. Skip any task IDs already processed — review only the delta **against this ledger**. **THE FILTER APPLIES TO THIS TEAM'S IDS ONLY.** The from-team population was routed at Step 1 source 4 and never enters this comparison: a from-team number that appears in your ledger names a DIFFERENT task in that store, so a ledger hit must not skip it. A dispatch that says "harvest the delta" means its own named range; that is a different delta, it is not this one, and it does not narrow this one. This enables incremental passes (e.g., after remediation).
+**A dispatch does not narrow this list.** The census finds which tasks carry content; only this ledger says where the last pass stopped, so the delta against it is the population — discard any scope the dispatch suggested. Read your processed task list from your team's section of `session_processed_tasks.md`, in the agent-memory directory the platform gave you — use the path you are given, never one built from your agent type. The file is namespaced by team — locate **only** your own `## team={your team_id}` section with the **Step 8 rule's existence decision**: the `grep -c` header count, what each of its outcomes means for whether your section exists, and the `awk` extract on the `1` branch (Step 8 also carries the file-format contract). **The write actions inside those branches — appending, creating a section — belong to the step that writes, not to this one.** Do NOT restate that rule here, and do NOT decide the section exists by searching what you read — a ledger past the read cap hides your section while the file is intact, and a pass that concludes "no processed IDs" reprocesses everything. Your processed set is the set of UNIT TOKENS on every `Processed task IDs` line in that section. Read them with the `parse_ledger_tokens` route over the `awk` extract. **Your processed set is the UNION of every `Processed task IDs` line in that section.** A section carries many; taking the newest line alone under-reports the set and reprocesses work already done. A token is `{id}#{key}` for this team's unit or `{from}/{id}#{key}` for a realigned team's unit, where `key` is the content key of the unit's selected copy. The parser drops an item with no `#`; that task is read again, which is safe. **Do not subtract anything from the discovered pairs here.** Step 3 checks each unit's token after selection and skips a unit whose token is already present. A dispatch that says "harvest the delta" means its own named range; that is a different delta, it is not this one, and it does not narrow this one. This enables incremental passes (e.g., after remediation).
 
 ### Step 3: Read All HANDOFFs
 
 For each discovered task, read the HANDOFF from the two copies and combine them. This is **not** a fallback chain. Each copy can hold content the other does not.
 
 1. **Session journal** (GC-proof): If the task was discovered through `agent_handoff` journal events, the event's `handoff` field contains the full HANDOFF content inline. **The journal carries the HANDOFF as it stood at the LAST EMITTING WRITE.** Do not read it as the accepted HANDOFF. A revision that lands before completion reaches the journal. A revision that lands after completion can reach no journal event, so the journal copy can be the superseded one.
-2. **Task file** (freshest, and the task-store drain removes it): `task_utils.read_task_json(task_id, team_name)`, the raw task JSON, which carries `owner`, `subject` and `metadata`. The HANDOFF is `metadata.handoff` (`TaskGet` is metadata-blind). ⚠️ **THAT READER RETURNS AN EMPTY DICT ON A MISSING FILE, NOT `None`.** It is fail-open by design, so a drained task file, a malformed JSON file and an IO error all give `{}`. Test the drained case as EMPTINESS (`if not task:`), and do NOT test `task is None`, which is False for every one of those states.
+2. **Task file** (freshest, and the task-store drain removes it): the `read_task_json` route in HOW TO CALL, `read_task_json(task_id, team_name, base_fallback=False)`, the raw task JSON, which carries `owner`, `subject` and `metadata`. The HANDOFF is `metadata.handoff` (`TaskGet` is metadata-blind). ⚠️ **THAT READER RETURNS AN EMPTY DICT ON A MISSING FILE, NOT `None`.** It is fail-open by design, so a drained task file, a malformed JSON file and an IO error all give `{}`. Test the drained case as EMPTINESS (`if not task:`), and do NOT test `task is None`, which is False for every one of those states. Read a named store's task file with this route only; it never reads a file outside that store.
 3. **Take the UNION of the two copies, and PREFER THE TASK FILE on a conflict, apart from the two states below. Both states are decided by the two copies' REQUIRED key sets, both are reported, and neither is decided by an empty or missing value alone.** Keep each field that is in one copy alone, except a REQUIRED field the task file lacks in the incomparable state, which is dropped and reported. When the two hold different content for one field, keep the task-file content.
 
 **SCOPE THE COMPARISON TO THE REQUIRED FIELD SET.** `reasoning_chain` is recommended, so a legal revision may omit it, and a journal copy may carry keys the task file never had; a comparison over every key calls a complete revision partial and restores the cleared field. **NORMALIZE LEGACY SPELLINGS IN BOTH COPIES BEFORE THE COMPARISON** — derive each raw key's canonical identity with the shared `HANDOFF_LEGACY_ALIASES` map (`key_decisions`→`decisions`, `areas_of_uncertainty`→`uncertainty`, `integration_points`→`integration`, and every other key is its own identity) — because a field renamed to a legacy spelling would otherwise leave the required set entirely. **`resolve_handoff_field` IS NOT A KEY NORMALISER:** it resolves a canonical NAME to a VALUE and returns `None` for both an absent key and a present `None`, so using it for this step collapses present-and-empty into absent — the distinction States A and B rest on. **VALUE SELECTION FOR A DUAL-SPELLED COPY IS A SEPARATE STEP:** when one copy carries both spellings, the canonical spelling wins when it holds content, and a FALSY canonical falls through to the FIRST TRUTHY alias spelling — the same rule `resolve_handoff_field` applies on read. When the canonical spelling is falsy AND no alias spelling is truthy, the CANONICAL spelling wins. The selected raw key is the one the output carries WHEN THE TASK FILE WINS that field; when the JOURNAL value wins a dual-spelled field (a restore or a journal-only keep), the merged output starts from the journal mapping and BOTH spellings survive. Normalize both sides, never one: the journal is append-only and carries legacy spellings, and the task file is mostly canonical but not guaranteed. **EQUALITY COUNTS AS COVERING:** a task-file required set equal to the journal's is a complete revision.
@@ -128,7 +130,7 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 🔴 **DO NOT restate this as a blanket prefer-the-non-empty-side rule.** The rule is per-field and per-state, and a blanket rule makes the journal the default winner while the task file is the freshest copy, which inverts the precedence this step is built on.
 4. **When the task file is ABSENT, report `handoff divergence check unavailable for task N: task file absent`** and use the journal copy alone. Do not skip in silence. A drained task file is a reportable gap and not a clean single-source read.
-5. **When the task carries NO `agent_handoff` event in a SECTION and that SECTION's task file EXISTS**, process that task-file HANDOFF alone: there is no second copy to union and no divergence to report. This is a normal population — the census exists because a completion hook may not fire — and it is not a gap. **THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES:** apply it per store to THIS team's store and to each `team={from}` store, labelling a from-team application `## team={from}` in the output. A from-team task with a task file and no journal group is processed exactly as this team's is — whatever the file carries, a `handoff` or a sibling key Step 3.1 resolves — and it produces NEITHER the absent-file report NOR the no-match report. **THE FROM-TEAM DISK SHAPE IS ADMITTED BY PROVENANCE, NEVER BY A NUMBER MATCH:** a from store's file is in scope only when the id came from the from-store CENSUS; a same-numbered file in a from store is NOT evidence about THIS team's task, so it must never be processed as one and must never make this team's gap report silent. **ADMISSION IS AGGREGATE BY ID, and the census is id-keyed:** a from-store task carrying ANY agent-authored key produced that id, so an admitted id reads the whole task file of EVERY from store that has one for that id — never a per-file content test, which would drop a sibling-key-only task the census admitted.
+5. **When the task carries NO `agent_handoff` event in a SECTION and that SECTION's task file EXISTS**, process that task-file HANDOFF alone: there is no second copy to union and no divergence to report. This is a normal population — the census exists because a completion hook may not fire — and it is not a gap. **THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES:** apply it per store to THIS team's store and to each `team={from}` store, labelling a from-team application `## team={from}` in the output. A from-team task with a task file and no journal group is processed exactly as this team's is — whatever the file carries, a `handoff` or a sibling key Step 3.1 resolves — and it produces NEITHER the absent-file report NOR the no-match report. **THE FROM-TEAM DISK SHAPE IS ADMITTED BY PROVENANCE, NEVER BY A NUMBER MATCH:** a from store's file is in scope only when the id came from the from-store CENSUS; a same-numbered file in a from store is NOT evidence about THIS team's task, so it must never be processed as one and must never make this team's gap report silent. **ADMISSION IS PER STORE:** a from store's file is read as a disk-only unit only for a `({from}, id)` pair that store's census produced. Read that whole task file, never a per-file content test, which would drop a sibling-key-only task the census admitted.
 6. **Report gap**: If no source resolves, report the gap to the lead. Record the task_id, the timestamp, and the agent name WHEN A SOURCE STILL IN SCOPE CARRIES ONE — a task can reach this branch with no journal event and no task file, and a task file drained between discovery and Step 3 had an owner that is no longer recoverable; record the agent as `unknown` rather than omitting the field.
 
 **THE THREE CONDITIONS ARE EXCLUSIVE — PICK BY THE EVIDENCE, NEVER BY THE ABSENCE OF A VALUE.** The ABSENT-FILE report requires a journal group for the task in that section and NO task file there. The NO-MATCH report requires a task file and NO group carrying its identity. The GAP line requires NO source at all: no journal group in this section, no task file, and no from-team JOURNAL PARTITION processed. **The disk-only from-team application does NOT count as a source for this line** — it was admitted by census provenance, so it is not evidence that this team's copy was handled. Never emit one as a fallback for another.
@@ -137,10 +139,10 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 **SELECTION, because `agent_handoff` is a multi-event family.** Do not take the first match. The first match is the FIRST emit, which is the superseded copy. Use the rule Step 3.1 uses for snapshots:
 
-1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **DECIDE EACH ROUTE WITH THE SHARED `partition_destination`, NEVER WITH AN INLINE TEAM COMPARISON:** it returns the exported `PARTITION_*` labels, the same one-rule-one-place shape as `old_format_destination` below. **THE FUNCTION IS AUTHORITATIVE; THIS PROSE NAMES THE OUTCOMES FOR THE READER** — a change to the mapping belongs in `partition_destination`, never here. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: synthesize it under that team's `team={from}` label and against THAT team's task store, and never union it with this team's task file. **DO NOT RUN STEP 2 OR STEP 8 FOR IT, AND DO NOT RECORD ITS ID IN THIS TEAM'S LEDGER** — the same id names different tasks in different stores, so a recorded foreign id would make a later pass skip your OWN task; the repeat guard is Step 6's save-vs-update dedup. **UNION IT WITH THAT TEAM'S TASK FILE**: read that store's `{task_id}.json` and apply the same union, because each copy can hold content the other lacks. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`. **THE REPORT FIRES ONCE PER TASK AND ONLY WHEN A JOURNAL MATCH EXISTS** — a census-only id has no partition to be underivable about.
-2. Group the match by the `(agent, task_subject)` identity the event carries. Compute that identity with the shared `occupant_hash` function and not with a local reimplementation. An `agent_handoff` event carries no `occupant` field, so compute the identity from the event's own fields. **THE GROUP KEY IS THE OCCUPANT IDENTITY, `(agent, task_subject)`, AND IT HAS A STATED LIMIT: THE KEY CANNOT SEPARATE TWO ARCS THAT SHARE AGENT AND SUBJECT.** The platform reuses task_ids across arcs, and a reused id whose two arcs share BOTH terms collapses into ONE group, so only that group's latest event is processed. The journal still holds both events; if you suspect this state, read the task's events by CONTENT KEY rather than assuming the group count equals the arc count. What would close it properly is an ARC field on the `agent_handoff` event used as a GROUP term — never inside the marker key, which would re-key every existing marker. When the group count is more than one, process each group as a distinct work unit. Do not pick one group. **DO NOT FOLD THE TEAM INTO `occupant_hash`.** The marker filename and the `task_metadata_snapshot` occupant are `occupant_hash(agent, subject)` alone, so a team inside the hash re-keys every existing marker and breaks every existing snapshot join. The team term routes partitions and is never a term of the group key.
-3. In each group take the **latest `ts`**, and take the **last in journal order on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties. The later line in journal order is the authoritative one, the same tie-break Step 3.1 uses).
-4. The task file belongs to at most one group. Union the task-file copy into the group with the identity `disk_identity(owner, subject)` computed from the task record — the SUBSTITUTED form the emit paths hashed, never a recomposed `occupant_hash`. **A group that does not carry that identity is a distinct work unit and gets NO per-group report** — the other group owns the file, so this one has no copy of its own to disagree with, and the divergence report is decided ONCE for the whole group set (see the report rule below).
+1. Take the `agent_handoff` events with the matching `task_id`, then PARTITION the match by the event's `team` field. **DECIDE EACH ROUTE WITH THE SHARED `partition_destination`, NEVER WITH AN INLINE TEAM COMPARISON:** it returns the exported `PARTITION_*` labels, the same one-rule-one-place shape as `old_format_destination` below. **THE FUNCTION IS AUTHORITATIVE; THIS PROSE NAMES THE OUTCOMES FOR THE READER** — a change to the mapping belongs in `partition_destination`, never here. **THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING ANOTHER TEAM.** The partition naming THIS team's name — the LAST PATH COMPONENT of the `Task list:` directory in your context — is this team's work unit. Each partition naming a team the journal realigned FROM (the `from` teams Step 1 source 4 harvests) is THAT team's work unit: synthesize it under that team's `team={from}` label and against THAT team's task store, and never union it with this team's task file. Record its unit token, `{from}/{id}#{key}`, in this team's section at Step 8; that token is what lets a later pass skip it. **UNION IT WITH THAT TEAM'S TASK FILE**: read that store's `{task_id}.json` and apply the same union, because each copy can hold content the other lacks. A partition naming neither is FOREIGN: do not process it, do not union it, and report `handoff identity mismatch for task N: journal event names team <team>; this store is team <name>`. Events carrying NO `team` form the OLD-FORMAT partition and the rule below decides them; do not discard them. When the `Task list:` directory is ABSENT, or its last path component cannot be derived (the value is empty), the team term cannot be evaluated: treat every partition as OLD-FORMAT and report `handoff team identity underivable for task N: no Task list: directory in context`. **THE REPORT FIRES ONCE PER TASK AND ONLY WHEN A JOURNAL MATCH EXISTS** — a census-only id has no partition to be underivable about.
+2. Group the match with the `group_events` route: the key is the `(agent, task_subject)` identity plus the event's ARC, the creation stamp of the `task_created` event that opened that instance of the task. Two instances of one task id that share agent and subject are two groups when the journal records their creations. When it does not, they form one group and only the latest is processed. The arc also carries the store epoch: a `task_created` whose number is at or below a number the journal already holds for that team marks a recreated store, so an instance created after it is a separate group even when its own creation wrote no event. A group whose events carry two or more distinct contents with no creation boundary between them: process the latest and report `handoff group for task N holds K distinct contents with no creation boundary; the latest was processed; the earlier contents remain in the journal`. When the group count is more than one, process each group as a distinct work unit. Do not pick one group. **DO NOT FOLD THE TEAM INTO `occupant_hash`.** The marker filename and the `task_metadata_snapshot` occupant are `occupant_hash(agent, subject)` alone, so a team inside the hash re-keys every existing marker and breaks every existing snapshot join. The team term routes partitions and is never a term of the group key.
+3. In each group take the **latest `ts`**, and take the **last in journal order on an equal `ts`**, with the `latest_by_ts_then_journal_order` route, which compares parsed instants (journal events stamp `ts` at second granularity, so a same-second re-emit ties. The later line in journal order is the authoritative one, the same tie-break Step 3.1 uses).
+4. The task file belongs to at most one group, and the `owning_group` route picks it. Compute the record's identity with `disk_identity(owner, subject)` — the SUBSTITUTED form the emit paths hashed, never a recomposed `occupant_hash` — and the store's arc with `current_arc`. The owner is the group with that identity and that arc; when no such group exists, it is the group with that identity and no arc, whose events carry no `team`. Union the task-file copy into the owner alone, and pass the task file's metadata to the owner alone. **A group that does not carry that identity is a distinct work unit and gets NO per-group report** — the other group owns the file, so this one has no copy of its own to disagree with, and the divergence report is decided ONCE for the whole group set (see the report rule below).
 
 **AN OLD-FORMAT EVENT CARRIES NO `team` FIELD, AND ITS IDENTITY ALONE DOES NOT PROVE IT IS THIS TEAM'S.** Decide it by content against the stores whose names you hold: this team's store, and each team a `team_realigned` event names in its `from` field. Read `{that store}/{task_id}.json` directly and compare its `metadata.handoff` content key with the event's, using the shared `handoff_content_key` function — never a local equality test. Mark the event MIXED when the content keys are EQUAL and the event's `(agent, task_subject)` identity is NOT that file's `(owner, subject)` identity; discard a mixed event and report `handoff identity mismatch for task N: journal content equals team <X> task N, whose identity it does not carry`. An event whose content AND identity both match one named store is that store's work unit: process it under that team. **CHECK EVERY NAMED CANDIDATE BEFORE REPORTING A MIXED EVENT** — an identity match in ANY candidate wins over an earlier candidate's content-only match, so a mixed result is returned only after all candidates are checked. When no other named store matches, keep the identity match and report `handoff cross-team check unavailable for task N: no other named store carries the identity` — a store you cannot name is out of reach, and the rule reports that bound instead of guessing. **DO NOT ENUMERATE THE TASKS ROOT.** THE CHECK IS REQUIRED FOR OLD-FORMAT EVENTS: every event already in a journal predates the `team` field, and nothing else protects them. **A CONTENT-MATCHING CANDIDATE WHOSE OWN RECORD CARRIES NO `owner` IS SKIPPED, NOT TREATED AS A MISMATCH.** The emit path substitutes the platform teammate name for an empty owner, and the record cannot reproduce that name, so comparing identities here would MANUFACTURE a mismatch and report this team's own event as MIXED, discarding content that was never foreign. **SKIPPING REMOVES THIS CANDIDATE FROM CONSIDERATION; IT DOES NOT SETTLE THE EVENT** — another named candidate may still return OWNED_BY that team or MIXED, and the event is routed or discarded accordingly; it is UNMATCHED — kept as this team's, with the cross-team-check-unavailable report above — only when no other candidate decides it. This is reachable: 143 of 1421 task records carry no `owner`, and THREE of those carry a `metadata.handoff`.
 
@@ -151,107 +153,137 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 1. **Subject term.** When the record subject is missing, empty, or whitespace-only, substitute the literal `(no subject)` before hashing. The two emit paths both apply this.
 2. **Agent term.** When the record owner is missing, empty, or whitespace-only, the `TaskCompleted` emit path hashes the platform teammate name for that task in place of the owner. The task record does not carry that name, so this one is NOT reproducible from the record. Report such a task through the report-message rule below and do not read it as a drain.
 
-**HOW TO CALL THE NAMES THIS STEP USES.** The step above FIRST NAMES `HANDOFF_LEGACY_ALIASES`, `partition_destination`, `old_format_destination`, `occupant_hash`, `disk_identity` and `handoff_content_key`; the pseudocode below FIRST NAMES `report_safe`, `union_preferring_task_file`, `mixed_old_format_event` and `latest_by_ts_then_journal_order`; `emit_side_subject` is named HERE because the step DESCRIBES the substitution but calls only `disk_identity`, which applies it. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.**
+**HOW TO CALL THE NAMES THIS STEP USES.** This step and the pseudocode below name these shared functions. None is callable from a name alone, and the instruction to use the shared function rather than a local one is not followable without a route. **DO NOT reimplement any of them. Use these.** Every route imports from `shared.handoff_merge`, except `read_task_json` (`shared.task_utils`) and `HANDOFF_LEGACY_ALIASES` (`shared.handoff_schema`). The block also names `positioned` and `store_epochs`, which the `group_events` and `current_arc` routes apply for you, and `task_metadata` and `disk_handoff`: a task's `metadata` when it is a mapping, else `{}`, and that mapping's `handoff` when it is a non-empty mapping, else `{}`.
 
-1. **`occupant_hash`**, the SHARED identity hash. This is the one runnable copy in this file. Step 3.1 uses the same command and points here.
+🔴 **EVERY VALUE CROSSES AS DATA, NEVER AS COMMAND TEXT.** Pass a value as a separate ARGV entry read through `sys.argv`, or carry it in a JSON payload on STDIN to a command whose text is a FIXED LITERAL — and never interpolate a value into the `-c` string or into an unquoted heredoc body. The author of a task writes its subject, so a subject folded into command text is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the DATA BOUNDARY is what makes it safe, and rewriting the command is enough to remove it.
 
-   ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import occupant_hash; print(occupant_hash(sys.argv[1], sys.argv[2]))" "$AGENT" "$TASK_SUBJECT"
-   ```
-
-   🔴 **THE AGENT AND THE SUBJECT MUST CROSS AS DATA, NEVER AS COMMAND TEXT.** Pass them as separate ARGV entries read through `sys.argv`, or carry them in a JSON payload on STDIN to a command whose text is a FIXED LITERAL — and never interpolate either value into the `-c` string or into an unquoted heredoc body. The author of the task writes its subject, so a subject folded into command text is Python that the subject author chose, executed by you. Nothing about the values makes this safe: the DATA BOUNDARY is what makes it safe, and rewriting the command is enough to remove it. The `occupant_hash` command above uses ARGV; the merge helper uses the STDIN form because its payload carries the two HANDOFF mappings.
-
-2. **`report_safe`**, the SHARED report sanitiser. Every `report(...)` value that comes from the journal, the task file or the context is interpolated through it:
+1. **`report_safe`**, the SHARED report sanitiser. Every `report(...)` value that comes from the journal, the task file or the context is interpolated through it:
 
    ```bash
    python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import report_safe; print(report_safe(sys.argv[1]))" "$VALUE"
    ```
 
-   It strips control characters and every line boundary (so a crafted team name, field name or task id cannot forge a report line) and caps the length. The helper-produced strings — `outcome.report` and the union's `reports` — are already sanitised; this applies to the values THIS step interpolates.
+   It strips control, format, separator and surrogate characters (so a crafted team name, field name or task id cannot forge a report line) and caps the length. The helper-produced strings — `outcome.report`, the union's `reports` and the `safe_from_teams` reports — are already sanitised; this applies to the values THIS step interpolates.
 
-3. **`emit_side_subject`**, the SHARED sentinel substitution BOTH emit paths apply before they hash:
-
-   ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import emit_side_subject; print(emit_side_subject(sys.argv[1] if len(sys.argv) > 1 else None))" "$SUBJECT"
-   ```
-
-   STRICT: any value that is not a non-empty stripped string prints `(no subject)`. A present string is returned unchanged.
-
-4. **`disk_identity`**, the SHARED disk-side identity, `occupant_hash(owner, emit_side_subject(subject))`:
+2. **`disk_identity`**, the SHARED identity of an `(agent or owner, subject)` pair, with the emit paths' `(no subject)` substitution applied. It is the one identity derivation for events, task records and snapshot occupants:
 
    ```bash
    python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import disk_identity; print(disk_identity(sys.argv[1], sys.argv[2]))" "$OWNER" "$SUBJECT"
    ```
 
-   Use this for the task record's identity; never recompose the hash inline.
-
-5. **`handoff_content_key`**, the SHARED handoff content digest the OLD-FORMAT classifier compares. Never compare two handoffs with a local equality test:
+3. **`handoff_content_key`**, the SHARED handoff content digest the OLD-FORMAT classifier compares. Never compare two handoffs with a local equality test:
 
    ```bash
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import handoff_content_key; print(handoff_content_key(json.load(sys.stdin)))" < "$HANDOFF_JSON"
    ```
 
-   The handoff crosses as DATA on STDIN; `$HANDOFF_JSON` names a file holding one handoff mapping.
+   `$HANDOFF_JSON` names a file holding one handoff mapping.
 
-6. **`union_preferring_task_file`**, the SHIPPED union predicate. It takes the two HANDOFF mappings and the task id, and returns the merged mapping plus its per-field report lines. Both mappings are DATA and cross on STDIN:
+4. **`union_preferring_task_file`**, the SHIPPED union predicate. It takes the two HANDOFF mappings and the task id, and returns the merged mapping plus its per-field report lines:
 
    ```bash
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import union_preferring_task_file; p = json.load(sys.stdin); merged, reports = union_preferring_task_file(p['journal'], p['disk'], p['task_id']); print(json.dumps({'handoff': merged, 'reports': reports}))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` names a file holding `{"journal": {...}, "disk": {...}, "task_id": "..."}`. The command text is a FIXED LITERAL; never interpolate either mapping into it.
+   `$PAYLOAD_JSON` names a file holding `{"journal": {...}, "disk": {...}, "task_id": "..."}`.
 
-7. **`latest_by_ts_then_journal_order`**, defined HERE because it is defined at no site in the repo. It takes the events of ONE group, in journal order, and returns the authoritative one:
+5. **`latest_by_ts_then_journal_order`**, the group's authoritative event: the latest parsed instant, and the later journal line on an equal instant. It takes the events of ONE group, in journal order:
 
-   ```python
-   def latest_by_ts_then_journal_order(events):
-       """Last write wins. `events` MUST arrive in journal order."""
-       winner = events[0]
-       for event in events[1:]:
-           # `>=` and not `>`: an equal ts keeps the LATER journal line.
-           if event["ts"] >= winner["ts"]:
-               winner = event
-       return winner
+   ```bash
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import latest_by_ts_then_journal_order; print(json.dumps(latest_by_ts_then_journal_order(json.load(sys.stdin))))" < "$EVENTS_JSON"
    ```
 
-   🔴 **THE STRING COMPARE ON `ts` IS CORRECT BY A CALLER PROPERTY, NOT BY A SCHEMA PROPERTY, AND THE DIFFERENCE IS THE WHOLE OF THE RISK.** `make_event` stamps `%Y-%m-%dT%H:%M:%SZ`, and neither `agent_handoff` emit path passes a `ts` of its own, so each event of this family carries ONE format and a string compare orders them correctly TODAY. `make_event` HONOURS a caller-supplied `ts` through `setdefault`, so the one-format property belongs to the CALLERS and the schema does not enforce it. A second format defeats the compare in silence, because a MIXED SET IS ORDERED BY BYTES AND NOT BY TIME.
+   `$EVENTS_JSON` names a file holding the group's events as a JSON list. Never compare `ts` values as strings.
 
-   🔴 **SO IF ANY CALLER EVER PASSES A `ts`, PARSE THE TWO VALUES BEFORE YOU COMPARE THEM. Do not compare them as strings, and do not reach for a rule about which byte decides.** THIS IS THE LOAD-BEARING SENTENCE OF THIS WARNING AND IT IS THE ONE PART THAT HAS NEEDED NO CORRECTION. Three rounds of review moved the text below it: a claim, then a rule replacing the claim, then a precondition replacing the rule. Each was complete across its own list of spellings and each was broken by the next probe. This sentence survived all of them. A sibling resolver in this repo carries the same warning for the same cause.
+6. **`group_events`**, the group key: `(disk_identity(agent, task_subject), arc)`. It takes the whole journal list from Step 1 and the journal positions of the events to group:
 
-   **WHAT FOLLOWS EXPLAINS THE CONSEQUENCE IF THAT PROPERTY IS LOST. IT IS AN EXPLANATION AND NOT A LAW, AND IT CARRIES A PRECONDITION.** A string compare walks left to right, so the DATETIME PREFIX decides first, and AT AN EQUAL DATETIME PREFIX THE COMPARE IS DECIDED BY THE FIRST BYTE AFTER THE SECONDS. MEASURED at one prefix, against the `Z` form at 0x5A: `+` at 0x2B, `-` at 0x2D and `.` at 0x2E each read as OLDER, a lowercase `z` at 0x7A reads as NEWER, and a bare form with NO suffix reads oldest of all. So `2026-08-19T20:00:00.123456Z` sorts BEFORE `2026-08-19T20:00:00Z` while naming the LATER instant. THE FRACTION IS THE MOST REACHABLE OF THESE AND IT TAKES NO DELIBERATE CHOICE: a bare `datetime.now(timezone.utc).isoformat()` emits microseconds by default, where an offset takes a decision.
+   ```bash
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import group_events, positioned, store_epochs; p = json.load(sys.stdin); j = positioned(p['journal']); g = group_events([j[i] for i in p['positions']], j, store_epochs(j)); print(json.dumps([[list(k), [e['_pos'] for e in v]] for k, v in g.items()]))" < "$PAYLOAD_JSON"
+   ```
 
-   🔴 **THE PRECONDITION: THAT RULE HOLDS WHERE THE DATETIME PREFIX IS FIXED-WIDTH AND THE SECONDS ARE PRESENT. OUTSIDE THAT, THE DECIDING BYTE IS NOT THE ONE THE RULE NAMES.** MEASURED, two forms that break it. `2026-08-19 20:00:00+00:00` against the `Z` form decides at INDEX 10, a SPACE at 0x20 against `T` at 0x54, and `str(datetime.now(timezone.utc))` produces that form. `2026-08-19T20:00:00.123Z` against `2026-08-19T20:00:00.123456Z` carries `.` as the byte after the seconds for BOTH, so the rule answers nothing, and the compare decides at INDEX 23 with the LATER instant reading as older. A `timespec='minutes'` form has no seconds field at all, so the named position does not exist.
-   THE BOUND ON THAT LIST, AND IT IS THE CAUSE FOR PUTTING THE PARSE INSTRUCTION FIRST: it comes from a probe of the stdlib producers and one hand-built form, so a producer outside those is outside the check. NO RULE ABOUT WHICH BYTE DECIDES CAN BE MADE COMPLETE, because a new spelling can move the deciding byte to a position no rule anticipated.
+   `$PAYLOAD_JSON` holds `{"journal": [...], "positions": [...]}`. It prints one `[key, positions]` pair per group, each group's positions in journal order.
 
-8. **`partition_destination(event_team, this_team, from_teams)`**, the NEW-FORMAT route. Returns one of the exported `PARTITION_THIS`, `PARTITION_FROM`, `PARTITION_FOREIGN` and `PARTITION_OLD_FORMAT` labels; compare against those constants, never bare literals. An absent or empty `event_team` returns `PARTITION_OLD_FORMAT`, and callers keep the underivable-`this_team` guard ABOVE it (when `this_team` is empty, every event is OLD-FORMAT before this runs). Pure; never raises.
+7. **`current_arc`**, the arc of the task a store holds now, for the task-file join:
+
+   ```bash
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import current_arc, positioned, store_epochs; p = json.load(sys.stdin); j = positioned(p['journal']); print(json.dumps(current_arc(p['team'], p['task_id'], j, store_epochs(j))))" < "$PAYLOAD_JSON"
+   ```
+
+   `$PAYLOAD_JSON` holds `{"journal": [...], "team": "...", "task_id": "..."}`.
+
+8. **`owning_group`**, the ONE group that owns a store's task file: the group with the record's identity and the store's current arc, else the group with that identity and no arc, else none:
+
+   ```bash
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import owning_group; p = json.load(sys.stdin); g = {(k[0], tuple(k[1]) if isinstance(k[1], list) else k[1]): None for k in p['groups']}; a = p['file_arc']; o = owning_group(g, p['disk_id'], tuple(a) if isinstance(a, list) else a); print(json.dumps(list(o) if o else None))" < "$PAYLOAD_JSON"
+   ```
+
+   `$PAYLOAD_JSON` holds `{"groups": [<keys the group_events route printed>], "disk_id": "...", "file_arc": <the current_arc route's output>}`. It prints the owning key, or `null`.
+
+9. **`undivided_contents`**, the count of distinct contents in ONE group, for the no-boundary report:
+
+   ```bash
+   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import undivided_contents; print(undivided_contents(json.load(sys.stdin)))" < "$EVENTS_JSON"
+   ```
+
+10. **`partition_destination(event_team, this_team, from_teams)`**, the NEW-FORMAT route. Returns one of the exported `PARTITION_THIS`, `PARTITION_FROM`, `PARTITION_FOREIGN` and `PARTITION_OLD_FORMAT` labels; compare against those constants, never bare literals. An absent or empty `event_team` returns `PARTITION_OLD_FORMAT`, and callers keep the underivable-`this_team` guard ABOVE it (when `this_team` is empty, every event is OLD-FORMAT before this runs). Pure; never raises.
 
    ```bash
    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import partition_destination; p = json.load(sys.stdin); print(partition_destination(p['event_team'], p['this_team'], p['from_teams']))" < "$PAYLOAD_JSON"
    ```
 
-   `$PAYLOAD_JSON` holds `{"event_team": ..., "this_team": "...", "from_teams": ["..."]}`. The values cross as DATA on STDIN; the command text is a FIXED LITERAL.
+   `$PAYLOAD_JSON` holds `{"event_team": ..., "this_team": "...", "from_teams": ["..."]}`.
 
-9. **`old_format_destination(outcome, this_team)`**, the OLD-FORMAT route. Takes the `OldFormatOutcome` from `mixed_old_format_event` and returns one of `OLD_FORMAT_DEST_MIXED`, `OLD_FORMAT_DEST_FROM` and `OLD_FORMAT_DEST_THIS`: MIXED means discard the event and emit `outcome.report`; FROM means process it under `outcome.team`; THIS covers OWNED_BY this team (no report) and UNMATCHED (emit `outcome.report`). Pure; never raises.
+11. **`old_format_destination(outcome, this_team)`**, the OLD-FORMAT route. Takes the `OldFormatOutcome` from `mixed_old_format_event` and returns one of `OLD_FORMAT_DEST_MIXED`, `OLD_FORMAT_DEST_FROM` and `OLD_FORMAT_DEST_THIS`: MIXED means discard the event and emit `outcome.report`; FROM means process it under `outcome.team`; THIS covers OWNED_BY this team (no report) and UNMATCHED (emit `outcome.report`). Pure; never raises.
 
-   ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import OldFormatOutcome, old_format_destination; p = json.load(sys.stdin); o = OldFormatOutcome(**p['outcome']); print(old_format_destination(o, p['this_team']))" < "$PAYLOAD_JSON"
-   ```
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import OldFormatOutcome, old_format_destination; p = json.load(sys.stdin); o = OldFormatOutcome(**p['outcome']); print(old_format_destination(o, p['this_team']))" < "$PAYLOAD_JSON"
+    ```
 
-   `$PAYLOAD_JSON` holds `{"outcome": {"state": "...", "team": "...", "report": "..."}, "this_team": "..."}`.
+    `$PAYLOAD_JSON` holds `{"outcome": {"state": "...", "team": "...", "report": "..."}, "this_team": "..."}`.
 
-10. **`mixed_old_format_event(task_id, event_agent, event_subject, event_handoff, candidate_tasks)`**, the OLD-FORMAT classifier. Returns an `OldFormatOutcome(state, team, report)`: `state` is one of `OLD_FORMAT_MIXED`, `OLD_FORMAT_OWNED` and `OLD_FORMAT_UNMATCHED`; `report` is the line to emit for MIXED and for UNMATCHED, and `None` for OWNED. `candidate_tasks` is the list of `{"team": "...", "task": <parsed task JSON>}` for the named stores. Pure; never raises.
+12. **`mixed_old_format_event(task_id, event_agent, event_subject, event_handoff, candidate_tasks)`**, the OLD-FORMAT classifier. Returns an `OldFormatOutcome(state, team, report)`: `state` is one of `OLD_FORMAT_MIXED`, `OLD_FORMAT_OWNED` and `OLD_FORMAT_UNMATCHED`; `report` is the line to emit for MIXED and for UNMATCHED, and `None` for OWNED. `candidate_tasks` is the list of `{"team": "...", "task": <parsed task JSON>}` for the named stores. Pure; never raises.
 
-   ```bash
-   python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import mixed_old_format_event; p = json.load(sys.stdin); o = mixed_old_format_event(p['task_id'], p['agent'], p['subject'], p['handoff'], p['candidates']); print(json.dumps({'state': o.state, 'team': o.team, 'report': o.report}))" < "$PAYLOAD_JSON"
-   ```
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import mixed_old_format_event; p = json.load(sys.stdin); o = mixed_old_format_event(p['task_id'], p['agent'], p['subject'], p['handoff'], p['candidates']); print(json.dumps({'state': o.state, 'team': o.team, 'report': o.report}))" < "$PAYLOAD_JSON"
+    ```
 
-   `$PAYLOAD_JSON` holds `{"task_id": "...", "agent": "...", "subject": "...", "handoff": {...}, "candidates": [...]}`.
+    `$PAYLOAD_JSON` holds `{"task_id": "...", "agent": "...", "subject": "...", "handoff": {...}, "candidates": [...]}`.
 
-11. **`HANDOFF_LEGACY_ALIASES`**, the SHARED legacy-spelling map. It is a DICT, not a call: derive a raw key's canonical identity with `HANDOFF_LEGACY_ALIASES.get(raw_key, raw_key)`. It carries exactly three entries — `key_decisions`→`decisions`, `areas_of_uncertainty`→`uncertainty`, `integration_points`→`integration`.
+13. **`safe_from_teams`**, the from-team list: each `team_realigned` event's `from` that is a valid team name and is not this team, once, plus one report line per rejected value:
 
-   ```bash
-   python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_schema import HANDOFF_LEGACY_ALIASES; print(HANDOFF_LEGACY_ALIASES)"
-   ```
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import safe_from_teams; p = json.load(sys.stdin); teams, reports = safe_from_teams(p['realign_events'], p['this_team']); print(json.dumps({'teams': teams, 'reports': reports}))" < "$PAYLOAD_JSON"
+    ```
+
+    `$PAYLOAD_JSON` holds `{"realign_events": [...], "this_team": "..."}`.
+
+14. **`unit_token`**, a work unit's ledger token: `{id}#{key}`, or `{from}/{id}#{key}` when the third argument names a realigned team. The selection key crosses on STDIN: the selected journal handoff for a journal group, or the task's whole `metadata` for a disk-only unit. An empty line means a part was not a valid name; process the unit, do not record it, and report it as the pseudocode does:
+
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import unit_token; print(unit_token(sys.argv[1], json.load(sys.stdin), sys.argv[2] or None) or '')" "$TASK_ID" "$FROM_TEAM" < "$SELECTION_KEY_JSON"
+    ```
+
+    Pass an empty `$FROM_TEAM` for this team's units.
+
+15. **`parse_ledger_tokens`**, the processed token set of one ledger section:
+
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_merge import parse_ledger_tokens; print(json.dumps(sorted(parse_ledger_tokens(sys.stdin.read()))))" < "$SECTION_TEXT"
+    ```
+
+    `$SECTION_TEXT` names a file holding the `awk` extract of your section.
+
+16. **`read_task_json`**, a named store's task file. Read a named store's task file with this route only; it never reads a file outside that store:
+
+    ```bash
+    python3 -c "import json, sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.task_utils import read_task_json; print(json.dumps(read_task_json(sys.argv[1], sys.argv[2], base_fallback=False)))" "$TASK_ID" "$TEAM"
+    ```
+
+17. **`HANDOFF_LEGACY_ALIASES`**, the SHARED legacy-spelling map. It is a DICT, not a call: derive a raw key's canonical identity with `HANDOFF_LEGACY_ALIASES.get(raw_key, raw_key)`. It carries exactly three entries — `key_decisions`→`decisions`, `areas_of_uncertainty`→`uncertainty`, `integration_points`→`integration`.
+
+    ```bash
+    python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.handoff_schema import HANDOFF_LEGACY_ALIASES; print(HANDOFF_LEGACY_ALIASES)"
+    ```
 
 🔴 **THIS RULE IS NOT MIRRORED ANY MORE — IT IS CALLED.** The substitution is implemented ONCE, in `emit_side_subject`, and BOTH emit paths and this step's `disk_identity` call it. There is no second copy to keep in step: a change to the helper changes all three consumers at once. Do not reintroduce a local `def` or an inline hash composition here; that is how the mirrors this branch removed came to exist.
 
@@ -261,132 +293,121 @@ Let `J` be the journal copy's required key set and `D` the task file's.
 
 **EVERY REPORT LINE THIS STEP EMITS IS SYNTHESIS INPUT, NOT A TRANSCRIPT DIAGNOSTIC, AND THE MEMORY ENTRY IS WHERE IT LANDS.** Each report records a decision the union or the identity check made — a field kept, restored, dropped or undecidable, and a group or section processed from one copy alone. **THE HARVESTED MEMORY ENTRY'S `context` MUST CARRY EVERY ONE OF THEM** — both partitions' reports and the union's per-field lines alike — because the journal preserves the raw content and cannot preserve the DECISION that combined it, so the entry is the only record of why the copies were merged as they were. **A SYNTHESIS THAT DROPS A REPORT LINE IS A DEFECT, NOT AN OMISSION OF OPTIONAL COLOUR:** otherwise it reproduces the gap the report exists to close, one layer up.
 
-**THIS WORKFLOW DOES NOT RE-SWEEP A TASK IT HAS PROCESSED BEFORE.** Step 2 skips each task_id in the processed list, the Incremental Harvest Workflow discovers the delta against that same list, and the Consolidation Harvest Workflow safety net reads only tasks that are not in it. **A COMPLETED TASK IS NOT A CLOSED TASK.** An agent writes content to a task after the pass that recorded that task as processed, and no trigger in this file collects it.
+**THIS WORKFLOW DOES NOT RE-SWEEP A TASK IT HAS PROCESSED BEFORE.** Step 3 skips each unit whose token is in the processed set, the Incremental Harvest Workflow discovers the delta against that same set, and the Consolidation Harvest Workflow safety net reads only tasks that are not in it. **A COMPLETED TASK IS NOT A CLOSED TASK.** An agent writes content to a task after the pass that recorded that task as processed, and no trigger in this file collects it.
 
-**THE RE-SWEEP IS NOT AN OPTIONAL REFINEMENT, AND HERE IS THE FAILURE IT PREVENTS.** A sibling key written after completion has no trigger of its own. A journal snapshot carries such a key only when something else fires a snapshot on that task afterwards, and it carries it as a side effect rather than by design. **So on a task that keeps receiving other writes, the journal picks the key up, and on a task that goes quiet, the key is on the task file alone and the task-store drain removes it.** The quiet task is the one that looks finished, so the loss is silent and this pass reports success while it happens. **On a quiescent completed task, this harvest is the carrier and the journal is not.** To collect that content, run an incremental pass **before the session ends** and put that task_id in its population even though the ledger lists it as processed. **Do not edit the ledger to achieve this**: writes there are append-only, so an id cannot be taken back out, and it does not need to be — the ledger is a dedup record, not a work queue, so nothing reads it to decide what work remains. The cost is that a re-opened task leaves no durable trace, and that trace has no reader.
+**THE RE-SWEEP IS NOT AN OPTIONAL REFINEMENT, AND HERE IS THE FAILURE IT PREVENTS.** A sibling key written after completion has no trigger of its own. A journal snapshot carries such a key only when something else fires a snapshot on that task afterwards, and it carries it as a side effect rather than by design. **So on a task that keeps receiving other writes, the journal picks the key up, and on a task that goes quiet, the key is on the task file alone and the task-store drain removes it.** The quiet task is the one that looks finished, so the loss is silent and this pass reports success while it happens. **On a quiescent completed task, this harvest is the carrier and the journal is not.** To collect that content, run an incremental pass **before the session ends** and name that task_id as FORCED: process its units even when their tokens are present, and record the tokens again. **Do not edit the ledger to achieve this**: writes there are append-only, so an id cannot be taken back out, and it does not need to be — the ledger is a dedup record, not a work queue, so nothing reads it to decide what work remains. The cost is that a re-opened task leaves no durable trace, and that trace has no reader.
 
 Pseudocode for the read. It carries all the selection steps, because a task_id reused across arcs resolves to the wrong arc when any one of them is dropped:
 
 ```python
-# The sentinel substitution and the disk identity are NOT restated here. Both
-# are shipped in shared.handoff_merge and called below, so this file
-# cannot carry a stale second copy of either.
+# INPUTS, built at Steps 1-2:
+#   task_list_dir    the `Task list:` directory in your context ("" when absent)
+#   realign_events   `team_realigned` events (Step 1 source 4)
+#   journal          the ONE whole-journal read, in order (Step 1 source 1)
+#   tasklist_ids     completed task ids from `TaskList` (Step 1 source 2)
+#   census           {store name: set of task ids} for THIS store and each
+#                    from store (Step 1 sources 3 and 4)
+#   processed_tokens the `parse_ledger_tokens` result (Step 2)
+#   forced_ids       task ids the quiescent-task rule sent back (else empty)
+# ACTIONS: report(line); process(handoff, metadata=None, section=None) runs
+#   Steps 4-7 for one work unit; read_task_json(task_id, team) is the route
+#   below, which never falls back to the bare tasks directory.
+# OUTPUT: recorded_tokens, appended at Step 8.
+
+this_team = Path(task_list_dir).name if task_list_dir else ""
+journal = positioned(journal)
+journal_events = [e for e in journal if e.get("type") == "agent_handoff"]
+epochs = store_epochs(journal)
+from_teams, from_reports = safe_from_teams(realign_events, this_team)
+for line in from_reports:
+    report(line)
+recorded_tokens = []
 
 
-# The union predicate is NOT restated here. It is the shipped
-# shared.handoff_merge.union_preferring_task_file, called below, so
-# this file cannot carry a stale second copy of its branches.
+def route(e):
+    # An underivable this_team makes EVERY event OLD-FORMAT; without this
+    # guard each team-carrying event fails both team tests and is reported
+    # FOREIGN, the opposite of the rule.
+    if not this_team:
+        return PARTITION_OLD_FORMAT
+    return partition_destination(e.get("team"), this_team, from_teams)
 
 
-# `process(handoff, metadata=None, section=None)` = run Steps 4-7 (extract,
-# dedup, save) for this work unit. `metadata` is the SECTION's task-file
-# metadata mapping, passed so Step 3.1 can resolve sibling keys (the disk-only
-# paths have the file in hand; a journal-only path passes None and Step 3.1
-# falls back to its own read). The optional `section` label names a from-team
-# partition's output; nothing else about processing differs.
+def handle(section, task_id, handoff, metadata, selection_key):
+    """One work unit: skip it when its token is already recorded."""
+    token = unit_token(task_id, selection_key, section)
+    if token is not None and token in processed_tokens and task_id not in forced_ids:
+        return
+    process(handoff, metadata=metadata,
+            section=f"team={section}" if section else None)
+    if token is None:
+        report(f"handoff ledger token unavailable for task "
+               f"{report_safe(task_id)}: unit processed, not recorded")
+    else:
+        recorded_tokens.append(token)
+
+
+def select(group, task_id):
+    """The group's authoritative event; report when contents are undivided."""
+    count = undivided_contents(group)
+    if count > 1:
+        report(f"handoff group for task {report_safe(task_id)} holds {count} "
+               f"distinct contents with no creation boundary; the latest was "
+               f"processed; the earlier contents remain in the journal")
+    return latest_by_ts_then_journal_order(group)
 
 
 def report_gap(task_id, agent, ts):
-    """The step-6 gap line: NO source resolved for this task.
-
-    Every interpolated value goes through report_safe. `agent` is the
-    discovery record's agent, or "unknown" when no source carries one; `ts`
-    is the UTC timestamp of THIS report, stamped as the journal stamps
-    (`%Y-%m-%dT%H:%M:%SZ`).
-    """
     report(f"handoff gap for task {report_safe(task_id)}: no source "
            f"resolved; agent {report_safe(agent)}; recorded {report_safe(ts)}")
 
 
-# The harvest's own team: the LAST PATH COMPONENT of the `Task list:`
-# directory in this agent's context. `from_teams` is every team the journal's
-# `team_realigned` events name in `from` (Step 1 source 4). An ABSENT or EMPTY
-# path value gives "" — NEVER a raise — because the empty value is the state
-# the partition guard below turns into OLD-FORMAT. The guard checks the
-# DERIVED NAME, not whether the directory can be read.
-this_team = Path(task_list_dir).name if task_list_dir else ""
-# A realigned team name is JOURNAL-SUPPLIED: keep only non-empty STRINGS.
-# A non-str `from` (a list) would reach a dict key downstream — the event
-# whose `team` is the same value matches PARTITION_FROM and raises
-# `unhashable type` at `from_events.setdefault(e.get("team"), [])`.
-from_teams = [
-    event["from"]
-    for event in realign_events
-    if isinstance(event.get("from"), str) and event["from"]
-]
-
-
-def group_by_identity(events):
-    """One group per (agent, task_subject); a reused task_id has one per arc."""
-    groups = {}
-    for e in events:
-        groups.setdefault(occupant_hash(e.agent, e.task_subject), []).append(e)
-    return groups
-
-
-def named_store_candidates(task_id, this_team, from_teams):
-    """The PARSED task files of the stores whose NAMES the harvest holds.
-
-    This team's store and each `team_realigned` `from` store. No directory
-    enumeration: a store no realignment event names is out of reach.
-    """
-    candidates = []
-    for team in [this_team, *from_teams]:
-        task = read_task_json(task_id, team)
-        if task:
-            candidates.append({"team": team, "task": task})
-    return candidates
-
-
-# DISCOVERY SPLIT, BEFORE any ledger comparison. `unprocessed` is THIS
-# team's delta after Step 2 subtracts this team's processed set.
-# `from_unprocessed` is the from-store population discovered at Step 1
-# source 4; this team's ledger NEVER subtracts it, because the same number
-# names a different task in the two stores. BOTH HALVES ARE LOAD-BEARING:
-# subtracting the from ids here drops that team's HANDOFF, and recording
-# them at Step 8 recreates the same skip on the next pass.
-for task_id in unprocessed | from_unprocessed:
-    matches = [e for e in journal_events if e.task_id == task_id]
-
-    # STEP 1: PARTITION by team. A realigned earlier team's events are still
-    # harvested — under that team's own section and store.
-    if not this_team:
-        # The team term cannot be evaluated (the `Task list:` directory is
-        # absent, or its last path component is underivable — this_team is
-        # empty): EVERY partition is OLD-FORMAT, per the rule above. Without
-        # this guard an empty this_team makes every team-carrying event fail
-        # both team tests and be reported FOREIGN — the OPPOSITE of that rule.
-        # Routing everything here is SAFE: named_store_candidates then reads
-        # only the from-stores, and read_task_json with an empty team returns
-        # {} which is skipped.
-        #
-        # Report ONCE per task and ONLY when a partition exists: a population
-        # id with no journal match has no partition to be underivable about.
-        if matches:
-            report(f"handoff team identity underivable for task "
-                   f"{report_safe(task_id)}: no Task list: directory in context")
-        this_team_events, from_events, foreign, old_format = [], {}, [], list(matches)
+# DISCOVERY: (section, task_id) pairs; section None is THIS team.
+candidates, foreign_only = set(), set()
+for e in journal_events:
+    destination = route(e)
+    if destination in (PARTITION_THIS, PARTITION_OLD_FORMAT):
+        candidates.add((None, e.get("task_id")))
+    elif destination == PARTITION_FROM:
+        candidates.add((e.get("team"), e.get("task_id")))
     else:
-        this_team_events, from_events, foreign, old_format = [], {}, [], []
-        for e in matches:
-            destination = partition_destination(
-                e.get("team"), this_team, from_teams
-            )
-            if destination == PARTITION_OLD_FORMAT:
-                old_format.append(e)
-            elif destination == PARTITION_THIS:
-                this_team_events.append(e)
-            elif destination == PARTITION_FROM:
-                from_events.setdefault(e.get("team"), []).append(e)
-            elif destination == PARTITION_FOREIGN:
-                foreign.append(e)
-            else:
-                # An UNKNOWN label fails CLOSED — routed to FOREIGN, which
-                # reports and never processes. The OLD-FORMAT chain defaults
-                # the other way on purpose (its UNMATCHED case is this team's
-                # by identity); a NEW-format label nobody recognizes must not
-                # fall into this team.
-                foreign.append(e)
+        foreign_only.add(e.get("task_id"))
+for task_id in set(tasklist_ids) | census.get(this_team, set()):
+    candidates.add((None, task_id))
+for team in from_teams:
+    for task_id in census.get(team, set()):
+        candidates.add((team, task_id))
+ids = {task_id for _, task_id in candidates}
+for task_id in sorted(foreign_only - ids):
+    for e in journal_events:
+        if e.get("task_id") == task_id:
+            report(f"handoff identity mismatch for task {report_safe(task_id)}: "
+                   f"journal event names team {report_safe(e.get('team'))}; this "
+                   f"store is team {report_safe(this_team)}")
+
+for task_id in sorted(ids):
+    matches = [e for e in journal_events if e.get("task_id") == task_id]
+    # Report ONCE per task and ONLY when a partition exists: a population id
+    # with no journal match has no partition to be underivable about.
+    if matches and not this_team:
+        report(f"handoff team identity underivable for task "
+               f"{report_safe(task_id)}: no Task list: directory in context")
+    this_events, from_events, foreign, old_format = [], {}, [], []
+    for e in matches:
+        destination = route(e)
+        if destination == PARTITION_OLD_FORMAT:
+            old_format.append(e)
+        elif destination == PARTITION_THIS:
+            this_events.append(e)
+        elif destination == PARTITION_FROM:
+            from_events.setdefault(e.get("team"), []).append(e)
+        else:
+            # An UNKNOWN label fails CLOSED — routed to FOREIGN, which
+            # reports and never processes. The OLD-FORMAT chain defaults
+            # the other way on purpose (its UNMATCHED case is this team's
+            # by identity); a NEW-format label nobody recognizes must not
+            # fall into this team.
+            foreign.append(e)
     for e in foreign:
         team_value = e.get("team")
         if not isinstance(team_value, str):
@@ -401,18 +422,16 @@ for task_id in unprocessed | from_unprocessed:
             report(f"handoff identity mismatch for task {report_safe(task_id)}: "
                    f"journal event names team {report_safe(team_value)}; this "
                    f"store is team {report_safe(this_team)}")
-    # OLD-FORMAT events carry no `team`; content decides them against the
-    # NAMED stores only. The classifier names a MIXED event's source store,
-    # an OWNED event's owner, and leaves the rest UNMATCHED (this team's by
-    # identity). ROUTE on the outcome: a realigned earlier team's work unit
-    # belongs under ITS section and store, never here.
     if old_format:
-        candidates = named_store_candidates(task_id, this_team, from_teams)
+        candidate_tasks = []
+        for team in [this_team, *from_teams]:
+            task = read_task_json(task_id, team) if team else {}
+            if task:
+                candidate_tasks.append({"team": team, "task": task})
         for e in old_format:
             outcome = mixed_old_format_event(
                 task_id, e.get("agent", ""), e.get("task_subject", ""),
-                e.get("handoff") or {}, candidates,
-            )
+                e.get("handoff") or {}, candidate_tasks)
             destination = old_format_destination(outcome, this_team)
             if destination == OLD_FORMAT_DEST_MIXED:
                 report(outcome.report)      # discard: another store's content
@@ -423,174 +442,83 @@ for task_id in unprocessed | from_unprocessed:
                 # the unavailable-check line. Never choose silently.
                 if outcome.report:
                     report(outcome.report)
-                this_team_events.append(e)
+                this_events.append(e)
 
-    # A from-team work unit is processed under THAT team's section against
-    # THAT team's store. It is NEVER unioned with THIS team's task file —
-    # and it IS unioned with ITS OWN, because each copy of a HANDOFF can hold
-    # content the other lacks. Reading THIS team's store here would also
-    # produce a false "task file absent" report for a task that lives in the
-    # from store.
+    # FROM SECTIONS: each against ITS OWN store, never this team's.
     from_handled_any = False
-    # THE FROM-TEAM POPULATION HAS THE SAME TWO SHAPES AS THIS TEAM'S: a
-    # journal partition, and a task file with no journal event (rule 5's
-    # counterpart). Iterating `from_events` alone drops a census id whose
-    # content lives only on disk, so the store set is the union of both.
-    # A from store joins the DISK shape only for a CENSUS-ADMITTED id
-    # (`from_unprocessed`). File presence is the right test there: the census
-    # admits a task by ANY agent-authored key, so a sibling-key-only file
-    # must enter and Step 3.1 resolve it. An id that is ONLY this team's
-    # never admits a from store at all — the same number names a different
-    # task, and that stranger is not this team's work.
-    from_stores = set(from_events)
-    if task_id in from_unprocessed:
-        for team in from_teams:
-            if read_task_json(task_id, team):
-                from_stores.add(team)
-    for team in sorted(from_stores):
-        events = from_events.get(team, [])
+    for team in sorted(set(from_events) | {t for t in from_teams if (t, task_id) in candidates}):
         from_task = read_task_json(task_id, team)
-        from_disk = (
-            from_task.get("metadata", {}).get("handoff") if from_task else None
-        ) or {}
-        from_disk_id = (
-            disk_identity(from_task.get("owner", ""), from_task.get("subject", ""))
-            if from_task else None
-        )
-        from_groups = group_by_identity(events)
-        for identity, group in from_groups.items():
-            handoff = latest_by_ts_then_journal_order(group).handoff
-            if identity == from_disk_id:
-                merged, reports = union_preferring_task_file(
-                    handoff, from_disk, task_id
-                )
+        meta = task_metadata(from_task)
+        disk = disk_handoff(from_task)
+        groups = group_events(from_events.get(team, []), journal, epochs)
+        owner = owning_group(
+            groups,
+            disk_identity(from_task.get("owner", ""), from_task.get("subject", "")),
+            current_arc(team, task_id, journal, epochs)) if from_task else None
+        for key, group in groups.items():
+            event = select(group, task_id)
+            handoff = event.get("handoff") if isinstance(event.get("handoff"), dict) else {}
+            if key == owner:
+                merged, reports = union_preferring_task_file(handoff, disk, task_id)
                 for line in reports:
                     report(line)
-                handoff = merged
-            process(
-                handoff,
-                metadata=from_task.get("metadata", {}),
-                section=f"team={team}",
-            )
-            # A journal event's `team` field names the store EXPLICITLY, so
-            # this IS evidence the work unit is real; the all-from-team
-            # carve-out depends on it.
+                handle(team, task_id, merged, meta, handoff)
+            else:
+                handle(team, task_id, handoff, None, handoff)
+            # A journal event's `team` names the store EXPLICITLY, so this is
+            # evidence the work unit is real; the disk-only branch below has
+            # no such claim and never sets it.
             from_handled_any = True
-        if not from_groups:
-            # RULE 5, FROM-TEAM APPLICATION: a census-admitted task file with
-            # no journal group is a normal population, processed from the file
-            # alone under this section's label. No absent-file report and no
-            # no-match report. It does NOT set `from_handled_any`: this branch
-            # has no explicit team claim (the store was admitted by census
-            # provenance), and the flag's only consumer is THIS team's gap
-            # line — a from-store file must never silence a gap for this
-            # team's id.
-            process(
-                from_disk,
-                metadata=from_task.get("metadata", {}),
-                section=f"team={team}",
-            )
-        # ONE report for THIS store's whole group set, decided AFTER the loop
-        # on the same rule as this section's: a per-group report repeats the
-        # line once per work unit. A group that lost to another matching
-        # group stays silent — that group owns the file. BOTH states report:
-        # a drained store is a reportable gap here exactly as it is below.
+        if not groups:
+            if from_task and (team, task_id) in candidates:
+                handle(team, task_id, disk, meta, meta)   # rule 5, from store
+            elif not from_task:
+                report(f"handoff divergence check unavailable for task "
+                       f"{report_safe(task_id)}: task file absent")
         elif not from_task:
             report(f"handoff divergence check unavailable for task "
                    f"{report_safe(task_id)}: task file absent")
-        elif from_disk_id not in from_groups:
-            report(f"handoff identity mismatch for task "
-                   f"{report_safe(task_id)}: task file present, no event "
-                   f"group carries its identity")
+        elif owner is None:
+            report(f"handoff identity mismatch for task {report_safe(task_id)}: "
+                   f"task file present, no event group carries its identity")
 
-    if task_id not in unprocessed:
-        # This team's ledger already covers this NUMBER; the work in this
-        # pass is the from-team partitions above. Do not reprocess this
-        # team's events, and do not report a divergence against this store.
+    # THIS SECTION.
+    if (None, task_id) not in candidates:
         continue
-
-    # STEP 2: group THIS team's events by identity. An agent_handoff event
-    # carries no `occupant` field, so compute the identity from the event's
-    # own (agent, task_subject) with the shared function.
-    groups = group_by_identity(this_team_events)
-
-    # EMPTY DICT once the drain removed it, and NOT None. read_task_json is
-    # fail-open: a missing file, a malformed file and an IO error all give {}.
-    # THIS section's store: the from-team sections read their own above.
-    task = read_task_json(task_id, this_team)
-    # Hash the SUBSTITUTED subject, because that is what the emit paths
-    # hashed. The owner substitution (platform teammate name on an empty
-    # owner) is NOT reproducible from the record, so a task carrying it
-    # falls through to the identity-mismatch report below.
-    # `.get` AND NOT A SUBSCRIPT, AT BOTH KEYS. The guard above tests
-    # EMPTINESS, which covers a DRAINED record and does NOT cover a PRESENT
-    # BUT PARTIAL one. MEASURED across the task store: 143 of 1421 records
-    # carry no `owner` key at all, and THREE of those carry
-    # `metadata.handoff`, so they are in this harvest target population.
-    # A subscript raises KeyError on the accurate case rule 2 above tells
-    # you to route to the identity-mismatch report, because an absent owner
-    # is what the emit path replaces with the platform name.
-    # `subject` is missing in 0 of 1421 today, and it takes `.get` anyway:
-    # read_task_json is FAIL-OPEN, so it returns a SHAPE and not a SCHEMA,
-    # and a subscript asserts a guarantee that reader does not make.
-    disk_id = (
-        disk_identity(task.get("owner", ""), task.get("subject", ""))
-        if task else None
-    )
-    disk_handoff = (task.get("metadata", {}).get("handoff") if task else None) or {}
-
+    task = read_task_json(task_id, this_team) if this_team else {}
+    meta = task_metadata(task)
+    disk = disk_handoff(task)
+    groups = group_events(this_events, journal, epochs)
+    owner = owning_group(
+        groups,
+        disk_identity(task.get("owner", ""), task.get("subject", "")),
+        current_arc(this_team, task_id, journal, epochs)) if task else None
     if not groups:
-        if not task:
-            # A task whose work units were ALL from-team partitions has no
-            # task file in THIS section's store, and that is not a gap: the
-            # from section already processed it against ITS own file.
-            if not from_handled_any:
-                # No journal event and no task file: the agent may be
-                # unknowable. Record the field, never omit it; the timestamp
-                # makes the gap auditable after the fact.
-                gap_ts = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-                report_gap(task_id, "unknown", gap_ts)
-        else:
-            # Task file only, no journal copy to union. Pass the metadata so
-            # Step 3.1 can resolve sibling keys from this same file.
-            process(disk_handoff, metadata=task.get("metadata", {}))
+        if task:
+            handle(None, task_id, disk, meta, meta)       # rule 5
+        elif not from_handled_any:
+            report_gap(task_id, "unknown",
+                       datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         continue
-
-    # More than one group means the task_id was reused across arcs. Each group
-    # is a distinct work unit. Do NOT pick one. A group that does not carry the
-    # task file's identity while ANOTHER group does is processed silently: the
-    # file is that other group's, so this group has no copy of its own to
-    # disagree with. `disk_group_matches` is the discriminator, and the
-    # divergence report below is decided ONCE for the whole group set.
-    disk_group_matches = disk_id in groups
-    for identity, events in groups.items():
-        # STEP 3: latest ts, and the line that comes after it on an equal ts.
-        journal_event = latest_by_ts_then_journal_order(events)
-        handoff = journal_event.handoff  # content at the last emitting write
-        if identity == disk_id:
-            # UNION via the shared predicate; every branch reports.
-            merged, reports = union_preferring_task_file(
-                handoff, disk_handoff, task_id
-            )
+    for key, group in groups.items():
+        event = select(group, task_id)
+        handoff = event.get("handoff") if isinstance(event.get("handoff"), dict) else {}
+        if key == owner:
+            merged, reports = union_preferring_task_file(handoff, disk, task_id)
             for line in reports:
                 report(line)
-            handoff = merged
-        process(handoff, metadata=task.get("metadata", {}))
-
-    # ONE divergence report for the WHOLE group set, decided AFTER the loop.
-    # Inside the loop it would fire once per work unit, and "no event group
+            handle(None, task_id, merged, meta, handoff)
+        else:
+            handle(None, task_id, handoff, None, handoff)
+    # ONE divergence report for the WHOLE group set, decided AFTER the loop:
+    # inside it the line fires once per work unit, and "no event group
     # carries its identity" is false whenever another group carries it.
     if not task:
         report(f"handoff divergence check unavailable for task "
                f"{report_safe(task_id)}: task file absent")
-    elif not disk_group_matches:
-        # The task file is PRESENT and NO group carries its identity. This is
-        # an identity mismatch, NOT a drain. Do not reuse the drain wording.
-        report(f"handoff identity mismatch for task "
-               f"{report_safe(task_id)}: task file present, no event "
-               f"group carries its identity")
+    elif owner is None:
+        report(f"handoff identity mismatch for task {report_safe(task_id)}: "
+               f"task file present, no event group carries its identity")
 ```
 
 Read all HANDOFFs before proceeding to extraction.
@@ -599,7 +527,7 @@ Read all HANDOFFs before proceeding to extraction.
 
 A HANDOFF may reference sibling metadata keys on its task (verification records, parked analyses, teachback history, variety rationales). Those siblings die with the task file when the task store drains — but every completed task's non-handoff metadata is also mirrored into the journal as a `task_metadata_snapshot` event. Resolve sibling keys through this fallback:
 
-1. **Task file** (freshest, and it can be drained): `task_utils.read_task_json(task_id, team_name).get("metadata", {})`, the raw task JSON's `metadata` object, the same accessor the Step 3 pseudocode uses. That reader returns an EMPTY DICT on a missing file, so a drained task gives `{}` rather than a raise, and the fallback below is what covers it.
+1. **Task file** (freshest, and it can be drained): use the `metadata` Step 3 passed for this unit. When Step 3 passed none, read the task file with the `read_task_json` route only if that record's `disk_identity(owner, subject)` equals the unit's group identity; when it does not, skip this item and use the snapshot fallback. A same-numbered task file of a different occupant is never this unit's sibling source.
 2. **Snapshot fallback** (GC-proof): read the mirrored snapshots via the existing subcommand (explicit `--session-dir`, masked-read-safe):
 
    ```bash
@@ -607,7 +535,7 @@ A HANDOFF may reference sibling metadata keys on its task (verification records,
                  --session-dir "$SESSION_DIR" --type task_metadata_snapshot)
    ```
 
-   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `occupant_hash(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. A snapshot with NO `team` is OLD-FORMAT and passes. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **The runnable command is in Step 3, under HOW TO CALL THE NAMES THIS STEP USES.** It is stated once, there, and referenced here. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
+   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated` / `team`. **Selection**: take the events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally require that `occupant` equals `disk_identity(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function — never a local reimplementation. Also require that `team` EQUALS the team of the SECTION the handoff is processed under — this team's name, or `{from}` for a realigned partition. A snapshot that CARRIES a `team` and names another team is DROPPED and reported `handoff snapshot identity mismatch for task N: snapshot names team <team>; this section is team <expected>`, even when the handoff side is OLD-FORMAT. A snapshot with NO `team` is OLD-FORMAT and passes. **A missing `team` on the handoff side does NOT excuse a snapshot that names another team.** **The runnable command is in Step 3, under HOW TO CALL THE NAMES THIS STEP USES.** It is stated once, there, and referenced here. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
 3. **Graceful degrade**: neither source resolves → record the gap (task_id, key, timestamp) exactly as Step 3's report-gap tier does; never invent content.
 
 **SIBLING KEY NAMES CARRY NO ORDER.** A task commonly carries a family of related sibling keys, and their names do not record which one is newest. A key that names itself `final` can be the earlier of two. Do not sort sibling keys by name, and do not read a name as a position. **ONE NAME DOES CARRY A RELATION, and it is not a position: a sibling key that amends, corrects or withdraws HANDOFF content SUPERSEDES what it addresses, whatever its date. Synthesize from the amended state, and never bank a claim an amendment withdrew.** Resolve the order of the rest in this priority:
@@ -705,7 +633,7 @@ If the dispatch carries the propagate sentence (see Propagation above), run `syn
 
 ### Step 8: Update Processed Task Tracking
 
-**Save the processed task IDs to your team's section in agent memory.** Multiple secretary instances (one per concurrent team) share this single file; each owns exactly its own `## team={your team_id}` section, and **whether yours already exists is decided by a count, never by searching what you read** — see **Section semantics** below for that count and for the boundary rule on other teams' sections. Append this pass's task IDs to your section in `session_processed_tasks.md`, in the agent-memory directory the platform gave you, as a new `Processed task IDs` line, never rewriting the lines already there. **WRITE THIS TEAM'S IDS ONLY — NEVER A FROM-TEAM ID.** A from-team work unit belongs to another store's namespace: the same number names a different task there, so recording it here would make a later pass skip your OWN task of that number. From-team work units are guarded by Step 6's save-vs-update dedup, not by this ledger.
+**Save the processed task IDs to your team's section in agent memory.** Multiple secretary instances (one per concurrent team) share this single file; each owns exactly its own `## team={your team_id}` section, and **whether yours already exists is decided by a count, never by searching what you read** — see **Section semantics** below for that count and for the boundary rule on other teams' sections. Append this pass's unit tokens to your section in `session_processed_tasks.md`, in the agent-memory directory the platform gave you, as a new `Processed task IDs` line, never rewriting the lines already there. **Write the unit tokens Step 3 recorded, from both sections, on this team's line.** A from-team token carries its `{from}/` prefix, so it never matches a token of this team's task of the same number.
 
 This file is **namespaced by team** so that concurrent secretary instances (one per active team, all sharing this single user-scope file) never clobber each other's processed-task baselines. The file-format contract:
 
@@ -723,13 +651,15 @@ type: reference
 
 {optional one-line session note}
 
-Processed task IDs (this team): {comma-separated IDs}
+Processed task IDs (this team): {comma-separated unit tokens}
 Last processed (this team): {timestamp}
 
 ## team={other_team_id} ({project}, session {session_id})
 
 ...
 ```
+
+Write each `Processed task IDs` line at column 0, exactly as the template shows; never place tokens inside a note. `Last processed` is for a human reader; no step compares it.
 
 **Section semantics:**
 - The section key is your own `{team_id}` (your spawn `session-XXXXXXXX`). The parenthetical `({project}, session {session_id})` carries the exact on-disk names of the `pact-sessions/{project}/{session_id}` directory, taken from your own `pact-session-context.json` through the `pact_harvest.py resolve-session-dir` subcommand named at Step 0; Consolidation Step 3 reads them as a filesystem path, so write them verbatim, never a paraphrase or a display name.
@@ -777,12 +707,12 @@ After processing HANDOFFs, gather calibration metrics for the orchestrator's var
 
 Triggered after remediation completes — processes only the delta since the last harvest pass. Fires only when remediation occurred and produced new completed tasks.
 
-1. **Check processed task tracking**: Locate your `## team={your team_id}` section of `session_processed_tasks.md` with the **Standard Harvest Step 8 rule's existence decision**: the `grep -c` header count, what each of its outcomes means for whether your section exists, and the `awk` extract on the `1` branch. **The write actions inside those branches — appending, creating a section — belong to step 6, not to this one.** Do NOT restate that rule here, and do NOT decide the section exists by searching what you read — a ledger past the read cap hides your section while the file is intact, and a pass that concludes "no processed IDs" reprocesses everything. From the extract, take already-processed task IDs as the **UNION of every `Processed task IDs` line** in that section, never the newest line alone
-2. **Discover new completions**: Run the Standard Harvest Step 1 sources — session journal `agent_handoff` events, `TaskList`, and the task-file metadata census — for completed tasks not in the processed set **OF THIS TEAM'S IDS — the from-team population is routed at Standard Harvest Step 1 source 4 and is NEVER subtracted by this ledger**, **PLUS any task the Standard Harvest Step 3 quiescent-task rule sent you back for**. That task IS in the processed set — the rule deliberately does not edit the ledger — so a filter that only subtracts the processed set drops the very task the re-sweep exists to collect, and step 3 then reports "no new completions" and completes. Including it widens the population, which is always permitted; only narrowing is forbidden. Do not narrow to the journal either: a new completion whose content sits only in a non-`handoff` key emits no `agent_handoff` event.
-3. **If no new completions**: Report "No new HANDOFFs since last harvest" and complete
+1. **Check processed task tracking**: Locate your `## team={your team_id}` section of `session_processed_tasks.md` with the **Standard Harvest Step 8 rule's existence decision**: the `grep -c` header count, what each of its outcomes means for whether your section exists, and the `awk` extract on the `1` branch. **The write actions inside those branches — appending, creating a section — belong to step 6, not to this one.** Do NOT restate that rule here, and do NOT decide the section exists by searching what you read — a ledger past the read cap hides your section while the file is intact, and a pass that concludes "no processed IDs" reprocesses everything. From the extract, take the processed token set as the **UNION of every `Processed task IDs` line** in that section, never the newest line alone, with the `parse_ledger_tokens` route
+2. **Discover new completions**: Run Standard Harvest Step 1 discovery, PLUS any task the Standard Harvest Step 3 quiescent-task rule sent you back for, which runs as FORCED. Do not narrow to the journal: a new completion whose content sits only in a non-`handoff` key emits no `agent_handoff` event.
+3. **If Step 3 selects no unit whose token is absent (and no FORCED task)**: Report "No new HANDOFFs since last harvest" and complete
 4. **Read new HANDOFFs** with the Standard Harvest Step 3 rule, in full: the identity derivation, the group selection, the union predicate and the report messages. Do NOT restate that rule here. A summary of it here is a second statement that goes stale on its own
 5. **Extract and save** using Steps 4-7 from Standard Harvest (extract knowledge, organizational state, dedup protocol, save) (every save with --no-sync; an Incremental dispatch never carries the propagate sentence)
-6. **Update processed task tracking** — **append** the new task IDs to **your team's** `## team={your team_id}` section of `session_processed_tasks.md` with the **Standard Harvest Step 8 rule, in full**: the `grep -c` header count and its branches decide WHERE to append, and the write is append-only. **THIS team's ids only — never a from-team id** (Step 8's non-recording rule, which this step inherits by reference). Do NOT restate that rule here, and do not append to a section you located by reading the file — that is how a second `## team=` section for one team gets created
+6. **Update processed task tracking** — **append** the recorded tokens to **your team's** `## team={your team_id}` section of `session_processed_tasks.md` with the **Standard Harvest Step 8 rule, in full**: the `grep -c` header count and its branches decide WHERE to append, and the write is append-only. Do NOT restate that rule here, and do not append to a section you located by reading the file — that is how a second `## team=` section for one team gets created
 7. **Do NOT delete the session journal** — it may still be accumulating entries from ongoing work
 8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`). Remember: default `update` is additive merge — pass `--replace` only when the prior list items need to be discarded, not amended.
 9. **Report delta summary** to team-lead — only report what changed in this incremental pass
@@ -797,7 +727,7 @@ Triggered during `/PACT:wrap-up`, `/PACT:pause` or `/PACT:refresh`. This is the 
 
 ### Step 1: Safety Net (Unprocessed HANDOFFs)
 
-Run the Standard Harvest Step 1 discovery in full — every source, including the task-file metadata census — for tasks not yet in the processed task set. Checking `agent_handoff` events alone leaves any task whose content sits in a non-`handoff` key undiscovered, and this is the last pass that will look. If unprocessed entries exist, run the Standard Harvest workflow above first (earlier harvest triggers may have been missed). Then continue with consolidation. That nested run does not propagate: Step 4 does, after the Step 3 prune.
+Run the Standard Harvest Step 1 discovery in full — every source, including the task-file metadata census — for units whose token is not in the processed set. Checking `agent_handoff` events alone leaves any task whose content sits in a non-`handoff` key undiscovered, and this is the last pass that will look. If unprocessed entries exist, run the Standard Harvest workflow above first (earlier harvest triggers may have been missed). Then continue with consolidation. That nested run does not propagate: Step 4 does, after the Step 3 prune.
 
 ### Step 2: Review Session Memories
 
@@ -807,7 +737,7 @@ Review all memories saved during this session by listing recent pact-memory entr
 
 - Merge overlapping memories (same topic, same entities, compatible conclusions)
 - Prune superseded memories (update or delete entries replaced by newer information)
-- **Prune complete `## team=` sections** in `session_processed_tasks.md`, in the agent-memory directory the platform gave you. The file is shared by every secretary instance across every project, so a section may be removed on exactly one ground and no other: you have VERIFIED that its team is complete by reading that session's journal. Age never prunes: a section's `Last processed` timestamp, however old, is not a ground for removal, and a section with no `Last processed` line is unjudgeable, not stale — a criterion that cannot be evaluated never does. **Enumerate the sections with `grep -n '^## team=' "{ledger path}"` rather than by reading the file**: a section past a read's line cap is invisible to a search of what you received, and item 6 would then under-report what this pass considered. Verify each section in this order:
+- **Prune complete `## team=` sections** in `session_processed_tasks.md`, in the agent-memory directory the platform gave you. The file is shared by every secretary instance across every project, so a section may be removed on exactly one ground and no other: you have VERIFIED that its team is complete by reading that session's journal. Age never prunes: a section's `Last processed` timestamp, however old, is not a ground for removal, and a section with no `Last processed` line is unjudgeable, not stale — a criterion that cannot be evaluated never does. **Enumerate the sections with `grep -n '^## team=' "{ledger path}"` rather than by reading the file**: a section past a read's line cap is invisible to a search of what you received, and item 6 would then under-report what this pass considered. A section may hold `{from}/` tokens of the same session's realigned teams; its completion ground covers them because the realign keeps one session directory. Do not extend tokens to any team outside that session. Verify each section in this order:
   1. **Address.** Take `{project}` and `{session_id}` from the section's header line, which carries them as `## team={team_id} ({project}, session {session_id})` and may carry other text after that on the same line: read the ids wherever they sit on that line. A session id is five lowercase-hex groups of 8-4-4-4-12 characters joined by hyphens, the shape the session-directory reaper accepts; any other shape counts as no session id. The session directory is `{config_dir}/pact-sessions/{project}/{session_id}` (`{config_dir}` is `$CLAUDE_CONFIG_DIR` when set and non-empty, otherwise `$HOME/.claude`). If the header carries no project or no session id and `{team_id}` has the shape `session-XXXXXXXX`, glob `{config_dir}/pact-sessions/*/XXXXXXXX-*`: exactly one match is the session directory, continue with it as if the header had named it; no match means the session cannot be located from this config root: it stays; two or more matches mean the section cannot be verified: it stays. A `{team_id}` of any other shape with no project or session id cannot be resolved: the section stays.
   2. **Existence.** If the session directory does not exist under `{config_dir}`, the section cannot be verified from this root: it stays. Absence is not evidence of reaping — PACT's own `session_end.py::cleanup_old_sessions` reaps only under the ending session's OWN config root, and no section records which root its session ran under, so absence here and alive-under-another-root produce the same bytes: none. If the directory exists but `{that dir}/session-journal.jsonl` does not exist, the team cannot be verified from that section: it stays.
   3. **Reads.** Run `python3 "{plugin_root}/hooks/shared/session_journal.py" read-last --session-dir '{that dir}' --type session_end`, then the same command with `--type session_paused`, then with `--type session_start` (`read-last` prints the newest event of that type as one JSON object, or `null`).
@@ -920,7 +850,7 @@ This is the Layer 4 fallback for completed handoffs left behind by sessions that
 2. If found: report to team-lead "Found N orphaned HANDOFFs from prior session {session_dir}"
 3. Read the HANDOFFs with the **Standard Harvest Step 3 rule, in full and without exception**: the identity derivation, the grouping, the latest-`ts` selection with its journal-order tie-break, the union predicate and the report messages. **This path is NOT a fallback chain and MUST NOT become one.** Do not prefer one source and fall back to the other, and do not restate the Step 3 rule here. Read the prior session's events with `read_events_from(session_dir, 'agent_handoff')`, and resolve the task-file copy in `{config_dir}/tasks/{team_id}/` where that session's task files survive. Run the Step 1 metadata census on those files also. The journal carries only the tasks that emitted a HANDOFF, so a journal-only pass reports a count it cannot support.
    🔴 **THIS PATH NEEDS THE SELECTION RULE MORE THAN THE LIVE PATH DOES.** It runs across PRIOR sessions, where a task_id reused across arcs and several accumulated events for one task are most likely. Without the selection rule an implementer takes the first match. The first match is the FIRST emit, and the content-keyed marker makes the first emit the SUPERSEDED copy. The one path that exists to catch what each other layer missed then reports recovered knowledge that a later revision had replaced.
-4. **Record the recovered task ids. Do NOT remove the files you read them from.** Add the ids to your team's `## team={your team_id}` section of `session_processed_tasks.md` with the **Standard Harvest Step 8 rule, in full**: the `grep -c` header count and its branches decide WHERE to append, and the write is append-only. Do NOT restate that rule here. That ledger is what stops a later pass reprocessing this session, and Step 2 reads it. No removal is needed to reach that outcome.
+4. **Record the recovered task ids. Do NOT remove the files you read them from.** Add the recovered units' tokens, each prefixed `{prior team}/`, to your team's `## team={your team_id}` section of `session_processed_tasks.md` with the **Standard Harvest Step 8 rule, in full**: the `grep -c` header count and its branches decide WHERE to append, and the write is append-only. Do NOT restate that rule here. That ledger is what stops a later pass reprocessing this session, and Step 2 reads it. No removal is needed to reach that outcome.
 
    **Two file classes carry this session's content, and either one can be the only carrier of a given HANDOFF.** The journal at `{session_dir}/session-journal.jsonl` carries the tasks that emitted an `agent_handoff` event. The task files under `{config_dir}/tasks/{team_id}/` carry a quiescent completed task whose key never reached the journal. Neither class is a copy of the other, so neither is safe to remove because the other was read.
 
@@ -930,5 +860,5 @@ This is the Layer 4 fallback for completed handoffs left behind by sessions that
    2. Read raised, or the path did not resolve → record ONE carrier. An unreadable directory is not an empty one, and the error does not tell you which you have.
    3. Re-fetch what you saved in Step 7 by its returned `memory_id` and compare it against what you recovered. Present and in agreement → a durable second copy exists. Save reported success but the re-fetch does not find it, or either step raised → NO durable second copy exists.
 
-   **You have processed these files. It does not follow that you may remove them.** A file processed twice costs a duplicate paragraph, and the Step 2 ledger skip pays even that cost only once. A journal removed once costs every HANDOFF, lifecycle event and snapshot that only it held, and nothing regenerates them. The cleanup this recovery needs is the ledger entry above, and that entry takes no bytes with it. A later reader who wants this workspace tidy is looking at the wrong step.
+   **You have processed these files. It does not follow that you may remove them.** A file processed twice costs a duplicate paragraph, and the ledger's token skip pays even that cost only once. A journal removed once costs every HANDOFF, lifecycle event and snapshot that only it held, and nothing regenerates them. The cleanup this recovery needs is the ledger entry above, and that entry takes no bytes with it. A later reader who wants this workspace tidy is looking at the wrong step.
 5. Report summary of recovered knowledge (or gaps where all sources failed). State the carrier test result from step 4 with it: how many carriers held the recovered content, and whether a durable second copy was verified.

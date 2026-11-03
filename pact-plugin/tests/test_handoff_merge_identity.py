@@ -857,6 +857,24 @@ class TestHarvestRuleProse:
     keep the assertion.
     """
 
+    @staticmethod
+    def _from_section():
+        """The Step 3 block's from-team section."""
+        return SKILL_TEXT.split("    # FROM SECTIONS", 1)[1].split(
+            "    # THIS SECTION.", 1
+        )[0]
+
+    @staticmethod
+    def _this_section():
+        """The Step 3 block's this-team section."""
+        return SKILL_TEXT.split("    # THIS SECTION.", 1)[1].split("\n```", 1)[0]
+
+    def _from_disk_only_branch(self):
+        """The from section's branch for a store with no journal group."""
+        return self._from_section().split("        if not groups:", 1)[1].split(
+            "\n        elif not from_task:", 1
+        )[0]
+
     def test_partition_clause_present(self):
         assert (
             "THIS IS A PARTITION: A PARTITION IS NEVER DISCARDED FOR NAMING "
@@ -879,27 +897,21 @@ class TestHarvestRuleProse:
         assert "filter" not in selection.lower()
         assert "filter" not in snapshot_step.lower()
 
-    def test_group_key_states_its_arc_limit(self):
-        """The group key is the occupant identity, and it cannot separate two
-        arcs sharing BOTH terms. The superseded text asserted that a reused
-        task_id carries one identity per arc — false for exactly that case:
-        the two events collapse into one group and only the latest is
-        processed."""
+    def test_group_key_carries_the_arc(self):
+        """The group key is the occupant identity PLUS the arc, so two
+        instances of one task id that share agent and subject are two groups
+        when the journal records their creations. Without a creation
+        boundary they collapse, and the skill says so and reports it."""
+        assert "Group the match with the `group_events` route" in SKILL_TEXT
+        assert "plus the event's ARC" in SKILL_TEXT
         assert (
-            "THE KEY CANNOT SEPARATE TWO ARCS THAT SHARE AGENT AND SUBJECT"
-            in SKILL_TEXT
+            "they form one group and only the latest is processed" in SKILL_TEXT
         )
         assert (
-            "a reused id whose two arcs share BOTH terms collapses into ONE group"
-            in SKILL_TEXT
+            "distinct contents with no creation boundary; the latest was "
+            "processed; the earlier contents remain in the journal" in SKILL_TEXT
         )
-        # What closes it is an ARC field used as a GROUP term, never inside the
-        # marker key (which would re-key every existing marker).
-        assert (
-            "an ARC field on the `agent_handoff` event used as a GROUP term"
-            in SKILL_TEXT
-        )
-        assert "never inside the marker key" in SKILL_TEXT
+        assert "**DO NOT FOLD THE TEAM INTO `occupant_hash`.**" in SKILL_TEXT
         # The unearned claim is gone from the instruction surface.
         assert "carries one identity for each arc" not in SKILL_TEXT
 
@@ -929,20 +941,18 @@ class TestHarvestRuleProse:
         assert "UNION IT WITH THAT TEAM'S TASK FILE" in SKILL_TEXT
 
     def test_from_team_partition_unions_with_its_own_store(self):
-        """Bugbot's High finding: the from-team loop must read THAT team's
-        store and union that copy. The journal alone drops task-file-only
-        content, and reading THIS team's store produced a false 'task file
-        absent' report for a task that lives in the from store."""
-        block = SKILL_TEXT.split(
-            "for team in sorted(from_stores):", 1
-        )[1].split("    # STEP 2", 1)[0]
-        assert "read_task_json(task_id, team)" in block
-        assert "union_preferring_task_file(" in block
-        assert 'section=f"team={team}"' in block
+        """The from-team loop reads THAT team's store and unions that copy.
+        The journal alone drops task-file-only content, and reading THIS
+        team's store produces a false 'task file absent' report for a task
+        that lives in the from store."""
+        block = self._from_section()
+        assert "from_task = read_task_json(task_id, team)" in block
+        assert "union_preferring_task_file(handoff, disk, task_id)" in block
+        assert "handle(team, task_id, merged, meta, handoff)" in block
         # The main section still reads THIS team's store, and the false gap
         # for an all-from-team task is guarded.
         assert "read_task_json(task_id, this_team)" in SKILL_TEXT
-        assert "if not from_handled_any:" in SKILL_TEXT
+        assert "elif not from_handled_any:" in SKILL_TEXT
 
     def test_old_format_cross_check_present(self):
         assert "AN OLD-FORMAT EVENT CARRIES NO `team` FIELD" in SKILL_TEXT
@@ -1003,59 +1013,37 @@ class TestHarvestRuleProse:
 
     def test_skill_calls_the_shared_identity_helpers(self):
         """The skill must NOT carry a local `def emit_side_subject` and must
-        CALL `disk_identity` for the record side, so the identity rule has
-        one executable home."""
+        CALL `disk_identity` (directly, and through `group_events`), so the
+        identity rule has one executable home."""
         assert "def emit_side_subject" not in SKILL_TEXT
         assert "disk_identity(task.get(" in SKILL_TEXT
-        assert "emit_side_subject" in SKILL_TEXT  # the call-route entry
+        # `disk_identity` is the ONE identity derivation: the block never
+        # composes `occupant_hash` itself.
+        fence = SKILL_TEXT.split("```python\n", 1)[1].split("\n```", 1)[0]
+        assert "occupant_hash(" not in fence
+        assert "group_events(" in fence
 
     def test_divergence_report_is_decided_after_the_group_loop(self):
         """The divergence reports compare ONE task file with the WHOLE group
-        set, so both partitions decide them AFTER their loop and emit each
+        set, so both sections decide them AFTER their loop and emit each
         ONCE. Inside the loop they would fire once per work unit, and for a
-        multi-arc task_id the removed per-group 'not the task file's group'
-        line was false: the other group owns the file and this one has no
-        copy of its own to disagree with. A DRAINED from store reports in the
-        from section too, so the two partitions speak in the same two states
-        and are quiet in the same one."""
-        # The former per-group third message is gone, prose and pseudocode.
+        multi-arc task_id 'no event group carries its identity' is false
+        whenever another group carries it. A DRAINED from store reports in
+        the from section too, so the two sections speak in the same two
+        states and are quiet in the same one."""
         assert "is not the task file's group" not in SKILL_TEXT
         assert "processed from the journal copy alone" not in SKILL_TEXT
-        assert "disk_group_matches = disk_id in groups" in SKILL_TEXT
-
-        # FROM partition: one group set per from store, one report after it,
-        # and BOTH states report — a drained from store is a reportable gap
-        # exactly as it is in the this-team partition.
-        from_block = SKILL_TEXT.split(
-            "for team in sorted(from_stores):", 1
-        )[1].split("    # STEP 2", 1)[0]
-        assert "from_groups = group_by_identity(events)" in from_block
-        assert "if not from_task:" in from_block
-        assert "elif from_disk_id not in from_groups:" in from_block
-        assert from_block.count('f"group carries its identity")') == 1
-        assert from_block.count(': task file absent")') == 1
-        from_loop = from_block.split(
-            "for identity, group in from_groups.items():", 1
-        )[1].split("            process(", 1)[0]
-        assert "carries its identity" not in from_loop
-        assert "task file absent" not in from_loop
-        assert from_block.index("if not from_task:") > from_block.index(
-            "            process("
-        )
-
-        # THIS partition: neither divergence message may sit inside the loop.
-        tail = SKILL_TEXT.split(
-            "disk_group_matches = disk_id in groups", 1
-        )[1].split("Read all HANDOFFs", 1)[0]
-        assert tail.count('f"group carries its identity")') == 1
-        this_loop = tail.split(
-            "for identity, events in groups.items():", 1
-        )[1].split("        process(handoff, metadata=", 1)[0]
-        assert "carries its identity" not in this_loop
-        assert "task file absent" not in this_loop
-        assert tail.index(
-            '        process(handoff, metadata=task.get("metadata", {}))\n'
-        ) < tail.index("elif not disk_group_matches:")
+        for section in (self._from_section(), self._this_section()):
+            loop = section.split("for key, group in groups.items():", 1)[1]
+            body, after = loop.split("        if not groups:", 1) if (
+                "        if not groups:" in loop
+            ) else loop.split("    if not task:", 1)
+            assert 'carries its identity")' not in body
+            assert 'task file absent")' not in body
+            assert after.count('f"task file present, no event group carries its identity")') == 1
+            assert "owner is None:" in after
+        assert self._from_section().count(': task file absent")') == 2
+        assert self._this_section().count(': task file absent")') == 1
 
     def test_divergence_report_rule_prose_states_the_once_rule(self):
         """The rule text must carry the once-post-loop instruction and the
@@ -1123,17 +1111,14 @@ class TestHarvestRuleProse:
         assert "if old_format:" in SKILL_TEXT
 
     def test_unreadable_task_list_branch_is_implemented(self):
-        """FINDING 3: the prose and the guard name the SAME state — an absent
+        """The prose and the guard name the SAME state — an absent
         `Task list:` or an underivable last path component (empty this_team).
-        That makes EVERY partition OLD-FORMAT and fires the underivable
-        report; without the guard, team-carrying events go to the FOREIGN
-        report instead, the opposite instruction."""
-        assert "if not this_team:" in SKILL_TEXT
-        guard = SKILL_TEXT.split("if not this_team:", 1)[1].split(
-            "\n    else:", 1
-        )[0]
-        assert "handoff team identity underivable for task" in guard
-        assert "list(matches)" in guard
+        That makes EVERY event OLD-FORMAT and fires the underivable report;
+        without the guard, team-carrying events go to the FOREIGN report
+        instead, the opposite instruction."""
+        route = SKILL_TEXT.split("def route(e):", 1)[1].split("def handle(", 1)[0]
+        assert "if not this_team:\n        return PARTITION_OLD_FORMAT" in route
+        assert "if matches and not this_team:" in SKILL_TEXT
         assert "task_list_dir else" in SKILL_TEXT
 
     def test_snapshot_section_join_present(self):
@@ -1149,7 +1134,7 @@ class TestHarvestRuleProse:
         assert "(task_id, team, agent, task_subject)" in SKILL_TEXT
 
     def test_data_boundary_sentence_present(self):
-        assert "THE AGENT AND THE SUBJECT MUST CROSS AS DATA" in SKILL_TEXT
+        assert "EVERY VALUE CROSSES AS DATA, NEVER AS COMMAND TEXT" in SKILL_TEXT
 
     # ---- PROSE-REVIEW FIXES. One pin per finding: a prose fix with no pin
     # is how the earlier divergences survived a green suite. ----
@@ -1214,41 +1199,31 @@ class TestHarvestRuleProse:
         )
         assert "gets NO per-group report" in SKILL_TEXT
 
-    def test_minor_from_team_has_no_nested_ledger_pass(self):
-        """Architect ruling (c): a from-team work unit is PROCESSED AND
-        SYNTHESIZED but NOT entered in this team's ledger. Both wrong answers
-        are stated with their reasons — writing the from team's section
-        contradicts Step 8's section semantics, and recording the id here
-        poisons this team's dedup set because the same id names different
-        tasks in different stores. The repeat guard is Step 6's save-vs-update
-        dedup, so a later pass updates rather than duplicates."""
-        assert "DO NOT RUN STEP 2 OR STEP 8 FOR THEM" in SKILL_TEXT
+    def test_minor_from_team_units_are_recorded_under_their_store(self):
+        """A from-team work unit is PROCESSED, SYNTHESIZED and RECORDED in
+        this team's section under a `{from}/` token, so a later pass skips it
+        and the token never matches this team's task of the same number.
+        Writing a `## team={from}` section would modify another team's
+        ledger."""
         assert (
             "name team `{from}` as the source in the entry's context"
             in SKILL_TEXT
         )
         assert (
-            "The repeat guard for from-team work units is Step 6's "
-            "save-vs-update dedup" in SKILL_TEXT
+            "Record its unit token, `{from}/{id}#{key}`, in this team's "
+            "section at Step 8" in SKILL_TEXT
         )
-        assert "would make a later pass skip your OWN task" in SKILL_TEXT
-        assert "Step 8 forbids touching another team's section" in SKILL_TEXT
+        assert "DO NOT RUN STEP 2 OR STEP 8 FOR THEM" not in SKILL_TEXT
         assert (
             "run Step 2 and Step 8 for them against a `## team={from}` section"
             not in SKILL_TEXT
         )
-        assert (
-            "run Step 2 and Step 8 for it against its own `## team={from}` "
-            "section" not in SKILL_TEXT
-        )
 
     def test_minor_process_is_defined(self):
-        """The pseudocode called `process` without ever saying what it does;
-        a reader executing the pseudocode had to invent the ingestion step."""
-        assert (
-            "`process(handoff, metadata=None, section=None)` = run Steps 4-7"
-            in SKILL_TEXT
-        )
+        """The pseudocode calls `process`; its header says what it does, so
+        a reader executing the block does not invent the ingestion step."""
+        assert "process(handoff, metadata=None, section=None) runs" in SKILL_TEXT
+        assert "Steps 4-7 for one work unit" in SKILL_TEXT
 
     def test_minor_task_file_only_branch_has_a_prose_rule(self):
         """A task with no journal event and a present task file is a normal
@@ -1262,8 +1237,7 @@ class TestHarvestRuleProse:
     def test_from_team_disk_only_task_is_processed(self):
         """The from-team half has rule 5's disk-only path: the file is
         processed under `## team={from}`, and the store produces NEITHER the
-        absent-file NOR the no-match report. GREEN on b9cd8157 — this is the
-        regression guard for the path itself."""
+        absent-file NOR the no-match report."""
         assert "THIS IS ONE RULE WITH TWO APPLICATIONS, NOT TWO RULES" in SKILL_TEXT
         assert (
             "it produces NEITHER the absent-file report NOR the no-match report"
@@ -1271,67 +1245,54 @@ class TestHarvestRuleProse:
         )
         # The store set is built from BOTH shapes, not from journal events
         # alone.
-        assert "from_stores = set(from_events)" in SKILL_TEXT
-        assert "from_stores.add(team)" in SKILL_TEXT
-        assert SKILL_TEXT.count("from_stores.add(team)") == 1
-        disk_only = SKILL_TEXT.split("if not from_groups:", 1)[1].split(
-            "elif not from_task:", 1
-        )[0]
+        assert (
+            "for team in sorted(set(from_events) | {t for t in from_teams "
+            "if (t, task_id) in candidates}):" in SKILL_TEXT
+        )
+        disk_only = self._from_disk_only_branch()
         assert "read_task_json" not in disk_only
-        block = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
-            "    if task_id not in unprocessed:", 1
-        )[0]
-        assert 'metadata=from_task.get("metadata", {})' in block
-        # The disk-only branch precedes both report branches, so a file with
-        # no group cannot fall through to the absent or no-match message.
-        assert block.index(
-            'metadata=from_task.get("metadata", {})'
-        ) < block.index("handoff divergence check unavailable for task")
-
-    def test_high_from_team_membership_is_census_provenance(self):
-        """Bugbot 2, RED on the content-gated membership: the disk shape is
-        admitted by PROVENANCE, not by a content test. The from census admits
-        a task by ANY agent-authored key (an auditor carries `audit_summary`
-        and no `handoff`), so a sibling-key-only file must enter and Step 3.1
-        resolve it. An id that is ONLY this team's must never admit a
-        same-numbered stranger's file."""
-        prelude = SKILL_TEXT.split("from_stores = set(from_events)", 1)[1].split(
-            "for team in sorted(from_stores):", 1
-        )[0]
-        assert "if task_id in from_unprocessed:" in prelude
-        assert "if read_task_json(task_id, team):" in prelude
-        assert "candidate_handoff" not in SKILL_TEXT
-        # A content gate here re-narrows the census population: a task whose
-        # only content is a sibling key would be dropped.
-        assert 'get("handoff")' not in prelude
-        assert prelude.index("if task_id in from_unprocessed:") < prelude.index(
-            "from_stores.add(team)"
+        assert "handle(team, task_id, disk, meta, meta)" in disk_only
+        block = self._from_section()
+        assert block.index("handle(team, task_id, disk, meta, meta)") < block.index(
+            "handoff divergence check unavailable for task"
         )
 
+    def test_high_from_team_membership_is_census_provenance(self):
+        """The disk shape is admitted by PROVENANCE, not by a content test:
+        the from census admits a task by ANY agent-authored key, so a
+        sibling-key-only file must enter and Step 3.1 resolve it. An id that
+        is ONLY this team's must never admit a same-numbered stranger's file,
+        and admission is per store."""
+        assert (
+            "for team in from_teams:\n"
+            "    for task_id in census.get(team, set()):\n"
+            "        candidates.add((team, task_id))" in SKILL_TEXT
+        )
+        disk_only = self._from_disk_only_branch()
+        assert "if from_task and (team, task_id) in candidates:" in disk_only
+        assert "candidate_handoff" not in SKILL_TEXT
+        assert 'get("handoff")' not in disk_only
+
     def test_high_disk_only_from_branch_never_sets_handled_any(self):
-        """Bugbot 1, RED on b9cd8157: `from_handled_any`'s only consumer is
-        THIS team's report-gap line, which runs only for a ledger-uncovered
-        this-team id. A from-store file is not evidence about this team's
-        task, so the disk-only branch must not set the flag — otherwise a
-        drained this-team discovery vanishes with no gap report."""
-        disk_only = SKILL_TEXT.split("if not from_groups:", 1)[1].split(
-            "elif not from_task:", 1
-        )[0]
-        assert 'metadata=from_task.get("metadata", {})' in disk_only
+        """`from_handled_any`'s only consumer is THIS team's report-gap line.
+        A from-store file is not evidence about this team's task, so the
+        disk-only branch must not set the flag — otherwise a drained
+        this-team discovery vanishes with no gap report."""
+        disk_only = self._from_disk_only_branch()
+        assert "handle(team, task_id, disk, meta, meta)" in disk_only
         assert "from_handled_any = True" not in disk_only
         # The gap line the flag would suppress is still reachable.
-        assert 'report_gap(task_id, "unknown", gap_ts)' in SKILL_TEXT
+        assert 'report_gap(task_id, "unknown",' in SKILL_TEXT
 
     def test_from_team_journal_partition_still_sets_handled_any(self):
-        """REGRESSION GUARD, GREEN on b9cd8157: a journal event's `team`
-        field is an explicit store claim, so the journal-partition branch
-        keeps setting the flag; the all-from-team-work-units carve-out
-        depends on it."""
-        loop_body = SKILL_TEXT.split(
-            "for identity, group in from_groups.items():", 1
-        )[1].split("if not from_groups:", 1)[0]
+        """A journal event's `team` field is an explicit store claim, so the
+        journal-group branch keeps setting the flag; the all-from-team carve
+        out depends on it."""
+        loop_body = self._from_section().split(
+            "for key, group in groups.items():", 1
+        )[1].split("        if not groups:", 1)[0]
         assert "from_handled_any = True" in loop_body
-        assert "if not from_handled_any:" in SKILL_TEXT
+        assert "elif not from_handled_any:" in SKILL_TEXT
 
     def test_minor_from_handled_any_carve_out_is_prose(self):
         """The all-from-team task has no file in THIS store and must not
@@ -1343,14 +1304,13 @@ class TestHarvestRuleProse:
         )
 
     def test_minor_report_gap_records_the_agent_when_known(self):
-        """The prose required an agent name the call site cannot supply. The
-        rule now says when it is knowable and what to record otherwise, and
-        the call carries the field."""
+        """The rule says when the agent is knowable and what to record
+        otherwise, and the call carries the field."""
         assert (
             "record the agent as `unknown` rather than omitting the field"
             in SKILL_TEXT
         )
-        assert 'report_gap(task_id, "unknown", gap_ts)' in SKILL_TEXT
+        assert 'report_gap(task_id, "unknown",' in SKILL_TEXT
 
     def test_minor_dual_spelling_value_selection_is_stated(self):
         """The disk value of a dual-spelled field is chosen by the same rule
@@ -1370,8 +1330,7 @@ class TestHarvestRuleProse:
         inventory and to this list, or this pin cannot see it.
 
         This parses the inventory's REAL import lines — a pin asserting a
-        sentence about coverage passes while the sentence is wrong, which is
-        exactly how four unrouted helpers survived an earlier pass."""
+        sentence about coverage passes while the sentence is wrong."""
         section = SKILL_TEXT.split(
             "**HOW TO CALL THE NAMES THIS STEP USES.**", 1
         )[1].split("🔴 **THIS RULE IS NOT MIRRORED", 1)[0]
@@ -1380,15 +1339,22 @@ class TestHarvestRuleProse:
         ]
         assert import_lines, "the inventory has no import lines"
         for name in (
-            "occupant_hash",
             "report_safe",
-            "emit_side_subject",
             "disk_identity",
             "handoff_content_key",
             "union_preferring_task_file",
+            "latest_by_ts_then_journal_order",
+            "group_events",
+            "current_arc",
+            "owning_group",
+            "undivided_contents",
             "partition_destination",
             "old_format_destination",
             "mixed_old_format_event",
+            "safe_from_teams",
+            "unit_token",
+            "parse_ledger_tokens",
+            "read_task_json",
             "HANDOFF_LEGACY_ALIASES",
         ):
             routed = [line for line in import_lines if name in line]
@@ -1396,9 +1362,8 @@ class TestHarvestRuleProse:
             assert any("python3 -c" in line for line in routed), (
                 f"{name} has no RUNNABLE route"
             )
-        # `latest_by_ts_then_journal_order` is DEFINED here, so it needs no
-        # import route; the definition itself is the route.
-        assert "def latest_by_ts_then_journal_order(events):" in section
+        # The tie-break is shipped code; a local definition must not return.
+        assert "def latest_by_ts_then_journal_order" not in SKILL_TEXT
         # The two label sets the routers return are documented with them.
         for label in (
             "PARTITION_THIS",
@@ -1411,39 +1376,44 @@ class TestHarvestRuleProse:
         ):
             assert label in section
 
-    def test_high_from_team_population_bypasses_the_ledger_filter(self):
-        """HIGH (commit 24): the from-team population must not pass through
-        THIS team's ledger filter. Discovery folds both populations into one
-        list today, so a from-store task whose NUMBER this team already
-        recorded never reaches the from-team partition and that HANDOFF is
-        silently dropped. The split is at DISCOVERY, before any ledger
-        comparison, and the pseudocode carries it as a separate set."""
+    def test_discovery_routes_every_event_before_any_ledger_check(self):
+        """The from-team population must not pass through an id-level ledger
+        filter. Discovery routes each event to its section first, collects
+        (section, id) pairs, and Step 3 checks each selected unit's token, so
+        a from-store task whose NUMBER this team recorded is still reached."""
         assert (
-            "ROUTE THESE IDS TO THE FROM-TEAM PARTITION AT DISCOVERY, BEFORE "
-            "ANY LEDGER COMPARISON" in SKILL_TEXT
+            "**Route each `agent_handoff` event at discovery with "
+            "`partition_destination`, and collect `(section, task_id)` pairs, "
+            "never bare ids.**" in SKILL_TEXT
         )
-        assert "THE FILTER APPLIES TO THIS TEAM'S IDS ONLY" in SKILL_TEXT
-        assert (
-            "the from-team population is routed at Standard Harvest Step 1 "
-            "source 4 and is NEVER subtracted by this ledger" in SKILL_TEXT
-        )
-        assert "for task_id in unprocessed | from_unprocessed:" in SKILL_TEXT
-        assert "if task_id not in unprocessed:" in SKILL_TEXT
-        # The pre-fix single-population loop must not come back.
-        assert "for task_id in unprocessed:\n" not in SKILL_TEXT
+        assert "**Do not subtract anything from the discovered pairs here.**" in SKILL_TEXT
+        assert 'candidates.add((e.get("team"), e.get("task_id")))' in SKILL_TEXT
+        assert "token in processed_tokens" in SKILL_TEXT
+        # The id-level population and its filter must not come back.
+        assert "from_unprocessed" not in SKILL_TEXT
+        assert "task_id not in unprocessed" not in SKILL_TEXT
+        assert "THE FILTER APPLIES TO THIS TEAM'S IDS ONLY" not in SKILL_TEXT
 
-    def test_high_ledger_never_records_a_from_team_id(self):
-        """HIGH (commit 24), second half: the ledger write must exclude
-        from-team ids. Recording one under this team's section recreates the
-        same skip on the NEXT pass, so the discovery split alone is not
-        enough. The rule is stated at Step 8 (the writer) and inherited by
-        the incremental writer."""
-        assert "WRITE THIS TEAM'S IDS ONLY — NEVER A FROM-TEAM ID" in SKILL_TEXT
+    def test_ledger_records_unit_tokens(self):
+        """The ledger records WORK-UNIT TOKENS, never bare task numbers: a
+        number names different work in two stores and in a recreated store.
+        Step 8 writes both sections' tokens on this team's line, and every
+        writer inherits that."""
         assert (
-            "recording it here would make a later pass skip your OWN task of "
-            "that number" in SKILL_TEXT
+            "**Write the unit tokens Step 3 recorded, from both sections, on "
+            "this team's line.**" in SKILL_TEXT
         )
-        assert "THIS team's ids only — never a from-team id" in SKILL_TEXT
+        assert "{comma-separated unit tokens}" in SKILL_TEXT
+        assert "A from-team token carries its `{from}/` prefix" in SKILL_TEXT
+        assert (
+            "Write each `Processed task IDs` line at column 0, exactly as the "
+            "template shows; never place tokens inside a note." in SKILL_TEXT
+        )
+        assert "recorded_tokens.append(token)" in SKILL_TEXT
+        assert "**append** the recorded tokens" in SKILL_TEXT
+        assert "Add the recovered units' tokens, each prefixed `{prior team}/`" in SKILL_TEXT
+        assert "WRITE THIS TEAM'S IDS ONLY" not in SKILL_TEXT
+        assert "{comma-separated IDs}" not in SKILL_TEXT
 
     # ---- second prose pass: blocking items, each RED on 86f8dd86 ----
     def test_blocking_b1_how_to_call_routes_the_three_helpers(self):
@@ -1475,18 +1445,17 @@ class TestHarvestRuleProse:
         assert "It is a DICT, not a call" in section
 
     def test_blocking_b2_union_identity_names_disk_identity(self):
-        """B2: the union identity sentence named `occupant_hash`, which skips
-        the `(no subject)` substitution; a subject-less task's identity then
-        never matches a group and the union never runs."""
+        """The union identity sentence names `disk_identity`, which applies
+        the `(no subject)` substitution; `occupant_hash` would skip it, so a
+        subject-less task's identity would never match a group."""
         sentence = SKILL_TEXT.split(
-            "4. The task file belongs to at most one group.", 1
+            "4. The task file belongs to at most one group", 1
         )[1].split("**A group that does not carry", 1)[0]
         assert "disk_identity(owner, subject)" in sentence
-        # The OLD call form is the defect; the sentence may still warn
-        # against recomposing the hash by name.
         assert "occupant_hash(owner, subject)" not in sentence
         assert "never a recomposed `occupant_hash`" in sentence
         assert "SUBSTITUTED" in sentence
+        assert "`owning_group` route" in sentence
 
     def test_blocking_b3_from_team_units_are_saved(self):
         """B3: "Steps 4-6" excludes Step 7 (Save to pact-memory), so every
@@ -1496,23 +1465,24 @@ class TestHarvestRuleProse:
         assert "Steps 4-7" in SKILL_TEXT
 
     def test_blocking_b4_report_gap_is_defined_and_stamped(self):
-        """B4: `report_gap` was called but never defined, and the call
-        omitted the timestamp the prose requires."""
+        """`report_gap` is defined in the block and its call carries the
+        timestamp the prose requires."""
         assert "def report_gap(task_id, agent, ts):" in SKILL_TEXT
         assert "report_safe(agent)" in SKILL_TEXT
         assert "report_safe(ts)" in SKILL_TEXT
-        assert "gap_ts = datetime.now(timezone.utc).strftime(" in SKILL_TEXT
-        assert 'report_gap(task_id, "unknown", gap_ts)' in SKILL_TEXT
+        assert 'datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")' in SKILL_TEXT
+        assert 'report_gap(task_id, "unknown",' in SKILL_TEXT
         assert SKILL_TEXT.index("def report_gap(") < SKILL_TEXT.index(
-            'report_gap(task_id, "unknown", gap_ts)'
+            'report_gap(task_id, "unknown",'
         )
 
     def test_minor_rule5_carries_its_own_provenance_gate(self):
-        """Minor 5: rule 5 alone must state that the from-team application
-        admits only census ids, and admit them AGGREGATE by id (the census is
-        id-keyed), so a reader does not add a per-file content test."""
-        assert "ADMISSION IS AGGREGATE BY ID" in SKILL_TEXT
-        assert "the census is id-keyed" in SKILL_TEXT
+        """Rule 5 states that a from-team application admits only census
+        pairs, PER STORE, so a reader neither adds a per-file content test nor
+        reads another store's same-numbered file."""
+        assert "**ADMISSION IS PER STORE:**" in SKILL_TEXT
+        assert "a `({from}, id)` pair that store's census produced" in SKILL_TEXT
+        assert "ADMISSION IS AGGREGATE BY ID" not in SKILL_TEXT
 
     def test_minor_dual_spelling_sentence_is_qualified(self):
         """Minor 6: 'the selected raw key is the one the output carries' is
@@ -1530,52 +1500,41 @@ class TestHarvestRuleProse:
         assert "The GAP line requires NO source at all" in SKILL_TEXT
 
     def test_minor_disk_only_paths_pass_metadata_to_process(self):
-        """Minor 8: rule 5 promises Step 3.1 resolves sibling keys, so the
-        disk-only branches must pass the section's task metadata rather than
-        only `metadata.handoff`."""
-        assert 'metadata=from_task.get("metadata", {})' in SKILL_TEXT
-        assert 'process(disk_handoff, metadata=task.get("metadata", {}))' in SKILL_TEXT
+        """Rule 5 promises Step 3.1 resolves sibling keys, so the disk-only
+        branches pass the section's task metadata, not only its handoff."""
+        assert "handle(team, task_id, disk, meta, meta)" in SKILL_TEXT
+        assert "handle(None, task_id, disk, meta, meta)" in SKILL_TEXT
+        assert "meta = task_metadata(from_task)" in SKILL_TEXT
+        assert "meta = task_metadata(task)" in SKILL_TEXT
 
     def test_journal_paths_pass_their_own_store_metadata_to_process(self):
-        """FIX 1 (pseudocode-level arm): every `process` call must hand Step
-        3.1 the metadata of the store it actually READ. The modelled input is
-        a from-team journal unit and THIS team's store holding conflicting
-        sibling keys for one number: the from entry must carry the FROM
-        store's sibling, and this team's entry its own — never the reverse.
-
-        Both from-side calls (journal + disk) read `from_task`; both
-        this-side calls (journal + disk) read `task`."""
-        assert SKILL_TEXT.count('metadata=from_task.get("metadata", {})') == 2
-        assert SKILL_TEXT.count('metadata=task.get("metadata", {})') == 2
-        # The journal calls, not only the disk-only branches.
-        assert (
-            'process(handoff, metadata=task.get("metadata", {}))' in SKILL_TEXT
-        )
-        from_block = SKILL_TEXT.split(
-            "for team in sorted(from_stores):", 1
-        )[1].split("    # STEP 2", 1)[0]
-        assert 'metadata=from_task.get("metadata", {})' in from_block
-        assert 'section=f"team={team}"' in from_block
+        """Every journal-group `process` hands Step 3.1 the metadata of the
+        store it READ, and ONLY the group that owns that store's task file
+        gets it; every other group gets None, so a same-numbered file of a
+        different occupant never feeds another unit's siblings."""
+        for section, label in ((self._from_section(), "team"), (self._this_section(), "None")):
+            assert f"handle({label}, task_id, merged, meta, handoff)" in section
+            assert f"handle({label}, task_id, handoff, None, handoff)" in section
+            owner_branch = section.split("if key == owner:", 1)[1].split("else:", 1)[0]
+            assert "merged, meta, handoff" in owner_branch
 
     # ---- amendment items ----
     def test_minor_partition_chain_fails_closed_on_an_unknown_label(self):
-        """M4: the partition chain needs a final `else` routing an unknown
-        label to FOREIGN — reported, never processed. The OLD-FORMAT chain
-        defaults the other way on purpose (its UNMATCHED case is this team's
-        by identity), so the two default postures must be stated."""
+        """The partition chain's final `else` routes an unknown label to
+        FOREIGN — reported, never processed. The OLD-FORMAT chain defaults the
+        other way on purpose (its UNMATCHED case is this team's by identity),
+        so the two default postures must be stated."""
         assert (
-            "elif destination == PARTITION_FOREIGN:\n"
-            "                foreign.append(e)\n"
-            "            else:\n"
-            "                # An UNKNOWN label fails CLOSED"
+            "        elif destination == PARTITION_FROM:\n"
+            '            from_events.setdefault(e.get("team"), []).append(e)\n'
+            "        else:\n"
+            "            # An UNKNOWN label fails CLOSED"
             in SKILL_TEXT
         )
         # The sentence wraps across comment lines, so the fragments are
         # asserted separately rather than as one contiguous phrase.
         assert "The OLD-FORMAT chain defaults" in SKILL_TEXT
         assert "the other way on purpose" in SKILL_TEXT
-        # FOREIGN is the list the report loop reads, so an unknown label is
-        # reported, not processed.
         assert "for e in foreign:" in SKILL_TEXT
 
     def test_m1_union_annotates_its_inputs_as_object(self):
@@ -1607,15 +1566,13 @@ class TestHarvestRuleProse:
         )
 
     def test_m6_underivable_report_needs_a_partition(self):
-        """M6: the report fired once per population id, including ids with
-        no journal match and therefore no partition to be underivable
+        """The underivable report fires only for an id with a journal match:
+        a population id with no match has no partition to be underivable
         about."""
-        guard = SKILL_TEXT.split("if not this_team:", 1)[1].split(
-            "\n    else:", 1
-        )[0]
-        assert "if matches:" in guard
-        assert guard.index("if matches:") < guard.index(
-            "handoff team identity underivable for task"
+        assert (
+            "    if matches and not this_team:\n"
+            '        report(f"handoff team identity underivable for task "'
+            in SKILL_TEXT
         )
 
     # ---- final text-accuracy pass: items 1-6 ----
@@ -1637,12 +1594,12 @@ class TestHarvestRuleProse:
             "for this line" in SKILL_TEXT
         )
 
-    def test_item3_admitted_id_reads_every_from_store_file(self):
-        """Item 3: "that store's whole task file" had no referent under a
-        flat id set; the pseudocode reads every from store with a file."""
+    def test_item3_admission_is_per_store(self):
+        """An id admitted in one from store never admits another store's file
+        of the same number."""
         assert (
-            "the whole task file of EVERY from store that has one for that id"
-            in SKILL_TEXT
+            "an id admitted in one from store never admits another store's "
+            "file of the same number" in SKILL_TEXT
         )
 
     def test_item4_gap_agent_is_unknown_when_unrecoverable(self):
@@ -1655,15 +1612,13 @@ class TestHarvestRuleProse:
             "that is no longer recoverable" in SKILL_TEXT
         )
 
-    def test_item6_emit_side_subject_claim_is_true_as_a_calling_claim(self):
-        """FIX 3: the sentence said the step "names" the helper; the step's
-        region had zero occurrences. The true claim is about CALLING: the
-        step describes the substitution, and calls only `disk_identity`."""
+    def test_item6_disk_identity_applies_the_substitution(self):
+        """The step calls only `disk_identity`, which applies the emit paths'
+        substitution; no separate substitution route exists to call."""
         assert (
-            "the step DESCRIBES the substitution but calls only "
-            "`disk_identity`, which applies it" in SKILL_TEXT
+            "with the emit paths' `(no subject)` substitution applied"
+            in SKILL_TEXT
         )
-        # The old, false NAMING claim must not come back.
         assert "the step names it but calls only" not in SKILL_TEXT
 
     def test_classifier_docstring_states_the_ownerless_skip(self):
@@ -1687,15 +1642,30 @@ class TestHarvestRuleProse:
         )
         assert "Skipping leaves the event UNMATCHED" not in SKILL_TEXT
 
-    def test_s3_realign_team_names_are_filtered_to_strings(self):
-        """S3 (pseudocode-level): `from_teams` is built from journal-supplied
-        `team_realigned` `from` fields. A non-str entry (a list) matches
-        PARTITION_FROM and then raises `unhashable type` at the
-        `from_events.setdefault` key. Only non-empty strings enter the list,
-        so a non-str can never reach a dict key."""
-        assert 'isinstance(event.get("from"), str)' in SKILL_TEXT
-        assert "for event in realign_events" in SKILL_TEXT
-        assert "unhashable type" in SKILL_TEXT
+    def test_s3_realign_team_names_go_through_the_shared_filter(self):
+        """`from_teams` is built from journal-supplied `team_realigned` `from`
+        fields, so it goes through `safe_from_teams`: a non-str, an unsafe
+        path component and this team's own name never enter the list, and
+        each rejection is reported."""
+        assert (
+            "from_teams, from_reports = safe_from_teams(realign_events, this_team)"
+            in SKILL_TEXT
+        )
+        assert "for line in from_reports:" in SKILL_TEXT
+        assert "Never join a `from` that route rejected into a path" in SKILL_TEXT
+
+    def test_step31_item1_requires_identity_match(self):
+        """Step 3.1 reads a task file's metadata for a unit only when that
+        record's identity is the unit's group identity."""
+        assert "use the `metadata` Step 3 passed for this unit" in SKILL_TEXT
+        assert (
+            "only if that record's `disk_identity(owner, subject)` equals the "
+            "unit's group identity" in SKILL_TEXT
+        )
+        assert (
+            "A same-numbered task file of a different occupant is never this "
+            "unit's sibling source." in SKILL_TEXT
+        )
 
     def test_foreign_non_str_team_reports_a_schema_line(self):
         """A non-str team is a SCHEMA violation wearing a routing label: the
