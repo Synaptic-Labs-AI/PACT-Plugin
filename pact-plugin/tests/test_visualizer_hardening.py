@@ -97,6 +97,27 @@ class TestStopPidCrossCheck:
         # The message names the escape hatch for a stuck user.
         assert str(settings.state_file(state_dir)) in out
 
+    def test_refusal_quotes_the_delete_operand(
+        self, live_server, tmp_path, monkeypatch, capsys
+    ):
+        """The delete hint must be one shell word for any state-dir path."""
+        srv = live_server
+        state_dir = tmp_path / "state dir;touch PWNED"
+        cli.write_state(
+            state_dir,
+            _state(srv.server_port, pid=999_999, instance_id=srv.instance_id),
+        )
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+
+        args = cli.build_parser().parse_args(
+            ["--stop", "--state-dir", str(state_dir)]
+        )
+        assert cli.cmd_stop(args) == 1
+
+        out = capsys.readouterr().out
+        operand = out.split("delete ", 1)[1].split(" to clear", 1)[0]
+        assert shlex.split(operand) == [str(settings.state_file(state_dir))]
+
     def test_stop_signals_when_the_pid_matches(self, tmp_path, monkeypatch, capsys):
         """Control arm: the guard must not block an honest stop."""
         state_dir = tmp_path / "state"
@@ -161,29 +182,94 @@ class TestStopHintQuoting:
         ]
 
 
-class TestReuseDemoMode:
-    def _roots(self, tmp_path):
-        return [
-            settings.RootSpec(id="r", label="r", path=tmp_path, default=True)
-        ]
+def _one_root(tmp_path):
+    return [settings.RootSpec(id="r", label="r", path=tmp_path, default=True)]
 
-    def _args(self, tmp_path, *extra):
-        return cli.build_parser().parse_args(
-            ["--detach", "--state-dir", str(tmp_path / "state"), *extra]
+
+def _reuse_args(tmp_path, *extra):
+    return cli.build_parser().parse_args(
+        ["--detach", "--state-dir", str(tmp_path / "state"), *extra]
+    )
+
+
+class TestReuseDemoMode:
+    def test_reuse_refuses_across_demo_modes(self, tmp_path):
+        state = {
+            "version": settings.VERSION,
+            "roots": ["r"],
+            "port": 5,
+            "filters": {},
+            "demo": False,
+        }
+        with pytest.raises(cli.CliError) as excinfo:
+            cli._refuse_on_reuse_mismatch(
+                state, _reuse_args(tmp_path, "--demo"), _one_root(tmp_path)
+            )
+        # Branch-specific: the wording must say which mode the server runs.
+        assert "started without --demo" in str(excinfo.value)
+
+    def test_reuse_refuses_demo_request_against_a_real_instance(self, tmp_path):
+        state = {
+            "version": settings.VERSION,
+            "roots": ["r"],
+            "port": 5,
+            "filters": {},
+            "demo": True,
+        }
+        with pytest.raises(cli.CliError) as excinfo:
+            cli._refuse_on_reuse_mismatch(
+                state, _reuse_args(tmp_path), _one_root(tmp_path)
+            )
+        assert "started with --demo" in str(excinfo.value)
+
+    def test_reuse_allows_the_same_demo_mode(self, tmp_path):
+        state = {
+            "version": settings.VERSION,
+            "roots": ["r"],
+            "port": 5,
+            "filters": {},
+            "demo": True,
+        }
+        cli._refuse_on_reuse_mismatch(
+            state, _reuse_args(tmp_path, "--demo"), _one_root(tmp_path)
         )
 
-    def test_reuse_refuses_across_demo_modes(self, tmp_path):
+
+class TestReuseVersion:
+    def test_reuse_refuses_a_different_version(self, tmp_path):
+        state = {
+            "version": "0.0.1",
+            "roots": ["r"],
+            "port": 5,
+            "filters": {},
+            "demo": False,
+        }
+        with pytest.raises(cli.CliError) as excinfo:
+            cli._refuse_on_reuse_mismatch(
+                state, _reuse_args(tmp_path), _one_root(tmp_path)
+            )
+        message = str(excinfo.value)
+        assert "version 0.0.1" in message
+        assert f"this is {settings.VERSION}" in message
+
+    def test_reuse_refuses_an_unknown_version(self, tmp_path):
         state = {"roots": ["r"], "port": 5, "filters": {}, "demo": False}
         with pytest.raises(cli.CliError) as excinfo:
             cli._refuse_on_reuse_mismatch(
-                state, self._args(tmp_path, "--demo"), self._roots(tmp_path)
+                state, _reuse_args(tmp_path), _one_root(tmp_path)
             )
-        assert "--demo" in str(excinfo.value)
+        assert "version (unknown)" in str(excinfo.value)
 
-    def test_reuse_allows_the_same_demo_mode(self, tmp_path):
-        state = {"roots": ["r"], "port": 5, "filters": {}, "demo": True}
+    def test_reuse_allows_the_same_version(self, tmp_path):
+        state = {
+            "version": settings.VERSION,
+            "roots": ["r"],
+            "port": 5,
+            "filters": {},
+            "demo": False,
+        }
         cli._refuse_on_reuse_mismatch(
-            state, self._args(tmp_path, "--demo"), self._roots(tmp_path)
+            state, _reuse_args(tmp_path), _one_root(tmp_path)
         )
 
 

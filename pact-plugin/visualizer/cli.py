@@ -530,7 +530,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print(
             f"PACT Mission Control: state file pid {pid} does not match the "
             f"server's pid {reported_pid!r}; refusing to signal — delete "
-            f"{settings.state_file(state_dir)} to clear the record"
+            f"{shlex.quote(str(settings.state_file(state_dir)))} to clear "
+            "the record"
         )
         return 1
     _terminate(pid)
@@ -562,10 +563,10 @@ def _reuse_if_running(
 
     Location: cli._reuse_if_running.
     Summary: Reuses only when the running instance serves EXACTLY what this
-             invocation asked for — same root ids in the same order, a
-             compatible port (an explicit --port must match; 0 accepts any),
-             the same launch mode (--demo), and the same --project/--session
-             filters. A mismatched request
+             invocation asked for — the same build version, the same root ids
+             in the same order, a compatible port (an explicit --port must
+             match; 0 accepts any), the same launch mode (--demo), and the
+             same --project/--session filters. A mismatched request
              refuses with a CliError pointing at --stop, because silently
              printing the old instance's URL would show the user the wrong
              data. The state file records the filters so the comparison is
@@ -593,6 +594,19 @@ def _refuse_on_reuse_mismatch(
     state: dict, args: argparse.Namespace, roots: Sequence[RootSpec]
 ) -> None:
     """Raise CliError when the running instance does not serve this request."""
+    running_version = state.get("version")
+    if not isinstance(running_version, str) or running_version != VERSION:
+        # Every writer of this file has recorded its version, so a missing or
+        # non-text value is a hand-edited/corrupt record, not an old build.
+        shown = (
+            running_version
+            if isinstance(running_version, str) and running_version
+            else "(unknown)"
+        )
+        raise CliError(
+            f"a running instance is version {shown} but this is {VERSION}; "
+            f"stop it first with {_stop_hint(args)}"
+        )
     wanted_roots = [root.id for root in roots]
     running_roots = [str(item) for item in state.get("roots", [])]
     if wanted_roots != running_roots:
