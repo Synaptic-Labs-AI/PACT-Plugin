@@ -9,6 +9,9 @@ truth for the HTTP payloads, DOM shell, and JS module boundaries.
   `~/.claude/teams`, or `~/.claude/pact-memory`.
 - Local-only. The server binds `127.0.0.1` only. No `--host`, no
   `--allow-remote`, no external network calls from the server or the page.
+- Single-user. Loopback is reachable by any local UID: the API serves the
+  journals and the `/api/health` instance token without authentication, so the
+  documented posture is one trusted user per machine.
 - Python 3.12+, stdlib only. Front-end is plain ES modules, no build step.
 - Runtime uses no model/API tokens. `/PACT:visualize` and direct
   `bin/pact-viz` are two equal launch paths over the same server.
@@ -43,6 +46,14 @@ file's `instance_id` AND its pid. It prints exactly one `Stop: ...` line:
   server's pid <server-pid>; refusing to signal` (a missing pid prints `None`),
   and the state file is deliberately kept: deleting the record would turn a
   recoverable mismatch into a server nothing can stop. Exit 1.
+
+Two consequences follow from the state file being the only record. A refusal
+leaves `<state-dir>/server.json` (default `<config>/pact-viz/server.json`) in
+place, so `--stop` keeps refusing until you delete that file by hand and then
+stop the unrecorded server by pid or port. An unconfirmed stop removes the
+state file and log while the server may still be answering, so exit 1 means the
+process must be checked directly, by pid or port, rather than trusting the
+missing record.
 
 ## HTTP API
 

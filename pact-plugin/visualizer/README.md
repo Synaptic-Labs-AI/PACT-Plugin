@@ -178,6 +178,10 @@ command that closes the same instance. `--stop` prints one `Stop: ...` line:
   `<config>/pact-viz/server.json` (directory `0700`, file `0600`), used to find
   and health-check a detached instance. `--stop` removes the instance; you may
   delete a stale state file by hand.
+- **Single-user by design.** Loopback is reachable by any process or user on
+  the machine, so anyone who can reach the port can read the journals the viewer
+  serves and the `/api/health` instance token; there is no authentication. Run it
+  on a single-user machine, and over SSH only through a tunnel you control.
 - **Journal content is private.** The UI renders agent names, task subjects,
   handoff notes, and review text from your journals. Treat screenshots and shared
   URLs as containing the same information as the journals themselves.

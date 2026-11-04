@@ -10,7 +10,7 @@ Mission Control renders a PACT run from its session journal: phases, the special
 
 - Empty or `live` — this session's project: pass `--project "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"`, then open that project's newest live run and, if no run of that project is live, its newest run. The project slug is the basename of the project root (`$CLAUDE_PROJECT_DIR`, so `/repos/my-app` becomes `my-app`), never the basename of a worktree or subdirectory the shell happens to be in. Use `<project>` to target another project.
 - `demo` — a deterministic built-in training run; available even with no journals on disk.
-- `<project>` — a project slug from the session list; open its newest run. Quote it and pass it verbatim: nothing between this argument and the command sanitizes the value.
+- `<project>` — the PROJECT label exactly as the session list shows it (the API constrains it to `[A-Za-z0-9._-]`); open its newest run. Never pass a raw directory name here. Keep the value quoted in the command (`--project "<label>"`) as defence in depth, but the label constraint — not the quoting — is what makes it safe against `$( )`, backticks, or embedded quotes.
 - `stop` — stop the Mission Control server this session launched.
 
 ## Launch
@@ -21,7 +21,7 @@ Run exactly one of these, from any directory:
 |---|---|
 | empty / `live` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"` |
 | `demo` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --demo` |
-| `<project>` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project "<slug>"` |
+| `<project>` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project "<label>"` |
 | `stop` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --stop` |
 
 Pass `--open` when the user is at a local GUI session. Omit it when the session is headless — over SSH (`$SSH_CONNECTION` or `$SSH_TTY` is set) or with no display server available — and report the printed `URL:` line so the user can open it themselves.
