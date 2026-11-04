@@ -96,6 +96,40 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
     source: Object.assign({}, feedBase.source, { session_id: "zzz" }),
   })));
 
+  /* Drive the real setModel cache decision with a fake Panels `this`: the
+   * render surfaces are stubbed, but the sameRun/key logic is the shipped
+   * code. A shifted window must rebuild even at constant event count. */
+  const { Panels } = await import("./panels.js");
+  let rebuilds = 0;
+  const fakePanels = (cachedKey, shown) => ({
+    model: shown,
+    cursor: shown.events.length,
+    filter: "all",
+    modalTab: null,
+    _nodes: { feed: {}, feedCount: null },
+    _feed: {
+      key: cachedKey,
+      filter: "all",
+      count: shown.events.length,
+      matched: shown.events.length,
+      rendered: shown.events.length,
+      list: {},
+      capNote: null,
+    },
+    _eventTotal: Panels.prototype._eventTotal,
+    _updateFeed: Panels.prototype._updateFeed,
+    _rebuildFeed: () => { rebuilds += 1; },
+    _updateFeedCount: () => {},
+    renderLeft: () => {},
+    renderFeed: () => {},
+  });
+  rebuilds = 0;
+  Panels.prototype.setModel.call(fakePanels(feedKey(windowA), windowB), windowB);
+  check("setModel rebuilds a shifted window at constant length", rebuilds === 1);
+  rebuilds = 0;
+  Panels.prototype.setModel.call(fakePanels(feedKey(windowB), windowB), windowB);
+  check("setModel leaves an unchanged window alone", rebuilds === 0);
+
   /* The launch filter label is built only from the server's echoed filters. */
   check("a project filter is named", requestedFilterLabel({ project: "My App" }) === "project My App");
   check("a session filter is named", requestedFilterLabel({ session: "abc" }) === "session abc");

@@ -177,6 +177,12 @@
   overflow-wrap: anywhere;
 }
 
+.run-altered {
+  color: var(--warning);
+  font-size: 11px;
+  vertical-align: 1px;
+}
+
 .run-sub {
   margin-top: 2px;
   color: var(--muted);

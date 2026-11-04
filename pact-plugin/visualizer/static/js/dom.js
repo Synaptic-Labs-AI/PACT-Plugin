@@ -1,5 +1,9 @@
 /* Tiny DOM helpers. No innerHTML anywhere: all data becomes text nodes. */
 
+/* User-facing explanation for a project label the server had to sanitize. */
+export const PROJECT_ALTERED_NOTE =
+  "The directory name contains characters that are not shown verbatim; this label was altered for display.";
+
 export function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {

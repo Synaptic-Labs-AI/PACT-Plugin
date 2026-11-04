@@ -11,6 +11,7 @@ import {
   rootChangeAction,
   modeBadge,
   requestedFilterLabel,
+  PROJECT_ALTERED_NOTE,
 } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
@@ -406,9 +407,6 @@ function sessionsFor(rootId, slug) {
     .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
 }
 
-const PROJECT_ALTERED_TITLE =
-  "The directory name contains characters that are not shown verbatim; this label was altered for display.";
-
 /* The server constrains a session's project label to [A-Za-z0-9._-] and sets
  * project_altered when it substituted characters. The select value stays the
  * slug (directory name), which is what every caller compares against. */
@@ -430,7 +428,7 @@ function populateProjects(rootId) {
       value: p,
       text: info.altered ? `${info.label} ⚠` : info.label,
       attrs: info.altered
-        ? { title: PROJECT_ALTERED_TITLE, "aria-label": `${info.label}. ${PROJECT_ALTERED_TITLE}` }
+        ? { title: PROJECT_ALTERED_NOTE, "aria-label": `${info.label}. ${PROJECT_ALTERED_NOTE}` }
         : { title: info.label },
     }));
   }

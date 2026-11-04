@@ -15,6 +15,7 @@ import {
   createSeqIndex,
   runKey,
   feedKey,
+  PROJECT_ALTERED_NOTE,
 } from "./dom.js";
 import { drawRadar, drawSparkline } from "./charts.js";
 
@@ -661,11 +662,18 @@ export class Panels {
     ]));
 
     const title = visible(meta.project) || visible(meta.team) || "Unnamed run";
+    /* meta.project is the sanitized label too; the same one-marker pattern as
+     * the project select explains why it may differ from the directory name. */
+    const titleAltered = meta.project_altered === true;
     card.appendChild(el("div", {
       class: "run-title",
-      text: title,
-      attrs: { title: visible(meta.project_dir) || title },
-    }));
+      attrs: titleAltered
+        ? { title: `${title}. ${PROJECT_ALTERED_NOTE}`, "aria-label": `${title}. ${PROJECT_ALTERED_NOTE}` }
+        : { title: visible(meta.project_dir) || title },
+    }, [
+      el("span", { text: title }),
+      titleAltered ? el("span", { class: "run-altered", text: " ⚠", attrs: { "aria-hidden": "true" } }) : null,
+    ]));
     const subBits = [visible(meta.team), visible(meta.run_kind), visible(model.source && model.source.kind)].filter(Boolean);
     card.appendChild(el("div", { class: "run-sub", text: subBits.join(" · ") || "local journal" }));
 
