@@ -344,6 +344,7 @@ IDs and their owners:
 #recorder                timeline.js renders
 #modal-root              panels.js renders, hidden when empty
 #toast-root              panels.js/app.js appends
+#live-announcer          app.js announces through it (visually hidden)
 #loading                 app.js shows/hides
 #error-banner            app.js shows/hides
 ```
@@ -359,12 +360,21 @@ the header. They only render their own roots and call callbacks.
 export function el(tag, props = {}, children = []); // props: class, text, attrs, on, style, dataset, value (unknown props throw)
 export function clear(node);
 export function text(node, value);
+export function toggleClass(node, name, on);
+export function on(node, type, fn, opts);  // adds listener
+export function clamp(n, lo, hi);
 export function fmtClock(seconds);   // "01:23:45"
 export function fmtDuration(seconds);
 export function fmtTime(iso);        // local HH:MM:SS
+export function fmtDate(iso);        // short local date
+export function missionSecondsAt(model, cursor);
 export function shortSha(sha);
-export function clamp(n, lo, hi);
-export function on(node, type, fn);  // adds listener
+export function rootChangeAction({ hasSession, requestedProject, hasRun });
+export function modeBadge({ hasModel, mode, followLive, status });
+export function runKey(model);
+export function createSeqIndex(model);
+export function cssToken(name);
+export function debounce(fn, ms = 120);
 ```
 
 `el` must set text/attributes without innerHTML. Children may be strings,
@@ -410,6 +420,7 @@ export class Panels {
   setSelectedAgent(name);
   setLive(isLive);
   toast({title, body, kind});      // achievement/notice
+  setNotice(message);              // neutral "not here" empty state
   showError(message, {retry});
   openDebrief(tab);                // "tasks" | "handoffs" | "gates" | "reviews" | "variety" | "raw"
   closeModal();
@@ -477,7 +488,7 @@ Wires everything. It owns:
 
 ```
 --bg: #070b16; --panel: #0e1628; --panel-2: #131f36; --line: #24324f;
---text: #e8eefc; --muted: #8fa0c4; --dim: #5f7096;
+--text: #e8eefc; --muted: #8fa0c4; --dim: #7a8cb0;
 --prepare: #2dd4bf; --architect: #60a5fa; --code: #fbbf24; --test: #f472b6;
 --success: #4ade80; --warning: #fbbf24; --danger: #fb7185; --accent: #a3e635;
 --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
