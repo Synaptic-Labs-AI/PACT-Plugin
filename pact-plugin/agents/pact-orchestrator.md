@@ -237,7 +237,7 @@ Create a feature branch before any new workstream begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
 
-**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — the one exception is the peer-review cold reviewer, dispatched as an anonymous `general-purpose` subagent with no `team_name`.
+**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams. This rule does not reach the peer-review cold reviewer, which is not a specialist dispatch: it is an anonymous `general-purpose` subagent with no `team_name`.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides — delegate anyway.
 
@@ -398,7 +398,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 >
-> Exception: the peer-review cold reviewer is dispatched as an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair. See the Cold Reviewer Lane in the `peer-review` command.
+> Outside this rule: the peer-review cold reviewer is not a specialist dispatch. It is an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair. See the Cold Reviewer Lane in the `peer-review` command.
 
 **Teachback-Gated Dispatch**:
 
@@ -460,7 +460,8 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 | Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
 | Agent's context near capacity from prior work | Spawn new |
-| Reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
+| Warm reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
+| Cold reviewer found issues | Never a fixer — route to a warm fixer (see the Cold Reviewer Lane in the `peer-review` command) |
 
 **Default**: Prefer reuse when domain + context overlap. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
 
@@ -605,7 +606,7 @@ This is the L1.5 entailment-mesh discipline — distinct from L2 (purpose) verif
 
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF (6 fields, 5 required: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. A closing response whose prose is missing the HANDOFF elements makes `validate_handoff` refuse the teammate's stop (the hook reads the closing message, not `metadata.handoff`), sending the teammate back to complete it. If a stop still lands without a proper HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal `SendMessage`** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) and validate the HANDOFF payload the notify carried — raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles, so the disk read is the deferred audit (Read-Trigger point 4), not the acceptance input. Then follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed. Note: HANDOFF's `reasoning_chain` (sender's view) is the symmetric counterpart to teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) — see [pact-ct-teachback §Relationship to Existing Protocols](../protocols/pact-ct-teachback.md#relationship-to-existing-protocols).
+Every agent except the peer-review cold reviewer delivers a structured HANDOFF (6 fields, 5 required: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. A closing response whose prose is missing the HANDOFF elements makes `validate_handoff` refuse the teammate's stop (the hook reads the closing message, not `metadata.handoff`), sending the teammate back to complete it. If a stop still lands without a proper HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal `SendMessage`** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) and validate the HANDOFF payload the notify carried — raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles, so the disk read is the deferred audit (Read-Trigger point 4), not the acceptance input. Then follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed. Note: HANDOFF's `reasoning_chain` (sender's view) is the symmetric counterpart to teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) — see [pact-ct-teachback §Relationship to Existing Protocols](../protocols/pact-ct-teachback.md#relationship-to-existing-protocols).
 
 #### Directive-Reflection Check
 

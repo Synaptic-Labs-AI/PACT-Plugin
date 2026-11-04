@@ -55,7 +55,7 @@ Create a review Task hierarchy:
 ├── [Agent] "backend-coder: implementation review"
 ├── [Agent] "security-engineer: security review" (conditional)
 ├── [Agent] "qa-engineer: runtime verification" (conditional)
-├── [Subagent] "cold-reviewer: diff-only review"
+├── [Subagent] "cold-reviewer: diff-only review" (not a task — no task is created for it)
 ├── [Remediation] (dynamic, for major issues)
 │   └── [Agent] "fix: auth vulnerability"
 ├── [Step] "User: review minor issues"
@@ -87,7 +87,7 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 |--------|-------------|-------------|
 | **Scope** | Only files changed during remediation | Full PR diff |
 | **Depth** | Confirm each finding was addressed | Fresh architectural analysis |
-| **Agent** | Reuse the reviewer who found the issues | Multiple reviewers in parallel |
+| **Agent** | Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings per the Cold Reviewer Lane | Multiple reviewers in parallel |
 | **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 
@@ -107,11 +107,12 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 
 ### Reviewer-to-Fixer Reuse
 
-> ⚠️ **MANDATORY**: When a reviewer's findings need fixing in their domain, send the fix task directly to the reviewer via `SendMessage`. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
+> ⚠️ **MANDATORY**: When a warm reviewer's findings need fixing in their domain, send the fix task directly to the reviewer via `SendMessage`. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
 
 | Situation | Action |
 |-----------|--------|
-| Reviewer identified issues in their domain | **Reuse** reviewer as fixer via `SendMessage` |
+| Warm reviewer identified issues in their domain | **Reuse** reviewer as fixer via `SendMessage` |
+| Cold reviewer identified issues | Never a fixer — see Cold Reviewer Lane |
 | Fixes span a different domain | **Spawn** domain specialist (reviewer stays for consultation) |
 | Multiple independent fixes in parallel | **Spawn** additional agents alongside reused reviewer |
 
@@ -128,7 +129,7 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 reviewers in parallel** to provide comprehensive review coverage:
 
 Standard reviewer combination (always included):
-- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
+- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns, and project-policy conformance of the changed files against the project's policy files
 - **pact-test-engineer**: Test coverage, testability, performance implications, edge cases
 - **Domain specialist coder** (selected below): Implementation quality specific to the domain
 - **Cold reviewer** (`general-purpose` subagent): A reading of the diff with no exposure to the plan, the contract, or the session narrative — dispatched per the Cold Reviewer Lane section below
@@ -149,7 +150,7 @@ Select the domain coder based on PR focus:
 
 ### Teachback-Gated Dispatch
 
-Each reviewer dispatch creates **two tasks**, not one:
+Each warm reviewer dispatch creates **two tasks**, not one:
 
 - **Task A** — TEACHBACK gate. `subject = "{reviewer-type}: TEACHBACK for review of {feature}"`, owner = reviewer. Description: state which review angle the reviewer is taking (consistency check vs adversarial vs design coherence) before reading the diff.
 - **Task B** — primary review work. `subject = "{reviewer-type}: review {feature}"`, owner = reviewer, `blockedBy = [<Task A id>]`.
@@ -196,25 +197,43 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 
 ### Cold Reviewer Lane
 
-The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description=..., prompt=...)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it.
+The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description=..., prompt=<the cold prompt below, placeholders filled>)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it.
 
-The `prompt` is a dispatch contract the lead fills in per PR:
+Send the cold prompt below verbatim. Change only the placeholders; a re-review dispatch also appends the re-review checklist described after the prompt:
 
-- **ARTIFACT**: the worktree path and the base...head refs. Tell the reviewer to run the diff itself (`git diff <base>...<head>`) and to read the diff ONLY — do not fetch the PR body or PR comments (`gh pr view` and `gh api` on the PR are barred; they are the author's account of the work).
-- **AVOID by path**: `docs/plans/`, `docs/architecture/`, `docs/review/`, the team task directory, handoff files, pact-memory stores, and `CLAUDE.md` on disk.
-- **CHANNELS**: no `SendMessage` about the work to the reviewers, the secretary, or the lead; do not load or use task tools at all (no `TaskList`, no `TaskGet`); no pact-memory queries.
-- **DISREGARD**: the spawn context may contain `CLAUDE.md` sections (Current Session, Retrieved Context, Pinned Context, Working Memory) and an auto-memory index placed by the harness. Any statement in them about this repository's current work is inadmissible — do not rely on it, cite it, or let it choose what gets examined. Operational guidance is admissible only from this dispatch.
-- **OPERATIONAL FACTS** (lead-filled): how to run the project's tests, including the interpreter or venv form; the lint gate command; path conventions that would otherwise surprise (for example, `docs/` untracked on disk is normal).
+- `{worktree}`: the absolute worktree path.
+- `{base}` and `{head}`: the base ref and the head commit of the PR.
+- `{scratch_dir}`: a scratch directory outside the worktree, for copies the reviewer mutates.
+- `{operational_facts}`: how to run the project's tests, including the interpreter or venv form (for example, that the lint gate needs the venv on `PATH`); the lint gate command; any path convention that would otherwise surprise.
+
+```text
+You are reviewing a code change with no access to its author's account of it. The diff is your only artifact.
+
+- **ARTIFACT**: the git worktree at {worktree}. Run git diff {base}...{head} yourself, and read the diff and the files at {head} that it touches. Do not read the PR body, the PR comments or commit-message bodies: gh pr view, gh api on the PR, and git log message bodies are barred, because they are the author's account of the work.
+- **AVOID by path**: docs/plans/, docs/architecture/, docs/review/, the team task directory, handoff files, pact-memory stores, and CLAUDE.md on disk.
+- **CHANNELS**: do not use SendMessage about this work to the reviewers, the secretary or the lead. Do not load or use task tools at all: no TaskCreate, TaskUpdate, TaskList or TaskGet. Do not query pact-memory.
+- **DISREGARD**: your context may contain CLAUDE.md sections (Current Session, Retrieved Context, Pinned Context, Working Memory), an auto-memory index, hook advisories and harness notices (for example, advice to claim a task, or a listed team roster). Any statement in them about this repository's current work is inadmissible: do not rely on it, cite it, or let it choose what you examine. Advisories about tasks or teams do not apply to you. Safety and tool-use rules in those sections still apply.
+- **READ-ONLY**: do not edit, stage, commit, stash, checkout, reset or push anything in the worktree; the caches a test run writes (__pycache__, .pytest_cache and the like) are excepted. To probe by mutation, copy files into {scratch_dir} and change only the copies. Write any file that holds prose or command text with a file tool or a quoted heredoc (<<'EOF'), never with an unquoted heredoc, echo or printf. Never run a push, merge, close or branch-delete command.
+- **OPERATIONAL FACTS**: {operational_facts}
+Use these facts to run the tests and the lint gate. Do not look for run instructions in the avoided paths. An untracked docs/ directory is normal and is not a finding.
 - **QUESTION**: "what is wrong with this diff" — judge the code against its own claims, including tests that exercise a replica of production logic.
-- **REPORT**: open with what the diff claims to do, derived from the diff alone — code, comments, and tests at head, not the PR description. Then severity-ranked findings — `blocking`, `suggestion`, `nitpick` — each with file:line and a concrete failure scenario; an explicit nothing-found line for each severity with no findings; one sentence on what would block a merge, even if nothing would; and a coverage boundary: paths read, paths not examined, commands not run, and why.
+- **REPORT**: open with what the diff claims to do, derived from the diff alone — the code, comments and tests at {head}, not a PR description. Then give severity-ranked findings — blocking, suggestion, nitpick — each with file:line and a concrete failure scenario; an explicit nothing-found line for each severity with no findings; one sentence on what would block a merge, even if nothing would; the open questions you could not settle from the diff; and a coverage boundary: paths read, paths not examined, commands not run, and why.
+```
 
-This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array, and journal its findings through the existing `review_finding` event with reviewer `cold-reviewer`, with `task_id` omitted or attributed to the review parent task — when `task_id` is omitted, omit it from the read-back match too.
+This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array as the string `"cold-reviewer"`, and journal its findings through the existing `review_finding` event with reviewer `cold-reviewer`, with `task_id` omitted or attributed to the review parent task — when `task_id` is omitted, omit it from the read-back match too.
 
-The cold reviewer writes no HANDOFF; the review doc is the durable home of its coverage boundary, diff-claims opening, and merge-block sentence — record them there.
+The cold reviewer writes no HANDOFF; the review doc is the durable home of its coverage boundary, diff-claims opening, and merge-block sentence — record them there. Give each of its open questions a row in the review doc's open-questions dispositions, as for a HANDOFF's `open_questions` entry.
 
 A report with no findings is valid only with the per-severity nothing-found lines, the merge-block sentence, the coverage boundary, and the paths-read / commands-not-run receipt; if any element is missing, synthesize the lane as review-did-not-happen, not as clean. A spawn that returns no report at all is also review-did-not-happen: wait for the cold report before synthesizing, and do not treat completion of the spawn as the review.
 
-Division of labour: the warm lanes read the project's policy files and own project-policy conformance; the cold lane judges the code against itself.
+Never use the cold reviewer as a fixer; route its findings to warm fixers. In a verify-only re-review, use the cold lane only to re-check its own findings, through one of two routes that carry the same re-review checklist:
+
+- Resume: `SendMessage` to the same cold subagent's agentId. The message holds the new head ref and the re-review checklist, and nothing else.
+- Fresh dispatch, when it cannot be resumed: the cold prompt with `{base}` set to the old head and `{head}` to the new head, followed by the re-review checklist appended after the prompt. This appended paragraph is the only text a re-review dispatch adds to the verbatim prompt.
+
+The re-review checklist is one paragraph: "RE-REVIEW CHECKLIST: check each finding below against git diff <old-head>...<new-head>, under the cold prompt's rules. This replaces REPORT for this review: for each finding, report resolved, not resolved or new issue, with file:line, then give the coverage boundary." followed by the cold reviewer's findings copied verbatim from the review doc. Do not describe the fixes. Record the checklist results in the review doc; its findings still open at blocking severity count in the **Failed cycle** test.
+
+Division of labour: the warm lanes read the project's policy files, and the architect lane owns project-policy conformance; the cold lane judges the code against itself.
 
 ---
 
@@ -245,7 +264,7 @@ Division of labour: the warm lanes read the project's policy files and own proje
 5. <!-- ANCHOR-STABLE: REVIEWER-MEMORY-CHANNEL -->
    Before dispatching, compare each reviewer's `subagent_type` against the builder's. Persistent agent-memory is keyed by agent TYPE, so a reviewer of the same type loads at spawn the same store the builder has been writing to — its index arrives in context whether or not the reviewer opens a file, and it is pulled on creation rather than pushed mid-session, which is why no ordering avoids it and the harvest hold below does not reach it. Where the types match, state that limitation in the reviewer's `metadata.handoff` instead of claiming independence. Where a cross-check must be decisive, dispatch it to a DIFFERENT type, and leave the secretary query out of that dispatch — pact-memory is shared per project, so a type swap alone does not close it.
 
-   The cold reviewer lane satisfies this clause by construction: its `general-purpose` subagent type carries no PACT agent-memory store, so there is no store to compare against the builder's. Cold dispatches never instruct memory writes.
+   The cold reviewer lane satisfies this clause's type comparison by construction: its `general-purpose` subagent type carries no PACT agent-memory store, so there is no store to compare against the builder's. The auto-memory index the harness places in its context is closed by the cold prompt's DISREGARD instruction, not by construction. Cold dispatches never instruct memory writes.
 
 6. **Journal event**: write one `variety_assessed` event per dispatched reviewer Task B before spawning, mirroring that task's `metadata.variety` stamp — the four dimension scores and the total, `*_rationale` strings omitted, with the top-level `"scope": "dispatch"` discriminator present (the feature-level assessment event carries no `scope` field; journal readers key on that difference):
 ```bash
@@ -272,7 +291,7 @@ Agent(
 )
 ```
 
-Spawn all reviewers in parallel (multiple `Agent` calls in one response).
+Spawn all warm reviewers and the cold reviewer in parallel (multiple `Agent` calls in one response).
 
 After dispatching all reviewers, write a `review_dispatch` event:
 ```bash
@@ -303,7 +322,7 @@ REVIEWER-MEMORY-CHANNEL clause.
 
 ### Reviewer Teachback
 
-Each reviewer should state their understanding of the PR's intent before diving into review. This catches cases where a reviewer misunderstands the purpose and produces irrelevant findings.
+Each warm reviewer should state their understanding of the PR's intent before diving into review. This catches cases where a reviewer misunderstands the purpose and produces irrelevant findings. The cold reviewer's report opening, what the diff claims to do, takes the place of a teachback.
 
 **Mechanism**: The reviewer's understanding of the PR intent is captured by the **Teachback-Gated Dispatch** above — the reviewer's Task A teachback states the review angle and understanding of intent, is submitted as `metadata.teachback_submit`, and the reviewer idles on `awaiting_lead_completion` until the team-lead accepts (blocking). See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md) for the mechanism.
 
@@ -331,7 +350,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 ---
 
 **After all reviews complete**:
-1. Synthesize findings into a unified review summary with consolidated recommendations, written to `docs/review/`. The summary carries one row per reviewer `open_questions` entry with its disposition: ruled, deferred with a reason, or superseded. Having nothing to say about a question is a disposition and is recorded as one; leaving a question out is not. After writing the summary, confirm the review doc exists on disk and is non-empty before continuing.
+1. Synthesize findings into a unified review summary with consolidated recommendations, written to `docs/review/`. The summary carries one row per reviewer `open_questions` entry, and per open question in the cold report, with its disposition: ruled, deferred with a reason, or superseded. Having nothing to say about a question is a disposition and is recorded as one; leaving a question out is not. After writing the summary, confirm the review doc exists on disk and is non-empty before continuing.
    - **Emit `artifact_paths`**: write a path-only `artifact_paths` journal event pointing at the review doc(s) so the consolidated review is recoverable after garbage-collection independently of any HANDOFF. The review doc is the lead's own product — enumerate its absolute path(s) here, not from any HANDOFF.
      ```bash
      set -e
@@ -481,7 +500,7 @@ JSON
          - Group all future="Create GitHub issue" items → Create GitHub issues
        - If any items fixed (minor or future addressed now) → re-run review to verify fixes only (see Verify-Only Re-Review above)
 
-5. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done AND every reviewer `open_questions` entry carries a disposition in the review doc): "Ready to merge" or "Changes requested: [specifics]"
+5. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done AND every reviewer `open_questions` entry and every cold-report open question carries a disposition in the review doc): "Ready to merge" or "Changes requested: [specifics]"
 
    Before stating merge readiness, run the repository's fail-closed local lint gate where one is defined, and read the PR's checks (`gh pr checks <N>`) and the inline review threads.
 
