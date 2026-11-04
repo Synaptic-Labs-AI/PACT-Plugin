@@ -1262,9 +1262,14 @@ export class Panels {
         /* focus is best-effort */
       }
     } else if (restoreKey) {
-      const target = [...this.modal.querySelectorAll("[data-focus-key]")]
+      const restored = [...this.modal.querySelectorAll("[data-focus-key]")]
         .find((node) => node.dataset.focusKey === restoreKey);
-      if (target && typeof target.focus === "function") {
+      /* A disabled control cannot take focus. Falling through would drop
+       * focus to <body>, outside the dialog's Tab trap, so land on the close
+       * button instead (the only restore target that can be disabled is the
+       * SEEK button for a slid-out event). */
+      const target = restored && !restored.disabled ? restored : this._nodes.modalClose;
+      if (target && typeof target.focus === "function" && !target.disabled) {
         try {
           target.focus({ preventScroll: true });
         } catch (_) {
@@ -2028,6 +2033,9 @@ export class Panels {
     wrap.appendChild(chips);
     const actions = el("div", { class: "event-actions" });
     if (this.cb.onSeek) {
+      /* A disabled button is not focusable, so the title alone is unreachable;
+       * the note below is the visible explanation and this wired description. */
+      const windowNoteId = "event-window-note";
       actions.appendChild(el("button", {
         class: "mini-btn is-primary",
         text: "SEEK HERE",
@@ -2037,6 +2045,7 @@ export class Panels {
               type: "button",
               disabled: true,
               title: "This event is outside the loaded window; the recorder cannot seek to it.",
+              "aria-describedby": windowNoteId,
             }
           : { type: "button", title: "Move the recorder to this event" },
         on: {
@@ -2049,6 +2058,7 @@ export class Panels {
       if (outsideWindow) {
         actions.appendChild(el("span", {
           class: "event-note",
+          attrs: { id: windowNoteId },
           text: "Event outside the loaded window — the recorder cannot seek to it.",
         }));
       }
