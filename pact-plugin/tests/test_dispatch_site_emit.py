@@ -681,20 +681,26 @@ class TestReviewerInclusionPin:
     against widening the inference made executable, because at the
     owner-witnessing write a work subject containing 'review' is
     indistinguishable from a reviewer subject.
+
+    Mutation teeth, MEASURED and reverted (a future verifier can re-derive
+    these without redesigning the runs): a lane-keyed carve-out (subject
+    name-prefix 'review-') reddens exactly T1 — cardinality 1; a
+    'review'-substring carve-out reddens T1 and T5 together — cardinality 2.
     """
 
     REVIEWER = "review-coder"  # deliberately NOT in MEMBERS: registered per-arm
 
-    def _register_reviewer(self, env):
-        """Register the reviewer owner in team config. Registration is
-        LOAD-BEARING for the emit itself (the owner must resolve to a pact
-        specialist or step 4 fails closed), not merely for a count."""
+    def _register_reviewer(self, env, agent_type="pact-backend-coder"):
+        """Register the reviewer owner in team config, PRESERVING every key
+        already present (merge, never rebuild — a rebuild-from-scratch would
+        silently drop unknown config keys). Registration is LOAD-BEARING for
+        the emit itself (the owner must resolve to a pact specialist or step
+        4 fails closed), not merely for a count."""
         cfg = env / ".claude" / "teams" / TEAM / "config.json"
-        members = json.loads(cfg.read_text(encoding="utf-8"))["members"]
-        members.append({"name": self.REVIEWER,
-                        "agentType": "pact-backend-coder"})
-        cfg.write_text(json.dumps({"leadSessionId": "s1", "members": members}),
-                       encoding="utf-8")
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data.setdefault("members", []).append(
+            {"name": self.REVIEWER, "agentType": agent_type})
+        cfg.write_text(json.dumps(data), encoding="utf-8")
 
     def test_T1_owner_wired_reviewer_dispatch_IS_a_site(self, env, events):
         """A reviewer-shaped Task B (the peer-review subject convention
@@ -714,7 +720,12 @@ class TestReviewerInclusionPin:
     def test_T2_reviewer_teachback_gate_stays_dark(self, env, events):
         """The reviewer TEACHBACK Task A carries the SAME owner wiring its
         Task B does, so the anchored subject predicate is the sole thing
-        keeping it dark — one site per reviewer pair, never two."""
+        keeping it dark — one site per reviewer pair, never two.
+        PAIR-DEPENDENT on T1: the wiring here is identical to T1's except
+        the subject, and T1 is the positive control proving the shared legs
+        (frame, team, registration, owner-bearing write) are live — delete
+        T1 and this arm degrades to a no-site assertion that can pass for
+        any broken leg."""
         self._register_reviewer(env)
         seed(env, owner=self.REVIEWER,
              subject="review-coder: TEACHBACK for review of PR #99",
@@ -733,6 +744,22 @@ class TestReviewerInclusionPin:
         tlg.evaluate_lifecycle(wiring(owner="backend-coder"))
         s = sites(events)
         assert len(s) == 1, "a work subject containing 'review' is still a site"
+
+    def test_T6_registered_owner_with_non_specialist_agentType_stays_dark(
+        self, env, events
+    ):
+        """RESOLVED-NON-SPECIALIST leg, reviewer-lane variant: the owner IS
+        a registered member but its agentType is not a pact specialist, so
+        member resolution SUCCEEDS and the specialist check fails closed —
+        no site. The generic leg is pinned by
+        test_non_specialist_owner_does_not_emit (explorer); this variant
+        guards the registration helper's own agentType boundary."""
+        self._register_reviewer(env, agent_type="general-purpose")
+        seed(env, owner=self.REVIEWER,
+             subject="review-coder: review PR #99 on the thing",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
+        assert sites(events) == []
 
 
 class TestRealJournalSeam:
