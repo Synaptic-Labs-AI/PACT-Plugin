@@ -268,8 +268,10 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             body = b'{"ok":false,"error":"serialization error"}'
             status = 500
         self._send_headers(status, JSON_CONTENT_TYPE, len(body), extra_headers)
-        # HEAD carries the headers a GET would (including Content-Length) but
-        # never a body; writing one would desync a keep-alive connection.
+        # HEAD reaches this helper through the 405 answer (see
+        # _method_not_allowed); the header block above already carries
+        # Content-Length, and a HEAD response must never carry a body, which
+        # would desync a keep-alive connection.
         if self.command != "HEAD":
             self.wfile.write(body)
 

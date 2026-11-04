@@ -115,6 +115,31 @@ class TestStopPidCrossCheck:
         assert cli.read_state(state_dir) is None
 
 
+class TestStopUnconfirmed:
+    def test_unconfirmed_stop_does_not_claim_success(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A signalled-but-still-answering instance must not print success."""
+        state_dir = tmp_path / "state"
+        cli.write_state(state_dir, _state(12345, pid=4242, instance_id="instance-ok"))
+        monkeypatch.setattr(
+            cli,
+            "_health_for_instance",
+            lambda port, instance_id, timeout=1.0: {"ok": True, "pid": 4242},
+        )
+        monkeypatch.setattr(cli, "_terminate", lambda pid: None)
+        monkeypatch.setattr(cli, "_wait_until_stopped", lambda *a, **k: False)
+        # Signal escalation is skipped when the pid is already gone.
+        monkeypatch.setattr(cli, "_pid_gone", lambda pid: True)
+
+        args = cli.build_parser().parse_args(["--stop", "--state-dir", str(state_dir)])
+        assert cli.cmd_stop(args) == 1
+
+        out = capsys.readouterr().out
+        assert "Stop: unconfirmed pid 4242" in out
+        assert "Stop: stopped pid" not in out
+
+
 class TestWaitUntilStopped:
     def test_a_disappeared_pid_is_not_success(self, monkeypatch):
         """The instance still answering wins over the pid having vanished."""

@@ -491,9 +491,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
              SIGTERM is followed by a bounded wait and a SIGKILL only if the
              process is still alive; the state file and the detached server's
              log are removed either way, unless a concurrent detach already
-             replaced the state with a different instance's. On
-             success prints ``Stop: stopped pid N``; when nothing is running it
-             prints ``Stop: not running`` and exits 0.
+             replaced the state with a different instance's. ``Stop: stopped
+             pid N`` prints only once health confirms the instance is gone
+             (exit 0); ``Stop: not running`` also exits 0; a delivered signal
+             whose exit is unconfirmed prints ``Stop: unconfirmed pid N`` and
+             exits 1.
     Used by: main, tests.
     """
     state_dir = _state_dir(args)
@@ -532,10 +534,14 @@ def cmd_stop(args: argparse.Namespace) -> int:
         stopped = _wait_until_stopped(port, instance_id, 2.0)
     if _clear_state_if_instance(state_dir, instance_id):
         _remove_server_log(state_dir)
-    print(f"Stop: stopped pid {pid}")
     if not stopped:
-        print("PACT Mission Control: stop was signalled but the process did not confirm exit")
+        print(f"Stop: unconfirmed pid {pid}")
+        print(
+            "PACT Mission Control: stop was signalled but the process did "
+            "not confirm exit"
+        )
         return 1
+    print(f"Stop: stopped pid {pid}")
     print("PACT Mission Control: stopped")
     return 0
 

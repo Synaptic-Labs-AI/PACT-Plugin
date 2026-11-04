@@ -31,17 +31,18 @@ visualizer/
 `<config>/pact-viz/server.json`, and only after `/api/health` answers with that
 file's `instance_id` AND its pid. It prints exactly one `Stop: ...` line:
 
-- `Stop: stopped pid <pid>` — the matching instance stopped answering; exit 0.
+- `Stop: stopped pid <pid>` — the health check confirmed the instance is gone;
+  exit 0.
 - `Stop: not running` — nothing healthy was running and a stale state file was
   removed; exit 0.
+- `Stop: unconfirmed pid <pid>` — the process was signalled but did not confirm
+  exit; the next line is `PACT Mission Control: stop was signalled but the process did not confirm exit`; exit 1.
 - `Stop: refused` — the state file's pid does not match the pid the running
   server reports, or the payload carries no pid. Nothing is signalled; the next
   line is `PACT Mission Control: state file pid <state-pid> does not match the
   server's pid <server-pid>; refusing to signal` (a missing pid prints `None`),
   and the state file is deliberately kept: deleting the record would turn a
   recoverable mismatch into a server nothing can stop. Exit 1.
-
-A stop that signals the process but cannot confirm it exited also exits 1.
 
 ## HTTP API
 

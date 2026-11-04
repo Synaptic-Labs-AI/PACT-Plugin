@@ -157,15 +157,17 @@ browser. `--detach` exits only once that URL passes a local health check, so the
 URL it prints is immediately reachable, and it adds a `Stop: ...` hint naming the
 command that closes the same instance. `--stop` prints one `Stop: ...` line:
 
-- `Stop: stopped pid <pid>` — the matching instance stopped answering; exit 0.
+- `Stop: stopped pid <pid>` — the health check confirmed the instance is gone;
+  exit 0.
 - `Stop: not running` — nothing healthy was running and any stale state file
   was removed; exit 0.
+- `Stop: unconfirmed pid <pid>` — the process was signalled but did not confirm
+  exit; the next line is `PACT Mission Control: stop was signalled but the process did not confirm exit`; exit 1.
 - `Stop: refused` — the state file's pid does not match the pid in the running
   server's `/api/health` payload (a missing pid is refused too). Nothing is
   signalled, the next line names both pids, and the state file is deliberately
   kept: deleting the record would turn a recoverable mismatch into a server
-  nothing can stop. Exit 1. A stop that signals the process but cannot confirm
-  it exited also exits 1.
+  nothing can stop. Exit 1.
 
 ## Privacy
 
