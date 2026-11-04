@@ -58,33 +58,67 @@ A SET WORD IS ALSO CAMOUFLAGE, AND A CONTRAST PHRASE IS WHAT CLOSES IT
     the negation scopes over. A phrase list sidesteps that question, and the
     decoy control below is what proves the decoy is still reported.
 
-THE BOUND, IN THREE PARTS — the statement of record for the whole detector
+THE BOUND, STATED IN SIX PARTS — the statement of record for the whole detector
     The PR body's limit statement uses this decomposition, and so does this
     module. KNOWN_NOT_CAUGHT below asserts what the whole DETECTOR cannot see,
     so it has to be stated against the detector's vocabulary rather than
     against one arm's.
-      VOCABULARY — a line is considered at all only if it carries a run verb, a
-        tests/suites pass predicate, or a suite noun. A demand phrased outside
-        all three ("make the tests work", "verify the change is covered") is
-        not even a candidate. The pass predicate covers both nouns with or
-        without a modal, so "tests must pass" IS a candidate and is held out
-        only because it names no unbounded set — the merge-boundary value rows
-        in protocols/pact-protocols.md and protocols/pact-s5-policy.md classify
-        that way today.
-      UNBOUNDEDNESS — a candidate is in-class only when it names an unbounded
-        set: "all", "every" or "both" in either position relative to the noun,
-        or the pre-nominal "full", "whole", "entire" or "complete" with
-        "tests"/"suites".
+      VOCABULARY — a line is considered at all only if it carries a run-verb
+        demand, a tests/suites pass predicate, or a suite noun, each in a
+        recognised SHAPE: the run verb with an optional determiner
+        (the/your/a) and an optional adjective — subset (full/affected/
+        relevant/integration/unit/smoke/fast/scoped), quantifier
+        (all/every/both) or whole-set (whole/entire/complete) — immediately
+        before a tests/suites noun; the pass predicate as noun plus an
+        optional modal (are/is/will/should/must/remain/stay, with optional
+        "be" and "all") plus green/pass; the suite noun as full/test suite.
+        A demand
+        phrased outside these shapes ("make the tests work", "verify the
+        change is covered", "run all the tests", where the determiner follows
+        the quantifier) is not even a candidate. The pass predicate covers
+        both nouns with or without a modal, so "tests must pass" IS a
+        candidate and is held out only because it names no unbounded set —
+        the merge-boundary value rows in protocols/pact-protocols.md and
+        protocols/pact-s5-policy.md classify that way today.
+      UNBOUNDEDNESS — the unbounded-set requirement ("all", "every" or "both"
+        in either position relative to the noun, or the pre-nominal "full",
+        "whole", "entire" or "complete" with "tests"/"suites") gates the
+        PROMOTION arm below, not the whole class: a run-verb demand is
+        in-class even when it names no set at all ("Run the tests." is
+        reported), which over-catches in the safe direction and is deliberate
+        — the census exists to make an unscoped demand VISIBLE, and a reader
+        can dismiss a false positive it is shown.
       CONTRAST — a line that names a set is still in-class when a contrast
         phrase from a six-string list ("not just", "not only", "in addition",
         "as well as", "then the full suite", "not enough") sits within 500
-        characters of any recognised run demand. The 500 is a measured
-        separation, not a derivation: the shapes this catches sit inside 400
-        characters and the comPACT carriers' unrelated "not only an `Edit` or
-        a `Write`" sits 873 and 971 characters away.
+        characters of a run-verb demand. The anchoring is run-verb ONLY: a
+        gate-form or noun-form demand does not anchor a contrast phrase, so
+        contrast camouflage beside one of those is not reported (witnessed
+        below). The 500 is a measured separation, not a derivation: the
+        shapes this catches sit inside 400 characters and the comPACT
+        carriers' unrelated "not only an `Edit` or a `Write`" sits 873 and
+        971 characters away.
+      SEGMENTATION — segments split on sentence periods and template pipes,
+        not on ";" or dashes, so a scope marker that shares a segment with a
+        demand excuses that demand ("Run the full test suite before HANDOFF;
+        add unit tests" is one segment; witnessed below). Splitting on more
+        boundaries was rejected: an exemption and the demand it applies to
+        can sit on opposite sides of a split, and the pre-PR checkpoint puts
+        its marker before a colon for exactly that reason.
+      PROMOTION — a gate/requirement line is promoted into the class when its
+        segment names an unbounded set, but only when that segment carries no
+        scope marker and no pre-PR marker: "All tests passing (the tests your
+        change affects)" is NOT promoted, because the co-located marker
+        scopes the segment (witnessed below).
+      EXEMPTION — a pre-PR boundary phrase ("before creating PR", "pre-PR",
+        "before PR", "at the PR boundary") exempts the whole segment it sits
+        in, including a co-located per-commit full-run demand ("Before PR,
+        run the full test suite at every commit boundary" is not reported;
+        witnessed below). The exemption is segment-wide because the phrase
+        names the boundary the demand belongs to.
 
     KNOWN_NOT_CAUGHT below is this bound made executable: every entry is a
-    spelling one of the three parts predicts will be missed, each asserted NOT
+    spelling one of these parts predicts will be missed, each asserted NOT
     caught. A red there is not a defect — it means the rule grew and the
     documented boundary is stale, so the docstring, the list and the PR body
     move together. This paragraph, that list, and the PR body's limit are three
@@ -114,6 +148,13 @@ SURFACE_GLOBS = (
     # but they still instruct the agent that opens them, so an unscoped demand
     # there is the same defect one hop later.
     "skills/*/references/*.md",
+    # Every other markdown a skill dir carries (pattern catalogs, function
+    # tables, per-skill READMEs) is one opened-file hop from its SKILL.md,
+    # and the plugin-root reference/ and templates/ files are opened the same
+    # way — an unscoped demand there instructs the same reader.
+    "skills/*/*.md",
+    "reference/*.md",
+    "templates/*.md",
     "protocols/*.md",
 )
 
@@ -185,6 +226,10 @@ LINE_PINS = (
             FALLBACK_CLAUSE,
             NO_SUITE_CLAUSE,
             "The full suite is not part of this boundary.",
+            # The verification-tests sentence was rewritten with the fix
+            # ("Tests you add" narrowed from "Your tests"); pin the new form
+            # so a revert to the unscoped-era phrasing reddens.
+            "Tests you add are verification tests",
         ),
     ),
     (
@@ -200,14 +245,25 @@ LINE_PINS = (
             "it is owed once at the PR boundary",
             "the TEST-phase checklist below owns it",
             "if TEST is skipped, the lead runs it once before opening the PR",
+            # The skip branch's own defer option: without it the TEST-skipped
+            # lead owed a local full run even where the project's gate covers
+            # it — the same double-run cost the checklist exists to remove.
+            "or defers to the project's required full-suite gate once the PR exists",
         ),
     ),
     (
         "commands/orchestrate.md",
         "- [ ] Full test suite run once",
         (
-            # orchestrate.md:990 — the single pre-PR full run.
+            # orchestrate.md:990 — the single pre-PR full run. The tail is
+            # pinned too: the deferral clause is what makes the project-gate
+            # branch satisfiable before the PR exists, and "as a whole rather
+            # than a subset of paths" is the path-less property the issue
+            # asked for — an earlier cut pinned only the opening phrase, so a
+            # revert of either clause kept this pin green.
             "Full test suite run once — the single pre-PR full run",
+            "run it as a whole rather than a subset of paths",
+            "once the PR exists",
         ),
     ),
     (
@@ -398,9 +454,17 @@ def test_every_removal_match_is_live(rel, sentence):
 # Part (b): the enumerate-and-assert census
 # ---------------------------------------------------------------------------
 
+# The adjective slot carries the quantifiers (all/every/both) and the whole-set
+# adjectives (whole/entire/complete) as well as the subset adjectives: "Run all
+# tests", "Run every test" and "Run the whole test suite" are the plainest
+# unscoped phrasings of the defect, and until the slot accepted them they were
+# not even candidates — invisible to the census, the unlisted check and the
+# counted baseline alike. The whole-set trio matches _UNBOUNDED_SET's list on
+# purpose: the two patterns widened together or the asymmetry returns.
 _RUN = re.compile(
     r"(?i)\b(?:run|execute)\s+(?:the\s+|your\s+|a\s+)?"
-    r"(?:(?:full|affected|relevant|integration|unit|smoke|fast|scoped)\s+)?"
+    r"(?:(?:full|affected|relevant|integration|unit|smoke|fast|scoped"
+    r"|all|every|both|whole|entire|complete)\s+)?"
     r"(?:tests?|suites?)\b"
 )
 _RUN_BARE = re.compile(r"(?i)\btests?\s+runs?\b")
@@ -416,10 +480,14 @@ _RUN_NOUN = re.compile(r"(?i)\btest\s+run\s+(?:is\s+|must\s+)?(?:green|pass(?:es
 # Covers both a tests-pass and a SUITE-pass predicate, with or without a modal
 # and with or without "be"/"all" inside it: "tests pass", "tests are green",
 # "the suite must be green", "suites must pass", "a suite passes", "the suite
-# should be green", "the suites must all pass".
+# should be green", "the suites must all pass". The remain/stay verbs (both
+# inflections, for plural and singular subjects) belong here for the same
+# reason the quantifiers belong in _RUN: the pass predicate is claimed
+# vocabulary, and a shape outside the vocabulary is not even a candidate —
+# invisible to the census, the unlisted check and the counted baseline alike.
 _GATE = re.compile(
     r"(?i)\b(?:tests?|suites?)\s+"
-    r"(?:(?:are|is|will|should|must)(?:\s+be)?\s+)?"
+    r"(?:(?:are|is|will|should|must|remains?|stays?)(?:\s+be)?\s+)?"
     r"(?:all\s+)?(?:green|pass(?:es|ing)?)\b"
 )
 _SUITE = re.compile(r"(?i)\b(?:full|test)[\s-]suites?\b")
@@ -513,11 +581,14 @@ _CONTRAST_WINDOW = 500
 
 
 def _contrast(line: str) -> bool:
-    """A contrast phrase within reach of ANY run demand it could qualify.
+    """A contrast phrase within reach of a RUN-VERB demand it could qualify.
 
-    Every match is considered, not the first: a line can carry a scoped run
-    near the front and an additive full-suite run far behind it, and anchoring
-    on only the first demand made the later one invisible.
+    Anchoring is run-verb only: gate-form and noun-form demands do not anchor
+    a contrast phrase (that limit is witnessed in KNOWN_NOT_CAUGHT), so the
+    anchor set here is _RUN, not the wider demand definition the class rule
+    uses. Every match is considered, not the first: a line can carry a scoped
+    run near the front and an additive full-suite run far behind it, and
+    anchoring on only the first demand made the later one invisible.
     """
     run_starts = [match.start() for match in _RUN.finditer(line)]
     if not run_starts:
@@ -599,6 +670,13 @@ BASELINE_BY_FILE = {
     "protocols/pact-scope-phases.md": 1,
     "protocols/pact-variety.md": 1,
     "protocols/pact-workflows.md": 1,
+    # Rows for the extended glob families. Both files hold exactly one
+    # candidate line today, each out of class (descriptive prose in a
+    # background-job note; a "Create test suite:" step inside an example
+    # block) — counted so that a NEW candidate in these files reddens the
+    # baseline rather than arriving silently.
+    "reference/unattended-runs.md": 1,
+    "skills/n8n-workflow-patterns/ai_agent_workflow.md": 1,
     "skills/pact-agent-teams/SKILL.md": 2,
     "skills/pact-architecture-patterns/references/anti-patterns.md": 1,
     "skills/pact-coding-standards/SKILL.md": 2,
@@ -709,6 +787,16 @@ def test_the_surface_enumeration_is_not_empty():
     present = {path.relative_to(PLUGIN).as_posix() for path in surfaces}
     for rel in KNOWN_SITE_FILES:
         assert rel in present, f"{rel} is missing from the enumerated surfaces"
+    # The glob families beyond skills/*/SKILL.md are pinned by representative
+    # members: a family whose files hold zero candidates leaves no baseline
+    # row, so dropping its glob would otherwise keep every test green while
+    # re-opening the blindness the family was added to close.
+    for rel in (
+        "reference/config.md",
+        "templates/environment-model.md",
+        "skills/n8n-code-javascript/BUILTIN_FUNCTIONS.md",
+    ):
+        assert rel in present, f"{rel} is missing — a surface glob family was dropped"
 
 
 def test_the_candidate_baseline_holds():
@@ -794,6 +882,34 @@ def test_control_a_scoped_instruction_is_not_reported():
     assert _unlisted([("synthetic/surface.md", 1, scoped)], ALLOWLIST) == []
 
 
+# The remain/stay predicates close a docstring-vs-implementation gap: the pass
+# predicate is claimed vocabulary, so these must be CANDIDATES — a non-candidate
+# is invisible to the counted baseline. They stay out of the class because they
+# name no unbounded set, held out exactly like the documented "tests must pass".
+# Both inflections are pinned: a singular subject takes "remains"/"stays", and
+# a list that accepted only the bare verbs would re-open the same gap one
+# conjugation over.
+@pytest.mark.parametrize(
+    "line",
+    (
+        "Tests remain green before commit.",
+        "Tests stay green before commit.",
+        "The suite remains green.",
+        "Suites stay green after the merge.",
+    ),
+    ids=["remain", "stay", "remains", "stays"],
+)
+def test_control_remain_stay_predicates_are_candidates_but_bounded(line):
+    assert any(pattern.search(line) for pattern in CANDIDATE_PATTERNS), (
+        f"{line!r} is not a candidate; the pass predicate is claimed "
+        "vocabulary and a non-candidate is invisible to the baseline"
+    )
+    assert _unlisted([("synthetic/surface.md", 1, line)], ALLOWLIST) == [], (
+        f"{line!r} was reported; it names no unbounded set and is held out "
+        "like 'tests must pass'"
+    )
+
+
 # Filler for the distance shapes: long enough to push a contrast phrase past a
 # small window without changing what the line demands.
 _FAR = "filler " * 50
@@ -854,6 +970,21 @@ CAUGHT_SHAPES = (
     "Run test suite before HANDOFF.",
     "Testing: New unit tests for logic changes (optional for trivial changes). "
     "Fix broken existing tests. Run test suite before HANDOFF.",
+    # Quantifier and whole-set adjectives between the verb and the noun — the
+    # plainest unscoped phrasings. Until the adjective slot accepted them these
+    # were not even candidates, so no guard layer could see them at all; each
+    # of these arms failed (was not reported) against the narrower slot.
+    "Run all tests before completing.",
+    "Run every test before completing.",
+    "Run both test suites before HANDOFF.",
+    "Run the whole test suite before HANDOFF.",
+    "Run the entire test suite before completing.",
+    "Run the complete test suite before completing.",
+    # Moved here from KNOWN_NOT_CAUGHT: with "whole" in the adjective slot the
+    # run demand is recognised, so the contrast phrase now has an anchor. The
+    # retired note blamed the anchoring; the anchoring was sound, the
+    # vocabulary was the gap.
+    "Run the whole test suite, not just the integration tests you changed.",
 )
 
 
@@ -909,19 +1040,59 @@ KNOWN_NOT_CAUGHT = (
         "Run the full test suite on top of the affected tests.",
         "contrast: 'on top of' is not one of the six contrast strings, so the named set bounds the demand",
     ),
+    # Contrast anchoring is run-verb only, so camouflage beside a gate-form or
+    # noun-form demand is not reported. Frozen by design: widening the anchor
+    # set would widen the arm, and the arm is frozen at its stated bound.
     (
-        "Run the whole test suite, not just the integration tests you changed.",
-        "contrast: 'not just' IS one of the six, but 'run the whole test suite' is not a "
-        "recognised run-demand form, so the contrast arm has no demand to anchor to",
+        "The full suite must be green before commit, not just the affected tests.",
+        "contrast: a gate-form demand does not anchor a contrast phrase — only run-verb demands do",
+    ),
+    (
+        "Test run green at every commit boundary, not just the affected tests.",
+        "contrast: a noun-form demand does not anchor a contrast phrase — only run-verb demands do",
+    ),
+    # Segmentation granularity: the split is sentence periods and pipes, not
+    # semicolons, so a co-located scope marker excuses a demand in the same
+    # segment. The counted baseline still reddens when such a line lands.
+    (
+        "Run the full test suite before HANDOFF; add unit tests for logic changes.",
+        "segmentation: ';' is not a segment boundary, so a scope marker in the same segment "
+        "excuses a demand elsewhere in it",
+    ),
+    # Promotion is blocked by a co-located scope marker: the docstring's
+    # promotion claim is conditional, and this is the witness.
+    (
+        "All tests passing (the tests your change affects)",
+        "promotion: the gate arm promotes only an unscoped segment — a co-located scope "
+        "marker blocks the promotion",
+    ),
+    # The pre-PR exemption is segment-wide, so it can swallow a co-located
+    # per-commit full-run demand. Baseline visibility is the mitigation.
+    (
+        "Before PR, run the full test suite at every commit boundary.",
+        "exemption: a pre-PR boundary phrase exempts the whole segment, including a "
+        "co-located per-commit full-run demand",
     ),
 )
 
 
-BOUND_PARTS = ("vocabulary", "unboundedness", "contrast")
+# The parts of the stated bound, in the docstring's order: the three detector
+# vocabulary parts plus the three doctrine parts (segmentation granularity,
+# gate-arm promotion, segment-wide pre-PR exemption). A KNOWN_NOT_CAUGHT
+# reason must lead with one of these, so the list stays expressed against the
+# bound rather than against free prose.
+BOUND_PARTS = (
+    "vocabulary",
+    "unboundedness",
+    "contrast",
+    "segmentation",
+    "promotion",
+    "exemption",
+)
 
 
 def test_every_residual_entry_names_the_part_of_the_bound_it_fails():
-    """The residual list is expressed against the three-part bound, not free prose.
+    """The residual list is expressed against the six-part bound, not free prose.
 
     Every reason leads with the part it belongs to, so the list and the
     docstring cannot drift into describing different boundaries.
@@ -956,14 +1127,20 @@ def test_control_the_self_reversing_decoy_is_still_reported():
     """The control that makes the contrast rule safe rather than merely wider.
 
     "The full suite is not part of this boundary, so run the full test suite
-    now." uses the fix's own corrective sentence as camouflage. A contrast
+    now, in addition to the affected tests." uses the fix's own corrective
+    sentence as camouflage and carries its own scope marker, so the demand
+    branch cannot be what reports it — only the contrast arm can. A contrast
     PHRASE list catches the additive family without deciding whether a
     negation negates; a NEGATION rule would have had to decide, and would have
     let this through. If a future edit turns the contrast arm into a negation
-    arm, this is the test that reddens.
+    arm, or deletes it, this is the test that reddens.
     """
     decoy = ("The full suite is not part of this boundary, so run the full "
-             "test suite now.")
+             "test suite now, in addition to the affected tests.")
+    assert any(marker in decoy.lower() for marker in ALL_SCOPE_MARKERS), (
+        "the decoy no longer carries a scope marker; without one the demand "
+        "branch alone reports it, and a neutered contrast arm would stay green"
+    )
     assert len(_unlisted([("synthetic/surface.md", 1, decoy)], ALLOWLIST)) == 1, (
         "the self-reversing decoy is no longer reported; the contrast rule has "
         "been widened into a negation rule"
