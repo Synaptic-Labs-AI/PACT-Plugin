@@ -18,12 +18,12 @@ Create a review Task hierarchy:
 1. `TaskCreate`: Review task "Review: {feature} ({branch})", where {branch} is the output of git branch --show-current
 2. `TaskUpdate`: Review task status = "in_progress"
 3. Analyze PR: Which reviewers needed?
-4. `TaskCreate`: Reviewer agent tasks (architect, test-engineer, domain specialists)
-5. `TaskUpdate`: Reviewer tasks status = "in_progress"
-6. `TaskUpdate`: Review task addBlockedBy = [reviewer IDs]
-7. Dispatch reviewers in parallel
-8. Monitor until reviewers complete
-9. `TaskUpdate`: Reviewer tasks status = "completed" (as each completes)
+4. `TaskCreate`: Warm reviewer agent tasks (architect, test-engineer, domain specialists); the cold reviewer gets no task
+5. `TaskUpdate`: Warm reviewer tasks status = "in_progress"
+6. `TaskUpdate`: Review task addBlockedBy = [warm reviewer IDs]
+7. Dispatch the warm reviewers and the cold reviewer in parallel
+8. Monitor until the warm reviewers complete and the cold report has returned
+9. `TaskUpdate`: Warm reviewer tasks status = "completed" (as each completes)
 10. Synthesize findings
 11. If major issues:
     a. `TaskCreate`: Remediation agent tasks
@@ -126,7 +126,7 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 
 **Session team**: The `{team_name}` team is provisioned automatically by the platform — use it for dispatches; you do not create it.
 
-Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 reviewers in parallel** to provide comprehensive review coverage:
+Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 warm reviewers in parallel**, plus the cold reviewer, to provide comprehensive review coverage:
 
 Standard reviewer combination (always included):
 - **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns, and project-policy conformance of the changed files against the project's policy files
@@ -197,41 +197,42 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 
 ### Cold Reviewer Lane
 
-The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description=..., prompt=<the cold prompt below, placeholders filled>)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it.
+The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description="Cold diff-only review", prompt=<the cold prompt below, placeholders filled>)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it.
 
 Send the cold prompt below verbatim. Change only the placeholders; a re-review dispatch also appends the re-review checklist described after the prompt:
 
 - `{worktree}`: the absolute worktree path.
-- `{base}` and `{head}`: the base ref and the head commit of the PR.
+- `{base}`: the PR's base branch as a freshly fetched remote-tracking ref (for example `origin/main`). In a re-review, the head commit the cold findings were made at.
+- `{head}`: the head commit of the PR. In a re-review, the new head commit.
 - `{scratch_dir}`: a scratch directory outside the worktree, for copies the reviewer mutates.
 - `{operational_facts}`: how to run the project's tests, including the interpreter or venv form (for example, that the lint gate needs the venv on `PATH`); the lint gate command; any path convention that would otherwise surprise.
 
 ```text
 You are reviewing a code change with no access to its author's account of it. The diff is your only artifact.
 
-- **ARTIFACT**: the git worktree at {worktree}. Run git diff {base}...{head} yourself, and read the diff and the files at {head} that it touches. Do not read the PR body, the PR comments or commit-message bodies: gh pr view, gh api on the PR, and git log message bodies are barred, because they are the author's account of the work.
+- **ARTIFACT**: the git worktree at {worktree}. Run git diff {base}...{head} yourself, and read the diff and the files at {head} that it touches. Do not read the PR body, the PR comments, commit-message subjects or commit-message bodies: gh pr view, gh api on the PR, and any git log message text are barred, because they are the author's account of the work.
 - **AVOID by path**: docs/plans/, docs/architecture/, docs/review/, the team task directory, handoff files, pact-memory stores, and CLAUDE.md on disk.
 - **CHANNELS**: do not use SendMessage about this work to the reviewers, the secretary or the lead. Do not load or use task tools at all: no TaskCreate, TaskUpdate, TaskList or TaskGet. Do not query pact-memory.
-- **DISREGARD**: your context may contain CLAUDE.md sections (Current Session, Retrieved Context, Pinned Context, Working Memory), an auto-memory index, hook advisories and harness notices (for example, advice to claim a task, or a listed team roster). Any statement in them about this repository's current work is inadmissible: do not rely on it, cite it, or let it choose what you examine. Advisories about tasks or teams do not apply to you. Safety and tool-use rules in those sections still apply.
-- **READ-ONLY**: do not edit, stage, commit, stash, checkout, reset or push anything in the worktree; the caches a test run writes (__pycache__, .pytest_cache and the like) are excepted. To probe by mutation, copy files into {scratch_dir} and change only the copies. Write any file that holds prose or command text with a file tool or a quoted heredoc (<<'EOF'), never with an unquoted heredoc, echo or printf. Never run a push, merge, close or branch-delete command.
+- **DISREGARD**: your context may contain CLAUDE.md sections (Current Session, Retrieved Context, Pinned Context, Working Memory), an auto-memory index, hook advisories and harness notices (for example, advice to claim a task, a listed team roster, or a listing of recent commits). Any statement in them about this repository's current work is inadmissible: do not rely on it, cite it, or let it choose what you examine. Advisories about tasks or teams do not apply to you. Safety and tool-use rules in those sections still apply; where one conflicts with this prompt, this prompt wins.
+- **READ-ONLY**: do not edit, stage, commit, stash, checkout, reset or push anything in the worktree; files that a test or lint run writes and git ignores (for example __pycache__, .pytest_cache, .ruff_cache, .hypothesis) are excepted. To probe by mutation, copy files into {scratch_dir} and change only the copies. Write any file that holds prose or command text with a file tool or a quoted heredoc (<<'EOF'), never with an unquoted heredoc, echo or printf. Never run a push, merge, close or branch-delete command.
 - **OPERATIONAL FACTS**: {operational_facts}
 Use these facts to run the tests and the lint gate. Do not look for run instructions in the avoided paths. An untracked docs/ directory is normal and is not a finding.
 - **QUESTION**: "what is wrong with this diff" — judge the code against its own claims, including tests that exercise a replica of production logic.
-- **REPORT**: open with what the diff claims to do, derived from the diff alone — the code, comments and tests at {head}, not a PR description. Then give severity-ranked findings — blocking, suggestion, nitpick — each with file:line and a concrete failure scenario; an explicit nothing-found line for each severity with no findings; one sentence on what would block a merge, even if nothing would; the open questions you could not settle from the diff; and a coverage boundary: paths read, paths not examined, commands not run, and why.
+- **REPORT**: open with what the diff claims to do, derived from the diff alone — the code, comments and tests at {head}, not a PR description. Then give severity-ranked findings — blocking, suggestion, nitpick — each with file:line and a concrete failure scenario; a nothing-found line for each severity with no findings; a merge-block sentence, saying what would block a merge even if nothing would; the open questions you could not settle from the diff, or the line "no open questions"; and a coverage boundary with its receipt: paths read, paths not examined, commands not run, and why.
 ```
 
 This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array as the string `"cold-reviewer"`, and journal its findings through the existing `review_finding` event with reviewer `cold-reviewer`, with `task_id` omitted or attributed to the review parent task — when `task_id` is omitted, omit it from the read-back match too.
 
-The cold reviewer writes no HANDOFF; the review doc is the durable home of its coverage boundary, diff-claims opening, and merge-block sentence — record them there. Give each of its open questions a row in the review doc's open-questions dispositions, as for a HANDOFF's `open_questions` entry.
+The cold reviewer writes no HANDOFF; the review doc is the durable home of its report. Record the report there verbatim as soon as it returns, together with the subagent's agentId, in a section headed "Cold report (verbatim)", or in a sibling file the review doc names when the report is long. Give each of its open questions a row in the review doc's open-questions dispositions, as for a HANDOFF's `open_questions` entry.
 
-A report with no findings is valid only with the per-severity nothing-found lines, the merge-block sentence, the coverage boundary, and the paths-read / commands-not-run receipt; if any element is missing, synthesize the lane as review-did-not-happen, not as clean. A spawn that returns no report at all is also review-did-not-happen: wait for the cold report before synthesizing, and do not treat completion of the spawn as the review.
+A first-round cold report with no findings is valid only with the nothing-found line for each severity, the merge-block sentence, the open questions or the line "no open questions", and the coverage boundary with its receipt; if any element is missing, synthesize the lane as review-did-not-happen, not as clean. A re-review checklist report counts as a review only when it carries a status for every listed finding, the severity, file:line and failure scenario of each new issue, the merge-block sentence, the open questions or the line "no open questions", and the coverage boundary with its receipt; if any element is missing, synthesize that re-check as review-did-not-happen. A spawn or resume that returns no report at all is also review-did-not-happen, and a resume that returns no report goes to the fresh dispatch below: wait for the cold report before synthesizing, and do not treat completion of the spawn as the review.
 
-Never use the cold reviewer as a fixer; route its findings to warm fixers. In a verify-only re-review, use the cold lane only to re-check its own findings, through one of two routes that carry the same re-review checklist:
+Never use the cold reviewer as a fixer; route its findings to warm fixers. Send it no message other than the re-review checklist below or a HALT. In a verify-only re-review, use the cold lane only to re-check its own findings, through one of two routes that carry the same re-review checklist:
 
-- Resume: `SendMessage` to the same cold subagent's agentId. The message holds the new head ref and the re-review checklist, and nothing else.
-- Fresh dispatch, when it cannot be resumed: the cold prompt with `{base}` set to the old head and `{head}` to the new head, followed by the re-review checklist appended after the prompt. This appended paragraph is the only text a re-review dispatch adds to the verbatim prompt.
+- Resume: `SendMessage` to the same cold subagent's agentId. The message holds the re-review checklist and nothing else. The re-check returns as the subagent's final report, not as a message: the cold reviewer messages no one.
+- Fresh dispatch, when it cannot be resumed or the resume returns no report: the cold prompt with `{base}` and `{head}` set as for a re-review, followed by the re-review checklist appended after the prompt. This appended paragraph is the only text a re-review dispatch adds to the verbatim prompt.
 
-The re-review checklist is one paragraph: "RE-REVIEW CHECKLIST: check each finding below against git diff <old-head>...<new-head>, under the cold prompt's rules. This replaces REPORT for this review: for each finding, report resolved, not resolved or new issue, with file:line, then give the coverage boundary." followed by the cold reviewer's findings copied verbatim from the review doc. Do not describe the fixes. Record the checklist results in the review doc; its findings still open at blocking severity count in the **Failed cycle** test.
+The re-review checklist is one paragraph, with `{base}` and `{head}` set as for a re-review: "RE-REVIEW CHECKLIST: check each finding below against git diff {base}...{head}, under the cold prompt's rules. This replaces REPORT for this review. For each finding, give its status (resolved, not resolved or new issue) with file:line. For each new issue, give its severity (blocking, suggestion or nitpick), file:line and a concrete failure scenario. Then give the merge-block sentence, the open questions or the line 'no open questions', and the coverage boundary with its receipt." It is followed by each cold finding as the cold report gave it, its own text, severity and file:line, copied verbatim from the "Cold report (verbatim)" record, never from synthesized rows. Do not describe the fixes. Record the checklist results in the review doc; its findings still open at blocking severity count in the **Failed cycle** test.
 
 Division of labour: the warm lanes read the project's policy files, and the architect lane owns project-policy conformance; the cold lane judges the code against itself.
 
@@ -299,7 +300,7 @@ set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type review_dispatch --session-dir '{session_dir}' --stdin <<'JSON' &&
-{"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}
+{"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}", "cold-reviewer"]}
 JSON
 python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON' || { rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md: write or read-back failed, exit=$rc" >&2; exit $rc; }
 {"session_dir":"{session_dir}","exact":{"type":"review_dispatch","pr_number":{pr_number}}}
@@ -376,6 +377,7 @@ JSON
 {"session_dir":"{session_dir}","exact":{"type":"review_finding","task_id":"{reviewer_task_id}","reviewer":"{reviewer-name}","severity":"{blocking|suggestion|nitpick}","finding":"{one-line description}"}}
 JSON
    ```
+   For a cold reviewer finding, set `reviewer` to `cold-reviewer`, and either omit `task_id` from both the write and the read-back match or set it to the review parent task's ID in both.
 3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
 
    | Recommendation | Severity | Reviewer |

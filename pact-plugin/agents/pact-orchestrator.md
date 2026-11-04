@@ -396,9 +396,9 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 > ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=..., prompt=...)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
-> ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
+> ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and teammate `SendMessage` communication.
 >
-> Outside this rule: the peer-review cold reviewer is not a specialist dispatch. It is an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair. See the Cold Reviewer Lane in the `peer-review` command.
+> Outside this rule: the peer-review cold reviewer is not a specialist dispatch. It is an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair. You can still resume it by `SendMessage` to its agentId; its reply returns as its final report. See the Cold Reviewer Lane in the `peer-review` command.
 
 **Teachback-Gated Dispatch**:
 
@@ -461,7 +461,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
 | Agent's context near capacity from prior work | Spawn new |
 | Warm reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
-| Cold reviewer found issues | Never a fixer — route to a warm fixer (see the Cold Reviewer Lane in the `peer-review` command) |
+| Cold reviewer found issues, or is idle with relevant context | Never a fixer and never reassigned — route its findings to a warm fixer; its only follow-up is the re-check of its own findings (see the Cold Reviewer Lane in the `peer-review` command) |
 
 **Default**: Prefer reuse when domain + context overlap. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
 
@@ -488,6 +488,8 @@ To stop all in-progress teammates (HALT, shutdown, or any other team-lead-to-man
             message=f"[team-lead→{task['owner']}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
             summary=f"HALT: {category}",
         )
+
+A running peer-review cold reviewer owns no task, so this loop does not reach it: send it the same HALT by its agentId.
 
 Each message lands at the teammate's next idle boundary. For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
 
@@ -764,7 +766,7 @@ For full detail, `Read(file_path="../protocols/pact-workflows.md")` when selecti
 - If an agent hits a blocker, they are instructed to stop working and report the blocker to you
 - As soon as a blocker is reported, execute `/PACT:imPACT` with the report as the command argument
 
-When delegating tasks to agents, remind them of their blocker-handling protocol.
+When delegating tasks to agents, remind them of their blocker-handling protocol. The peer-review cold reviewer is the exception: its prompt is sent verbatim, and it reports a blocker in its coverage boundary.
 
 ### Agent Workflow
 
@@ -787,9 +789,9 @@ Within each phase, invoke **multiple specialists concurrently** for non-conflict
 
 ### PR Review Workflow
 
-Invoke **at least 3 agents in parallel**:
+Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer:
 
-- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
+- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns, and project-policy conformance of the changed files against the project's policy files
 - **pact-test-engineer**: Test coverage, testability, performance implications, edge cases
 - **Domain specialist coder(s)**: Implementation quality specific to PR focus
   - Select the specialist(s) based on PR focus:
@@ -803,7 +805,7 @@ Invoke **at least 3 agents in parallel**:
   - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
 - **Cold reviewer** (`general-purpose` subagent, always): A diff-only reading with no plan, contract, or session narrative — dispatch per the Cold Reviewer Lane in the `peer-review` command
 
-After agent reviews completed:
+After the warm reviews complete and the cold report has returned:
 
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`
@@ -811,7 +813,7 @@ After agent reviews completed:
 
 ### Recommended Agent Prompting Structure
 
-Use this structure in the `prompt` field to ensure agents have adequate context:
+Use this structure in the `prompt` field of every specialist dispatch to ensure agents have adequate context. The peer-review cold reviewer's prompt is fixed by its command and takes none of it:
 
 **CONTEXT**
 
