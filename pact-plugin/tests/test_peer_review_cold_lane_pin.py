@@ -57,11 +57,31 @@ PERSONA = PLUGIN_ROOT / "agents" / "pact-orchestrator.md"
 SECTION_HEADING = "### Cold Reviewer Lane"
 # The persona names the exception at exactly two sites — the Agent-Teams
 # checkpoint and the dispatch-mandatory carve-out — whose lead-ins were
-# reworded apart, so the pin keys on the phrase BOTH sites share. The
-# count arm below holds the pair to two.
+# reworded apart, so the pin keys on the phrase BOTH sites share. Each
+# site is bound by its own REGION below, not by a file-wide count: a
+# third occurrence of the fragment elsewhere in the persona (a
+# reviewer-list bullet, say) must not stand in for a dropped site.
 PERSONA_EXCEPTION = "the peer-review cold reviewer"
-# The NEVER sentence the carve-out relaxes, located verbatim in the persona.
-PERSONA_NEVER_ANCHOR = "for specialist agents"
+# The two regions the exception must live in.
+PERSONA_CHECKPOINT_MARKER = (
+    "Reaching for `Agent(subagent_type=...)` without `team_name`"
+)
+PERSONA_NEVER_MARKER = "for specialist agents"
+
+
+def _persona_region(marker: str) -> str:
+    """The paragraph/blockquote block containing `marker`, alone.
+
+    Region-scoped so a fragment occurring anywhere else in the persona
+    cannot satisfy a site arm — the same slice rule the cold section
+    uses. The blockquote block spans its `> ` continuation lines, so the
+    NEVER sentence and its Exception line share one region.
+    """
+    persona = PERSONA.read_text(encoding="utf-8")
+    start = persona.find(marker)
+    assert start != -1, f"the persona lost its {marker!r} marker"
+    end = persona.find("\n\n", start)
+    return persona[start:end if end != -1 else None]
 
 
 def _peer_review_text() -> str:
@@ -477,35 +497,32 @@ class TestCrossSurfaceCoherence:
             "cold dispatch."
         )
 
-    def test_carve_out_sits_beside_the_never_sentence(self):
-        persona = PERSONA.read_text(encoding="utf-8")
-        never = persona.find(PERSONA_NEVER_ANCHOR)
-        assert never != -1, (
-            "the persona lost its NEVER-plain-subagent sentence for "
-            "specialist agents"
-        )
-        carve = persona.find(PERSONA_EXCEPTION, never)
-        assert carve != -1 and carve - never < 400, (
-            "the cold-reviewer exception no longer sits beside the NEVER "
-            "sentence it relaxes — a carve-out elsewhere in the persona "
-            "leaves the blanket rule reading as unqualified at the point "
-            "a lead reads it"
+    def test_agent_teams_checkpoint_names_the_exception(self):
+        """SITE-BOUND (Bugbot a48908f1): the checkpoint paragraph — where a
+        lead catches an Agent call without team_name, exactly the cold
+        spawn shape — must itself name the exception. A file-wide count
+        let a third occurrence of the fragment anywhere in the persona
+        stand in for a dropped checkpoint exception; a region-scoped
+        assert cannot be satisfied from outside the paragraph."""
+        region = _persona_region(PERSONA_CHECKPOINT_MARKER)
+        assert PERSONA_EXCEPTION in region, (
+            "the Agent-Teams checkpoint paragraph no longer names the "
+            "cold-reviewer exception — it reads as an unqualified rule "
+            "at the exact point a lead would 'correct' the cold spawn "
+            "back into a teammate"
         )
 
-    def test_exception_named_at_both_persona_sites(self):
-        """TWO sites, not one: the dispatch-mandatory carve-out (read when
-        dispatching) and the Agent-Teams checkpoint (read when a lead
-        catches an Agent call without team_name — exactly the cold spawn
-        shape). Either one alone leaves the other surface reading as an
-        unqualified rule, and a lead obeying it 'corrects' the cold spawn
-        back into a teammate."""
-        persona = PERSONA.read_text(encoding="utf-8")
-        count = persona.count(PERSONA_EXCEPTION)
-        assert count >= 2, (
-            f"the persona names {PERSONA_EXCEPTION!r} at {count} site(s); "
-            f"expected both the checkpoint and the dispatch-mandatory "
-            f"carve-out. A site lost its exception and now reads as an "
-            f"unqualified rule at the point a lead checks it."
+    def test_dispatch_mandatory_block_names_the_exception(self):
+        """SITE-BOUND: the dispatch-mandatory blockquote — the MANDATORY
+        and NEVER sentences a lead reads when dispatching — must carry
+        the exception in its own block. Subsumes the old distance window:
+        same block means co-located by construction."""
+        region = _persona_region(PERSONA_NEVER_MARKER)
+        assert PERSONA_EXCEPTION in region, (
+            "the dispatch-mandatory block no longer names the "
+            "cold-reviewer exception — the blanket teammates-only rule "
+            "reads as unqualified at the section a lead consults when "
+            "spawning reviewers"
         )
 
     def test_persona_reviewer_list_names_the_lane(self):
