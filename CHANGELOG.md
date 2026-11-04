@@ -18,6 +18,24 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.21: reviewer dispatches count in the Q5 dispatch_site population (issue #1701)
+
+### Summary
+
+The Q5 `dispatch_site` population now matches the owner-witnessed emit: a reviewer dispatch whose task carries an owner resolving to a pact specialist is counted, the same as any work dispatch. The stale exclusion prose, written against a peer-review path that never wired owners, is retired from every surface that carried it, and the dark set is defined by mechanism — failing any leg of the owner witness, or having no task at all — never by lane.
+
+### What landed
+
+- The population rule in `protocols/pact-protocols.md` states membership as path-blind and defines the dark set by mechanism: owner absent, owner not resolving to a pact specialist, teachback-shaped subject, teachback-exempt owner, no task at all, or a lead-owned coordination umbrella. Those lanes are examples of the mechanism, never its definition. The `protocols/pact-variety.md` extract mirrors the region byte-identically.
+- `commands/wrap-up.md` Q5 step 5 carries the corrected membership statement: reviewer dispatches with owner wiring are counted, and a dispatch is dark only by mechanism, never by lane.
+- The `_emit_dispatch_site` docstring in `hooks/task_lifecycle_gate.py` states the same rule; the emit ladder itself is untouched.
+- Test docstrings in `tests/test_dispatch_site_emit.py` that restated the stale exclusion are aligned with the corrected rule; every test's mechanics are unchanged.
+- An inclusion pin: an owner-wired review-shaped dispatch emits a `dispatch_site` event, so the corrected population cannot drift back silently.
+
+### Why
+
+The exclusion premise described a mechanism that no longer exists: peer review now wires owner on reviewer tasks, and owner-wired reviewer dispatches already emit. Documents that excluded them keyed membership on the dispatching path, which moves, instead of on the owner write the stream already defines.
+
 ## v4.8.20: harvest identity, cleared-field revival, and a total union
 
 ### Summary
