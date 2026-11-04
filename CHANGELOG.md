@@ -22,11 +22,11 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-`/PACT:peer-review` dispatches a cold reviewer: a general-purpose subagent that reads only the diff. It never sees the plan, the architecture contract, the review docs, task files, `CLAUDE.md`, or pact-memory, and it cannot message the other reviewers, so one lane's findings are formed outside the author's account of the work.
+`/PACT:peer-review` dispatches a cold reviewer: a general-purpose subagent that reads only the diff. It never sees the plan, the architecture contract, the review docs, task files, `CLAUDE.md`, or pact-memory, and its dispatch bars it from messaging anyone about the work, so one lane's findings are formed outside the author's account of the work.
 
 ### What landed
 
-- New always-on reviewer in the peer-review dispatch: an anonymous `general-purpose` subagent spawned with no `team_name` and no task wiring, so the peer channel, the task list, and the harvest surface are closed by construction rather than by instruction.
+- New always-on reviewer in the peer-review dispatch: an anonymous `general-purpose` subagent spawned with no `team_name` and no task wiring, so peer-context injection and the harvest surface are closed by construction; the channels that remain loadable for a subagent (task tools, `SendMessage`) are barred by instruction in the dispatch, with a belt that says not to load task tools at all.
 - The dispatch contract in the peer-review command carries seven clauses the lead fills per PR: the diff-only artifact (PR body and comments barred), a named avoid-list, the channel prohibitions, a disregard clause for harness-attached `CLAUDE.md` sections and the auto-loaded memory index, per-project operational facts, the "what is wrong with this diff" question, and a report format that opens with what the diff claims to do, ranks findings by severity with file:line and a concrete failure scenario, states what it found nothing of at each severity, names what it would block a merge on, and closes with a required coverage boundary.
 - A null report counts as a review only when it carries the per-severity nothing-found lines, the merge-block sentence, the coverage boundary, and the paths-read receipt; otherwise the synthesis records it as a review that did not happen.
 - The warm lanes keep project-policy conformance and the cold lane judges the code against itself, stated in the command; the orchestrator persona's dispatch-mandatory rules name the cold reviewer as their exception at both the teammate-mandatory sentence and the Agent-Teams checkpoint.
@@ -34,7 +34,7 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Why
 
-Reviewer lanes that share one plan and one contract produce readings that share one frame: they can tell "the code is wrong" from "the code does not match the story told about it" only by accident. A trial lane with no narrative access found one Major, two Minor and four Nit findings that the warm lanes missed across two review rounds and two remediation cycles, including a test replica that had silently stopped replicating the production detector it claimed to mirror. The cold lane buys that frame break once per review, and the required coverage boundary keeps its silence legible as stated coverage rather than absence.
+Reviewer lanes that share one plan and one contract produce readings that share one frame: they can tell "the code is wrong" from "the code does not match the story told about it" only by accident. A trial lane with no narrative access found one blocking-class, two suggestion-class and four nitpick-class findings (reported there as Major, Minor and Nit) that the warm lanes missed across two review rounds and two remediation cycles, including a test replica that had silently stopped replicating the production detector it claimed to mirror. The cold lane buys that frame break once per review, and the required coverage boundary keeps its silence legible as stated coverage rather than absence.
 
 ## v4.8.20: harvest identity, cleared-field revival, and a total union
 
