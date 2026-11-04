@@ -821,9 +821,12 @@ def _emit_dispatch_site(
         site.
       * Everything failing a leg of the witness — owner absent, owner not
         resolving to a pact specialist, teachback-shaped subject,
-        teachback-exempt owner — plus dispatches with no task at all and
-        lead-owned coordination umbrellas. Those lanes are examples of the
-        mechanism, never its definition.
+        teachback-exempt owner — plus writes whose emit preconditions fail
+        (a non-canonical journal frame, an unresolvable team or task id),
+        plus dispatches with no task at all and lead-owned coordination
+        umbrellas. Those lanes are examples of the mechanism, never its
+        definition. Dark review-shaped lanes stay visible through the
+        ``review_dispatch`` stream.
 
     READ BY Q5, AND IT IS THE ONLY SOURCE: commands/wrap-up.md sources the
     retrospective's dispatch population from this stream and says so under a
