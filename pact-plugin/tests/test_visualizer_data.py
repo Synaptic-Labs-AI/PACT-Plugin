@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import re
+import types
+from collections import UserDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -769,6 +771,61 @@ class TestClassify:
         assert classify.HANDOFF_CANONICAL_FIELDS == ssot.HANDOFF_CANONICAL_FIELDS
         assert classify.HANDOFF_RECOMMENDED_FIELDS == ssot.HANDOFF_RECOMMENDED_FIELDS
         assert classify.HANDOFF_LEGACY_ALIASES == ssot.HANDOFF_LEGACY_ALIASES
+
+    def test_handoff_predicate_agrees_with_the_hooks_validator_on_json_shapes(self):
+        """Every shape a journal can produce must get the same verdict.
+
+        json.loads always yields a dict, so these are the reachable inputs.
+        handoff_schema_complete_raw documents itself as mirroring the SSOT
+        validator exactly; this is the arm that catches a semantic split.
+        """
+        from shared.handoff_schema import validate_handoff_schema
+
+        required = classify.HANDOFF_REQUIRED_FIELDS
+        full = {field: "x" for field in required}
+        cases = {
+            "all-present": full,
+            "all-empty-strings": {field: "" for field in required},
+            "empty-list-valued": {**full, "open_questions": []},
+            "empty-object-valued": {**full, "integration": {}},
+            "explicit-null-valued": {**full, "uncertainty": None},
+            "missing-first-required": {f: "x" for f in required if f != "produced"},
+            "missing-last-required": {f: "x" for f in required if f != "open_questions"},
+            "legacy-aliases-only": {
+                "produced": "p",
+                "key_decisions": "d",
+                "areas_of_uncertainty": "u",
+                "integration_points": "i",
+                "open_questions": "o",
+            },
+            "extra-unknown-keys": {**full, "junk": 1},
+            "empty-object": {},
+            "non-mapping-list": ["produced"],
+            "non-mapping-none": None,
+        }
+        for name, handoff in cases.items():
+            ours = classify.handoff_schema_complete_raw(handoff)
+            theirs = validate_handoff_schema(handoff) is None
+            assert ours is theirs, name
+
+    def test_handoff_predicate_type_gate_differs_from_the_hooks_validator(self):
+        """KNOWN DIVERGENCE, pinned rather than hidden.
+
+        The visualizer gates on Mapping, the SSOT on dict, so a non-dict
+        Mapping is `complete` here and `malformed` there. Unreachable from the
+        server path (journal JSON always parses to dict), so this records the
+        current relationship instead of changing either implementation. The
+        dict arm below is the control: the difference is the TYPE gate, not
+        the field logic.
+        """
+        from shared.handoff_schema import validate_handoff_schema
+
+        full = {field: "x" for field in classify.HANDOFF_REQUIRED_FIELDS}
+        for shape in (UserDict(full), types.MappingProxyType(full)):
+            assert classify.handoff_schema_complete_raw(shape) is True
+            assert validate_handoff_schema(shape) is not None
+        assert classify.handoff_schema_complete_raw(dict(full)) is True
+        assert validate_handoff_schema(dict(full)) is None
 
     def test_normalize_variety(self):
         assert classify.normalize_variety({"novelty": 2, "scope": 3}) == {
