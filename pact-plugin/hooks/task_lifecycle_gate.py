@@ -810,7 +810,11 @@ def _emit_dispatch_site(
     event means one dispatch BY CONSTRUCTION, the owner write on the task
     is the witness, and the dispatching path (work, review, otherwise) is
     never a membership input — a reviewer dispatch with owner wiring is a
-    site exactly like a work dispatch. Two shapes are OUT and stay out:
+    site exactly like a work dispatch. The stream counts ONE SITE PER
+    (team, task), not one per owner-bearing write: the dedup marker is
+    task-scoped, so a repeat owner write on the same task, and a later arc
+    reusing the same task id, each leave no second event. Two shapes are
+    OUT and stay out:
 
       * Teachback Task-A gates — excluded by the SUBJECT carve-out at step
         (5). DEPENDENCE, named where the membership is defined: under the
@@ -820,13 +824,15 @@ def _emit_dispatch_site(
         convention. A gate whose subject loses that marker is counted as a
         site.
       * Everything failing a leg of the witness — owner absent, owner not
-        resolving to a pact specialist, teachback-shaped subject,
-        teachback-exempt owner — plus writes whose emit preconditions fail
-        (a non-canonical journal frame, an unresolvable team or task id),
-        plus dispatches with no task at all and lead-owned coordination
-        umbrellas. Those lanes are examples of the mechanism, never its
-        definition. Dark review-shaped lanes stay visible through the
-        ``review_dispatch`` stream.
+        resolving to a pact specialist, teachback-exempt owner — plus
+        writes whose emit preconditions fail (a non-canonical journal
+        frame, an unresolvable team or task id, a write that also sets
+        ``status`` to ``completed``), plus dispatches with no task at all
+        and lead-owned coordination umbrellas. Those lanes are examples of
+        the mechanism, never its definition. Review panels dispatched by
+        the peer-review command stay visible through the ``review_dispatch``
+        stream, which records the panel roster; a dark review lane outside
+        that command has no journal witness.
 
     READ BY Q5, AND IT IS THE ONLY SOURCE: commands/wrap-up.md sources the
     retrospective's dispatch population from this stream and says so under a
