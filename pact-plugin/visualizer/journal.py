@@ -350,7 +350,10 @@ def _scan_back(path: Path, size: int, wanted: frozenset[str]) -> dict[str, dict]
              carried into the next (earlier) window instead of being dropped:
              a line that straddles a window boundary is a fragment in both
              windows, so without the carry a marker sitting on a boundary
-             would be invisible to every bounded scan.
+             would be invisible to every bounded scan. A window that begins
+             exactly ON a line boundary keeps its first line whole — one byte
+             of look-behind tells the two cases apart, and getting it wrong
+             would lose an aligned marker at the outermost budget edge.
     Used by: summarize_journal (phase, run_kind, ended) and tests.
     """
     found: dict[str, dict] = {}
@@ -360,8 +363,21 @@ def _scan_back(path: Path, size: int, wanted: frozenset[str]) -> dict[str, dict]
         if offset <= 0:
             break
         start = max(0, offset - SUMMARY_TAIL_BYTES)
-        data = _read_window(path, start, offset - start) + carry
+        # Read ONE byte of look-behind to learn whether the window begins ON a
+        # line boundary. If it does, its first line is WHOLE and must not be
+        # carried: carrying it would lose an aligned marker at the outermost
+        # budget edge, where no earlier window is left to carry it into. The
+        # probe byte itself is dropped from `data` — the next (earlier) window
+        # already covers it as its last byte, and keeping it here would
+        # duplicate a character into a carried line.
         if start > 0:
+            head = _read_window(path, start - 1, offset - start + 1)
+            starts_on_boundary = head[:1] == b"\n"
+            data = head[1:] + carry
+        else:
+            starts_on_boundary = True
+            data = _read_window(path, start, offset - start) + carry
+        if start > 0 and not starts_on_boundary:
             newline = data.find(b"\n")
             if newline == -1:
                 # One line longer than a whole window: keep it whole and let

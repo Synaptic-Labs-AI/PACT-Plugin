@@ -671,18 +671,14 @@ def derive_tasks(
                 task["updated_at"] = ts or task["updated_at"]
         elif event_type == "task_created":
             # The creation leg is the board's only durable evidence once the
-            # task store has been reaped, so it seeds id/subject/owner/phase.
+            # task store has been reaped. The writer emits task_id plus
+            # optional team/subject, so the branch reads no other field and
+            # seeds id/subject/status only.
             task = ensure(task_id)
             if task is not None:
                 subject = _text(data.get("subject"), MAX_FIELD_CHARS)
                 if subject:
                     task["subject"] = subject
-                owner = _text(data.get("owner"), 200)
-                if owner:
-                    task["owner"] = owner
-                phase = _normalize_phase(data.get("phase"))
-                if phase:
-                    task["phase"] = phase
                 if not task["status"]:
                     task["status"] = "pending"
                 task["updated_at"] = ts or task["updated_at"]
@@ -1146,7 +1142,12 @@ def _build_meta(
         or _text(session_start.get("project_dir"), MAX_FIELD_CHARS)
         or _text(session_context.get("project_dir"), MAX_FIELD_CHARS)
     )
-    project = _text(seed.get("project"), 200) or _basename(project_dir) or slug
+    # The run header, About tab and stage render this label, so it is
+    # constrained by the SAME rule as the session list's `project`: a
+    # journal-derived basename must never reach the UI as arbitrary text.
+    project, project_conformed = project_label(
+        _text(seed.get("project"), 200) or _basename(project_dir) or slug
+    )
     team = (
         _text(seed.get("team"), 200)
         or _text(session_start.get("team"), 200)
@@ -1194,7 +1195,7 @@ def _build_meta(
         )
         run_kind = "orchestrate" if has_orchestration else "session"
 
-    return {
+    meta = {
         "project": project,
         "project_dir": project_dir,
         "team": team,
@@ -1208,6 +1209,10 @@ def _build_meta(
         "event_count": _int(seed.get("event_count"), None) or event_count,
         "warnings": list(warnings)[:MAX_WARNINGS],
     }
+    if not project_conformed:
+        # Same visible marker the session list carries: the label was altered.
+        meta["project_altered"] = True
+    return meta
 
 
 def derive_model(

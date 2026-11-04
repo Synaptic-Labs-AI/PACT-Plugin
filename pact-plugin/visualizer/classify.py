@@ -289,19 +289,6 @@ def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
     return result
 
 
-def handoff_schema_complete(fields: Mapping[str, str | None]) -> bool:
-    """True when every REQUIRED handoff field carries a DISPLAYED value.
-
-    DISPLAY PROJECTION ONLY. ``fields`` is the output of
-    extract_handoff_fields, where an absent key and a present-but-empty one
-    both read as None, so this predicate cannot reproduce the schema's rule
-    and must not decide the debrief badge — use handoff_schema_complete_raw
-    for that. It answers the narrower display question "does the debrief have
-    something to show for every required row".
-    """
-    return all(fields.get(field) for field in HANDOFF_REQUIRED_FIELDS)
-
-
 def handoff_schema_complete_raw(handoff: object) -> bool:
     """True when every REQUIRED handoff key is PRESENT in the raw payload.
 
@@ -314,7 +301,8 @@ def handoff_schema_complete_raw(handoff: object) -> bool:
 
     Input is the RAW metadata.handoff dict, never the extract_handoff_fields
     projection: the projection erases the present/absent distinction this
-    predicate exists to test.
+    predicate exists to test, and a value-based test on it was the defect that
+    recurred five times. This is the ONLY completeness predicate.
     """
     if not isinstance(handoff, Mapping):
         return False

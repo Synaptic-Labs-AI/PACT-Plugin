@@ -237,6 +237,28 @@ class TestBackwardScanBoundary:
         assert summary.last_phase == "CODE"
         assert summary.status == "ended"
 
+    @pytest.mark.parametrize("windows_before", [1, 2, 3, 4])
+    def test_marker_aligned_exactly_on_a_window_boundary_is_found(
+        self, tmp_path, windows_before
+    ):
+        """A whole line starting exactly ON a boundary is not a fragment.
+
+        Stripping it as if it were carries it out of the scan; at the
+        outermost window there is no earlier window left to carry it into, so
+        an aligned marker sitting at the budget edge vanished. The one-byte
+        look-behind is what tells the two cases apart.
+        """
+        path = tmp_path / f"aligned-{windows_before}.jsonl"
+        marker = {"v": 1, "type": "phase_transition", "ts": STAMP, "phase": "TEST"}
+        encoded = json.dumps(marker, separators=(",", ":")).encode("utf-8") + b"\n"
+        prefix = filler_bytes(128)  # one whole line, so the window start is > 0
+        suffix = filler_bytes(windows_before * SUMMARY_TAIL_BYTES - len(encoded))
+        path.write_bytes(prefix + encoded + suffix)
+        size = len(prefix) + len(encoded) + len(suffix)
+        assert size - windows_before * SUMMARY_TAIL_BYTES == len(prefix)
+        found = journal._scan_back(path, size, {"phase_transition"})
+        assert found["phase_transition"]["phase"] == "TEST"
+
     def test_marker_older_than_the_budget_stays_out_of_reach(self, tmp_path):
         """The 512KB budget still bounds the scan: older means invisible."""
         path = tmp_path / "beyond.jsonl"
@@ -263,6 +285,10 @@ class TestTaskCreated:
         assert classify.is_visual_type("handoff_emit_suppressed") is True
 
     def test_task_created_seeds_the_board_without_a_store(self, tmp_path):
+        """The pin uses the shape the ONLY writer emits: task_id + optional
+        team/subject. owner and phase are not written by any producer, so the
+        branch must not read them (a fixture that invents them proves
+        nothing)."""
         root = make_root(tmp_path)
         write_journal(
             root,
@@ -275,9 +301,8 @@ class TestTaskCreated:
                     "type": "task_created",
                     "ts": STAMP,
                     "task_id": "12",
+                    "team": "session-abc12345",
                     "subject": "review the parser",
-                    "owner": "backend-coder",
-                    "phase": "code",
                 },
             ],
         )
@@ -286,9 +311,9 @@ class TestTaskCreated:
         task = payload["tasks"][0]
         assert task["id"] == "12"
         assert task["subject"] == "review the parser"
-        assert task["owner"] == "backend-coder"
-        assert task["phase"] == "CODE"
         assert task["status"] == "pending"
+        assert task["owner"] == ""
+        assert task["phase"] == ""
 
     def test_every_classified_type_is_registered_in_the_journal_ssot(self):
         """Derive the journal's type set from its own dicts, never restate it.
@@ -396,6 +421,21 @@ class TestProjectLabelConstraint:
         row = list_payload(root)["sessions"][0]
         assert row["project"] == "PACT-prompt"
         assert "project_altered" not in row
+
+    def test_model_meta_uses_the_same_constrained_label(self, tmp_path):
+        """The run header/About/stage read meta.project, not the list entry."""
+        root = make_root(tmp_path)
+        project_session(root, "unsafe", "/work/My App <b>")
+        meta = build_payload(root, "unsafe", "sess")["meta"]
+        assert meta["project"] == "My_App__b_"
+        assert meta["project_altered"] is True
+
+    def test_model_meta_marks_nothing_when_the_label_conforms(self, tmp_path):
+        root = make_root(tmp_path)
+        project_session(root, "clean", "/work/PACT-prompt")
+        meta = build_payload(root, "clean", "sess")["meta"]
+        assert meta["project"] == "PACT-prompt"
+        assert "project_altered" not in meta
 
 
 # --- 5. one run-kind rule for the list and the model ------------------------

@@ -687,28 +687,26 @@ class TestClassify:
         assert classify.is_visual_type("commit") is True
 
     def test_handoff_canonical_fields_and_legacy_aliases(self):
-        fields = classify.extract_handoff_fields(
-            {
-                "produced": "p",
-                "key_decisions": "legacy decisions",
-                "areas_of_uncertainty": "legacy uncertainty",
-                "integration_points": "legacy integration",
-                "open_questions": "",
-            }
-        )
+        payload = {
+            "produced": "p",
+            "key_decisions": "legacy decisions",
+            "areas_of_uncertainty": "legacy uncertainty",
+            "integration_points": "legacy integration",
+            "open_questions": "",
+        }
+        fields = classify.extract_handoff_fields(payload)
         assert fields["produced"] == "p"
         assert fields["decisions"] == "legacy decisions"
         assert fields["uncertainty"] == "legacy uncertainty"
         assert fields["integration"] == "legacy integration"
         assert fields["reasoning_chain"] is None
         assert fields["open_questions"] is None
-        assert classify.handoff_schema_complete(fields) is False
+        assert classify.handoff_schema_complete_raw(payload) is False
 
     def test_handoff_schema_complete_for_full_payload(self):
-        fields = classify.extract_handoff_fields(
-            {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
-        )
-        assert classify.handoff_schema_complete(fields) is True
+        payload = {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
+        fields = classify.extract_handoff_fields(payload)
+        assert classify.handoff_schema_complete_raw(payload) is True
 
     def test_handoff_list_valued_fields_are_joined_not_dropped(self):
         """The handoff schema is presence-only, so a field may carry a list.
@@ -721,7 +719,7 @@ class TestClassify:
         payload["open_questions"] = ["one question", "another question"]
         fields = classify.extract_handoff_fields(payload)
         assert fields["open_questions"] == "one question · another question"
-        assert classify.handoff_schema_complete(fields) is True
+        assert classify.handoff_schema_complete_raw(payload) is True
 
     def test_handoff_empty_list_field_counts_as_present(self):
         """An explicit empty list is PRESENT under the presence-only schema.
@@ -734,7 +732,7 @@ class TestClassify:
         payload["open_questions"] = []
         fields = classify.extract_handoff_fields(payload)
         assert fields["open_questions"] == "(none)"
-        assert classify.handoff_schema_complete(fields) is True
+        assert classify.handoff_schema_complete_raw(payload) is True
 
     def test_handoff_schema_complete_allows_missing_recommended_reasoning_chain(self):
         """The SSOT marks reasoning_chain recommended, not required.
@@ -747,7 +745,7 @@ class TestClassify:
         }
         fields = classify.extract_handoff_fields(payload)
         assert fields["reasoning_chain"] is None
-        assert classify.handoff_schema_complete(fields) is True
+        assert classify.handoff_schema_complete_raw(payload) is True
 
     def test_handoff_schema_required_set_excludes_the_recommended_field(self):
         assert "reasoning_chain" not in classify.HANDOFF_REQUIRED_FIELDS
