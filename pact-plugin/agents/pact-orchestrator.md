@@ -398,7 +398,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and teammate `SendMessage` communication.
 >
-> Outside this rule: the peer-review cold reviewer is not a specialist dispatch. It is an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair. You can still resume it by `SendMessage` to its agentId; its reply returns as its final report. See the Cold Reviewer Lane in the `peer-review` command.
+> Outside this rule: the peer-review cold reviewer is not a specialist dispatch. It is an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair — that the lead still reaches by `SendMessage` to its agentId. See the Cold Reviewer Lane in the `peer-review` command.
 
 **Teachback-Gated Dispatch**:
 
@@ -461,7 +461,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
 | Agent's context near capacity from prior work | Spawn new |
 | Warm reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
-| Cold reviewer found issues, or is idle with relevant context | Never a fixer and never reassigned — route its findings to a warm fixer; its only follow-up is the re-check of its own findings (see the Cold Reviewer Lane in the `peer-review` command) |
+| Cold reviewer (found issues, or idle with relevant context) | Never a fixer and never reassigned — see the Cold Reviewer Lane in the `peer-review` command |
 
 **Default**: Prefer reuse when domain + context overlap. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
 
@@ -489,7 +489,7 @@ To stop all in-progress teammates (HALT, shutdown, or any other team-lead-to-man
             summary=f"HALT: {category}",
         )
 
-A running peer-review cold reviewer owns no task, so this loop does not reach it: send it the same HALT by its agentId.
+A running peer-review cold reviewer owns no task, so this loop does not reach it: HALT it as the Cold Reviewer Lane in the `peer-review` command says.
 
 Each message lands at the teammate's next idle boundary. For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
 
@@ -766,7 +766,7 @@ For full detail, `Read(file_path="../protocols/pact-workflows.md")` when selecti
 - If an agent hits a blocker, they are instructed to stop working and report the blocker to you
 - As soon as a blocker is reported, execute `/PACT:imPACT` with the report as the command argument
 
-When delegating tasks to agents, remind them of their blocker-handling protocol. The peer-review cold reviewer is the exception: its prompt is sent verbatim, and it reports a blocker in its coverage boundary.
+When delegating tasks to agents, remind them of their blocker-handling protocol. The peer-review cold reviewer is the exception: its prompt is sent verbatim and already says how it reports a blocker.
 
 ### Agent Workflow
 

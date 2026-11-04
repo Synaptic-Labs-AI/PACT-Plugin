@@ -15,38 +15,48 @@ COVERED, and this list is the scope:
 - the cold prompt: exactly one fenced block sent verbatim, its ordered
   clause labels, no backticks inside it, and every placeholder it uses
   defined in the placeholder list (and every defined placeholder used);
-  the {base} and {head} definitions, including their re-review values;
+  the {base} and {head} definitions, including their re-check values;
+  the bound on what a re-check dispatch appends;
 - each prompt clause's content, bound to its own label line: ARTIFACT's
   diff instruction and its bar on PR and commit-message surfaces; AVOID's
   named paths and stores; CHANNELS' messaging, task-tool and pact-memory
-  prohibitions; DISREGARD's arrival surfaces, its operative verb, the
-  advisory carve-out, the safety-rules exception and its precedence rule;
-  READ-ONLY's worktree bar, cache exception, scratch-copy route,
-  quoted-heredoc rule and guarded-command bar; OPERATIONAL FACTS' placeholder and use instruction, and the
+  prohibitions and its HALT instruction; DISREGARD's arrival surfaces,
+  its operative verb, the advisory carve-out, the safety-rules exception
+  and its precedence rule; READ-ONLY's worktree bar, cache exception,
+  scratch-copy route, quoted-heredoc rule and guarded-command bar;
+  OPERATIONAL FACTS' placeholder and use instruction, and the
   placeholder's own definition; QUESTION's phrase and replica clause;
   REPORT's diff-derived opening, severity enum, nothing-found lines,
-  merge-block sentence, open questions and coverage boundary;
+  merge-block sentence, open questions, coverage boundary and blocker
+  report;
 - the spawn sentence: one inline Agent(subagent_type="general-purpose",
-  ...) reference carrying no name=, no team_name= and no role prelude,
+  description="Cold diff-only review", ...) reference carrying no name=,
+  no team_name= and no role prelude,
   plus the prose that requires that shape (NO name=/team_name=/prelude,
   with every review, same parallel block, no teammate conversion, no
   tasks);
-- the lead-facing paragraphs, each bound to its own paragraph: the skip
-  sentence as one phrase, the report landing (review_dispatch string,
-  review_finding reviewer, read-back omission), the verbatim report record
-  and open-question rows, the null rule (both validity sentences, the main
-  review-did-not-happen clauses, the silent-resume fallback,
-  wait-for-the-report), the never-a-fixer rule, both re-review routes with
-  the resume return path, the quoted checklist, and the division of
-  labour;
+- the lifecycle: the ordering lead-in, the ten step labels in order,
+  and a once guard that holds each lifecycle rule's operative phrase to a
+  single occurrence in peer-review.md (a paraphrased second copy evades
+  it); each step's operative clauses, bound to its own step paragraph
+  (dispatch and skip sentence, agentId record at spawn, HALT, verbatim
+  return record, first-round null clause, the one re-dispatch and the
+  did-not-run row and line, the blocker rule in Return, synthesis wait
+  and journal landing,
+  never-a-fixer, re-check scope and message composition, failed cycle);
+  the re-check send paragraph (resume target, whole-message rule,
+  fallback, re-check null clause, verbatim re-check record); the quoted
+  re-check message; and the division of labour;
 - the copy-paste guard: no warm dispatch-machinery token occurs in the
   section, with task-tool names allowed only inside CHANNELS;
 - satellites: the always-included bullet, the example-tree [Subagent]
   label, the Reuse-table cold row, the warm-only completion check, and the
   clause-satisfaction paragraph after REVIEWER-MEMORY-CHANNEL;
 - outside the section, in both files: each warm-scoping or cold-line
-  phrase (overview steps, reviewer counts, journal cold line, dispatch
-  template, persona waits, resume route), each asserted to occur once;
+  phrase (overview steps 4-9, reviewer counts, journal cold line, dispatch
+  template, warm spawn line, synthesis rows, the merge gate's cold
+  conditions, persona waits, resume route, HALT and blocker exceptions),
+  each asserted to occur once;
 - the persona: the exception at the Agent-Teams checkpoint and in the
   dispatch-mandatory block, the cold row of its Reuse table, the HANDOFF
   exception and its reviewer-list bullet, each bound to its own region;
@@ -264,6 +274,36 @@ def _table_row(text: str, first_cell: str, what: str) -> str:
     return rows[0]
 
 
+# The lane's lifecycle steps, in order: bold lead-ins "**Label.**".
+STEP_LABEL_LINE = re.compile(r"^\*\*([A-Z][^*\n]*)\.\*\* ", re.MULTILINE)
+LIFECYCLE_STEPS = (
+    "Dispatch",
+    "Spawn result",
+    "While it runs",
+    "Return",
+    "First-round validity",
+    "No report or an invalid one",
+    "Synthesis",
+    "Remediation",
+    "Re-check",
+    "Failed cycle",
+)
+# Once guard: each lifecycle rule's operative phrase occurs exactly once in
+# peer-review.md. Cross-references use the bold step label instead.
+ONCE_RULES = (
+    ("record the subagent's agentId", "the agentId record at spawn"),
+    ("HALT` by its recorded agentId", "the HALT route"),
+    ("Append the report verbatim to the record", "the verbatim record"),
+    ("valid only with", "the first-round validity list"),
+    ("counts as a review only when", "the re-check validity list"),
+    ("run one fresh cold dispatch", "the no-report rule"),
+    ("The re-check message is the paragraph below", "the re-check message"),
+    ("count in the **Failed cycle** test", "the cold failed-cycle rule"),
+    ("in the same parallel block as the warm reviewers", "the same-block spawn rule"),
+    ("treat it as a blocker report", "the cold blocker rule"),
+    ("Send it no message other than a HALT or the re-check message", "the lead's message bar"),
+)
+
 # Class guard (a): an angle-bracket slot is a placeholder the list does not define.
 ANGLE_SLOT = re.compile(r"<[a-z]+(?:-[a-z]+)+>")
 
@@ -285,16 +325,24 @@ RECHECK_ELEMENTS = (
     "no open questions",
     "coverage boundary with its receipt",
 )
-FIRST_ROUND_VALIDITY = "A first-round cold report with no findings is valid only with"
+FIRST_ROUND_VALIDITY = "A first-round cold report is valid only with"
 RECHECK_VALIDITY = "A re-review checklist report counts as a review only when"
-VALIDITY_END = "if any element is missing"
+# Each validity list ends at its consequence clause.
+VALIDITY_ENDS = ("if any element is missing", "; otherwise")
+# A word inside a validity list that turns a required element optional.
+# Only the list span is scanned, so a negator elsewhere in the sentence
+# (or a phrasing such as "is not needed" after the consequence) evades it.
+VALIDITY_NEGATOR = re.compile(
+    r"\b(?:without|except|excepting|optional|optionally|not|unless|may omit)\b",
+    re.IGNORECASE,
+)
 
 # Class guard (c): reviewer paragraphs that name warm machinery without
 # saying warm or cold, each scoped by a qualified sentence in its container.
 # Key: the paragraph's first content line, first 60 characters.
 REVIEWER_WORD = re.compile(r"reviewer", re.IGNORECASE)
 WARM_MACHINERY = re.compile(
-    r"TaskCreate|TaskUpdate|HANDOFF|open_questions|teachback|task_id|\breuse",
+    r"TaskCreate|TaskUpdate|TaskList|TaskGet|\bTask [AB]\b|team_name|HANDOFF|open_questions|teachback|task_id|\breuse",
     re.IGNORECASE,
 )
 QUALIFIER = re.compile(r"\bwarm\b|\bcold\b", re.IGNORECASE)
@@ -316,29 +364,34 @@ WARM_SCOPED_INVENTORY = {
         "pr", "The cold reviewer writes no HANDOFF"),
     "**Mechanism**: The reviewer's understanding of the PR intent": (
         "pr", "Each warm reviewer should state"),
+    "Monitor for blocker/algedonic signals via:": (
+        "pr", "**`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead"),
     "- After CODE phase specialists have reported → Standard Harv": (
         "persona", "Every agent except the peer-review cold reviewer delivers a structured HANDOFF"),
 }
 
 
 def _validity_sentence(marker: str) -> str:
-    """One validity sentence of the null-rule paragraph: marker to its 'if any element is missing'."""
-    region = _paragraph("valid only with")
+    """One validity list: its marker up to its consequence clause."""
+    region = _paragraph(marker)
     start = region.find(marker)
-    assert start != -1, f"the null-rule paragraph lost its {marker!r} sentence"
-    end = region.find(VALIDITY_END, start)
-    assert end != -1, f"the {marker!r} sentence lost its {VALIDITY_END!r} consequence"
-    return region[start:end]
+    ends = [i for i in (region.find(e, start) for e in VALIDITY_ENDS) if i != -1]
+    assert ends, f"the {marker!r} list lost its consequence clause"
+    return region[start:min(ends)]
 
 
 def _checklist_quote() -> str:
-    """The quoted re-review checklist the lead sends."""
-    region = _paragraph("The re-review checklist is one paragraph")
-    start = region.find("RE-REVIEW CHECKLIST:")
-    assert start != -1, "the re-review checklist lost its quoted text"
-    end = region.find('" It is followed', start)
-    assert end != -1, "the quoted re-review checklist no longer ends before its findings"
-    return region[start:end]
+    """The quoted re-check paragraph the lead sends, quotes stripped."""
+    region = _paragraph('"RE-REVIEW CHECKLIST:').strip()
+    assert region.startswith('"') and region.endswith('"'), (
+        "the re-check paragraph is no longer one quoted paragraph"
+    )
+    return region[1:-1]
+
+
+def _step(label: str) -> str:
+    """The lifecycle step paragraph that opens with **label.**"""
+    return _strip_ticks(_paragraph(f"**{label}.**"))
 
 
 def _unqualified_reviewer_paragraphs() -> list[str]:
@@ -425,6 +478,13 @@ class TestPromptShape:
             f"{PROMPT_LABELS!r}, found {labels!r}"
         )
 
+    def test_re_check_append_is_bounded(self):
+        before = _split_section()[0]
+        assert "a re-check dispatch also appends the re-check message (see **Re-check**), and nothing else" in before, (
+            "the cold lane no longer bounds what a re-check dispatch adds to "
+            "the verbatim prompt"
+        )
+
     def test_prompt_has_no_backticks(self):
         assert "`" not in _prompt(), (
             "the cold prompt carries a backtick — the fence is pasted "
@@ -502,6 +562,8 @@ class TestChannelsClause:
         ("TaskList", "the task read tools — the task store carries the narrative"),
         ("TaskGet", "the task read tools — ditto"),
         ("Do not query pact-memory", "the bar on pact-memory queries"),
+        ("If the lead sends you HALT, stop at once and return your report so far, with its coverage boundary", (
+         "the HALT instruction the lead's HALT route relies on")),
     ])
     def test_channels_token_present(self, token, lost):
         assert token in _clause("CHANNELS"), (
@@ -639,6 +701,8 @@ class TestReportClause:
          "passes vacuously")),
         ("the open questions you could not settle", ("the questions the diff could not settle — they "
          "get a disposition row like a HANDOFF's open_questions")),
+        ("and why, and anything that prevented you from reviewing a changed path", ("the blocker report the "
+         "persona's blocker exception relies on")),
         ("coverage boundary with its receipt", ("the required boundary — a partial review "
          "must be visible as partial")),
     ])
@@ -666,6 +730,14 @@ class TestSpawnShape:
         ref = _spawn_reference()
         assert 'subagent_type="general-purpose"' in ref, (
             f"the cold spawn reference is not a general-purpose subagent: {ref!r}"
+        )
+
+    def test_spawn_description_is_the_fixed_literal(self):
+        ref = _spawn_reference()
+        assert 'description="Cold diff-only review"' in ref, (
+            f"the cold spawn reference lost its fixed description literal — "
+            f"the lead then invents one, and a warm-style description names "
+            f"the reviewer as a specialist: {ref!r}"
         )
 
     def test_spawn_carries_description_and_prompt(self):
@@ -711,122 +783,128 @@ class TestSpawnShape:
         )
 
 
+class TestLifecycleOrder:
+    """The lane runs as one ordered list of steps, each stated where it
+    applies, so no rule is stated twice and no step sits in a gap between
+    two separately written sentences."""
+
+    def test_lead_in_states_the_order_rule(self):
+        assert "Run the cold lane in the order below; each rule applies where it is written." in _lead_prose(), (
+            "the lane lost its ordering lead-in"
+        )
+
+    def test_steps_in_order(self):
+        labels = tuple(STEP_LABEL_LINE.findall(_lead_prose()))
+        assert labels == LIFECYCLE_STEPS, (
+            f"the cold lane's lifecycle steps changed: expected "
+            f"{LIFECYCLE_STEPS!r}, found {labels!r}"
+        )
+
+    @pytest.mark.parametrize("phrase, rule", ONCE_RULES)
+    def test_rule_stated_once(self, phrase, rule):
+        count = _peer_review_text().count(phrase)
+        assert count == 1, (
+            f"{rule} must be stated once in peer-review.md ({phrase!r}), "
+            f"found {count} — a second copy drifts from the first"
+        )
+
+
 class TestLeadFacingRules:
-    """The lane's structural exceptions, each bound to its own paragraph:
-    what the cold dispatch skips, where its report lands, how a null
-    report is read, and who fixes its findings."""
+    """Each lifecycle step's operative clauses, bound to its own step."""
 
-    def test_skip_sentence_is_one_phrase(self):
-        region = _paragraph("This lane skips")
-        phrase = ("This lane skips the Task A + Task B sequence, the variety "
-                  "stamp, and the per-reviewer journal block")
-        assert phrase in region, (
-            "the skip sentence changed — it must keep all three skipped "
-            "steps in one phrase, or the surrounding per-reviewer procedure "
-            "re-absorbs the cold lane"
-        )
-
-    @pytest.mark.parametrize("token, lost", [
-        ('reviewers array as the string "cold-reviewer"', (
-         "the named review_dispatch string — without it the lead invents one")),
-        ("review_finding event with reviewer cold-reviewer", (
-         "the journal landing — a subagent's report otherwise vanishes at "
-         "compaction")),
-        ("omit it from the read-back match too", (
-         "the read-back rule — a match that keeps task_id never finds the "
-         "event")),
-    ])
-    def test_report_landing_present(self, token, lost):
-        region = _strip_ticks(_paragraph("This lane skips"))
-        assert token in region, f"the report-landing line lost {lost} ({token!r})"
-
-    @pytest.mark.parametrize("token, lost", [
-        ("writes no HANDOFF", "the statement that no HANDOFF exists"),
-        ("the review doc is the durable home of its report", "where the report is recorded"),
-        ("Record the report there verbatim", ("the verbatim rule — the "
-         "re-review checklist copies from this record, never from "
-         "synthesized rows")),
-        ('in a section headed "Cold report (verbatim)"', "the named record the checklist cites"),
-        ("as soon as it returns, together with the subagent's agentId", (
-         "the timing and the agentId the resume route needs")),
-        ("open-questions dispositions", ("the disposition row for each cold "
-         "open question — the merge gate keys on it")),
-    ])
-    def test_record_paragraph_present(self, token, lost):
-        region = _paragraph("writes no HANDOFF")
-        assert token in region, f"the cold record paragraph lost {lost} ({token!r})"
-
-    @pytest.mark.parametrize("token, lost", [
-        ("valid only with", ("the operative claim — the receipt list is a "
-         "requirement, not advice")),
-        ("synthesize the lane as review-did-not-happen, not as clean", (
-         "the main null clause — an incomplete report reads as clean")),
-        ("wait for the cold report before synthesizing", (
-         "the wait rule — synthesis before the report lands drops the lane")),
-        ("do not treat completion of the spawn as the review", (
+    @pytest.mark.parametrize("step, token, lost", [
+        ("Dispatch", "This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block", (
+         "the skip sentence as one phrase — the per-reviewer procedure "
+         "otherwise re-absorbs the cold lane")),
+        ("Dispatch", 'reviewers array as the string "cold-reviewer"', (
+         "the named review_dispatch string")),
+        ("Spawn result", "record the subagent's agentId at once in the review doc's \"Cold report (verbatim)\" section", (
+         "the agentId record at spawn — resume and HALT need it")),
+        ("Spawn result", "with the {base} and {head} it was dispatched with", "the refs the record carries"),
+        ("Spawn result", "create the review doc with that section if it does not exist yet", (
+         "the record's creation rule")),
+        ("Spawn result", "keep it in a sibling file the review doc names; every mention of the record below means that file", (
+         "the sibling-file rule")),
+        ("While it runs", "SendMessage it HALT by its recorded agentId; it returns its report so far", (
+         "the HALT route")),
+        ("Return", "writes no HANDOFF and messages no one; its final report is its return", (
+         "the return path")),
+        ("Return", "Append the report verbatim to the record under its agentId", "the verbatim record"),
+        ("Return", "as soon as it returns, before synthesizing", "the record's timing"),
+        ("First-round validity", "or the report was cut short by a HALT, synthesize the lane as review-did-not-happen, not as clean", (
+         "the first-round null clause")),
+        ("No report or an invalid one", "run one fresh cold dispatch, after any HALT is resolved, with the same placeholders", (
+         "the one re-dispatch")),
+        ("No report or an invalid one", "for a re-check, the same re-check message", (
+         "the re-dispatch carrying the re-check")),
+        ("No report or an invalid one", "An invalid report stays in the record where **Return** appended it, and its findings count like any cold finding", (
+         "the invalid report's findings")),
+        ("No report or an invalid one", "If that also returns no valid report, the cold lane did not run for this round", (
+         "the did-not-run outcome")),
+        ("No report or an invalid one", 'add the row "Cold lane did not run" to the recommendations table', (
+         "the did-not-run table row")),
+        ("No report or an invalid one", 'the line "Cold lane did not run." to the merge-readiness statement', (
+         "the did-not-run merge line")),
+        ("No report or an invalid one", "Do not treat completion of the spawn as the review", (
          "the completion-is-not-review rule")),
-        ("synthesize that re-check as review-did-not-happen", (
-         "the re-check's own null clause")),
-        ("a resume that returns no report goes to the fresh dispatch", (
-         "the fallback for a silent resume")),
+        ("Synthesis", "Wait for the cold report, or the did-not-run outcome, before synthesizing", (
+         "the wait rule")),
+        ("Synthesis", "Journal each cold finding per the review_finding journal step", (
+         "the journal landing")),
+        ("Return", "names, in its coverage boundary, something that prevented it from reviewing a changed path, treat it as a blocker report", (
+         "the cold blocker rule — a blocked lane otherwise reads as an ordinary report")),
+        ("Return", "run /PACT:imPACT before judging its validity", (
+         "the blocker route and its timing — before validity, so the re-dispatch rule cannot fire first")),
+        ("Return", "and do not synthesize the lane as clean", "the bar on reading a blocked lane as clean"),
+        ("Return", "**No report or an invalid one** applies only to reports that name no such blocker", (
+         "the bar on re-dispatching into the same blocker")),
+        ("Synthesis", "Give each open question in a cold report or re-check report a row", (
+         "the open-question rows, including re-checks")),
+        ("Remediation", "Never use the cold reviewer as a fixer and never reassign it", "the never-a-fixer rule"),
+        ("Remediation", "route its findings to warm fixers", "where its findings go"),
+        ("Remediation", "Send it no message other than a HALT or the re-check message", (
+         "the bar on any other message")),
+        ("Re-check", "re-check every cold finding not yet resolved, including new issues an earlier re-check raised", (
+         "the re-check scope across cycles")),
+        ("Re-check", "The re-check message is the paragraph below followed by those findings", (
+         "the message composition — checklist plus findings")),
+        ("Re-check", "copied verbatim from the record, never from synthesized rows", (
+         "the findings' source")),
+        ("Re-check", "Do not describe the fixes", "the bar on narrating the fixes"),
+        ("Failed cycle", "A cold finding a re-check reports as not resolved at blocking severity, and each new issue it raises", (
+         "what counts toward a failed cycle")),
+        ("Failed cycle", "count in the **Failed cycle** test like any reviewer's", "the link to the cycle test"),
     ])
-    def test_null_rule_present(self, token, lost):
-        region = _paragraph("valid only with")
-        assert token in region, f"the null rule lost {lost} ({token!r})"
+    def test_step_clause_present(self, step, token, lost):
+        assert token in _step(step), f"the {step!r} step lost {lost} ({token!r})"
 
     @pytest.mark.parametrize("token, lost", [
-        ("Never use the cold reviewer as a fixer", "the never-a-fixer rule"),
-        ("route its findings to warm fixers", "where its findings go"),
-        ("Send it no message other than the re-review checklist below or a HALT", (
-         "the bar on messaging the cold reviewer anything else")),
-        ("only to re-check its own findings", ("the re-review scope — the "
-         "cold lane re-checks, it does not re-review fresh")),
+        ("SendMessage to the agentId of the most recent cold subagent in the record", "the resume target"),
+        ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
+        ("If it cannot be resumed, apply **No report or an invalid one**", "the fallback to the one re-dispatch"),
+        ("the fresh dispatch is the cold prompt with the re-check placeholders, followed by the re-check message", (
+         "the fresh re-check dispatch")),
+        ("otherwise it is review-did-not-happen", "the re-check null clause"),
+        ("Append each re-check report verbatim to the record as in **Return**", "the verbatim re-check record"),
     ])
-    def test_re_review_rule_present(self, token, lost):
-        region = _paragraph("Never use the cold reviewer as a fixer")
-        assert token in region, f"the cold re-review rule lost {lost} ({token!r})"
-
-    @pytest.mark.parametrize("route, token, lost", [
-        ("- Resume:", "same cold subagent's agentId", "the resume target"),
-        ("- Resume:", "holds the re-review checklist and nothing else", (
-         "the bar on adding narrative to the resume message")),
-        ("- Resume:", "returns as the subagent's final report, not as a message", (
-         "the return path — the cold reviewer is barred from messaging")),
-        ("- Resume:", "the cold reviewer messages no one", "the reason the return path is the report"),
-        ("- Fresh dispatch", "when it cannot be resumed or the resume returns no report", (
-         "the fallback conditions")),
-        ("- Fresh dispatch", "the only text a re-review dispatch adds to the verbatim prompt", (
-         "the bound on what a fresh re-review dispatch may add")),
-    ])
-    def test_re_review_route_present(self, route, token, lost):
-        lines = [ln for ln in _lead_prose().splitlines() if ln.startswith(route)]
-        assert len(lines) == 1, f"the cold re-review lost its {route!r} route"
-        assert token in _strip_ticks(lines[0]), (
-            f"the {route!r} re-review route lost {lost} ({token!r})"
-        )
+    def test_resume_paragraph_present(self, token, lost):
+        region = _strip_ticks(_paragraph("Send the re-check message by resume"))
+        assert token in region, f"the re-check send paragraph lost {lost} ({token!r})"
 
     @pytest.mark.parametrize("token, lost", [
         ("RE-REVIEW CHECKLIST:", "the checklist's literal lead-in"),
-        ("This replaces REPORT for this review", "the re-review report shape"),
-        ('copied verbatim from the "Cold report (verbatim)" record, never from synthesized rows', (
-         "the findings' source — never a summary written by the lead")),
+        ("This replaces REPORT for this review", "the re-check report shape"),
         ("git diff {base}...{head}", "the diff the re-check runs, in defined placeholders"),
         ("For each new issue, give its severity (blocking, suggestion or nitpick), file:line and a concrete failure scenario", (
          "the new-issue fields the Failed cycle test needs")),
-        ("Do not describe the fixes", ("the bar on narrating the fixes — a "
-         "description is the author's account")),
-        ("Failed cycle", "the link from open cold findings to the cycle test"),
     ])
-    def test_re_review_checklist_present(self, token, lost):
-        region = _paragraph("The re-review checklist is one paragraph")
-        assert token in region, f"the re-review checklist lost {lost} ({token!r})"
+    def test_re_check_message_present(self, token, lost):
+        assert token in _checklist_quote(), f"the re-check message lost {lost} ({token!r})"
 
     @pytest.mark.parametrize("token, lost", [
         ("policy files", "the warm lanes' reading of project policy"),
-        ("the architect lane owns project-policy conformance", (
-         "the named owner of policy conformance")),
-        ("against itself", ("the cold lane's frame — the code's own claims, "
-         "not the project's rules")),
+        ("the architect lane owns project-policy conformance", "the named owner of policy conformance"),
+        ("against itself", "the cold lane's frame — the code's own claims"),
     ])
     def test_division_token_present(self, token, lost):
         region = _paragraph("Division of labour")
@@ -917,19 +995,22 @@ class TestOutsideSectionRules:
     @pytest.mark.parametrize("which, phrase, lost", [
         ("pr", "Each warm reviewer dispatch creates **two tasks**", (
          "the warm scoping of the two-task dispatch")),
-        ("pr", "Spawn all warm reviewers and the cold reviewer in parallel", (
-         "the single parallel spawn block")),
+        ("pr", "Spawn all warm reviewers in parallel (multiple `Agent` calls in one response); the cold reviewer's spawn joins that response per the Cold Reviewer Lane", (
+         "the warm spawn line deferring the same-block rule to the lane")),
         ("pr", "Each warm reviewer should state", "the warm scoping of the intent statement"),
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
         ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings", (
          "the Verify-Only re-review routing")),
-        ("pr", "and per open question in the cold report", (
+        ("pr", "and per open question in each cold report or re-check report", (
          "the synthesis row for each cold open question")),
-        ("pr", "every cold-report open question carries a disposition", (
+        ("pr", "every cold open question carries a disposition", (
          "the merge gate on cold open questions — without it the gate "
          "passes vacuously for the lane")),
+        ("pr", 'AND the cold lane\'s latest round was synthesized as a valid review, or the statement carries the line "Cold lane did not run."', (
+         "the merge gate on the cold lane's outcome — without it a "
+         "did-not-happen lane merges silently")),
         ("pr", "project-policy conformance of the changed files", (
          "the architect lane's policy-conformance mission")),
         ("pr", "Warm reviewer agent tasks (architect, test-engineer, domain specialists); the cold reviewer gets no task", (
@@ -939,6 +1020,9 @@ class TestOutsideSectionRules:
          "the overview's wait on the cold report — the parent task's "
          "blockers cannot hold it")),
         ("pr", 'Warm reviewer tasks status = "completed"', "the overview's completion step"),
+        ("pr", 'Warm reviewer tasks status = "in_progress"', "the overview's start step"),
+        ("pr", "Dispatch the warm reviewers and the cold reviewer in parallel", (
+         "the overview's dispatch step naming both lanes")),
         ("pr", "Dispatch **at least 3 warm reviewers in parallel**, plus the cold reviewer", (
          "the reviewer count scoped to warm reviewers")),
         ("pr", '"reviewers": ["{reviewer1}", "{reviewer2}", "cold-reviewer"]', (
@@ -955,11 +1039,11 @@ class TestOutsideSectionRules:
          "the persona's wait on the cold report")),
         ("persona", "teammate `SendMessage` communication", (
          "the NEVER rule's scope — teammate messaging, not every SendMessage")),
-        ("persona", "You can still resume it by `SendMessage` to its agentId; its reply returns as its final report", (
-         "the persona's resume route and its return path")),
-        ("persona", "A running peer-review cold reviewer owns no task, so this loop does not reach it: send it the same HALT by its agentId", (
+        ("persona", "that the lead still reaches by `SendMessage` to its agentId", (
+         "the persona's resume route")),
+        ("persona", "A running peer-review cold reviewer owns no task, so this loop does not reach it: HALT it as the Cold Reviewer Lane in the `peer-review` command says", (
          "the HALT route for a reviewer with no task")),
-        ("persona", "The peer-review cold reviewer is the exception: its prompt is sent verbatim, and it reports a blocker in its coverage boundary", (
+        ("persona", "The peer-review cold reviewer is the exception: its prompt is sent verbatim and already says how it reports a blocker", (
          "the blocker-protocol exception")),
         ("persona", "The peer-review cold reviewer's prompt is fixed by its command and takes none of it", (
          "the prompting-structure exception")),
@@ -980,9 +1064,9 @@ class TestPlaceholderDefinitions:
     @pytest.mark.parametrize("name, token, lost", [
         ("{base}", "freshly fetched remote-tracking ref", (
          "the ref kind — a stale local base widens the triple-dot diff")),
-        ("{base}", "In a re-review, the head commit the cold findings were made at", (
-         "the re-review value of {base}")),
-        ("{head}", "In a re-review, the new head commit", "the re-review value of {head}"),
+        ("{base}", "In a re-check, the head commit of the previous cold review or re-check", (
+         "the re-check value of {base} — one commit per round, never ambiguous")),
+        ("{head}", "In a re-check, the new head commit", "the re-check value of {head}"),
     ])
     def test_placeholder_definition(self, name, token, lost):
         lines = [ln for ln in _placeholder_list().splitlines() if ln.startswith(f"- `{name}`")]
@@ -1003,13 +1087,20 @@ class TestClassGuards:
     (b) Each validity list carries every element its report contract
     requires. The element keys are an explicit map, asserted to occur in
     the contract itself, and the contract's element count is asserted, so
-    adding an element to REPORT or the checklist fails here until the map
-    and both lists follow. CANNOT CATCH: an element the lists name with a
-    noun the contract does not use.
+    adding an element to REPORT fails here until the map and both lists
+    follow. The count splits REPORT on ';', and that premise is itself
+    asserted: each mapped element must sit in its own ';' segment. Each
+    validity list must also carry no negator (without, except, optional,
+    not, unless, may omit) between its marker and its consequence.
+    CANNOT CATCH: an element the lists name with a noun the contract does
+    not use; an element added to REPORT inside an existing ';' segment; a
+    negation phrased without those words or placed outside the list span;
+    an element added to the re-check checklist (no count is kept there).
 
     (c) Every paragraph in either file that names reviewers alongside the
-    warm machinery (tasks, HANDOFF, open_questions, teachback, task_id,
-    reuse) says warm or cold in its own words, or sits in the inventory
+    warm machinery (TaskCreate, TaskUpdate, TaskList, TaskGet, Task A,
+    Task B, team_name, HANDOFF, open_questions, teachback, task_id, reuse)
+    says warm or cold in its own words, or sits in the inventory
     below, whose entries are scoped by a qualified sentence in their
     container. The inventory must match exactly, so a new unqualified
     paragraph fails, and so does an entry that stopped matching. CANNOT
@@ -1043,6 +1134,30 @@ class TestClassGuards:
             f"validity map holds the findings plus {len(REPORT_ELEMENTS_KEYS)}. "
             f"Add the new element to REPORT_ELEMENTS_KEYS and to both validity "
             f"lists"
+        )
+
+    def test_report_elements_are_semicolon_separated(self):
+        """The element count above splits on ';'. This holds that premise:
+        each mapped element sits in its own ';' segment, so merging two
+        elements into one comma list, or dropping the ';' between them,
+        fails here instead of silently changing the count."""
+        segments = _clause("REPORT").split("Then give ", 1)[-1].split(";")
+        homes = {key: [i for i, s in enumerate(segments) if key in s] for key in REPORT_ELEMENTS_KEYS}
+        assert all(len(h) == 1 for h in homes.values()), (
+            f"a REPORT element is not in exactly one ';' segment: {homes!r}"
+        )
+        assert len({h[0] for h in homes.values()}) == len(REPORT_ELEMENTS_KEYS), (
+            f"two REPORT elements share one ';' segment: {homes!r} — the "
+            f"element count can no longer see an added element"
+        )
+
+    @pytest.mark.parametrize("marker", [FIRST_ROUND_VALIDITY, RECHECK_VALIDITY])
+    def test_validity_list_has_no_negator(self, marker):
+        span = _validity_sentence(marker)[len(marker):]
+        hits = VALIDITY_NEGATOR.findall(span)
+        assert not hits, (
+            f"the validity list after {marker!r} carries {hits!r} — an element "
+            f"named as optional or excepted still matches its key"
         )
 
     @pytest.mark.parametrize("key", REPORT_ELEMENTS_KEYS)
