@@ -1479,14 +1479,20 @@ def build_sessions_list(
     sessions: list[dict] = []
     for ref in discovery.discover_sessions(roots):
         summary = journal.summarize_journal(ref.journal, reference)
-        project, project_conformed = project_label(
-            _basename(summary.project_dir) or ref.slug
-        )
+        raw_project = _basename(summary.project_dir) or ref.slug
+        project, project_conformed = project_label(raw_project)
         if project_filter:
-            # EXACT, case-insensitive, against the two names the API emits: a
-            # substring filter makes "PACT" swallow every "PACT-*" project.
+            # EXACT, case-insensitive, against every name this session can be
+            # addressed by: the raw directory basename, its constrained label
+            # and the slug. The QUERY is run through the same sanitiser too,
+            # because commands/visualize.md passes the raw basename: a
+            # directory named "My App" is labelled "My_App" and the raw query
+            # must still find it. Never a substring — "PACT" must not match
+            # "PACT-prompt".
             wanted = project_filter.lower()
-            if wanted not in {project.lower(), ref.slug.lower()}:
+            wanted_label = project_label(project_filter)[0].lower()
+            candidates = {raw_project.lower(), project.lower(), ref.slug.lower()}
+            if wanted not in candidates and wanted_label not in candidates:
                 continue
         if session_filter and session_filter.lower() not in ref.session_id.lower():
             continue

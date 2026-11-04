@@ -359,6 +359,25 @@ class TestProjectFilter:
         project_session(root, "slug-name", "/work/other-dir")
         assert len(list_payload(root, project_filter="slug-name")["sessions"]) == 1
 
+    @pytest.mark.parametrize("wanted", ["My App", "My_App", "my app", "my_app"])
+    def test_raw_basename_query_finds_the_sanitized_label(self, tmp_path, wanted):
+        """commands/visualize.md passes the RAW basename; it must still match.
+
+        The label on the wire is sanitised to [A-Za-z0-9._-], so a directory
+        named "My App" is listed as "My_App". Matching the exact rule only
+        against the emitted label would make the documented launch path return
+        an empty list with no error.
+        """
+        root = make_root(tmp_path)
+        project_session(root, "unsafe", "/work/My App")
+        payload = list_payload(root, project_filter=wanted)
+        assert [row["project"] for row in payload["sessions"]] == ["My_App"]
+
+    def test_absent_project_still_returns_nothing(self, tmp_path):
+        root = make_root(tmp_path)
+        project_session(root, "alpha", "/work/PACT-prompt")
+        assert list_payload(root, project_filter="nowhere")["sessions"] == []
+
 
 class TestProjectLabelConstraint:
     def test_label_is_constrained_and_marked(self, tmp_path):
