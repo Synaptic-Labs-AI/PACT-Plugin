@@ -136,6 +136,15 @@ export function shortSha(sha) {
   return String(sha).slice(0, 7);
 }
 
+/* What a root change should do. A filtered root with no sessions must not
+ * leave the previous root's run on screen (that run belongs to another root),
+ * and an unfiltered empty root keeps the existing keep-or-demo behaviour. */
+export function rootChangeAction({ hasSession, requestedProject, hasRun }) {
+  if (hasSession) return "open";
+  if (requestedProject) return "empty";
+  return hasRun ? "keep" : "demo";
+}
+
 /* A run's identity is its coordinates, never its journal revision: a live
  * poll must not read as a different run. Shared by the stage and panels. */
 export function runKey(model) {

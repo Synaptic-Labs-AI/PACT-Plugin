@@ -2,7 +2,7 @@
  * Reads local journals via same-origin API only. No external requests. */
 
 import { sessions, session, demo, health, USE_MOCK } from "./api.js";
-import { el, clear, fmtClock, clamp, missionSecondsAt } from "./dom.js";
+import { el, clear, fmtClock, clamp, missionSecondsAt, rootChangeAction } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
 import { createTimeline } from "./timeline.js";
@@ -490,10 +490,45 @@ function selectRoot(rootId, { open = true } = {}) {
   populateSessions(rootId, slug);
   if (open) {
     const first = sessionsFor(rootId, slug)[0];
-    if (first) openSession(first);
-    else if (state.requestedProject) showEmptyProject(state.requestedProject);
-    else if (!state.current) openDemo();
+    const action = rootChangeAction({
+      hasSession: Boolean(first),
+      requestedProject: state.requestedProject,
+      hasRun: Boolean(state.model),
+    });
+    if (action === "open") {
+      openSession(first);
+    } else if (action === "empty") {
+      /* The displayed run belongs to the previous root; keeping it under a
+       * NO SESSIONS caption would be the same lie in a different place. */
+      clearRunView();
+      showEmptyProject(state.requestedProject);
+    } else if (action === "demo") {
+      openDemo();
+    }
   }
+}
+
+/* Drop the open run so the rails, recorder and caption all agree there is
+ * nothing to show. Used when the selected root cannot show a run at all. */
+function clearRunView() {
+  stopPolling();
+  state.current = null;
+  state.model = null;
+  state.etag = null;
+  state.cursor = 0;
+  state.playing = false;
+  state.followLive = false;
+  state.mode = "idle";
+  state.selectedAgent = null;
+  if (stage) stage.setModel(null);
+  if (panels) {
+    panels.setModel(null);
+    panels.setSelectedAgent(null);
+  }
+  if (timeline) timeline.setModel(null);
+  document.title = "PACT // Mission Control";
+  setModeLabel();
+  updateTimeline();
 }
 
 /* A launch-level project filter that matches nothing must say so. Falling

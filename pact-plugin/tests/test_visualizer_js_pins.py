@@ -34,7 +34,7 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
 
 (async () => {
   const { Stage } = await import("./stage.js");
-  const { createSeqIndex, missionSecondsAt } = await import("./dom.js");
+  const { createSeqIndex, missionSecondsAt, rootChangeAction } = await import("./dom.js");
 
   /* A live poll is a new journal revision of the SAME run. Identity must not
    * include the etag, or the stage resets its roster and selection each tick. */
@@ -58,6 +58,21 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("a seq before the window maps to 0", indexFor(99) === 0);
   check("a seq past the window maps to its length", indexFor(104) === 3);
   check("an absent seq has no index", indexFor(null) === null);
+
+  /* A filtered root with no sessions clears the open run: the rails, recorder
+   * and caption must not disagree about what is on screen. */
+  check("a session in the new root always opens", rootChangeAction({
+    hasSession: true, requestedProject: "P", hasRun: true,
+  }) === "open");
+  check("a filtered empty root clears the open run", rootChangeAction({
+    hasSession: false, requestedProject: "P", hasRun: true,
+  }) === "empty");
+  check("an unfiltered empty root keeps an open run", rootChangeAction({
+    hasSession: false, requestedProject: "", hasRun: true,
+  }) === "keep");
+  check("an unfiltered empty root with nothing open opens the demo", rootChangeAction({
+    hasSession: false, requestedProject: "", hasRun: false,
+  }) === "demo");
 
   /* An empty window is zero mission time, never wall-clock elapsed time. */
   const meta = { started_at: "2026-01-01T00:00:00Z" };
