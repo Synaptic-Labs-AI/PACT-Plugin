@@ -492,7 +492,7 @@ body.disco #stage-frame { box-shadow: 0 0 40px rgba(167, 139, 250, 0.45), var(--
   #left-rail {
     position: absolute;
     left: 12px;
-    top: calc(var(--header-h) + 12px);
+    top: calc(var(--header-real-h, var(--header-h)) + 12px);
     width: 250px;
     max-height: 62vh;
     z-index: 20;
@@ -523,7 +523,7 @@ body.disco #stage-frame { box-shadow: 0 0 40px rgba(167, 139, 250, 0.45), var(--
     position: absolute;
     right: 12px;
     bottom: calc(var(--footer-h) + 12px);
-    top: calc(var(--header-h) + 12px);
+    top: calc(var(--header-real-h, var(--header-h)) + 12px);
     width: min(340px, 88vw);
     z-index: 20;
     padding: 8px;

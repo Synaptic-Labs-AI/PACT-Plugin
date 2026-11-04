@@ -769,7 +769,33 @@ function bindHeader() {
   });
 }
 
+let headerHeight = 0;
+
+/* The topbar wraps below 980px, so its real height is content-dependent and
+ * can exceed the static --header-h token. The overlay drawers must start
+ * below the header, not below the token, or they cover the wrapped controls. */
+function measureHeaderHeight() {
+  const header = document.getElementById("topbar");
+  if (!header) return;
+  const height = Math.round(header.getBoundingClientRect().height || 0);
+  if (height <= 0 || height === headerHeight) return;
+  headerHeight = height;
+  document.documentElement.style.setProperty("--header-real-h", `${height}px`);
+}
+
+function trackHeaderHeight() {
+  measureHeaderHeight();
+  const header = document.getElementById("topbar");
+  if (!header) return;
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(measureHeaderHeight).observe(header);
+  } else {
+    window.addEventListener("resize", measureHeaderHeight);
+  }
+}
+
 function toggleDrawer(cls, button) {
+  measureHeaderHeight(); /* content changes can re-wrap the header */
   const open = !document.body.classList.contains(cls);
   document.body.classList.toggle(cls, open);
   if (button) button.setAttribute("aria-pressed", open ? "true" : "false");
@@ -959,6 +985,7 @@ function initModules() {
 }
 
 async function boot() {
+  trackHeaderHeight();
   initModules();
   bindHeader();
   bindKeyboard();
