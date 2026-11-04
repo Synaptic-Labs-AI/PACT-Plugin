@@ -668,6 +668,73 @@ class TestLiveDispatchShapes:
         assert sites(events) == []
 
 
+class TestReviewerInclusionPin:
+    """The inclusion pin: an owner-wired reviewer dispatch IS a dispatch_site.
+
+    Membership is PATH-BLIND — the same ladder legs that witness a work
+    dispatch witness a review dispatch — so the reviewer lane needs no
+    special-case arm of the ladder. These arms are the executable
+    counterpart of the rewritten owner-less arm's rationale ("a reviewer
+    dispatch WITH owner wiring would be a site"): a lane-shaped carve-out
+    (any predicate dropping reviewer-shaped subjects) reddens T1, and the
+    cruder subject-TEXT carve-out reddens T5 too — the collision argument
+    against widening the inference made executable, because at the
+    owner-witnessing write a work subject containing 'review' is
+    indistinguishable from a reviewer subject.
+    """
+
+    REVIEWER = "review-coder"  # deliberately NOT in MEMBERS: registered per-arm
+
+    def _register_reviewer(self, env):
+        """Register the reviewer owner in team config. Registration is
+        LOAD-BEARING for the emit itself (the owner must resolve to a pact
+        specialist or step 4 fails closed), not merely for a count."""
+        cfg = env / ".claude" / "teams" / TEAM / "config.json"
+        members = json.loads(cfg.read_text(encoding="utf-8"))["members"]
+        members.append({"name": self.REVIEWER,
+                        "agentType": "pact-backend-coder"})
+        cfg.write_text(json.dumps({"leadSessionId": "s1", "members": members}),
+                       encoding="utf-8")
+
+    def test_T1_owner_wired_reviewer_dispatch_IS_a_site(self, env, events):
+        """A reviewer-shaped Task B (the peer-review subject convention
+        '{name}: review {feature}') whose owner write names a registered
+        specialist emits ONE dispatch_site carrying the stamp. Live-confirmed
+        before this pin existed: reviewer Task Bs emitted with their stamps
+        while their TEACHBACK gates stayed dark."""
+        self._register_reviewer(env)
+        seed(env, owner=self.REVIEWER,
+             subject="review-coder: review PR #99 on the thing",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
+        s = sites(events)
+        assert len(s) == 1, "an owner-wired reviewer dispatch is a site"
+        assert s[0]["variety"]["total"] == 11, "and it carries the stamp"
+
+    def test_T2_reviewer_teachback_gate_stays_dark(self, env, events):
+        """The reviewer TEACHBACK Task A carries the SAME owner wiring its
+        Task B does, so the anchored subject predicate is the sole thing
+        keeping it dark — one site per reviewer pair, never two."""
+        self._register_reviewer(env)
+        seed(env, owner=self.REVIEWER,
+             subject="review-coder: TEACHBACK for review of PR #99",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
+        assert sites(events) == []
+
+    def test_T5_work_subject_containing_review_still_emits(self, env, events):
+        """COLLISION ARM. A WORK dispatch whose subject merely contains
+        'review' emits like any work dispatch: any subject-TEXT carve-out
+        eats work lanes, which is why membership keys on the owner write
+        alone."""
+        seed(env, owner="backend-coder",
+             subject="backend-coder: review the failing suite",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner="backend-coder"))
+        s = sites(events)
+        assert len(s) == 1, "a work subject containing 'review' is still a site"
+
+
 class TestRealJournalSeam:
     """NON-MOCKED SEAM INTEGRATION — the real session-journal write path.
 
