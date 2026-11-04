@@ -55,6 +55,7 @@ Create a review Task hierarchy:
 ├── [Agent] "backend-coder: implementation review"
 ├── [Agent] "security-engineer: security review" (conditional)
 ├── [Agent] "qa-engineer: runtime verification" (conditional)
+├── [Subagent] "cold-reviewer: diff-only review"
 ├── [Remediation] (dynamic, for major issues)
 │   └── [Agent] "fix: auth vulnerability"
 ├── [Step] "User: review minor issues"
@@ -130,6 +131,7 @@ Standard reviewer combination (always included):
 - **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
 - **pact-test-engineer**: Test coverage, testability, performance implications, edge cases
 - **Domain specialist coder** (selected below): Implementation quality specific to the domain
+- **Cold reviewer** (`general-purpose` subagent): A reading of the diff with no exposure to the plan, the contract, or the session narrative — dispatched per the Cold Reviewer Lane section below
 
 Conditional reviewers (included when relevant):
 - **pact-security-engineer**: When PR touches auth/authorization, user input handling, API endpoints, data serialization, or crypto/token code. File-pattern heuristics:
@@ -192,6 +194,26 @@ TaskUpdate(A_id, addBlocks=[B_id])
 
 The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding `TaskCreate` sequence.
 
+### Cold Reviewer Lane
+
+The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description=..., prompt=...)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it.
+
+The `prompt` is a dispatch contract the lead fills in per PR:
+
+- **ARTIFACT**: the worktree path and the base...head refs. Tell the reviewer to run the diff itself (`git diff <base>...<head>`) and to read the diff ONLY — do not fetch the PR body or PR comments (`gh pr view` and `gh api` on the PR are barred; they are the author's account of the work).
+- **AVOID by path**: `docs/plans/`, `docs/architecture/`, `docs/review/`, the team task directory, handoff files, pact-memory stores, and `CLAUDE.md` on disk.
+- **CHANNELS**: no `SendMessage` about the work to the reviewers, the secretary, or the lead; do not load or use task tools at all (no `TaskList`, no `TaskGet`); no pact-memory queries.
+- **DISREGARD**: the spawn context may contain `CLAUDE.md` sections (Current Session, Retrieved Context, Pinned Context, Working Memory) and an auto-memory index placed by the harness. Any statement in them about this repository's current work is inadmissible — do not rely on it, cite it, or let it choose what gets examined. Operational guidance is admissible only from this dispatch.
+- **OPERATIONAL FACTS** (lead-filled): how to run the project's tests, including the interpreter or venv form; the lint gate command; path conventions that would otherwise surprise (for example, `docs/` untracked on disk is normal).
+- **QUESTION**: "what is wrong with this diff" — judge the code against its own claims, including tests that exercise a replica of production logic.
+- **REPORT**: open with what the diff claims to do, derived from the diff alone — code, comments, and tests at head, not the PR description. Then severity-ranked findings — `blocking`, `suggestion`, `nitpick` — each with file:line and a concrete failure scenario; an explicit nothing-found line for each severity with no findings; one sentence on what would block a merge, even if nothing would; and a coverage boundary: paths read, paths not examined, commands not run, and why.
+
+This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array, and journal its findings through the existing `review_finding` event with reviewer `cold-reviewer`, with `task_id` omitted or attributed to the review parent task.
+
+A report with no findings is valid only with the per-severity nothing-found lines, the merge-block sentence, the coverage boundary, and the paths-read / commands-not-run receipt; if any element is missing, synthesize the lane as review-did-not-happen, not as clean.
+
+Division of labour: the warm lanes read the project's policy files and own project-policy conformance; the cold lane judges the code against itself.
+
 ---
 
 **Dispatch reviewers** — for each reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
@@ -220,6 +242,8 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 4. `TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])`
 5. <!-- ANCHOR-STABLE: REVIEWER-MEMORY-CHANNEL -->
    Before dispatching, compare each reviewer's `subagent_type` against the builder's. Persistent agent-memory is keyed by agent TYPE, so a reviewer of the same type loads at spawn the same store the builder has been writing to — its index arrives in context whether or not the reviewer opens a file, and it is pulled on creation rather than pushed mid-session, which is why no ordering avoids it and the harvest hold below does not reach it. Where the types match, state that limitation in the reviewer's `metadata.handoff` instead of claiming independence. Where a cross-check must be decisive, dispatch it to a DIFFERENT type, and leave the secretary query out of that dispatch — pact-memory is shared per project, so a type swap alone does not close it.
+
+   The cold reviewer lane satisfies this clause by construction: its `general-purpose` subagent type carries no PACT agent-memory store, so there is no store to compare against the builder's. Cold dispatches never instruct memory writes.
 
 6. **Journal event**: write one `variety_assessed` event per dispatched reviewer Task B before spawning, mirroring that task's `metadata.variety` stamp — the four dimension scores and the total, `*_rationale` strings omitted, with the top-level `"scope": "dispatch"` discriminator present (the feature-level assessment event carries no `scope` field; journal readers key on that difference):
 ```bash

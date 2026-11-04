@@ -237,7 +237,7 @@ Create a feature branch before any new workstream begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
 
-**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — no exceptions.
+**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — no exceptions. Exception: the peer-review cold reviewer is dispatched as an anonymous `general-purpose` subagent with no `team_name`.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides — delegate anyway.
 
@@ -397,6 +397,8 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 > ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=..., prompt=...)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
+>
+> Exception: the peer-review cold reviewer is dispatched as an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair. See the Cold Reviewer Lane in the `peer-review` command.
 
 **Teachback-Gated Dispatch**:
 
@@ -798,6 +800,7 @@ Invoke **at least 3 agents in parallel**:
 - **Conditional reviewers** (included when relevant):
   - **pact-security-engineer**: When PR touches auth, user input handling, API endpoints, or crypto/token code
   - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
+- **Cold reviewer** (`general-purpose` subagent, always): A diff-only reading with no plan, contract, or session narrative — dispatch per the Cold Reviewer Lane in the `peer-review` command
 
 After agent reviews completed:
 
