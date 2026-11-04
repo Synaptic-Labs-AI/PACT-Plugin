@@ -33,6 +33,7 @@ const els = {
   recorder: $("recorder"),
   modal: $("modal-root"),
   toast: $("toast-root"),
+  announcer: $("live-announcer"),
   loading: $("loading"),
   loadingSub: $("loading-sub"),
   error: $("error-banner"),
@@ -76,6 +77,7 @@ const state = {
   followLive: false,
   etag: null,
   lastError: "",
+  demoAvailable: true,
   suppress: false,
   pollTimer: 0,
   raf: 0,
@@ -120,6 +122,21 @@ function hideError() {
 function toast(title, body, kind = "info") {
   if (!panels) return;
   panels.toast({ title, body, kind });
+}
+
+const ANNOUNCE_MIN_MS = 4000;
+let lastAnnouncement = 0;
+
+/* Polite live-region text for screen readers. Only live polling calls this:
+ * replay scrubbing must stay silent, or every tick would speak. */
+function announce(message, { force = false } = {}) {
+  if (!els.announcer || !message) return;
+  const now = Date.now();
+  if (!force && now - lastAnnouncement < ANNOUNCE_MIN_MS) return;
+  lastAnnouncement = now;
+  /* A live region speaks a CHANGE; an identical repeated string is silent.
+   * Toggle a zero-width space so the same sentence still re-announces. */
+  els.announcer.textContent = els.announcer.textContent === message ? `${message}\u200b` : message;
 }
 
 function setModeLabel() {
@@ -268,6 +285,7 @@ async function pollLive() {
     if (!state.current || state.current.key !== ref.key) return;
     const follow = state.followLive;
     const priorCursor = state.cursor;
+    const priorTotal = state.model && Array.isArray(state.model.events) ? state.model.events.length : 0;
     state.etag = data.etag || null;
     state.model = data;
     if (stage) stage.setModel(data);
@@ -278,6 +296,11 @@ async function pollLive() {
     else setCursor(clamp(priorCursor, 0, total), { animate: false });
     updateHeader(data);
     if (achievements) achievements.evaluate(data, { live: true });
+    const added = Math.max(0, data.events.length - priorTotal);
+    if (follow && added > 0) {
+      const phase = data.phases && data.phases.current ? ` in ${data.phases.current}` : "";
+      announce(`${added} new event${added === 1 ? "" : "s"}${phase}`);
+    }
     if (data.meta.status !== "live") {
       state.mode = "replay";
       state.followLive = false;
@@ -286,6 +309,7 @@ async function pollLive() {
       if (panels) panels.setLive(false);
       updateTimeline();
       toast("Run ended", "The journal recorded the end of this run.", "success");
+      announce("Run ended. The journal is complete.", { force: true });
     }
   } catch (err) {
     showError(`Live poll failed: ${err.message}`, pollLive);
@@ -369,7 +393,9 @@ function populateRoots() {
       })
     );
   }
-  els.root.appendChild(el("option", { value: "__demo__", text: "training simulation" }));
+  if (state.demoAvailable) {
+    els.root.appendChild(el("option", { value: "__demo__", text: "training simulation" }));
+  }
 }
 
 function projectsFor(rootId) {
@@ -384,10 +410,34 @@ function sessionsFor(rootId, slug) {
     .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
 }
 
+const PROJECT_ALTERED_TITLE =
+  "The directory name contains characters that are not shown verbatim; this label was altered for display.";
+
+/* The server constrains a session's project label to [A-Za-z0-9._-] and sets
+ * project_altered when it substituted characters. The select value stays the
+ * slug (directory name), which is what every caller compares against. */
+function projectInfoFor(rootId, slug) {
+  const rows = state.sessions.filter((s) => s.root === rootId && s.slug === slug);
+  const named = rows.find((s) => s && typeof s.project === "string" && s.project);
+  return {
+    label: named ? named.project : slug,
+    altered: rows.some((s) => s && s.project_altered === true),
+  };
+}
+
 function populateProjects(rootId) {
   const projects = projectsFor(rootId);
   clear(els.project);
-  for (const p of projects) els.project.appendChild(el("option", { value: p, text: p }));
+  for (const p of projects) {
+    const info = projectInfoFor(rootId, p);
+    els.project.appendChild(el("option", {
+      value: p,
+      text: info.altered ? `${info.label} ⚠` : info.label,
+      attrs: info.altered
+        ? { title: PROJECT_ALTERED_TITLE, "aria-label": `${info.label}. ${PROJECT_ALTERED_TITLE}` }
+        : { title: info.label },
+    }));
+  }
   if (projects.length) els.project.value = projects[0];
 }
 
@@ -448,6 +498,15 @@ async function loadInitial() {
   setLoading(true, "reading local journals");
   try {
     const params = new URLSearchParams(window.location.search);
+    /* `demo_available` is the capability; `demo` is the server's actual launch
+     * mode. Only the capability decides whether the demo affordance exists. */
+    try {
+      const info = await health();
+      state.demoAvailable = Boolean(info && info.demo_available !== false);
+    } catch (_) {
+      /* Keep the default: the demo is also the degraded-path fallback. */
+    }
+    els.demo.hidden = !state.demoAvailable;
     const data = await refreshList(params.get("root") || undefined);
     const rootId = els.root.value;
     if (params.has("demo") || (USE_MOCK && !params.has("session"))) {

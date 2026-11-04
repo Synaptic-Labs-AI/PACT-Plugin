@@ -50,7 +50,10 @@ export async function health() {
       instance_id: "mock",
       uptime_s: 0,
       roots: [{ id: "mock", label: "mock", path: "mock", journals: 1, default: true }],
+      /* `demo` is the actual mode; `demo_available` is the capability. The
+       * mock preview is the demo, and the scripted demo is available. */
       demo: true,
+      demo_available: true,
       mock: true,
     };
   }

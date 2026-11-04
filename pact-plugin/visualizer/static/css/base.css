@@ -57,6 +57,19 @@ button { cursor: pointer; }
 a { color: var(--accent); }
 [hidden] { display: none !important; }
 
+/* Announcements only: present in the accessibility tree, absent on screen. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 ::selection { background: rgba(163, 230, 53, 0.25); }
 
 :focus-visible {
@@ -377,7 +390,10 @@ body.no-crt #app::after { display: none; }
 
 #toast-root {
   position: fixed;
-  top: calc(var(--header-h) + 10px);
+  /* Anchored above the recorder, not under the topbar: at the old top position
+   * the stack covered the comms header (its title, LIVE pill and count) for
+   * the life of every toast. */
+  bottom: calc(var(--footer-h) + 14px);
   right: 18px;
   z-index: 70;
   display: flex;
