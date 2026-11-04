@@ -3,7 +3,17 @@
  * cursor and mission labels. The visual track is a decorative canvas; a real
  * range input underneath keeps the recorder keyboard accessible. */
 
-import { el, clear, fmtClock, fmtTime, clamp } from "./dom.js";
+import {
+  el,
+  clear,
+  fmtClock,
+  fmtTime,
+  clamp,
+  toggleClass,
+  createSeqIndex,
+  cssToken,
+  missionSecondsAt,
+} from "./dom.js";
 
 const SPEEDS = [1, 2, 4, 8];
 
@@ -21,49 +31,24 @@ LANES.forEach((lane, index) => {
   for (const category of lane.cats) LANE_BY_CATEGORY.set(category, index);
 });
 
-const FALLBACK = {
-  text: "#e8eefc",
-  muted: "#8fa0c4",
-  dim: "#5f7096",
-  line: "#24324f",
-  accent: "#a3e635",
-  success: "#4ade80",
-  warning: "#fbbf24",
-  danger: "#fb7185",
-  violet: "#a78bfa",
-  prepare: "#2dd4bf",
-  architect: "#60a5fa",
-  code: "#fbbf24",
-  test: "#f472b6",
-};
-
 let paletteCache = null;
 
 function palette() {
   if (paletteCache) return paletteCache;
-  const read = (name, fallback) => {
-    try {
-      if (typeof getComputedStyle !== "function") return fallback;
-      const value = getComputedStyle(document.documentElement).getPropertyValue(name);
-      return value && value.trim() ? value.trim() : fallback;
-    } catch (_) {
-      return fallback;
-    }
-  };
   paletteCache = {
-    text: read("--text", FALLBACK.text),
-    muted: read("--muted", FALLBACK.muted),
-    dim: read("--dim", FALLBACK.dim),
-    line: read("--line", FALLBACK.line),
-    accent: read("--accent", FALLBACK.accent),
-    success: read("--success", FALLBACK.success),
-    warning: read("--warning", FALLBACK.warning),
-    danger: read("--danger", FALLBACK.danger),
-    violet: read("--violet", FALLBACK.violet),
-    prepare: read("--prepare", FALLBACK.prepare),
-    architect: read("--architect", FALLBACK.architect),
-    code: read("--code", FALLBACK.code),
-    test: read("--test", FALLBACK.test),
+    text: cssToken("--text"),
+    muted: cssToken("--muted"),
+    dim: cssToken("--dim"),
+    line: cssToken("--line"),
+    accent: cssToken("--accent"),
+    success: cssToken("--success"),
+    warning: cssToken("--warning"),
+    danger: cssToken("--danger"),
+    violet: cssToken("--violet"),
+    prepare: cssToken("--prepare"),
+    architect: cssToken("--architect"),
+    code: cssToken("--code"),
+    test: cssToken("--test"),
   };
   return paletteCache;
 }
@@ -109,18 +94,6 @@ function laneFor(event) {
   const category = String((event && event.category) || "");
   const lane = LANE_BY_CATEGORY.get(category);
   return lane === undefined ? 0 : lane;
-}
-
-function toggleClass(node, name, on) {
-  if (!node) return;
-  if (node.classList && typeof node.classList.toggle === "function") {
-    node.classList.toggle(name, Boolean(on));
-    return;
-  }
-  const set = new Set(String(node.className || "").split(/\s+/).filter(Boolean));
-  if (on) set.add(name);
-  else set.delete(name);
-  node.className = [...set].join(" ");
 }
 
 function safeClass(value) {
@@ -247,19 +220,6 @@ export function createTimeline(root, options = {}) {
     return phases && phases.current ? String(phases.current).toUpperCase() : "STANDBY";
   }
 
-  function missionSecondsAt(cursor) {
-    const model = state.model;
-    if (!model || !model.meta || !model.meta.started_at) return 0;
-    const start = new Date(model.meta.started_at).getTime();
-    if (Number.isNaN(start)) return 0;
-    const total = eventTotal();
-    if (!total || cursor <= 0) return 0;
-    const event = model.events[clamp(cursor - 1, 0, total - 1)];
-    const end = event && event.ts ? new Date(event.ts).getTime() : NaN;
-    if (Number.isNaN(end)) return 0;
-    return Math.max(0, Math.round((end - start) / 1000));
-  }
-
   /* --- rendering -------------------------------------------------------- */
 
   function updatePhaseLabel() {
@@ -276,7 +236,7 @@ export function createTimeline(root, options = {}) {
     slider.value = String(cursor);
     slider.setAttribute("aria-valuetext", `${cursor} of ${total} events`);
     countLabel.textContent = `${cursor} / ${total}`;
-    clockLabel.textContent = fmtClock(missionSecondsAt(cursor));
+    clockLabel.textContent = fmtClock(missionSecondsAt(state.model, cursor));
     updatePhaseLabel();
   }
 
@@ -305,12 +265,20 @@ export function createTimeline(root, options = {}) {
       return;
     }
     const items = model && model.phases && Array.isArray(model.phases.items) ? model.phases.items.slice() : [];
+    /* Phase boundaries are journal seqs, not positions in the visible event
+     * window (the server keeps only the newest MAX_EVENTS). Translate them
+     * once. A pending phase has no start; a phase that ended before the
+     * window opens has no visible events. Neither gets a band. */
+    const indexForSeq = createSeqIndex(model);
     const bands = [];
     for (const item of items) {
-      const startSeq = Number(item.started_seq);
-      const endSeq = Number(item.ended_seq);
-      const start = Number.isFinite(startSeq) ? clamp(startSeq, 0, total - 1) : 0;
-      const end = Number.isFinite(endSeq) ? clamp(endSeq + 1, start + 1, total) : total;
+      const start = indexForSeq(item.started_seq);
+      if (start === null || start >= total) continue;
+      const rawEnd = item.ended_seq === null || item.ended_seq === undefined
+        ? null
+        : indexForSeq(Number(item.ended_seq) + 1);
+      if (rawEnd !== null && rawEnd <= start) continue;
+      const end = rawEnd === null ? total : clamp(rawEnd, start + 1, total);
       bands.push({
         name: String(item.name || item.family || "PHASE"),
         family: String(item.family || item.name || "").toLowerCase(),

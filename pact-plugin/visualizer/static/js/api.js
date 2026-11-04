@@ -2,7 +2,7 @@
  * front-end can be built without the Python server. No external requests. */
 
 const params = new URLSearchParams(window.location.search);
-export const USE_MOCK = params.has("mock");
+export const USE_MOCK = params.get("mock") === "1";
 
 let mockPromise = null;
 

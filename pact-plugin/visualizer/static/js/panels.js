@@ -3,7 +3,18 @@
  * callbacks it was constructed with, and all journal text is rendered as text
  * nodes (never markup). No header elements are queried from this module. */
 
-import { el, clear, fmtTime, fmtDate, fmtDuration, shortSha, clamp } from "./dom.js";
+import {
+  el,
+  clear,
+  fmtTime,
+  fmtDate,
+  fmtDuration,
+  shortSha,
+  clamp,
+  toggleClass,
+  createSeqIndex,
+  runKey,
+} from "./dom.js";
 import { drawRadar, drawSparkline } from "./charts.js";
 
 const FEED_LIMIT = 240;
@@ -169,18 +180,6 @@ function clockTime(iso) {
   return value.replace(/\s*[AP]M$/i, "").trim();
 }
 
-function toggleClass(node, name, on) {
-  if (!node) return;
-  if (node.classList && typeof node.classList.toggle === "function") {
-    node.classList.toggle(name, Boolean(on));
-    return;
-  }
-  const set = new Set(String(node.className || "").split(/\s+/).filter(Boolean));
-  if (on) set.add(name);
-  else set.delete(name);
-  node.className = [...set].join(" ");
-}
-
 function safeClass(value, fallback = "run") {
   const cleaned = String(value === undefined || value === null ? "" : value)
     .toLowerCase()
@@ -306,11 +305,13 @@ export class Panels {
     this._chipNodes = new Map();
     this._crewRows = new Map();
     this._phaseRows = [];
-    this._feed = { model: null, filter: "all", count: 0, matched: 0, rendered: 0, list: null, capNote: null };
+    this._feed = { key: null, filter: "all", count: 0, matched: 0, rendered: 0, list: null, capNote: null };
     this._nodes = {};
     this._chartJobs = [];
     this._lastFocus = null;
     this._focusOnOpen = false;
+    this._lastFocusKey = "";
+    this._seqIndex = () => null;
 
     if (this.modal) {
       this.modal.setAttribute("role", "dialog");
@@ -320,7 +321,29 @@ export class Panels {
         if (event.key === "Escape") {
           event.stopPropagation();
           this.closeModal();
+          return;
         }
+        if (event.key !== "Tab") return;
+        /* aria-modal promises the background is inert; without a Tab wrap,
+         * focus still walks into the page behind the dialog. */
+        const focusables = [...this.modal.querySelectorAll(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )].filter((node) => !node.disabled && node.offsetParent !== null);
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const inside = this.modal.contains(document.activeElement);
+        if (event.shiftKey && (!inside || document.activeElement === first)) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (!inside || document.activeElement === last)) {
+          event.preventDefault();
+          first.focus();
+        }
+      });
+      this.modal.addEventListener("focusin", (event) => {
+        const key = event.target && event.target.dataset ? event.target.dataset.focusKey : "";
+        if (key) this._lastFocusKey = key;
       });
       this.modal.addEventListener("click", (event) => {
         if (event.target === this.modal) this.closeModal();
@@ -334,11 +357,19 @@ export class Panels {
   /* --- public interface -------------------------------------------------- */
 
   setModel(model) {
-    this.model = model && typeof model === "object" ? model : null;
+    const next = model && typeof model === "object" ? model : null;
+    const sameRun = Boolean(this.model && next) && runKey(this.model) === runKey(next);
+    this.model = next;
+    this._seqIndex = createSeqIndex(next);
     this.cursor = clamp(this.cursor, 0, this._eventTotal());
-    this._feed.model = null;
     this.renderLeft();
-    this.renderFeed();
+    if (sameRun && this._feed.list) {
+      /* A live poll grows the same run: update the feed in place instead of
+       * rebuilding up to 240 rows (and destroying the focused row) each tick. */
+      this._updateFeed();
+    } else {
+      this.renderFeed();
+    }
     if (this.modalTab) this._renderModal();
   }
 
@@ -362,7 +393,6 @@ export class Panels {
     /* Rebuild only the feed list so the active chip keeps keyboard focus. */
     const feed = this._nodes.feed;
     if (feed) {
-      this._feed.model = null;
       this._rebuildFeed(feed);
     } else {
       this.renderFeed();
@@ -447,6 +477,7 @@ export class Panels {
     this._chartJobs = [];
     const previous = this._lastFocus;
     this._lastFocus = null;
+    this._lastFocusKey = "";
     this._focusOnOpen = false;
     if (previous && typeof previous.focus === "function" && previous.isConnected !== false) {
       try {
@@ -548,6 +579,7 @@ export class Panels {
     const left = this.left;
     if (!left) return;
     const scrollTop = Number(left.scrollTop) || 0;
+    const focusKey = this._focusKeyWithin(left);
     clear(left);
     this._leftLivePills = [];
     this._crewRows = new Map();
@@ -565,6 +597,26 @@ export class Panels {
     left.appendChild(this._crewCard());
     left.appendChild(this._statusLine());
     left.scrollTop = scrollTop;
+    this._restoreFocusWithin(left, focusKey);
+  }
+
+  _focusKeyWithin(root) {
+    const active = document.activeElement;
+    if (!root || !active || !root.contains(active) || !active.dataset) return "";
+    return active.dataset.focusKey || "";
+  }
+
+  _restoreFocusWithin(root, key) {
+    if (!root || !key) return;
+    const target = [...root.querySelectorAll("[data-focus-key]")]
+      .find((node) => node.dataset.focusKey === key);
+    if (target && typeof target.focus === "function") {
+      try {
+        target.focus({ preventScroll: true });
+      } catch (_) {
+        try { target.focus(); } catch (err) { /* focus is best-effort */ }
+      }
+    }
   }
 
   _emptyCard(title, body) {
@@ -768,7 +820,9 @@ export class Panels {
       else if (["completed", "complete", "done", "passed"].includes(status)) statusClass = "is-completed";
     }
     const run = item ? firstNumber(item.run) : 0;
-    const startSeq = item ? Number(item.started_seq) : NaN;
+    /* phase boundaries are journal seqs; compare them to the cursor only
+     * after mapping them onto the visible event window. */
+    const startIndex = item ? this._seqIndex(item.started_seq) : null;
     const glyph = statusClass === "is-completed" ? "✓" : statusClass === "is-current" ? "▶" : statusClass === "is-skipped" ? "–" : "·";
     const metaBits = [];
     if (!item) {
@@ -801,9 +855,8 @@ export class Panels {
         el("span", { class: "phase-meta", text: metaBits.join(" · ") }),
       ]),
     ]);
-    const startNumber = Number.isFinite(startSeq) ? startSeq : null;
-    if (startNumber !== null && this.cursor <= startNumber) step.className += " is-ahead";
-    this._phaseRows.push({ node: step, startSeq: startNumber });
+    if (startIndex !== null && this.cursor <= startIndex) step.className += " is-ahead";
+    this._phaseRows.push({ node: step, startIndex });
     return step;
   }
 
@@ -853,6 +906,7 @@ export class Panels {
     const selected = String(this.selectedAgent || "") === name;
     const row = el("div", {
       class: `crew-item${selected ? " is-selected" : ""}`,
+      dataset: { focusKey: `crew:${name}` },
       attrs: { role: "button", tabindex: "0", "aria-pressed": selected ? "true" : "false", title: `${name} · ${visible(agent.role) || "agent"}` },
     }, [
       el("span", { class: `crew-badge ${toneClass}`, text: initials(name), attrs: { "aria-hidden": "true" } }),
@@ -889,8 +943,8 @@ export class Panels {
     const eventsValue = this._nodes.eventsVal;
     if (eventsValue) eventsValue.textContent = `${this.cursor} / ${this._eventTotal()}`;
     for (const row of this._phaseRows) {
-      if (row.startSeq === null) continue;
-      toggleClass(row.node, "is-ahead", this.cursor <= row.startSeq);
+      if (row.startIndex === null) continue;
+      toggleClass(row.node, "is-ahead", this.cursor <= row.startIndex);
     }
   }
 
@@ -938,7 +992,6 @@ export class Panels {
     const feed = el("div", { class: "feed", attrs: { role: "list", "aria-label": "Comms feed" } });
     this._nodes.feed = feed;
     right.appendChild(feed);
-    this._feed.model = null;
     this._rebuildFeed(feed);
     right.scrollTop = scrollTop;
   }
@@ -951,7 +1004,6 @@ export class Panels {
         role: "button",
         tabindex: "0",
         title: `${visible(event.type) || "event"} · press Enter for detail`,
-        "data-seq": event.seq === undefined ? index : event.seq,
       },
     }, [
       el("span", { class: "feed-time", text: clockTime(event.ts) || "--:--:--" }),
@@ -1005,7 +1057,7 @@ export class Panels {
       if (event && match(event)) matches.push({ event, index });
     }
     this._feed = {
-      model: this.model,
+      key: runKey(this.model),
       filter: this.filter,
       count: this.cursor,
       matched: matches.length,
@@ -1059,7 +1111,7 @@ export class Panels {
       return;
     }
     const events = asArray(this.model && this.model.events);
-    if (this._feed.model !== this.model || this._feed.filter !== this.filter || !this._feed.list) {
+    if (this._feed.key !== runKey(this.model) || this._feed.filter !== this.filter || !this._feed.list) {
       this._rebuildFeed(feed);
       return;
     }
@@ -1157,6 +1209,10 @@ export class Panels {
   _renderModal() {
     if (!this.modal || this.modal.hidden) return;
     const tab = this.modalTab || "tasks";
+    /* A live poll re-renders this dialog while the reader is inside it.
+     * Preserve the scroll position and return focus to the same control. */
+    const scrollTop = this._nodes.modalBody ? Number(this._nodes.modalBody.scrollTop) || 0 : 0;
+    const restoreKey = this._focusOnOpen ? "" : this._lastFocusKey;
     clear(this.modal);
     this._chartJobs = [];
     if (this.modalView !== "event") this.detailEvent = null;
@@ -1173,12 +1229,23 @@ export class Panels {
     this.modal.appendChild(card);
     this._nodes.modalCard = card;
     this._nodes.modalBody = body;
+    body.scrollTop = scrollTop;
     if (this._focusOnOpen && this._nodes.modalClose && typeof this._nodes.modalClose.focus === "function") {
       this._focusOnOpen = false;
       try {
         this._nodes.modalClose.focus();
       } catch (_) {
         /* focus is best-effort */
+      }
+    } else if (restoreKey) {
+      const target = [...this.modal.querySelectorAll("[data-focus-key]")]
+        .find((node) => node.dataset.focusKey === restoreKey);
+      if (target && typeof target.focus === "function") {
+        try {
+          target.focus({ preventScroll: true });
+        } catch (_) {
+          try { target.focus(); } catch (err) { /* focus is best-effort */ }
+        }
       }
     }
     if (this.modalView === "tab" && tab === "variety") {
@@ -1202,6 +1269,7 @@ export class Panels {
       const button = el("button", {
         class: `debrief-tab${active ? " is-active" : ""}`,
         text: definition.label,
+        dataset: { focusKey: `tab:${definition.id}` },
         attrs: { type: "button", role: "tab", "aria-selected": active ? "true" : "false" },
       });
       button.addEventListener("click", () => {
@@ -1216,6 +1284,7 @@ export class Panels {
     const close = el("button", {
       class: "debrief-close",
       text: "✕",
+      dataset: { focusKey: "close" },
       attrs: { type: "button", title: "Close debrief (Esc)", "aria-label": "Close debrief" },
     });
     close.addEventListener("click", () => this.closeModal());
@@ -1773,6 +1842,7 @@ export class Panels {
       toolbar.appendChild(el("button", {
         class: "mini-btn",
         text: "COPY JSON",
+        dataset: { focusKey: "copy" },
         attrs: { type: "button" },
         on: {
           click: () => {
@@ -1784,7 +1854,11 @@ export class Panels {
       }));
     }
     wrap.appendChild(toolbar);
-    const pre = el("pre", { class: "raw-pre", attrs: { tabindex: "0", "aria-label": "Raw JSON model snapshot" } });
+    const pre = el("pre", {
+      class: "raw-pre",
+      dataset: { focusKey: "raw-pre" },
+      attrs: { tabindex: "0", "aria-label": "Raw JSON model snapshot" },
+    });
     pre.textContent = pretty;
     wrap.appendChild(pre);
     wrap.appendChild(el("p", { class: "raw-note", text: "This is the model payload the page rendered, filtered to the current replay point. Read-only: nothing is written back." }));
@@ -1904,6 +1978,7 @@ export class Panels {
       actions.appendChild(el("button", {
         class: "mini-btn is-primary",
         text: "SEEK HERE",
+        dataset: { focusKey: "seek" },
         attrs: { type: "button", title: "Move the recorder to this event" },
         on: {
           click: () => {
@@ -1916,6 +1991,7 @@ export class Panels {
     actions.appendChild(el("button", {
       class: "mini-btn",
       text: "BACK TO COMMS",
+      dataset: { focusKey: "back" },
       attrs: { type: "button" },
       on: { click: () => this.closeModal() },
     }));

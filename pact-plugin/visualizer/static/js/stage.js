@@ -23,6 +23,7 @@
  * this module touches.
  */
 
+import { runKey } from "./dom.js";
 import {
   SPRITE_W,
   SPRITE_H,
@@ -454,17 +455,9 @@ export class Stage {
   /* ---- setup ----------------------------------------------------------- */
 
   _identity(model) {
-    if (!model) return "";
-    const source = model.source || {};
-    const meta = model.meta || {};
-    return [
-      source.kind || "",
-      source.root || "",
-      source.slug || "",
-      source.session_id || "",
-      meta.team || "",
-      source.etag || model.etag || "",
-    ].join("|");
+    /* Coordinates only. The etag used to be part of this key, which made
+     * every live poll look like a different run. */
+    return runKey(model);
   }
 
   _resolveCaption() {
@@ -588,9 +581,13 @@ export class Stage {
       if (!item || typeof item !== "object") continue;
       const family = familyOf(item.family || item.name);
       if (!family) continue;
-      const start = Number(item.started_seq);
+      /* A pending phase carries null for both boundaries. Number(null) is 0,
+       * which used to make it look like the phase had started at the top of
+       * the journal, so the last pending phase overwrote `current`. Absent
+       * boundaries are absent, not zero. */
+      const start = item.started_seq === null || item.started_seq === undefined ? null : Number(item.started_seq);
       const endRaw = item.ended_seq === null || item.ended_seq === undefined ? null : Number(item.ended_seq);
-      if (Number.isFinite(start) && cursorSeq >= start && (endRaw === null || cursorSeq < endRaw)) {
+      if (start !== null && Number.isFinite(start) && cursorSeq >= start && (endRaw === null || cursorSeq < endRaw)) {
         current = family;
       }
       if (endRaw !== null && Number.isFinite(endRaw) && cursorSeq >= endRaw) {

@@ -3,6 +3,8 @@
  * history. Both are device-pixel-ratio aware, read their colours from the CSS
  * tokens in base.css, and never load an external library or asset. */
 
+import { cssToken } from "./dom.js";
+
 const DIM_KEYS = ["novelty", "scope", "uncertainty", "risk"];
 const DIM_LABELS = {
   novelty: "NOVELTY",
@@ -11,31 +13,7 @@ const DIM_LABELS = {
   risk: "RISK",
 };
 
-const FALLBACK = {
-  text: "#e8eefc",
-  muted: "#8fa0c4",
-  dim: "#5f7096",
-  line: "#24324f",
-  accent: "#a3e635",
-  success: "#4ade80",
-  warning: "#fbbf24",
-  danger: "#fb7185",
-  prepare: "#2dd4bf",
-  architect: "#60a5fa",
-  code: "#fbbf24",
-  test: "#f472b6",
-};
-
-function token(name) {
-  const fallback = FALLBACK[String(name || "").replace(/^--/, "")] || FALLBACK.text;
-  try {
-    if (typeof getComputedStyle !== "function") return fallback;
-    const value = getComputedStyle(document.documentElement).getPropertyValue(name);
-    return value && value.trim() ? value.trim() : fallback;
-  } catch (_) {
-    return fallback;
-  }
-}
+const token = cssToken;
 
 /* Canvas accepts rgba() for every token; tokens are hex, so convert. */
 function withAlpha(color, alpha) {

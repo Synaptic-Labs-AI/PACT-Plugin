@@ -12,7 +12,7 @@
   --line-bright: #38507a;
   --text: #e8eefc;
   --muted: #8fa0c4;
-  --dim: #5f7096;
+  --dim: #7a8cb0; /* 5.3:1 on --panel and 4.9:1 on --panel-2 (WCAG AA) */
   --prepare: #2dd4bf;
   --architect: #60a5fa;
   --code: #fbbf24;

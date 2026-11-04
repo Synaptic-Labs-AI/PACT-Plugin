@@ -1,8 +1,8 @@
 /* PACT Mission Control — app shell and orchestration.
  * Reads local journals via same-origin API only. No external requests. */
 
-import { sessions, session, demo, USE_MOCK } from "./api.js";
-import { el, clear, fmtClock, clamp, prefersReducedMotion } from "./dom.js";
+import { sessions, session, demo, health, USE_MOCK } from "./api.js";
+import { el, clear, fmtClock, clamp, missionSecondsAt } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
 import { createTimeline } from "./timeline.js";
@@ -64,7 +64,6 @@ const TIPS = [
 const state = {
   roots: [],
   sessions: [],
-  projects: [],
   current: null,
   model: null,
   mode: "idle", // idle | live | replay | demo
@@ -76,7 +75,6 @@ const state = {
   sound: false,
   followLive: false,
   etag: null,
-  audioSeq: 0,
   lastError: "",
   suppress: false,
   pollTimer: 0,
@@ -92,6 +90,11 @@ let panels;
 let timeline;
 let audio;
 let achievements;
+
+/* One live poll at a time: a slow response must not overlap the next tick. */
+let pollBusy = false;
+/* Monotonic token: a slow openSession must not overwrite a later selection. */
+let sessionRequest = 0;
 
 function setLoading(on, sub) {
   els.loading.hidden = !on;
@@ -143,6 +146,9 @@ function setModeLabel() {
     label = "◼ PAUSED";
   } else if (model.meta && model.meta.status === "refreshed") {
     label = "◼ REFRESHED";
+  } else if (model.meta && model.meta.status === "live") {
+    /* Replaying a run that is still live is REPLAY, not ENDED. */
+    label = "◼ REPLAY";
   } else {
     label = "◼ ENDED";
   }
@@ -150,24 +156,12 @@ function setModeLabel() {
   els.live.className = cls;
 }
 
-function missionSecondsAt(index) {
-  const model = state.model;
-  if (!model || !model.meta || !model.meta.started_at) return 0;
-  const start = new Date(model.meta.started_at).getTime();
-  if (Number.isNaN(start)) return 0;
-  const events = model.events || [];
-  const ev = events[Math.min(Math.max(index - 1, 0), events.length - 1)];
-  const end = ev && ev.ts ? new Date(ev.ts).getTime() : Date.now();
-  if (Number.isNaN(end)) return 0;
-  return Math.max(0, Math.round((end - start) / 1000));
-}
-
 function updateClock() {
   if (!state.model) {
     els.clock.textContent = "00:00:00";
     return;
   }
-  els.clock.textContent = fmtClock(missionSecondsAt(state.cursor));
+  els.clock.textContent = fmtClock(missionSecondsAt(state.model, state.cursor));
 }
 
 function setCursor(index, opts = {}) {
@@ -201,11 +195,12 @@ function setCursor(index, opts = {}) {
     const last = fresh[fresh.length - 1];
     if (last) audio.play(AUDIO_KINDS[last.category]);
   }
-  if (state.audioSeq < next) state.audioSeq = next;
 }
 
 function setPlaying(playing) {
-  state.playing = Boolean(playing);
+  const next = Boolean(playing);
+  if (next && !state.playing) state.acc = 0;
+  state.playing = next;
   if (timeline) timeline.setMode({ live: state.mode === "live", playing: state.playing, speed: state.speed });
 }
 
@@ -255,8 +250,10 @@ function startPolling() {
 }
 
 async function pollLive() {
+  if (pollBusy) return;
   if (state.mode !== "live" || !state.current || state.current.kind === "demo") return;
   const ref = state.current;
+  pollBusy = true;
   try {
     const data = await session({
       root: ref.root,
@@ -264,6 +261,9 @@ async function pollLive() {
       session_id: ref.session_id,
       since: state.etag,
     });
+    /* The server answered, so a connection banner from an earlier poll is
+     * stale even when this poll found no new events. */
+    if (state.lastError) hideError();
     if (!data || data.unchanged) return;
     if (!state.current || state.current.key !== ref.key) return;
     const follow = state.followLive;
@@ -289,6 +289,8 @@ async function pollLive() {
     }
   } catch (err) {
     showError(`Live poll failed: ${err.message}`, pollLive);
+  } finally {
+    pollBusy = false;
   }
 }
 
@@ -320,7 +322,6 @@ function applyModel(model, opts = {}) {
   if (state.mode === "demo") cursor = 0;
   if (state.followLive) cursor = total;
   state.cursor = cursor;
-  state.audioSeq = cursor;
   if (stage) stage.setCursor(cursor, { animate: false, live: state.followLive });
   if (panels) panels.setCursor(cursor);
   if (timeline) timeline.setCursor(cursor);
@@ -385,7 +386,6 @@ function sessionsFor(rootId, slug) {
 
 function populateProjects(rootId) {
   const projects = projectsFor(rootId);
-  state.projects = projects;
   clear(els.project);
   for (const p of projects) els.project.appendChild(el("option", { value: p, text: p }));
   if (projects.length) els.project.value = projects[0];
@@ -477,9 +477,18 @@ async function loadInitial() {
   } catch (err) {
     setLoading(false);
     showError(`Could not read PACT runs: ${err.message}`, loadInitial);
-    if (els.modal) {
-      // Keep the shell usable with the demo even when the API is down.
-      try { await openDemo(); } catch (_) { /* ignore */ }
+    /* The demo needs the same server. Only try it when health answers;
+     * otherwise openDemo's failure would replace this error and its retry
+     * with a dead end. */
+    try {
+      await health();
+      try {
+        await openDemo();
+      } catch (_) {
+        showError(`Could not read PACT runs: ${err.message}`, loadInitial);
+      }
+    } catch (_) {
+      /* API unreachable: keep the list error and its retry. */
     }
   } finally {
     setLoading(false);
@@ -489,6 +498,7 @@ async function loadInitial() {
 async function openDemo() {
   closeDrawers();
   hideError();
+  sessionRequest += 1; /* supersede any in-flight openSession */
   setLoading(true, "loading training simulation");
   try {
     const model = await demo();
@@ -525,6 +535,7 @@ async function openSession(ref, opts = {}) {
   if (!opts.since) stopPolling();
   hideError();
   setLoading(true, "decoding journal");
+  const token = ++sessionRequest;
   try {
     const model = await session({
       root: ref.root,
@@ -532,6 +543,8 @@ async function openSession(ref, opts = {}) {
       session_id: ref.session_id,
       since: opts.since || undefined,
     });
+    /* A later selection (or the demo) owns the screen now. */
+    if (token !== sessionRequest) return;
     if (model && model.unchanged) {
       setLoading(false);
       return;
@@ -555,9 +568,9 @@ async function openSession(ref, opts = {}) {
     if (live) startPolling();
     else stopPolling();
   } catch (err) {
-    showError(`Could not open run: ${err.message}`, () => openSession(ref));
+    if (token === sessionRequest) showError(`Could not open run: ${err.message}`, () => openSession(ref));
   } finally {
-    setLoading(false);
+    if (token === sessionRequest) setLoading(false);
   }
 }
 
@@ -686,6 +699,15 @@ function bindHeader() {
     hideError();
     openDemo();
   });
+
+  /* Drawers are overlays below 1180px; a click anywhere else dismisses them. */
+  document.addEventListener("pointerdown", (event) => {
+    if (!document.body.classList.contains("show-crew") && !document.body.classList.contains("show-comms")) return;
+    const target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    if (target.closest("#left-rail, #right-rail, #btn-crew, #btn-comms")) return;
+    closeDrawers();
+  });
 }
 
 function toggleDrawer(cls, button) {
@@ -765,6 +787,9 @@ function bindKeyboard() {
   let index = 0;
   state.discon = false;
   window.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const tag = (target && target.tagName) || "";
+    if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(tag) || (target && target.isContentEditable)) return;
     if (event.key === KONAMI[index]) {
       index += 1;
       if (index === KONAMI.length) {
@@ -823,7 +848,9 @@ function initModules() {
       toast("Sir Pactsalot says", tip, "info");
     },
   });
-  stage.setReducedMotion(prefersReducedMotion());
+  /* The stage reads prefers-reduced-motion itself and keeps listening for
+   * changes; calling setReducedMotion here marked it "explicit" and killed
+   * that listener for the rest of the session. */
 
   panels = new Panels({
     left: els.left,
