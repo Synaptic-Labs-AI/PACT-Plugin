@@ -332,6 +332,7 @@ ONCE_RULES = (
     ("filling each slot in angle brackets from that finding in the record", "the question's slot-filling rule"),
     ("the valid first-round report is the round's end state instead", "the same-round re-check fallback"),
     ("Choosing the second option starts that verify-only re-review round", "the re-review option's effect"),
+    ("Never use the cold reviewer as a fixer and never reassign it", "the never-a-fixer rule"),
 )
 # Phrases a frozen literal legitimately repeats: the per-finding question's
 # text names the re-review option, and the option label names it again, so
