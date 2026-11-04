@@ -42,6 +42,7 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
     feedKey,
     requestedFilterLabel,
     pollClearsError,
+    pollMayShowError,
   } = await import("./dom.js");
 
   /* A live poll is a new journal revision of the SAME run. Identity must not
@@ -144,6 +145,14 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("a poll does not clear a refresh banner", pollClearsError("refresh") === false);
   check("a poll does not clear a load banner", pollClearsError("load") === false);
   check("a poll does not clear an untagged banner", pollClearsError("") === false);
+
+  /* Precedence: a failing poll may take the banner only when it is empty or
+   * poll-authored; navigation/refresh/load banners keep their retry. */
+  check("a poll may raise a banner on a clean view", pollMayShowError("") === true);
+  check("a poll may replace its own banner", pollMayShowError("poll") === true);
+  check("a poll does not displace a navigation banner", pollMayShowError("navigation") === false);
+  check("a poll does not displace a refresh banner", pollMayShowError("refresh") === false);
+  check("a poll does not displace a load banner", pollMayShowError("load") === false);
 
   /* A multi-event batch must stay newest-first. Drive the real _updateFeed
    * insert path over a fake list: events 110..112 arrive over a feed whose

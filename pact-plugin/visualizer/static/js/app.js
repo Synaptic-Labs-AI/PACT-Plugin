@@ -12,6 +12,7 @@ import {
   modeBadge,
   requestedFilterLabel,
   pollClearsError,
+  pollMayShowError,
   PROJECT_ALTERED_NOTE,
 } from "./dom.js";
 import { Stage } from "./stage.js";
@@ -315,7 +316,12 @@ async function pollLive() {
       announce("Run ended. The journal is complete.", { force: true });
     }
   } catch (err) {
-    showError(`Live poll failed: ${err.message}`, pollLive, "poll");
+    /* A poll failure is silent while a navigation or refresh banner is
+     * showing: that banner owns the retry, and this poll keeps retrying on its
+     * own timer. */
+    if (pollMayShowError(state.errorSource)) {
+      showError(`Live poll failed: ${err.message}`, pollLive, "poll");
+    }
   } finally {
     pollBusy = false;
   }

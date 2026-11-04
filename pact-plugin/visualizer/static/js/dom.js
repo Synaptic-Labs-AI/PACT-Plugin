@@ -167,6 +167,12 @@ export function pollClearsError(errorSource) {
   return errorSource === "poll";
 }
 
+/* A failing poll may take the banner only when it is empty or poll-authored.
+ * A navigation or refresh banner carries a retry a poll must not displace. */
+export function pollMayShowError(currentSource) {
+  return !currentSource || currentSource === "poll";
+}
+
 /* The feed cache must notice a SHIFTED visible window, not just a new run:
  * above MAX_EVENTS the array length is constant while events[0].seq advances,
  * so a length-only key leaves the rows frozen. */
