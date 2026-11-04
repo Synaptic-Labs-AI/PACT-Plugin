@@ -1073,6 +1073,24 @@ KNOWN_NOT_CAUGHT = (
         "exemption: a pre-PR boundary phrase exempts the whole segment, including a "
         "co-located per-commit full-run demand",
     ),
+    # Bound-edge spellings observed in verify-only re-review: each defeats a
+    # different arm for a different stated reason, so each is witnessed
+    # separately rather than folded into one entry.
+    (
+        "Every test must be run before commit.",
+        "vocabulary: the passive voice puts the noun before the run verb, which no "
+        "recognised shape covers, so the line is not even a candidate",
+    ),
+    (
+        "The full suite has to pass before commit.",
+        "promotion: 'has to' is outside the predicate modal list, so the gate arm "
+        "never fires and an unbounded-set line phrased this way is not promoted",
+    ),
+    (
+        "Run each test before HANDOFF.",
+        "vocabulary: 'each' is outside the stated quantifier list (all/every/both), "
+        "so the run-verb shape does not match and the line is not a candidate",
+    ),
 )
 
 
