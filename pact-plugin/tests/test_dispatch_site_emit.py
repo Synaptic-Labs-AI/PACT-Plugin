@@ -685,7 +685,16 @@ class TestReviewerInclusionPin:
     Mutation teeth, MEASURED and reverted (a future verifier can re-derive
     these without redesigning the runs): a lane-keyed carve-out (subject
     name-prefix 'review-') reddens exactly T1 — cardinality 1; a
-    'review'-substring carve-out reddens T1 and T5 together — cardinality 2.
+    'review'-substring carve-out reddens T1 and T5 together — cardinality 2;
+    breaking the registration leg itself (a no-op _register_reviewer) also
+    reddens exactly T1 — cardinality 1 — while the no-site arms stay green
+    for the wrong reason, which is the pair-dependence below.
+
+    EVERY no-site arm in this class (T2, T6) pairs against T1 as the
+    positive control: T1 proves the shared legs (frame, team, registration,
+    owner-bearing write) are live, so each no-site assertion's pass-reason
+    is its own exclusion leg — delete T1 and every one of them degrades to
+    an assertion that can pass for any broken leg.
     """
 
     REVIEWER = "review-coder"  # deliberately NOT in MEMBERS: registered per-arm
@@ -760,6 +769,21 @@ class TestReviewerInclusionPin:
              metadata={"variety": STAMP})
         tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
         assert sites(events) == []
+
+    def test_registration_round_trip_preserves_unknown_config_keys(self, env):
+        """FIX-E pin: _register_reviewer MERGES into the config, never
+        rebuilds it — an unknown top-level key seeded before registration
+        SURVIVES the round-trip. A rebuild-from-scratch helper drops it and
+        this reddens."""
+        cfg = env / ".claude" / "teams" / TEAM / "config.json"
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data["umbrellaTaskId"] = "99"
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+        self._register_reviewer(env)
+        after = json.loads(cfg.read_text(encoding="utf-8"))
+        assert after.get("umbrellaTaskId") == "99", (
+            "registration must merge into the config, not rebuild it"
+        )
 
 
 class TestRealJournalSeam:
