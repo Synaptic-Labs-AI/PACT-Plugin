@@ -11,6 +11,7 @@ import {
   rootChangeAction,
   modeBadge,
   requestedFilterLabel,
+  pollClearsError,
   PROJECT_ALTERED_NOTE,
 } from "./dom.js";
 import { Stage } from "./stage.js";
@@ -87,6 +88,7 @@ const state = {
   followLive: false,
   etag: null,
   lastError: "",
+  errorSource: "",
   demoAvailable: true,
   requestedFilter: "",
   suppress: false,
@@ -114,8 +116,11 @@ function setLoading(on, sub) {
   if (sub) els.loadingSub.textContent = sub;
 }
 
-function showError(message, retry) {
+/* `source` records which operation raised the banner: only a poll may clear a
+ * poll banner, so a failed navigation or refresh survives the next poll. */
+function showError(message, retry, source = "") {
   state.lastError = message || "Something went wrong";
+  state.errorSource = source;
   els.errorText.textContent = state.lastError;
   els.error.hidden = false;
   els.errorRetry.onclick = () => {
@@ -128,6 +133,7 @@ function showError(message, retry) {
 function hideError() {
   els.error.hidden = true;
   state.lastError = "";
+  state.errorSource = "";
 }
 
 function toast(title, body, kind = "info") {
@@ -270,9 +276,9 @@ async function pollLive() {
     /* A stale poll belongs to a view that is gone: it must not touch the
      * error banner either. */
     if (!state.current || state.current.key !== ref.key) return;
-    /* The server answered for the current run, so a connection banner from an
-     * earlier poll is stale even when this poll found no new events. */
-    if (state.lastError) hideError();
+    /* Clear only a banner this poll raised: a failed navigation or refresh
+     * banner must survive a successful poll. */
+    if (state.lastError && pollClearsError(state.errorSource)) hideError();
     if (!data || data.unchanged) return;
     const follow = state.followLive;
     const priorCursor = state.cursor;
@@ -309,7 +315,7 @@ async function pollLive() {
       announce("Run ended. The journal is complete.", { force: true });
     }
   } catch (err) {
-    showError(`Live poll failed: ${err.message}`, pollLive);
+    showError(`Live poll failed: ${err.message}`, pollLive, "poll");
   } finally {
     pollBusy = false;
   }
@@ -594,7 +600,7 @@ async function loadInitial() {
     }
   } catch (err) {
     setLoading(false);
-    showError(`Could not read PACT runs: ${err.message}`, loadInitial);
+    showError(`Could not read PACT runs: ${err.message}`, loadInitial, "load");
     /* The demo needs the same server. Only try it when health answers;
      * otherwise openDemo's failure would replace this error and its retry
      * with a dead end. */
@@ -603,7 +609,7 @@ async function loadInitial() {
       try {
         await openDemo();
       } catch (_) {
-        showError(`Could not read PACT runs: ${err.message}`, loadInitial);
+        showError(`Could not read PACT runs: ${err.message}`, loadInitial, "load");
       }
     } catch (_) {
       /* API unreachable: keep the list error and its retry. */
@@ -641,7 +647,7 @@ async function openDemo() {
     updateTimeline();
     updateUrl("demo");
   } catch (err) {
-    showError(`Demo failed to load: ${err.message}`, openDemo);
+    showError(`Demo failed to load: ${err.message}`, openDemo, "navigation");
   } finally {
     setLoading(false);
   }
@@ -687,11 +693,13 @@ async function openSession(ref, opts = {}) {
     else stopPolling();
   } catch (err) {
     if (token === sessionRequest) {
-      showError(`Could not open run: ${err.message}`, () => openSession(ref));
+      showError(`Could not open run: ${err.message}`, () => openSession(ref), "navigation");
       /* The previous run is still on screen, and this load stopped its
        * polling. If that run is live, resume it so the LIVE badge stays true;
        * startPolling() is a no-op for a demo, replay or ended run. */
       startPolling();
+      /* The selectors must show what is on screen, not the failed choice. */
+      if (state.current) syncSelectors(state.current);
     }
   } finally {
     if (token === sessionRequest) setLoading(false);
@@ -758,7 +766,7 @@ async function refreshAll() {
       selectRoot(els.root.value);
     }
   } catch (err) {
-    showError(`Refresh failed: ${err.message}`, refreshAll);
+    showError(`Refresh failed: ${err.message}`, refreshAll, "refresh");
   }
 }
 
@@ -794,7 +802,7 @@ function bindHeader() {
       await refreshList(els.root.value);
       selectRoot(els.root.value);
     } catch (err) {
-      showError(`Could not switch root: ${err.message}`, () => refreshAll());
+      showError(`Could not switch root: ${err.message}`, () => refreshAll(), "refresh");
     }
   });
   els.project.addEventListener("change", async () => {
@@ -1063,7 +1071,7 @@ async function boot() {
     await loadInitial();
   } catch (err) {
     setLoading(false);
-    showError(String(err && err.message ? err.message : err), loadInitial);
+    showError(String(err && err.message ? err.message : err), loadInitial, "load");
   }
   setLoading(false);
 }

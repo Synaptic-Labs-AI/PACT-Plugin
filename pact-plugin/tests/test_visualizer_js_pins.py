@@ -41,6 +41,7 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
     modeBadge,
     feedKey,
     requestedFilterLabel,
+    pollClearsError,
   } = await import("./dom.js");
 
   /* A live poll is a new journal revision of the SAME run. Identity must not
@@ -135,6 +136,58 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("a session filter is named", requestedFilterLabel({ session: "abc" }) === "session abc");
   check("both filters are named", requestedFilterLabel({ project: "P", session: "s" }) === "project P and session s");
   check("no filters means no label", requestedFilterLabel({}) === "" && requestedFilterLabel(null) === "");
+
+  /* A successful poll clears only a banner the poll itself raised: a failed
+   * navigation or refresh must survive it. */
+  check("a poll clears its own banner", pollClearsError("poll") === true);
+  check("a poll does not clear a navigation banner", pollClearsError("navigation") === false);
+  check("a poll does not clear a refresh banner", pollClearsError("refresh") === false);
+  check("a poll does not clear a load banner", pollClearsError("load") === false);
+  check("a poll does not clear an untagged banner", pollClearsError("") === false);
+
+  /* A multi-event batch must stay newest-first. Drive the real _updateFeed
+   * insert path over a fake list: events 110..112 arrive over a feed whose
+   * top is 109. */
+  const batchModel = Object.assign({}, feedBase, {
+    events: Array.from({ length: 13 }, (_, i) => ({ seq: 100 + i })),
+  });
+  const list = {
+    nodes: [],
+    get firstChild() { return this.nodes[0] || null; },
+    get lastChild() { return this.nodes[this.nodes.length - 1] || null; },
+    insertBefore(node, ref) {
+      const at = ref ? this.nodes.indexOf(ref) : this.nodes.length;
+      this.nodes.splice(at < 0 ? this.nodes.length : at, 0, node);
+      return node;
+    },
+    removeChild(node) {
+      const at = this.nodes.indexOf(node);
+      if (at >= 0) this.nodes.splice(at, 1);
+      return node;
+    },
+  };
+  list.nodes.push({ seq: 109 });
+  const batchThis = {
+    model: batchModel,
+    cursor: 13,
+    filter: "all",
+    _nodes: { feed: list, feedCount: null },
+    _feed: {
+      key: feedKey(batchModel),
+      filter: "all",
+      count: 10,
+      matched: 10,
+      rendered: 10,
+      list,
+      capNote: null,
+    },
+    _feedRow: (event) => ({ seq: event.seq }),
+    _ensureCapNote: () => {},
+    _updateFeedCount: () => {},
+  };
+  Panels.prototype._updateFeed.call(batchThis);
+  check("a batch insert keeps the feed newest-first",
+    JSON.stringify(list.nodes.map((node) => node.seq)) === JSON.stringify([112, 111, 110, 109]));
 
   /* The mode badge must agree with the screen. With no run open it is IDLE,
    * even if stale mode/status values still say live (the named-empty load). */

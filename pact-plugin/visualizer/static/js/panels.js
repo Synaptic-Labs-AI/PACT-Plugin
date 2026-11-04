@@ -1970,6 +1970,13 @@ export class Panels {
 
   _eventDetail(event, index) {
     const total = this._eventTotal();
+    /* The modal can outlive a window slide, so resolve the seek target from
+     * the event's seq against the CURRENT visible window instead of the index
+     * captured when it was opened. */
+    const bySeq = event && event.seq !== undefined && event.seq !== null
+      ? this._seqIndex(event.seq)
+      : null;
+    const seekIndex = bySeq === null || bySeq === undefined ? index : bySeq;
     const wrap = el("div", { class: "event-detail" });
     wrap.appendChild(el("div", { class: "event-detail-head" }, [
       el("span", { class: "event-seq", text: `EVENT ${event.seq === undefined ? index : event.seq}` }),
@@ -2006,7 +2013,7 @@ export class Panels {
         attrs: { type: "button", title: "Move the recorder to this event" },
         on: {
           click: () => {
-            this.cb.onSeek(clamp(index + 1, 1, Math.max(1, total)));
+            this.cb.onSeek(clamp(seekIndex + 1, 1, Math.max(1, total)));
             this.closeModal();
           },
         },

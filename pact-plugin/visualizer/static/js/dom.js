@@ -161,6 +161,12 @@ export function requestedFilterLabel(filters) {
   return parts.join(" and ");
 }
 
+/* A successful poll may clear only a banner the poll itself raised. A failed
+ * navigation or refresh must survive the poll that follows it. */
+export function pollClearsError(errorSource) {
+  return errorSource === "poll";
+}
+
 /* The feed cache must notice a SHIFTED visible window, not just a new run:
  * above MAX_EVENTS the array length is constant while events[0].seq advances,
  * so a length-only key leaves the rows frozen. */
