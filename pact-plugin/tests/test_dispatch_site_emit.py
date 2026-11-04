@@ -21,7 +21,7 @@ Calibration (Wrap-Up Aggregation)", the Population paragraph — which also owns
 the task-scoped dedup and the `review_dispatch` relationship. Do not restate
 the enumeration here: a mirrored copy drifts silently whenever the SSOT
 changes, which is what falsified this docstring twice in this change. The arms
-below pin two of the dark-set legs — the teachback carve-out (T2/T6) and the
+below pin two of the dark-set legs — the teachback carve-out (T2) and the
 owner-resolution leg (T1/T6).
 
 WHY THE TaskUpdate BRANCH AND NOT BESIDE dispatch_variety: that emit lives in
