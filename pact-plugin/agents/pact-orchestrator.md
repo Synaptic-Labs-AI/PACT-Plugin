@@ -491,7 +491,7 @@ To stop all in-progress teammates (HALT, shutdown, or any other team-lead-to-man
 
 A running peer-review cold reviewer owns no task, so this loop does not reach it: HALT it as the Cold Reviewer Lane in the `peer-review` command says.
 
-Each message lands at the teammate's next idle boundary. For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
+Each message lands at the teammate's next idle boundary; this timing is for teammates, not the peer-review cold reviewer. For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
 
 Use the same iterate-by-name pattern for any other team-lead-to-many signal (`plan_approval_request`, plain-text announcements, or a `shutdown_request` on the rare occasion a user asks for one — PACT's own flows send none). There is no broadcast addressing mode.
 
@@ -805,7 +805,7 @@ Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer:
   - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
 - **Cold reviewer** (`general-purpose` subagent, always): A diff-only reading with no plan, contract, or session narrative — dispatch per the Cold Reviewer Lane in the `peer-review` command
 
-After the warm reviews complete and the cold lane reaches a cold report, a recorded skip, or the did-not-run outcome:
+After the warm reviews complete and the cold lane reaches its round's end state (see the Cold Reviewer Lane in the `peer-review` command):
 
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`

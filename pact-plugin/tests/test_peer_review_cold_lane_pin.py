@@ -15,8 +15,8 @@ COVERED, and this list is the scope:
 - the cold prompt: exactly one fenced block sent verbatim, its ordered
   clause labels, no backticks inside it, and every placeholder it uses
   defined in the placeholder list (and every defined placeholder used);
-  the {base} and {head} definitions, including their re-check values;
-  the bound on what a re-check dispatch appends;
+  the {base} and {head} definitions (one base for every round);
+  the bound on what a re-check appends;
 - each prompt clause's content, bound to its own label line: ARTIFACT's
   diff instruction and its bar on PR and commit-message surfaces; AVOID's
   named paths and stores; CHANNELS' messaging, task-tool and pact-memory
@@ -35,18 +35,13 @@ COVERED, and this list is the scope:
   plus the prose that requires that shape (NO name=/team_name=/prelude,
   with every review, same parallel block, no teammate conversion, no
   tasks);
-- the lifecycle: the ordering lead-in, the ten step labels in order,
-  and a once guard that holds each lifecycle rule's operative phrase to a
+- the lifecycle: the per-round ordering lead-in, the ten step labels in
+  order, a once guard that holds each listed rule's operative phrase to a
   single occurrence in peer-review.md (a paraphrased second copy evades
-  it); each step's operative clauses, bound to its own step paragraph
-  (dispatch and skip sentence, agentId record at spawn, HALT, verbatim
-  return record, first-round null clause, the one re-dispatch and the
-  did-not-run row and line, the blocker rule in Return, synthesis wait
-  and journal landing,
-  never-a-fixer, re-check scope and message composition, failed cycle);
-  the re-check send paragraph (resume target, whole-message rule,
-  fallback, re-check null clause, verbatim re-check record); the quoted
-  re-check message; and the division of labour;
+  it), and an absence check keeping the dropped machinery's terms out of
+  the lane; each step's operative clauses, bound to its own step
+  paragraph; the resume paragraph; the quoted re-check message; and the
+  division of labour;
 - the copy-paste guard: no warm dispatch-machinery token occurs in the
   section, with task-tool names allowed only inside CHANNELS;
 - satellites: the always-included bullet, the example-tree [Subagent]
@@ -281,7 +276,7 @@ LIFECYCLE_STEPS = (
     "Spawn result",
     "While it runs",
     "Return",
-    "First-round validity",
+    "Validity",
     "No report or an invalid one",
     "Synthesis",
     "Remediation",
@@ -293,28 +288,24 @@ LIFECYCLE_STEPS = (
 ONCE_RULES = (
     ("record the subagent's agentId", "the agentId record at spawn"),
     ("HALT` by its recorded agentId", "the HALT route"),
-    ("Append the report verbatim to the record", "the verbatim record"),
-    ("valid only with", "the first-round validity list"),
-    ("counts as a review only when", "the re-check validity list"),
-    ("run one fresh cold dispatch", "the no-report rule"),
-    ("The re-check message is the paragraph below", "the re-check message"),
-    ("Cold findings count under the **Failed cycle** test", "the cold failed-cycle rule"),
-    ("in the same parallel block as the warm reviewers", "the same-block spawn rule"),
-    ("is a blocker report", "the blocker-report trigger"),
-    ("A report cut short by a HALT", "the HALT exclusion"),
-    ("Follow imPACT's outcome", "the blocker exit"),
-    ("always uses the re-check `{base}` and `{head}`", "the re-check retry rule"),
-    ("corrections apply to the other placeholders", "the placeholder precedence after imPACT"),
-    ("Each round gets one fresh cold dispatch in total", "the per-round dispatch bound"),
-    ("applies to the next round", "the carry-over of an unresolved blocker"),
     ("the HALT lands at its next tool call", "the HALT timing"),
-    ("run a fresh first-round cold dispatch at the new head", "the first-round restart until a valid round exists"),
-    ("unless a restart supersedes them", "the supersession condition"),
-    ("as superseded", "the supersession marking"),
-    ("is not an ancestor of the new head", "the rebase rule for the re-check base"),
-    ("No open cold findings; no re-check", "the skip line"),
+    ("Append every report verbatim to the record", "the verbatim record"),
+    ("is a blocker report when", "the blocker-report trigger"),
+    ("is never valid", "the HALT and blocker invalidity rule"),
+    ("A first-round cold report is valid only with", "the first-round validity list"),
+    ("A re-check report is valid only with", "the re-check validity list"),
+    ("run one fresh cold dispatch", "the no-report rule"),
+    ("Each round gets that one fresh dispatch at most", "the per-round dispatch bound"),
     ("The status row carries no severity", "the did-not-run row's routing"),
     ("Send it no message other than a HALT or the re-check message", "the lead's message bar"),
+    ("when the record holds no valid first-round cold report", "the first-round fallback in a re-review"),
+    ("whichever report raised it", "the re-check list's scope"),
+    ("No open cold findings; no re-check", "the skip line"),
+    ("The re-check message is the paragraph below", "the re-check message"),
+    ("Use it in every round", "the fixed base"),
+    ("still triages it", "the retry blocker's triage"),
+    ("Cold findings count under the **Failed cycle** test", "the cold failed-cycle rule"),
+    ("in the same parallel block as the warm reviewers", "the same-block spawn rule"),
 )
 
 # Class guard (a): an angle-bracket slot is a placeholder the list does not define.
@@ -348,9 +339,12 @@ RECHECK_ELEMENTS = (
     "coverage boundary with its receipt",
 )
 FIRST_ROUND_VALIDITY = "A first-round cold report is valid only with"
-RECHECK_VALIDITY = "A re-review checklist report counts as a review only when"
+RECHECK_VALIDITY = "A re-check report is valid only with"
+# Terms of machinery the lane deliberately dropped; they must not return to it.
+RETIRED_LANE_TERMS = ("superseded", "restart", "merge-base", "not an ancestor", "latest round")
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
+VALIDITY_CONSEQUENCE = "; otherwise it is not valid."
 # A word inside a validity list that turns a required element optional.
 # Only the list span is scanned, so a negator elsewhere in the sentence
 # (or a phrasing such as "is not needed" after the consequence) evades it.
@@ -502,7 +496,7 @@ class TestPromptShape:
 
     def test_re_check_append_is_bounded(self):
         before = _split_section()[0]
-        assert "a re-check dispatch also appends the re-check message (see **Re-check**), and nothing else" in before, (
+        assert "a re-check also appends the re-check message (see **Re-check**), and nothing else" in before, (
             "the cold lane no longer bounds what a re-check dispatch adds to "
             "the verbatim prompt"
         )
@@ -812,7 +806,7 @@ class TestLifecycleOrder:
     copy of a rule, or a rule absent from ONCE_RULES, is not caught."""
 
     def test_lead_in_states_the_order_rule(self):
-        assert "Run the cold lane in the order below; each rule applies where it is written." in _lead_prose(), (
+        assert "Run the cold lane once in each review round — the initial review and each verify-only re-review — in the order below; each rule applies where it is written." in _lead_prose(), (
             "the lane lost its ordering lead-in"
         )
 
@@ -821,6 +815,14 @@ class TestLifecycleOrder:
         assert labels == LIFECYCLE_STEPS, (
             f"the cold lane's lifecycle steps changed: expected "
             f"{LIFECYCLE_STEPS!r}, found {labels!r}"
+        )
+
+    @pytest.mark.parametrize("term", RETIRED_LANE_TERMS)
+    def test_retired_term_absent_from_lane(self, term):
+        assert term not in _cold_section(), (
+            f"the cold lane again uses {term!r} — machinery the lane dropped "
+            f"(restart, supersession, a moving re-check base, round "
+            f"bookkeeping); every round now reviews the whole PR with one retry"
         )
 
     def test_no_third_failure_term(self):
@@ -860,74 +862,61 @@ class TestLeadFacingRules:
          "the HALT timing and what comes back")),
         ("Return", "writes no HANDOFF and messages no one; its final report is its return", (
          "the return path")),
-        ("Return", "Append the report verbatim to the record under its agentId", "the verbatim record"),
+        ("Return", "Append every report verbatim to the record under its agentId", "the verbatim record"),
         ("Return", "as soon as it returns, before synthesizing", "the record's timing"),
-        ("First-round validity", "a severity, file:line and failure scenario for each finding", (
-         "the per-finding fields, bound with their quantifier")),
-        ("First-round validity", "; otherwise it is not valid", (
-         "the first-round consequence — an incomplete report is not valid, and L6 handles it")),
-        ("No report or an invalid one", "or /PACT:imPACT resolves a blocker report's blocker", (
-         "the blocker exit's re-entry")),
-        ("No report or an invalid one", "run one fresh cold dispatch, after any HALT is resolved, with the same placeholders", (
-         "the one re-dispatch, after any HALT")),
-        ("No report or an invalid one", "or with the placeholders as /PACT:imPACT corrected them", (
-         "the corrected placeholders after a blocker")),
-        ("No report or an invalid one", "For a re-check, that dispatch always uses the re-check {base} and {head} and the re-check message, whichever route failed", (
-         "the re-check retry — a re-check never falls back to a first-round prompt")),
-        ("No report or an invalid one", "/PACT:imPACT's corrections apply to the other placeholders", (
-         "the placeholder precedence — imPACT cannot move the re-check refs")),
-        ("No report or an invalid one", "Each round gets one fresh cold dispatch in total, whether an invalid report, a failed resume or a resolved blocker triggered it", (
-         "the per-round bound — no retry loop")),
-        ("No report or an invalid one", "An invalid report or a blocker report stays in the record where **Return** appended it, and its findings count like any cold finding unless a restart supersedes them", (
-         "the findings of invalid and blocker reports, and their supersession")),
-        ("No report or an invalid one", "If that dispatch also returns no valid report, or returns a blocker report, or /PACT:imPACT does not resolve the blocker, the cold lane did not run for this round", (
-         "the did-not-run outcome, all three causes")),
-        ("No report or an invalid one", "any /PACT:imPACT outcome for that blocker applies to the next round", (
-         "the carry-over of an unresolved blocker")),
-        ("No report or an invalid one", 'add the status row "Cold lane did not run" to the recommendations table', (
-         "the did-not-run table row")),
-        ("No report or an invalid one", 'the line "Cold lane did not run." to the merge-readiness statement, each naming the blocker when there was one', (
-         "the did-not-run merge line")),
-        ("No report or an invalid one", "The status row carries no severity, so step 4 does not route it", (
-         "the row's routing — the lead invents no severity")),
-        ("No report or an invalid one", "Do not treat completion of the spawn as the review", (
-         "the completion-is-not-review rule")),
-        ("Synthesis", "Wait for the cold lane to reach a cold report, a recorded skip, or the did-not-run outcome before synthesizing", (
-         "the wait rule, naming all three outcomes")),
-        ("Synthesis", "Journal each cold finding per the review_finding journal step", (
-         "the journal landing")),
-        ("Return", "A report cut short by a HALT, first-round or re-check, is not valid and is never a blocker report", (
-         "the HALT exclusion — a truthful HALT boundary must not trip the blocker rule")),
         ("Return", "is a blocker report when its coverage boundary names a changed path whose diff hunk it could not read", (
          "the blocker trigger, matching REPORT's wording")),
         ("Return", "or one it did not read although the path is review-relevant, by its own judgement or, when the path is clearly review-relevant, by yours", (
          "the relevance half of the trigger and who judges it")),
         ("Return", "a skipped path that is not review-relevant (a version bump, a lockfile, a generated file) and a path read but whose tests did not run are coverage notes", (
          "the trigger's boundary — untested or irrelevant is not a blocker")),
-        ("Return", "Run /PACT:imPACT on a blocker report before judging its validity", (
-         "the blocker route and its timing")),
-        ("Return", "and do not synthesize the lane as clean", "the bar on reading a blocked lane as clean"),
-        ("Return", "Follow imPACT's outcome, then return to the lane at **No report or an invalid one**", (
-         "the blocker exit — without it a blocked lane never reaches merge readiness")),
+        ("Return", "Run /PACT:imPACT on a blocker report, and do not synthesize the lane as clean", (
+         "the blocker route and the bar on reading a blocked lane as clean")),
+        ("Validity", "A report cut short by a HALT, or a blocker report, is never valid", (
+         "the HALT and blocker invalidity rule")),
+        ("Validity", "a severity, file:line and failure scenario for each finding", (
+         "the per-finding fields, bound with their quantifier")),
+        ("Validity", "; otherwise it is not valid", (
+         "the validity consequence — an incomplete report is not valid, and the next step handles it")),
+        ("No report or an invalid one", "When a cold dispatch or a resume returns no report or a report that is not valid, or a resume is not possible, run one fresh cold dispatch", (
+         "the re-dispatch trigger, all three causes")),
+        ("No report or an invalid one", "after any HALT and any /PACT:imPACT are resolved", (
+         "the re-dispatch timing")),
+        ("No report or an invalid one", "with the placeholders as /PACT:imPACT corrected them and, for a re-check, the re-check message", (
+         "the re-dispatch's placeholders and message")),
+        ("No report or an invalid one", "Each round gets that one fresh dispatch at most", (
+         "the per-round bound — no retry loop")),
+        ("No report or an invalid one", "If it also returns no valid report, or /PACT:imPACT does not resolve the blocker, the cold lane did not run for this round", (
+         "the did-not-run outcome, both causes")),
+        ("No report or an invalid one", 'add the status row "Cold lane did not run" to the recommendations table', (
+         "the did-not-run table row")),
+        ("No report or an invalid one", 'the line "Cold lane did not run." to the merge-readiness statement, each naming the blocker when there was one', (
+         "the did-not-run merge line")),
+        ("No report or an invalid one", "When that dispatch returned a blocker report, /PACT:imPACT still triages it, and its corrections apply when the next round fills the placeholders", (
+         "the retry blocker's triage and its carry into the next round")),
+        ("No report or an invalid one", "The status row carries no severity, so step 4 does not route it", (
+         "the row's routing — the lead invents no severity")),
+        ("No report or an invalid one", "Do not treat completion of the spawn as the review", (
+         "the completion-is-not-review rule")),
+        ("Synthesis", 'Wait for the round\'s end state — a valid cold report, the recorded skip, or the "Cold lane did not run" line — before synthesizing', (
+         "the wait rule, naming the three end states and requiring a valid report")),
         ("Synthesis", 'Append the synthesis to the review doc and leave the "Cold report (verbatim)" record intact', (
          "the bar on rewriting the verbatim record")),
-        ("Synthesis", "Give each open question in a cold report or re-check report a row", (
-         "the open-question rows, including re-checks")),
+        ("Synthesis", "Journal each cold finding per the review_finding journal step", (
+         "the journal landing")),
+        ("Synthesis", "Give each open question in a cold report a row", (
+         "the open-question rows")),
         ("Remediation", "Never use the cold reviewer as a fixer and never reassign it", "the never-a-fixer rule"),
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
         ("Remediation", "Send it no message other than a HALT or the re-check message", (
          "the bar on any other message")),
-        ("Re-check", "re-check every cold finding not yet resolved, including new issues an earlier re-check raised", (
-         "the re-check scope across cycles")),
-        ("Re-check", "When no cold round has yet returned a valid report, run a fresh first-round cold dispatch at the new head instead", (
-         "the restart until a valid round exists")),
-        ("Re-check", "and mark the findings of earlier invalid or blocker reports in the record as superseded", (
-         "the supersession of earlier invalid and blocker findings")),
-        ("Re-check", 'When a valid cold review has left no cold finding open, skip the cold re-check and add the line "No open cold findings; no re-check" to the record', (
+        ("Re-check", "when the record holds no valid first-round cold report, dispatch the cold prompt as a first-round review", (
+         "the first-round fallback in a re-review")),
+        ("Re-check", "Otherwise list every cold finding in the record that no valid cold report has marked resolved, whichever report raised it", (
+         "the re-check list — every unresolved finding, from any report")),
+        ("Re-check", 'when the list is empty, skip the cold lane for this round and add the line "No open cold findings; no re-check" to the record', (
          "the skip rule and its record line")),
-        ("Re-check", "the cold lane's latest round is then the previous one", (
-         "what the merge gate reads after a skip")),
-        ("Re-check", "The re-check message is the paragraph below followed by those findings", (
+        ("Re-check", "The re-check message is the paragraph below followed by the listed findings", (
          "the message composition — checklist plus findings")),
         ("Re-check", "copied verbatim from the record, never from synthesized rows", (
          "the findings' source")),
@@ -939,15 +928,13 @@ class TestLeadFacingRules:
         assert token in _step(step), f"the {step!r} step lost {lost} ({token!r})"
 
     @pytest.mark.parametrize("token, lost", [
-        ("SendMessage to the agentId of the most recent cold subagent in the record", "the resume target"),
+        ("SendMessage to the agentId of the cold subagent that returned the most recent valid report", (
+         "the resume target")),
         ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
-        ("If it cannot be resumed, apply **No report or an invalid one**", "the fallback to the one re-dispatch"),
-        ("; otherwise it is not valid", "the re-check consequence — an incomplete re-check is not valid"),
-        ("Append each re-check report verbatim to the record as in **Return**", "the verbatim re-check record"),
     ])
     def test_resume_paragraph_present(self, token, lost):
         region = _strip_ticks(_paragraph("Send the re-check message by resume"))
-        assert token in region, f"the re-check send paragraph lost {lost} ({token!r})"
+        assert token in region, f"the resume paragraph lost {lost} ({token!r})"
 
     @pytest.mark.parametrize("token, lost", [
         ("RE-REVIEW CHECKLIST:", "the checklist's literal lead-in"),
@@ -1061,20 +1048,23 @@ class TestOutsideSectionRules:
          "the warm scoping of reviewer-to-fixer reuse")),
         ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings", (
          "the Verify-Only re-review routing")),
-        ("pr", "and per open question in each cold report or re-check report", (
+        ("pr", "and per open question in each cold report,", (
          "the synthesis row for each cold open question")),
         ("pr", "every cold open question carries a disposition", (
          "the merge gate on cold open questions — without it the gate "
          "passes vacuously for the lane")),
-        ("pr", 'AND the cold lane\'s latest round was synthesized as a valid review, or the statement carries the line "Cold lane did not run."', (
+        ("pr", 'AND the cold lane\'s round ended in a valid cold report or the recorded skip, or the statement carries the line "Cold lane did not run."', (
          "the merge gate on the cold lane's outcome — without it a "
          "did-not-happen lane merges silently")),
+        ("pr", "AND no cold finding at blocking severity in the record is open)", (
+         "the merge gate on open blocking cold findings — scoped to blocking "
+         "so a declined minor cannot hold the merge")),
         ("pr", "project-policy conformance of the changed files", (
          "the architect lane's policy-conformance mission")),
         ("pr", "Warm reviewer agent tasks (architect, test-engineer, domain specialists); the cold reviewer gets no task", (
          "the overview's task-creation step scoped to warm reviewers")),
         ("pr", "Review task addBlockedBy = [warm reviewer IDs]", "the overview's blocking step"),
-        ("pr", "Monitor until the warm reviewers complete and the cold lane reaches a cold report, a recorded skip, or the did-not-run outcome", (
+        ("pr", "Monitor until the warm reviewers complete and the cold lane reaches its round's end state (see **Synthesis** in the Cold Reviewer Lane)", (
          "the overview's wait on the cold report — the parent task's "
          "blockers cannot hold it")),
         ("pr", 'Warm reviewer tasks status = "completed"', "the overview's completion step"),
@@ -1093,8 +1083,10 @@ class TestOutsideSectionRules:
          "the persona's architect mission")),
         ("persona", "Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer", (
          "the persona's reviewer count scoped to warm reviewers")),
-        ("persona", "After the warm reviews complete and the cold lane reaches a cold report, a recorded skip, or the did-not-run outcome", (
+        ("persona", "After the warm reviews complete and the cold lane reaches its round's end state (see the Cold Reviewer Lane in the `peer-review` command)", (
          "the persona's wait on the cold report")),
+        ("persona", "Each message lands at the teammate's next idle boundary; this timing is for teammates, not the peer-review cold reviewer", (
+         "the fan-out's idle-boundary timing scoped away from the cold reviewer")),
         ("persona", "teammate `SendMessage` communication", (
          "the NEVER rule's scope — teammate messaging, not every SendMessage")),
         ("persona", "that the lead still reaches by `SendMessage` to its agentId", (
@@ -1124,11 +1116,9 @@ class TestPlaceholderDefinitions:
          "the ref kind — a stale local base widens the triple-dot diff")),
         ("{base}", "or the commit of the freshly fetched base tip where no such ref exists", (
          "the base where no remote-tracking ref exists")),
-        ("{base}", "In a re-check, the head commit of the most recent cold round that returned a valid report", (
-         "the re-check value of {base} — the last head a valid round covered")),
-        ("{base}", "when that head is not an ancestor of the new head, the merge-base of the new head with the base branch, so the range is the whole PR", (
-         "the re-check base after a rebase")),
-        ("{head}", "In a re-check, the new head commit", "the re-check value of {head}"),
+        ("{base}", "Use it in every round, so the diff is always the whole PR", (
+         "the fixed base — every round reviews the whole PR")),
+        ("{head}", "the head commit of the PR.", "the head value"),
     ])
     def test_placeholder_definition(self, name, token, lost):
         lines = [ln for ln in _placeholder_list().splitlines() if ln.startswith(f"- `{name}`")]
@@ -1214,6 +1204,17 @@ class TestClassGuards:
         assert len({h[0] for h in homes.values()}) == len(REPORT_ELEMENTS_KEYS), (
             f"two REPORT elements share one ';' segment: {homes!r} — the "
             f"element count can no longer see an added element"
+        )
+
+    @pytest.mark.parametrize("marker", [FIRST_ROUND_VALIDITY, RECHECK_VALIDITY])
+    def test_validity_list_ends_not_valid(self, marker):
+        region = _paragraph(marker)
+        span = _validity_sentence(marker)
+        tail = region[region.find(span) + len(span):]
+        assert tail.startswith(VALIDITY_CONSEQUENCE), (
+            f"the list after {marker!r} no longer ends {VALIDITY_CONSEQUENCE!r} "
+            f"— each list must carry its own consequence, or a flipped one "
+            f"hides behind the other list's"
         )
 
     @pytest.mark.parametrize("marker", [FIRST_ROUND_VALIDITY, RECHECK_VALIDITY])
