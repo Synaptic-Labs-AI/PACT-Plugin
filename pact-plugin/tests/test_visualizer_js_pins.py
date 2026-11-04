@@ -34,7 +34,12 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
 
 (async () => {
   const { Stage } = await import("./stage.js");
-  const { createSeqIndex, missionSecondsAt, rootChangeAction } = await import("./dom.js");
+  const {
+    createSeqIndex,
+    missionSecondsAt,
+    rootChangeAction,
+    modeBadge,
+  } = await import("./dom.js");
 
   /* A live poll is a new journal revision of the SAME run. Identity must not
    * include the etag, or the stage resets its roster and selection each tick. */
@@ -73,6 +78,23 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("an unfiltered empty root with nothing open opens the demo", rootChangeAction({
     hasSession: false, requestedProject: "", hasRun: false,
   }) === "demo");
+
+  /* The mode badge must agree with the screen. With no run open it is IDLE,
+   * even if stale mode/status values still say live (the named-empty load). */
+  const idle = modeBadge({ hasModel: false, mode: "live", followLive: true, status: "live" });
+  check("no run means IDLE, not LIVE", idle.label === "● IDLE" && idle.variant === "");
+  check("the demo badge is DEMO", modeBadge({
+    hasModel: true, mode: "demo", followLive: false, status: "ended",
+  }).label === "◆ DEMO");
+  check("following a live run says LIVE", modeBadge({
+    hasModel: true, mode: "live", followLive: true, status: "live",
+  }).label === "● LIVE");
+  check("replaying a live run says REPLAY", modeBadge({
+    hasModel: true, mode: "replay", followLive: false, status: "live",
+  }).label === "◼ REPLAY");
+  check("an ended run says ENDED", modeBadge({
+    hasModel: true, mode: "replay", followLive: false, status: "ended",
+  }).label === "◼ ENDED");
 
   /* An empty window is zero mission time, never wall-clock elapsed time. */
   const meta = { started_at: "2026-01-01T00:00:00Z" };

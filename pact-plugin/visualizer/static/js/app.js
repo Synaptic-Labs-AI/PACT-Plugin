@@ -2,7 +2,15 @@
  * Reads local journals via same-origin API only. No external requests. */
 
 import { sessions, session, demo, health, USE_MOCK } from "./api.js";
-import { el, clear, fmtClock, clamp, missionSecondsAt, rootChangeAction } from "./dom.js";
+import {
+  el,
+  clear,
+  fmtClock,
+  clamp,
+  missionSecondsAt,
+  rootChangeAction,
+  modeBadge,
+} from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
 import { createTimeline } from "./timeline.js";
@@ -142,36 +150,14 @@ function announce(message, { force = false } = {}) {
 
 function setModeLabel() {
   const model = state.model;
-  if (!model) {
-    els.live.textContent = "● IDLE";
-    els.live.className = "live-badge";
-    return;
-  }
-  let label = "◼ REPLAY";
-  let cls = "live-badge is-replay";
-  if (state.mode === "demo") {
-    label = "◆ DEMO";
-    cls = "live-badge is-demo";
-  } else if (state.mode === "live") {
-    if (state.followLive && model.meta && model.meta.status === "live") {
-      label = "● LIVE";
-      cls = "live-badge is-live";
-    } else {
-      label = "◼ REPLAY";
-      cls = "live-badge is-replay";
-    }
-  } else if (model.meta && model.meta.status === "paused") {
-    label = "◼ PAUSED";
-  } else if (model.meta && model.meta.status === "refreshed") {
-    label = "◼ REFRESHED";
-  } else if (model.meta && model.meta.status === "live") {
-    /* Replaying a run that is still live is REPLAY, not ENDED. */
-    label = "◼ REPLAY";
-  } else {
-    label = "◼ ENDED";
-  }
-  els.live.textContent = label;
-  els.live.className = cls;
+  const badge = modeBadge({
+    hasModel: Boolean(model),
+    mode: state.mode,
+    followLive: state.followLive,
+    status: model && model.meta ? model.meta.status : "",
+  });
+  els.live.textContent = badge.label;
+  els.live.className = badge.variant ? `live-badge ${badge.variant}` : "live-badge";
 }
 
 function updateClock() {
@@ -552,6 +538,7 @@ function showEmptyProject(project) {
     );
   }
   els.stageCaption.textContent = `NO SESSIONS FOR PROJECT ${name.toUpperCase()}`;
+  setModeLabel(); /* no run is open; the badge must not keep saying LIVE */
 }
 
 async function loadInitial() {
@@ -1056,6 +1043,7 @@ async function boot() {
   initModules();
   bindHeader();
   bindKeyboard();
+  setModeLabel(); /* the static HTML badge starts as LIVE; the app starts idle */
   updateTimeline();
   state.raf = requestAnimationFrame(frame);
   try {

@@ -145,6 +145,22 @@ export function rootChangeAction({ hasSession, requestedProject, hasRun }) {
   return hasRun ? "keep" : "demo";
 }
 
+/* The mode badge is the page's claim about what is on screen, so it is a pure
+ * decision over the run state. No model means IDLE, never the static LIVE. */
+export function modeBadge({ hasModel, mode, followLive, status }) {
+  if (!hasModel) return { label: "● IDLE", variant: "" };
+  if (mode === "demo") return { label: "◆ DEMO", variant: "is-demo" };
+  if (mode === "live") {
+    return followLive && status === "live"
+      ? { label: "● LIVE", variant: "is-live" }
+      : { label: "◼ REPLAY", variant: "is-replay" };
+  }
+  if (status === "paused") return { label: "◼ PAUSED", variant: "is-replay" };
+  if (status === "refreshed") return { label: "◼ REFRESHED", variant: "is-replay" };
+  if (status === "live") return { label: "◼ REPLAY", variant: "is-replay" };
+  return { label: "◼ ENDED", variant: "is-replay" };
+}
+
 /* A run's identity is its coordinates, never its journal revision: a live
  * poll must not read as a different run. Shared by the stage and panels. */
 export function runKey(model) {
