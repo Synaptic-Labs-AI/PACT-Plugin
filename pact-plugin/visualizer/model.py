@@ -12,6 +12,7 @@ Every function is pure over its inputs: no network, no writes, and the
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -116,6 +117,28 @@ def _basename(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         return ""
     return value.rstrip("/").rsplit("/", 1)[-1]
+
+
+# The label alphabet the API exposes for a project. The value ultimately
+# comes from a DIRECTORY NAME the operator chose, so it is constrained here
+# rather than trusted by every future consumer (select options, CLI output,
+# docs snippets). Anything else is replaced, and the caller adds a marker.
+_PROJECT_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def project_label(raw: object) -> tuple[str, bool]:
+    """Constrain a project label to ``[A-Za-z0-9._-]``.
+
+    Location: model.project_label.
+    Summary: Returns (label, conformed). ``conformed`` is False when the raw
+             value carried any character outside the alphabet, which is the
+             caller's signal to mark the entry — the session is never dropped
+             and the label is never silently rewritten without a trace.
+    Used by: build_sessions_list.
+    """
+    text = raw if isinstance(raw, str) else ""
+    label = _PROJECT_LABEL_UNSAFE.sub("_", text)
+    return label, label == text
 
 
 def _text(value: object, limit: int = 200) -> str:
@@ -419,10 +442,12 @@ def derive_agents(
             if event.get("type") in _LEAD_EVENT_TYPES:
                 lead_accumulator.observe(event)
 
-    # Commit events carry no agent of their own, so attribute each to the
-    # most recent dispatch in the same phase (the documented design): a
-    # commit before any same-phase dispatch stays unattributed rather than
-    # guessing, and a commit without a phase has nothing to key on.
+    # Most commit events carry no agent of their own, so attribute each to the
+    # most recent dispatch in the same phase (the documented design): a commit
+    # before any same-phase dispatch stays unattributed rather than guessing.
+    # A commit that DOES name an agent is attributed to it directly — the
+    # first pass already opened its accumulator, and nothing else counts
+    # commits.
     latest_dispatch_by_phase: dict[str, str] = {}
     for event in events:
         event_type = event.get("type")
@@ -430,8 +455,13 @@ def derive_agents(
             dispatched = event.get("agent")
             if isinstance(dispatched, str) and dispatched:
                 latest_dispatch_by_phase[str(event.get("phase") or "")] = dispatched
-        elif event_type == "commit" and not event.get("agent"):
-            attributed = latest_dispatch_by_phase.get(str(event.get("phase") or ""))
+        elif event_type == "commit":
+            own_agent = event.get("agent")
+            attributed = (
+                own_agent
+                if isinstance(own_agent, str) and own_agent
+                else latest_dispatch_by_phase.get(str(event.get("phase") or ""))
+            )
             accumulator = accumulators.get(attributed) if attributed else None
             if accumulator is not None:
                 accumulator.commits += 1
@@ -639,6 +669,23 @@ def derive_tasks(
                 if task["status"] not in _TERMINAL_TASK_STATUSES:
                     task["status"] = "handoff"
                 task["updated_at"] = ts or task["updated_at"]
+        elif event_type == "task_created":
+            # The creation leg is the board's only durable evidence once the
+            # task store has been reaped, so it seeds id/subject/owner/phase.
+            task = ensure(task_id)
+            if task is not None:
+                subject = _text(data.get("subject"), MAX_FIELD_CHARS)
+                if subject:
+                    task["subject"] = subject
+                owner = _text(data.get("owner"), 200)
+                if owner:
+                    task["owner"] = owner
+                phase = _normalize_phase(data.get("phase"))
+                if phase:
+                    task["phase"] = phase
+                if not task["status"]:
+                    task["status"] = "pending"
+                task["updated_at"] = ts or task["updated_at"]
         elif event_type == "task_metadata_snapshot":
             task = ensure(task_id)
             if task is not None:
@@ -720,10 +767,11 @@ def derive_handoffs(
 
     Location: model.derive_handoffs.
     Summary: One row per agent_handoff event, in seq order. ``fields`` always
-             carries the six canonical keys (None when absent), legacy
-             spellings are resolved server-side, and schema_complete is True
-             when every required field (all but recommended reasoning_chain)
-             carries a value.
+             carries the six canonical keys (None when absent) and legacy
+             spellings are resolved server-side, but schema_complete is
+             decided on the RAW payload with the SSOT's presence-only rule
+             (every required key — all but recommended reasoning_chain — is
+             present, whatever its value).
     Used by: derive_model, tests.
     """
     handoffs: list[dict] = []
@@ -731,7 +779,8 @@ def derive_handoffs(
         if event.get("type") != "agent_handoff":
             continue
         data = _mapping(event.get("raw"))
-        fields = classify.extract_handoff_fields(data.get("handoff"))
+        raw_handoff = data.get("handoff")
+        fields = classify.extract_handoff_fields(raw_handoff)
         task_id = _text(event.get("task_id"), 60)
         task_subject = _text(data.get("task_subject"), MAX_FIELD_CHARS)
         if not task_subject and task_id:
@@ -746,7 +795,7 @@ def derive_handoffs(
                 "task_id": task_id,
                 "task_subject": task_subject,
                 "fields": fields,
-                "schema_complete": classify.handoff_schema_complete(fields),
+                "schema_complete": classify.handoff_schema_complete_raw(raw_handoff),
             }
         )
     total = len(handoffs)
@@ -1136,10 +1185,14 @@ def _build_meta(
 
     run_kind = _text(seed.get("run_kind"), 40)
     if not run_kind:
+        # ONE rule for both views: a marker event makes the run an
+        # orchestration. The cheap list derives the same answer from the same
+        # set within a bounded scan, so no team-store fact can promote one
+        # view and not the other.
         has_orchestration = any(
             _text(event.data.get("type"), 80) in _ORCHESTRATION_TYPES for event in events
         )
-        run_kind = "orchestrate" if has_orchestration or team_info.known else "session"
+        run_kind = "orchestrate" if has_orchestration else "session"
 
     return {
         "project": project,
@@ -1416,42 +1469,50 @@ def build_sessions_list(
 
     Location: model.build_sessions_list.
     Summary: One bounded head/tail read per journal (never a full parse), then
-             filter by the CLI's --project/--session substrings, sort newest
-             updated_at first, and cap at ``limit``. ``started_at`` is None
-             when the head window has no timestamp.
+             filter (--project is an exact, case-insensitive match on the
+             emitted project or the slug; --session stays a substring), sort
+             newest updated_at first, and cap at ``limit``. ``started_at`` is
+             None when the head window has no timestamp.
     Used by: server (/api/sessions), tests.
     """
     reference = utcnow(now)
     sessions: list[dict] = []
     for ref in discovery.discover_sessions(roots):
         summary = journal.summarize_journal(ref.journal, reference)
-        project = _basename(summary.project_dir) or ref.slug
-        if project_filter and project_filter.lower() not in (
-            f"{project} {ref.slug}".lower()
-        ):
-            continue
+        project, project_conformed = project_label(
+            _basename(summary.project_dir) or ref.slug
+        )
+        if project_filter:
+            # EXACT, case-insensitive, against the two names the API emits: a
+            # substring filter makes "PACT" swallow every "PACT-*" project.
+            wanted = project_filter.lower()
+            if wanted not in {project.lower(), ref.slug.lower()}:
+                continue
         if session_filter and session_filter.lower() not in ref.session_id.lower():
             continue
-        sessions.append(
-            {
-                "key": ref.key,
-                "root": ref.root_id,
-                "slug": ref.slug,
-                "session_id": ref.session_id,
-                "project": project,
-                "project_dir": summary.project_dir,
-                "team": summary.team
-                or (f"session-{ref.session_id[:8]}" if ref.session_id else ""),
-                "started_at": summary.started_at,
-                "updated_at": summary.updated_at,
-                "size_bytes": int(summary.size),
-                "is_live": bool(summary.is_live),
-                "status": summary.status,
-                "last_event_type": summary.last_event_type,
-                "last_phase": summary.last_phase,
-                "run_kind": summary.run_kind,
-            }
-        )
+        entry = {
+            "key": ref.key,
+            "root": ref.root_id,
+            "slug": ref.slug,
+            "session_id": ref.session_id,
+            "project": project,
+            "project_dir": summary.project_dir,
+            "team": summary.team
+            or (f"session-{ref.session_id[:8]}" if ref.session_id else ""),
+            "started_at": summary.started_at,
+            "updated_at": summary.updated_at,
+            "size_bytes": int(summary.size),
+            "is_live": bool(summary.is_live),
+            "status": summary.status,
+            "last_event_type": summary.last_event_type,
+            "last_phase": summary.last_phase,
+            "run_kind": summary.run_kind,
+        }
+        if not project_conformed:
+            # Visible marker, never a silent rewrite: the session stays in the
+            # list and the payload says the label lost characters.
+            entry["project_altered"] = True
+        sessions.append(entry)
     sessions.sort(
         key=lambda entry: (
             entry.get("updated_at") or "",

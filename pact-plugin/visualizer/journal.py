@@ -315,7 +315,15 @@ def read_tail_events(path: Path, limit: int = 80) -> list[RawEvent]:
     return events
 
 
-_PHASE_START_TYPES = frozenset(ORCHESTRATION_MARKER_TYPES)
+# THE single marker set for "this run is an orchestration". settings owns the
+# definition so the full model (model._ORCHESTRATION_TYPES) and this cheap
+# summary can never disagree about which event types count; session_end is
+# deliberately absent because every run ends.
+_ORCHESTRATION_TYPES = frozenset(ORCHESTRATION_MARKER_TYPES)
+
+# Types the cheap summary looks for in ONE pass: the marker set plus the two
+# fields it derives itself (last_phase, ended).
+_SUMMARY_SCAN_TYPES = _ORCHESTRATION_TYPES | {"session_end"}
 
 
 def _timestamp_of(value: object) -> str | None:
@@ -323,31 +331,47 @@ def _timestamp_of(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-# How many tail-sized windows the last-phase scan will walk backward before
-# giving up: 4 x SUMMARY_TAIL_BYTES. A phase_transition older than that from
-# the end leaves last_phase empty — the bound keeps the cheap summary path
-# cheap instead of parsing the whole file.
+# How many tail-sized windows a backward scan will walk before giving up:
+# 4 x SUMMARY_TAIL_BYTES (the 512KB budget CONTRACT.md documents). THE single
+# budget for every bounded lookup in this module — the phase scan, the
+# orchestration-marker scan and the session_end scan all use it, so one number
+# describes what the cheap summary can and cannot see.
 _PHASE_SCAN_MAX_WINDOWS = 4
 
 
-def _last_phase_transition(path: Path, size: int) -> str:
-    """Bounded backward scan for the most recent phase_transition's phase.
+def _scan_back(path: Path, size: int, wanted: frozenset[str]) -> dict[str, dict]:
+    """Newest event of each requested type within the scan budget.
 
-    Location: journal._last_phase_transition.
+    Location: journal._scan_back.
     Summary: Walks tail-sized windows from the end of the file toward the
-             start (at most _PHASE_SCAN_MAX_WINDOWS of them) and returns the
-             phase of the newest phase_transition found; "" when none is
-             within the scanned budget. The first line of each window may be
-             a byte-boundary fragment and is skipped by the tolerant parser.
-    Used by: summarize_journal.
+             start (at most _PHASE_SCAN_MAX_WINDOWS of them) and returns
+             ``{type: event data}`` for the first — i.e. newest — event of
+             each requested type. Each window's LEADING partial line is
+             carried into the next (earlier) window instead of being dropped:
+             a line that straddles a window boundary is a fragment in both
+             windows, so without the carry a marker sitting on a boundary
+             would be invisible to every bounded scan.
+    Used by: summarize_journal (phase, run_kind, ended) and tests.
     """
+    found: dict[str, dict] = {}
     offset = size
+    carry = b""
     for _ in range(_PHASE_SCAN_MAX_WINDOWS):
         if offset <= 0:
             break
-        window = min(offset, SUMMARY_TAIL_BYTES)
-        start = offset - window
-        data = _read_window(path, start, window)
+        start = max(0, offset - SUMMARY_TAIL_BYTES)
+        data = _read_window(path, start, offset - start) + carry
+        if start > 0:
+            newline = data.find(b"\n")
+            if newline == -1:
+                # One line longer than a whole window: keep it whole and let
+                # the earlier window supply its head.
+                carry, offset = data, start
+                continue
+            carry = data[:newline]
+            data = data[newline + 1:]
+        else:
+            carry = b""
         for _, raw_line in reversed(list(_iter_lines(data))):
             if not raw_line.strip():
                 continue
@@ -355,13 +379,15 @@ def _last_phase_transition(path: Path, size: int) -> str:
             if text is None:
                 continue
             value = _parse_object(text)
-            if value is None or value.get("type") != "phase_transition":
+            if value is None:
                 continue
-            phase = value.get("phase")
-            if isinstance(phase, str) and phase:
-                return phase
+            event_type = value.get("type")
+            if event_type in wanted and event_type not in found:
+                found[event_type] = value
+                if len(found) == len(wanted):
+                    return found
         offset = start
-    return ""
+    return found
 
 
 def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary:
@@ -370,9 +396,11 @@ def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary
     Location: journal.summarize_journal.
     Summary: Provides started_at/updated_at/last_event_type/last_phase/team/
              project_dir/run_kind/status without parsing the whole journal.
-             ``status`` is "live" only when no session_end is visible in the
-             tail window and the file mtime is within settings.LIVE_WINDOW_S
-             of ``now``; otherwise "ended". All failures read as empty fields.
+             last_phase, run_kind and ended all come from ONE backward pass
+             over the shared 512KB budget. ``status`` is "live" only when no
+             session_end is inside that budget and the file mtime is within
+             settings.LIVE_WINDOW_S of ``now``; otherwise "ended". All
+             failures read as empty fields.
     Used by: model.build_sessions_list, cli (--list), tests.
     """
     summary = JournalSummary()
@@ -404,37 +432,32 @@ def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary
         last = tail[-1]
         summary.updated_at = _timestamp_of(last.data.get("ts")) or summary.updated_at
         summary.last_event_type = str(last.data.get("type", ""))
-        ended = summary.last_event_type == "session_end"
-        for event in reversed(tail):
-            data = event.data
-            event_type = data.get("type")
-            if event_type == "session_end":
-                # session_end marks the run ENDED, never an orchestration:
-                # every run ends, so it says nothing about run kind. Keep
-                # scanning past it for a real marker.
-                ended = True
-                continue
-            if event_type in _PHASE_START_TYPES:
-                summary.run_kind = "orchestrate"
-                break
-        summary.last_phase = _last_phase_transition(path, summary.size)
-        if ended:
-            summary.status = "ended"
-        else:
-            age = max(0.0, current.timestamp() - summary.mtime)
-            summary.status = "live" if age <= LIVE_WINDOW_S else "ended"
+
+    # ONE backward pass over ONE budget answers three questions that must not
+    # drift apart: the newest phase, whether a marker makes this an
+    # orchestration, and whether the run ended. session_end answers only the
+    # last of those — every run ends, so it marks no kind.
+    found = _scan_back(path, summary.size, _SUMMARY_SCAN_TYPES) if summary.size else {}
+    phase = (found.get("phase_transition") or {}).get("phase")
+    if isinstance(phase, str) and phase:
+        summary.last_phase = phase
+    if _ORCHESTRATION_TYPES.intersection(found):
+        summary.run_kind = "orchestrate"
+
+    if "session_end" in found:
+        summary.status = "ended"
     else:
         age = max(0.0, current.timestamp() - summary.mtime)
         summary.status = "live" if age <= LIVE_WINDOW_S else "ended"
 
     if summary.run_kind != "orchestrate" and head:
-        # A long wrap-up tail can bury every orchestration marker older than
-        # the tail window; the head window (already loaded for started_at)
-        # carries the run's opening markers, so an ended orchestration still
-        # lists as orchestrate. Still bounded: markers between the two
-        # windows remain invisible to the cheap summary.
+        # A run's opening markers sit in the first 64KB even when every marker
+        # older than the 512KB tail budget has scrolled out of the backward
+        # scan. The head window is already loaded for started_at/team, so the
+        # extra reach is free. Markers between the two windows stay invisible
+        # to the cheap summary — the documented residual.
         for event in head:
-            if event.data.get("type") in _PHASE_START_TYPES:
+            if event.data.get("type") in _ORCHESTRATION_TYPES:
                 summary.run_kind = "orchestrate"
                 break
 

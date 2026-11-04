@@ -75,7 +75,13 @@ EVENT_TYPE_INFO: dict[str, tuple[str, str, str]] = {
     "dispatch_variety": ("variety", "variety", "info"),
     "variety_assessed": ("variety", "variety", "info"),
     "agent_handoff": ("handoff", "handoff", "success"),
+    # The durable trace that the b1 mixed-store guard withheld both the
+    # agent_handoff event and its snapshot. A loss is a warning, not silence.
+    "handoff_emit_suppressed": ("handoff", "handoff", "warning"),
     "teachback_ack": ("teachback", "teachback", "success"),
+    # The creation leg: the only journal evidence of a task once the task
+    # store has been reaped, so the board survives a GC'd store.
+    "task_created": ("task", "task", "info"),
     "task_metadata_snapshot": ("task", "task", "info"),
     "checkpoint": ("checkpoint", "save", "success"),
     "commit": ("commit", "commit", "success"),
@@ -284,12 +290,35 @@ def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
 
 
 def handoff_schema_complete(fields: Mapping[str, str | None]) -> bool:
-    """True when every REQUIRED handoff field carries a value.
+    """True when every REQUIRED handoff field carries a DISPLAYED value.
 
-    reasoning_chain is recommended in the PACT handoff schema, so its absence
-    does not make a handoff incomplete. Mirrors the SSOT's required set.
+    DISPLAY PROJECTION ONLY. ``fields`` is the output of
+    extract_handoff_fields, where an absent key and a present-but-empty one
+    both read as None, so this predicate cannot reproduce the schema's rule
+    and must not decide the debrief badge — use handoff_schema_complete_raw
+    for that. It answers the narrower display question "does the debrief have
+    something to show for every required row".
     """
     return all(fields.get(field) for field in HANDOFF_REQUIRED_FIELDS)
+
+
+def handoff_schema_complete_raw(handoff: object) -> bool:
+    """True when every REQUIRED handoff key is PRESENT in the raw payload.
+
+    Mirrors hooks/shared/handoff_schema.validate_handoff_schema exactly:
+    presence only (``field in handoff``), never the value. An empty string, an
+    empty list, an empty object and an explicit null are all sanctioned by the
+    templates and are NOT defects; only a missing required key is. Legacy
+    aliases do not count, because the SSOT validator reports an alias-only
+    record as missing its canonical key.
+
+    Input is the RAW metadata.handoff dict, never the extract_handoff_fields
+    projection: the projection erases the present/absent distinction this
+    predicate exists to test.
+    """
+    if not isinstance(handoff, Mapping):
+        return False
+    return all(field in handoff for field in HANDOFF_REQUIRED_FIELDS)
 
 
 def classify_event(
