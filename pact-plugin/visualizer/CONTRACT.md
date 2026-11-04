@@ -76,6 +76,7 @@ demo can be opened in either mode.
   "ok": true,
   "generated_at": "2026-11-03T00:00:00Z",
   "default_root": "~/.claude",
+  "filters": {},
   "roots": [{"id": "~/.claude", "label": ".claude", "path": "/Users/x/.claude", "journals": 291, "default": true}],
   "sessions": [{
     "key": "~/.claude::PACT-prompt::d0964a9f",
@@ -96,6 +97,11 @@ demo can be opened in either mode.
   }]
 }
 ```
+
+`filters` echoes the server's launch filters: only the `--project` / `--session`
+flags that were passed appear as keys, and it is `{}` when the server is
+unfiltered. The page uses it to tell an empty root from a filter that excluded
+everything.
 
 List entries are deliberately cheap: no full journal parse. `started_at` may be
 null when unavailable. `last_phase` reflects the last `phase_transition` within

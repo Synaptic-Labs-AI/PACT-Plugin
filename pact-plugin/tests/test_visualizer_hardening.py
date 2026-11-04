@@ -154,10 +154,14 @@ class TestHeadResponse:
         assert body.startswith(b'{"ok":true')
 
 
-def _health(port: int) -> dict:
-    url = f"http://127.0.0.1:{port}/api/health"
+def _get_json(port: int, path: str) -> dict:
+    url = f"http://127.0.0.1:{port}{path}"
     with urllib.request.urlopen(url, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _health(port: int) -> dict:
+    return _get_json(port, "/api/health")
 
 
 class TestHealthLaunchMode:
@@ -179,6 +183,29 @@ class TestHealthLaunchMode:
 
         assert demo["demo"] is True
         assert demo["demo_available"] is True
+
+
+class TestSessionsFilterEcho:
+    def test_unfiltered_sessions_echo_empty_filters(self, live_server):
+        payload = _get_json(live_server.server_port, "/api/sessions")
+        assert payload["filters"] == {}
+
+    def test_launch_project_filter_is_echoed(self, live_server):
+        """A filtered launch's /api/sessions names the filter that emptied it."""
+        srv = server_module.create_server(
+            live_server.roots, filters={"project": "my project"}
+        )
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            payload = _get_json(srv.server_port, "/api/sessions")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
+
+        assert payload["filters"]["project"] == "my project"
+        assert payload["sessions"] == []
 
 
 class TestHalfOpenTimeout:

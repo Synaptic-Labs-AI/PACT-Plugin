@@ -298,6 +298,7 @@ export class Panels {
     this.modalView = "tab";
     this.detailEvent = null;
     this.error = null;
+    this.notice = "";
     this.toasts = [];
     this._toastTimers = new Map();
     this._leftLivePills = [];
@@ -498,6 +499,14 @@ export class Panels {
     }
   }
 
+  /* A neutral empty state for "the requested thing is not here", as opposed
+   * to an error. It replaces the generic awaiting-telemetry card until a run
+   * loads. */
+  setNotice(message) {
+    this.notice = visible(message);
+    if (!this.model) this.renderLeft();
+  }
+
   /* --- shared internals -------------------------------------------------- */
 
   _eventTotal() {
@@ -588,7 +597,11 @@ export class Panels {
     this._nodes.statusValue = null;
     const model = this.model;
     if (!model) {
-      left.appendChild(this._emptyCard("AWAITING TELEMETRY", "Choose a run in the header, or open the training simulation."));
+      left.appendChild(
+        this.notice
+          ? this._emptyCard("NO SESSIONS", this.notice)
+          : this._emptyCard("AWAITING TELEMETRY", "Choose a run in the header, or open the training simulation.")
+      );
       left.appendChild(this._statusLine());
       return;
     }
@@ -620,7 +633,7 @@ export class Panels {
   }
 
   _emptyCard(title, body) {
-    return el("div", { class: "rail-card rail-empty" }, [
+    return el("div", { class: "rail-card rail-empty", attrs: { role: "status" } }, [
       el("div", { class: "rail-kicker", text: title }),
       el("p", { class: "rail-empty-text", text: body }),
     ]);

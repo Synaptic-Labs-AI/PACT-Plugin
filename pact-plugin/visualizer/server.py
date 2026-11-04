@@ -328,6 +328,9 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             session_filter=filters.get("session", ""),
             now=_now(),
         )
+        # Always present (empty when unfiltered) so the page can tell "no runs"
+        # from "the launch filter excluded everything" without a second branch.
+        payload["filters"] = dict(filters)
         self._send_json(200, payload)
 
     def _serve_session(self, query: str) -> None:

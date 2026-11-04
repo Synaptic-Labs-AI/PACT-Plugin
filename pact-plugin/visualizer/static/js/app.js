@@ -78,6 +78,7 @@ const state = {
   etag: null,
   lastError: "",
   demoAvailable: true,
+  requestedProject: "",
   suppress: false,
   pollTimer: 0,
   raf: 0,
@@ -490,8 +491,23 @@ function selectRoot(rootId, { open = true } = {}) {
   if (open) {
     const first = sessionsFor(rootId, slug)[0];
     if (first) openSession(first);
+    else if (state.requestedProject) showEmptyProject(state.requestedProject);
     else if (!state.current) openDemo();
   }
+}
+
+/* A launch-level project filter that matches nothing must say so. Falling
+ * through to the demo shows a different run as if it were the requested one. */
+function showEmptyProject(project) {
+  const name = String(project || "").trim();
+  if (!name) return;
+  hideError();
+  if (panels) {
+    panels.setNotice(
+      `No sessions for project ${name}. Choose another project, or open the training simulation.`
+    );
+  }
+  els.stageCaption.textContent = `NO SESSIONS FOR PROJECT ${name.toUpperCase()}`;
 }
 
 async function loadInitial() {
@@ -508,6 +524,12 @@ async function loadInitial() {
     }
     els.demo.hidden = !state.demoAvailable;
     const data = await refreshList(params.get("root") || undefined);
+    /* The launch `--project` filter is applied server-side. The payload echo
+     * (or a project query param) is the only way the page can name it. */
+    state.requestedProject =
+      (data && data.filters && typeof data.filters.project === "string" && data.filters.project) ||
+      params.get("project") ||
+      "";
     const rootId = els.root.value;
     if (params.has("demo") || (USE_MOCK && !params.has("session"))) {
       await openDemo();
@@ -530,7 +552,8 @@ async function loadInitial() {
         await openSession(pick, { fromUrl: true });
       } else {
         selectRoot(rootId, { open: false });
-        await openDemo();
+        if (state.requestedProject) showEmptyProject(state.requestedProject);
+        else await openDemo();
       }
     }
   } catch (err) {
