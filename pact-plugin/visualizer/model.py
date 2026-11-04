@@ -1543,13 +1543,16 @@ def build_health(
     instance_id: str,
     uptime_s: float,
     now: datetime | None = None,
+    demo_mode: bool = False,
 ) -> dict:
     """Build the /api/health payload.
 
     Location: model.build_health.
-    Summary: Identity, pid, random instance token, uptime, the roots array
-             (with live journal counts) and ``demo: true`` (the scripted demo
-             is always available).
+    Summary: Identity, pid, random instance token, uptime and the roots array
+             (with live journal counts). ``demo`` reports the ACTUAL launch
+             mode — the caller passes what the server was started as, so a
+             real-journal launch never claims to be the demo. ``demo_available``
+             is the capability: the scripted demo exists in every mode.
     Used by: server (/api/health), tests.
     """
     reference = utcnow(now)
@@ -1561,6 +1564,7 @@ def build_health(
         "instance_id": str(instance_id),
         "uptime_s": round(max(0.0, float(uptime_s)), 1),
         "roots": discovery.root_payload(roots),
-        "demo": True,
+        "demo": bool(demo_mode),
+        "demo_available": True,
         "generated_at": iso_utc(reference),
     }

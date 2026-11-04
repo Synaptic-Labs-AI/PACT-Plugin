@@ -434,6 +434,36 @@ class TestRunKindAgreement:
 # --- 6. commit attribution counts agent-carrying commits too ----------------
 
 
+class TestHealthDemoShape:
+    """`demo` is the launch MODE; `demo_available` is the capability."""
+
+    def _health(self, tmp_path: Path, **kwargs) -> dict:
+        root = make_root(tmp_path)
+        return model.build_health(
+            roots_for(root),
+            pid=4242,
+            instance_id="deadbeef",
+            uptime_s=1.5,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            **kwargs,
+        )
+
+    def test_real_launch_does_not_claim_the_demo_mode(self, tmp_path):
+        payload = self._health(tmp_path)
+        assert payload["demo"] is False
+        assert payload["demo_available"] is True
+
+    def test_demo_launch_reports_the_demo_mode(self, tmp_path):
+        payload = self._health(tmp_path, demo_mode=True)
+        assert payload["demo"] is True
+        assert payload["demo_available"] is True
+
+    def test_the_capability_field_is_the_only_addition(self, tmp_path):
+        payload = self._health(tmp_path)
+        assert {"demo", "demo_available"} <= set(payload)
+        assert not {"demo_mode", "is_demo", "mode"} & set(payload)
+
+
 class TestCommitAttribution:
     def test_commit_with_its_own_agent_is_counted(self, tmp_path):
         root = make_root(tmp_path)

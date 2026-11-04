@@ -9,9 +9,11 @@ Used by: pytest (hardening regressions for the visualizer server and CLI).
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import threading
+import urllib.request
 
 import pytest
 
@@ -150,6 +152,33 @@ class TestHeadResponse:
         _head, separator, body = raw.partition(b"\r\n\r\n")
         assert separator == b"\r\n\r\n"
         assert body.startswith(b'{"ok":true')
+
+
+def _health(port: int) -> dict:
+    url = f"http://127.0.0.1:{port}/api/health"
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+class TestHealthLaunchMode:
+    def test_health_reports_the_actual_launch_mode(self, live_server):
+        """/api/health reports the launch mode, not a hard-coded demo flag."""
+        real = _health(live_server.server_port)
+        assert real["demo"] is False
+        assert real["demo_available"] is True
+
+        demo_srv = server_module.create_server(live_server.roots, demo_mode=True)
+        thread = threading.Thread(target=demo_srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            demo = _health(demo_srv.server_port)
+        finally:
+            demo_srv.shutdown()
+            demo_srv.server_close()
+            thread.join(timeout=5)
+
+        assert demo["demo"] is True
+        assert demo["demo_available"] is True
 
 
 class TestHalfOpenTimeout:

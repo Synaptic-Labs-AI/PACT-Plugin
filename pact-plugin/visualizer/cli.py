@@ -623,6 +623,7 @@ def serve_foreground(
         return 0
     port = int(getattr(args, "port", 0) or 0)
     filters = _filters(args)
+    demo_mode = bool(getattr(args, "demo", False))
     try:
         server = server_module.create_server(
             roots,
@@ -630,12 +631,12 @@ def serve_foreground(
             instance_id=instance_id,
             verbose=bool(getattr(args, "verbose", False)),
             filters=filters,
+            demo_mode=demo_mode,
         )
     except OSError as error:
         # A port already in use is a user-facing condition, not a traceback.
         raise CliError(f"cannot bind {LOOPBACK_HOST}:{port}: {error}") from error
     actual_port = int(server.server_port)
-    demo_mode = bool(getattr(args, "demo", False))
     # The state file always stores the canonical BASE url; ?demo=1 is a
     # client-side display mode, so appending it at print/open time (and
     # exactly once) keeps --status/--stop/reuse from doubling the query.

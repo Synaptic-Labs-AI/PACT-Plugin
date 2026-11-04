@@ -1477,7 +1477,8 @@ class TestSessionsListAndHealth:
         assert payload["pid"] == 1234
         assert payload["instance_id"] == "deadbeef"
         assert payload["uptime_s"] == 12.3
-        assert payload["demo"] is True
+        assert payload["demo"] is False
+        assert payload["demo_available"] is True
         assert payload["roots"][0]["journals"] == 2
 
 

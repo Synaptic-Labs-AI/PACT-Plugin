@@ -193,7 +193,8 @@ class TestHealth:
         assert len(payload["instance_id"]) == 32
         int(payload["instance_id"], 16)  # hex
         assert payload["uptime_s"] >= 0
-        assert payload["demo"] is True
+        assert payload["demo"] is False
+        assert payload["demo_available"] is True
         assert payload["roots"][0]["default"] is True
         assert payload["roots"][0]["journals"] == 1
         assert payload["roots"][0]["path"].endswith(".claude")

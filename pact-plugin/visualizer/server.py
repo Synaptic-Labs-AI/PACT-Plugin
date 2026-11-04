@@ -68,7 +68,8 @@ class MissionControlServer(ThreadingHTTPServer):
 
     Location: server.MissionControlServer.
     Summary: Carries the resolved roots, the random instance token, the
-             server's start time and the CLI's list filters. Threading
+             server's start time, the CLI's list filters and the launch mode
+             (``demo_mode``) that /api/health reports. Threading
              (daemon threads) keeps a slow static read from blocking the API
              and lets shutdown return promptly.
     Used by: create_server, cli, tests.
@@ -88,11 +89,13 @@ class MissionControlServer(ThreadingHTTPServer):
         instance_id: str,
         verbose: bool = False,
         filters: Mapping[str, str] | None = None,
+        demo_mode: bool = False,
     ) -> None:
         self.roots: list[RootSpec] = list(roots)
         self.instance_id = instance_id
         self.verbose = bool(verbose)
         self.filters = dict(filters or {})
+        self.demo_mode = bool(demo_mode)
         self.started_at = _now()
         self.started_monotonic = time.monotonic()
         super().__init__(address, handler_class)
@@ -300,6 +303,7 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             instance_id=server.instance_id,
             uptime_s=server.uptime_s,
             now=_now(),
+            demo_mode=server.demo_mode,
         )
         self._send_json(200, payload)
 
@@ -494,6 +498,7 @@ def create_server(
     instance_id: str | None = None,
     verbose: bool = False,
     filters: Mapping[str, str] | None = None,
+    demo_mode: bool = False,
 ) -> MissionControlServer:
     """Bind and return a Mission Control server without serving it.
 
@@ -524,6 +529,7 @@ def create_server(
         instance_id=token,
         verbose=verbose,
         filters=filters,
+        demo_mode=demo_mode,
     )
     bound_host = str(server.server_address[0])
     if bound_host != LOOPBACK_HOST:
