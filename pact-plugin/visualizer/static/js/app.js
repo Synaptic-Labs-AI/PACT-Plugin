@@ -511,6 +511,13 @@ function selectRoot(rootId, { open = true } = {}) {
 /* Drop the open run so the rails, recorder and caption all agree there is
  * nothing to show. Used when the selected root cannot show a run at all. */
 function clearRunView() {
+  /* Same invalidations the other view switches perform. A pending
+   * openSession must not re-apply its journal over this empty state, and the
+   * loading overlay it raised must not stay up: its finally block sees a
+   * stale token and skips its own reset. */
+  hideError();
+  sessionRequest += 1;
+  setLoading(false);
   stopPolling();
   state.current = null;
   state.model = null;
@@ -527,7 +534,9 @@ function clearRunView() {
   }
   if (timeline) timeline.setModel(null);
   document.title = "PACT // Mission Control";
+  updateUrl("", null);
   setModeLabel();
+  updateClock();
   updateTimeline();
 }
 
