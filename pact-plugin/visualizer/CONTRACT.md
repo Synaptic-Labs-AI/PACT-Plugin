@@ -377,6 +377,7 @@ export function shortSha(sha);
 export function rootChangeAction({ hasSession, requestedFilter, hasRun });
 export function requestedFilterLabel(filters);  // named-empty label from the server's echoed filters
 export function pollClearsError(errorSource);   // a successful poll clears only a poll-authored banner
+export function pollMayShowError(currentSource); // a poll may raise or clear only its own banner
 export function feedKey(model);        // feed cache key: run identity + first visible event seq (the capped window slides while its length stays fixed)
 export function modeBadge({ hasModel, mode, followLive, status });
 export function runKey(model);
