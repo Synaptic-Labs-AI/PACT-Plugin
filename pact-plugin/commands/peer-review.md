@@ -208,15 +208,17 @@ The `prompt` is a dispatch contract the lead fills in per PR:
 - **QUESTION**: "what is wrong with this diff" — judge the code against its own claims, including tests that exercise a replica of production logic.
 - **REPORT**: open with what the diff claims to do, derived from the diff alone — code, comments, and tests at head, not the PR description. Then severity-ranked findings — `blocking`, `suggestion`, `nitpick` — each with file:line and a concrete failure scenario; an explicit nothing-found line for each severity with no findings; one sentence on what would block a merge, even if nothing would; and a coverage boundary: paths read, paths not examined, commands not run, and why.
 
-This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array, and journal its findings through the existing `review_finding` event with reviewer `cold-reviewer`, with `task_id` omitted or attributed to the review parent task.
+This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array, and journal its findings through the existing `review_finding` event with reviewer `cold-reviewer`, with `task_id` omitted or attributed to the review parent task — when `task_id` is omitted, omit it from the read-back match too.
 
-A report with no findings is valid only with the per-severity nothing-found lines, the merge-block sentence, the coverage boundary, and the paths-read / commands-not-run receipt; if any element is missing, synthesize the lane as review-did-not-happen, not as clean.
+The cold reviewer writes no HANDOFF; the review doc is the durable home of its coverage boundary, diff-claims opening, and merge-block sentence — record them there.
+
+A report with no findings is valid only with the per-severity nothing-found lines, the merge-block sentence, the coverage boundary, and the paths-read / commands-not-run receipt; if any element is missing, synthesize the lane as review-did-not-happen, not as clean. A spawn that returns no report at all is also review-did-not-happen: wait for the cold report before synthesizing, and do not treat completion of the spawn as the review.
 
 Division of labour: the warm lanes read the project's policy files and own project-policy conformance; the cold lane judges the code against itself.
 
 ---
 
-**Dispatch reviewers** — for each reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
+**Dispatch reviewers** — for each warm reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>, metadata=<see below>)` — Task B.
@@ -508,7 +510,7 @@ JSON
 
    Calibration runs unconditionally after all reviewers complete. Skip only for trivial single-file PRs.
 
-   **Verify agent task completion**: After each reviewer completes, check their task status via `TaskList`. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
+   **Verify agent task completion**: After each reviewer completes, check their task status via `TaskList`. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`. The cold reviewer owns no task — skip this step for it.
 
 7. ⚠️ **Merge Authorization Checkpoint**
 

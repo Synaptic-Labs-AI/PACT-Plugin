@@ -237,7 +237,7 @@ Create a feature branch before any new workstream begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
 
-**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — no exceptions. Exception: the peer-review cold reviewer is dispatched as an anonymous `general-purpose` subagent with no `team_name`.
+**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — the one exception is the peer-review cold reviewer, dispatched as an anonymous `general-purpose` subagent with no `team_name`.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides — delegate anyway.
 
