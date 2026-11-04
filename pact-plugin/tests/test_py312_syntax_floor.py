@@ -2,9 +2,9 @@
 Location: pact-plugin/tests/test_py312_syntax_floor.py
 Summary: Static AST guard keeping the plugin's bare-python3 surfaces
          parseable at the declared Python 3.12 floor -- hooks/,
-         skills/pact-memory/scripts/ and scripts/ (the roots a consumer
-         can end up running on /usr/bin/python3 rather than a managed
-         interpreter). One rule: every scanned .py parses at
+         skills/pact-memory/scripts/, scripts/ and visualizer/ (the roots
+         a consumer can end up running on /usr/bin/python3 rather than a
+         managed interpreter). One rule: every scanned .py parses at
          ast feature_version=(3, 12). Pure static analysis: nothing
          scanned is imported or executed.
 Used by: pact-plugin test suite (standing merge gate).
@@ -56,6 +56,7 @@ SCANNED_ROOTS: tuple[Path, ...] = (
     PLUGIN_ROOT / "hooks",
     PLUGIN_ROOT / "skills" / "pact-memory" / "scripts",
     PLUGIN_ROOT / "scripts",
+    PLUGIN_ROOT / "visualizer",
 )
 
 
@@ -135,7 +136,13 @@ class TestDiscoveryFloor:
         # raised 55 -> 71 when skills/pact-memory/scripts and scripts were
         # added; raised 71 -> 106 when this guard was rebuilt for the 3.12
         # floor (measured 2026-10-30 at f1c44200: hooks 86 +
-        # skills/pact-memory/scripts 14 + scripts 6).
+        # skills/pact-memory/scripts 14 + scripts 6); raised 106 -> 117 when
+        # visualizer/ (the Mission Control backend) joined the scanned roots
+        # (measured 2026-11-03 at 68b34e08: hooks 86 +
+        # skills/pact-memory/scripts 14 + scripts 6 + visualizer 11 = 117);
+        # raised 117 -> 118 after the rebase onto main brought hooks/ to 87
+        # (measured 2026-11-04 at HEAD: hooks 87 +
+        # skills/pact-memory/scripts 14 + scripts 6 + visualizer 11 = 118).
         #
         # COUNTING RULE, so the next reader RE-DERIVES instead of inheriting a
         # number: _SCANNED_FILES is every *.py that Path.rglob finds under
@@ -144,16 +151,17 @@ class TestDiscoveryFloor:
         # the day it was written.
         #
         # SLACK IS NOT A PROPERTY THIS COMMENT CAN PIN: it is today's count
-        # minus 106, and it WIDENS on its own as files are added. The wider
-        # the slack, the more of a root can disappear unnoticed. Re-measure
-        # and raise the floor when it has drifted.
+        # minus the current floor assertion (118 today), and it WIDENS on its
+        # own as files are added. The wider the slack, the more of a root can
+        # disappear unnoticed. Re-measure and raise the floor when it has
+        # drifted.
         #
         # LIMIT, stated rather than implied: a count floor cannot protect a
         # SMALL root. Losing one whose file count is under the current slack
         # leaves the total above the floor, indistinguishable from normal
         # churn. This test guards against a LARGE root collapsing, not
         # against every root.
-        assert len(_SCANNED_FILES) >= 106
+        assert len(_SCANNED_FILES) >= 118
 
     def test_every_scanned_root_resolves_non_empty(self):
         # The count floor above cannot see a root vanish when that root is

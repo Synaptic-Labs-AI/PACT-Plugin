@@ -204,6 +204,7 @@ The orchestrator manages the cycle, delegating each phase to the appropriate spe
 | `/PACT:pin-memory` | Pin critical context permanently | Gotchas, key decisions to preserve |
 | `/PACT:prune-memory` | Interactively evict an existing pin | When `pin_caps_gate` blocks a new pin |
 | `/PACT:telegram-setup` | Set up Telegram notifications | Interact with sessions from mobile |
+| `/PACT:visualize` | Local, read-only Mission Control view of a run | Watch a run live, or replay a past session |
 
 ### comPACT examples
 
@@ -249,6 +250,19 @@ Specialists persist after their phase, available as consultants for follow-up qu
 ### Telegram notifications
 
 Stay connected to your Claude Code sessions from your phone. Get notifications, answer blocking questions, and send voice replies — all from Telegram. Run `/PACT:telegram-setup` to enable.
+
+### Mission Control
+
+A local, read-only browser view of a run: the phase floor, specialist crew, dispatch and handoff flow, gates, findings, and the wrap-up debrief. Watch a run live or replay a historical session from its journal.
+
+Two equal launch paths over the same loopback-only server:
+
+```
+/PACT:visualize demo               # from a Claude Code session (one turn)
+pact-plugin/bin/pact-viz --open    # direct from a clone — no tokens, no Claude turn
+```
+
+Mission Control uses no model or API tokens while it runs, makes no external requests, and never writes to the sessions, tasks, teams, or memory directories. See [`pact-plugin/visualizer/README.md`](pact-plugin/visualizer/README.md) for flags, privacy, and troubleshooting.
 
 ---
 
@@ -665,7 +679,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.8.20/     # Plugin version
+│               └── 4.9.0/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
@@ -713,7 +727,8 @@ PACT-Plugin/
 │   ├── reference/              # VSM glossary
 │   ├── telegram/               # Telegram bridge MCP server
 │   ├── templates/              # Settings and environment-model templates
-│   └── tests/                  # 147 test files
+│   ├── tests/                  # 147 test files
+│   └── visualizer/             # Mission Control — local read-only run viewer
 └── docs/
 ```
 

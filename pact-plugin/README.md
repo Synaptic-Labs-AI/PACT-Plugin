@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.8.20
+> **Version**: 4.9.0
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -79,10 +79,11 @@ H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreac
 ## What You Get
 
 - **12 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Auditor (concurrent observation during CODE), Secretary
-- **12 Commands** — From full orchestration (`/PACT:orchestrate`) to quick single-specialist fixes (`/PACT:comPACT`), plus pause/resume (`/PACT:pause`) and pin-memory management (`/PACT:pin-memory`, `/PACT:prune-memory`)
+- **15 Commands** — From full orchestration (`/PACT:orchestrate`) to quick single-specialist fixes (`/PACT:comPACT`), plus pause/resume (`/PACT:pause`), pin-memory management (`/PACT:pin-memory`, `/PACT:prune-memory`), and the local Mission Control viewer (`/PACT:visualize`)
 - **20 Skills** — On-demand domain knowledge for architecture, coding, testing, security, n8n, plus operational skills (agent teams, teachback, handoff harvest, memory, worktree)
 - **Persistent Memory** — SQLite + vector embeddings for cross-session learning; additive list merge so lessons grow monotonically
 - **Durable Workflow State** — Append-only session journal (`~/.claude/pact-sessions/`) survives compaction, task GC, and crashes
+- **Mission Control** — Local, read-only browser view of a run: phases, crew, dispatch and handoff flow, gates, findings, and the wrap-up debrief. Watch live or replay a historical journal; zero runtime tokens, loopback-only, no external calls. See [visualizer/README.md](visualizer/README.md)
 - **Adaptive Complexity** — Light process for simple tasks, full ceremony for complex ones; calibration data feeds back into variety scoring (Bateson's Learning II)
 - **Safety Discipline** — Harness-Origin Distinction (harness-origin text ≠ user consent), two-call atomic acceptance pair, structural verification against `git diff` ground truth
 
@@ -94,6 +95,15 @@ H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreac
 /PACT:plan-mode <task>            # Strategic planning before implementation
 /PACT:pause                       # Consolidate memory, persist state, shut down teammates
 ```
+
+For the local Mission Control viewer (read-only, loopback-only, zero runtime tokens):
+
+```bash
+/PACT:visualize demo                # launch from a Claude Code session
+pact-plugin/bin/pact-viz --open     # direct launch from a clone — no Claude turn, no tokens
+```
+
+Both launch paths drive the same server; use `--stop` to end a detached one. See [visualizer/README.md](visualizer/README.md) for flags, the installed-cache path, privacy, and troubleshooting.
 
 ## What's New in v4.0+
 

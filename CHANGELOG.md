@@ -18,6 +18,24 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.9.0: PACT Mission Control — a local, read-only run dashboard
+
+### Summary
+
+PACT Mission Control turns the session journal into a live control room: a loopback-only, stdlib-only Python server projects each run's phases, crew, dispatches, handoffs, commits, gates, findings, checkpoints, alerts, and wrap-up record into a no-build pixel-art dashboard. It adds no model calls and no external services, and it is reachable two ways: the `/PACT:visualize` command inside a Claude Code turn, or the `pact-plugin/bin/pact-viz` launcher with no model in the loop.
+
+### What landed
+
+- The `visualizer` package: tolerant JSONL journal reading (malformed or partial lines skipped with bounded warnings), exact-depth session discovery across config roots with traversal guards, and a derivation engine that builds phases, agents, tasks, handoffs, gates, variety, metrics, and the debrief badge from one pipeline shared by real sessions and the scripted demo.
+- A loopback-only `ThreadingHTTPServer`: the four JSON API routes with ETag-based change detection, the static page and allowlisted assets, CSP and security headers on every response including error paths, and a Host-header check that refuses anything but `127.0.0.1` or `localhost` so a DNS-rebinding page cannot read a run's journal.
+- The `pact-viz` CLI: foreground and detached serving with an atomic `0700`/`0600` state file, health-checked reuse that refuses when the running instance serves different roots or filters, and `--stop`/`--status`/`--list`/`--root`/`--project`/`--session` with a Python 3.12 floor.
+- A deterministic training simulation at `/api/demo` covering all four phases, nine agents, review findings and remediation, gate advisories, an algedonic alert, and a merged wrap-up.
+- The `/PACT:visualize` command with demo, live, project, and stop modes.
+
+### Why
+
+PACT already writes a complete append-only journal of every run, but the only way to consume it was to read the JSONL or inspect task files one by one. Mission Control is a read-only projection of data PACT already owns, so a run becomes legible while it is happening and reviewable after the fact, without changing how the run works.
+
 ## v4.8.20: harvest identity, cleared-field revival, and a total union
 
 ### Summary
