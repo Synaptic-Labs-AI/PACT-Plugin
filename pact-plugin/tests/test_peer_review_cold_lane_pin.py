@@ -300,7 +300,17 @@ ONCE_RULES = (
     ("Send it no message other than a HALT or the re-check message", "the lead's message bar"),
     ("when the record holds no valid first-round cold report", "the first-round fallback in a re-review"),
     ("whichever report raised it", "the re-check list's scope"),
-    ("No open cold findings; no re-check", "the skip line"),
+    ("ends in exactly one disposition", "the disposition rule"),
+    ("verified invalid", "the verified-invalid disposition"),
+    ("declined, when the user declines it at step C", "the declined disposition"),
+    ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
+    ("even when the list is empty", "the no-skip rule"),
+    ("send it instead as a fresh cold dispatch", "the fresh re-check after imPACT corrections"),
+    ("lacks a disposition", "the merge gate on undisposed blocking findings"),
+    ("or another reason, stated", "the REPORT reason set"),
+    ("for any reason, or none, other than", "the blocker trigger's reason test"),
+    ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
+    ("declines it at an `AskUserQuestion` you ask then", "the at-gate decline of a lone blocking finding"),
     ("The re-check message is the paragraph below", "the re-check message"),
     ("Use it in every round", "the fixed base"),
     ("still triages it", "the retry blocker's triage"),
@@ -340,8 +350,25 @@ RECHECK_ELEMENTS = (
 )
 FIRST_ROUND_VALIDITY = "A first-round cold report is valid only with"
 RECHECK_VALIDITY = "A re-check report is valid only with"
-# Terms of machinery the lane deliberately dropped; they must not return to it.
-RETIRED_LANE_TERMS = ("superseded", "restart", "merge-base", "not an ancestor", "latest round")
+# Stems of machinery the lane deliberately dropped; they must not return to
+# it. Matched against the lowercased lane, so a capitalised or inflected
+# form ('Superseded', 'restarts', 'ancestors') is caught too. Bare 'next
+# round' is deliberately absent: the lane legitimately says what the next
+# round does.
+RETIRED_LANE_STEMS = (
+    "supersed",
+    "restart",
+    "merge-base",
+    "ancestor",
+    "latest round",
+    "previous cold",
+    "most recent cold round",
+    "applies to the next round",
+    "recorded skip",
+    "no open cold findings",
+    "skip the cold lane",
+    "that no valid cold report has marked resolved",
+)
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
 VALIDITY_CONSEQUENCE = "; otherwise it is not valid."
@@ -717,7 +744,7 @@ class TestReportClause:
          "passes vacuously")),
         ("the open questions you could not settle", ("the questions the diff could not settle — they "
          "get a disposition row like a HANDOFF's open_questions")),
-        ("and each changed path whose diff hunk you did not read, with the reason: you could not read it, or you judged it not review-relevant", ("the blocker report the "
+        ("and each changed path whose diff hunk you did not read, with the reason: you could not read it, you judged it not review-relevant, or another reason, stated", ("the blocker report the "
          "persona's blocker exception relies on")),
         ("coverage boundary with its receipt", ("the required boundary — a partial review "
          "must be visible as partial")),
@@ -817,12 +844,13 @@ class TestLifecycleOrder:
             f"{LIFECYCLE_STEPS!r}, found {labels!r}"
         )
 
-    @pytest.mark.parametrize("term", RETIRED_LANE_TERMS)
+    @pytest.mark.parametrize("term", RETIRED_LANE_STEMS)
     def test_retired_term_absent_from_lane(self, term):
-        assert term not in _cold_section(), (
+        assert term not in _cold_section().lower(), (
             f"the cold lane again uses {term!r} — machinery the lane dropped "
             f"(restart, supersession, a moving re-check base, round "
-            f"bookkeeping); every round now reviews the whole PR with one retry"
+            f"bookkeeping, the re-check skip); every round now reviews the whole "
+            f"PR with one retry"
         )
 
     def test_no_third_failure_term(self):
@@ -864,10 +892,10 @@ class TestLeadFacingRules:
          "the return path")),
         ("Return", "Append every report verbatim to the record under its agentId", "the verbatim record"),
         ("Return", "as soon as it returns, before synthesizing", "the record's timing"),
-        ("Return", "is a blocker report when its coverage boundary names a changed path whose diff hunk it could not read", (
-         "the blocker trigger, matching REPORT's wording")),
-        ("Return", "or one it did not read although the path is review-relevant, by its own judgement or, when the path is clearly review-relevant, by yours", (
-         "the relevance half of the trigger and who judges it")),
+        ("Return", "A report not cut short by a HALT is a blocker report when its coverage boundary names a changed path whose diff hunk it did not read for any reason, or none, other than that the path is not review-relevant", (
+         "the blocker trigger with its HALT carve-out, matching REPORT's reasons")),
+        ("Return", "or a path it judged not review-relevant that you judge clearly review-relevant", (
+         "the lead's reclassification and its bound ('clearly')")),
         ("Return", "a skipped path that is not review-relevant (a version bump, a lockfile, a generated file) and a path read but whose tests did not run are coverage notes", (
          "the trigger's boundary — untested or irrelevant is not a blocker")),
         ("Return", "Run /PACT:imPACT on a blocker report, and do not synthesize the lane as clean", (
@@ -898,13 +926,22 @@ class TestLeadFacingRules:
          "the row's routing — the lead invents no severity")),
         ("No report or an invalid one", "Do not treat completion of the spawn as the review", (
          "the completion-is-not-review rule")),
-        ("Synthesis", 'Wait for the round\'s end state — a valid cold report, the recorded skip, or the "Cold lane did not run" line — before synthesizing', (
-         "the wait rule, naming the three end states and requiring a valid report")),
+        ("Synthesis", 'Wait for the round\'s end state — a valid cold report or the "Cold lane did not run" line — before synthesizing', (
+         "the wait rule, naming both end states and requiring a valid report")),
+        ("Synthesis", "Every cold finding in the record ends in exactly one disposition", (
+         "the disposition rule — every finding closes, exactly once")),
+        ("Synthesis", "resolved, when a valid cold report marks it so", "the resolved disposition"),
+        ("Synthesis", "verified invalid, when you record file:line evidence that the finding is wrong", (
+         "the verified-invalid disposition and its evidence bar")),
+        ("Synthesis", "or declined, when the user declines it at step C, routes it to a tracked GitHub issue there, or, for a blocking cold finding with no disposition when it alone holds merge readiness, declines it at an AskUserQuestion you ask then", (
+         "the declined disposition and its three routes")),
+        ("Synthesis", "Append each disposition you make as its own line in the record, labelled as yours, and never edit the verbatim reports", (
+         "the record discipline for lead dispositions")),
         ("Synthesis", 'Append the synthesis to the review doc and leave the "Cold report (verbatim)" record intact', (
          "the bar on rewriting the verbatim record")),
         ("Synthesis", "Journal each cold finding per the review_finding journal step", (
          "the journal landing")),
-        ("Synthesis", "Give each open question in a cold report a row", (
+        ("Synthesis", "Give each open question in a first-round or re-check cold report a row", (
          "the open-question rows")),
         ("Remediation", "Never use the cold reviewer as a fixer and never reassign it", "the never-a-fixer rule"),
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
@@ -912,10 +949,10 @@ class TestLeadFacingRules:
          "the bar on any other message")),
         ("Re-check", "when the record holds no valid first-round cold report, dispatch the cold prompt as a first-round review", (
          "the first-round fallback in a re-review")),
-        ("Re-check", "Otherwise list every cold finding in the record that no valid cold report has marked resolved, whichever report raised it", (
-         "the re-check list — every unresolved finding, from any report")),
-        ("Re-check", 'when the list is empty, skip the cold lane for this round and add the line "No open cold findings; no re-check" to the record', (
-         "the skip rule and its record line")),
+        ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing them, and that re-check's report is the round's end state", (
+         "the same-round re-check of earlier findings after the fallback")),
+        ("Re-check", "Otherwise send the re-check message listing every cold finding in the record with no disposition, whichever report raised it, even when the list is empty", (
+         "the re-check list and the no-skip rule")),
         ("Re-check", "The re-check message is the paragraph below followed by the listed findings", (
          "the message composition — checklist plus findings")),
         ("Re-check", "copied verbatim from the record, never from synthesized rows", (
@@ -931,6 +968,8 @@ class TestLeadFacingRules:
         ("SendMessage to the agentId of the cold subagent that returned the most recent valid report", (
          "the resume target")),
         ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
+        ("When /PACT:imPACT has corrected placeholders since that report, send it instead as a fresh cold dispatch: the cold prompt with the corrected placeholders, followed by the re-check message", (
+         "the fresh re-check after imPACT corrections")),
     ])
     def test_resume_paragraph_present(self, token, lost):
         region = _strip_ticks(_paragraph("Send the re-check message by resume"))
@@ -1048,17 +1087,21 @@ class TestOutsideSectionRules:
          "the warm scoping of reviewer-to-fixer reuse")),
         ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings", (
          "the Verify-Only re-review routing")),
-        ("pr", "and per open question in each cold report,", (
+        ("pr", "and per open question in each first-round or re-check cold report,", (
          "the synthesis row for each cold open question")),
         ("pr", "every cold open question carries a disposition", (
          "the merge gate on cold open questions — without it the gate "
          "passes vacuously for the lane")),
-        ("pr", 'AND the cold lane\'s round ended in a valid cold report or the recorded skip, or the statement carries the line "Cold lane did not run."', (
+        ("pr", 'AND the cold lane\'s round ended in a valid cold report, or the statement carries the line "Cold lane did not run."', (
          "the merge gate on the cold lane's outcome — without it a "
          "did-not-happen lane merges silently")),
-        ("pr", "AND no cold finding at blocking severity in the record is open)", (
-         "the merge gate on open blocking cold findings — scoped to blocking "
-         "so a declined minor cannot hold the merge")),
+        ("pr", "AND no blocking cold finding in the record lacks a disposition)", (
+         "the merge gate on undisposed blocking cold findings — scoped to "
+         "blocking so a declined minor cannot hold the merge")),
+        ("pr", "| **Scope** | Warm: only files changed during remediation; cold: the whole PR, per the Cold Reviewer Lane |", (
+         "the Verify-Only scope split — the cold re-check reviews the whole PR")),
+        ("pr", "Warm verify-only reviewers see a narrow remediation diff", (
+         "the new-issue verification note scoped to warm reviewers")),
         ("pr", "project-policy conformance of the changed files", (
          "the architect lane's policy-conformance mission")),
         ("pr", "Warm reviewer agent tasks (architect, test-engineer, domain specialists); the cold reviewer gets no task", (
