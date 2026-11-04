@@ -91,10 +91,14 @@ THE BOUND, STATED IN SIX PARTS — the statement of record for the whole detecto
       CONTRAST — a line that names a set is still in-class when a contrast
         phrase from a six-string list ("not just", "not only", "in addition",
         "as well as", "then the full suite", "not enough") sits within 500
-        characters of a run-verb demand. The anchoring is run-verb ONLY: a
-        gate-form or noun-form demand does not anchor a contrast phrase, so
-        contrast camouflage beside one of those is not reported (witnessed
-        below). The 500 is a measured separation, not a derivation: the
+        characters of a run-verb demand. The anchoring is run-verb ONLY: the
+        noun-form limit is witnessed below, with a landing control proving a
+        widened anchor set would catch the witness. A gate-form line cannot
+        enter the contrast arm AT ALL, whatever the anchoring — the arm
+        requires a run-verb or noun-form demand and a gate-form line has
+        neither — so its contrast immunity is structural rather than an
+        anchoring limit, and it is stated here instead of witnessed. The 500
+        is a measured separation, not a derivation: the
         shapes this catches sit inside 400 characters and the comPACT
         carriers' unrelated "not only an `Edit` or a `Write`" sits 873 and
         971 characters away.
@@ -134,6 +138,7 @@ from __future__ import annotations
 
 import collections
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -993,6 +998,17 @@ CAUGHT_SHAPES = (
 # is tested rather than described. If a future change starts catching one, this
 # test reddens and the docstring and the PR body are updated together with it.
 # That is the point: three statements of one limit must move as one.
+#
+# The noun-form contrast witness is named because a landing control executes
+# it against a widened anchor set: it must carry an unbounded set AND a
+# noun-form demand AND a contrast phrase AND a set marker — drop any one and
+# it either reddens at head (no marker) or can never redden at all (no
+# unbounded set, the vacuity the external review caught in the first cut).
+NOUN_CONTRAST_WITNESS = (
+    "The full suite stays out of this boundary: test run green at every "
+    "commit boundary, not just the unit tests."
+)
+
 KNOWN_NOT_CAUGHT = (
     (
         "The whole test set must pass before commit.",
@@ -1040,16 +1056,22 @@ KNOWN_NOT_CAUGHT = (
         "Run the full test suite on top of the affected tests.",
         "contrast: 'on top of' is not one of the six contrast strings, so the named set bounds the demand",
     ),
-    # Contrast anchoring is run-verb only, so camouflage beside a gate-form or
-    # noun-form demand is not reported. Frozen by design: widening the anchor
-    # set would widen the arm, and the arm is frozen at its stated bound.
+    # Contrast anchoring is run-verb only, so camouflage beside a noun-form
+    # demand is not reported. Frozen by design: widening the anchor set would
+    # widen the arm, and the arm is frozen at its stated bound. The witness
+    # deliberately KEEPS a set marker ("unit tests"): without one the demand
+    # branch reports the line at head and it cannot be a not-caught entry at
+    # all, and the marker is no vacuity here because the contrast branch runs
+    # BEFORE the marker check — a widened anchor set overrides it. The landing
+    # control below proves that by execution. A gate-form contrast witness is
+    # impossible, not merely hard: the arm requires a run-verb or noun-form
+    # demand and a gate-form line has neither, so no anchoring change alone
+    # can make one redden — stated in the docstring instead of witnessed.
     (
-        "The full suite must be green before commit, not just the affected tests.",
-        "contrast: a gate-form demand does not anchor a contrast phrase — only run-verb demands do",
-    ),
-    (
-        "Test run green at every commit boundary, not just the affected tests.",
-        "contrast: a noun-form demand does not anchor a contrast phrase — only run-verb demands do",
+        NOUN_CONTRAST_WITNESS,
+        "contrast: a noun-form demand does not anchor a contrast phrase — only "
+        "run-verb demands do; the co-located set marker holds the line out at "
+        "head, and the branch order is what lets a widened anchor set override it",
     ),
     # Segmentation granularity: the split is sentence periods and pipes, not
     # semicolons, so a co-located scope marker excuses a demand in the same
@@ -1162,6 +1184,42 @@ def test_control_the_self_reversing_decoy_is_still_reported():
     assert len(_unlisted([("synthetic/surface.md", 1, decoy)], ALLOWLIST)) == 1, (
         "the self-reversing decoy is no longer reported; the contrast rule has "
         "been widened into a negation rule"
+    )
+
+
+def test_the_noun_contrast_witness_reddens_under_widened_anchoring(monkeypatch):
+    """Mutation landing control for the noun-form contrast witness.
+
+    A not-caught entry pins the anchoring bound only if widening the anchor
+    set would actually catch it — otherwise it asserts a bound nobody can
+    cross, which was the defect the external review caught in the first cut.
+    The mutation anchors _contrast on the noun-form demand as well (everything
+    else unchanged); under it the witness MUST redden. The retired shape,
+    which lacked an unbounded set and so could not redden under any anchoring,
+    must stay green under the same mutation — the pair proves this control
+    discriminates vacuous from live witnesses.
+    """
+    def widened(line):
+        anchors = [match.start() for match in _RUN.finditer(line)]
+        anchors += [match.start() for match in _RUN_NOUN.finditer(line)]
+        if not anchors:
+            return False
+        return any(
+            min(abs(match.start() - anchor) for anchor in anchors) <= _CONTRAST_WINDOW
+            for match in _CONTRAST.finditer(line)
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_contrast", widened)
+    retired = ("Test run green at every commit boundary, not just the "
+               "affected tests.")
+    assert _unlisted([("synthetic/surface.md", 1, NOUN_CONTRAST_WITNESS)], ALLOWLIST), (
+        "the noun-form contrast witness no longer reddens under widened "
+        "anchoring; it has gone vacuous — something other than the anchoring "
+        "is excluding it"
+    )
+    assert _unlisted([("synthetic/surface.md", 1, retired)], ALLOWLIST) == [], (
+        "the retired shape reddens under widened anchoring; it was not vacuous "
+        "after all — re-examine its removal"
     )
 
 
