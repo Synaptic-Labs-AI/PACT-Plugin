@@ -13,11 +13,18 @@ owner+addBlockedBy the ordering gate keys on — a composite-keyed population is
 dark by construction on every real arc. Teachback Task-A gates are excluded by
 the SUBJECT carve-out alone (the named dependence: an owner-only write is
 exactly the split wiring a gate receives); membership is otherwise PATH-BLIND
-— a reviewer dispatch with owner wiring is a site like any work dispatch, and
-the dark set is everything failing a leg of the witness (owner absent, owner
-not resolving to a pact specialist, teachback-shaped subject, teachback-exempt
-owner) plus dispatches with no task at all and lead-owned coordination
-umbrellas.
+— a reviewer dispatch with owner wiring is a site like any work dispatch. The
+stream counts ONE SITE PER (team, task), not one per owner-bearing write: the
+emit's dedup marker is task-scoped, so a repeat owner write on the same task,
+and a later arc reusing the same task id, each leave no second event. The dark
+set is DEFINED BY MECHANISM, never by lane: a dispatch is dark when any leg of
+the witness fails (owner absent, owner not resolving to a pact specialist,
+teachback-shaped subject, teachback-exempt owner), when the emit's own
+preconditions fail (a write from a non-canonical journal frame, an
+unresolvable team or task id, a write that also sets status to completed), or
+when there is no task at all, as with a taskless or anonymous subagent lane,
+or the task is a lead-owned coordination umbrella; those lanes are examples of
+the mechanism, never its definition.
 
 WHY THE TaskUpdate BRANCH AND NOT BESIDE dispatch_variety: that emit lives in
 the TaskCreate branch and keys on metadata.variety PRESENCE, because
@@ -686,15 +693,17 @@ class TestReviewerInclusionPin:
     these without redesigning the runs): a lane-keyed carve-out (subject
     name-prefix 'review-') reddens exactly T1 — cardinality 1; a
     'review'-substring carve-out reddens T1 and T5 together — cardinality 2;
-    breaking the registration leg itself (a no-op _register_reviewer) also
-    reddens exactly T1 — cardinality 1 — while the no-site arms stay green
-    for the wrong reason, which is the pair-dependence below.
+    breaking the registration leg itself (a no-op _register_reviewer)
+    reddens T1, T2 and T6 together — cardinality 3 — because each no-site
+    arm self-checks that registration landed.
 
-    EVERY no-site arm in this class (T2, T6) pairs against T1 as the
-    positive control: T1 proves the shared legs (frame, team, registration,
-    owner-bearing write) are live, so each no-site assertion's pass-reason
-    is its own exclusion leg — delete T1 and every one of them degrades to
-    an assertion that can pass for any broken leg.
+    T2 and T6 are SELF-ATTRIBUTING on the registration leg: each asserts
+    the reviewer is present in the team config after _register_reviewer, so
+    a failed or skipped registration reddens the arm directly instead of
+    leaving its darkness to pass for any broken leg. T1 remains the
+    positive control for the other shared legs (frame, team resolution,
+    owner-bearing write), which cannot be distinguished inside a no-site
+    arm.
     """
 
     REVIEWER = "review-coder"  # deliberately NOT in MEMBERS: registered per-arm
@@ -710,6 +719,19 @@ class TestReviewerInclusionPin:
         data.setdefault("members", []).append(
             {"name": self.REVIEWER, "agentType": agent_type})
         cfg.write_text(json.dumps(data), encoding="utf-8")
+
+    def _assert_reviewer_registered(self, env):
+        """The member must be ON DISK before the owner-bearing write:
+        resolution fail-closes on member-not-found, so without this check a
+        no-site arm would pass for a failed registration rather than its own
+        exclusion leg."""
+        cfg = env / ".claude" / "teams" / TEAM / "config.json"
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        members = data.get("members", [])
+        assert any(m.get("name") == self.REVIEWER for m in members), (
+            "reviewer must be registered before the write — an absent member "
+            "makes this arm's darkness unattributable"
+        )
 
     def test_T1_owner_wired_reviewer_dispatch_IS_a_site(self, env, events):
         """A reviewer-shaped Task B (the peer-review subject convention
@@ -729,13 +751,12 @@ class TestReviewerInclusionPin:
     def test_T2_reviewer_teachback_gate_stays_dark(self, env, events):
         """The reviewer TEACHBACK Task A carries the SAME owner wiring its
         Task B does, so the anchored subject predicate is the sole thing
-        keeping it dark — one site per reviewer pair, never two.
-        PAIR-DEPENDENT on T1: the wiring here is identical to T1's except
-        the subject, and T1 is the positive control proving the shared legs
-        (frame, team, registration, owner-bearing write) are live — delete
-        T1 and this arm degrades to a no-site assertion that can pass for
-        any broken leg."""
+        keeping it dark — one site per reviewer pair, never two. The arm
+        asserts registration landed before the write, so a failed
+        registration reddens it rather than passing it dark for the wrong
+        reason; the frame and owner-write legs are shared with T1."""
         self._register_reviewer(env)
+        self._assert_reviewer_registered(env)
         seed(env, owner=self.REVIEWER,
              subject="review-coder: TEACHBACK for review of PR #99",
              metadata={"variety": STAMP})
@@ -762,8 +783,11 @@ class TestReviewerInclusionPin:
         member resolution SUCCEEDS and the specialist check fails closed —
         no site. The generic leg is pinned by
         test_non_specialist_owner_does_not_emit (explorer); this variant
-        guards the registration helper's own agentType boundary."""
+        guards the registration helper's own agentType boundary. The arm
+        asserts registration landed, so a missing member reddens it rather
+        than passing it dark."""
         self._register_reviewer(env, agent_type="general-purpose")
+        self._assert_reviewer_registered(env)
         seed(env, owner=self.REVIEWER,
              subject="review-coder: review PR #99 on the thing",
              metadata={"variety": STAMP})

@@ -22,19 +22,19 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-The Q5 `dispatch_site` population now matches the owner-witnessed emit: a reviewer dispatch whose task carries an owner resolving to a pact specialist is counted, the same as any work dispatch. The stale exclusion prose, written against a peer-review path that never wired owners, is retired from every surface that carried it, and the dark set is defined by mechanism — failing any leg of the owner witness, or having no task at all — never by lane.
+The Q5 `dispatch_site` population is now documented as matching the owner-witnessed emit: a reviewer dispatch whose task carries an owner resolving to a pact specialist is counted, the same as any work dispatch. The stale exclusion prose, written against a peer-review path that already wired owners, is retired from every surface that carried it, and the dark set is defined by mechanism — witness legs, emit preconditions, taskless lanes and lead-owned umbrellas — never by lane.
 
 ### What landed
 
-- The population rule in `protocols/pact-protocols.md` states membership as path-blind and defines the dark set by mechanism: owner absent, owner not resolving to a pact specialist, teachback-shaped subject, teachback-exempt owner, no task at all, or a lead-owned coordination umbrella. Those lanes are examples of the mechanism, never its definition. The `protocols/pact-variety.md` extract mirrors the region byte-identically.
+- The population rule in `protocols/pact-protocols.md` states membership as path-blind and defines the dark set by mechanism: owner absent, owner not resolving to a pact specialist, teachback-shaped subject, teachback-exempt owner, the emit's own preconditions failing (a write from a non-canonical journal frame, an unresolvable team or task id, or a write whose `status` is `completed`), no task at all, or a lead-owned coordination umbrella. The stream counts one site per (team, task), not one per owner-bearing write: the dedup marker is task-scoped, so a repeat owner write on the same task and a later arc reusing the same task id each leave no second event. Those lanes are examples of the mechanism, never its definition. The `protocols/pact-variety.md` extract mirrors the region byte-identically.
 - `commands/wrap-up.md` Q5 step 5 carries the corrected membership statement: reviewer dispatches with owner wiring are counted, and a dispatch is dark only by mechanism, never by lane.
 - The `_emit_dispatch_site` docstring in `hooks/task_lifecycle_gate.py` states the same rule; the emit ladder itself is untouched.
-- Test docstrings in `tests/test_dispatch_site_emit.py` that restated the stale exclusion are aligned with the corrected rule; every test's mechanics are unchanged.
+- Test docstrings in `tests/test_dispatch_site_emit.py` that restated the stale exclusion are aligned with the corrected rule, and the two no-site arms (T2 and T6) gained a registration assertion so each fails for its own reason rather than leaning on T1 as a shared control. The pins' membership logic is unchanged: the no-op-registration mutation now reddens T1, T2 and T6 (measured on the class alone: `3 failed, 2 passed`), where it previously reddened T1 only.
 - An inclusion pin: an owner-wired review-shaped dispatch emits a `dispatch_site` event, so the corrected population cannot drift back silently.
 
 ### Why
 
-The exclusion premise described a mechanism that no longer exists: peer review now wires owner on reviewer tasks, and owner-wired reviewer dispatches already emit. Documents that excluded them keyed membership on the dispatching path, which moves, instead of on the owner write the stream already defines.
+The exclusion premise never described the shipped path: peer review wired owner on reviewer tasks with #578 and #692, months before the exclusion was added in #1532, so the premise was false when written. Owner-wired reviewer dispatches already emit. Documents that excluded them keyed membership on the dispatching path, which moves, instead of on the owner write the stream already defines.
 
 ## v4.8.20: harvest identity, cleared-field revival, and a total union
 
