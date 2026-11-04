@@ -189,6 +189,47 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("a batch insert keeps the feed newest-first",
     JSON.stringify(list.nodes.map((node) => node.seq)) === JSON.stringify([112, 111, 110, 109]));
 
+  /* Drive the REAL _rebuildFeed against a fake feed node. This pins both the
+   * cache key assignment (a regression to runKey would rebuild every poll)
+   * and the newest-first row order of a full rebuild. */
+  const makeFeedNode = () => {
+    const nodes = [];
+    return {
+      get firstChild() { return nodes[0] || null; },
+      get lastChild() { return nodes[nodes.length - 1] || null; },
+      appendChild(node) { nodes.push(node); return node; },
+      insertBefore(node, ref) {
+        const at = ref ? nodes.indexOf(ref) : nodes.length;
+        nodes.splice(at < 0 ? nodes.length : at, 0, node);
+        return node;
+      },
+      removeChild(node) {
+        const at = nodes.indexOf(node);
+        if (at >= 0) nodes.splice(at, 1);
+        return node;
+      },
+      nodes,
+    };
+  };
+  const rebuiltFeed = makeFeedNode();
+  const rebuildThis = {
+    model: batchModel,
+    cursor: 13,
+    filter: "all",
+    _nodes: { feed: rebuiltFeed, feedCount: null },
+    _feed: { key: null, filter: "all", count: 0, matched: 0, rendered: 0, list: null, capNote: null },
+    _feedRow: (event) => ({ seq: event.seq }),
+    _ensureCapNote: () => {},
+    _updateFeedCount: () => {},
+  };
+  Panels.prototype._rebuildFeed.call(rebuildThis, rebuiltFeed);
+  check("a rebuild renders the feed newest-first",
+    JSON.stringify(rebuiltFeed.nodes.map((node) => node.seq)) === JSON.stringify(
+      [112, 111, 110, 109, 108, 107, 106, 105, 104, 103, 102, 101, 100]
+    ));
+  check("a rebuild keys the cache by the visible window",
+    rebuildThis._feed.key === feedKey(rebuildThis.model));
+
   /* The mode badge must agree with the screen. With no run open it is IDLE,
    * even if stale mode/status values still say live (the named-empty load). */
   const idle = modeBadge({ hasModel: false, mode: "live", followLive: true, status: "live" });
