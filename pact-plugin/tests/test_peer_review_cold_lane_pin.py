@@ -37,8 +37,8 @@ COVERED, and this list is the scope:
   tasks);
 - the lifecycle: the per-round ordering lead-in, the ten step labels in
   order, a once guard that holds each listed rule's operative phrase to a
-  single occurrence in the lane (a step-5 rule once in step 5 and never in
-  the lane; a paraphrased second copy evades it), and an absence check keeping the dropped machinery's terms out of
+  single occurrence in its home (the lane, or step 5) and in the whole
+  file (a paraphrased second copy evades it), and an absence check keeping the dropped machinery's terms out of
   the lane; each step's operative clauses, bound to its own step
   paragraph; the resume paragraph; the quoted re-check message; and the
   division of labour;
@@ -309,7 +309,7 @@ ONCE_RULES = (
     ("a finding has no disposition until that line exists", "the line-is-the-disposition rule"),
     ("List each verified-invalid blocking cold finding", "the user-visible invalidation"),
     ("ask one `AskUserQuestion` per finding", "the per-finding merge-readiness question"),
-    ("run one more verify-only re-review round", "the question's re-review option"),
+    ('"Run one more verify-only re-review round", described as', "the question's re-review option"),
     ("with every placeholder value it was dispatched with", "the full placeholder record at spawn"),
     ("in the changed code at `{head}`", "the evidence location for verified invalid"),
     ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
@@ -327,9 +327,18 @@ ONCE_RULES = (
     ("a lead line of corrected placeholder values", "the resume test on corrections"),
     ("greedy-fix exclusion summary excludes it", "the greedy-fix decline"),
     ("as a status row with no severity, which step 4 does not route", "the verified-invalid status row"),
-    ("except a same-round re-check", "the retry exemption for the same-round re-check"),
+    ("a resume other than a same-round re-check", "the retry exemption for the same-round re-check"),
+    ("However many findings choose it, run one such round", "the one-round bound on re-review answers"),
+    ("filling each slot in angle brackets from that finding in the record", "the question's slot-filling rule"),
     ("the valid first-round report is the round's end state instead", "the same-round re-check fallback"),
     ("Choosing the second option starts that verify-only re-review round", "the re-review option's effect"),
+)
+# Phrases a frozen literal legitimately repeats: the per-finding question's
+# text names the re-review option, and the option label names it again, so
+# the phrase occurs exactly twice in the lane and the file. A third copy (a
+# restated rule) still fails.
+EXACT_COUNT_RULES = (
+    ("run one more verify-only re-review round", 2, "the re-review option, in the question text and the option label"),
 )
 # Once phrases whose home is step 5 (merge readiness), outside the lane: each
 # occurs exactly once in step 5's own item and never in the lane.
@@ -857,8 +866,8 @@ class TestSpawnShape:
 class TestLifecycleOrder:
     """The lane runs as one ordered list of steps. The order arm holds the
     step labels' sequence; the once arm holds each listed rule's operative
-    phrase to a single occurrence in the lane, case-insensitively, and each
-    step-5 rule to a single occurrence in step 5 and none in the lane. A
+    phrase to a single occurrence, case-insensitively, both in its home
+    (the lane, or step 5's line) and in the whole file. A
     paraphrased second copy of a rule, or a rule absent from both lists,
     is not caught."""
 
@@ -892,23 +901,34 @@ class TestLifecycleOrder:
 
     @pytest.mark.parametrize("phrase, rule", ONCE_RULES)
     def test_rule_stated_once(self, phrase, rule):
-        # Counted in the lane only, case-insensitive: a second copy that
-        # starts a sentence ('Ask one ...' beside 'ask one ...') is still a
-        # second copy, while the same words elsewhere in the file, in
-        # another context, are not this rule.
-        count = _cold_section().lower().count(phrase.lower())
-        assert count == 1, (
-            f"{rule} must be stated once in the cold lane ({phrase!r}), "
-            f"found {count} — a second copy drifts from the first"
+        # Case-insensitive, so a copy that starts a sentence ('Ask one ...'
+        # beside 'ask one ...') still counts. Once in the lane AND once in
+        # the whole file: a verbatim copy pasted anywhere else (step 4, say)
+        # is a second statement of the rule.
+        in_lane = _cold_section().lower().count(phrase.lower())
+        in_file = _peer_review_text().lower().count(phrase.lower())
+        assert in_lane == 1 and in_file == 1, (
+            f"{rule} must be stated once, in the cold lane ({phrase!r}): "
+            f"the lane has {in_lane}, the file has {in_file} — a second copy "
+            f"drifts from the first"
+        )
+
+    @pytest.mark.parametrize("phrase, expected, rule", EXACT_COUNT_RULES)
+    def test_rule_stated_exact_count(self, phrase, expected, rule):
+        in_lane = _cold_section().lower().count(phrase.lower())
+        in_file = _peer_review_text().lower().count(phrase.lower())
+        assert in_lane == expected and in_file == expected, (
+            f"{rule} must occur exactly {expected} times, all in the cold "
+            f"lane ({phrase!r}): the lane has {in_lane}, the file has {in_file}"
         )
 
     @pytest.mark.parametrize("phrase, rule", STEP5_ONCE_RULES)
     def test_step5_rule_stated_once_at_home(self, phrase, rule):
         home = _step5_item().lower().count(phrase.lower())
-        in_lane = _cold_section().lower().count(phrase.lower())
-        assert home == 1 and in_lane == 0, (
-            f"{rule} must be stated once in step 5 and never in the lane "
-            f"({phrase!r}): step 5 has {home}, the lane has {in_lane}"
+        in_file = _peer_review_text().lower().count(phrase.lower())
+        assert home == 1 and in_file == 1, (
+            f"{rule} must be stated once, in step 5 ({phrase!r}): step 5 "
+            f"has {home}, the file has {in_file}"
         )
 
 
@@ -942,7 +962,7 @@ class TestLeadFacingRules:
          "the lead's reclassification and its bound ('clearly')")),
         ("Return", "a skipped path that is not review-relevant (a version bump, a lockfile, a generated file) and a path read but whose tests did not run are coverage notes", (
          "the trigger's boundary — untested or irrelevant is not a blocker")),
-        ("Return", "Record any placeholder values /PACT:imPACT corrects as a labelled lead line in the record", (
+        ("Return", "Record any placeholder values /PACT:imPACT corrects as a labelled lead line in the record as soon as /PACT:imPACT returns", (
          "the record of imPACT's corrections the resume test reads")),
         ("Return", "Run /PACT:imPACT on a blocker report, and do not synthesize the lane as clean", (
          "the blocker route and the bar on reading a blocked lane as clean")),
@@ -952,7 +972,7 @@ class TestLeadFacingRules:
          "the per-finding fields, bound with their quantifier")),
         ("Validity", "; otherwise it is not valid", (
          "the validity consequence — an incomplete report is not valid, and the next step handles it")),
-        ("No report or an invalid one", "When a cold dispatch or a resume returns no report or a report that is not valid, or a resume is not possible (except a same-round re-check, as **Re-check** says), run one fresh cold dispatch", (
+        ("No report or an invalid one", "When a cold dispatch, or a resume other than a same-round re-check (as **Re-check** says), returns no report or a report that is not valid, or such a resume is not possible, run one fresh cold dispatch", (
          "the re-dispatch trigger, all three causes")),
         ("No report or an invalid one", "after any HALT and any /PACT:imPACT are resolved", (
          "the re-dispatch timing")),
@@ -979,8 +999,8 @@ class TestLeadFacingRules:
         ("Synthesis", "resolved, when a valid cold report marks it so", "the resolved disposition"),
         ("Synthesis", "verified invalid, when you find file:line evidence in the changed code at {head} that the finding is wrong", (
          "the verified-invalid disposition and its evidence bar — changed code, not a plan or review doc")),
-        ("Synthesis", 'or declined, when the user declines it at Step C, routes it to a tracked GitHub issue there, answers "No" at Step A, which declines every cold minor and future finding, or declines it at the merge-readiness question below, or when the greedy-fix exclusion summary excludes it from fixing', (
-         "the declined disposition and its five routes")),
+        ("Synthesis", 'or declined, when the user declines it at Step C, routes it to a tracked GitHub issue there, answers "No" at Step A, which declines every cold minor and future finding, or declines it at the merge-readiness question below, or, for a cold minor or future finding, when the greedy-fix exclusion summary excludes it from fixing', (
+         "the declined disposition and its five routes, the greedy route scoped to minors and futures")),
         ("Synthesis", "Record every disposition, resolved included, as its own line in the record, labelled as yours, with the evidence for a verified-invalid finding, and never edit the verbatim reports", (
          "the record discipline — every disposition, resolved included, is a lead line")),
         ("Synthesis", "a finding has no disposition until that line exists, and the re-check list and the merge gate read these lines only", (
@@ -989,6 +1009,16 @@ class TestLeadFacingRules:
          "the user-visible invalidation, kept out of step 4's fixer routing")),
         ("Synthesis", "When only blocking cold findings with no disposition hold merge readiness, ask one AskUserQuestion per finding", (
          "the per-finding merge-readiness question and its trigger")),
+        ("Synthesis", "filling each slot in angle brackets from that finding in the record", (
+         "the question's slot-filling rule")),
+        ("Synthesis", 'the question "Cold finding [<severity>] <file:line>: <finding text>. This blocking finding has no disposition. Decline it, or run one more verify-only re-review round?"', (
+         "the question's literal text")),
+        ("Synthesis", '"Decline it", described as "Record it as declined by you; it no longer holds merge readiness."', (
+         "the decline option's description")),
+        ("Synthesis", '"Run one more verify-only re-review round", described as "Run one verify-only re-review round in which the cold re-check checks it."', (
+         "the re-review option's description")),
+        ("Synthesis", "However many findings choose it, run one such round; it runs the cold re-check only, which lists every finding still without a disposition", (
+         "the one-round bound on re-review answers and its scope")),
         ("Synthesis", 'with the literal options "Decline it"', "the question's decline option"),
         ("Synthesis", '"Run one more verify-only re-review round"', "the question's re-review option"),
         ("Synthesis", "marking the recommended one with the (recommended) suffix and a one-line rationale as in C.2", (
@@ -1028,7 +1058,7 @@ class TestLeadFacingRules:
         ("SendMessage to the agentId of the cold subagent that returned the most recent valid report", (
          "the resume target")),
         ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
-        ("When the record holds a lead line of corrected placeholder values newer than that report, send it instead as a fresh cold dispatch: the cold prompt with the corrected placeholders, followed by the re-check message", (
+        ("When the record holds a lead line of corrected placeholder values appended after that report, send it instead as a fresh cold dispatch: the cold prompt with the corrected placeholders, followed by the re-check message", (
          "the fresh re-check after imPACT corrections")),
     ])
     def test_resume_paragraph_present(self, token, lost):
@@ -1164,7 +1194,7 @@ class TestOutsideSectionRules:
          "the merge-readiness statement's invalidation list — the user sees each closure before merging")),
         ("pr", "Handle recommendations by severity (a status row with no severity from the Cold Reviewer Lane is not routed)", (
          "step 4's skip of status rows")),
-        ("pr", "This summary is the decline route for each excluded cold finding (see **Synthesis** in the Cold Reviewer Lane)", (
+        ("pr", "This summary is the decline route for each excluded cold minor or future finding (see **Synthesis** in the Cold Reviewer Lane)", (
          "the greedy-fix decline pointer")),
         ("pr", "this is the Step A decline of the cold minor and future findings (see **Synthesis** in the Cold Reviewer Lane)", (
          "the Step A decline pointer")),
