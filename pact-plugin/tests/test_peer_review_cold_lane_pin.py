@@ -302,7 +302,16 @@ ONCE_RULES = (
     ("whichever report raised it", "the re-check list's scope"),
     ("ends in exactly one disposition", "the disposition rule"),
     ("verified invalid", "the verified-invalid disposition"),
-    ("declined, when the user declines it at step C", "the declined disposition"),
+    ("declined, when the user declines it at Step C", "the declined disposition"),
+    ('answers "No" at Step A', "the Step A decline"),
+    ("declines it at the merge-readiness question below", "the at-gate decline"),
+    ("Record every disposition, resolved included", "the disposition record rule"),
+    ("a finding has no disposition until that line exists", "the line-is-the-disposition rule"),
+    ("List each verified-invalid blocking cold finding", "the user-visible invalidation"),
+    ("ask one `AskUserQuestion` per finding", "the per-finding merge-readiness question"),
+    ("run one more verify-only re-review round", "the question's re-review option"),
+    ("with every placeholder value it was dispatched with", "the full placeholder record at spawn"),
+    ("in the changed code at `{head}`", "the evidence location for verified invalid"),
     ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
     ("even when the list is empty", "the no-skip rule"),
     ("send it instead as a fresh cold dispatch", "the fresh re-check after imPACT corrections"),
@@ -310,7 +319,6 @@ ONCE_RULES = (
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
-    ("declines it at an `AskUserQuestion` you ask then", "the at-gate decline of a lone blocking finding"),
     ("The re-check message is the paragraph below", "the re-check message"),
     ("Use it in every round", "the fixed base"),
     ("still triages it", "the retry blocker's triage"),
@@ -368,6 +376,7 @@ RETIRED_LANE_STEMS = (
     "no open cold findings",
     "skip the cold lane",
     "that no valid cold report has marked resolved",
+    "alone holds merge readiness",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -862,7 +871,9 @@ class TestLifecycleOrder:
 
     @pytest.mark.parametrize("phrase, rule", ONCE_RULES)
     def test_rule_stated_once(self, phrase, rule):
-        count = _peer_review_text().count(phrase)
+        # Case-insensitive, so a second copy that starts a sentence
+        # ('Ask one ...' beside 'ask one ...') is still a second copy.
+        count = _peer_review_text().lower().count(phrase.lower())
         assert count == 1, (
             f"{rule} must be stated once in peer-review.md ({phrase!r}), "
             f"found {count} — a second copy drifts from the first"
@@ -880,7 +891,8 @@ class TestLeadFacingRules:
          "the named review_dispatch string")),
         ("Spawn result", "record the subagent's agentId at once in the review doc's \"Cold report (verbatim)\" section", (
          "the agentId record at spawn — resume and HALT need it")),
-        ("Spawn result", "with the {base} and {head} it was dispatched with", "the refs the record carries"),
+        ("Spawn result", "with every placeholder value it was dispatched with", (
+         "the full placeholder record — a fresh dispatch must reproduce every value")),
         ("Spawn result", "create the review doc with that section if it does not exist yet", (
          "the record's creation rule")),
         ("Spawn result", "keep it in a sibling file the review doc names; every mention of the record below means that file", (
@@ -931,12 +943,18 @@ class TestLeadFacingRules:
         ("Synthesis", "Every cold finding in the record ends in exactly one disposition", (
          "the disposition rule — every finding closes, exactly once")),
         ("Synthesis", "resolved, when a valid cold report marks it so", "the resolved disposition"),
-        ("Synthesis", "verified invalid, when you record file:line evidence that the finding is wrong", (
-         "the verified-invalid disposition and its evidence bar")),
-        ("Synthesis", "or declined, when the user declines it at step C, routes it to a tracked GitHub issue there, or, for a blocking cold finding with no disposition when it alone holds merge readiness, declines it at an AskUserQuestion you ask then", (
-         "the declined disposition and its three routes")),
-        ("Synthesis", "Append each disposition you make as its own line in the record, labelled as yours, and never edit the verbatim reports", (
-         "the record discipline for lead dispositions")),
+        ("Synthesis", "verified invalid, when you find file:line evidence in the changed code at {head} that the finding is wrong", (
+         "the verified-invalid disposition and its evidence bar — changed code, not a plan or review doc")),
+        ("Synthesis", 'or declined, when the user declines it at Step C, routes it to a tracked GitHub issue there, answers "No" at Step A, which declines every cold minor and future finding, or declines it at the merge-readiness question below', (
+         "the declined disposition and its four routes")),
+        ("Synthesis", "Record every disposition, resolved included, as its own line in the record, labelled as yours, with the evidence for a verified-invalid finding, and never edit the verbatim reports", (
+         "the record discipline — every disposition, resolved included, is a lead line")),
+        ("Synthesis", "a finding has no disposition until that line exists, and the re-check list and the merge gate read these lines only", (
+         "the line-is-the-disposition rule and its readers")),
+        ("Synthesis", "List each verified-invalid blocking cold finding, with its evidence, in the recommendations table", (
+         "the user-visible invalidation")),
+        ("Synthesis", "When only blocking cold findings with no disposition hold merge readiness, ask one AskUserQuestion per finding with two options: decline it, or run one more verify-only re-review round so the cold re-check can mark it", (
+         "the per-finding merge-readiness question, its trigger and both options")),
         ("Synthesis", 'Append the synthesis to the review doc and leave the "Cold report (verbatim)" record intact', (
          "the bar on rewriting the verbatim record")),
         ("Synthesis", "Journal each cold finding per the review_finding journal step", (
