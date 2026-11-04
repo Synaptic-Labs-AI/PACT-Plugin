@@ -188,6 +188,22 @@ def env_record_project_dir_disagreement() -> tuple[str, str] | None:
     return env_value, record_value
 
 
+def _record_path_is_canonicalisable(value: str) -> bool:
+    """Whether the recorded declaration is a path the OS will canonicalise.
+
+    A corrupt session record can carry an embedded NUL, which makes
+    `os.path.realpath` raise ValueError. The `os.path.isdir` test below
+    swallows that and reports False, so without this check a CORRUPT record
+    is classified "removed" and the refusal tells the user the directory no
+    longer exists when it was never a usable path.
+    """
+    try:
+        os.path.realpath(value)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def project_dir_disagreement_kind(env_value: str, record_value: str) -> str | None:
     """Classify an env/record pair ONCE, for the refusal and for its text.
 
@@ -201,6 +217,12 @@ def project_dir_disagreement_kind(env_value: str, record_value: str) -> str | No
                   (the writer pinned MAIN, the record names the worktree).
     "removed"  -- they disagree, and the recorded directory no longer exists,
                   so re-exporting it is not a remedy.
+    "corrupt"  -- they disagree and the recorded value cannot be
+                  canonicalised (a malformed record), so it is neither
+                  "removed" nor a live directory and re-exporting it cannot
+                  help. Checked BEFORE "removed": `os.path.isdir` reports
+                  False for a malformed path, which would otherwise name the
+                  wrong cause.
     "textual"  -- they disagree and the recorded directory still exists.
     """
     env_norm = os.path.normcase(os.path.normpath(env_value))
@@ -209,6 +231,8 @@ def project_dir_disagreement_kind(env_value: str, record_value: str) -> str | No
         return None
     if _env_is_the_recorded_checkouts_main_root(env_norm, record_value):
         return None
+    if not _record_path_is_canonicalisable(record_value):
+        return "corrupt"
     return "removed" if not os.path.isdir(record_value) else "textual"
 
 
@@ -252,25 +276,44 @@ def format_project_dir_disagreement(env_value: str, record_value: str) -> str:
     the verdict cannot disagree about which case this is.
     """
     kind = project_dir_disagreement_kind(env_value, record_value)
-    if kind == "removed":
+    if kind == "corrupt":
+        remedy = (
+            "The recorded directory is not a usable path — the session record "
+            "is malformed — so re-exporting it cannot help: run without the "
+            "override, or start a fresh session so the record is rewritten. "
+        )
+        spelling_note = (
+            "The recorded value is malformed rather than merely spelled "
+            "differently, so no re-spelling of it can be compared."
+        )
+    elif kind == "removed":
         remedy = (
             "The recorded directory no longer exists, so re-exporting it is "
             "not possible: run without the override, or start the session "
             "from the project's main checkout. "
+        )
+        spelling_note = (
+            "The comparison is textual (normcase/normpath, not resolved): a "
+            "symlinked or case-differing spelling of the same directory refuses "
+            "although identical, and re-exporting the recorded value is the "
+            "remedy for that spelling."
         )
     else:
         remedy = (
             "Run without the override, or re-export CLAUDE_PROJECT_DIR to "
             "the recorded value. "
         )
+        spelling_note = (
+            "The comparison is textual (normcase/normpath, not resolved): a "
+            "symlinked or case-differing spelling of the same directory refuses "
+            "although identical, and re-exporting the recorded value is the "
+            "remedy for that spelling."
+        )
     return (
         f"CLAUDE_PROJECT_DIR ({env_value}) disagrees with this session's "
         f"recorded project directory ({record_value}); the write was refused "
         f"rather than scoped silently. Nothing was written. {remedy}"
-        f"The comparison is textual (normcase/normpath, not resolved): a "
-        f"symlinked or case-differing spelling of the same directory refuses "
-        f"although identical, and re-exporting the recorded value is the "
-        f"remedy for that spelling."
+        f"{spelling_note}"
     )
 
 

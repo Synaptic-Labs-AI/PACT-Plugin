@@ -818,8 +818,12 @@ def _record_names_declaration(identity: Optional[dict], declared: Path) -> bool:
     isinstance short-circuit stays first, so a non-dict identity is decided
     without touching the filesystem at all.
 
-    Both exception types are measured, not speculative: `os.path.realpath`
-    raises ValueError on an embedded NUL, and OSError on an unreadable path.
+    ValueError is the MEASURED failure: `os.path.realpath` raises it on an
+    embedded NUL. OSError is retained defensively for a filesystem-level
+    refusal; no input shape tested by the review lane raised it through
+    `realpath` (which handles unreadable components internally), so it is
+    listed to keep a refusal from escaping, not because a specific input is
+    known to raise it.
     """
     if not isinstance(identity, dict):
         return False
@@ -1091,7 +1095,11 @@ def get_worktree_identity_from_session_record() -> dict:
     CLAUDE_CODE_SESSION_ID. Nothing is cached.
 
     Returns {} unless the record's `session_id` equals CLAUDE_CODE_SESSION_ID
-    and `declared`, `worktree` and `common_dir` are all absolute path strings.
+    and `declared`, `worktree` and `common_dir` are all absolute path strings
+    that the OS can canonicalise. Refusing the whole record on an unusable
+    field is deliberate: `record_resolution` resolves those paths and its
+    guards do not include the ValueError a malformed value raises, so a
+    record admitted here would crash consumers that trust this reader.
     Never raises.
     """
     # Same guard pair as pact_session._discover_session_id -- keep in sync.
@@ -1106,6 +1114,28 @@ def get_worktree_identity_from_session_record() -> dict:
     for key in _WORKTREE_IDENTITY_PATHS:
         value = record.get(key)
         if not isinstance(value, str) or not os.path.isabs(value):
+            return {}
+        # CANONICALISABILITY, CHECKED AT THE ONE SEAM EVERY CONSUMER USES.
+        # A field the OS will not canonicalise (an embedded NUL, or another
+        # refused value) would raise ValueError deeper in `record_resolution`,
+        # at `common_dir.resolve()` / `common_dir.parent.resolve()` /
+        # `os.path.realpath` — all inside guards that name OSError and
+        # RuntimeError but not ValueError. Refusing the WHOLE record here
+        # closes the field family (declared, worktree, common_dir) rather
+        # than the two fields someone remembered, and it matches the write
+        # side's own rule: a record whose paths cannot be canonicalised
+        # proves nothing.
+        #
+        # VALIDATE, DO NOT REWRITE. The record is returned with its original
+        # spellings, because consumers compare `common_dir` and `worktree`
+        # against git's own output; substituting a canonical form here could
+        # turn a passing comparison into a failing one on a symlinked
+        # checkout. `resolve()` is the same operation the consumers perform,
+        # and it does NOT raise for a merely deleted path (non-strict), so
+        # the removed-worktree case this record exists for still reads back.
+        try:
+            Path(value).resolve()
+        except (OSError, RuntimeError, ValueError):
             return {}
     return record
 
