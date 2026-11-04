@@ -1942,11 +1942,17 @@ export class Panels {
 
     const source = model && model.source ? model.source : {};
     const meta = model && model.meta ? model.meta : {};
+    /* The About tab must name the run the same way the run card does: the
+     * constrained project label plus the same marker, not the raw slug. The
+     * raw directory name is still visible in the JOURNAL path below. */
+    const projectAltered = meta.project_altered === true;
+    const projectLabel = visible(meta.project) || visible(source.slug);
+    const shownLabel = projectAltered ? `${projectLabel} ⚠` : projectLabel;
     const aboutRows = [
       ["VIEWER", "PACT Mission Control"],
       ["VERSION", visible(model && model.version) || "—"],
-      ["RUN", [visible(meta.project), visible(meta.team)].filter(Boolean).join(" · ") || "no run loaded"],
-      ["SOURCE", [visible(source.kind), visible(source.root), visible(source.slug)].filter(Boolean).join(" · ") || "—"],
+      ["RUN", [shownLabel, visible(meta.team)].filter(Boolean).join(" · ") || "no run loaded"],
+      ["SOURCE", [visible(source.kind), visible(source.root), shownLabel].filter(Boolean).join(" · ") || "—"],
       ["SESSION", visible(source.session_id) || "—"],
       ["JOURNAL", visible(source.journal) || "—"],
       ["ETAG", visible(model && model.etag) || "—"],
@@ -1954,7 +1960,13 @@ export class Panels {
     ];
     const aboutList = el("div", { class: "help-list" });
     for (const [key, value] of aboutRows) {
-      aboutList.appendChild(el("div", { class: "help-row help-row-wide" }, [
+      const namesProject = key === "RUN" || key === "SOURCE";
+      aboutList.appendChild(el("div", {
+        class: "help-row help-row-wide",
+        attrs: projectAltered && namesProject
+          ? { title: PROJECT_ALTERED_NOTE, "aria-label": `${key}: ${value}. ${PROJECT_ALTERED_NOTE}` }
+          : {},
+      }, [
         el("span", { class: "help-key", text: key }),
         el("span", { class: "help-value", text: value }),
       ]));
