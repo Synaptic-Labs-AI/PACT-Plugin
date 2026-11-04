@@ -123,14 +123,14 @@ the same journal events. Roughly:
 | `finding` / bug | Bug sprite and severity badge; findings tab of the debrief |
 | `pr` | Pull-request badge in the run summary and debrief |
 | `gate` | Gate turnstiles; allowed/advisory counts and top rules in the governance tab |
-| `alert` | Siren and flash; alert entry in the feed |
+| `alert` | Siren and flash; alert entry in the feed. Fed by `algedonic_signal` and `blocker_raised` journal events; no current PACT writer emits those (algedonic signals travel as task metadata), so alerts are demo-only unless a journal carries the events |
 | `checkpoint` | Save flag on the floor; phase-completion checkpoint |
 | `session` | Start/end markers and the mission clock |
 | `compact` | Screen wipe; context-compaction entry |
 | `wake` | Auditor wake blip |
 | `variety` | Variety gauge and radar reassessment |
 | `task` | Task board updates in the debrief |
-| anything unknown | Counted and visible in the raw log only |
+| anything unknown | Counted in the run's warnings and omitted from the feed and the raw log |
 
 ## Flags
 

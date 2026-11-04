@@ -8,9 +8,9 @@ Mission Control renders a PACT run from its session journal: phases, the special
 
 ## Parse the argument
 
-- Empty or `live` — this session's project: pass `--project` with the basename of the session's working directory, and open that project's newest live run; if no run of that project is live, its newest run. Use `<project>` to target another project.
+- Empty or `live` — this session's project: pass `--project "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"`, then open that project's newest live run and, if no run of that project is live, its newest run. The project slug is the basename of the project root (`$CLAUDE_PROJECT_DIR`, so `/repos/my-app` becomes `my-app`), never the basename of a worktree or subdirectory the shell happens to be in. Use `<project>` to target another project.
 - `demo` — a deterministic built-in training run; available even with no journals on disk.
-- `<project>` — a project slug from the session list; open its newest run.
+- `<project>` — a project slug from the session list; open its newest run. Quote it and pass it verbatim: nothing between this argument and the command sanitizes the value.
 - `stop` — stop the Mission Control server this session launched.
 
 ## Launch
@@ -19,9 +19,9 @@ Run exactly one of these, from any directory:
 
 | Argument | Command |
 |---|---|
-| empty / `live` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project <basename of the session's working directory>` |
+| empty / `live` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"` |
 | `demo` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --demo` |
-| `<project>` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project <slug>` |
+| `<project>` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --detach --open --project "<slug>"` |
 | `stop` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --stop` |
 
 Pass `--open` when the user is at a local GUI session. Omit it when the session is headless — over SSH (`$SSH_CONNECTION` or `$SSH_TTY` is set) or with no display server available — and report the printed `URL:` line so the user can open it themselves.

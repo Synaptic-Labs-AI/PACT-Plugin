@@ -163,6 +163,38 @@ class TestLaunchInstructions:
             f"body never tells the model to pass: missing {flag!r}."
         )
 
+    def test_live_row_binds_project_to_the_project_root(self):
+        """The live-launch fix (Bugbot "Live launch skips current session"):
+        the empty/live row must pass --project and derive it from the PROJECT
+        ROOT, not from the shell's current working directory.
+
+        A worktree session's cwd basename is the worktree name, while the
+        journal slug is the basename of $CLAUDE_PROJECT_DIR. Taking the slug
+        from $PWD filters every session out, and the page then silently falls
+        back to the training demo: the user asks for their live run and gets
+        fictional data with no error. The row-level asserts are deliberately
+        narrower than the body-wide flag check above, which a revert leaves
+        green."""
+        rows = [
+            line for line in _body().splitlines()
+            if line.strip().startswith("| empty / `live`")
+        ]
+        assert len(rows) == 1, (
+            "visualize.md must carry exactly one empty/live launch row; "
+            f"found {len(rows)}"
+        )
+        row = rows[0]
+        assert "--project" in row, (
+            "the empty/live launch row must pass --project so the viewer "
+            "opens this session's project rather than any live run in the root"
+        )
+        assert "${CLAUDE_PROJECT_DIR:-$PWD}" in row, (
+            "the empty/live launch row must derive the project from "
+            "$CLAUDE_PROJECT_DIR (the project root), falling back to $PWD. A "
+            "bare $PWD basename is the worktree name in a worktree session, "
+            "which matches no journal slug and silently opens the demo."
+        )
+
     def test_body_reports_url_and_stop_lines(self):
         body = _body()
         assert "URL:" in body, (

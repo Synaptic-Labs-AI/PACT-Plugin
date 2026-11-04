@@ -28,7 +28,9 @@ visualizer/
 ## HTTP API
 
 All responses are JSON, `Content-Type: application/json; charset=utf-8`.
-Errors are `{"ok": false, "error": "<short reason>"}` with 400/404/405.
+Errors are `{"ok": false, "error": "<short reason>"}` with 400 (bad
+parameters), 403 (a `Host` header other than loopback), 404, 405, or 500 (an
+unhandled handler error).
 
 ### GET /api/health
 
@@ -93,6 +95,7 @@ Otherwise return the full model:
 ```json
 {
   "ok": true,
+  "version": "0.1.0",
   "etag": "178...-10193885",
   "source": {
     "kind": "real",
@@ -240,14 +243,16 @@ Otherwise return the full model:
 
 Field rules:
 
+- `version` is the server's payload version; the About tab reports it.
 - `events` is ordered by `seq` ascending. `seq` is the journal line index
-  (0-based) and must be stable across polls. Unknown event types are included
-  with category `raw` only if they are in the visual set; otherwise they are
-  counted and omitted.
+  (0-based) and must be stable across polls. An event type outside the visual
+  set is counted in `warnings` and omitted from `events`, so it appears in
+  neither the feed nor the raw-log view.
 - `title` / `detail` are plain text, no HTML, truncated to 240/500 chars.
 - `severity` ∈ `info|success|warning|danger|muted`. `icon` is a short token
   (`phase`, `dispatch`, `handoff`, `commit`, `review`, `bug`, `pr`, `gate`,
-  `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`, `raw`).
+  `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`,
+  `teachback`, `raw`).
 - `handoffs[].fields` always carries all six canonical keys; absent values are
   `null` (renderer shows a dash). Legacy spellings are resolved server-side.
   `schema_complete` is true when the five REQUIRED keys are present;
@@ -255,6 +260,10 @@ Field rules:
   complete.
 - `wrapup` is `null` unless a wrap-up `session_end` (or explicit PR state)
   exists.
+- `alerts` is built only from `algedonic_signal` and `blocker_raised` journal
+  events. No current PACT writer emits either (algedonic signals travel as
+  task metadata), so a real run's alerts array is normally empty; the demo
+  synthesizes both to exercise the visual.
 - `warnings` is a short bounded list; never crash on malformed input.
 
 ### GET /api/demo?since=…
@@ -436,9 +445,11 @@ Wires everything. It owns:
 --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 ```
 
-Desktop grid: 264px / 1fr / 340px, header 64px, footer 104px. At ≤1180px the
-left rail collapses above the stage (CSS); at ≤900px both rails become
-scrollable drawers/tabs. Panels and stage must remain usable at 1024×768.
+Desktop grid: 264px / 1fr / 340px, header 64px, footer 108px. At ≤1320px the
+rails narrow to 232px / 306px. At ≤1180px the left rail becomes a crew drawer
+opened by the header toggle and the footer drops to 96px. At ≤980px the right
+rail becomes a comms drawer, the layout goes single-column, and the header and
+footer drop to 58px / 92px. Panels and stage must remain usable at 1024×768.
 
 ## Data roots and demo
 
