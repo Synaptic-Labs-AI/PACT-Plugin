@@ -166,8 +166,15 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
     get firstChild() { return this.nodes[0] || null; },
     get lastChild() { return this.nodes[this.nodes.length - 1] || null; },
     insertBefore(node, ref) {
-      const at = ref ? this.nodes.indexOf(ref) : this.nodes.length;
-      this.nodes.splice(at < 0 ? this.nodes.length : at, 0, node);
+      // The real DOM throws when the reference is not a child; the fake must
+      // too, or a bad call could pass here and fail in the browser.
+      if (!ref) {
+        this.nodes.push(node);
+        return node;
+      }
+      const at = this.nodes.indexOf(ref);
+      if (at < 0) throw new Error("insertBefore: reference is not a child");
+      this.nodes.splice(at, 0, node);
       return node;
     },
     removeChild(node) {
@@ -209,8 +216,14 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
       get lastChild() { return nodes[nodes.length - 1] || null; },
       appendChild(node) { nodes.push(node); return node; },
       insertBefore(node, ref) {
-        const at = ref ? nodes.indexOf(ref) : nodes.length;
-        nodes.splice(at < 0 ? nodes.length : at, 0, node);
+        // Same contract as the real DOM: a non-child reference throws.
+        if (!ref) {
+          nodes.push(node);
+          return node;
+        }
+        const at = nodes.indexOf(ref);
+        if (at < 0) throw new Error("insertBefore: reference is not a child");
+        nodes.splice(at, 0, node);
         return node;
       },
       removeChild(node) {
@@ -366,12 +379,30 @@ def test_poll_path_uses_the_banner_rules():
     body = source[start:source.index("\n}\n", start)]
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
     body = re.sub(r"//[^\n]*", "", body)
-    assert re.search(r"pollMayShowError\s*\(\s*state\.errorSource\s*\)", body), (
-        "the pollLive catch no longer asks pollMayShowError before showing a "
-        "poll error; a failing poll can displace a navigation or refresh "
-        "banner and its retry"
+    # Three assertions, each with a mutation that must redden it:
+    # (a) the clear guard's polarity and action, (b) the show guard's
+    # polarity, (c) the source literal on the poll error banner.
+    assert re.search(
+        r"if\s*\(\s*state\.lastError\s*&&\s*pollClearsError\s*\("
+        r"\s*state\.errorSource\s*\)\s*\)\s*hideError\s*\(\s*\)",
+        body,
+    ), (
+        "pollLive no longer clears with the positive "
+        "'state.lastError && pollClearsError(state.errorSource)' guard; a "
+        "negated or weakened guard changes when a banner is erased"
     )
-    assert re.search(r"pollClearsError\s*\(\s*state\.errorSource\s*\)", body), (
-        "pollLive no longer asks pollClearsError before clearing on a "
-        "successful poll; a poll can erase a navigation or refresh banner"
+    assert re.search(
+        r"if\s*\(\s*pollMayShowError\s*\(\s*state\.errorSource\s*\)\s*\)",
+        body,
+    ), (
+        "pollLive no longer shows with the positive "
+        "'pollMayShowError(state.errorSource)' guard; a negated guard changes "
+        "banner precedence"
+    )
+    assert re.search(
+        r'showError\s*\(\s*`Live poll failed[^`]*`\s*,\s*pollLive\s*,\s*"poll"\s*\)',
+        body,
+    ), (
+        "the poll error banner is no longer tagged with source \"poll\"; "
+        "another source changes which banner a poll may clear or displace"
     )

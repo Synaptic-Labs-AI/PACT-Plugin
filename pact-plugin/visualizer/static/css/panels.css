@@ -1768,6 +1768,12 @@
   margin-bottom: 14px;
 }
 
+.event-note {
+  align-self: center;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .event-raw-pre { max-height: 34vh; }
 
 /* ----------------------------------------------------------------------- */

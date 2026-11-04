@@ -316,6 +316,9 @@ async function pollLive() {
       announce("Run ended. The journal is complete.", { force: true });
     }
   } catch (err) {
+    /* Mirror the success arm: surface a failure only while this poll still
+     * belongs to the displayed run (state.current exists and matches ref). */
+    if (!state.current || state.current.key !== ref.key) return;
     /* A poll failure is silent while a navigation or refresh banner is
      * showing: that banner owns the retry, and this poll keeps retrying on its
      * own timer. */
@@ -704,7 +707,8 @@ async function openSession(ref, opts = {}) {
        * polling. If that run is live, resume it so the LIVE badge stays true;
        * startPolling() is a no-op for a demo, replay or ended run. */
       startPolling();
-      /* The selectors must show what is on screen, not the failed choice. */
+      /* Resync only when a run is still displayed; with no run open there is
+       * nothing to point the selectors at (syncSelectors no-ops on null). */
       if (state.current) syncSelectors(state.current);
     }
   } finally {

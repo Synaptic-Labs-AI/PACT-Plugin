@@ -1977,6 +1977,16 @@ export class Panels {
       ? this._seqIndex(event.seq)
       : null;
     const seekIndex = bySeq === null || bySeq === undefined ? index : bySeq;
+    /* SEEK HERE can only land inside the loaded window. An event that slid out
+     * has no correct target, so the control is disabled rather than silently
+     * seeking to the window start. */
+    const events = this.model && Array.isArray(this.model.events) ? this.model.events : [];
+    const eventSeq = event && event.seq !== undefined && event.seq !== null ? Number(event.seq) : NaN;
+    const firstSeq = events.length ? Number(events[0] && events[0].seq) : NaN;
+    const lastSeq = events.length ? Number(events[events.length - 1] && events[events.length - 1].seq) : NaN;
+    const outsideWindow = Number.isFinite(eventSeq)
+      && ((Number.isFinite(firstSeq) && eventSeq < firstSeq)
+        || (Number.isFinite(lastSeq) && eventSeq > lastSeq));
     const wrap = el("div", { class: "event-detail" });
     wrap.appendChild(el("div", { class: "event-detail-head" }, [
       el("span", { class: "event-seq", text: `EVENT ${event.seq === undefined ? index : event.seq}` }),
@@ -2010,7 +2020,13 @@ export class Panels {
         class: "mini-btn is-primary",
         text: "SEEK HERE",
         dataset: { focusKey: "seek" },
-        attrs: { type: "button", title: "Move the recorder to this event" },
+        attrs: outsideWindow
+          ? {
+              type: "button",
+              disabled: true,
+              title: "This event is outside the loaded window; the recorder cannot seek to it.",
+            }
+          : { type: "button", title: "Move the recorder to this event" },
         on: {
           click: () => {
             this.cb.onSeek(clamp(seekIndex + 1, 1, Math.max(1, total)));
@@ -2018,6 +2034,12 @@ export class Panels {
           },
         },
       }));
+      if (outsideWindow) {
+        actions.appendChild(el("span", {
+          class: "event-note",
+          text: "Event outside the loaded window — the recorder cannot seek to it.",
+        }));
+      }
     }
     actions.appendChild(el("button", {
       class: "mini-btn",
