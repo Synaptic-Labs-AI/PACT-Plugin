@@ -12,6 +12,7 @@ Used by: pytest (front-end regression gate for pact-plugin/visualizer).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -347,4 +348,25 @@ def test_no_query_param_project_fallback():
     assert 'params.get("project")' not in source, (
         "app.js reads a project query param; only the server's launch filters "
         "narrow the session list, and only data.filters may name them"
+    )
+
+
+def test_poll_path_uses_the_banner_rules():
+    """The pure banner rules only matter if the poll path calls them.
+
+    app.js is not importable without a DOM, so the behaviour pins never reach
+    this wiring; a future edit could drop either call and leave the rules
+    green while the poll steals or erases another banner.
+    """
+    source = (STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+    # Match the CALL, not a formatted line: reindentation or a wrapped
+    # argument must not break this pin. `state.errorSource` appears only in
+    # the poll catch today, so the call expression is the stable fragment.
+    assert re.search(r"pollMayShowError\s*\(\s*state\.errorSource\s*\)", source), (
+        "app.js no longer asks pollMayShowError before showing a poll error; "
+        "a failing poll can displace a navigation or refresh banner and its retry"
+    )
+    assert re.search(r"pollClearsError\s*\(\s*state\.errorSource\s*\)", source), (
+        "app.js no longer asks pollClearsError before clearing on a successful "
+        "poll; a poll can erase a navigation or refresh banner"
     )
