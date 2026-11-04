@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import threading
+import urllib.error
 import urllib.request
 
 import pytest
@@ -92,6 +94,8 @@ class TestStopPidCrossCheck:
         out = capsys.readouterr().out
         assert "refusing to signal" in out
         assert "does not match" in out
+        # The message names the escape hatch for a stuck user.
+        assert str(settings.state_file(state_dir)) in out
 
     def test_stop_signals_when_the_pid_matches(self, tmp_path, monkeypatch, capsys):
         """Control arm: the guard must not block an honest stop."""
@@ -138,6 +142,49 @@ class TestStopUnconfirmed:
         out = capsys.readouterr().out
         assert "Stop: unconfirmed pid 4242" in out
         assert "Stop: stopped pid" not in out
+
+
+class TestStopHintQuoting:
+    def test_state_dir_metacharacters_round_trip_as_one_token(self, tmp_path):
+        """The printed Stop: line must be paste-safe for any state-dir path."""
+        weird = tmp_path / "state dir;touch PWNED"
+        args = cli.build_parser().parse_args(
+            ["--stop", "--state-dir", str(weird)]
+        )
+        hint = cli._stop_hint(args)
+
+        assert shlex.split(hint) == [
+            "pact-viz",
+            "--stop",
+            "--state-dir",
+            str(weird),
+        ]
+
+
+class TestReuseDemoMode:
+    def _roots(self, tmp_path):
+        return [
+            settings.RootSpec(id="r", label="r", path=tmp_path, default=True)
+        ]
+
+    def _args(self, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            ["--detach", "--state-dir", str(tmp_path / "state"), *extra]
+        )
+
+    def test_reuse_refuses_across_demo_modes(self, tmp_path):
+        state = {"roots": ["r"], "port": 5, "filters": {}, "demo": False}
+        with pytest.raises(cli.CliError) as excinfo:
+            cli._refuse_on_reuse_mismatch(
+                state, self._args(tmp_path, "--demo"), self._roots(tmp_path)
+            )
+        assert "--demo" in str(excinfo.value)
+
+    def test_reuse_allows_the_same_demo_mode(self, tmp_path):
+        state = {"roots": ["r"], "port": 5, "filters": {}, "demo": True}
+        cli._refuse_on_reuse_mismatch(
+            state, self._args(tmp_path, "--demo"), self._roots(tmp_path)
+        )
 
 
 class TestWaitUntilStopped:
@@ -231,6 +278,30 @@ class TestSessionsFilterEcho:
 
         assert payload["filters"]["project"] == "my project"
         assert payload["sessions"] == []
+
+    def test_invalid_byte_filter_is_escaped_not_a_500(self, live_server):
+        """A lone surrogate must escape as JSON, not kill the whole response."""
+        bad = "evil-\udcff-proj"  # what an undecodable argv byte becomes
+        srv = server_module.create_server(
+            live_server.roots, filters={"project": bad}
+        )
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{srv.server_port}/api/sessions"
+            try:
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    status, raw = response.status, response.read()
+            except urllib.error.HTTPError as error:
+                status, raw = error.code, error.read()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
+
+        assert status == 200
+        assert b"\\udcff" in raw
+        assert json.loads(raw.decode("utf-8"))["filters"]["project"] == bad
 
 
 class TestHalfOpenTimeout:

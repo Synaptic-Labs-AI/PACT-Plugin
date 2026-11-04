@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -318,11 +319,18 @@ def _print_url(url: str) -> None:
 
 
 def _stop_hint(args: argparse.Namespace | None = None) -> str:
-    """The Stop: command matching how this server was launched."""
+    """The Stop: command matching how this server was launched.
+
+    Location: cli._stop_hint.
+    Summary: The state directory is shell-quoted because this line is meant to
+             be pasted into a shell; an unquoted path with a metacharacter
+             would execute it.
+    Used by: _print_stop_line, _refuse_on_reuse_mismatch.
+    """
     hint = "pact-viz --stop"
     override = getattr(args, "state_dir", None) if args is not None else None
     if override:
-        hint += f" --state-dir {override}"
+        hint += f" --state-dir {shlex.quote(str(override))}"
     return hint
 
 
@@ -521,7 +529,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print("Stop: refused")
         print(
             f"PACT Mission Control: state file pid {pid} does not match the "
-            f"server's pid {reported_pid!r}; refusing to signal"
+            f"server's pid {reported_pid!r}; refusing to signal — delete "
+            f"{settings.state_file(state_dir)} to clear the record"
         )
         return 1
     _terminate(pid)
@@ -555,7 +564,8 @@ def _reuse_if_running(
     Summary: Reuses only when the running instance serves EXACTLY what this
              invocation asked for — same root ids in the same order, a
              compatible port (an explicit --port must match; 0 accepts any),
-             and the same --project/--session filters. A mismatched request
+             the same launch mode (--demo), and the same --project/--session
+             filters. A mismatched request
              refuses with a CliError pointing at --stop, because silently
              printing the old instance's URL would show the user the wrong
              data. The state file records the filters so the comparison is
@@ -597,6 +607,14 @@ def _refuse_on_reuse_mismatch(
         raise CliError(
             f"a running instance is on port {state['port']} but port "
             f"{wanted_port} was requested; stop it first with {_stop_hint(args)}"
+        )
+    running_demo = bool(state.get("demo", False))
+    wanted_demo = bool(getattr(args, "demo", False))
+    if wanted_demo != running_demo:
+        raise CliError(
+            "a running instance was started "
+            f"{'with --demo' if running_demo else 'without --demo'}; "
+            f"stop it first with {_stop_hint(args)}"
         )
     running_filters = state.get("filters") or {}
     for key in ("project", "session"):

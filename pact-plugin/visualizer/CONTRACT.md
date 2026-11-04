@@ -43,17 +43,24 @@ file's `instance_id` AND its pid. It prints exactly one `Stop: ...` line:
 - `Stop: refused` — the state file's pid does not match the pid the running
   server reports, or the payload carries no pid. Nothing is signalled; the next
   line is `PACT Mission Control: state file pid <state-pid> does not match the
-  server's pid <server-pid>; refusing to signal` (a missing pid prints `None`),
-  and the state file is deliberately kept: deleting the record would turn a
-  recoverable mismatch into a server nothing can stop. Exit 1.
+  server's pid <server-pid>; refusing to signal — delete <state-file> to clear
+  the record` (a missing pid prints `None`), and the state file is deliberately
+  kept by `--stop`: deleting the record would turn a recoverable mismatch into a
+  server nothing can stop. Exit 1.
 
 Two consequences follow from the state file being the only record. A refusal
 leaves `<state-dir>/server.json` (default `<config>/pact-viz/server.json`) in
-place, so `--stop` keeps refusing until you delete that file by hand and then
-stop the unrecorded server by pid or port. An unconfirmed stop removes the
-state file and log while the server may still be answering, so exit 1 means the
-process must be checked directly, by pid or port, rather than trusting the
-missing record.
+place and the refusal line names it, so `--stop` keeps refusing until you delete
+that file by hand and then stop the unrecorded server by pid or port. An
+unconfirmed stop removes the state file and log while the server may still be
+answering, so exit 1 means the process must be checked directly, by pid or
+port, rather than trusting the missing record.
+
+Reuse is refused when the requested launch mode differs from the running
+instance's: `pact-viz: a running instance was started with --demo; stop it
+first with pact-viz --stop` (or `without --demo`), exit 1. One recorded
+instance per state directory is deliberate; a second would overwrite the
+record and orphan the first.
 
 ## HTTP API
 

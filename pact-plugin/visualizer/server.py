@@ -261,8 +261,12 @@ class MissionControlHandler(BaseHTTPRequestHandler):
     ) -> None:
         """Send one JSON response (UTF-8, no-store, security headers)."""
         try:
+            # ensure_ascii=True keeps every payload encodable: a lone
+            # surrogate (e.g. an undecodable byte in a directory name or a
+            # --project filter) becomes a JSON \uXXXX escape instead of
+            # raising on encode and turning the whole response into a 500.
             body = json.dumps(
-                payload, ensure_ascii=False, separators=(",", ":")
+                payload, ensure_ascii=True, separators=(",", ":")
             ).encode("utf-8")
         except (TypeError, ValueError):
             body = b'{"ok":false,"error":"serialization error"}'
