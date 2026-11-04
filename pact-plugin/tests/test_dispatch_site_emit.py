@@ -13,18 +13,16 @@ owner+addBlockedBy the ordering gate keys on — a composite-keyed population is
 dark by construction on every real arc. Teachback Task-A gates are excluded by
 the SUBJECT carve-out alone (the named dependence: an owner-only write is
 exactly the split wiring a gate receives); membership is otherwise PATH-BLIND
-— a reviewer dispatch with owner wiring is a site like any work dispatch. The
-stream counts ONE SITE PER (team, task), not one per owner-bearing write: the
-emit's dedup marker is task-scoped, so a repeat owner write on the same task,
-and a later arc reusing the same task id, each leave no second event. The dark
-set is DEFINED BY MECHANISM, never by lane: a dispatch is dark when any leg of
-the witness fails (owner absent, owner not resolving to a pact specialist,
-teachback-shaped subject, teachback-exempt owner), when the emit's own
-preconditions fail (a write from a non-canonical journal frame, an
-unresolvable team or task id, a write that also sets status to completed), or
-when there is no task at all, as with a taskless or anonymous subagent lane,
-or the task is a lead-owned coordination umbrella; those lanes are examples of
-the mechanism, never its definition.
+— a reviewer dispatch with owner wiring is a site like any work dispatch.
+
+THE DARK SET AND ITS CARDINALITY ARE THE SSOT'S, NOT THIS FILE'S. The
+authoritative text is `protocols/pact-protocols.md` § "Q5 Dispatch Variety
+Calibration (Wrap-Up Aggregation)", the Population paragraph — which also owns
+the task-scoped dedup and the `review_dispatch` relationship. Do not restate
+the enumeration here: a mirrored copy drifts silently whenever the SSOT
+changes, which is what falsified this docstring twice in this change. The arms
+below pin two of the dark-set legs — the teachback carve-out (T2/T6) and the
+owner-resolution leg (T1/T6).
 
 WHY THE TaskUpdate BRANCH AND NOT BESIDE dispatch_variety: that emit lives in
 the TaskCreate branch and keys on metadata.variety PRESENCE, because

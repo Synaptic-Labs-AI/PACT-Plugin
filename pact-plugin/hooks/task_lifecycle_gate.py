@@ -813,8 +813,11 @@ def _emit_dispatch_site(
     site exactly like a work dispatch. The stream counts ONE SITE PER
     (team, task), not one per owner-bearing write: the dedup marker is
     task-scoped, so a repeat owner write on the same task, and a later arc
-    reusing the same task id, each leave no second event. Two shapes are
-    OUT and stay out:
+    reusing the same task id, each leave no second event. The second is
+    UNREPORTABLE: no counter records a deduped emit, so a reused-task-id
+    dispatch is silently absent and the arc cannot be reported as fully
+    accounted for. Two GROUPS are OUT and stay out — a grouping of the
+    mechanism legs below, never a second enumeration:
 
       * Teachback Task-A gates — excluded by the SUBJECT carve-out at step
         (5). DEPENDENCE, named where the membership is defined: under the
@@ -827,12 +830,15 @@ def _emit_dispatch_site(
         resolving to a pact specialist, teachback-exempt owner — plus
         writes whose emit preconditions fail (a non-canonical journal
         frame, an unresolvable team or task id, a write that also sets
-        ``status`` to ``completed``), plus dispatches with no task at all
-        and lead-owned coordination umbrellas. Those lanes are examples of
-        the mechanism, never its definition. Review panels dispatched by
-        the peer-review command stay visible through the ``review_dispatch``
-        stream, which records the panel roster; a dark review lane outside
-        that command has no journal witness.
+        ``status`` to ``completed``), plus dispatches with no task at all,
+        plus lead-owned coordination umbrellas, which are tasks and are
+        dark through the SAME owner leg, never through a separate umbrella
+        rule. Those lanes are examples of the mechanism, never its
+        definition. Review panels dispatched by the peer-review command
+        are IN this population — each owner-wired reviewer dispatch is
+        itself a site — and the ``review_dispatch`` stream is a second,
+        independent record of the panel roster, never a substitute; a
+        review lane outside that command has no journal witness.
 
     READ BY Q5, AND IT IS THE ONLY SOURCE: commands/wrap-up.md sources the
     retrospective's dispatch population from this stream and says so under a
