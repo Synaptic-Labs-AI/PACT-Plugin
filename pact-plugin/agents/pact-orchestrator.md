@@ -805,7 +805,7 @@ Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer:
   - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
 - **Cold reviewer** (`general-purpose` subagent, always): A diff-only reading with no plan, contract, or session narrative — dispatch per the Cold Reviewer Lane in the `peer-review` command
 
-After the warm reviews complete and the cold report has returned:
+After the warm reviews complete and the cold lane reaches a cold report, a recorded skip, or the did-not-run outcome:
 
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`

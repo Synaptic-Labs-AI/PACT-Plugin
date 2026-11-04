@@ -308,7 +308,10 @@ ONCE_RULES = (
     ("Each round gets one fresh cold dispatch in total", "the per-round dispatch bound"),
     ("applies to the next round", "the carry-over of an unresolved blocker"),
     ("the HALT lands at its next tool call", "the HALT timing"),
-    ("run a fresh first-round cold dispatch at the new head", "the first-round restart after a did-not-run round"),
+    ("run a fresh first-round cold dispatch at the new head", "the first-round restart until a valid round exists"),
+    ("unless a restart supersedes them", "the supersession condition"),
+    ("as superseded", "the supersession marking"),
+    ("is not an ancestor of the new head", "the rebase rule for the re-check base"),
     ("No open cold findings; no re-check", "the skip line"),
     ("The status row carries no severity", "the did-not-run row's routing"),
     ("Send it no message other than a HALT or the re-check message", "the lead's message bar"),
@@ -347,7 +350,7 @@ RECHECK_ELEMENTS = (
 FIRST_ROUND_VALIDITY = "A first-round cold report is valid only with"
 RECHECK_VALIDITY = "A re-review checklist report counts as a review only when"
 # Each validity list ends at its consequence clause.
-VALIDITY_ENDS = ("if any element is missing", "; otherwise")
+VALIDITY_ENDS = ("; otherwise",)
 # A word inside a validity list that turns a required element optional.
 # Only the list span is scanned, so a negator elsewhere in the sentence
 # (or a phrasing such as "is not needed" after the consequence) evades it.
@@ -720,7 +723,7 @@ class TestReportClause:
          "passes vacuously")),
         ("the open questions you could not settle", ("the questions the diff could not settle — they "
          "get a disposition row like a HANDOFF's open_questions")),
-        ("and each changed path whose content at {head} you did not read, and why", ("the blocker report the "
+        ("and each changed path whose diff hunk you did not read, with the reason: you could not read it, or you judged it not review-relevant", ("the blocker report the "
          "persona's blocker exception relies on")),
         ("coverage boundary with its receipt", ("the required boundary — a partial review "
          "must be visible as partial")),
@@ -820,6 +823,13 @@ class TestLifecycleOrder:
             f"{LIFECYCLE_STEPS!r}, found {labels!r}"
         )
 
+    def test_no_third_failure_term(self):
+        assert "review-did-not-happen" not in _peer_review_text(), (
+            "peer-review.md again uses 'review-did-not-happen' — a failure "
+            "outcome nothing downstream reads; an incomplete report is 'not "
+            "valid' and the lane's one failure outcome is 'did not run'"
+        )
+
     @pytest.mark.parametrize("phrase, rule", ONCE_RULES)
     def test_rule_stated_once(self, phrase, rule):
         count = _peer_review_text().count(phrase)
@@ -852,10 +862,10 @@ class TestLeadFacingRules:
          "the return path")),
         ("Return", "Append the report verbatim to the record under its agentId", "the verbatim record"),
         ("Return", "as soon as it returns, before synthesizing", "the record's timing"),
-        ("First-round validity", "a severity and file:line for each finding", (
-         "the per-finding fields")),
-        ("First-round validity", "synthesize the lane as review-did-not-happen, not as clean", (
-         "the first-round null clause")),
+        ("First-round validity", "a severity, file:line and failure scenario for each finding", (
+         "the per-finding fields, bound with their quantifier")),
+        ("First-round validity", "; otherwise it is not valid", (
+         "the first-round consequence — an incomplete report is not valid, and L6 handles it")),
         ("No report or an invalid one", "or /PACT:imPACT resolves a blocker report's blocker", (
          "the blocker exit's re-entry")),
         ("No report or an invalid one", "run one fresh cold dispatch, after any HALT is resolved, with the same placeholders", (
@@ -868,8 +878,8 @@ class TestLeadFacingRules:
          "the placeholder precedence — imPACT cannot move the re-check refs")),
         ("No report or an invalid one", "Each round gets one fresh cold dispatch in total, whether an invalid report, a failed resume or a resolved blocker triggered it", (
          "the per-round bound — no retry loop")),
-        ("No report or an invalid one", "An invalid report stays in the record where **Return** appended it, and its findings count like any cold finding", (
-         "the invalid report's findings")),
+        ("No report or an invalid one", "An invalid report or a blocker report stays in the record where **Return** appended it, and its findings count like any cold finding unless a restart supersedes them", (
+         "the findings of invalid and blocker reports, and their supersession")),
         ("No report or an invalid one", "If that dispatch also returns no valid report, or returns a blocker report, or /PACT:imPACT does not resolve the blocker, the cold lane did not run for this round", (
          "the did-not-run outcome, all three causes")),
         ("No report or an invalid one", "any /PACT:imPACT outcome for that blocker applies to the next round", (
@@ -882,16 +892,18 @@ class TestLeadFacingRules:
          "the row's routing — the lead invents no severity")),
         ("No report or an invalid one", "Do not treat completion of the spawn as the review", (
          "the completion-is-not-review rule")),
-        ("Synthesis", "Wait for the cold report, or the did-not-run outcome, before synthesizing", (
-         "the wait rule")),
+        ("Synthesis", "Wait for the cold lane to reach a cold report, a recorded skip, or the did-not-run outcome before synthesizing", (
+         "the wait rule, naming all three outcomes")),
         ("Synthesis", "Journal each cold finding per the review_finding journal step", (
          "the journal landing")),
         ("Return", "A report cut short by a HALT, first-round or re-check, is not valid and is never a blocker report", (
          "the HALT exclusion — a truthful HALT boundary must not trip the blocker rule")),
-        ("Return", "names, in its coverage boundary, a changed path whose content at {head} it did not read is a blocker report", (
+        ("Return", "is a blocker report when its coverage boundary names a changed path whose diff hunk it could not read", (
          "the blocker trigger, matching REPORT's wording")),
-        ("Return", "a path it read but whose tests it did not run is a coverage note", (
-         "the trigger's boundary — untested is not unread")),
+        ("Return", "or one it did not read although the path is review-relevant, by its own judgement or, when the path is clearly review-relevant, by yours", (
+         "the relevance half of the trigger and who judges it")),
+        ("Return", "a skipped path that is not review-relevant (a version bump, a lockfile, a generated file) and a path read but whose tests did not run are coverage notes", (
+         "the trigger's boundary — untested or irrelevant is not a blocker")),
         ("Return", "Run /PACT:imPACT on a blocker report before judging its validity", (
          "the blocker route and its timing")),
         ("Return", "and do not synthesize the lane as clean", "the bar on reading a blocked lane as clean"),
@@ -907,8 +919,10 @@ class TestLeadFacingRules:
          "the bar on any other message")),
         ("Re-check", "re-check every cold finding not yet resolved, including new issues an earlier re-check raised", (
          "the re-check scope across cycles")),
-        ("Re-check", "When the cold lane's latest round did not run, there are no recorded findings to re-check: run a fresh first-round cold dispatch at the new head instead", (
-         "the restart after a did-not-run round")),
+        ("Re-check", "When no cold round has yet returned a valid report, run a fresh first-round cold dispatch at the new head instead", (
+         "the restart until a valid round exists")),
+        ("Re-check", "and mark the findings of earlier invalid or blocker reports in the record as superseded", (
+         "the supersession of earlier invalid and blocker findings")),
         ("Re-check", 'When a valid cold review has left no cold finding open, skip the cold re-check and add the line "No open cold findings; no re-check" to the record', (
          "the skip rule and its record line")),
         ("Re-check", "the cold lane's latest round is then the previous one", (
@@ -928,7 +942,7 @@ class TestLeadFacingRules:
         ("SendMessage to the agentId of the most recent cold subagent in the record", "the resume target"),
         ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
         ("If it cannot be resumed, apply **No report or an invalid one**", "the fallback to the one re-dispatch"),
-        ("otherwise it is review-did-not-happen", "the re-check null clause"),
+        ("; otherwise it is not valid", "the re-check consequence — an incomplete re-check is not valid"),
         ("Append each re-check report verbatim to the record as in **Return**", "the verbatim re-check record"),
     ])
     def test_resume_paragraph_present(self, token, lost):
@@ -1060,7 +1074,7 @@ class TestOutsideSectionRules:
         ("pr", "Warm reviewer agent tasks (architect, test-engineer, domain specialists); the cold reviewer gets no task", (
          "the overview's task-creation step scoped to warm reviewers")),
         ("pr", "Review task addBlockedBy = [warm reviewer IDs]", "the overview's blocking step"),
-        ("pr", "Monitor until the warm reviewers complete and the cold report has returned", (
+        ("pr", "Monitor until the warm reviewers complete and the cold lane reaches a cold report, a recorded skip, or the did-not-run outcome", (
          "the overview's wait on the cold report — the parent task's "
          "blockers cannot hold it")),
         ("pr", 'Warm reviewer tasks status = "completed"', "the overview's completion step"),
@@ -1079,7 +1093,7 @@ class TestOutsideSectionRules:
          "the persona's architect mission")),
         ("persona", "Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer", (
          "the persona's reviewer count scoped to warm reviewers")),
-        ("persona", "After the warm reviews complete and the cold report has returned", (
+        ("persona", "After the warm reviews complete and the cold lane reaches a cold report, a recorded skip, or the did-not-run outcome", (
          "the persona's wait on the cold report")),
         ("persona", "teammate `SendMessage` communication", (
          "the NEVER rule's scope — teammate messaging, not every SendMessage")),
@@ -1110,10 +1124,10 @@ class TestPlaceholderDefinitions:
          "the ref kind — a stale local base widens the triple-dot diff")),
         ("{base}", "or the commit of the freshly fetched base tip where no such ref exists", (
          "the base where no remote-tracking ref exists")),
-        ("{base}", "or, if the branch was rebased since, the merge-base of the new head with the base branch", (
+        ("{base}", "In a re-check, the head commit of the most recent cold round that returned a valid report", (
+         "the re-check value of {base} — the last head a valid round covered")),
+        ("{base}", "when that head is not an ancestor of the new head, the merge-base of the new head with the base branch, so the range is the whole PR", (
          "the re-check base after a rebase")),
-        ("{base}", "In a re-check, the head commit of the previous cold review or re-check", (
-         "the re-check value of {base} — one commit per round, never ambiguous")),
         ("{head}", "In a re-check, the new head commit", "the re-check value of {head}"),
     ])
     def test_placeholder_definition(self, name, token, lost):
