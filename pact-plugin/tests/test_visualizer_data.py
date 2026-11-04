@@ -210,6 +210,22 @@ class TestRoots:
         assert roots[0].id == "~/.claude"
         assert roots[0].label == ".claude"
 
+    def test_tilde_roots_expand_against_the_injected_home(self, tmp_path):
+        """`~` and `~/x` must use the injected home, never the process HOME.
+
+        os.path.expanduser reads the real HOME, so a test passing
+        home=tmp_path would silently touch the operator's home and the
+        resolver would disagree with the hooks whenever the two homes differ.
+        """
+        for raw in ("~", "~/nested/root"):
+            resolved = settings.resolve_roots([raw], env={}, home=tmp_path)[0].path
+            assert resolved.is_relative_to(tmp_path), raw
+        assert settings.resolve_roots(["~"], env={}, home=tmp_path)[0].path == tmp_path
+        assert (
+            settings.resolve_roots(["~/nested/root"], env={}, home=tmp_path)[0].path
+            == tmp_path / "nested" / "root"
+        )
+
     @pytest.mark.parametrize("blank", ["", "   ", "\t", "\n ", " \t \n"])
     def test_blank_env_root_is_unset(self, tmp_path, blank):
         """$CLAUDE_CONFIG_DIR that is set but blank means UNSET, not cwd.
@@ -230,7 +246,15 @@ class TestRoots:
         """
         from shared.paths import get_claude_config_dir
 
-        for value in ("", "   ", "\t\n", str(tmp_path / "abs"), "relative-dir"):
+        for value in (
+            "",
+            "   ",
+            "\t\n",
+            str(tmp_path / "abs"),
+            "relative-dir",
+            "~",
+            "~/sub",
+        ):
             environment = {"CLAUDE_CONFIG_DIR": value}
             ours = settings.resolve_roots((), env=environment, home=tmp_path)[0].path
             theirs = get_claude_config_dir(env=environment, home=tmp_path)
