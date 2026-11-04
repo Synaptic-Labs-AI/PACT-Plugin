@@ -279,6 +279,10 @@ Otherwise return the full model:
 }
 ```
 
+`meta.project` follows the same `[A-Za-z0-9._-]` constraint as the session
+list's `project`, and `meta.project_altered: true` marks a label that had
+characters replaced.
+
 Field rules:
 
 - `version` is the server's payload version; the About tab reports it.
