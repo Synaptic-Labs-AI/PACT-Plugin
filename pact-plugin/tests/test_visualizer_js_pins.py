@@ -359,14 +359,19 @@ def test_poll_path_uses_the_banner_rules():
     green while the poll steals or erases another banner.
     """
     source = (STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
-    # Match the CALL, not a formatted line: reindentation or a wrapped
-    # argument must not break this pin. `state.errorSource` appears only in
-    # the poll catch today, so the call expression is the stable fragment.
-    assert re.search(r"pollMayShowError\s*\(\s*state\.errorSource\s*\)", source), (
-        "app.js no longer asks pollMayShowError before showing a poll error; "
-        "a failing poll can displace a navigation or refresh banner and its retry"
+    # Narrow to the pollLive body and drop comments, so a call moved elsewhere
+    # or commented out cannot satisfy the pin. The patterns stay
+    # whitespace-tolerant: reindentation or a wrapped argument must still pass.
+    start = source.index("function pollLive(")
+    body = source[start:source.index("\n}\n", start)]
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"//[^\n]*", "", body)
+    assert re.search(r"pollMayShowError\s*\(\s*state\.errorSource\s*\)", body), (
+        "the pollLive catch no longer asks pollMayShowError before showing a "
+        "poll error; a failing poll can displace a navigation or refresh "
+        "banner and its retry"
     )
-    assert re.search(r"pollClearsError\s*\(\s*state\.errorSource\s*\)", source), (
-        "app.js no longer asks pollClearsError before clearing on a successful "
-        "poll; a poll can erase a navigation or refresh banner"
+    assert re.search(r"pollClearsError\s*\(\s*state\.errorSource\s*\)", body), (
+        "pollLive no longer asks pollClearsError before clearing on a "
+        "successful poll; a poll can erase a navigation or refresh banner"
     )
