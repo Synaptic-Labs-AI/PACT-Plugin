@@ -155,10 +155,17 @@ Every successful launch prints exactly one `URL: ...` line on stdout, whether or
 not `--open` was passed, so a headless session can report it without opening a
 browser. `--detach` exits only once that URL passes a local health check, so the
 URL it prints is immediately reachable, and it adds a `Stop: ...` hint naming the
-command that closes the same instance. `--stop` always prints a `Stop: ...` line —
-`Stop: stopped pid <pid>` when it stops the matching instance, or
-`Stop: not running` when nothing healthy is running (a stale state file is
-cleaned up) — and exits 0 in both cases.
+command that closes the same instance. `--stop` prints one `Stop: ...` line:
+
+- `Stop: stopped pid <pid>` — the matching instance stopped answering; exit 0.
+- `Stop: not running` — nothing healthy was running and any stale state file
+  was removed; exit 0.
+- `Stop: refused` — the state file's pid does not match the pid in the running
+  server's `/api/health` payload (a missing pid is refused too). Nothing is
+  signalled, the next line names both pids, and the state file is deliberately
+  kept: deleting the record would turn a recoverable mismatch into a server
+  nothing can stop. Exit 1. A stop that signals the process but cannot confirm
+  it exited also exits 1.
 
 ## Privacy
 

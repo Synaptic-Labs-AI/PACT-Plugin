@@ -25,6 +25,24 @@ visualizer/
   static/js/{api,dom,app,sprites,stage,panels,timeline,charts,audio,achievements}.js
 ```
 
+## CLI lifecycle
+
+`--stop` acts only on the detached instance recorded in
+`<config>/pact-viz/server.json`, and only after `/api/health` answers with that
+file's `instance_id` AND its pid. It prints exactly one `Stop: ...` line:
+
+- `Stop: stopped pid <pid>` — the matching instance stopped answering; exit 0.
+- `Stop: not running` — nothing healthy was running and a stale state file was
+  removed; exit 0.
+- `Stop: refused` — the state file's pid does not match the pid the running
+  server reports, or the payload carries no pid. Nothing is signalled; the next
+  line is `PACT Mission Control: state file pid <state-pid> does not match the
+  server's pid <server-pid>; refusing to signal` (a missing pid prints `None`),
+  and the state file is deliberately kept: deleting the record would turn a
+  recoverable mismatch into a server nothing can stop. Exit 1.
+
+A stop that signals the process but cannot confirm it exited also exits 1.
+
 ## HTTP API
 
 All responses are JSON, `Content-Type: application/json; charset=utf-8`.
@@ -43,9 +61,13 @@ unhandled handler error).
   "instance_id": "random-hex",
   "uptime_s": 12.3,
   "roots": [{"id": "~/.claude", "label": ".claude", "path": "/Users/x/.claude", "journals": 291, "default": true}],
-  "demo": true
+  "demo": false,
+  "demo_available": true
 }
 ```
+
+`demo` reports the launch mode; `demo_available` reports that the scripted
+demo can be opened in either mode.
 
 ### GET /api/sessions?limit=500
 
@@ -79,6 +101,15 @@ List entries are deliberately cheap: no full journal parse. `started_at` may be
 null when unavailable. `last_phase` reflects the last `phase_transition` within
 512KB of the journal's end; older transitions yield `""`. Sorted newest
 `updated_at` first, capped by `limit`.
+
+`project` is constrained to `[A-Za-z0-9._-]`; a basename carrying any other
+character has those characters replaced with `_` and the entry carries
+`project_altered: true` (the session is never dropped).
+
+`run_kind` in the session list is derived from the first 64KB (at most its
+first 40 valid events) and the last 512KB of the journal; a run whose only
+orchestration markers fall outside both windows lists as `session`, while
+`/api/session` (a full parse) reports `orchestrate`.
 
 ### GET /api/session?root=…&slug=…&session_id=…&since=…
 
