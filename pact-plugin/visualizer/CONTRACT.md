@@ -361,6 +361,7 @@ the header. They only render their own roots and call callbacks.
 ### dom.js
 
 ```js
+export const PROJECT_ALTERED_NOTE;  // user-facing explanation for a sanitised project label
 export function el(tag, props = {}, children = []); // props: class, text, attrs, on, style, dataset, value (unknown props throw)
 export function clear(node);
 export function text(node, value);
