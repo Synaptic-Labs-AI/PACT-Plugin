@@ -122,6 +122,9 @@ class MissionControlHandler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    # A socket that stops mid-request is dropped instead of pinning its thread
+    # forever (StreamRequestHandler applies this as the connection timeout).
+    timeout = 30
 
     # Set by _send_headers once the status line and headers are on the wire.
     # A crash after this point must close the connection, never write a
@@ -262,7 +265,10 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             body = b'{"ok":false,"error":"serialization error"}'
             status = 500
         self._send_headers(status, JSON_CONTENT_TYPE, len(body), extra_headers)
-        self.wfile.write(body)
+        # HEAD carries the headers a GET would (including Content-Length) but
+        # never a body; writing one would desync a keep-alive connection.
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _send_error(self, status: int, reason: str) -> None:
         """Send the contract's short error body."""

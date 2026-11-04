@@ -448,13 +448,19 @@ def _terminate(pid: int) -> None:
         raise CliError(f"cannot signal pid {pid}: {error}") from error
 
 
-def _wait_until_stopped(port: int, instance_id: str, pid: int, timeout: float) -> bool:
-    """Poll until the instance stops answering or its pid disappears."""
+def _wait_until_stopped(port: int, instance_id: str, timeout: float) -> bool:
+    """Poll until the instance stops answering.
+
+    Location: cli._wait_until_stopped.
+    Summary: Success means THIS instance's /api/health no longer answers. A
+             disappeared pid is not enough: the recorded pid can name an
+             unrelated process, and treating its exit as success reported a
+             stop while the real server kept serving.
+    Used by: cmd_stop.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _health_for_instance(port, instance_id, timeout=0.25) is None:
-            return True
-        if _pid_gone(pid):
             return True
         time.sleep(_POLL_INTERVAL_S)
     return False
@@ -478,8 +484,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     Location: cli.cmd_stop.
     Summary: The process is only signalled when /api/health answers with the
-             SAME random instance token recorded in the state file — a stale
-             pid that the OS reused for an unrelated process is never killed.
+             SAME random instance token recorded in the state file AND reports
+             the same pid — a stale or tampered pid that the OS reused, or that
+             names a bystander, is never killed. Stop success means the
+             instance stopped answering, not merely that a pid disappeared.
              SIGTERM is followed by a bounded wait and a SIGKILL only if the
              process is still alive; the state file and the detached server's
              log are removed either way, unless a concurrent detach already
@@ -497,20 +505,31 @@ def cmd_stop(args: argparse.Namespace) -> int:
     port = int(state["port"])
     instance_id = str(state["instance_id"])
     pid = int(state["pid"])
-    if _health_for_instance(port, instance_id) is None:
+    health = _health_for_instance(port, instance_id)
+    if health is None:
         if _clear_state_if_instance(state_dir, instance_id):
             _remove_server_log(state_dir)
         print("Stop: not running")
         print("PACT Mission Control: not running (stale state file cleaned)")
         return 0
+    reported_pid = health.get("pid")
+    if not isinstance(reported_pid, int) or reported_pid != pid:
+        # The state file names a different process than the one answering with
+        # this instance token; signalling it would kill an unrelated process.
+        print("Stop: refused")
+        print(
+            f"PACT Mission Control: state file pid {pid} does not match the "
+            f"server's pid {reported_pid!r}; refusing to signal"
+        )
+        return 1
     _terminate(pid)
-    stopped = _wait_until_stopped(port, instance_id, pid, _STOP_TIMEOUT_S)
+    stopped = _wait_until_stopped(port, instance_id, _STOP_TIMEOUT_S)
     if not stopped and not _pid_gone(pid):
         try:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-        stopped = _wait_until_stopped(port, instance_id, pid, 2.0)
+        stopped = _wait_until_stopped(port, instance_id, 2.0)
     if _clear_state_if_instance(state_dir, instance_id):
         _remove_server_log(state_dir)
     print(f"Stop: stopped pid {pid}")
@@ -604,13 +623,17 @@ def serve_foreground(
         return 0
     port = int(getattr(args, "port", 0) or 0)
     filters = _filters(args)
-    server = server_module.create_server(
-        roots,
-        port=port,
-        instance_id=instance_id,
-        verbose=bool(getattr(args, "verbose", False)),
-        filters=filters,
-    )
+    try:
+        server = server_module.create_server(
+            roots,
+            port=port,
+            instance_id=instance_id,
+            verbose=bool(getattr(args, "verbose", False)),
+            filters=filters,
+        )
+    except OSError as error:
+        # A port already in use is a user-facing condition, not a traceback.
+        raise CliError(f"cannot bind {LOOPBACK_HOST}:{port}: {error}") from error
     actual_port = int(server.server_port)
     demo_mode = bool(getattr(args, "demo", False))
     # The state file always stores the canonical BASE url; ?demo=1 is a
@@ -788,7 +811,9 @@ def detach(
                     process.kill()
                 except OSError:
                     pass
-        clear_state(state_dir)
+        # Same instance guard as every other clear site: a concurrent detach
+        # that already published its state must not lose its record here.
+        _clear_state_if_instance(state_dir, instance_id)
         tail = _log_tail(log_path)
         message = "server did not become healthy in time"
         if tail:
