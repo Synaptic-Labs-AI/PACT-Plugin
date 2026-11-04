@@ -138,8 +138,11 @@ class TestDiscoveryFloor:
         # floor (measured 2026-10-30 at f1c44200: hooks 86 +
         # skills/pact-memory/scripts 14 + scripts 6); raised 106 -> 117 when
         # visualizer/ (the Mission Control backend) joined the scanned roots
-        # (measured 2026-11-03: hooks 86 + skills/pact-memory/scripts 14 +
-        # scripts 6 + visualizer 11 = 117).
+        # (measured 2026-11-03 at 68b34e08: hooks 86 +
+        # skills/pact-memory/scripts 14 + scripts 6 + visualizer 11 = 117);
+        # raised 117 -> 118 after the rebase onto main brought hooks/ to 87
+        # (measured 2026-11-04 at HEAD: hooks 87 +
+        # skills/pact-memory/scripts 14 + scripts 6 + visualizer 11 = 118).
         #
         # COUNTING RULE, so the next reader RE-DERIVES instead of inheriting a
         # number: _SCANNED_FILES is every *.py that Path.rglob finds under
@@ -148,7 +151,7 @@ class TestDiscoveryFloor:
         # the day it was written.
         #
         # SLACK IS NOT A PROPERTY THIS COMMENT CAN PIN: it is today's count
-        # minus the current floor assertion (117 today), and it WIDENS on its
+        # minus the current floor assertion (118 today), and it WIDENS on its
         # own as files are added. The wider the slack, the more of a root can
         # disappear unnoticed. Re-measure and raise the floor when it has
         # drifted.
@@ -158,7 +161,7 @@ class TestDiscoveryFloor:
         # leaves the total above the floor, indistinguishable from normal
         # churn. This test guards against a LARGE root collapsing, not
         # against every root.
-        assert len(_SCANNED_FILES) >= 117
+        assert len(_SCANNED_FILES) >= 118
 
     def test_every_scanned_root_resolves_non_empty(self):
         # The count floor above cannot see a root vanish when that root is

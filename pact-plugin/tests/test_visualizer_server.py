@@ -340,6 +340,72 @@ class TestSessionRoute:
         assert response.status == 200
         assert response.json()["meta"]["project"] == "PACT-prompt"
 
+    def test_concurrent_requests_are_all_served_consistently(self, live_server):
+        """The server is a ThreadingHTTPServer; nothing else proves that under
+        simultaneous polls every request is answered from the same snapshot."""
+        srv, _thread = live_server
+        path = "/api/session?slug=PACT-prompt&session_id=sess-1"
+        results: list[tuple[int, bytes]] = []
+        lock = threading.Lock()
+
+        def fetch() -> None:
+            response = http_request(srv.server_port, path)
+            with lock:
+                results.append((response.status, response.body))
+
+        workers = [threading.Thread(target=fetch) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+        assert not any(worker.is_alive() for worker in workers)
+        assert len(results) == 8
+        assert {status for status, _body in results} == {200}
+        payloads = [json.loads(body) for _status, body in results]
+        assert all(payload["ok"] is True for payload in payloads)
+        assert len({tuple(event["seq"] for event in payload["events"]) for payload in payloads}) == 1
+
+
+class TestSymlinkedSessionDirs:
+    """A symlinked slug or session directory is not a session.
+
+    Pinned on BOTH routes, because the two have separate guards: a run must
+    not be fetchable by /api/session while invisible in /api/sessions.
+
+    MEASURED, so a future reader does not credit the wrong line: this property
+    rests on the listing's symlink filter in discovery._safe_dirs. The early
+    symlink return in find_session is NOT load-bearing -- the containment
+    check below it rejects the escaped path on its own. Ablating the listing
+    filter fails both tests; ablating the early return fails neither.
+    """
+
+    def test_symlinked_slug_is_invisible_on_both_routes(self, live_server, tmp_path):
+        srv, _thread = live_server
+        outside = tmp_path / "outside"
+        write_journal(outside, "ghost", "sess-g", sample_events())
+        link = srv.roots[0].path / "pact-sessions" / "ghost"
+        link.symlink_to(outside / "pact-sessions" / "ghost", target_is_directory=True)
+
+        listed = http_request(srv.server_port, "/api/sessions").json()["sessions"]
+        assert [(s["slug"], s["session_id"]) for s in listed] == [("PACT-prompt", "sess-1")]
+        fetched = http_request(srv.server_port, "/api/session?slug=ghost&session_id=sess-g")
+        assert fetched.status == 404
+
+    def test_symlinked_session_dir_is_invisible_on_both_routes(self, live_server, tmp_path):
+        srv, _thread = live_server
+        outside = tmp_path / "outside"
+        write_journal(outside, "real", "sess-h", sample_events())
+        slug_dir = srv.roots[0].path / "pact-sessions" / "real"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        (slug_dir / "sess-h").symlink_to(
+            outside / "pact-sessions" / "real" / "sess-h", target_is_directory=True
+        )
+
+        listed = http_request(srv.server_port, "/api/sessions").json()["sessions"]
+        assert [(s["slug"], s["session_id"]) for s in listed] == [("PACT-prompt", "sess-1")]
+        fetched = http_request(srv.server_port, "/api/session?slug=real&session_id=sess-h")
+        assert fetched.status == 404
+
 
 # ---------------------------------------------------------------------------
 # /api/demo

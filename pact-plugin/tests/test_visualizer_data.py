@@ -11,6 +11,7 @@ Used by: pytest (data half of the visualizer backend acceptance suite).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -209,6 +210,32 @@ class TestRoots:
         assert roots[0].id == "~/.claude"
         assert roots[0].label == ".claude"
 
+    @pytest.mark.parametrize("blank", ["", "   ", "\t", "\n ", " \t \n"])
+    def test_blank_env_root_is_unset(self, tmp_path, blank):
+        """$CLAUDE_CONFIG_DIR that is set but blank means UNSET, not cwd.
+
+        hooks/shared/paths.get_claude_config_dir strips before its truthiness
+        test; a whitespace-only value that slipped through here would resolve
+        to the process working directory and the dashboard would read a
+        different root than the hooks that write the journals.
+        """
+        roots = settings.resolve_roots((), env={"CLAUDE_CONFIG_DIR": blank}, home=tmp_path)
+        assert [root.path for root in roots] == [tmp_path / ".claude"]
+
+    def test_env_root_precedence_matches_the_hooks_resolver(self, tmp_path):
+        """Parity with the hooks' config-root resolver, not just with literals.
+
+        The visualizer duplicates this resolver rather than importing hooks,
+        so the two are only kept honest by a test that loads both.
+        """
+        from shared.paths import get_claude_config_dir
+
+        for value in ("", "   ", "\t\n", str(tmp_path / "abs"), "relative-dir"):
+            environment = {"CLAUDE_CONFIG_DIR": value}
+            ours = settings.resolve_roots((), env=environment, home=tmp_path)[0].path
+            theirs = get_claude_config_dir(env=environment, home=tmp_path)
+            assert Path(ours).resolve() == Path(theirs).resolve(), value
+
     def test_repeatable_roots_keep_order_and_first_default(self, tmp_path):
         one = make_root(tmp_path, "one")
         two = make_root(tmp_path, "two")
@@ -258,6 +285,14 @@ class TestDefaultStateDir:
     def test_empty_env_var_falls_back_to_home(self, tmp_path):
         state = settings.default_state_dir(
             env={"CLAUDE_CONFIG_DIR": ""}, home=tmp_path
+        )
+        assert state == tmp_path / ".claude" / "pact-viz"
+
+    @pytest.mark.parametrize("blank", ["   ", "\t", "\n "])
+    def test_blank_env_var_falls_back_to_home(self, tmp_path, blank):
+        """The state dir uses the same resolver as the roots: blank is UNSET."""
+        state = settings.default_state_dir(
+            env={"CLAUDE_CONFIG_DIR": blank}, home=tmp_path
         )
         assert state == tmp_path / ".claude" / "pact-viz"
 
@@ -369,6 +404,24 @@ class TestJournalRead:
         read = journal.read_journal(path)
         assert len(read.events) == 1
         assert read.skipped_lines == 0
+
+    def test_empty_file_reads_as_no_events_without_warnings(self, tmp_path):
+        """A zero-byte journal is a run with no events, not a malformed file."""
+        path = tmp_path / "session-journal.jsonl"
+        path.write_bytes(b"")
+        read = journal.read_journal(path)
+        assert read.events == []
+        assert read.warnings == []
+
+    def test_boundary_truncated_final_line_is_skipped_with_a_warning(self, tmp_path):
+        """A reader that catches a writer mid-append must not fail on the
+        partial last line, and must say so rather than dropping it silently."""
+        path = tmp_path / "session-journal.jsonl"
+        path.write_bytes(b'{"v": 1, "type": "session_start", "ts": "2026-11')
+        read = journal.read_journal(path)
+        assert read.events == []
+        assert read.skipped_lines == 1
+        assert read.warnings
 
     def test_missing_file_reads_empty(self, tmp_path):
         read = journal.read_journal(tmp_path / "missing.jsonl")
@@ -678,6 +731,21 @@ class TestClassify:
             if field not in classify.HANDOFF_RECOMMENDED_FIELDS
         )
 
+    def test_handoff_schema_mirrors_the_hooks_ssot(self):
+        """The mirror is hand-copied, so this test is all that keeps it in sync.
+
+        visualizer/ must not import hooks at runtime (it is launched with only
+        the plugin root on sys.path), so the three tuples are duplicated by
+        hand. Without this test a field moving between required and recommended
+        in hooks/shared/handoff_schema leaves the debrief badge reporting the
+        old partition while every visualizer test stays green.
+        """
+        from shared import handoff_schema as ssot
+
+        assert classify.HANDOFF_CANONICAL_FIELDS == ssot.HANDOFF_CANONICAL_FIELDS
+        assert classify.HANDOFF_RECOMMENDED_FIELDS == ssot.HANDOFF_RECOMMENDED_FIELDS
+        assert classify.HANDOFF_LEGACY_ALIASES == ssot.HANDOFF_LEGACY_ALIASES
+
     def test_normalize_variety(self):
         assert classify.normalize_variety({"novelty": 2, "scope": 3}) == {
             "novelty": 2,
@@ -701,6 +769,28 @@ class TestClassify:
             assert isinstance(category, str) and category
             assert isinstance(icon, str) and icon
             assert severity in classify.SEVERITIES
+
+    def test_every_emitted_icon_token_is_handled_by_the_stage(self):
+        """The server's icon vocabulary and the canvas's must agree.
+
+        The table check above is self-consistency only: a typo'd token (say
+        "hadnoff") is still a non-empty string, and the feed row still renders,
+        so nothing reddens while the stage silently animates nothing.
+        """
+        stage_js = (
+            Path(__file__).resolve().parent.parent
+            / "visualizer" / "static" / "js" / "stage.js"
+        ).read_text(encoding="utf-8")
+        handled = set(re.findall(r'icon === "([a-z_]+)"', stage_js))
+        emitted = {icon for _category, icon, _severity in classify.EVENT_TYPE_INFO.values()}
+        # Feed-row only: panels.js renders these by category, so they carry no
+        # stage effect by design.
+        inert = {"raw", "variety", "wake"}
+        unhandled = emitted - handled - inert
+        assert not unhandled, (
+            f"event icons with no stage.js branch: {sorted(unhandled)}. "
+            f"Either branch on the token in stage.js or add it to `inert` here."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1446,9 @@ class TestSessionsListAndHealth:
         )
         assert payload["ok"] is True
         assert payload["name"] == "pact-mission-control"
+        # CONTRACT.md is the source of truth for the payload shape, so pin its
+        # literal: `== settings.VERSION` would pass on any value at all.
+        assert payload["version"] == "0.1.0"
         assert payload["version"] == settings.VERSION
         assert payload["pid"] == 1234
         assert payload["instance_id"] == "deadbeef"

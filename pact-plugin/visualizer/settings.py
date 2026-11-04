@@ -226,10 +226,37 @@ def python_version_ok(version_info: object = sys.version_info) -> bool:
     return (major, minor) >= MIN_PYTHON
 
 
+def _env_config_dir(environment: Mapping[str, str]) -> str:
+    """$CLAUDE_CONFIG_DIR, stripped: a set-but-blank value is UNSET.
+
+    Location: settings._env_config_dir.
+    Summary: Mirrors hooks/shared/paths.get_claude_config_dir, which strips
+             before its own truthiness test. Without the strip a
+             whitespace-only value passes the truthiness test and resolves to
+             the process working directory, so the dashboard would read a
+             different root than the hooks that write the journals.
+    Used by: resolve_roots, default_state_dir.
+    """
+    return (environment.get("CLAUDE_CONFIG_DIR") or "").strip()
+
+
 def _expanded(path: str | os.PathLike[str], home: Path) -> Path:
-    """Expand a user-supplied path and make it absolute (never resolved)."""
+    """Expand a user-supplied path and make it absolute (never resolved).
+
+    ``~`` and ``~/x`` expand against the INJECTED ``home``, exactly as
+    hooks/shared/paths.get_claude_config_dir does. Using os.path.expanduser
+    for those two forms reads the process HOME instead, so a test that passes
+    ``home=tmp_path`` would silently touch the operator's real home, and the
+    two resolvers would disagree whenever the injected home is not the real
+    one. Bare ``~user`` forms still go through expanduser: they need the
+    passwd database, and the hooks do not support them either.
+    """
     text = os.fspath(path)
-    if text.startswith("~"):
+    if text == "~":
+        text = os.fspath(home)
+    elif text.startswith("~/"):
+        text = os.fspath(home / text[2:])
+    elif text.startswith("~"):
         text = os.path.expanduser(text)
     candidate = Path(text)
     if not candidate.is_absolute():
@@ -294,7 +321,7 @@ def resolve_roots(
     if root_args:
         paths = [_expanded(item, home_dir) for item in root_args]
     else:
-        env_root = environment.get("CLAUDE_CONFIG_DIR", "")
+        env_root = _env_config_dir(environment)
         paths = [_expanded(env_root, home_dir) if env_root else _normalise(home_dir / ".claude")]
     deduped: list[Path] = []
     for path in paths:
@@ -342,7 +369,7 @@ def default_state_dir(
     """
     environment = os.environ if env is None else env
     home_dir = Path.home() if home is None else home
-    env_root = environment.get("CLAUDE_CONFIG_DIR", "")
+    env_root = _env_config_dir(environment)
     base = _expanded(env_root, home_dir) if env_root else _normalise(home_dir / ".claude")
     return base / "pact-viz"
 
