@@ -39,6 +39,8 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
     missionSecondsAt,
     rootChangeAction,
     modeBadge,
+    feedKey,
+    requestedFilterLabel,
   } = await import("./dom.js");
 
   /* A live poll is a new journal revision of the SAME run. Identity must not
@@ -67,17 +69,38 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   /* A filtered root with no sessions clears the open run: the rails, recorder
    * and caption must not disagree about what is on screen. */
   check("a session in the new root always opens", rootChangeAction({
-    hasSession: true, requestedProject: "P", hasRun: true,
+    hasSession: true, requestedFilter: "P", hasRun: true,
   }) === "open");
   check("a filtered empty root clears the open run", rootChangeAction({
-    hasSession: false, requestedProject: "P", hasRun: true,
+    hasSession: false, requestedFilter: "P", hasRun: true,
   }) === "empty");
   check("an unfiltered empty root keeps an open run", rootChangeAction({
-    hasSession: false, requestedProject: "", hasRun: true,
+    hasSession: false, requestedFilter: "", hasRun: true,
   }) === "keep");
   check("an unfiltered empty root with nothing open opens the demo", rootChangeAction({
-    hasSession: false, requestedProject: "", hasRun: false,
+    hasSession: false, requestedFilter: "", hasRun: false,
   }) === "demo");
+
+  /* The feed cache must distinguish a SHIFTED visible window from a new run:
+   * above MAX_EVENTS the length is constant while events[0].seq advances. */
+  const feedBase = {
+    source: { kind: "real", root: "r", slug: "s", session_id: "abc" },
+    meta: { team: "t" },
+  };
+  const windowA = Object.assign({}, feedBase, { events: [{ seq: 6000 }, { seq: 6001 }] });
+  const windowB = Object.assign({}, feedBase, { events: [{ seq: 6001 }, { seq: 6002 }] });
+  const windowA2 = Object.assign({}, feedBase, { events: [{ seq: 6000 }, { seq: 6001 }] });
+  check("the same run and window keep the feed key", feedKey(windowA) === feedKey(windowA2));
+  check("a shifted window changes the feed key", feedKey(windowA) !== feedKey(windowB));
+  check("a different run changes the feed key", feedKey(windowA) !== feedKey(Object.assign({}, windowB, {
+    source: Object.assign({}, feedBase.source, { session_id: "zzz" }),
+  })));
+
+  /* The launch filter label is built only from the server's echoed filters. */
+  check("a project filter is named", requestedFilterLabel({ project: "My App" }) === "project My App");
+  check("a session filter is named", requestedFilterLabel({ session: "abc" }) === "session abc");
+  check("both filters are named", requestedFilterLabel({ project: "P", session: "s" }) === "project P and session s");
+  check("no filters means no label", requestedFilterLabel({}) === "" && requestedFilterLabel(null) === "");
 
   /* The mode badge must agree with the screen. With no run open it is IDLE,
    * even if stale mode/status values still say live (the named-empty load). */
@@ -172,4 +195,19 @@ def test_js_behaviour_pins():
     assert "PINS OK" in proc.stdout, (
         f"pin script produced no success marker:\nstdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}"
+    )
+
+
+def test_no_query_param_project_fallback():
+    """The named-empty state comes only from the server's echoed filters.
+
+    A `?project=` query param never narrowed the response, so trusting it
+    could name a filter that was not applied — and the pick path would open
+    an unrelated run instead of the empty state. The server echoes
+    `filters` (server.py, since b7ecf6fb), which is the only source.
+    """
+    source = (STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'params.get("project")' not in source, (
+        "app.js reads a project query param; only the server's launch filters "
+        "narrow the session list, and only data.filters may name them"
     )

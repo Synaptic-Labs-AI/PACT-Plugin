@@ -139,10 +139,31 @@ export function shortSha(sha) {
 /* What a root change should do. A filtered root with no sessions must not
  * leave the previous root's run on screen (that run belongs to another root),
  * and an unfiltered empty root keeps the existing keep-or-demo behaviour. */
-export function rootChangeAction({ hasSession, requestedProject, hasRun }) {
+export function rootChangeAction({ hasSession, requestedFilter, hasRun }) {
   if (hasSession) return "open";
-  if (requestedProject) return "empty";
+  if (requestedFilter) return "empty";
   return hasRun ? "keep" : "demo";
+}
+
+/* Display label for the launch filters the server echoes. The page never
+ * invents a filter from a query param: only the launch filters narrowed the
+ * list, so only they can explain an empty one. */
+export function requestedFilterLabel(filters) {
+  const project = filters && typeof filters.project === "string" ? filters.project : "";
+  const session = filters && typeof filters.session === "string" ? filters.session : "";
+  const parts = [];
+  if (project) parts.push(`project ${project}`);
+  if (session) parts.push(`session ${session}`);
+  return parts.join(" and ");
+}
+
+/* The feed cache must notice a SHIFTED visible window, not just a new run:
+ * above MAX_EVENTS the array length is constant while events[0].seq advances,
+ * so a length-only key leaves the rows frozen. */
+export function feedKey(model) {
+  const events = model && Array.isArray(model.events) ? model.events : [];
+  const head = events.length && events[0] ? events[0].seq : null;
+  return `${runKey(model)}#${head === null || head === undefined ? "" : head}`;
 }
 
 /* The mode badge is the page's claim about what is on screen, so it is a pure
@@ -208,7 +229,7 @@ export function createSeqIndex(model) {
 const CSS_FALLBACK = {
   text: "#e8eefc",
   muted: "#8fa0c4",
-  dim: "#5f7096",
+  dim: "#7a8cb0",
   line: "#24324f",
   accent: "#a3e635",
   success: "#4ade80",

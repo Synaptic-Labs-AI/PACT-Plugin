@@ -10,6 +10,7 @@ import {
   missionSecondsAt,
   rootChangeAction,
   modeBadge,
+  requestedFilterLabel,
 } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
@@ -86,7 +87,7 @@ const state = {
   etag: null,
   lastError: "",
   demoAvailable: true,
-  requestedProject: "",
+  requestedFilter: "",
   suppress: false,
   pollTimer: 0,
   raf: 0,
@@ -265,14 +266,17 @@ async function pollLive() {
       session_id: ref.session_id,
       since: state.etag,
     });
-    /* The server answered, so a connection banner from an earlier poll is
-     * stale even when this poll found no new events. */
+    /* A stale poll belongs to a view that is gone: it must not touch the
+     * error banner either. */
+    if (!state.current || state.current.key !== ref.key) return;
+    /* The server answered for the current run, so a connection banner from an
+     * earlier poll is stale even when this poll found no new events. */
     if (state.lastError) hideError();
     if (!data || data.unchanged) return;
-    if (!state.current || state.current.key !== ref.key) return;
     const follow = state.followLive;
     const priorCursor = state.cursor;
-    const priorTotal = state.model && Array.isArray(state.model.events) ? state.model.events.length : 0;
+    const priorEvents = state.model && Array.isArray(state.model.events) ? state.model.events : [];
+    const priorLastSeq = priorEvents.length ? Number(priorEvents[priorEvents.length - 1].seq) : -1;
     state.etag = data.etag || null;
     state.model = data;
     if (stage) stage.setModel(data);
@@ -283,7 +287,12 @@ async function pollLive() {
     else setCursor(clamp(priorCursor, 0, total), { animate: false });
     updateHeader(data);
     if (achievements) achievements.evaluate(data, { live: true });
-    const added = Math.max(0, data.events.length - priorTotal);
+    /* Count by seq, not length: above MAX_EVENTS the window length is
+     * constant while the contents shift, so a length delta reads 0. */
+    let added = 0;
+    for (const event of data.events) {
+      if (Number(event && event.seq) > priorLastSeq) added += 1;
+    }
     if (follow && added > 0) {
       const phase = data.phases && data.phases.current ? ` in ${data.phases.current}` : "";
       announce(`${added} new event${added === 1 ? "" : "s"}${phase}`);
@@ -478,7 +487,7 @@ function selectRoot(rootId, { open = true } = {}) {
     const first = sessionsFor(rootId, slug)[0];
     const action = rootChangeAction({
       hasSession: Boolean(first),
-      requestedProject: state.requestedProject,
+      requestedFilter: state.requestedFilter,
       hasRun: Boolean(state.model),
     });
     if (action === "open") {
@@ -487,7 +496,7 @@ function selectRoot(rootId, { open = true } = {}) {
       /* The displayed run belongs to the previous root; keeping it under a
        * NO SESSIONS caption would be the same lie in a different place. */
       clearRunView();
-      showEmptyProject(state.requestedProject);
+      showEmptyFilter(state.requestedFilter);
     } else if (action === "demo") {
       openDemo();
     }
@@ -526,18 +535,18 @@ function clearRunView() {
   updateTimeline();
 }
 
-/* A launch-level project filter that matches nothing must say so. Falling
- * through to the demo shows a different run as if it were the requested one. */
-function showEmptyProject(project) {
-  const name = String(project || "").trim();
+/* A launch-level filter that matches nothing must say so. Falling through to
+ * the demo shows a different run as if it were the requested one. */
+function showEmptyFilter(label) {
+  const name = String(label || "").trim();
   if (!name) return;
   hideError();
   if (panels) {
     panels.setNotice(
-      `No sessions for project ${name}. Choose another project, or open the training simulation.`
+      `No sessions for ${name}. Choose another project or session, or open the training simulation.`
     );
   }
-  els.stageCaption.textContent = `NO SESSIONS FOR PROJECT ${name.toUpperCase()}`;
+  els.stageCaption.textContent = `NO SESSIONS FOR ${name.toUpperCase()}`;
   setModeLabel(); /* no run is open; the badge must not keep saying LIVE */
 }
 
@@ -555,12 +564,10 @@ async function loadInitial() {
     }
     els.demo.hidden = !state.demoAvailable;
     const data = await refreshList(params.get("root") || undefined);
-    /* The launch `--project` filter is applied server-side. The payload echo
-     * (or a project query param) is the only way the page can name it. */
-    state.requestedProject =
-      (data && data.filters && typeof data.filters.project === "string" && data.filters.project) ||
-      params.get("project") ||
-      "";
+    /* Only the server's launch filters narrowed the list, and the payload
+     * echoes them; a query param here would name a filter that was never
+     * applied to the response. */
+    state.requestedFilter = requestedFilterLabel(data && data.filters);
     const rootId = els.root.value;
     if (params.has("demo") || (USE_MOCK && !params.has("session"))) {
       await openDemo();
@@ -583,7 +590,7 @@ async function loadInitial() {
         await openSession(pick, { fromUrl: true });
       } else {
         selectRoot(rootId, { open: false });
-        if (state.requestedProject) showEmptyProject(state.requestedProject);
+        if (state.requestedFilter) showEmptyFilter(state.requestedFilter);
         else await openDemo();
       }
     }
@@ -681,7 +688,13 @@ async function openSession(ref, opts = {}) {
     if (live) startPolling();
     else stopPolling();
   } catch (err) {
-    if (token === sessionRequest) showError(`Could not open run: ${err.message}`, () => openSession(ref));
+    if (token === sessionRequest) {
+      showError(`Could not open run: ${err.message}`, () => openSession(ref));
+      /* The previous run is still on screen, and this load stopped its
+       * polling. If that run is live, resume it so the LIVE badge stays true;
+       * startPolling() is a no-op for a demo, replay or ended run. */
+      startPolling();
+    }
   } finally {
     if (token === sessionRequest) setLoading(false);
   }
@@ -885,11 +898,17 @@ function toggleFullscreen() {
 
 function bindKeyboard() {
   window.addEventListener("keydown", (event) => {
-    const tag = (event.target && event.target.tagName) || "";
-    if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(tag) || (event.target && event.target.isContentEditable)) {
-      if (event.key === "Escape") {
-        if (panels) panels.closeModal();
-      }
+    const target = event.target;
+    const tag = (target && target.tagName) || "";
+    /* Escape is a global dismissal, so it runs before the form-control guard:
+     * a focused drawer toggle is a BUTTON, and the drawer must still close. */
+    if (event.key === "Escape") {
+      if (panels) panels.closeModal();
+      closeDrawers();
+      if (state.discon) toggleDisco(false);
+      return;
+    }
+    if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(tag) || (target && target.isContentEditable)) {
       return;
     }
     if (event.key === " " || event.code === "Space") {
@@ -914,10 +933,6 @@ function bindKeyboard() {
     } else if (event.key === "?" || event.key === "/") {
       event.preventDefault();
       openDebrief("help");
-    } else if (event.key === "Escape") {
-      if (panels) panels.closeModal();
-      closeDrawers();
-      if (state.discon) toggleDisco(false);
     }
   });
 

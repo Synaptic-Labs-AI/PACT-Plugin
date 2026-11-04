@@ -14,6 +14,7 @@ import {
   toggleClass,
   createSeqIndex,
   runKey,
+  feedKey,
 } from "./dom.js";
 import { drawRadar, drawSparkline } from "./charts.js";
 
@@ -1070,7 +1071,7 @@ export class Panels {
       if (event && match(event)) matches.push({ event, index });
     }
     this._feed = {
-      key: runKey(this.model),
+      key: feedKey(this.model),
       filter: this.filter,
       count: this.cursor,
       matched: matches.length,
@@ -1124,7 +1125,7 @@ export class Panels {
       return;
     }
     const events = asArray(this.model && this.model.events);
-    if (this._feed.key !== runKey(this.model) || this._feed.filter !== this.filter || !this._feed.list) {
+    if (this._feed.key !== feedKey(this.model) || this._feed.filter !== this.filter || !this._feed.list) {
       this._rebuildFeed(feed);
       return;
     }
@@ -1150,7 +1151,9 @@ export class Panels {
         const event = events[index];
         if (event && match(event)) added.push({ event, index });
       }
-      for (let index = added.length - 1; index >= 0; index -= 1) {
+      /* `added` is oldest-first; prepending each in that order leaves the
+       * newest at the top, matching the newest-first feed. */
+      for (let index = 0; index < added.length; index += 1) {
         feed.insertBefore(this._feedRow(added[index].event, added[index].index), feed.firstChild);
       }
       this._feed.matched += added.length;
