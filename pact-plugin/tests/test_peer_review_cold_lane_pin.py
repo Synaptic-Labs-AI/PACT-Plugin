@@ -8,18 +8,25 @@ A token living elsewhere in the file cannot satisfy a section-scoped arm,
 and a rewording that keeps the load-bearing tokens survives.
 
 COVERED, and this list is the scope:
-- the lane section's anchor and the seven-clause dispatch contract tokens
-  (ARTIFACT/AVOID/CHANNELS/DISREGARD/OPERATIONAL FACTS/QUESTION/REPORT,
-  each pinned by its load-bearing tokens, not its label);
+- the lane section's anchor and the seven-clause dispatch contract tokens:
+  AVOID's named paths and stores, CHANNELS' barred tools, the ARTIFACT
+  PR-surface bar, the QUESTION's operative phrase, OPERATIONAL FACTS'
+  tests/lint/path-convention content, and REPORT's null-legibility tokens;
+- the lane's wiring exceptions: the skip sentence (no Task A + Task B, no
+  variety stamp, no per-reviewer journal block), the null rule
+  (review-did-not-happen, not clean), and the report-landing line
+  (review_dispatch array + review_finding with reviewer cold-reviewer);
 - the spawn shape: one inline Agent(subagent_type="general-purpose", ...)
   reference carrying NO name=, NO team_name=, NO teammate role prelude;
 - the copy-paste guard: none of the warm dispatch machinery's tokens occur
   in the cold section;
-- the always-lane bullet, the example-tree [Subagent] label, and the
-  clause-satisfaction paragraph appended after REVIEWER-MEMORY-CHANNEL;
+- the always-lane bullet, the example-tree [Subagent] label, the
+  division-of-labour sentence, and the clause-satisfaction paragraph
+  appended after REVIEWER-MEMORY-CHANNEL;
 - cross-surface coherence: peer-review.md carries the subagent cold
-  dispatch IFF the orchestrator persona's dispatch-mandatory section names
-  the exception.
+  dispatch IFF the orchestrator persona names the exception, at BOTH
+  persona sites (the Agent-Teams checkpoint and the dispatch-mandatory
+  carve-out).
 
 ENUMERATION NOTE for the copy-paste guard: the plan anticipated pinning
 the warm template's handed-path tokens (plan path, contract path). At HEAD
@@ -48,9 +55,11 @@ PEER_REVIEW = PLUGIN_ROOT / "commands" / "peer-review.md"
 PERSONA = PLUGIN_ROOT / "agents" / "pact-orchestrator.md"
 
 SECTION_HEADING = "### Cold Reviewer Lane"
-# The persona names the exception at (at least) the Agent-Teams checkpoint
-# and the dispatch-mandatory carve-out; both open with this lead-in.
-PERSONA_EXCEPTION = "Exception: the peer-review cold reviewer"
+# The persona names the exception at exactly two sites — the Agent-Teams
+# checkpoint and the dispatch-mandatory carve-out — whose lead-ins were
+# reworded apart, so the pin keys on the phrase BOTH sites share. The
+# count arm below holds the pair to two.
+PERSONA_EXCEPTION = "the peer-review cold reviewer"
 # The NEVER sentence the carve-out relaxes, located verbatim in the persona.
 PERSONA_NEVER_ANCHOR = "for specialist agents"
 
@@ -221,6 +230,133 @@ class TestReportContract:
         )
 
 
+class TestArtifactClause:
+    """The PR surface is barred: a subagent with no team and no tasks can
+    still reach the author's account of the work through `gh pr view` and
+    `gh api` — the last open narrative channel — so the bar must be in the
+    contract, not left to the reviewer's discretion."""
+
+    @pytest.mark.parametrize("token, lost", [
+        ("git diff", "the instruction to run the diff itself"),
+        ("gh pr view", "the bar on reading the PR body"),
+        ("gh api", "the bar on reading the PR comments"),
+    ])
+    def test_artifact_token_present(self, token, lost):
+        clause = _bullet("**ARTIFACT**", "**AVOID by path**")
+        assert token in clause, (
+            f"the cold lane's ARTIFACT contract lost {lost} ({token!r})"
+        )
+
+
+class TestChannelsClause:
+    """The channel prohibitions. The subagent shape closes the team inbox
+    by construction, but task tools and messaging remain loadable for a
+    plain subagent — the belt that bars them is load-bearing precisely
+    because the construction does not reach them."""
+
+    @pytest.mark.parametrize("token, lost", [
+        ("SendMessage", ("the bar on messaging reviewers, secretary, or "
+         "lead about the work")),
+        ("TaskList", ("the bar on loading task tools — the task store "
+         "carries the narrative")),
+        ("TaskGet", "the bar on reading task descriptions — ditto"),
+    ])
+    def test_channels_token_present(self, token, lost):
+        clause = _bullet("**CHANNELS**", "**DISREGARD**")
+        assert token in clause, (
+            f"the cold lane's CHANNELS contract lost {lost} ({token!r})"
+        )
+
+
+class TestQuestionClause:
+    """The operative question, verbatim. 'Does this diff implement the
+    plan' is the warm lanes' question; the cold lane's value depends on
+    asking the other one."""
+
+    def test_question_phrase_present(self):
+        clause = _bullet("**QUESTION**", "**REPORT**")
+        assert '"what is wrong with this diff"' in clause, (
+            "the cold lane's QUESTION no longer asks 'what is wrong with "
+            "this diff' — a drift toward the plan-conformance question "
+            "would erase the frame break the lane exists to buy"
+        )
+
+
+class TestOperationalFactsClause:
+    """The trial's own failure mode: a cold reviewer that cannot run the
+    project's tests or lint because the access instructions lived in the
+    documents it was told to avoid. Independence is about the narrative,
+    not about being under-equipped."""
+
+    @pytest.mark.parametrize("token, lost", [
+        ("tests", "how to run the project's tests"),
+        ("lint", "the lint gate command"),
+        ("docs/", "the path-convention facts (untracked docs/ is normal)"),
+    ])
+    def test_operational_facts_token_present(self, token, lost):
+        clause = _bullet("**OPERATIONAL FACTS**", "**QUESTION**")
+        assert token in clause, (
+            f"the cold lane's OPERATIONAL FACTS contract lost {lost} "
+            f"({token!r}) — an under-equipped lane produces "
+            f"static-tracing evidence only"
+        )
+
+
+class TestWiringExceptions:
+    """The lane's structural exceptions: what the cold dispatch SKIPS, how
+    a null report is read, and where its findings land. The skip sentence
+    is the guard against the surrounding warm-dispatch procedure absorbing
+    the cold lane back into the Task A + Task B pattern."""
+
+    def test_skip_sentence_present(self):
+        section = _cold_section()
+        assert "Task A + Task B" in section and "skips" in section, (
+            "the cold lane's skip sentence is gone — without it the "
+            "surrounding per-reviewer dispatch procedure invites wiring "
+            "the cold lane into the Task A + Task B pattern, the "
+            "conversion the section exists to prevent"
+        )
+
+    def test_null_rule_present(self):
+        section = _cold_section()
+        assert "review-did-not-happen" in section, (
+            "the null rule is gone: without 'review-did-not-happen, not "
+            "clean', a silent or empty cold report reads as a clean "
+            "review at synthesis"
+        )
+        assert "valid only with" in section, (
+            "the null rule lost its operative claim — a no-findings "
+            "report is VALID ONLY WITH the nothing-found lines, the "
+            "merge-block sentence, and the coverage boundary; without "
+            "'valid only with' the receipt list reads as advisory"
+        )
+
+    def test_report_landing_present(self):
+        section = _cold_section()
+        for token in ("review_dispatch", "review_finding", "cold-reviewer"):
+            assert token in section, (
+                f"the report-landing line lost {token!r} — a subagent's "
+                f"report lives only in the lead's conversation; without "
+                f"the journal landing it vanishes at compaction"
+            )
+
+
+class TestDivisionOfLabour:
+    """The deliberate split: warm lanes own project-policy conformance,
+    the cold lane judges the code against itself. It works only if stated,
+    so the statement is pinned."""
+
+    @pytest.mark.parametrize("token, lost", [
+        ("policy files", "the warm lanes' ownership of project policy"),
+        ("against itself", ("the cold lane's frame — the code's own "
+         "claims, not the project's rules")),
+    ])
+    def test_division_token_present(self, token, lost):
+        assert token in _cold_section(), (
+            f"the division-of-labour sentence lost {lost} ({token!r})"
+        )
+
+
 class TestSpawnShape:
     """JOINT-HIGHEST: the spawn reference carries the anonymous-subagent
     shape. A cold dispatch written by copying the warm template inherits
@@ -354,6 +490,22 @@ class TestCrossSurfaceCoherence:
             "sentence it relaxes — a carve-out elsewhere in the persona "
             "leaves the blanket rule reading as unqualified at the point "
             "a lead reads it"
+        )
+
+    def test_exception_named_at_both_persona_sites(self):
+        """TWO sites, not one: the dispatch-mandatory carve-out (read when
+        dispatching) and the Agent-Teams checkpoint (read when a lead
+        catches an Agent call without team_name — exactly the cold spawn
+        shape). Either one alone leaves the other surface reading as an
+        unqualified rule, and a lead obeying it 'corrects' the cold spawn
+        back into a teammate."""
+        persona = PERSONA.read_text(encoding="utf-8")
+        count = persona.count(PERSONA_EXCEPTION)
+        assert count >= 2, (
+            f"the persona names {PERSONA_EXCEPTION!r} at {count} site(s); "
+            f"expected both the checkpoint and the dispatch-mandatory "
+            f"carve-out. A site lost its exception and now reads as an "
+            f"unqualified rule at the point a lead checks it."
         )
 
     def test_persona_reviewer_list_names_the_lane(self):
