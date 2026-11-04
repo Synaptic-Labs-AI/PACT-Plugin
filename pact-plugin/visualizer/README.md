@@ -279,7 +279,10 @@ line and forward the port, for example
 
 **Address already in use.** Choose another loopback port with `--port`, or stop
 the old instance with `--stop` first. The tool reuses a healthy detached instance
-rather than starting a second one, so a stale `--stop` is rarely needed.
+rather than starting a second one, so a stale `--stop` is rarely needed. It
+refuses to reuse one recorded by a different build version, root set, port,
+launch mode, or filter — stop that instance first; a record with no readable
+version is reported as `(unknown)` and refused too.
 
 **`--stop` reports no running instance.** `Stop: not running` is success, not an
 error: no healthy detached instance was found, and any stale state file was
