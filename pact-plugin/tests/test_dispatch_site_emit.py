@@ -12,9 +12,12 @@ another), so the population leg is the owner-BEARING shape, not the composite
 owner+addBlockedBy the ordering gate keys on — a composite-keyed population is
 dark by construction on every real arc. Teachback Task-A gates are excluded by
 the SUBJECT carve-out alone (the named dependence: an owner-only write is
-exactly the split wiring a gate receives); review-panel dispatches are EXCLUDED
-because no owner write ever witnesses them (documented exclusion — their
-dispatches stay visible via the review_dispatch stream).
+exactly the split wiring a gate receives); membership is otherwise PATH-BLIND
+— a reviewer dispatch with owner wiring is a site like any work dispatch, and
+the dark set is everything failing a leg of the witness (owner absent, owner
+not resolving to a pact specialist, teachback-shaped subject, teachback-exempt
+owner) plus dispatches with no task at all and lead-owned coordination
+umbrellas.
 
 WHY THE TaskUpdate BRANCH AND NOT BESIDE dispatch_variety: that emit lives in
 the TaskCreate branch and keys on metadata.variety PRESENCE, because
@@ -422,8 +425,9 @@ class TestEvaluationOrderNegations:
         )
 
     def test_partial_wiring_blockers_only_does_not_emit(self, env, events):
-        """No owner named → no witness. This is the review-dispatch shape too:
-        a write that never names owner cannot witness a dispatch site."""
+        """No owner named → no witness, whatever the lane: membership is
+        path-blind, so any dispatch's write — work, review, coordination —
+        that never names owner cannot witness a dispatch site."""
         seed(env, metadata={"variety": STAMP})
         tlg.evaluate_lifecycle(wiring(owner=None))
         assert sites(events) == []
@@ -647,13 +651,11 @@ class TestLiveDispatchShapes:
         )
 
     def test_review_dispatch_shape_never_owner_wired_no_site(self, env, events):
-        """Review-panel dispatches are EXCLUDED BY DOCUMENTED SEMANTICS: the
-        peer-review path dispatches reviewers without ever writing owner on
-        the task, so no owner write witnesses them. Whatever else lands on
-        such a task — status flips, blocker writes — witnesses nothing. Their
-        dispatches stay visible through the review_dispatch stream; wanting
-        them in this population is remedied by canonical owner wiring at
-        dispatch (practice-side), never by inferring ownership here."""
+        """A review-shaped task that is never owner-wired is dark BY
+        MECHANISM, not by lane: membership is path-blind, so a reviewer
+        dispatch WITH owner wiring would be a site — but this task never
+        receives one, and whatever else lands on it (status flips, blocker
+        writes) witnesses nothing."""
         seed(env, owner="", subject="review-coder: review PR #99 on the thing",
              metadata={"variety": STAMP})
         # The writes a never-owner-wired task receives: blockers-only and

@@ -806,9 +806,11 @@ def _emit_dispatch_site(
     Both come from one stream, so the distribution and the site count can
     never be sourced over different populations.
 
-    MEMBERSHIP IS OWNER-WITNESSED, NEVER INFERRED. One event means one
-    dispatch BY CONSTRUCTION: the owner write on the task is the witness.
-    Two shapes are OUT and stay out:
+    MEMBERSHIP IS OWNER-WITNESSED, NEVER INFERRED, and PATH-BLIND: one
+    event means one dispatch BY CONSTRUCTION, the owner write on the task
+    is the witness, and the dispatching path (work, review, otherwise) is
+    never a membership input — a reviewer dispatch with owner wiring is a
+    site exactly like a work dispatch. Two shapes are OUT and stay out:
 
       * Teachback Task-A gates — excluded by the SUBJECT carve-out at step
         (5). DEPENDENCE, named where the membership is defined: under the
@@ -817,13 +819,11 @@ def _emit_dispatch_site(
         discriminator — membership depends on the TEACHBACK subject
         convention. A gate whose subject loses that marker is counted as a
         site.
-      * Review-panel dispatches — the peer-review path dispatches reviewers
-        WITHOUT ever writing owner on the task, so no owner write witnesses
-        them and no emit leg can cover them without inferring ownership from
-        a display convention. Wanting them counted is remedied by canonical
-        owner wiring at dispatch (a practice-side change), never by widening
-        this emit's inference; they stay visible through the
-        ``review_dispatch`` stream.
+      * Everything failing a leg of the witness — owner absent, owner not
+        resolving to a pact specialist, teachback-shaped subject,
+        teachback-exempt owner — plus dispatches with no task at all and
+        lead-owned coordination umbrellas. Those lanes are examples of the
+        mechanism, never its definition.
 
     READ BY Q5, AND IT IS THE ONLY SOURCE: commands/wrap-up.md sources the
     retrospective's dispatch population from this stream and says so under a
