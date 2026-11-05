@@ -1160,15 +1160,16 @@ def _run_direct_guard(line, list_variable, raw_variable, cli_events,
 
 
 def _run_q6_creation_model(q6, raw_events, feature_event, candidates,
-                           arc_start, current_team):
+                           arc_start, current_team, parse_ts=None):
     """Execute wrap-up's per-candidate creation-witness expressions."""
     if not candidates:
         return {"outcome": "GENUINE ZERO", "flags": []}
     if any(not isinstance(event, dict) for event in raw_events):
         return {"outcome": "UNAVAILABLE", "flags": []}
+    parser = parse_ts or _parse_ts
     try:
         for event in raw_events:
-            _parse_ts(event.get("ts"))
+            parser(event.get("ts"))
     except (ValueError, TypeError):
         return {"outcome": "UNAVAILABLE", "flags": []}
     namespace = {
@@ -2064,6 +2065,56 @@ class TestQ5Q7ReportingContract:
         assert result["unwitnessed_count"] == 1
         assert direct_excluded == 2
         assert result["unreadable_withheld_count"] != direct_excluded
+
+    def test_q6_documented_inputs_bind_parser_and_team(self, tmp_path):
+        """The instruction itself supplies parser and team, with no test injection."""
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        valid = _candidate("41", flag="no")
+        mismatched = _candidate("42", flag="no")
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        _write_creation(session, valid, arc_start, team="test-team")
+        _write_creation(session, mismatched, arc_start, team="other-team")
+        raw = _raw_journal_events(session)
+        feature = next(
+            event for event in raw
+            if event["type"] == "variety_assessed"
+            and event["ts"] == arc_start
+        )
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        namespace = {}
+        _exec_documented_chain(
+            _backticked_expression(
+                q6, "from shared.session_journal import _parse_ts"
+            ),
+            namespace,
+        )
+        assert "_parse_ts" in namespace
+        assert "_ts_ge" in namespace
+        binding = _backticked_expression(q6, "current_team_name =")
+        binding = binding.replace("{team_name}", "test-team")
+        _exec_documented_chain(binding, namespace)
+        assert namespace["current_team_name"] == "test-team"
+
+        result = _run_q6_creation_model(
+            q6, raw, feature, [valid], arc_start,
+            namespace["current_team_name"], parse_ts=namespace["_parse_ts"],
+        )
+        assert result["outcome"] == "LEGACY"
+        assert result["flags"] == ["no"]
+
+        result = _run_q6_creation_model(
+            q6, raw, feature, [mismatched], arc_start,
+            namespace["current_team_name"], parse_ts=namespace["_parse_ts"],
+        )
+        assert result["outcome"] == "UNAVAILABLE"
+        assert result["flags"] == []
 
     @pytest.mark.parametrize(
         ("question", "failure_text"),
