@@ -109,18 +109,19 @@ class TestIsSafePluginRoot:
 class TestSubstitutionSentence:
     @pytest.mark.parametrize("root", REAL_ROOTS)
     def test_real_roots_render_byte_identically(self, root):
-        text = format_session_substitutions("session-9f8e7d6c", "/s", root, "main")
+        text = format_session_substitutions("session-9f8e7d6c", "/s", root, "main", SESSION_ID)
         assert text == (
             "Session placeholder variables (substitute before running commands): "
             "Use the name `session-9f8e7d6c` wherever {team_name} appears in commands. "
             "Use `/s` wherever {session_dir} appears in commands. "
+            f"Running session id: `{SESSION_ID}`. "
             f"Use `{root}` wherever {{plugin_root}} appears in commands. "
             "Use `main` wherever {lead_address} appears in spawn prompts and task text."
         )
 
     @pytest.mark.parametrize("root", HOSTILE_ROOTS)
     def test_hostile_roots_are_named_unavailable(self, root):
-        text = format_session_substitutions("t", "/s", root, "main")
+        text = format_session_substitutions("t", "/s", root, "main", SESSION_ID)
         reason = "(not set)" if root == "" else "(not a safe absolute path)"
         assert f"Plugin root unavailable {reason}" in text
         assert "wherever {plugin_root} appears in commands" not in text
@@ -132,13 +133,13 @@ class TestSubstitutionSentence:
 class TestTeamNameResidual:
     @pytest.mark.parametrize("team", ["-", "--", "---", "a" * 129])
     def test_all_dash_and_over_long_names_are_unavailable(self, team):
-        text = format_session_substitutions(team, "/s", "/p", "main")
+        text = format_session_substitutions(team, "/s", "/p", "main", SESSION_ID)
         assert "Team name unavailable" in text
         assert "Use the name `" not in text
 
     @pytest.mark.parametrize("team", ["a" * 128, "-a-", "session-9f8e7d6c"])
     def test_names_at_the_limit_still_pass(self, team):
-        text = format_session_substitutions(team, "/s", "/p", "main")
+        text = format_session_substitutions(team, "/s", "/p", "main", SESSION_ID)
         assert f"Use the name `{team}` wherever {{team_name}}" in text
 
 
@@ -304,7 +305,7 @@ class TestPluginBanner:
         # not a safe absolute path. Both now judge the raw value.
         banner = self._banner(monkeypatch, root)
         assert banner.endswith("(root: <unsafe>)")
-        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead")
+        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead", SESSION_ID)
         assert "Plugin root unavailable (not a safe absolute path)" in sentence
 
 
@@ -317,7 +318,7 @@ class TestAllSinksAgree:
     def test_every_sink_shows_the_same_root(self, tmp_path, monkeypatch, root):
         from shared.plugin_manifest import format_plugin_banner
 
-        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead")
+        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead", SESSION_ID)
         assert f"Use `{root}` wherever {{plugin_root}}" in sentence
         block = _session_block_text(SESSION_ID, "pact-x", "/s", root, "2026")
         assert f"- Plugin root: `{root}`" in block
@@ -329,7 +330,7 @@ class TestAllSinksAgree:
         from shared.plugin_manifest import format_plugin_banner
 
         assert not is_safe_plugin_root(root)
-        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead")
+        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead", SESSION_ID)
         assert "Plugin root unavailable (not a safe absolute path)" in sentence
         block = _session_block_text(SESSION_ID, "pact-x", "/s", root, "2026")
         assert "Plugin root" not in block
