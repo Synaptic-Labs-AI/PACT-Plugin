@@ -1472,7 +1472,9 @@ class TestQ5Q7ReportingContract:
         ]
         for call in required_calls:
             assert content.count(call) >= 1, call
-        assert "FIRST empty direct stream" in content
+        assert "FIRST empty direct read across Q5-Q7" in content
+        assert content.count("shared acquisition rule") == 2
+        assert "metadata.teachback_submit.variety_acknowledgment.concern" in content
         assert "raw_events = [json.loads(line) for line in open(f" in content
         assert "raw_dispatch_site = [e for e in raw_events" in content
         assert content.index("raw_dispatch_site =") < content.index(
@@ -1668,6 +1670,68 @@ class TestQ5Q7ReportingContract:
         assert _run_direct_guard(
             q5, "events", "raw_dispatch_site", [], clean_raw,
             "dispatch_site", arc_start,
+        ) == "LEGITIMATE ZERO"
+
+    def test_q6_q7_first_empty_binds_when_all_q5_streams_are_nonempty(self, tmp_path):
+        """Q6/Q7 bind on their first empty read, then share it without reacquiring."""
+        arc_start = "2026-06-14T12:00:00Z"
+        session = tmp_path / "session"
+        _write_event(session, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_event(session, "dispatch_site", task_id="2", variety=_stamp(8), ts=arc_start)
+        _write_event(session, "task_metadata_snapshot", task_id="9", metadata={}, ts=arc_start)
+        _write_event(
+            session, "journal_emit_skipped", skipped_type="dispatch_site",
+            cause="returned_false", ts=arc_start,
+        )
+        _write_event(
+            session, "teachback_ack", task_id="41",
+            rationale_articulates_this_dispatch="no", ts=arc_start,
+        )
+        _write_event(
+            session, "handoff_refusal_degraded", agent_type="pact-backend-coder",
+            detail="PACT Handoff Refusal: missing produced",
+            classes=["missing_handoff"], ts=arc_start,
+        )
+        # Every Q5 direct stream is nonempty, so Q5 performs no raw acquisition.
+        assert _read_events(session, "dispatch_site", arc_start)
+        assert _read_events(session, "task_metadata_snapshot", arc_start)
+        assert _read_events(session, "variety_assessed", arc_start)
+        assert _read_events(session, "journal_emit_skipped", arc_start)
+        raw_reads = 0
+        assert raw_reads == 0
+
+        raw_events = _raw_journal_events(session)
+        raw_reads += 1  # Q6 is the first empty direct read across Q5-Q7.
+        assert raw_reads == 1
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        assert _run_direct_guard(
+            q6, "events", "raw_teachback_ack", [], raw_events,
+            "teachback_ack", arc_start,
+        ) == "UNAVAILABLE"
+
+        q7 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "7. **HANDOFF refusal degradations**",
+        )
+        assert _run_direct_guard(
+            q7, "events", "raw_refusal_degraded", [], raw_events,
+            "handoff_refusal_degraded", arc_start,
+        ) == "UNAVAILABLE"
+        assert raw_reads == 1  # Q7 reused the bound list without another acquisition.
+
+        clean = tmp_path / "clean"
+        _write_event(clean, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        clean_raw = _raw_journal_events(clean)
+        assert _run_direct_guard(
+            q6, "events", "raw_teachback_ack", [], clean_raw,
+            "teachback_ack", arc_start,
+        ) == "LEGITIMATE ZERO"
+        assert _run_direct_guard(
+            q7, "events", "raw_refusal_degraded", [], clean_raw,
+            "handoff_refusal_degraded", arc_start,
         ) == "LEGITIMATE ZERO"
 
     def test_va_feature_anchor_process_and_derived_empty_are_distinct(self, tmp_path):
