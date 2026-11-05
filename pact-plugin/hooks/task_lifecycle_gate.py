@@ -807,7 +807,7 @@ def _emit_dispatch_site(
     never be sourced over different populations.
 
     MEMBERSHIP IS OWNER-WITNESSED, NEVER INFERRED, and PATH-BLIND: one
-    event means one dispatch BY CONSTRUCTION, the owner write on the task
+    event witnesses a dispatch and contributes ONE COUNTED SITE PER (team, task), never by inference; it does not prove one dispatch per task across arcs, the owner write on the task
     is the witness, and the dispatching path (work, review, otherwise) is
     never a membership input — a reviewer dispatch with owner wiring is a
     site exactly like a work dispatch. The stream counts ONE SITE PER
@@ -838,7 +838,11 @@ def _emit_dispatch_site(
         are IN this population — each owner-wired reviewer dispatch is
         itself a site — and the ``review_dispatch`` stream is a second,
         independent record of the panel roster, never a substitute; a
-        review lane outside that command has no journal witness.
+        external review lane has no command-specific
+        ``review_dispatch`` roster event, but an owner-wired review task
+        still emits ``dispatch_site``; the peer-review cold lane is taskless,
+        so it has no ``dispatch_site`` while its roster entry remains in
+        ``review_dispatch``.
 
     READ BY Q5, AND IT IS THE ONLY SOURCE: commands/wrap-up.md sources the
     retrospective's dispatch population from this stream and says so under a

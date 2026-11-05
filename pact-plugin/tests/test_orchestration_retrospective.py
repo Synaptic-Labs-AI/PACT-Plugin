@@ -12,15 +12,20 @@ Tests cover:
 8. Q7 handoff_refusal_degraded question presence pin
 """
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from shared.teachback_schema import resolve_variety_total  # noqa: E402
+from shared.session_journal import _ts_ge  # noqa: E402
 from shared.variety_divergence import (  # noqa: E402
     extract_dispatch_coverage,
     extract_final_dispatch_coverage,
+    resolve_arc_start,
 )
 
 WRAPUP_PATH = Path(__file__).parent.parent / "commands" / "wrap-up.md"
@@ -301,10 +306,10 @@ class TestRetroReadHardening:
         # now states what was OBSERVED, so the landmark moves with it.
         # Identical assertion shape: same three guard requirements, same
         # single ordering check, one substituted landmark string.
-        assert "no dispatch sites recorded" in q5
+        assert "no `dispatch_site` events recorded this arc" in q5
         # ordering: the guard must precede the OMISSION conclusion
         assert q5.index("masked-empty guard") < q5.index(
-            "no dispatch sites recorded"
+            "no `dispatch_site` events recorded this arc"
         )
 
     def test_q5_stops_on_a_failed_snapshot_read_rather_than_passing_empty(
@@ -352,7 +357,7 @@ class TestRetroReadHardening:
         helper cannot check this, so the instruction owns it."""
         assert "read --type task_metadata_snapshot" in q5
         assert "the SAME `--since` value" in q5
-        assert "BOTH reads omit `--since`" in q5
+        assert "BOTH reads carry the validated `--since '{arc_start}'`" in q5
 
     def test_q5_denominator_comes_from_the_one_pass_helper(self, q5):
         """Successor to the retired-helper pin. The NEGATIVE half is the
@@ -455,8 +460,8 @@ class TestRetroReadHardening:
         )
 
     def test_q5_arc_scoped_with_since(self, q5):
-        assert "Arc scope (current feature only)" in q5
-        assert "--since" in q5
+        assert "Inputs and shared Q5-Q7 prerequisites" in q5
+        assert "EVERY one carrying `--since '{arc_start}'`" in q5
 
     # --- Q6 structural safety (no explicit re-read guard; rests on the
     #     parse bans + fallback-on-zero) ---
@@ -489,13 +494,14 @@ class TestRetroReadHardening:
         any conclusion, so it cannot be reported as a real 0% cargo-cult
         signal rate (#966 noted a masked read corrupting Q6 to 0% vs a true
         44%). The guard must precede the fallback-on-zero branch."""
-        assert "Masked-empty guard" in q6
+        assert "masked-empty guard" in q6
         assert "re-read the raw" in q6
         assert "session-journal.jsonl" in q6
-        assert "genuinely absent" in q6
-        assert "0% signal rate" in q6
+        assert "_ts_ge(e.get(\"ts\"), arc_start)" in q6
+        assert "genuine zero" in q6
+        assert "never a zero rate" in q6
         # ordering: the re-read guard precedes the fallback-on-zero clause
-        assert q6.index("Masked-empty guard") < q6.index("fall back to the legacy")
+        assert q6.index("masked-empty guard") < q6.index("fall back to the legacy")
 
 
 class TestTotalExtraction:
@@ -1025,4 +1031,272 @@ class TestComPACTDoesNotInvokeTheRetrospective:
             "the resolve_arc_start docstring's 'comPACT does not invoke the "
             "retrospective' claim no longer holds structurally — revisit "
             "that docstring in the same change."
+        )
+
+
+_SJ_SCRIPT = str(
+    Path(__file__).parent.parent / "hooks" / "shared" / "session_journal.py"
+)
+
+
+def _journal_cli(session_dir, *args, data=None):
+    command = [sys.executable, _SJ_SCRIPT, *args, "--session-dir", str(session_dir)]
+    if data is not None:
+        command.extend(["--data", json.dumps(data)])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(session_dir.parent)},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def _write_event(session_dir, event_type, **fields):
+    return _journal_cli(session_dir, "write", "--type", event_type, data=fields)
+
+
+def _read_events(session_dir, event_type, since=None):
+    args = ["read", "--type", event_type]
+    if since is not None:
+        args.extend(["--since", since])
+    return json.loads(_journal_cli(session_dir, *args).stdout)
+
+
+def _stamp(total):
+    return {
+        "novelty": 2,
+        "scope": 2,
+        "uncertainty": 2,
+        "risk": 2,
+        "total": total,
+    }
+
+
+def _run_documented_witness(q5, feature_task, events, feature_task_id):
+    """Execute wrap-up's witness expressions, stopping before any Q5 join."""
+    arc_start = resolve_arc_start(events, feature_task_id)
+    namespace = {
+        "feature_task": feature_task,
+        "feature_task_id": feature_task_id,
+        "variety_assessed_events": events,
+        "arc_start": arc_start,
+    }
+    if arc_start is None:
+        return "UNAVAILABLE", namespace
+    if "variety" not in feature_task.get("metadata", {}):
+        return "UNAVAILABLE", namespace
+    for prefix in (
+        "feature_metadata =",
+        "task_witness =",
+        "latest_feature_events =",
+    ):
+        _exec_documented_chain(_backticked_expression(q5, prefix), namespace)
+    if len(namespace["latest_feature_events"]) != 1:
+        return "UNAVAILABLE", namespace
+    for prefix in ("feature_event =", "event_witness ="):
+        _exec_documented_chain(_backticked_expression(q5, prefix), namespace)
+    feature_event = namespace["feature_event"]
+    if (
+        "variety" not in feature_event
+        or namespace["event_witness"] != namespace["task_witness"]
+    ):
+        return "UNAVAILABLE", namespace
+    feature_variety = resolve_variety_total(feature_event["variety"])
+    namespace["feature_variety"] = feature_variety
+    return (
+        "NO FEATURE VARIETY" if feature_variety is None else "WITNESSED",
+        namespace,
+    )
+
+
+class TestQ5Q7ReportingContract:
+    def test_shared_gate_precedes_metrics_and_none_never_omits_since(self):
+        content = WRAPUP_PATH.read_text(encoding="utf-8")
+        q5 = _question_line(content, "5. **Variety divergence**")
+        q6 = _question_line(content, "6. **Variety acknowledgment signals**")
+        q7 = _question_line(content, "7. **HANDOFF refusal degradations**")
+        assert q5.index("Before ANY Q5-Q7 metric read") < q5.index(
+            "read --type dispatch_site"
+        )
+        assert q5.index("feature_task_id` must be non-`None") < q5.index(
+            "arc_start = resolve_arc_start"
+        )
+        assert q5.index("A `None` result is UNAVAILABLE") < q5.index(
+            "read --type dispatch_site"
+        )
+        for line in (q5, q6, q7):
+            assert "when `arc_start` is `None`" not in line
+            assert "_ts_ge(e.get(\"ts\"), arc_start)" in line
+        assert "Q6 and Q7: skipped" in q5
+        assert "Q6 UNAVAILABLE" in q6
+        assert "Q7 UNAVAILABLE" in q7
+
+    def test_five_outcomes_and_one_ordered_suffix(self):
+        content = WRAPUP_PATH.read_text(encoding="utf-8")
+        assert "**UNAVAILABLE — shared-prerequisite failure**" in content
+        assert content.count("**One common suffix**") == 1
+        assert "no `dispatch_site` events recorded this arc" in content
+        assert "including task-id-reuse dedup" in content
+        assert "last line of the form" not in content
+        assert content.count("resolvable totals across") == 3
+        assert content.count(
+            "The current-arc feature assessment exists, but its total is unresolvable."
+        ) == 1
+        assert "exactly one of five `{form}` values" in content
+        assert "Q6 actually ran and its dual-trigger fired" in content
+        suffix = content.split("**One common suffix**", 1)[1]
+        ordered = [
+            "dispatch sites left no sample",
+            "recorded dispatch_site events had no resolvable variety total",
+            "fallback_used",
+            "total_unresolved",
+            "superseded:",
+            "late_stamped",
+            "dispatch_malformed",
+            "superseded_dimensions_only",
+            "dimensions_incomparable",
+            "Each final value rests on emitter preconditions",
+            "feature_task_id:",
+            "The current-arc feature assessment exists",
+        ]
+        positions = [suffix.index(token) for token in ordered]
+        assert positions == sorted(positions)
+
+    def test_documented_witness_match_mismatch_and_duplicate(self):
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        event = {
+            "type": "variety_assessed",
+            "task_id": "100",
+            "ts": "2026-06-14T12:00:00Z",
+            "variety": _stamp(14),
+        }
+        feature_task = {
+            "metadata": {"variety": {**_stamp(14), "risk_rationale": "text"}}
+        }
+        outcome, _ = _run_documented_witness(q5, feature_task, [event], "100")
+        assert outcome == "WITNESSED"
+        mismatch = {
+            "metadata": {"variety": {**_stamp(13), "risk_rationale": "text"}}
+        }
+        outcome, _ = _run_documented_witness(q5, mismatch, [event], "100")
+        assert outcome == "UNAVAILABLE"
+        outcome, _ = _run_documented_witness(
+            q5, feature_task, [event, dict(event)], "100"
+        )
+        assert outcome == "UNAVAILABLE"
+
+    def test_real_journal_unresolvable_witness_is_no_feature(self, tmp_path):
+        session_dir = tmp_path / "session"
+        ts = "2026-06-14T12:00:00Z"
+        _write_event(
+            session_dir,
+            "variety_assessed",
+            task_id="100",
+            variety={"total": "unresolvable"},
+            ts=ts,
+        )
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="2",
+            variety=_stamp(14),
+            ts="2026-06-14T13:00:00Z",
+        )
+        events = _read_events(session_dir, "variety_assessed")
+        feature_task = {
+            "metadata": {
+                "variety": {"total": "unresolvable", "risk_rationale": "text"}
+            }
+        }
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        outcome, namespace = _run_documented_witness(
+            q5, feature_task, events, "100"
+        )
+        assert outcome == "NO FEATURE VARIETY"
+        assert namespace["arc_start"] == ts
+        assert len(_read_events(session_dir, "dispatch_site", ts)) == 1
+
+    @pytest.mark.parametrize("missing_metadata", [True, False])
+    def test_real_journal_prior_arc_cannot_anchor_without_a_witness(
+        self, tmp_path, missing_metadata
+    ):
+        session_dir = tmp_path / "session"
+        _write_event(
+            session_dir,
+            "variety_assessed",
+            task_id="100",
+            variety=_stamp(8),
+            ts="2026-06-13T12:00:00Z",
+        )
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="2",
+            variety=_stamp(8),
+            ts="2026-06-13T13:00:00Z",
+        )
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="3",
+            variety=_stamp(14),
+            ts="2026-06-14T13:00:00Z",
+        )
+        feature_task = {
+            "metadata": (
+                {} if missing_metadata
+                else {"variety": {**_stamp(9), "risk_rationale": "text"}}
+            )
+        }
+        events = _read_events(session_dir, "variety_assessed")
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        outcome, namespace = _run_documented_witness(
+            q5, feature_task, events, "100"
+        )
+        assert outcome == "UNAVAILABLE"
+        assert "coverage" not in namespace
+
+    def test_real_journal_scoped_raw_guard_ignores_prior_reused_task(self, tmp_path):
+        session_dir = tmp_path / "session"
+        prior_ts = "2026-06-13T12:00:00Z"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="42",
+            variety=_stamp(8),
+            ts=prior_ts,
+        )
+        _write_event(
+            session_dir,
+            "variety_assessed",
+            task_id="100",
+            variety=_stamp(9),
+            ts=arc_start,
+        )
+        assert _read_events(session_dir, "dispatch_site", arc_start) == []
+        raw_events = [
+            json.loads(line)
+            for line in (session_dir / "session-journal.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        scoped_raw = [
+            event for event in raw_events
+            if event.get("type") == "dispatch_site"
+            and _ts_ge(event.get("ts"), arc_start)
+        ]
+        assert scoped_raw == []
+        assert any(
+            event.get("type") == "dispatch_site" for event in raw_events
         )

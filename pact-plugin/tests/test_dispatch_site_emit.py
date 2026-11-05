@@ -763,9 +763,9 @@ class TestReviewerInclusionPin:
 
     def test_T5_work_subject_containing_review_still_emits(self, env, events):
         """COLLISION ARM. A WORK dispatch whose subject merely contains
-        'review' emits like any work dispatch: any subject-TEXT carve-out
-        eats work lanes, which is why membership keys on the owner write
-        alone."""
+        'review' emits like any work dispatch: membership keys on the
+        owner-witnessing write rather than the dispatching path or a
+        subject-text heuristic, so a subject-TEXT carve-out eats work lanes."""
         seed(env, owner="backend-coder",
              subject="backend-coder: review the failing suite",
              metadata={"variety": STAMP})

@@ -884,11 +884,11 @@ def resolve_arc_start(
     Returns the LATEST `ts` among `variety_assessed` events whose `task_id`
     matches `feature_task_id`. The platform REUSES low task_ids across arcs,
     so the current feature's id can also match a PRIOR arc's
-    `variety_assessed`; the latest-ts match is the current arc (this is why
-    a plain most-recent `read-last` of ANY feature is wrong). Returns None
-    when no matching `variety_assessed` exists (legacy/trivial session) →
-    the caller omits `--since` → whole-journal read (fail-open; single-arc
-    behavior unchanged).
+    `variety_assessed`; the latest-ts match is a candidate boundary, not
+    current-arc provenance by itself. Returns None when no matching
+    `variety_assessed` exists or when `feature_task_id` is None. None means
+    the boundary is unavailable to the caller: current-arc metric readers
+    must stop rather than omit `--since` and relabel the whole journal.
 
     Scope boundary (comPACT/rePACT-led arcs): feature-level
     `variety_assessed` events are written by three commands — the
@@ -920,7 +920,9 @@ def resolve_arc_start(
 
     task_id matching is str-normalized (`str(event task_id) == str(feature
     task_id)`) so a future bare-int `variety_assessed` emit still matches a
-    str feature_task_id.
+    str feature_task_id. A None feature id returns before iteration, and an
+    event whose task_id is None is skipped before normalization, so neither
+    can alias the other. The string id "None" remains an ordinary id.
 
     arc_start relies on `variety_assessed` being emitted exactly once per
     arc per feature (writers: the orchestrate feature assessment, the
