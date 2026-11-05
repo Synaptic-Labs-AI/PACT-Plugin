@@ -18,6 +18,24 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.22: name the boundary and scope of test runs in instruction text
+
+### Summary
+
+The command and protocol text now names, at every site that demands a test run, which boundary the run belongs to and what scope it covers. A coder runs the tests its change affects at each commit boundary; the full suite runs once at the PR boundary or through the project's required full-suite gate, and only the post-concurrency batch keeps an unconditional full run.
+
+### What landed
+
+- `commands/orchestrate.md`: the coder dispatch guidelines carry the scoped-run mechanism (module-to-test mapping by import or name, plan-named subsets, the smallest enclosing suite as fallback, named in the HANDOFF); the CODE-to-TEST checklist names the scoped run plus the PR-boundary full run, and the TEST-phase checklist owns the single pre-PR full run.
+- `commands/comPACT.md`: the concurrent and single-specialist dispatch templates carry the same operational core, the post-concurrency step keeps the full run and labels it the integration exception, and the lead's pre-commit step runs the affected tests.
+- `protocols/pact-workflows.md` and its `protocols/pact-protocols.md` mirror: the pre-commit step runs the affected tests and names the full suite as the PR/project gate.
+- `tests/test_test_run_scope_pins.py`: two-sided pins for each rewritten site (a presence assertion plus a file-level count-to-zero on each removed sentence, so a half-fix cannot pass), carrier-consistency pins across the three duplicated dispatch templates, and an enumerate-and-assert census with an exact counted baseline and three discrimination controls.
+- Release metadata and this changelog moved to 4.8.22.
+
+### Why
+
+The instruction text ordered a test run without naming the set, so a lead could read it as a full-suite run at every commit boundary and pay the whole suite's cost repeatedly for a small change. The text also disagreed with the project's own gate, which forbids a local full run before a merge. Naming both the boundary and the scope makes the scoped run the default and keeps exactly one full-suite obligation at the PR boundary, with the post-concurrency batch as the stated integration exception.
+
 ## v4.8.21: cold reviewer lane for peer review
 
 ### Summary
