@@ -37,7 +37,7 @@ import pytest
 
 from fixtures.project_dir import write_session_context
 from fixtures.role_frames import teammate_frame
-from scripts import pact_session
+from scripts import memory_api, pact_session
 from scripts.memory_api import (
     PACTMemory,
     ProjectIdentityUnresolvedError,
@@ -1229,15 +1229,10 @@ class TestUnresolvedIdentityRefusesWrites:
         assert null_files == 0, "a NULL-keyed file row survived the save"
         assert memory.last_project_scope["source"] == "supplied"
 
-    def test_f2_an_empty_string_payload_project_is_not_accepted_silently(
+    def test_f2_an_empty_string_payload_project_is_rejected(
         self, tmp_path, monkeypatch
     ):
-        """F2: an empty-string id is neither a warrant nor a project name.
-
-        Accepted silently it produces a row no read can attribute to a
-        project. Either outcome is acceptable — refuse, or write a non-empty
-        id — but a row whose project_id is "" is not.
-        """
+        """An empty id is invalid input, never an auto-detect request."""
         db_path = tmp_path / "empty-id.db"
         monkeypatch.setattr(
             PACTMemory,
@@ -1247,117 +1242,42 @@ class TestUnresolvedIdentityRefusesWrites:
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None
 
-        try:
-            memory_id = memory.save(
+        with pytest.raises(ValueError) as excinfo:
+            memory.save(
                 {"context": "EMPTY-ID", "project_id": ""}, sync_to_claude=False
             )
-        except ValueError as exc:
-            # THE ONLY REACHABLE CHANNEL FOR AN EMPTY SUPPLIED ID. The coder's
-            # falsy-payload guard is unconditional and runs before the
-            # identity guard, so an empty string never reaches
-            # ProjectIdentityUnresolvedError — the earlier subclass branch was
-            # unreachable and asserted nothing. That channel IS covered, by
-            # `test_w1_a_refused_save_writes_no_null_row` (unresolved instance,
-            # NO payload id), which is the input that actually reaches it.
-            # A refusal from any other ProjectScopeDisagreementError site
-            # propagates and errors this arm instead of satisfying it.
-            assert str(exc).startswith(
-                "project_id, when supplied, must be a non-empty string; "
-                "omit it to auto-detect the project."
-            ), f"refused for an unrelated ValueError reason: {str(exc)!r}"
-            memory_id = None
 
-        if memory_id is None:
-            # Refused before the store was initialized, so the database file
-            # may not exist at all. "No row" is asserted without creating one.
-            if db_path.exists():
-                with db_connection(db_path) as conn:
-                    table = conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' "
-                        "AND name='memories'"
-                    ).fetchone()
-                    count = (
-                        conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-                        if table
-                        else 0
-                    )
-                assert count == 0, "a refused empty-id save still wrote a row"
-            return
-        with db_connection(db_path) as conn:
-            row = conn.execute(
-                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
-            ).fetchone()
-        assert row is not None
-        assert row[0] not in (None, ""), (
-            "an empty-string payload project was accepted silently; the row "
-            "has no project identity and no later read can attribute it"
+        assert str(excinfo.value).startswith(
+            "project_id, when supplied, must be a non-empty string without "
+            "control characters (U+0000-U+001F, U+007F-U+009F); "
+        )
+        assert not db_path.exists(), (
+            "the empty-payload refusal created the store; it must precede "
+            "_ensure_ready()"
         )
 
-    def test_f2_a_resolved_instance_still_rejects_a_falsy_payload_id(
-        self, tmp_path
-    ):
-        """The RESOLVED-instance route, which the unresolved arm cannot reach.
-
-        With an instance identity present the no-identity guard does not fire,
-        so before this was fixed the falsy payload reached the defaulting (it
-        is not None) and was written to `memories.project_id` AND
-        `files.project_id`. `__init__` routes falsy input to detection, so no
-        instance can ever address those rows.
-
-        The contract is the same as the unresolved arm: refuse for a
-        cause-specific reason, or write a non-empty id. Neither an unrelated
-        ProjectScopeDisagreementError nor ProjectIdentityUnresolvedError is
-        caught here: the latter's "no project identity could be resolved" is
-        FALSE on a resolved instance, so accepting it would let a misnamed
-        cause pass. Both propagate and error the arm.
-        """
+    def test_f2_a_resolved_instance_rejects_an_empty_payload_id(self, tmp_path):
+        """The validation also fires when the instance has a valid identity."""
         db_path = tmp_path / "resolved-empty-id.db"
         memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
         assert memory.project_id == "detected-b"
 
         linked = tmp_path / "linked.py"
         linked.write_text("x = 1\n", encoding="utf-8")
-        try:
-            memory_id = memory.save(
+        with pytest.raises(ValueError) as excinfo:
+            memory.save(
                 {"context": "RESOLVED-EMPTY-ID", "project_id": ""},
                 files=[str(linked)],
                 sync_to_claude=False,
             )
-        except ValueError as exc:
-            # The payload-validation channel: an empty supplied id is invalid
-            # input, not a project-scope disagreement. `ProjectIdentityUnresolvedError`
-            # is deliberately NOT caught here: on a RESOLVED instance its
-            # message ("no project identity could be resolved") is false, so
-            # accepting it would let a misnamed cause pass. The no-identity
-            # channel is covered by W1, where that statement is true.
-            assert str(exc).startswith(
-                "project_id, when supplied, must be a non-empty string; "
-                "omit it to auto-detect the project."
-            ), f"refused for an unrelated reason: {str(exc)!r}"
-            memory_id = None
 
-        if memory_id is None:
-            # The guard precedes `_ensure_ready()`, so a refusal must not even
-            # create the store file. If that ever stops being true, this arm
-            # should say so rather than silently accepting an empty database.
-            assert not db_path.exists(), (
-                "the falsy-payload refusal created the store; the guard must "
-                "precede _ensure_ready()"
-            )
-            return
-
-        with db_connection(db_path) as conn:
-            row = conn.execute(
-                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
-            ).fetchone()
-            file_row = conn.execute(
-                "SELECT project_id FROM files WHERE path LIKE ?",
-                (f"%/{linked.name}",),
-            ).fetchone()
-        assert row is not None and row[0] not in (None, "")
-        assert file_row is not None and file_row[0] not in (None, ""), (
-            "the resolved-instance save wrote a file row with an empty or "
-            "NULL project id"
+        assert str(excinfo.value).startswith(
+            "project_id, when supplied, must be a non-empty string without "
+            "control characters (U+0000-U+001F, U+007F-U+009F); "
+        )
+        assert not db_path.exists(), (
+            "the empty-payload refusal created the store; it must precede "
+            "_ensure_ready()"
         )
 
     def test_f2_a_NULL_payload_project_is_omission_not_an_empty_id(
@@ -1408,12 +1328,48 @@ class TestUnresolvedIdentityRefusesWrites:
             )
 
         assert str(excinfo.value).startswith(
-            "project_id, when supplied, must be a non-empty string; "
-            "omit it to auto-detect the project."
+            "project_id, when supplied, must be a non-empty string without "
+            "control characters (U+0000-U+001F, U+007F-U+009F); "
         ), f"refused for a different reason: {str(excinfo.value)!r}"
         assert not db_path.exists(), (
             "the integer-payload refusal created the store; the guard must "
             "precede _ensure_ready()"
+        )
+
+    @pytest.mark.parametrize(
+        "project_id",
+        [
+            "bad\x00id",
+            "bad\nid",
+            "bad\tid",
+            "bad\x1fid",
+            "bad\x7fid",
+            "bad\x85id",
+            "bad\x9fid",
+        ],
+    )
+    def test_f2_control_characters_in_payload_project_are_rejected(
+        self, tmp_path, project_id
+    ):
+        """C0, DEL and C1 controls are invalid before any store work."""
+        db_path = tmp_path / "control-id.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+
+        with pytest.raises(ValueError) as excinfo:
+            memory.save(
+                {"context": "CONTROL-ID", "project_id": project_id},
+                files=[str(linked)],
+                sync_to_claude=False,
+            )
+
+        assert "without control characters (U+0000-U+001F, U+007F-U+009F)" in str(
+            excinfo.value
+        )
+        assert not db_path.exists(), (
+            "an invalid payload created the store, so memory/file row absence "
+            "was not established before _ensure_ready()"
         )
 
 
@@ -1516,6 +1472,37 @@ class TestUnresolvedIdentityScopesReads:
 
         empty = self._unresolved(monkeypatch, db_path)
         assert empty.search_by_file(str(linked)) == []
+
+    def test_unresolved_search_clears_the_previous_sync_status(
+        self, tmp_path, monkeypatch
+    ):
+        """The identity early return must not inherit a save's `wrote`."""
+        empty = self._unresolved(monkeypatch, tmp_path / "store.db")
+        with patch(
+            "scripts.memory_api.sync_to_claude_md",
+            return_value=SyncResult(SyncResult.WROTE),
+        ):
+            empty.save({"context": "PREVIOUS", "project_id": "chosen"})
+        assert empty.last_sync_status == SyncResult.WROTE
+
+        assert empty.search("NO-RECORDS") == []
+        assert empty.last_sync_status is None
+
+    def test_empty_result_search_clears_the_previous_sync_status(self, tmp_path):
+        """An ordinary no-result search also attempts no sync."""
+        memory = PACTMemory(
+            project_id="detected-b", session_id="s", db_path=tmp_path / "store.db"
+        )
+        with patch(
+            "scripts.memory_api.sync_to_claude_md",
+            return_value=SyncResult(SyncResult.WROTE),
+        ):
+            memory.save({"context": "PREVIOUS"})
+        assert memory.last_sync_status == SyncResult.WROTE
+
+        with patch("scripts.memory_api.graph_enhanced_search", return_value=[]):
+            assert memory.search("NO-MATCH") == []
+        assert memory.last_sync_status is None
 
 
 class TestIssueCriterionALiteralShape:
@@ -1683,3 +1670,17 @@ def test_a_nul_bearing_declaration_does_not_name_a_session_record():
         )
         is False
     ), "a malformed declaration must not match a recorded one"
+
+
+def test_declaration_predicate_accepts_an_existing_file(tmp_path):
+    """`exists()`, not `is_dir()`: a live non-directory stays on the live arm."""
+    declared = tmp_path / "declaration"
+    declared.write_text("not a directory\n", encoding="utf-8")
+    assert memory_api._declared_path_exists(str(declared)) is True
+
+
+def test_declaration_predicate_declines_a_broken_symlink(tmp_path):
+    """A symlink whose target is gone does not count as a live declaration."""
+    declared = tmp_path / "declaration"
+    declared.symlink_to(tmp_path / "missing-target")
+    assert memory_api._declared_path_exists(str(declared)) is False

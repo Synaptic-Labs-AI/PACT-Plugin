@@ -1020,14 +1020,18 @@ class PACTMemory:
         # an env/record disagreement.
         payload_project = memory.get("project_id")
         if payload_project is not None and (
-            not isinstance(payload_project, str) or not payload_project
+            not isinstance(payload_project, str)
+            or not payload_project
+            or any(
+                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                for char in payload_project
+            )
         ):
-            # TYPE AND NON-EMPTINESS BOTH, because the message below promises
-            # both. Truthiness alone accepted an integer id, which every other
-            # project-id consumer in this codebase treats as a string.
+            # Reject C0, DEL and C1 controls without restricting other Unicode.
             raise ValueError(
-                "project_id, when supplied, must be a non-empty string; omit "
-                "it to auto-detect the project. Nothing was written."
+                "project_id, when supplied, must be a non-empty string without "
+                "control characters (U+0000-U+001F, U+007F-U+009F); omit it "
+                "to auto-detect the project. Nothing was written."
             )
 
         # AND FAIL CLOSED WHEN NO IDENTITY RESOLVED AT ALL. A None id is not a
@@ -1475,6 +1479,9 @@ class PACTMemory:
         Returns:
             List of matching MemoryObject instances.
         """
+        # A search with no results or no identity attempts no sync. Clear any
+        # previous save's outcome before either early-return path.
+        self._last_sync_status = None
         # NO IDENTITY MEANS NO PROJECT'S RECORDS, never all projects'. The
         # search layer drops its project filter on None, so an unguarded call
         # would return the whole store and, on a non-empty result, follow it
@@ -1503,9 +1510,7 @@ class PACTMemory:
                 # KEEP THE RESULT (F5). This call used to discard it, so the
                 # reason it produced -- including ROOT_UNKNOWN, "git could not
                 # answer, so the project memory target is unknown" -- reached
-                # no reader. Clearing first mirrors save(): a status left from
-                # an earlier write must not be read as this one's.
-                self._last_sync_status = None
+                # no reader.
                 result = sync_retrieved_to_claude_md(
                     memory_dicts, query, None, memory_ids,
                     claude_md_root=claude_md_root

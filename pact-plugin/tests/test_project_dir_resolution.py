@@ -410,6 +410,22 @@ class TestWriteRefusalOnDisagreement:
             memory.save({"context": "c", "goal": "g"})
         assert "comparison is textual" in str(excinfo.value)
 
+    def test_corrupt_record_kind_and_remedy_are_explicit(self, tmp_path):
+        """A malformed record is not mislabeled as a removed directory."""
+        env_value = str(tmp_path / "env")
+        record_value = str(tmp_path / "record") + "\x00tail"
+
+        assert pact_session.project_dir_disagreement_kind(
+            env_value, record_value
+        ) == "corrupt"
+        text = pact_session.format_project_dir_disagreement(
+            env_value, record_value
+        )
+        assert "session record is malformed" in text
+        assert "start a fresh session" in text
+        assert "re-export CLAUDE_PROJECT_DIR" not in text
+        assert "no longer exists" not in text
+
     def test_agreement_with_a_trailing_slash_does_not_refuse(self, tmp_path, monkeypatch):
         """normpath collapses the spelling difference; the predicate — not a
         full save — is the unit under test here."""
@@ -637,12 +653,10 @@ class TestCliRefusalEnvelope:
         ), "a refused save left the row behind"
 
     def test_memory_save_cli_envelopes_the_no_identity_refusal(self, tmp_path):
-        """The new refusal's actual boundary: exit non-zero, SCOPE_DISAGREEMENT,
-        nothing written.
+        """Unresolved identity gets its own structured error, not a disagreement.
 
         The subclass relationship is pinned in-process by W1's isinstance
-        assertion; this arm proves the CLI's own except-site catches it and
-        emits the documented envelope rather than a traceback.
+        assertion; this arm proves the CLI catches the subclass before its base.
         """
         umbrella = make_umbrella(tmp_path)
         gone = tmp_path / "removed-worktree"
@@ -668,11 +682,11 @@ class TestCliRefusalEnvelope:
             capture_output=True, text=True, env=carry_clock_shift(env),
             cwd=str(umbrella.project), timeout=120,
         )
-        assert proc.returncode != 0, (
-            f"a save with no resolvable identity exited 0: {proc.stdout!r}"
+        assert proc.returncode == 1, (
+            f"a save with no resolvable identity did not exit 1: {proc.stdout!r}"
         )
-        assert "SCOPE_DISAGREEMENT" in proc.stderr, (
-            f"the envelope type is missing from stderr: {proc.stderr!r}"
+        assert json.loads(proc.stderr)["error"] == "PROJECT_IDENTITY_UNRESOLVED", (
+            f"the envelope has the wrong error code: {proc.stderr!r}"
         )
         assert "no project identity could be resolved" in proc.stderr, (
             f"the envelope does not name the actual cause: {proc.stderr!r}"
@@ -680,6 +694,59 @@ class TestCliRefusalEnvelope:
         assert not store.exists() or "NO-IDENTITY" not in store.read_bytes().decode(
             "utf-8", errors="ignore"
         ), "the refused save left the row behind"
+
+    @pytest.mark.parametrize(
+        "project_id", ["", "bad\x00id", "bad\nid", "bad\x7fid", "bad\x85id"]
+    )
+    def test_memory_save_cli_rejects_invalid_payload_project_ids(
+        self, tmp_path, project_id
+    ):
+        """Empty/control IDs exit 2 and create no memory or file rows."""
+        umbrella = make_umbrella(tmp_path)
+        store = tmp_path / "invalid-payload.db"
+        env = child_env(
+            umbrella.config_root,
+            home=tmp_path,
+            session_id=SID,
+            project_dir=umbrella.project,
+        )
+        setup = subprocess.run(
+            [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
+            capture_output=True, text=True, env=carry_clock_shift(env),
+            cwd=str(umbrella.project), timeout=120,
+        )
+        assert setup.returncode == 0, setup.stderr
+
+        proc = subprocess.run(
+            [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
+             json.dumps({"context": "INVALID-ID", "project_id": project_id})],
+            capture_output=True, text=True, env=carry_clock_shift(env),
+            cwd=str(umbrella.project), timeout=120,
+        )
+
+        assert proc.returncode == 2, proc.stderr
+        assert json.loads(proc.stderr)["error"] == "ValueError"
+        assert "without control characters" in proc.stderr
+        with sqlite3.connect(store) as conn:
+            counts = [
+                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("memories", "files")
+            ]
+        assert counts == [0, 0], "an invalid payload wrote memory or file rows"
+
+    def test_sync_help_empty_covers_unresolved_identity(self, tmp_path):
+        """The help text names both empty causes: unresolved and no records."""
+        proc = subprocess.run(
+            [sys.executable, str(_MEMORY_CLI), "sync", "--help"],
+            capture_output=True, text=True,
+            env=child_env(tmp_path / "config", home=tmp_path),
+            cwd=str(tmp_path), timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert (
+            "project identity is unresolved or the project has no memories"
+            in proc.stdout
+        )
 
     def test_child_env_defaults_delete_the_project_dir_var(self, tmp_path):
         """Guard the env-builder itself: DELETE is the default and the pytest

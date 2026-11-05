@@ -54,7 +54,11 @@ from scripts.database import (
     AmbiguousPrefixError,
     PrefixTooShortError,
 )
-from scripts.memory_api import PACTMemory, ProjectScopeDisagreementError
+from scripts.memory_api import (
+    PACTMemory,
+    ProjectIdentityUnresolvedError,
+    ProjectScopeDisagreementError,
+)
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
 
@@ -556,11 +560,11 @@ def cmd_save(args, db_path=None):
         if claude_md_root:
             save_kwargs["claude_md_root"] = Path(claude_md_root)
         memory_id = memory.save(memory_dict, **save_kwargs)
+    except ProjectIdentityUnresolvedError as exc:
+        _error("PROJECT_IDENTITY_UNRESOLVED", _scrub(str(exc)))
     except ProjectScopeDisagreementError as exc:
-        # A deliberate fail-closed refusal, not bad input: either an
-        # env/session-record DISAGREEMENT or an UNRESOLVED project identity
-        # (`ProjectIdentityUnresolvedError` subclasses this). The message
-        # names the values it observed and the remedy.
+        # An env/session-record disagreement remains distinct from an
+        # unresolved identity, whose subclass is caught above.
         _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
     except ValueError as exc:
         _error(
@@ -835,9 +839,10 @@ def cmd_sync(args, db_path=None):
     Rebuilds CLAUDE.md's Working Memory section from this project's newest
     records. The envelope is total: `sync_status` names the outcome in every
     case, and `projected` is 0 with `memory_ids` [] on every outcome but
-    `wrote`. `empty` means the project has no records and the file was not
-    touched. `project_id` is the id the records were selected under, so an
-    `empty` can be checked against the project the caller expected.
+    `wrote`. `empty` means project identity is unresolved or the project has
+    no records; the file was not touched. `project_id` is the id the records
+    were selected under, so an `empty` can be checked against the project the
+    caller expected.
     """
     memory = PACTMemory(db_path=db_path)
     sync_kwargs = {}
@@ -1172,8 +1177,9 @@ def build_parser():
             "Replace the Working Memory section of CLAUDE.md with this "
             "project's newest memories, each under its own date. Stateless: "
             "the section is a view of the store, so fix a record with update "
-            "or delete and run sync again. A project with no memories reports "
-            "sync_status 'empty' and leaves the file untouched."
+            "or delete and run sync again. When project identity is unresolved "
+            "or the project has no memories, sync reports sync_status 'empty' "
+            "and leaves the file untouched."
         ),
         parents=[parent],
         formatter_class=fmt,

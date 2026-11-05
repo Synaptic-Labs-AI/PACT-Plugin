@@ -237,10 +237,20 @@ field instead.
 
 If no project identity can be resolved, `save` refuses with
 `ProjectIdentityUnresolvedError`, a `ProjectScopeDisagreementError`
-subclass. The CLI surfaces it as exit 1 with `SCOPE_DISAGREEMENT` on stderr,
-and nothing is written.
+subclass. The CLI surfaces it as exit 1 with `PROJECT_IDENTITY_UNRESOLVED`
+on stderr, and nothing is written. An actual disagreement between
+`CLAUDE_PROJECT_DIR` and the session record uses `SCOPE_DISAGREEMENT`
+instead.
 
-To proceed, supply `project_id` explicitly in the payload.
+To proceed, supply `project_id` explicitly in the payload. A supplied
+`project_id` must be a non-empty string without C0, DEL, or C1 control
+characters (`U+0000-U+001F`, `U+007F-U+009F`). Other Unicode, including
+ordinary spaces, is allowed. Invalid values exit 2 and write nothing.
+
+When no project identity resolves, `list`, `search`, and `search_by_file`
+return empty results, and `status` reports zero project-scoped counts. These
+results do not prove that the store has no memories; resolve the project
+identity before interpreting them.
 
 ### Task Format
 ```python
@@ -498,7 +508,7 @@ Shows recent memories (default: 20).
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" sync
 ```
-The Working Memory section of CLAUDE.md is a derived view of the store. `sync` replaces it with this project's newest 3 memories, each under its own date; to change what the section shows, `update` or `delete` the record, then run `sync` again. A `sync_status` of `empty` means the project has no memories and the file was not touched; check the envelope's `project_id` against the project you expected.
+The Working Memory section of CLAUDE.md is a derived view of the store. `sync` replaces it with this project's newest 3 memories, each under its own date; to change what the section shows, `update` or `delete` the record, then run `sync` again. A `sync_status` of `empty` means either that no project identity resolved or that the resolved project has no memories; the file was not touched. Check the envelope's `project_id` against the project you expected: `null` means no project identity resolved.
 
 ## Best Practices
 

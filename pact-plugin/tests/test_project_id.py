@@ -263,7 +263,7 @@ class TestSourceEquivalence:
     """Pins on the REAL implementation's source (there is no replica)."""
 
     def test_source_equivalence(self):
-        """The replica logic should match the real detector's strategy body.
+        """Pin the real detector's strategy markers and ordering directly.
 
         Reads _detect_project_id_with_source, NOT _detect_project_id: the
         latter is a one-line delegation, so the strategy markers and their
