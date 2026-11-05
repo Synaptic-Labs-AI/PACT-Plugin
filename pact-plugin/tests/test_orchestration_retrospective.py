@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from shared.teachback_schema import resolve_variety_total  # noqa: E402
-from shared.session_journal import _ts_ge  # noqa: E402
+from shared.session_journal import _parse_ts, _ts_ge  # noqa: E402
 from shared.variety_divergence import (  # noqa: E402
     extract_dispatch_coverage,
     extract_final_dispatch_coverage,
@@ -1065,6 +1065,16 @@ def _read_events(session_dir, event_type, since=None):
     return json.loads(_journal_cli(session_dir, *args).stdout)
 
 
+def _raw_journal_events(session_dir):
+    return [
+        json.loads(line)
+        for line in (session_dir / "session-journal.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+
+
 def _stamp(total):
     return {
         "novelty": 2,
@@ -1135,7 +1145,28 @@ class TestQ5Q7ReportingContract:
         assert "Q7 UNAVAILABLE" in q7
 
     def test_five_outcomes_and_one_ordered_suffix(self):
+        """Pin the suffix's exact four-outcome scope in both public surfaces.
+
+        MUTATION THAT REDDENS: replace both scope statements with 'all five
+        outcomes share the suffix'. The pre-pin suite stayed green on that
+        mutation; these assertions bind the correction and UNAVAILABLE's
+        explicit exclusion rather than only the suffix's structure.
+        """
         content = WRAPUP_PATH.read_text(encoding="utf-8")
+        changelog = (Path(__file__).parents[2] / "CHANGELOG.md").read_text(
+            encoding="utf-8"
+        )
+        assert (
+            "**One common suffix** prints after EVERY non-UNAVAILABLE form, "
+            "including NO SAMPLES"
+        ) in content
+        assert (
+            "UNAVAILABLE prints no distribution, sample loss, counters, "
+            "emitter statement, or common suffix."
+        ) in content
+        assert (
+            "The four non-UNAVAILABLE Q5 outcomes share one ordered suffix"
+        ) in changelog
         assert "**UNAVAILABLE — shared-prerequisite failure**" in content
         assert content.count("**One common suffix**") == 1
         assert "no `dispatch_site` events recorded this arc" in content
@@ -1300,3 +1331,130 @@ class TestQ5Q7ReportingContract:
         assert any(
             event.get("type") == "dispatch_site" for event in raw_events
         )
+
+    @pytest.mark.parametrize(
+        ("question", "event_type", "fields"),
+        [
+            (
+                "5. **Variety divergence**",
+                "dispatch_site",
+                {"task_id": "42", "variety": _stamp(8)},
+            ),
+            (
+                "6. **Variety acknowledgment signals**",
+                "teachback_ack",
+                {"task_id": "41", "rationale_articulates_this_dispatch": "no"},
+            ),
+            (
+                "7. **HANDOFF refusal degradations**",
+                "handoff_refusal_degraded",
+                {
+                    "agent_type": "pact-backend-coder",
+                    "detail": "PACT Handoff Refusal: missing produced",
+                    "classes": ["missing_handoff"],
+                },
+            ),
+        ],
+    )
+    def test_cli_empty_raw_nonempty_is_unavailable(
+        self, tmp_path, question, event_type, fields
+    ):
+        """Each question's documented guard rejects the contradictory read.
+
+        A real raw current-arc event stands behind a simulated reader-regression
+        empty CLI result. The expression is lifted from the instruction itself;
+        raw-empty and CLI-nonempty controls prove the three states differ.
+        """
+        session_dir = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(session_dir, event_type, ts=arc_start, **fields)
+        scoped_raw = [
+            event for event in _raw_journal_events(session_dir)
+            if event.get("type") == event_type
+            and _ts_ge(event.get("ts"), arc_start)
+        ]
+        assert len(scoped_raw) == 1
+        line = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), question)
+        expression = _backticked_expression(line, "guard_outcome =")
+        namespace = {"events": [], "scoped_raw_events": scoped_raw}
+        _exec_documented_chain(expression, namespace)
+        assert namespace["guard_outcome"] == "UNAVAILABLE"
+        namespace["scoped_raw_events"] = []
+        _exec_documented_chain(expression, namespace)
+        assert namespace["guard_outcome"] == "LEGITIMATE ZERO"
+        namespace["events"] = [{"type": event_type}]
+        _exec_documented_chain(expression, namespace)
+        assert namespace["guard_outcome"] == "NONEMPTY"
+
+    def test_q6_legacy_fallback_rejects_prior_arc_task_a(self, tmp_path):
+        """A retained prior-arc Task-A cannot supply a current Q6 signal.
+
+        The raw journal proves this is not a single-arc legacy session, so the
+        documented fallback gate never reads the retained 'no'. A single-arc
+        control beside it permits the legacy read and prevents an always-deny
+        implementation from passing.
+        """
+        arc_start = "2026-06-14T12:00:00Z"
+        multi = tmp_path / "multi-arc"
+        _write_event(
+            multi,
+            "teachback_ack",
+            task_id="41",
+            rationale_articulates_this_dispatch="no",
+            ts="2026-06-13T12:00:00Z",
+        )
+        _write_event(
+            multi,
+            "variety_assessed",
+            task_id="100",
+            variety=_stamp(9),
+            ts=arc_start,
+        )
+        task_path = tmp_path / "tasks" / "41.json"
+        task_path.parent.mkdir()
+        task_path.write_text(json.dumps({
+            "metadata": {
+                "teachback_submit": {
+                    "variety_acknowledgment": {
+                        "rationale_articulates_this_dispatch": "no"
+                    }
+                }
+            }
+        }), encoding="utf-8")
+        retained_flag = json.loads(task_path.read_text(encoding="utf-8"))[
+            "metadata"
+        ]["teachback_submit"]["variety_acknowledgment"][
+            "rationale_articulates_this_dispatch"
+        ]
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        expression = _backticked_expression(q6, "prior_arc_events =")
+        namespace = {
+            "raw_events": _raw_journal_events(multi),
+            "arc_start": arc_start,
+            "_parse_ts": _parse_ts,
+        }
+        _exec_documented_chain(expression, namespace)
+        assert len(namespace["prior_arc_events"]) == 1
+        fallback_flags = (
+            [] if namespace["prior_arc_events"] else [retained_flag]
+        )
+        assert fallback_flags == []
+
+        single = tmp_path / "single-arc"
+        _write_event(
+            single,
+            "variety_assessed",
+            task_id="100",
+            variety=_stamp(9),
+            ts=arc_start,
+        )
+        namespace["raw_events"] = _raw_journal_events(single)
+        _exec_documented_chain(expression, namespace)
+        assert namespace["prior_arc_events"] == []
+        fallback_flags = (
+            [] if namespace["prior_arc_events"] else [retained_flag]
+        )
+        assert fallback_flags == [retained_flag]
