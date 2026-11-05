@@ -661,7 +661,7 @@ class TestFailedCycleRule:
         """Reddens when the remediation termination rule counts something other
         than failed cycles. Mutation: restore "If blocking items persist after 2
         fix-verify cycles"."""
-        step = _section(_text("peer-review.md"), "4. Handle recommendations by severity:",
+        step = _section(_text("peer-review.md"), "4. Handle recommendations by severity",
                         "\n5. State merge readiness")
         lines = [ln for ln in step.splitlines() if "**Termination**:" in ln]
         assert len(lines) == 1, lines
