@@ -837,7 +837,7 @@ def _emit_dispatch_site(
         definition. Review panels dispatched by the peer-review command
         are IN this population — each owner-wired reviewer dispatch is
         itself a site — and the ``review_dispatch`` stream is a second,
-        independent record of the panel roster, never a substitute; a
+        independent record of the panel roster, never a substitute; an
         external review lane has no command-specific
         ``review_dispatch`` roster event, but an owner-wired review task
         still emits ``dispatch_site``; the peer-review cold lane is taskless,
