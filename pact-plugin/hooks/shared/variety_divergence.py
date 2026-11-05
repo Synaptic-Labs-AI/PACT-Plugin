@@ -942,10 +942,15 @@ def resolve_arc_start(
     """
     latest_ts: str | None = None
     latest_dt: datetime | None = None
+    if feature_task_id is None:
+        return None
     for event in variety_assessed_events:
         if event.get("scope") == VARIETY_ASSESSED_DISPATCH_SCOPE:
             continue
-        if str(event.get("task_id")) != str(feature_task_id):
+        task_id = event.get("task_id")
+        if task_id is None:
+            continue
+        if str(task_id) != str(feature_task_id):
             continue
         ts = event.get("ts")
         if not ts:

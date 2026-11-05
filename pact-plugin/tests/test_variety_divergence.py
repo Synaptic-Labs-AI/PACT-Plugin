@@ -401,6 +401,37 @@ class TestResolveArcStart:
         events = [self._va("200", "2026-06-14T12:00:00Z")]
         assert resolve_arc_start(events, "100") is None
 
+    def test_none_feature_id_never_aliases_a_missing_task_id(self):
+        events = [{
+            "type": "variety_assessed",
+            "ts": "2026-06-14T12:00:00Z",
+            "variety": {"total": 8},
+        }]
+        assert resolve_arc_start(events, None) is None
+        control = self._va("100", "2026-06-15T12:00:00Z")
+        assert resolve_arc_start(events + [control], "100") == (
+            "2026-06-15T12:00:00Z"
+        )
+
+    def test_explicit_none_task_id_cannot_match_another_feature(self):
+        events = [{
+            "type": "variety_assessed",
+            "task_id": None,
+            "ts": "2026-06-14T12:00:00Z",
+            "variety": {"total": 8},
+        }]
+        assert resolve_arc_start(events, None) is None
+        assert resolve_arc_start(events, "100") is None
+        control = self._va("100", "2026-06-15T12:00:00Z")
+        assert resolve_arc_start(events + [control], "100") == (
+            "2026-06-15T12:00:00Z"
+        )
+
+    def test_string_none_remains_an_ordinary_feature_id(self):
+        event = self._va("None", "2026-06-14T12:00:00Z")
+        assert resolve_arc_start([event], "None") == "2026-06-14T12:00:00Z"
+        assert resolve_arc_start([event], None) is None
+
     def test_returns_none_for_empty_events(self):
         assert resolve_arc_start([], "100") is None
 
