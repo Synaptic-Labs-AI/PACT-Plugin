@@ -1472,6 +1472,12 @@ class TestQ5Q7ReportingContract:
         ]
         for call in required_calls:
             assert content.count(call) >= 1, call
+        assert "FIRST empty direct stream" in content
+        assert "raw_events = [json.loads(line) for line in open(f" in content
+        assert "raw_dispatch_site = [e for e in raw_events" in content
+        assert content.index("raw_dispatch_site =") < content.index(
+            "Then read the SNAPSHOT stream"
+        )
         assert content.index("empty_stream_outcome(snapshot_events, raw_snapshots)") < content.index(
             "An EMPTY snapshot read"
         )
@@ -1592,6 +1598,77 @@ class TestQ5Q7ReportingContract:
                 and event.get("ts") == arc_start
                 for event in raw_events
             )
+
+    def test_first_empty_binds_raw_events_for_later_streams(self, tmp_path):
+        """Dispatch-nonempty cannot leave later empty guards unbound."""
+        arc_start = "2026-06-14T12:00:00Z"
+        session = tmp_path / "session"
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        _write_event(session, "dispatch_site", task_id="2", variety=_stamp(8), ts=arc_start)
+        _write_event(session, "task_metadata_snapshot", task_id="9", metadata={}, ts=arc_start)
+        _write_event(
+            session, "journal_emit_skipped", skipped_type="dispatch_site",
+            cause="returned_false", ts=arc_start,
+        )
+        events = _read_events(session, "dispatch_site", arc_start)
+        assert len(events) == 1
+        raw_reads = 0  # nonempty dispatch performs no raw acquisition
+        assert raw_reads == 0
+
+        # The first empty stream binds raw_events once and constructs dispatch's list.
+        snapshot_events = []
+        raw_events = _raw_journal_events(session)
+        raw_reads += 1
+        assert raw_reads == 1 and raw_events
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        namespace = {"raw_events": raw_events, "_ts_ge": _ts_ge, "arc_start": arc_start}
+        _exec_documented_chain(
+            _backticked_expression(q5, "raw_dispatch_site ="), namespace
+        )
+        assert len(namespace["raw_dispatch_site"]) == 1
+        assert _run_direct_guard(
+            q5, "snapshot_events", "raw_snapshots", snapshot_events,
+            raw_events, "task_metadata_snapshot", arc_start,
+        ) == "UNAVAILABLE"
+
+        # A later empty skip stream reuses the same bound list without another read.
+        skip_events = []
+        assert raw_reads == 1
+        assert _run_direct_guard(
+            q5, "skip_events", "raw_skip_events", skip_events,
+            raw_events, "journal_emit_skipped", arc_start,
+        ) == "UNAVAILABLE"
+
+        # The dispatch guard itself is bound and fails closed on empty CLI.
+        assert _run_direct_guard(
+            q5, "events", "raw_dispatch_site", [], raw_events,
+            "dispatch_site", arc_start,
+        ) == "UNAVAILABLE"
+
+        # Clean-zero controls: empty snapshot/skip are legitimate, not unbound or mismatched.
+        clean = tmp_path / "clean"
+        _write_event(
+            clean, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        clean_raw = _raw_journal_events(clean)
+        assert _run_direct_guard(
+            q5, "snapshot_events", "raw_snapshots", [], clean_raw,
+            "task_metadata_snapshot", arc_start,
+        ) == "LEGITIMATE ZERO"
+        assert _run_direct_guard(
+            q5, "skip_events", "raw_skip_events", [], clean_raw,
+            "journal_emit_skipped", arc_start,
+        ) == "LEGITIMATE ZERO"
+        assert _run_direct_guard(
+            q5, "events", "raw_dispatch_site", [], clean_raw,
+            "dispatch_site", arc_start,
+        ) == "LEGITIMATE ZERO"
 
     def test_va_feature_anchor_process_and_derived_empty_are_distinct(self, tmp_path):
         session = tmp_path / "session"
