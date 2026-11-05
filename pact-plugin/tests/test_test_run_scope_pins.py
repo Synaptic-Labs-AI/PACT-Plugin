@@ -642,6 +642,14 @@ ALLOWLIST = (
         "one script path and carries no boundary obligation.",
     ),
     (
+        "commands/peer-review.md",
+        "Use these facts to run the tests",
+        "An operational pointer inside the cold-reviewer prompt: the "
+        "{operational_facts} placeholder immediately above it carries the "
+        "how-to-run (interpreter or venv form, lint gate command). The reviewer "
+        "runs tests to verify findings; it sets no boundary and gates no commit.",
+    ),
+    (
         "skills/pact-coding-standards/SKILL.md",
         "every test green. The import-hygiene check",
         "Describes a blind spot in behavioural tests — a dead import passes every "
@@ -669,6 +677,10 @@ BASELINE_BY_FILE = {
     "agents/pact-test-engineer.md": 7,
     "commands/comPACT.md": 4,
     "commands/orchestrate.md": 6,
+    # One candidate, allowlisted above as the cold-reviewer prompt's
+    # operational pointer; the row keeps the file visible to the census so a
+    # SECOND candidate line here reddens the count.
+    "commands/peer-review.md": 1,
     "protocols/pact-phase-transitions.md": 1,
     "protocols/pact-protocols.md": 6,
     "protocols/pact-s5-policy.md": 2,
