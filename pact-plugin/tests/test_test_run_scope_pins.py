@@ -200,9 +200,9 @@ def _line_with(text: str, marker: str) -> str:
 
 # The fallback that makes the instruction actionable when a module-to-test
 # mapping finds nothing. Named here rather than left to the carrier-identity
-# pin: identity only proves the three carriers AGREE, so a shared rewrite of
+# pin: identity only proves the carriers AGREE, so a shared rewrite of
 # the fallback would keep every carrier pin green. Measured — the clause was
-# added to all three carriers and this module passed 43/43 without naming it.
+# added to every carrier and this module passed 43/43 without naming it.
 FALLBACK_CLAUSE = (
     "where the project's runner does not expose tests by file or name, the suite "
     "named in the runner's own configuration"
@@ -371,10 +371,10 @@ def test_the_scoped_wording_is_on_its_line(rel, marker, phrases):
         )
 
 
-# The operational core is duplicated VERBATIM in the three dispatch carriers,
+# The operational core is duplicated VERBATIM in every dispatch carrier,
 # because each is a separate string injected into a specialist's prompt and a
 # reference would not reach the reader. Presence pins alone cannot keep them
-# aligned — three carriers could each contain the fragments while drifting in
+# aligned — the carriers could each contain the fragments while drifting in
 # the middle — so the span itself is compared.
 CORE_START = "run the tests your change affects"
 CORE_END = "The full suite is not part of this boundary."
@@ -394,31 +394,37 @@ def _operational_core(rel: str, marker: str) -> str:
     return line[start:end]
 
 
-def test_the_operational_core_is_identical_across_its_three_carriers():
+def test_the_operational_core_is_identical_across_its_carriers():
     cores = [_phrase(_operational_core(rel, marker)) for rel, marker in OPERATIONAL_CARRIERS]
     distinct = set(cores)
     assert len(distinct) == 1, (
-        "the three dispatch carriers no longer share one operational statement; "
+        "the dispatch carriers no longer share one operational statement; "
         f"found {len(distinct)} variants:\n"
         + "\n".join(f"  {rel} [{marker[:28]}]: {len(core)} chars"
                     for (rel, marker), core in zip(OPERATIONAL_CARRIERS, cores))
     )
 
 
-def test_the_operational_core_occurs_exactly_three_times():
-    """A fourth copy ANYWHERE in the surfaces, or a lost carrier, must not pass.
+def test_the_operational_core_occurs_once_per_carrier():
+    """A copy beyond the registered carriers, or a lost carrier, must not pass.
 
-    Counted over every enumerated surface rather than over the two files the
-    carriers live in: a copy placed in any other instruction surface is a
-    fourth carrier, and scoping the count to the two files would let it
-    through. Measured at the fix: the core occurs exactly three times across
-    all surfaces, so the wider scan costs nothing.
+    The expected count is DERIVED from len(OPERATIONAL_CARRIERS), never
+    restated: a carrier set extended with its copy passes, a copy arriving
+    without a carrier entry reddens, and a carrier entry removed while its
+    copy survives reddens too — a restated literal went stale silently on
+    exactly that last drift. Counted over every enumerated surface rather
+    than over the files the carriers live in: a copy placed in any other
+    instruction surface is an unregistered carrier, and scoping the count
+    to the carrier files would let it through.
     """
+    expected = len(OPERATIONAL_CARRIERS)
     core = _phrase(_operational_core(*OPERATIONAL_CARRIERS[0]))
     combined = _phrase("".join(_text(rel) for rel in _surface_rels()))
-    assert combined.count(core) == 3, (
+    assert combined.count(core) == expected, (
         f"the operational core occurs {combined.count(core)} times across every "
-        "instruction surface, expected 3 (1 canonical + 2 dispatch carriers)"
+        f"instruction surface, expected {expected} = len(OPERATIONAL_CARRIERS) — "
+        "either a copy landed with no carrier registered, or a registered "
+        "carrier lost its copy"
     )
 
 
