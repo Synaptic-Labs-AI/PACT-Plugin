@@ -91,7 +91,7 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | **Format** | Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 
-**Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the review task's description when the round creates a fresh review task, and in the `SendMessage` when the reviewer is reused:
+**Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the description of the warm reviewer task the round creates, and in the `SendMessage` when the reviewer is reused:
 
 - **Reader false flags**: the check you ran, each result it reported as absent or changed that was in fact present, and each correction you made in the check rather than in the artifact. When it reported none, write `Reader false flags: none — <the check you ran>`; otherwise write `Reader false flags: <the check you ran> — <each wrong result>; <each correction in the check>`.
 - **Declined items**: each checklist item or review criterion you did not satisfy, with the measured evidence that the artifact is correct. When you satisfied every item, write `Declined items: none`.
