@@ -11,11 +11,11 @@ It can only show that the instruction asking for that still exists, in the
 section where the lead reads it, and that the cold lane is still scoped out.
 The relay itself is prose and stays unenforceable here.
 
-ORACLE: the expected block is the oracle for its own subject. A single edit
-that changes both commands/peer-review.md and EXPECTED_BLOCK together passes
-every arm in this module, so the test diff, not the suite, is what a reviewer
-reads to catch that. This is inherent to a verbatim pin, not a gap an arm can
-close.
+ORACLE: the expected block is the oracle for the two block-equality arms.
+Coordinated edits to commands/peer-review.md and EXPECTED_BLOCK stay green
+on those arms; the independent LABELS, RELAY_TOKENS and unauditable arms
+still catch changes to their own tokens. Semantic drift that preserves all
+of those tokens needs review of the test diff, not another equality arm.
 
 SCOPE: the region arms read their own bounded region; the file-wide arm reads
 the whole command file. Only the block arms compare whitespace-normalized
@@ -41,14 +41,11 @@ PEER_REVIEW = PLUGIN_ROOT / "commands" / "peer-review.md"
 VERIFY_ONLY_START = "### Verify-Only Re-Review"
 VERIFY_ONLY_END = "### Post-Remediation Incremental Update"
 COLD_LANE_START = "### Cold Reviewer Lane"
-# The lane ends at its own closing separator. Bounding it at the next heading
-# instead swallows the warm `**Dispatch reviewers**` block that follows the
-# separator, so the absence arms would fire on a label the contract actually
-# instructs the lead to put in the warm dispatch.
+# The warm dispatch paragraph follows the lane. Its position, rather than the
+# first horizontal rule, anchors the lane's closing rule and excludes the warm
+# dispatch labels without truncating a lane that contains its own rules.
+COLD_LANE_FOLLOWER = "**Dispatch reviewers**"
 COLD_LANE_SEPARATOR = "\n---\n"
-# Only a bound on the SEPARATOR SEARCH, never a fallback region end: it keeps a
-# lost separator from silently finding a later one elsewhere in the file.
-COLD_LANE_NEXT_HEADING = "### Reviewer Teachback"
 
 REPORT_BLOCK_START = "**Verify-only report lines.**"
 # The block is three paragraphs and ends where the following blockquote note
@@ -64,14 +61,18 @@ FORMAT_ROW = (
     "| **Format** | Checklist: finding → resolved / not resolved / new issue, "
     "plus the two warm report lines below | Full review with severity ratings |"
 )
+TABLE_END_ROW = (
+    "| **Duration** | Significantly faster than initial review | Full review cycle |"
+)
+NEW_ISSUE_NOTE = "> **New issue verification**"
 
 EXPECTED_BLOCK = """\
 **Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the description of the warm reviewer task the round creates for the review work, and in the `SendMessage` when the reviewer is reused:
 
-- **Reader false flags**: the check you ran, each result it reported as absent or changed that was in fact present, and each correction you made in the check rather than in the artifact. When it reported none, write `Reader false flags: none — <the check you ran>`; otherwise write `Reader false flags: <the check you ran> — <each wrong result>; <each correction in the check>`.
+- **Reader false flags**: for each check you ran, give its relevant input scope and outcome — its exit status, or its test summary with passed, failed, and error counts, including the error when it failed — each result it reported as absent or changed that was in fact present, and each correction you made in the check rather than in the artifact. A check that errors, has empty input or an empty test selection, cannot read its target, or targets the wrong input makes verification incomplete: it cannot use the clean empty form or support `resolved`. When a completed, correctly scoped check reported no false flags, write `Reader false flags: none — <the check, its input scope, and its outcome>`; otherwise write `Reader false flags: <the check, its input scope, and its outcome> — <each wrong result>; <each correction in the check>`.
 - **Declined items**: each checklist item or review criterion you did not satisfy, with the measured evidence that the artifact is correct. When you satisfied every item, write `Declined items: none`.
 
-Neither line is a finding: journal neither as a `review_finding`, and count neither in a finding class. A warm verify-only report that omits either line is unauditable: send it back for the missing line instead of synthesizing its verdict. Neither line applies to the cold lane: the cold lane's own coverage boundary with its receipt governs there."""
+Neither line is a finding: journal neither as a `review_finding`, and count neither in a finding class. A warm verify-only report that omits either line is unauditable: send it back for the missing line instead of synthesizing its verdict. Neither line applies to the cold lane: its existing finding-status `RE-REVIEW CHECKLIST` and coverage boundary with its receipt govern there."""
 
 LABELS = ("Reader false flags", "Declined items")
 
@@ -88,12 +89,12 @@ def _normalize(text: str) -> str:
     return " ".join(text.split())
 
 
-def _command_text() -> str:
+def _command_text(path: Path = PEER_REVIEW) -> str:
     """Read the shipped command file; fail the test rather than raise."""
     try:
-        return PEER_REVIEW.read_text(encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - guarded lookup
-        pytest.fail(f"cannot read {PEER_REVIEW}: {exc}")
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        pytest.fail(f"cannot read {path}: {exc}")
 
 
 def _bounded(text: str, start: str, end: str, label: str) -> str:
@@ -116,33 +117,50 @@ def _verify_only_region(text: str) -> str:
 
 
 def _cold_lane_region(text: str) -> str:
-    """The cold lane up to its own closing separator, exclusive.
+    """The cold lane, excluding its closing rule and the warm follower.
 
-    The separator is searched ONLY between the cold-lane heading and the next
-    section heading. An unbounded search would find a later separator elsewhere
-    in the file when the lane's own is lost, silently widening the region; and
-    a fallback to the next heading would silently restore the wider bound the
-    separator exists to close. Both failure directions are loud instead.
+    Anchoring on the follower keeps internal horizontal rules inside the lane.
+    Requiring the closing rule immediately before that follower fails loudly
+    when the boundary moves instead of swallowing the warm dispatch block.
     """
     start_at = text.find(COLD_LANE_START)
     if start_at < 0:
         pytest.fail(f"cold lane section: missing start anchor {COLD_LANE_START!r}")
-    heading_at = text.find(COLD_LANE_NEXT_HEADING, start_at + len(COLD_LANE_START))
-    if heading_at < 0:
+    follower_at = text.find(COLD_LANE_FOLLOWER, start_at + len(COLD_LANE_START))
+    if follower_at < 0:
         pytest.fail(
-            "cold lane section: missing next heading "
-            f"{COLD_LANE_NEXT_HEADING!r} after {COLD_LANE_START!r} — the "
-            "region bound has changed; re-anchor deliberately"
+            "cold lane section: missing warm dispatch follower "
+            f"{COLD_LANE_FOLLOWER!r} — the region bound has changed"
         )
-    end_at = text.find(
-        COLD_LANE_SEPARATOR, start_at + len(COLD_LANE_START), heading_at
-    )
-    if end_at < 0:
+    body = text[start_at:follower_at].rstrip()
+    if not body.endswith("\n---"):
         pytest.fail(
-            "the cold-lane separator is missing — the region bound has "
-            "changed; widen or re-anchor deliberately"
+            "the cold-lane separator is missing or no longer immediately "
+            f"before {COLD_LANE_FOLLOWER!r} — re-anchor the boundary deliberately"
         )
-    return text[start_at:end_at]
+    return body[: -len("\n---")]
+
+
+def _assert_contract_placement(region: str) -> None:
+    """The contract immediately follows the table and precedes the note."""
+    table_at = region.find(TABLE_END_ROW)
+    if table_at < 0:
+        pytest.fail(f"verify-only region: missing table end row {TABLE_END_ROW!r}")
+    table_end = table_at + len(TABLE_END_ROW)
+    block_at = region.find(REPORT_BLOCK_START)
+    note_at = region.find(NEW_ISSUE_NOTE)
+    if block_at < 0 or note_at < 0:
+        pytest.fail("verify-only region: contract block or New-issue note is missing")
+    if not table_end <= block_at < note_at:
+        pytest.fail(
+            "contract block must follow the comparison table and precede the "
+            "New-issue note; its current order breaks the Format row's 'below' route"
+        )
+    if region[table_end:block_at].strip():
+        pytest.fail(
+            "contract block must immediately follow the comparison table; "
+            "intervening content separates it from the Format row"
+        )
 
 
 def _block_count(text: str) -> int:
@@ -197,6 +215,19 @@ def _report_block(region: str, *, check_end: bool = True) -> str:
     return block
 
 
+class TestCommandReader:
+    def test_invalid_utf8_uses_named_diagnostic(self, tmp_path):
+        path = tmp_path / "invalid-peer-review.md"
+        path.write_bytes(b"\xff")
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _command_text(path)
+        message = str(excinfo.value)
+        assert "cannot read" in message and str(path) in message and "utf-8" in message, (
+            "invalid UTF-8 must produce the reader's named path diagnostic, "
+            f"not an unhandled UnicodeError; got: {message!r}"
+        )
+
+
 class TestContractBlock:
     """The full contract, exactly once, inside the verify-only section."""
 
@@ -215,6 +246,24 @@ class TestContractBlock:
             "the verify-only report contract must have a single home: found "
             f"{text.count(needle)} copies in the command file, expected 1"
         )
+
+    def test_block_immediately_follows_table_and_precedes_note(self):
+        _assert_contract_placement(_verify_only_region(_command_text()))
+
+    def test_relocation_above_table_fails_placement(self):
+        region = _verify_only_region(_command_text())
+        table_at = region.index("| Aspect | Verify-Only | Full Review |")
+        block_at = region.index(REPORT_BLOCK_START)
+        relocated = (
+            region[:table_at]
+            + region[block_at:].rstrip()
+            + "\n\n"
+            + region[table_at:block_at]
+        )
+        assert relocated != region, "the relocation did not change the region"
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _assert_contract_placement(relocated)
+        assert "must follow the comparison table" in str(excinfo.value)
 
 
 class TestFormatRow:
@@ -275,9 +324,9 @@ class TestColdLaneExclusion:
             "on an empty or gutted section, so its result would mean nothing."
         )
         assert label not in cold, (
-            f"{label!r} leaked into the cold lane section — the contract is "
-            "warm-only, and the cold lane receives findings rather than a "
-            "checklist"
+            f"{label!r} leaked into the cold lane section — the two new report "
+            "lines are warm-only; the cold lane keeps its finding-status "
+            "RE-REVIEW CHECKLIST and coverage-boundary receipt"
         )
 
 
@@ -307,8 +356,8 @@ class TestColdLaneBound:
     def test_label_in_the_warm_dispatch_does_not_reach_the_region(self):
         text = _command_text()
         start = text.index(COLD_LANE_START)
-        sep_end = text.index(COLD_LANE_SEPARATOR, start) + len(COLD_LANE_SEPARATOR)
-        injected = text[:sep_end] + "Reader false flags in the warm dispatch\n" + text[sep_end:]
+        follower = text.index(COLD_LANE_FOLLOWER, start) + len(COLD_LANE_FOLLOWER)
+        injected = text[:follower] + "Reader false flags in the warm dispatch\n" + text[follower:]
         assert injected != text, "the injection did not change the text"
         assert "Reader false flags" not in _cold_lane_region(injected), (
             "a label written in the warm dispatch block reached the cold-lane "
@@ -325,10 +374,28 @@ class TestColdLaneBound:
             "so the absence arms have stopped testing the lane"
         )
 
+    def test_internal_rule_does_not_hide_a_later_cold_label(self):
+        text = _command_text()
+        start = text.index(COLD_LANE_START)
+        follower = text.index(COLD_LANE_FOLLOWER, start)
+        insert_at = text.index("Send the re-check message by resume:", start, follower)
+        injected = (
+            text[:insert_at]
+            + "---\n\nReader false flags after an internal cold-lane rule.\n\n"
+            + text[insert_at:]
+        )
+        cold = _cold_lane_region(injected)
+        assert COLD_LANE_POSITIVE_CONTROL in cold, "the mutation lost the live-section control"
+        assert "Reader false flags after an internal cold-lane rule" in cold, (
+            "an internal horizontal rule truncated the cold-lane region and "
+            "hid a later label from the absence arms"
+        )
+
     def test_missing_separator_fails_loudly(self):
         text = _command_text()
         start = text.index(COLD_LANE_START)
-        sep_at = text.index(COLD_LANE_SEPARATOR, start)
+        follower = text.index(COLD_LANE_FOLLOWER, start)
+        sep_at = text.rfind(COLD_LANE_SEPARATOR, start, follower)
         mutated = text[:sep_at] + "\n\n" + text[sep_at + len(COLD_LANE_SEPARATOR):]
         with pytest.raises(pytest.fail.Exception) as excinfo:
             _cold_lane_region(mutated)
