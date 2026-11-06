@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.25: resolve all five Q5 counter definitions from the prose (issue #1705)
+## v4.8.26: resolve all five Q5 counter definitions from the prose (issue #1705)
 
 ### Summary
 
