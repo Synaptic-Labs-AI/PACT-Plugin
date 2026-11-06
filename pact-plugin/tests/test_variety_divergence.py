@@ -819,6 +819,39 @@ class TestExtractFinalDispatchCoverage:
         assert result["superseded"] == 0
         assert result["dimensions_incomparable"] == 0
 
+    def test_a_present_but_null_variety_reaches_dispatch_malformed(self):
+        """The discriminator is KEY PRESENCE, not the VALUE'S nullability.
+
+        `late_stamped` is "carry NO `variety` key"; `dispatch_malformed` is
+        "carry a PRESENT but unresolvable `variety`". A null value is PRESENT,
+        so it is malformed. The `_site` helper cannot express this — its
+        `variety=None` means the key is ABSENT — so the event is built
+        directly, and the assertion below that the key SURVIVES construction
+        is what keeps this fixture from silently degrading to the absent case.
+
+        This is the ARM-1 leg: the member has a resolving snapshot, so it
+        lands in the dispatch_malformed cell and NOT in late_stamped.
+        """
+        null_site = make_event("dispatch_site", task_id="1", variety=None)
+        assert "variety" in null_site and null_site["variety"] is None
+
+        result = extract_final_dispatch_coverage(
+            [null_site], [self._snap("1", {"variety": {"total": 10}})]
+        )
+        assert result["dispatch_malformed"] == 1
+        assert result["late_stamped"] == 0
+
+    def test_a_present_but_null_variety_reaches_the_malformed_list(self):
+        """The ARM-3 leg of the same predicate: no snapshot and no assessed
+        event, so nothing resolves a total and the member joins the
+        `malformed` list on the KEY's presence alone."""
+        null_site = make_event("dispatch_site", task_id="1", variety=None)
+        assert "variety" in null_site and null_site["variety"] is None
+
+        unresolved = extract_final_dispatch_coverage([null_site], [])
+        assert unresolved["malformed"] == [null_site]
+        assert unresolved["total_unresolved"] == 1
+
     def test_a_dimension_revision_that_holds_the_total_is_counted(self):
         """A correction that moved dimensions and left the total is REPORTED.
 
@@ -1718,7 +1751,14 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
     def test_snapshot_still_wins_over_everything(self):
         """Arm 1 is untouched by the third argument: a resolving snapshot
         supplies the FINAL value and the member does not count in
-        fallback_used at all."""
+        fallback_used at all.
+
+        `superseded` stays 0 because its comparator is the `dispatch_site`
+        event's own variety, which is ABSENT here, not the assessed value
+        (8). This is the only fixture carrying a divergent assessed value,
+        so this assertion is what denies arm-2b contamination of the
+        comparator.
+        """
         sites = [self._site("1")]
         snapshots = [
             make_event(
@@ -1733,6 +1773,7 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
         assert result["variety_totals"] == [10]
         assert result["fallback_used"] == 0
         assert result["late_stamped"] == 1
+        assert result["superseded"] == 0
 
     # -- The stream boundary -------------------------------------------------
 
