@@ -1323,7 +1323,8 @@ class TestQ5Q7ReportingContract:
         assert (
             '2. When `coverage["total_unresolved"] > 0`: '
             '`- {coverage["total_unresolved"]} recorded dispatch_site events '
-            "had no resolvable variety total"
+            "had no resolvable variety total "
+            "({len(malformed)} with a present variety key)"
         ) in suffix
         assert "2. When `len(malformed) > 0`" not in suffix
         ordered = [

@@ -1884,6 +1884,30 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
         result = extract_final_dispatch_coverage(sites, [], assessed)
         assert result["variety_totals"] == [7]
 
+    def test_an_unresolvable_latest_assessed_event_does_not_scan_backward(self):
+        """The latest timestamp-valid event is SELECTED before resolution.
+
+        The earlier event resolves 8, but the later event carries only a junk
+        total. No backward scan may rescue the earlier total. The site also
+        carries a present junk variety, so arm 3 includes it in `malformed`.
+        """
+        sites = [self._site("1", {"total": "junk"})]
+        assessed = [
+            self._va("1", "2026-06-15T12:00:01Z", total=8),
+            make_event(
+                "variety_assessed",
+                task_id="1",
+                scope="dispatch",
+                variety={"total": "junk"},
+                ts="2026-06-15T13:00:00Z",
+            ),
+        ]
+        result = extract_final_dispatch_coverage(sites, [], assessed)
+        assert result["variety_totals"] == []
+        assert result["fallback_used"] == 1
+        assert result["total_unresolved"] == 1
+        assert result["malformed"] == sites
+
     def test_assessed_event_for_another_task_never_joins(self):
         """The index is keyed on the member's task id; a dispatch-marked
         event for a different task is unreachable."""
