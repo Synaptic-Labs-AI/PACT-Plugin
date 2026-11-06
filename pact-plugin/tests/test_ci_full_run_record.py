@@ -25,6 +25,7 @@ import ci_contract
 from ci_full_run_record import (
     OWNER_ENV,
     RECORD_NAME,
+    FullRunRecord,
     aggregate_worker_collection_counts,
 )
 
@@ -342,25 +343,79 @@ def test_an_unreported_item_removal_fails_the_verifier(tmp_path):
 
 
 def test_the_aggregate_is_the_pair_every_worker_agrees_on():
-    assert aggregate_worker_collection_counts([(4, 4), (4, 4)], 4) == (4, 4)
+    assert aggregate_worker_collection_counts(
+        [(4, 4, 0), (4, 4, 0)], 4) == (4, 4, 0)
 
 
 def test_the_aggregate_is_not_a_sum_of_workers():
     """Every worker collected the whole corpus; a sum would be 16."""
-    assert aggregate_worker_collection_counts([(4, 4)] * 4, 4) == (4, 4)
+    assert aggregate_worker_collection_counts([(4, 4, 0)] * 4, 4) == (4, 4, 0)
 
 
 def test_disagreeing_workers_have_no_faithful_aggregate():
-    assert aggregate_worker_collection_counts([(4, 4), (4, 3)], 4) is None
+    assert aggregate_worker_collection_counts(
+        [(4, 4, 0), (4, 3, 0)], 4) is None
 
 
 def test_an_aggregate_inconsistent_with_collected_is_refused():
-    assert aggregate_worker_collection_counts([(4, 4)], 3) is None
+    assert aggregate_worker_collection_counts([(4, 4, 0)], 3) is None
+
+
+def test_the_aggregate_carries_a_narrowed_pair():
+    """The identity reads AFTER, not BEFORE or DESELECTED.
+
+    Every other fixture here has before == after and deselected == 0, so a
+    check on the wrong element passes them all; this is the only case that
+    can tell ``triples[0][1]`` from ``triples[0][0]`` or ``triples[0][2]``.
+    The pair is a legitimate deselection (4 taken to 3, one reported), which
+    must be RETURNED rather than refused so the verifier can see it.
+    """
+    assert aggregate_worker_collection_counts([(4, 3, 1)], 3) == (4, 3, 1)
 
 
 def test_no_worker_reports_have_no_aggregate():
     assert aggregate_worker_collection_counts([], 4) is None
     assert aggregate_worker_collection_counts([None], 4) is None
+
+
+def test_a_non_integer_pair_value_has_no_aggregate():
+    """float and bool are the shapes the identity check cannot reject.
+
+    ``4.0 == 4`` and ``True == 1``, so without the type guard each would be
+    returned as a faithful triple. A None entry would be caught downstream by
+    the collected check and so would not exercise this guard. The third
+    element is asserted separately: a guard that checked only before/after
+    would miss it.
+    """
+    assert aggregate_worker_collection_counts([(4.0, 4.0, 0)], 4) is None
+    assert aggregate_worker_collection_counts([(True, True, 0)], 1) is None
+    assert aggregate_worker_collection_counts([(4, 4, 0.0)], 4) is None
+
+
+def test_a_non_integer_collected_has_no_aggregate():
+    assert aggregate_worker_collection_counts([(4, 4, 0)], 4.0) is None
+    assert aggregate_worker_collection_counts([(1, 1, 0)], True) is None
+
+
+def test_a_malformed_pair_has_no_aggregate():
+    """A triple of the wrong length is refused, not unpacked."""
+    assert aggregate_worker_collection_counts([(4, 3)], 3) is None
+    assert aggregate_worker_collection_counts([(4, 4, 0, 0)], 4) is None
+
+
+def test_the_recorder_counts_deselected_items_from_the_hook(monkeypatch):
+    """The published deselected count comes from pytest_deselected.
+
+    Under xdist the controller never collects, so its own stats report 0 and
+    a controller-sourced count would be a number nobody measured. This is
+    the only CI-visible pin on the source: the hook fires in the session
+    that deselected, and the triple carries what it counted.
+    """
+    monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
+    record = FullRunRecord()
+    record.pytest_deselected(["a", "b", "c"])
+    record.pytest_deselected(["d"])
+    assert record._deselected == 4
 
 
 def test_xdist_workers_agree_and_the_record_verifies(tmp_path):

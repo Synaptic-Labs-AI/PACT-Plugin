@@ -41,18 +41,24 @@ two cannot see it. The outermost wrapper records the item count before and
 after every other implementation, and the verifier requires
 ``after + deselected == before``.
 
-UNDER XDIST THE CONTROLLER NEVER RUNS THAT HOOK. Collection is distributed:
-every worker performs the WHOLE collection and the controller schedules only
-execution, so the controller's wrapper never fires and both counts would be
-None. Each worker therefore PUBLISHES its own ``(before, after)`` pair in
-``config.workeroutput``, and the controller reads the pairs in
-``pytest_testnodedown``. THE PAIRS ARE NOT ADDITIVE: every worker collected
-the whole corpus, so summing N workers yields N x the corpus while the
-verifier requires ``after == collected``. The only faithful aggregate is the
-pair every worker AGREES on; disagreement, or an ``after`` that does not
-equal the certifying session's own ``testscollected``, leaves both fields
-None and prints why. A wrong integer here would turn a fail-closed gate into
-a fail-open one, so None is the correct answer when no aggregate is provable.
+UNDER XDIST THE CONTROLLER NEVER RUNS THAT HOOK. Execution is distributed;
+collection is repeated in every worker, so the controller's wrapper never
+fires and both counts would be None. Each worker therefore PUBLISHES its own
+``(before, after, deselected)`` triple in ``config.workeroutput``, and the
+controller reads the triples in ``pytest_testnodedown``. The deselected count
+travels with the pair because the controller never collects: it never sees a
+worker's deselection, so its own stats report 0 and the record would claim a
+deselection nobody measured. It is taken from the workers, never derived
+from ``before - after``, which would satisfy the verifier's identity
+arithmetically and leave the narrowing detector unable to tell a reported
+deselection from an item removed without one. THE TRIPLES ARE NOT ADDITIVE:
+every worker collected the whole corpus, so summing N workers yields N x the
+corpus while the verifier requires ``after == collected``. The only faithful
+aggregate is the triple every worker AGREES on; disagreement, or an
+``after`` that does not equal the certifying session's own
+``testscollected``, leaves the collection fields null and prints why. A
+wrong integer here would turn a fail-closed gate into a fail-open one, so
+None is the correct answer when no aggregate is provable.
 
 WHY EACH SKIP IS RECORDED BY SITE. The verifier admits only skips listed in
 a committed allowlist keyed on (file, reason), so the record carries every
@@ -113,35 +119,51 @@ def record_path():
 
 
 def aggregate_worker_collection_counts(worker_pairs, collected):
-    """The (before, after) pair every xdist worker agreed on, or None.
+    """The (before, after, deselected) triple every worker agreed on, or None.
 
-    Every worker collects the WHOLE corpus, so these pairs are not additive:
-    summing N workers yields N x the corpus while the verifier requires
-    ``after == collected``. The only faithful cross-worker value is a pair
-    every worker reports identically. Disagreement, a non-integer entry, or
-    an ``after`` inconsistent with the certifying session's own collected
-    count means no aggregate is provable; None is returned so the verifier's
-    BAD-FIELD failure stands rather than an invented integer turning a
-    fail-closed gate into a fail-open one.
+    Every worker collects the WHOLE corpus, so these triples are not
+    additive: summing N workers yields N x the corpus while the verifier
+    requires ``after == collected``. The only faithful cross-worker value is
+    a triple every worker reports identically. Disagreement, a non-integer
+    entry, or an ``after`` inconsistent with the certifying session's own
+    collected count means no aggregate is provable; None is returned so the
+    verifier's BAD-FIELD failure stands rather than an invented integer
+    turning a fail-closed gate into a fail-open one.
+
+    The ``deselected`` entry is what the worker's own ``pytest_deselected``
+    counted. It is taken from the workers rather than derived from
+    ``before - after``: a derived count would satisfy the second identity
+    arithmetically and leave the verifier's narrowing detector unable to
+    distinguish a reported deselection from an item removed without one.
+
+    The reporting population is complete: xdist dispatches
+    ``pytest_testnodedown`` on both of its paths (``workerfinished`` and
+    ``errordown``), so every node that ever connected is represented here, and
+    one that published nothing arrives as None and is rejected.
+
+    This guarantees only ``after == collected``; the second verifier identity,
+    ``after + deselected == before``, is enforced in
+    ``scripts/verify_full_run.py``, where a non-zero ``deselected`` is a hard
+    failure before it is reached.
     """
     if not worker_pairs:
         return None
-    pairs = []
-    for pair in worker_pairs:
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+    triples = []
+    for triple in worker_pairs:
+        if not isinstance(triple, (list, tuple)) or len(triple) != 3:
             return None
-        before, after = pair
-        for value in (before, after):
+        before, after, deselected = triple
+        for value in (before, after, deselected):
             if not isinstance(value, int) or isinstance(value, bool):
                 return None
-        pairs.append((before, after))
-    if any(pair != pairs[0] for pair in pairs[1:]):
+        triples.append((before, after, deselected))
+    if any(triple != triples[0] for triple in triples[1:]):
         return None
     if not isinstance(collected, int) or isinstance(collected, bool):
         return None
-    if pairs[0][1] != collected:
+    if triples[0][1] != collected:
         return None
-    return pairs[0]
+    return triples[0]
 
 
 def _format_duration(seconds):
@@ -162,6 +184,7 @@ class FullRunRecord:
         self._seen_node_ids = set()
         self._items_before = None
         self._items_after = None
+        self._deselected = 0
         self._worker_pairs = []
         self._skips = []
         self._collection_skips = 0
@@ -175,6 +198,16 @@ class FullRunRecord:
             if self._items_before is None:
                 self._items_before = before
                 self._items_after = len(items)
+
+    def pytest_deselected(self, items):
+        """Count the items reported as deselected in this session.
+
+        Under xdist the controller never collects, so it never sees a worker's
+        deselection and its own stats report 0. The worker sees every event,
+        which is why this count travels with the worker's (before, after)
+        pair rather than being left to the controller.
+        """
+        self._deselected += len(items)
 
     def pytest_runtest_logreport(self, report):
         """Record every node ID that reached ANY terminal outcome.
@@ -243,12 +276,14 @@ class FullRunRecord:
         return f"{text} in {_format_duration(elapsed)}"
 
     def pytest_sessionfinish(self, session, exitstatus):
+        # A worker's _root is None (the controller claimed ownership), so this
+        # branch must precede the guard below or no worker ever publishes.
         if getattr(session.config, "workerinput", None) is not None:
             # An xdist worker of a distributed run: publish this worker's own
             # counts for the controller. The controller aggregates by
             # agreement; see aggregate_worker_collection_counts.
             session.config.workeroutput[WORKER_OUTPUT_KEY] = (
-                self._items_before, self._items_after)
+                self._items_before, self._items_after, self._deselected)
             return
         if self._root is None or session.config.option.collectonly:
             return
@@ -279,7 +314,13 @@ class FullRunRecord:
                 summary_line = None
         items_before = self._items_before
         items_after = self._items_after
-        if items_before is None:
+        deselected = len(stats.get("deselected", []))
+        # xdist's -n is absent without xdist, None for a serial run, and 0
+        # for -n 0, which does not distribute; only a positive count is
+        # distributed.
+        numprocesses = getattr(session.config.option, "numprocesses", None)
+        distributed = isinstance(numprocesses, int) and numprocesses > 0
+        if items_before is None and distributed:
             collected = int(session.testscollected)
             aggregate = aggregate_worker_collection_counts(
                 self._worker_pairs, collected)
@@ -292,7 +333,7 @@ class FullRunRecord:
                     file=sys.stderr,
                 )
             else:
-                items_before, items_after = aggregate
+                items_before, items_after, deselected = aggregate
         record = {
             "schema_version": SCHEMA_VERSION,
             "collected": int(session.testscollected),
@@ -300,7 +341,7 @@ class FullRunRecord:
             "skipped": len(stats.get("skipped", [])),
             "failed": len(stats.get("failed", [])),
             "errors": len(stats.get("error", [])),
-            "deselected": len(stats.get("deselected", [])),
+            "deselected": deselected,
             "xfailed": len(stats.get("xfailed", [])),
             "xpassed": len(stats.get("xpassed", [])),
             "exitstatus": int(exitstatus),
