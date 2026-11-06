@@ -342,7 +342,7 @@ def test_an_unreported_item_removal_fails_the_verifier(tmp_path):
 # --- xdist aggregation: the policy runs in CI; the seam is probe-only ---
 
 
-def test_the_aggregate_is_the_pair_every_worker_agrees_on():
+def test_the_aggregate_is_the_triple_every_worker_agrees_on():
     assert aggregate_worker_collection_counts(
         [(4, 4, 0), (4, 4, 0)], 4) == (4, 4, 0)
 

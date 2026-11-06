@@ -46,7 +46,7 @@ collection is repeated in every worker, so the controller's wrapper never
 fires and both counts would be None. Each worker therefore PUBLISHES its own
 ``(before, after, deselected)`` triple in ``config.workeroutput``, and the
 controller reads the triples in ``pytest_testnodedown``. The deselected count
-travels with the pair because the controller never collects: it never sees a
+travels with the counts because the controller never collects: it never sees a
 worker's deselection, so its own stats report 0 and the record would claim a
 deselection nobody measured. It is taken from the workers, never derived
 from ``before - after``, which would satisfy the verifier's identity
@@ -118,7 +118,7 @@ def record_path():
     return Path(workspace) / RECORD_NAME
 
 
-def aggregate_worker_collection_counts(worker_pairs, collected):
+def aggregate_worker_collection_counts(worker_triples, collected):
     """The (before, after, deselected) triple every worker agreed on, or None.
 
     Every worker collects the WHOLE corpus, so these triples are not
@@ -136,20 +136,27 @@ def aggregate_worker_collection_counts(worker_pairs, collected):
     arithmetically and leave the verifier's narrowing detector unable to
     distinguish a reported deselection from an item removed without one.
 
-    The reporting population is complete: xdist dispatches
-    ``pytest_testnodedown`` on both of its paths (``workerfinished`` and
-    ``errordown``), so every node that ever connected is represented here, and
-    one that published nothing arrives as None and is rejected.
+    The population is NOT complete, and must not be read as if it were. The
+    two normal down paths (``workerfinished`` and ``errordown``) both
+    dispatch ``pytest_testnodedown``, so a node that published nothing
+    arrives here as None and is rejected. A third path does not dispatch
+    it: xdist's ``DSession.worker_internal_error`` removes the node and
+    raises ``pytest_internalerror``, so a worker lost that way is simply
+    ABSENT and the surviving nodes can still agree - measured, the aggregate
+    succeeded on a population missing the failed worker. That run is caught
+    downstream by the verifier's off-test accounting and, in CI, by the
+    session's exit status 3 failing the test step before the verifier runs.
+    This function guarantees no such completeness.
 
     This guarantees only ``after == collected``; the second verifier identity,
     ``after + deselected == before``, is enforced in
     ``scripts/verify_full_run.py``, where a non-zero ``deselected`` is a hard
     failure before it is reached.
     """
-    if not worker_pairs:
+    if not worker_triples:
         return None
     triples = []
-    for triple in worker_pairs:
+    for triple in worker_triples:
         if not isinstance(triple, (list, tuple)) or len(triple) != 3:
             return None
         before, after, deselected = triple
@@ -185,7 +192,7 @@ class FullRunRecord:
         self._items_before = None
         self._items_after = None
         self._deselected = 0
-        self._worker_pairs = []
+        self._worker_triples = []
         self._skips = []
         self._collection_skips = 0
 
@@ -204,8 +211,8 @@ class FullRunRecord:
 
         Under xdist the controller never collects, so it never sees a worker's
         deselection and its own stats report 0. The worker sees every event,
-        which is why this count travels with the worker's (before, after)
-        pair rather than being left to the controller.
+        which is why this count travels in the worker's (before, after,
+        deselected) triple rather than being left to the controller.
         """
         self._deselected += len(items)
 
@@ -226,7 +233,7 @@ class FullRunRecord:
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node, error):
-        """Collect each xdist worker's published pair (controller only).
+        """Collect each xdist worker's published triple (controller only).
 
         OPTIONAL HOOK: this spec comes from xdist, and the suite spawns
         child sessions with ``-p no:xdist``. Pluggy rejects a plugin that
@@ -235,7 +242,7 @@ class FullRunRecord:
         """
         if self._root is None:
             return
-        self._worker_pairs.append(
+        self._worker_triples.append(
             getattr(node, "workeroutput", {}).get(WORKER_OUTPUT_KEY))
 
     def pytest_collectreport(self, report):
@@ -323,11 +330,11 @@ class FullRunRecord:
         if items_before is None and distributed:
             collected = int(session.testscollected)
             aggregate = aggregate_worker_collection_counts(
-                self._worker_pairs, collected)
+                self._worker_triples, collected)
             if aggregate is None:
                 print(
                     "CI-FULL-RUN-RECORD: no faithful cross-worker collection "
-                    f"aggregate (workers reported {self._worker_pairs!r}, "
+                    f"aggregate (workers reported {self._worker_triples!r}, "
                     f"collected={collected}); items_before/after_modifyitems "
                     "stay null so the verifier fails closed.",
                     file=sys.stderr,
