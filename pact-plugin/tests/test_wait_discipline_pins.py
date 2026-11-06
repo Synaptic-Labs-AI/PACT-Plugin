@@ -8,10 +8,11 @@ Pins the amendment surfaces:
   §5 Wait in Silence:
     - the narration-versus-milestone rule (a milestone is a dispatch's
       result, a measured number, or a state change the user would act on
-      and cannot otherwise see; relayed in one line that is not a running
-      tally of the same work; a long dispatch reports at its milestones
-      unprompted, and "no actionable content" means nothing the team needs
-      AND nothing the user is owed);
+      and cannot otherwise see; relayed to the user in one line, only when it
+      is new since your last report to the user, carrying a number where
+      there is one, and not a running tally of the same work; a long
+      dispatch reports at its milestones unprompted, and "no actionable
+      content" means nothing the team needs AND nothing the user is owed);
     - the filler-call compulsion block (names the reflex, states the
       turn-manufacture mechanics, states the terminal action);
     - the termination test — the discriminator stated ONCE at its §5 home:
@@ -149,11 +150,18 @@ SECTION_PHRASE_PINS = [
     # protocol-defined exception above) ---
     (WAIT_IN_SILENCE, "Narration is not a milestone"),
     (WAIT_IN_SILENCE, "A milestone is a dispatch's result, a measured number, or a state change the user would act on and cannot otherwise see"),
-    # The relay sentence's anti-tally clause: the part of that sentence which
-    # cannot be re-derived from the definition, and the one that closes the
-    # repeated-status-report defect. "to the user" and "a number where there
-    # is one" are left unpinned on purpose — narrower, and recoverable once
-    # this sentence is protected.
+    # The relay sentence's four load-bearing clauses, each pinned to the span
+    # that is UNIQUE to it: "to the user" alone occurs three times in this
+    # slice (the watcher rule also reports "to the user"), so the bare
+    # phrase would stay green if the relay clause were deleted. The rule
+    # this block records is general: a pin must name a span unique to the
+    # sentence it guards, or it is not guarding that sentence.
+    (WAIT_IN_SILENCE, "to the user in one line"),
+    # Without "to the user" here a milestone already sent to a teammate
+    # reads as suppressed for the user, which is the ambiguity this clause
+    # closes.
+    (WAIT_IN_SILENCE, "new since your last report to the user"),
+    (WAIT_IN_SILENCE, "a number where there is one"),
     (WAIT_IN_SILENCE, "not a running tally of the same work"),
     # The redefinition is pinned separately: it is the clause that reverses the
     # old safe reading, so a presence pin on the definition alone would stay
