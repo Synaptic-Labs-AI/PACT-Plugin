@@ -22,16 +22,16 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-The orchestrator's wait-in-silence rule now separates narration from a milestone. It stays silent on "waiting on X", "still running" and the filler poll, and it reports a dispatch's result, a measured number, or a state change the user cannot otherwise see, in one line that carries the number rather than a description of the activity. On a long dispatch that makes the orchestrator report at its milestones unprompted, so the user no longer has to ask for status to learn that work is progressing.
+The orchestrator's wait-in-silence rule now separates narration from a milestone. It stays silent on "waiting on X", "still running" and the filler poll, and it reports a dispatch's result, a measured number, or a state change the user cannot otherwise see, in one line that carries the concrete fact rather than a description of the activity. A dispatch's result is a milestone in its own right, and a long dispatch also reports at its intermediate milestones unprompted, so the user sees milestones as they land rather than asking for status.
 
 ### What landed
 
-- `agents/pact-orchestrator.md` §Wait in Silence gains one paragraph, placed immediately after the rule that emits no reply on a turn with no actionable content. It defines a milestone as a dispatch's result, a measured number, or a state change the user cannot otherwise see, requires the relay to be one line carrying the number, and states that "No actionable content" means nothing the team needs, not nothing the user is owed.
-- The paragraph names the milestone rule as the deviation from strict silence, so the surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
+- `agents/pact-orchestrator.md` §Wait in Silence gains one paragraph, placed immediately after the rule that emits no reply on a turn with no actionable content. It defines a milestone as a dispatch's result, a measured number, or a state change the user cannot otherwise see, requires the relay to be one line addressed to the user, carrying the concrete fact only when it is new since the last report, and states that "No actionable content" means nothing the team needs AND nothing the user is owed.
+- The paragraph separates narration from a milestone rather than carving an exception out of the silence rule, so the surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
 
 ### Why
 
-The silence rule named only what is actionable for the team, so its safe reading was silence on everything. In a long dispatch the only progress signal then arrived in teammate notifications the user never sees, and the user had to ask for status repeatedly. Naming the milestone case changes what the orchestrator does on a teammate turn, without reopening the narrate-the-wait and filler-call failures the section exists to prevent.
+The silence rule named only what is actionable for the team, so its safe reading was silence on everything. Between dispatch and the awaited event the only interim progress signal arrived in teammate notifications the user never sees — completion reports the watcher rules already require — so the user had to ask for status repeatedly. Naming the milestone case changes what the orchestrator does on a teammate turn, without reopening the narrate-the-wait and filler-call failures the section exists to prevent.
 
 ## v4.8.25: verify-only re-review reports carry two required lines
 

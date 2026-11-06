@@ -6,6 +6,11 @@ Waiting).
 Pins the amendment surfaces:
 
   §5 Wait in Silence:
+    - the narration-versus-milestone rule (a milestone is a dispatch's
+      result, a measured number, or a state change the user cannot
+      otherwise see; a long dispatch reports at its milestones
+      unprompted, and "no actionable content" means nothing the team
+      needs AND nothing the user is owed);
     - the filler-call compulsion block (names the reflex, states the
       turn-manufacture mechanics, states the terminal action);
     - the termination test — the discriminator stated ONCE at its §5 home:
@@ -137,6 +142,16 @@ SECTION_PHRASE_PINS = [
     # fact that makes "end with NO tool call" non-negotiable.
     (WAIT_IN_SILENCE, "every tool result generates a new turn, so a filler call manufactures the next turn"),
     (WAIT_IN_SILENCE, "A tool call that produces no new information is a discipline violation"),
+    # --- §5: narration versus milestone (the named deviation from strict
+    # silence — without it the safe reading of the rule above is silence on
+    # everything, which is the defect this block exists to prevent) ---
+    (WAIT_IN_SILENCE, "Narration is not a milestone"),
+    (WAIT_IN_SILENCE, "A milestone is a dispatch's result, a measured number, or a state change the user cannot otherwise see"),
+    # The redefinition is pinned separately: it is the clause that reverses the
+    # old safe reading, so a presence pin on the definition alone would stay
+    # green if a later edit softened this back to a contrast.
+    (WAIT_IN_SILENCE, '"No actionable content" means nothing the team needs AND nothing the user is owed.'),
+    (WAIT_IN_SILENCE, "A long dispatch reports at its milestones, unprompted"),
     # --- §5: the termination test (discriminator canonical phrase, §5 home) ---
     (WAIT_IN_SILENCE, "Legitimate wait-time activity terminates on the awaited event"),
     # --- §5: the watcher rule ---
