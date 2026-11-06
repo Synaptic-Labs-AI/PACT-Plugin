@@ -361,13 +361,13 @@ def test_an_aggregate_inconsistent_with_collected_is_refused():
     assert aggregate_worker_collection_counts([(4, 4, 0)], 3) is None
 
 
-def test_the_aggregate_carries_a_narrowed_pair():
+def test_the_aggregate_carries_a_narrowed_triple():
     """The identity reads AFTER, not BEFORE or DESELECTED.
 
     Every other fixture here has before == after and deselected == 0, so a
     check on the wrong element passes them all; this is the only case that
     can tell ``triples[0][1]`` from ``triples[0][0]`` or ``triples[0][2]``.
-    The pair is a legitimate deselection (4 taken to 3, one reported), which
+    The triple is a legitimate deselection (4 taken to 3, one reported), which
     must be RETURNED rather than refused so the verifier can see it.
     """
     assert aggregate_worker_collection_counts([(4, 3, 1)], 3) == (4, 3, 1)
@@ -378,7 +378,7 @@ def test_no_worker_reports_have_no_aggregate():
     assert aggregate_worker_collection_counts([None], 4) is None
 
 
-def test_a_non_integer_pair_value_has_no_aggregate():
+def test_a_non_integer_triple_value_has_no_aggregate():
     """float and bool are the shapes the identity check cannot reject.
 
     ``4.0 == 4`` and ``True == 1``, so without the type guard each would be
@@ -397,8 +397,13 @@ def test_a_non_integer_collected_has_no_aggregate():
     assert aggregate_worker_collection_counts([(1, 1, 0)], True) is None
 
 
-def test_a_malformed_pair_has_no_aggregate():
-    """A triple of the wrong length is refused, not unpacked."""
+def test_an_input_of_the_wrong_length_has_no_aggregate():
+    """An input of the wrong length is refused, not unpacked.
+
+    Both lengths are kept in one test on purpose: the 2-element case is the
+    migration trap (a value that used to be the shape now has to be refused),
+    and a separate test could be deleted without this one noticing.
+    """
     assert aggregate_worker_collection_counts([(4, 3)], 3) is None
     assert aggregate_worker_collection_counts([(4, 4, 0, 0)], 4) is None
 
