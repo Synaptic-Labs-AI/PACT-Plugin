@@ -41,7 +41,14 @@ PEER_REVIEW = PLUGIN_ROOT / "commands" / "peer-review.md"
 VERIFY_ONLY_START = "### Verify-Only Re-Review"
 VERIFY_ONLY_END = "### Post-Remediation Incremental Update"
 COLD_LANE_START = "### Cold Reviewer Lane"
-COLD_LANE_END = "### Reviewer Teachback"
+# The lane ends at its own closing separator. Bounding it at the next heading
+# instead swallows the warm `**Dispatch reviewers**` block that follows the
+# separator, so the absence arms would fire on a label the contract actually
+# instructs the lead to put in the warm dispatch.
+COLD_LANE_SEPARATOR = "\n---\n"
+# Only a bound on the SEPARATOR SEARCH, never a fallback region end: it keeps a
+# lost separator from silently finding a later one elsewhere in the file.
+COLD_LANE_NEXT_HEADING = "### Reviewer Teachback"
 
 REPORT_BLOCK_START = "**Verify-only report lines.**"
 # The block is three paragraphs and ends where the following blockquote note
@@ -109,7 +116,33 @@ def _verify_only_region(text: str) -> str:
 
 
 def _cold_lane_region(text: str) -> str:
-    return _bounded(text, COLD_LANE_START, COLD_LANE_END, "cold lane section")
+    """The cold lane up to its own closing separator, exclusive.
+
+    The separator is searched ONLY between the cold-lane heading and the next
+    section heading. An unbounded search would find a later separator elsewhere
+    in the file when the lane's own is lost, silently widening the region; and
+    a fallback to the next heading would silently restore the wider bound the
+    separator exists to close. Both failure directions are loud instead.
+    """
+    start_at = text.find(COLD_LANE_START)
+    if start_at < 0:
+        pytest.fail(f"cold lane section: missing start anchor {COLD_LANE_START!r}")
+    heading_at = text.find(COLD_LANE_NEXT_HEADING, start_at + len(COLD_LANE_START))
+    if heading_at < 0:
+        pytest.fail(
+            "cold lane section: missing next heading "
+            f"{COLD_LANE_NEXT_HEADING!r} after {COLD_LANE_START!r} — the "
+            "region bound has changed; re-anchor deliberately"
+        )
+    end_at = text.find(
+        COLD_LANE_SEPARATOR, start_at + len(COLD_LANE_START), heading_at
+    )
+    if end_at < 0:
+        pytest.fail(
+            "the cold-lane separator is missing — the region bound has "
+            "changed; widen or re-anchor deliberately"
+        )
+    return text[start_at:end_at]
 
 
 def _block_count(text: str) -> int:
@@ -245,6 +278,63 @@ class TestColdLaneExclusion:
             f"{label!r} leaked into the cold lane section — the contract is "
             "warm-only, and the cold lane receives findings rather than a "
             "checklist"
+        )
+
+
+class TestColdLaneBound:
+    """The cold-lane region must end at the lane's own separator.
+
+    The lane is followed by the warm `**Dispatch reviewers**` block, which the
+    contract tells the lead to populate with exactly the labels the absence
+    arms forbid. A region bounded by the next heading instead would fire on
+    the contract's own instruction — the wrong-reason red this bound closes.
+    """
+
+    def test_region_excludes_the_warm_dispatch_block(self):
+        region = _cold_lane_region(_command_text())
+        assert "**Dispatch reviewers**" not in region, (
+            "the cold-lane region swallowed the warm dispatch block — a label "
+            "written there would redden the absence arms for the wrong reason"
+        )
+
+    def test_region_keeps_the_positive_control(self):
+        region = _cold_lane_region(_command_text())
+        assert COLD_LANE_POSITIVE_CONTROL in region, (
+            f"the narrower bound lost {COLD_LANE_POSITIVE_CONTROL!r}, so the "
+            "absence arms' positive control no longer proves the section is live"
+        )
+
+    def test_label_in_the_warm_dispatch_does_not_reach_the_region(self):
+        text = _command_text()
+        start = text.index(COLD_LANE_START)
+        sep_end = text.index(COLD_LANE_SEPARATOR, start) + len(COLD_LANE_SEPARATOR)
+        injected = text[:sep_end] + "Reader false flags in the warm dispatch\n" + text[sep_end:]
+        assert injected != text, "the injection did not change the text"
+        assert "Reader false flags" not in _cold_lane_region(injected), (
+            "a label written in the warm dispatch block reached the cold-lane "
+            "region, so the absence arm fires on what the contract asks for"
+        )
+
+    def test_label_inside_the_cold_lane_reaches_the_region(self):
+        text = _command_text()
+        start = text.index(COLD_LANE_START) + len(COLD_LANE_START)
+        injected = text[:start] + "\n\nReader false flags leaked here.\n" + text[start:]
+        assert injected != text, "the injection did not change the text"
+        assert "Reader false flags" in _cold_lane_region(injected), (
+            "a label written inside the cold lane did not reach the region, "
+            "so the absence arms have stopped testing the lane"
+        )
+
+    def test_missing_separator_fails_loudly(self):
+        text = _command_text()
+        start = text.index(COLD_LANE_START)
+        sep_at = text.index(COLD_LANE_SEPARATOR, start)
+        mutated = text[:sep_at] + "\n\n" + text[sep_at + len(COLD_LANE_SEPARATOR):]
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _cold_lane_region(mutated)
+        assert "separator is missing" in str(excinfo.value), (
+            "a lost separator must fail loudly on its own name, not widen the "
+            f"region silently; got: {str(excinfo.value)!r}"
         )
 
 
