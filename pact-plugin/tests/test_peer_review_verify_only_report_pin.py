@@ -59,7 +59,7 @@ FORMAT_ROW = (
 )
 
 EXPECTED_BLOCK = """\
-**Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the description of the warm reviewer task the round creates, and in the `SendMessage` when the reviewer is reused:
+**Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the description of the warm reviewer task the round creates for the review work, and in the `SendMessage` when the reviewer is reused:
 
 - **Reader false flags**: the check you ran, each result it reported as absent or changed that was in fact present, and each correction you made in the check rather than in the artifact. When it reported none, write `Reader false flags: none — <the check you ran>`; otherwise write `Reader false flags: <the check you ran> — <each wrong result>; <each correction in the check>`.
 - **Declined items**: each checklist item or review criterion you did not satisfy, with the measured evidence that the artifact is correct. When you satisfied every item, write `Declined items: none`.
@@ -70,7 +70,7 @@ LABELS = ("Reader false flags", "Declined items")
 
 # The two dispatch routes plus the journal exclusion the block must name.
 RELAY_TOKENS = (
-    ("description of the warm reviewer task", "the fresh-review-task route"),
+    ("for the review work", "the review-work route"),
     ("SendMessage", "the reused-reviewer route"),
     ("review_finding", "the journal exclusion"),
 )
@@ -123,15 +123,21 @@ def _block_count(text: str) -> int:
     return _normalize(region).count(_normalize(EXPECTED_BLOCK))
 
 
-def _report_block(region: str) -> str:
+def _report_block(region: str, *, check_end: bool = True) -> str:
     """The contract block, from its first words to the following blockquote.
 
     The end is structural: the block's three paragraphs run until the next
-    block type, the `> **New issue verification**` note. The suffix check
-    below is a post-condition, not the boundary. Both failure messages name
-    the observed condition and the live causes, because a blockquote added
-    inside the block and a de-blockquoted following note need different
+    block type, the `> **New issue verification**` note. Both failure messages
+    name the observed condition and the live causes, because a blockquote
+    added inside the block and a de-blockquoted following note need different
     repairs and neither is a truncation of the contract text.
+
+    `check_end=False` skips the suffix post-condition ONLY. The extraction is
+    still bounded by REPORT_BLOCK_TERMINATOR, so a caller that opts out gets
+    the same block span, never the rest of the region. The token arms opt out
+    so their own named message is reachable when a relay phrase is removed;
+    the post-conditioned path stays alive in TestBlockBoundaryPaths, which is
+    what keeps the truncation diagnosis from disappearing.
     """
     start_at = region.find(REPORT_BLOCK_START)
     if start_at < 0:
@@ -146,7 +152,7 @@ def _report_block(region: str) -> str:
             "REPORT_BLOCK_TERMINATOR deliberately."
         )
     block = region[start_at:end_at]
-    if not _normalize(EXPECTED_BLOCK).endswith(_normalize(block)):
+    if check_end and not _normalize(EXPECTED_BLOCK).endswith(_normalize(block)):
         pytest.fail(
             "contract block boundary mismatch — the extracted span is not the "
             "tail of EXPECTED_BLOCK. Two live causes: a blockquote sits inside "
@@ -247,16 +253,77 @@ class TestRelayAndJournalExclusion:
 
     @pytest.mark.parametrize("token,lost", RELAY_TOKENS)
     def test_token_present_in_block(self, token, lost):
-        block = _normalize(_report_block(_verify_only_region(_command_text())))
+        block = _normalize(
+            _report_block(_verify_only_region(_command_text()), check_end=False)
+        )
         assert token in block, (
             f"the contract block lost {token!r} — it carries {lost}"
         )
 
     def test_unauditable_trigger_present(self):
-        block = _normalize(_report_block(_verify_only_region(_command_text())))
+        block = _normalize(
+            _report_block(_verify_only_region(_command_text()), check_end=False)
+        )
         assert "unauditable" in block, (
             "the contract block lost its 'unauditable' trigger — a report "
             "missing either line must be sent back, not synthesized"
+        )
+
+
+class TestBlockBoundaryPaths:
+    """The post-conditioned and post-condition-free paths must stay distinct.
+
+    The token arms opt out of the suffix check so their own named message is
+    reachable when a relay phrase is removed. This class keeps the opt-out from
+    swallowing the truncation diagnosis: the same truncated-block input must
+    REDDEN the post-conditioned path and RETURN on the opt-out path, and the
+    opt-out path must still stop at the terminator rather than searching the
+    whole region.
+    """
+
+    def _truncated_region(self) -> str:
+        """The live region with a blockquote injected inside the block."""
+        region = _verify_only_region(_command_text())
+        marker = "Neither line is a finding:"
+        assert marker in region, "the block's final paragraph marker moved"
+        injected = region.replace(marker, "> injected blockquote\n\n" + marker, 1)
+        assert injected != region, "the injection did not change the region"
+        return injected
+
+    def test_live_block_satisfies_the_boundary_post_condition(self):
+        """The post-conditioned path must stay alive on the LIVE command file.
+
+        Without this arm every caller of _report_block opts out, so a real
+        blockquote inserted inside the block would red the equality arms
+        without ever printing the boundary diagnosis they exist to give.
+        """
+        block = _report_block(_verify_only_region(_command_text()))
+        assert block, "the post-conditioned path returned nothing"
+
+    def test_post_conditioned_path_names_the_cause_on_a_truncated_block(self):
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _report_block(self._truncated_region())
+        message = str(excinfo.value)
+        assert "not the tail of EXPECTED_BLOCK" in message, (
+            "the post-conditioned path no longer reports the boundary "
+            f"mismatch; got: {message!r}"
+        )
+        assert "blockquote sits inside the block" in message, (
+            "the post-conditioned failure lost its named cause; got: "
+            f"{message!r}"
+        )
+
+    def test_opt_out_path_returns_the_truncated_block_without_the_post_condition(self):
+        block = _normalize(_report_block(self._truncated_region(), check_end=False))
+        assert block, "the opt-out path returned nothing"
+        # The two paths differ on exactly this input: one raises, one returns.
+        assert "Neither line is a finding:" not in block, (
+            "the opt-out extraction ran past the terminator — 'raw' must skip "
+            "the suffix check only, never search the whole region"
+        )
+        assert "New issue verification" not in block, (
+            "the opt-out extraction swallowed the note that follows the "
+            "block, so a token arm could pass on text outside the block"
         )
 
 
