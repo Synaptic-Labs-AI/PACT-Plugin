@@ -17,9 +17,11 @@ Each arm's docstring names the change that turns it red.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -343,3 +345,170 @@ def test_a_dotfiles_home_is_never_the_enclosing_checkout(tmp_path, clean_env):
 
     other = tmp_path / "dotfiles"
     assert enclosing_main_checkout(other / "projects" / "app") == other.resolve()
+
+
+# -- a corrupt record FIELD is a DECLINE, not a crash ------------------------
+#
+# The declared-directory NUL is caught at memory_api's boundary, but the
+# record's OWN fields are consumed by `record_resolution`, whose os.path calls
+# reject a NUL with ValueError. The declaration must be DELETED and the record
+# kept: only then is the record consulted at all. A live declaration never
+# reaches this branch and would pass on a tree that still crashes.
+
+_HOOKS = Path(__file__).resolve().parents[1] / "hooks"
+
+
+def _remove_worktree(main: Path, path: Path) -> None:
+    _git("worktree", "remove", "--force", str(path), cwd=main)
+    assert not path.exists()
+
+
+def _in_tree_worktree_removed(tmp_path):
+    """An IN-TREE worktree (an out-of-tree one is RECORD_UNRELATED by design)."""
+    repo = tmp_path / "main"
+    repo.mkdir()
+    _git("init", "-q", ".", cwd=repo)
+    _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=repo)
+    repo = repo.resolve()
+    worktree = repo / ".worktrees" / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=repo)
+    identity = {
+        "session_id": SID,
+        "declared": os.path.realpath(worktree),
+        "worktree": os.path.realpath(worktree),
+        "common_dir": str(repo / ".git"),
+    }
+    _remove_worktree(repo, worktree)
+    return repo, worktree, identity
+
+
+def _write_record(config_root: Path, identity: dict) -> Path:
+    record = config_root / "pact-sessions" / "slug" / SID / "worktree-identity.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps(identity), encoding="utf-8")
+    return record
+
+
+def _live_reader_env(monkeypatch, config_root: Path) -> None:
+    """Let the REAL reader run in-process: defeat the pytest guard and point
+    it at the sandboxed config root."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_root))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+
+
+def test_a_nul_in_common_dir_declines_instead_of_raising(tmp_path, monkeypatch):
+    """A corrupt `common_dir` must DECLINE with the anchor's cause, not crash.
+
+    Red before the fix: the ValueError escapes `record_resolution`, so the
+    call raises instead of returning a SessionRoot. The control writes a VALID
+    record first and reads it back, which proves the path under test is the
+    reader's path; only then is the field corrupted.
+    """
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID"):
+        monkeypatch.delenv(key, raising=False)
+    repo, worktree, identity = _in_tree_worktree_removed(tmp_path)
+    config_root = tmp_path / "config"
+    record = _write_record(config_root, identity)
+    _live_reader_env(monkeypatch, config_root)
+
+    # CONTROL: the record PATH is the reader's path.
+    assert project_scope.get_worktree_identity_from_session_record(), (
+        "the valid record was not read; the corrupt arm would prove nothing"
+    )
+
+    corrupted = dict(identity, common_dir=identity["common_dir"] + "\x00")
+    record.write_text(json.dumps(corrupted), encoding="utf-8")
+    assert "\x00" in json.loads(record.read_text(encoding="utf-8"))["common_dir"]
+    assert not worktree.exists(), (
+        "the declaration must be gone for the record to be consulted at all"
+    )
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+
+    session = session_memory_root()
+
+    assert session == SessionRoot(worktree, True, None, ROOT_CAUSE_MISSING), (
+        "a corrupt common_dir changed the outcome instead of declining: "
+        f"{session!r}"
+    )
+
+
+def _run_session_init(home: Path, config_root: Path, declared: Path) -> dict:
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("CLAUDE_")
+        and not k.startswith("GIT_")
+        and k != "PYTEST_CURRENT_TEST"
+    }
+    env.update(
+        HOME=str(home),
+        CLAUDE_CONFIG_DIR=str(config_root),
+        CLAUDE_CODE_SESSION_ID=SID,
+        CLAUDE_PROJECT_DIR=str(declared),
+        CLAUDE_PLUGIN_ROOT=str(_HOOKS.parent),
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_HOOKS / "session_init.py")],
+        input=json.dumps({
+            "hook_event_name": "SessionStart",
+            "session_id": SID,
+            "source": "startup",
+            "agent_type": "PACT:pact-orchestrator",
+        }),
+        capture_output=True, text=True, env=env, cwd=str(home), timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_session_init_declines_a_nul_common_dir_instead_of_crashing(
+    tmp_path, monkeypatch
+):
+    """The hook must SKIP cleanly, not fail early with the NUL on stderr.
+
+    The distinction is the arm: a crash produces 'Session team: NOT GENERATED
+    (session_init failed early)' or 'Hook warning (session_init): embedded
+    null byte', while a decline produces the ordinary skip line.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    config_root = home / ".claude"
+    probe = subprocess.run(
+        ["git", "-C", str(home), "rev-parse"],
+        capture_output=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+    )
+    assert probe.returncode != 0, "home sits inside a repository"
+
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID"):
+        monkeypatch.delenv(key, raising=False)
+    _repo, worktree, identity = _in_tree_worktree_removed(tmp_path)
+    record = _write_record(config_root, identity)
+
+    # CONTROL: the record PATH is the reader's path (a valid record is read
+    # back in-process through the real reader, pointed at the same root).
+    _live_reader_env(monkeypatch, config_root)
+    assert project_scope.get_worktree_identity_from_session_record(), (
+        "the valid record was not read; the child run would prove nothing"
+    )
+
+    corrupted = dict(identity, common_dir=identity["common_dir"] + "\x00")
+    record.write_text(json.dumps(corrupted), encoding="utf-8")
+    assert "\x00" in json.loads(record.read_text(encoding="utf-8"))["common_dir"]
+    assert not worktree.exists()
+
+    output = _run_session_init(home, config_root, worktree)
+    message = output.get("systemMessage", "")
+
+    assert "Project CLAUDE.md skipped" in message, (
+        f"session_init did not decline cleanly: {message[:400]!r}"
+    )
+    assert "Session team: NOT GENERATED (session_init failed early)" not in message, (
+        f"the hook failed early instead of declining: {message[:400]!r}"
+    )
+    assert "Hook warning (session_init): embedded null byte" not in message, (
+        f"the NUL escaped as a hook warning: {message[:400]!r}"
+    )
