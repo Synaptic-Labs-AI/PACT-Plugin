@@ -151,7 +151,7 @@ def _assert_contract_placement(region: str) -> None:
     note_at = region.find(NEW_ISSUE_NOTE)
     if block_at < 0 or note_at < 0:
         pytest.fail("verify-only region: contract block or New-issue note is missing")
-    if not table_end <= block_at < note_at:
+    if not table_end < block_at < note_at:
         pytest.fail(
             "contract block must follow the comparison table and precede the "
             "New-issue note; its current order breaks the Format row's 'below' route"
@@ -263,6 +263,16 @@ class TestContractBlock:
         assert relocated != region, "the relocation did not change the region"
         with pytest.raises(pytest.fail.Exception) as excinfo:
             _assert_contract_placement(relocated)
+        assert "must follow the comparison table" in str(excinfo.value)
+
+    def test_zero_whitespace_between_table_and_block_fails_placement(self):
+        region = _verify_only_region(_command_text())
+        table_end = region.index(TABLE_END_ROW) + len(TABLE_END_ROW)
+        block_at = region.index(REPORT_BLOCK_START)
+        concatenated = region[:table_end] + region[block_at:]
+        assert concatenated != region, "the concatenation did not change the region"
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _assert_contract_placement(concatenated)
         assert "must follow the comparison table" in str(excinfo.value)
 
 
