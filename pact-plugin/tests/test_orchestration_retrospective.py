@@ -18,6 +18,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1077,6 +1078,18 @@ def _raw_journal_events(session_dir):
     ]
 
 
+def _documented_raw_events(session_dir):
+    """Execute wrap-up's raw_events assignment with a real session_dir."""
+    q5 = _question_line(
+        WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+    )
+    namespace = {"session_dir": str(session_dir), "json": json}
+    _exec_documented_chain(
+        _backticked_expression(q5, "raw_events ="), namespace
+    )
+    return namespace["raw_events"]
+
+
 def _stamp(total):
     return {
         "novelty": 2,
@@ -1473,6 +1486,8 @@ class TestQ5Q7ReportingContract:
         for call in required_calls:
             assert content.count(call) >= 1, call
         assert "FIRST empty direct read across Q5-Q7" in content
+        assert "]` ONCE;" in content
+        assert "every later empty stream reuses that same bound list" in content
         assert content.count("shared acquisition rule") == 2
         assert "metadata.teachback_submit.variety_acknowledgment.concern" in content
         assert "raw_events = [json.loads(line) for line in open(f" in content
@@ -1559,7 +1574,7 @@ class TestQ5Q7ReportingContract:
                 variety=_stamp(9), ts=arc_start,
             )
         _write_event(session, event_type, ts=arc_start, **fields)
-        raw_events = _raw_journal_events(session)
+        raw_events = _documented_raw_events(session)
         line = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), question)
 
         def run(cli_events, raw=raw_events, unrelated=None):
@@ -1617,40 +1632,43 @@ class TestQ5Q7ReportingContract:
         )
         events = _read_events(session, "dispatch_site", arc_start)
         assert len(events) == 1
-        raw_reads = 0  # nonempty dispatch performs no raw acquisition
-        assert raw_reads == 0
 
-        # The first empty stream binds raw_events once and constructs dispatch's list.
+        # The first empty stream executes the documented acquisition exactly once.
         snapshot_events = []
-        raw_events = _raw_journal_events(session)
-        raw_reads += 1
-        assert raw_reads == 1 and raw_events
         q5 = _question_line(
             WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
         )
+        real_open = open
+        open_calls = 0
+
+        def counting_open(*args, **kwargs):
+            nonlocal open_calls
+            open_calls += 1
+            return real_open(*args, **kwargs)
+
+        with patch("builtins.open", new=counting_open):
+            raw_events = _documented_raw_events(session)
+            snapshot_result = _run_direct_guard(
+                q5, "snapshot_events", "raw_snapshots", snapshot_events,
+                raw_events, "task_metadata_snapshot", arc_start,
+            )
+            skip_result = _run_direct_guard(
+                q5, "skip_events", "raw_skip_events", [],
+                raw_events, "journal_emit_skipped", arc_start,
+            )
+            dispatch_result = _run_direct_guard(
+                q5, "events", "raw_dispatch_site", [], raw_events,
+                "dispatch_site", arc_start,
+            )
+        assert open_calls == 1
+        assert snapshot_result == "UNAVAILABLE"
+        assert skip_result == "UNAVAILABLE"
+        assert dispatch_result == "UNAVAILABLE"
         namespace = {"raw_events": raw_events, "_ts_ge": _ts_ge, "arc_start": arc_start}
         _exec_documented_chain(
             _backticked_expression(q5, "raw_dispatch_site ="), namespace
         )
         assert len(namespace["raw_dispatch_site"]) == 1
-        assert _run_direct_guard(
-            q5, "snapshot_events", "raw_snapshots", snapshot_events,
-            raw_events, "task_metadata_snapshot", arc_start,
-        ) == "UNAVAILABLE"
-
-        # A later empty skip stream reuses the same bound list without another read.
-        skip_events = []
-        assert raw_reads == 1
-        assert _run_direct_guard(
-            q5, "skip_events", "raw_skip_events", skip_events,
-            raw_events, "journal_emit_skipped", arc_start,
-        ) == "UNAVAILABLE"
-
-        # The dispatch guard itself is bound and fails closed on empty CLI.
-        assert _run_direct_guard(
-            q5, "events", "raw_dispatch_site", [], raw_events,
-            "dispatch_site", arc_start,
-        ) == "UNAVAILABLE"
 
         # Clean-zero controls: empty snapshot/skip are legitimate, not unbound or mismatched.
         clean = tmp_path / "clean"
@@ -1658,7 +1676,7 @@ class TestQ5Q7ReportingContract:
             clean, "variety_assessed", task_id="100",
             variety=_stamp(9), ts=arc_start,
         )
-        clean_raw = _raw_journal_events(clean)
+        clean_raw = _documented_raw_events(clean)
         assert _run_direct_guard(
             q5, "snapshot_events", "raw_snapshots", [], clean_raw,
             "task_metadata_snapshot", arc_start,
@@ -1697,42 +1715,62 @@ class TestQ5Q7ReportingContract:
         assert _read_events(session, "task_metadata_snapshot", arc_start)
         assert _read_events(session, "variety_assessed", arc_start)
         assert _read_events(session, "journal_emit_skipped", arc_start)
-        raw_reads = 0
-        assert raw_reads == 0
+        real_open = open
+        open_calls = 0
 
-        raw_events = _raw_journal_events(session)
-        raw_reads += 1  # Q6 is the first empty direct read across Q5-Q7.
-        assert raw_reads == 1
-        q6 = _question_line(
-            WRAPUP_PATH.read_text(encoding="utf-8"),
-            "6. **Variety acknowledgment signals**",
-        )
-        assert _run_direct_guard(
-            q6, "events", "raw_teachback_ack", [], raw_events,
-            "teachback_ack", arc_start,
-        ) == "UNAVAILABLE"
+        def counting_open(*args, **kwargs):
+            nonlocal open_calls
+            open_calls += 1
+            return real_open(*args, **kwargs)
 
-        q7 = _question_line(
-            WRAPUP_PATH.read_text(encoding="utf-8"),
-            "7. **HANDOFF refusal degradations**",
-        )
-        assert _run_direct_guard(
-            q7, "events", "raw_refusal_degraded", [], raw_events,
-            "handoff_refusal_degraded", arc_start,
-        ) == "UNAVAILABLE"
-        assert raw_reads == 1  # Q7 reused the bound list without another acquisition.
+        with patch("builtins.open", new=counting_open):
+            raw_events = _documented_raw_events(session)
+            q6 = _question_line(
+                WRAPUP_PATH.read_text(encoding="utf-8"),
+                "6. **Variety acknowledgment signals**",
+            )
+            q6_result = _run_direct_guard(
+                q6, "events", "raw_teachback_ack", [], raw_events,
+                "teachback_ack", arc_start,
+            )
+            q7 = _question_line(
+                WRAPUP_PATH.read_text(encoding="utf-8"),
+                "7. **HANDOFF refusal degradations**",
+            )
+            q7_result = _run_direct_guard(
+                q7, "events", "raw_refusal_degraded", [], raw_events,
+                "handoff_refusal_degraded", arc_start,
+            )
+        assert open_calls == 1
+        assert q6_result == "UNAVAILABLE"
+        assert q7_result == "UNAVAILABLE"
 
         clean = tmp_path / "clean"
         _write_event(clean, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
-        clean_raw = _raw_journal_events(clean)
-        assert _run_direct_guard(
-            q6, "events", "raw_teachback_ack", [], clean_raw,
-            "teachback_ack", arc_start,
-        ) == "LEGITIMATE ZERO"
-        assert _run_direct_guard(
-            q7, "events", "raw_refusal_degraded", [], clean_raw,
-            "handoff_refusal_degraded", arc_start,
-        ) == "LEGITIMATE ZERO"
+        _write_event(clean, "dispatch_site", task_id="2", variety=_stamp(8), ts=arc_start)
+        _write_event(clean, "task_metadata_snapshot", task_id="9", metadata={}, ts=arc_start)
+        _write_event(
+            clean, "journal_emit_skipped", skipped_type="dispatch_site",
+            cause="returned_false", ts=arc_start,
+        )
+        assert _read_events(clean, "dispatch_site", arc_start)
+        assert _read_events(clean, "task_metadata_snapshot", arc_start)
+        assert _read_events(clean, "variety_assessed", arc_start)
+        assert _read_events(clean, "journal_emit_skipped", arc_start)
+        open_calls = 0
+        with patch("builtins.open", new=counting_open):
+            clean_raw = _documented_raw_events(clean)
+            clean_q6 = _run_direct_guard(
+                q6, "events", "raw_teachback_ack", [], clean_raw,
+                "teachback_ack", arc_start,
+            )
+            clean_q7 = _run_direct_guard(
+                q7, "events", "raw_refusal_degraded", [], clean_raw,
+                "handoff_refusal_degraded", arc_start,
+            )
+        assert open_calls == 1
+        assert clean_q6 == "LEGITIMATE ZERO"
+        assert clean_q7 == "LEGITIMATE ZERO"
 
     def test_va_feature_anchor_process_and_derived_empty_are_distinct(self, tmp_path):
         session = tmp_path / "session"
