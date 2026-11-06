@@ -155,11 +155,11 @@ def _report_block(region: str, *, check_end: bool = True) -> str:
     if check_end and not _normalize(EXPECTED_BLOCK).endswith(_normalize(block)):
         pytest.fail(
             "contract block boundary mismatch — the extracted span is not the "
-            "tail of EXPECTED_BLOCK. Two live causes: a blockquote sits inside "
-            "the block, so extraction stopped early; or extraction ran past "
-            "the block because the block is no longer immediately followed by "
-            "the note. The block's own text is owned by the equality arms, "
-            "not here."
+            "tail of EXPECTED_BLOCK. Three live causes: a blockquote sits "
+            "inside the block, so extraction stopped early; extraction ran "
+            "past the block because the block is no longer immediately "
+            "followed by the note; or the block's own text was edited, which "
+            "the equality arms report."
         )
     return block
 
@@ -296,6 +296,12 @@ class TestBlockBoundaryPaths:
         Without this arm every caller of _report_block opts out, so a real
         blockquote inserted inside the block would red the equality arms
         without ever printing the boundary diagnosis they exist to give.
+
+        WHAT THIS ARM DOES NOT PROVE: it supplies the LIVE call site, not the
+        deletion detection. It passes if the post-condition is disabled. The
+        sibling `test_post_conditioned_path_names_the_cause_on_a_truncated_block`
+        is the arm that catches a dead post-condition — cite that one, not this
+        canary, as evidence the post-condition exists.
         """
         block = _report_block(_verify_only_region(_command_text()))
         assert block, "the post-conditioned path returned nothing"
