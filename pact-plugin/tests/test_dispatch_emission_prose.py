@@ -216,3 +216,38 @@ class TestDiscriminatorConstant:
         from shared.constants import VARIETY_ASSESSED_DISPATCH_SCOPE
 
         assert VARIETY_ASSESSED_DISPATCH_SCOPE == "dispatch"
+
+
+class TestPopulationAndAuditorWording:
+    def test_external_reviews_split_roster_from_dispatch_site_membership(self):
+        paths = [
+            COMMANDS / "wrap-up.md",
+            PLUGIN_ROOT / "protocols" / "pact-protocols.md",
+            PLUGIN_ROOT / "protocols" / "pact-variety.md",
+            PLUGIN_ROOT / "hooks" / "task_lifecycle_gate.py",
+        ]
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            assert "no journal witness" not in text, path
+            assert "review_dispatch` roster event" in text or (
+                "review_dispatch`` roster event" in text
+            ), path
+            assert "one event means one dispatch" not in text, path
+            assert "witnesses a dispatch" in text, path
+
+    def test_auditor_prohibition_names_real_consequences_and_unchanged_q5(self):
+        text = (
+            PLUGIN_ROOT / "agents" / "pact-orchestrator.md"
+        ).read_text(encoding="utf-8")
+        assert "self-completion authority and harvest propagation" in text
+        assert "would NOT change Q5 `dispatch_site` membership" in text
+        assert "would silently move those dispatches out of the Q5" not in text
+
+    def test_t5_keys_on_owner_write_not_path_or_subject_heuristic(self):
+        text = (
+            PLUGIN_ROOT / "tests" / "test_dispatch_site_emit.py"
+        ).read_text(encoding="utf-8")
+        t5 = text.split("def test_T5_work_subject_containing_review", 1)[1]
+        t5 = t5.split("def ", 1)[0]
+        assert "owner-witnessing write rather than" in t5
+        assert "owner write\n        alone" not in t5

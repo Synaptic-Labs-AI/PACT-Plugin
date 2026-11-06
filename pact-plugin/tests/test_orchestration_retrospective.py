@@ -12,15 +12,23 @@ Tests cover:
 8. Q7 handoff_refusal_degraded question presence pin
 """
 import json
+import os
 import re
+import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from shared.teachback_schema import resolve_variety_total  # noqa: E402
+from shared.session_journal import _parse_ts, _ts_ge  # noqa: E402
 from shared.variety_divergence import (  # noqa: E402
+    count_emit_skips,
     extract_dispatch_coverage,
     extract_final_dispatch_coverage,
+    resolve_arc_start,
 )
 
 WRAPUP_PATH = Path(__file__).parent.parent / "commands" / "wrap-up.md"
@@ -301,10 +309,10 @@ class TestRetroReadHardening:
         # now states what was OBSERVED, so the landmark moves with it.
         # Identical assertion shape: same three guard requirements, same
         # single ordering check, one substituted landmark string.
-        assert "no dispatch sites recorded" in q5
+        assert "no `dispatch_site` events recorded this arc" in q5
         # ordering: the guard must precede the OMISSION conclusion
         assert q5.index("masked-empty guard") < q5.index(
-            "no dispatch sites recorded"
+            "no `dispatch_site` events recorded this arc"
         )
 
     def test_q5_stops_on_a_failed_snapshot_read_rather_than_passing_empty(
@@ -352,7 +360,7 @@ class TestRetroReadHardening:
         helper cannot check this, so the instruction owns it."""
         assert "read --type task_metadata_snapshot" in q5
         assert "the SAME `--since` value" in q5
-        assert "BOTH reads omit `--since`" in q5
+        assert "BOTH reads carry the validated `--since '{arc_start}'`" in q5
 
     def test_q5_denominator_comes_from_the_one_pass_helper(self, q5):
         """Successor to the retired-helper pin. The NEGATIVE half is the
@@ -455,8 +463,8 @@ class TestRetroReadHardening:
         )
 
     def test_q5_arc_scoped_with_since(self, q5):
-        assert "Arc scope (current feature only)" in q5
-        assert "--since" in q5
+        assert "Inputs and shared Q5-Q7 prerequisites" in q5
+        assert "EVERY one carrying `--since '{arc_start}'`" in q5
 
     # --- Q6 structural safety (no explicit re-read guard; rests on the
     #     parse bans + fallback-on-zero) ---
@@ -489,13 +497,14 @@ class TestRetroReadHardening:
         any conclusion, so it cannot be reported as a real 0% cargo-cult
         signal rate (#966 noted a masked read corrupting Q6 to 0% vs a true
         44%). The guard must precede the fallback-on-zero branch."""
-        assert "Masked-empty guard" in q6
+        assert "masked-empty guard" in q6
         assert "re-read the raw" in q6
         assert "session-journal.jsonl" in q6
-        assert "genuinely absent" in q6
-        assert "0% signal rate" in q6
+        assert "_ts_ge(e.get(\"ts\"), arc_start)" in q6
+        assert "genuine zero" in q6
+        assert "never a zero rate" in q6
         # ordering: the re-read guard precedes the fallback-on-zero clause
-        assert q6.index("Masked-empty guard") < q6.index("fall back to the legacy")
+        assert q6.index("masked-empty guard") < q6.index("fall back to the legacy")
 
 
 class TestTotalExtraction:
@@ -1026,3 +1035,1287 @@ class TestComPACTDoesNotInvokeTheRetrospective:
             "retrospective' claim no longer holds structurally — revisit "
             "that docstring in the same change."
         )
+
+
+_SJ_SCRIPT = str(
+    Path(__file__).parent.parent / "hooks" / "shared" / "session_journal.py"
+)
+
+
+def _journal_cli(session_dir, *args, data=None):
+    command = [sys.executable, _SJ_SCRIPT, *args, "--session-dir", str(session_dir)]
+    if data is not None:
+        command.extend(["--data", json.dumps(data)])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(session_dir.parent)},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def _write_event(session_dir, event_type, **fields):
+    return _journal_cli(session_dir, "write", "--type", event_type, data=fields)
+
+
+def _read_events(session_dir, event_type, since=None):
+    args = ["read", "--type", event_type]
+    if since is not None:
+        args.extend(["--since", since])
+    return json.loads(_journal_cli(session_dir, *args).stdout)
+
+
+def _raw_journal_events(session_dir):
+    return [
+        json.loads(line)
+        for line in (session_dir / "session-journal.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+
+
+def _documented_raw_events(session_dir):
+    """Execute wrap-up's raw_events assignment with a real session_dir."""
+    q5 = _question_line(
+        WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+    )
+    namespace = {"session_dir": str(session_dir), "json": json}
+    _exec_documented_chain(
+        _backticked_expression(q5, "raw_events ="), namespace
+    )
+    return namespace["raw_events"]
+
+
+def _stamp(total):
+    return {
+        "novelty": 2,
+        "scope": 2,
+        "uncertainty": 2,
+        "risk": 2,
+        "total": total,
+    }
+
+
+def _run_documented_witness(q5, feature_task, events, feature_task_id):
+    """Execute wrap-up's witness expressions, stopping before any Q5 join."""
+    arc_start = resolve_arc_start(events, feature_task_id)
+    namespace = {
+        "feature_task": feature_task,
+        "feature_task_id": feature_task_id,
+        "variety_assessed_events": events,
+        "arc_start": arc_start,
+    }
+    if arc_start is None:
+        return "UNAVAILABLE", namespace
+    if "variety" not in feature_task.get("metadata", {}):
+        return "UNAVAILABLE", namespace
+    for prefix in (
+        "feature_metadata =",
+        "task_witness =",
+        "latest_feature_events =",
+    ):
+        _exec_documented_chain(_backticked_expression(q5, prefix), namespace)
+    if len(namespace["latest_feature_events"]) != 1:
+        return "UNAVAILABLE", namespace
+    for prefix in ("feature_event =", "event_witness ="):
+        _exec_documented_chain(_backticked_expression(q5, prefix), namespace)
+    feature_event = namespace["feature_event"]
+    if (
+        "variety" not in feature_event
+        or namespace["event_witness"] != namespace["task_witness"]
+    ):
+        return "UNAVAILABLE", namespace
+    feature_variety = resolve_variety_total(feature_event["variety"])
+    namespace["feature_variety"] = feature_variety
+    return (
+        "NO FEATURE VARIETY" if feature_variety is None else "WITNESSED",
+        namespace,
+    )
+
+
+def _run_direct_guard(line, list_variable, raw_variable, cli_events,
+                      raw_events, event_type, arc_start, unrelated_events=None):
+    """Execute a documented guard with raw malformed-record handling."""
+    if cli_events:
+        scoped_raw = None
+    else:
+        if any(not isinstance(event, dict) for event in raw_events):
+            return "UNAVAILABLE"
+        scoped_raw = [
+            event for event in raw_events
+            if event.get("type") == event_type
+            and _ts_ge(event.get("ts"), arc_start)
+        ]
+    namespace = {
+        list_variable: cli_events,
+        raw_variable: scoped_raw,
+        "_ts_ge": _ts_ge,
+    }
+    if unrelated_events is not None:
+        namespace["events"] = unrelated_events
+    definition_line = _question_line(
+        WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+    )
+    _exec_documented_chain(
+        _backticked_expression(definition_line, "empty_stream_outcome ="),
+        namespace,
+    )
+    call = (
+        f"guard_outcome = empty_stream_outcome("
+        f"{list_variable}, {raw_variable})"
+    )
+    _exec_documented_chain(_backticked_expression(line, call), namespace)
+    return namespace["guard_outcome"]
+
+
+def _run_q6_creation_model(q6, raw_events, feature_event, candidates,
+                           arc_start, current_team, parse_ts=None):
+    """Execute wrap-up's per-candidate creation-witness expressions."""
+    if not candidates:
+        return {"outcome": "GENUINE ZERO", "flags": []}
+    if any(not isinstance(event, dict) for event in raw_events):
+        return {"outcome": "UNAVAILABLE", "flags": []}
+    parser = parse_ts or _parse_ts
+    try:
+        for event in raw_events:
+            parser(event.get("ts"))
+    except (ValueError, TypeError):
+        return {"outcome": "UNAVAILABLE", "flags": []}
+    namespace = {
+        "raw_events": raw_events,
+        "feature_task_id": feature_event["task_id"],
+        "arc_start": arc_start,
+        "event_witness": feature_event["variety"],
+        "current_team_name": current_team,
+        "_ts_ge": _ts_ge,
+    }
+    _exec_documented_chain(
+        _backticked_expression(q6, "feature_event_indices ="), namespace
+    )
+    if len(namespace["feature_event_indices"]) != 1:
+        return {"outcome": "UNAVAILABLE", "flags": []}
+    namespace["feature_event_index"] = namespace["feature_event_indices"][0]
+    witnessed = []
+    unwitnessed = 0
+    for candidate in candidates:
+        namespace.update({
+            "candidate_task_id": candidate["id"],
+            "candidate_subject": candidate["subject"],
+        })
+        _exec_documented_chain(
+            _backticked_expression(q6, "candidate_creations ="), namespace
+        )
+        if len(namespace["candidate_creations"]) == 1:
+            witnessed.append(candidate)
+        else:
+            unwitnessed += 1
+    readable_candidates = [
+        candidate for candidate in candidates
+        if isinstance(candidate.get("flag"), str)
+    ]
+    witnessed_readable = [
+        candidate for candidate in witnessed
+        if isinstance(candidate.get("flag"), str)
+    ]
+    rate_candidates = [
+        candidate for candidate in witnessed_readable
+        if "WITHHELD: ignorance-dependent dispatch" not in (
+            candidate.get("concern") or ""
+        )
+    ]
+    if not readable_candidates:
+        outcome = "EXCLUSION"
+    elif not witnessed_readable:
+        outcome = "UNAVAILABLE"
+    elif rate_candidates:
+        outcome = "LEGACY"
+    else:
+        outcome = "EXCLUSION"
+    return {
+        "outcome": outcome,
+        "flags": [candidate["flag"] for candidate in rate_candidates],
+        "unwitnessed_count": unwitnessed,
+        "unreadable_withheld_count": len(witnessed) - len(rate_candidates),
+    }
+
+
+def _candidate(task_id="41", subject=None, flag="no", concern=None):
+    return {
+        "id": task_id,
+        "subject": subject or f"{task_id}: TEACHBACK for review",
+        "flag": flag,
+        "concern": concern,
+    }
+
+
+def _write_creation(session_dir, candidate, ts, team="test-team"):
+    fields = {
+        "task_id": candidate["id"],
+        "subject": candidate["subject"],
+        "ts": ts,
+    }
+    if team is not None:
+        fields["team"] = team
+    return _write_event(session_dir, "task_created", **fields)
+
+
+class TestQ5Q7ReportingContract:
+    def test_shared_gate_precedes_metrics_and_none_never_omits_since(self):
+        content = WRAPUP_PATH.read_text(encoding="utf-8")
+        q5 = _question_line(content, "5. **Variety divergence**")
+        q6 = _question_line(content, "6. **Variety acknowledgment signals**")
+        q7 = _question_line(content, "7. **HANDOFF refusal degradations**")
+        assert q5.index("Before ANY Q5-Q7 metric read") < q5.index(
+            "read --type dispatch_site"
+        )
+        assert q5.index("feature_task_id` must be non-`None") < q5.index(
+            "arc_start = resolve_arc_start"
+        )
+        assert q5.index("A `None` result is UNAVAILABLE") < q5.index(
+            "read --type dispatch_site"
+        )
+        for line in (q5, q6, q7):
+            assert "when `arc_start` is `None`" not in line
+            assert "_ts_ge(e.get(\"ts\"), arc_start)" in line
+        assert "Q6 and Q7: skipped" in q5
+        assert "Q6 UNAVAILABLE" in q6
+        assert "Q7 UNAVAILABLE" in q7
+
+    def test_five_outcomes_and_one_ordered_suffix(self):
+        """Pin the suffix's exact four-outcome scope in both public surfaces.
+
+        MUTATION THAT REDDENS: replace both scope statements with 'all five
+        outcomes share the suffix'. The pre-pin suite stayed green on that
+        mutation; these assertions bind the correction and UNAVAILABLE's
+        explicit exclusion rather than only the suffix's structure.
+        """
+        content = WRAPUP_PATH.read_text(encoding="utf-8")
+        changelog = (Path(__file__).parents[2] / "CHANGELOG.md").read_text(
+            encoding="utf-8"
+        )
+        assert (
+            "**One common suffix** prints after EVERY non-UNAVAILABLE form, "
+            "including NO SAMPLES"
+        ) in content
+        assert (
+            "UNAVAILABLE prints no distribution, sample loss, counters, "
+            "emitter statement, or common suffix."
+        ) in content
+        assert (
+            "The four non-UNAVAILABLE Q5 outcomes share one ordered suffix"
+        ) in changelog
+        assert "**UNAVAILABLE — shared-prerequisite failure**" in content
+        assert content.count("**One common suffix**") == 1
+        assert "no `dispatch_site` events recorded this arc" in content
+        assert "including task-id-reuse dedup" in content
+        assert "last line of the form" not in content
+        assert content.count("resolvable totals across") == 3
+        assert content.count(
+            "The current-arc feature assessment exists, but its total is unresolvable."
+        ) == 1
+        assert "exactly one of five `{form}` values" in content
+        assert "Q6 actually ran and its dual-trigger fired" in content
+        suffix = content.split("**One common suffix**", 1)[1]
+        ordered = [
+            "dispatch sites left no sample",
+            "recorded dispatch_site events had no resolvable variety total",
+            "fallback_used",
+            "total_unresolved",
+            "superseded:",
+            "late_stamped",
+            "dispatch_malformed",
+            "superseded_dimensions_only",
+            "dimensions_incomparable",
+            "Each final value rests on emitter preconditions",
+            "feature_task_id:",
+            "The current-arc feature assessment exists",
+        ]
+        positions = [suffix.index(token) for token in ordered]
+        assert positions == sorted(positions)
+
+    def test_documented_witness_match_mismatch_and_duplicate(self):
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        event = {
+            "type": "variety_assessed",
+            "task_id": "100",
+            "ts": "2026-06-14T12:00:00Z",
+            "variety": _stamp(14),
+        }
+        feature_task = {
+            "metadata": {"variety": {**_stamp(14), "risk_rationale": "text"}}
+        }
+        outcome, _ = _run_documented_witness(q5, feature_task, [event], "100")
+        assert outcome == "WITNESSED"
+        mismatch = {
+            "metadata": {"variety": {**_stamp(13), "risk_rationale": "text"}}
+        }
+        outcome, _ = _run_documented_witness(q5, mismatch, [event], "100")
+        assert outcome == "UNAVAILABLE"
+        outcome, _ = _run_documented_witness(
+            q5, feature_task, [event, dict(event)], "100"
+        )
+        assert outcome == "UNAVAILABLE"
+
+    def test_real_journal_unresolvable_witness_is_no_feature(self, tmp_path):
+        session_dir = tmp_path / "session"
+        ts = "2026-06-14T12:00:00Z"
+        _write_event(
+            session_dir,
+            "variety_assessed",
+            task_id="100",
+            variety={"total": "unresolvable"},
+            ts=ts,
+        )
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="2",
+            variety=_stamp(14),
+            ts="2026-06-14T13:00:00Z",
+        )
+        events = _read_events(session_dir, "variety_assessed")
+        feature_task = {
+            "metadata": {
+                "variety": {"total": "unresolvable", "risk_rationale": "text"}
+            }
+        }
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        outcome, namespace = _run_documented_witness(
+            q5, feature_task, events, "100"
+        )
+        assert outcome == "NO FEATURE VARIETY"
+        assert namespace["arc_start"] == ts
+        assert len(_read_events(session_dir, "dispatch_site", ts)) == 1
+
+    @pytest.mark.parametrize("missing_metadata", [True, False])
+    def test_real_journal_prior_arc_cannot_anchor_without_a_witness(
+        self, tmp_path, missing_metadata
+    ):
+        session_dir = tmp_path / "session"
+        _write_event(
+            session_dir,
+            "variety_assessed",
+            task_id="100",
+            variety=_stamp(8),
+            ts="2026-06-13T12:00:00Z",
+        )
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="2",
+            variety=_stamp(8),
+            ts="2026-06-13T13:00:00Z",
+        )
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="3",
+            variety=_stamp(14),
+            ts="2026-06-14T13:00:00Z",
+        )
+        feature_task = {
+            "metadata": (
+                {} if missing_metadata
+                else {"variety": {**_stamp(9), "risk_rationale": "text"}}
+            )
+        }
+        events = _read_events(session_dir, "variety_assessed")
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        outcome, namespace = _run_documented_witness(
+            q5, feature_task, events, "100"
+        )
+        assert outcome == "UNAVAILABLE"
+        assert "coverage" not in namespace
+
+    def test_real_journal_scoped_raw_guard_ignores_prior_reused_task(self, tmp_path):
+        session_dir = tmp_path / "session"
+        prior_ts = "2026-06-13T12:00:00Z"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(
+            session_dir,
+            "dispatch_site",
+            task_id="42",
+            variety=_stamp(8),
+            ts=prior_ts,
+        )
+        _write_event(
+            session_dir,
+            "variety_assessed",
+            task_id="100",
+            variety=_stamp(9),
+            ts=arc_start,
+        )
+        assert _read_events(session_dir, "dispatch_site", arc_start) == []
+        raw_events = [
+            json.loads(line)
+            for line in (session_dir / "session-journal.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        scoped_raw = [
+            event for event in raw_events
+            if event.get("type") == "dispatch_site"
+            and _ts_ge(event.get("ts"), arc_start)
+        ]
+        assert scoped_raw == []
+        assert any(
+            event.get("type") == "dispatch_site" for event in raw_events
+        )
+
+    def test_per_stream_guard_bindings_precede_consumers(self):
+        content = WRAPUP_PATH.read_text(encoding="utf-8")
+        required_calls = [
+            "empty_stream_outcome(events, raw_dispatch_site)",
+            "empty_stream_outcome(snapshot_events, raw_snapshots)",
+            "empty_stream_outcome(va_events, raw_va_events)",
+            "empty_stream_outcome(skip_events, raw_skip_events)",
+            "empty_stream_outcome(events, raw_teachback_ack)",
+            "empty_stream_outcome(events, raw_refusal_degraded)",
+        ]
+        for call in required_calls:
+            assert content.count(call) >= 1, call
+        assert "FIRST empty direct read across Q5-Q7" in content
+        assert "]` ONCE;" in content
+        assert "every later empty stream reuses that same bound list" in content
+        assert content.count("shared acquisition rule") == 2
+        assert "metadata.teachback_submit.variety_acknowledgment.concern" in content
+        assert "raw_events = [json.loads(line) for line in open(f" in content
+        assert "raw_dispatch_site = [e for e in raw_events" in content
+        assert content.index("raw_dispatch_site =") < content.index(
+            "Then read the SNAPSHOT stream"
+        )
+        assert content.index("empty_stream_outcome(snapshot_events, raw_snapshots)") < content.index(
+            "An EMPTY snapshot read"
+        )
+        assert content.index("empty_stream_outcome(va_events, raw_va_events)") < content.index(
+            "dispatch_assessed ="
+        )
+        assert content.index("empty_stream_outcome(skip_events, raw_skip_events)") < content.index(
+            "count_emit_skips(skip_events)"
+        )
+        assert content.index("empty_stream_outcome(events, raw_teachback_ack)") < content.index(
+            "flags = [e[\"rationale_articulates_this_dispatch\"]"
+        )
+        assert content.index("empty_stream_outcome(events, raw_refusal_degraded)") < content.index(
+            "A non-zero count reports one line"
+        )
+
+    @pytest.mark.parametrize(
+        ("question", "list_variable", "raw_variable", "event_type", "fields"),
+        [
+            (
+                "5. **Variety divergence**",
+                "events",
+                "raw_dispatch_site",
+                "dispatch_site",
+                {"task_id": "42", "variety": _stamp(8)},
+            ),
+            (
+                "5. **Variety divergence**",
+                "snapshot_events",
+                "raw_snapshots",
+                "task_metadata_snapshot",
+                {"task_id": "9", "metadata": {}},
+            ),
+            (
+                "5. **Variety divergence**",
+                "va_events",
+                "raw_va_events",
+                "variety_assessed",
+                {"task_id": "100", "variety": _stamp(9)},
+            ),
+            (
+                "5. **Variety divergence**",
+                "skip_events",
+                "raw_skip_events",
+                "journal_emit_skipped",
+                {"skipped_type": "dispatch_site", "cause": "returned_false"},
+            ),
+            (
+                "6. **Variety acknowledgment signals**",
+                "events",
+                "raw_teachback_ack",
+                "teachback_ack",
+                {"task_id": "41", "rationale_articulates_this_dispatch": "no"},
+            ),
+            (
+                "7. **HANDOFF refusal degradations**",
+                "events",
+                "raw_refusal_degraded",
+                "handoff_refusal_degraded",
+                {
+                    "agent_type": "pact-backend-coder",
+                    "detail": "PACT Handoff Refusal: missing produced",
+                    "classes": ["missing_handoff"],
+                },
+            ),
+        ],
+    )
+    def test_each_direct_guard_uses_its_own_stream(
+        self, tmp_path, question, list_variable, raw_variable, event_type, fields
+    ):
+        """Every direct binding covers zero, mismatch, process and malformed input."""
+        arc_start = "2026-06-14T12:00:00Z"
+        session = tmp_path / "session"
+        if event_type != "variety_assessed":
+            _write_event(
+                session, "variety_assessed", task_id="100",
+                variety=_stamp(9), ts=arc_start,
+            )
+        _write_event(session, event_type, ts=arc_start, **fields)
+        raw_events = _documented_raw_events(session)
+        line = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), question)
+
+        def run(cli_events, raw=raw_events, unrelated=None):
+            return _run_direct_guard(
+                line, list_variable, raw_variable, cli_events, raw,
+                event_type, arc_start, unrelated_events=unrelated,
+            )
+
+        assert run([]) == "UNAVAILABLE"
+        unrelated = [{"type": "dispatch_site"}] if list_variable != "events" else None
+        if event_type != "variety_assessed":
+            assert run([], raw=raw_events[:1], unrelated=unrelated) == (
+                "LEGITIMATE ZERO"
+            )
+            assert run([], unrelated=unrelated) == "UNAVAILABLE"
+        assert run([{"type": event_type}], raw=None, unrelated=unrelated) == "NONEMPTY"
+        assert run([], raw=raw_events + ["not-a-record"]) == "UNAVAILABLE"
+
+        missing_ts = raw_events + [{
+            "v": 1, "type": event_type, "task_id": "missing-ts"
+        }]
+        assert run([], raw=missing_ts) == "UNAVAILABLE"
+        assert run([{"type": event_type}], raw=missing_ts) == "NONEMPTY"
+        unparseable_ts = raw_events[:-1] + [{
+            **raw_events[-1], "ts": "not-a-time"
+        }]
+        assert run([], raw=unparseable_ts) == "UNAVAILABLE"
+        assert run([{"type": event_type}], raw=unparseable_ts) == "NONEMPTY"
+
+        if event_type != "variety_assessed":
+            prior_only = [dict(raw_events[0])]
+            prior_only.append({**raw_events[-1], "ts": "2026-06-13T12:00:00Z"})
+            assert run([], raw=prior_only) == "LEGITIMATE ZERO"
+        else:
+            # A valid feature witness makes raw-empty va_events unreachable.
+            assert any(
+                event.get("type") == "variety_assessed"
+                and event.get("ts") == arc_start
+                for event in raw_events
+            )
+
+    def test_first_empty_binds_raw_events_for_later_streams(self, tmp_path):
+        """Dispatch-nonempty cannot leave later empty guards unbound."""
+        arc_start = "2026-06-14T12:00:00Z"
+        session = tmp_path / "session"
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        _write_event(session, "dispatch_site", task_id="2", variety=_stamp(8), ts=arc_start)
+        _write_event(session, "task_metadata_snapshot", task_id="9", metadata={}, ts=arc_start)
+        _write_event(
+            session, "journal_emit_skipped", skipped_type="dispatch_site",
+            cause="returned_false", ts=arc_start,
+        )
+        events = _read_events(session, "dispatch_site", arc_start)
+        assert len(events) == 1
+
+        # The first empty stream executes the documented acquisition exactly once.
+        snapshot_events = []
+        q5 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        real_open = open
+        open_calls = 0
+
+        def counting_open(*args, **kwargs):
+            nonlocal open_calls
+            open_calls += 1
+            return real_open(*args, **kwargs)
+
+        with patch("builtins.open", new=counting_open):
+            raw_events = _documented_raw_events(session)
+            snapshot_result = _run_direct_guard(
+                q5, "snapshot_events", "raw_snapshots", snapshot_events,
+                raw_events, "task_metadata_snapshot", arc_start,
+            )
+            skip_result = _run_direct_guard(
+                q5, "skip_events", "raw_skip_events", [],
+                raw_events, "journal_emit_skipped", arc_start,
+            )
+            dispatch_result = _run_direct_guard(
+                q5, "events", "raw_dispatch_site", [], raw_events,
+                "dispatch_site", arc_start,
+            )
+        assert open_calls == 1
+        assert snapshot_result == "UNAVAILABLE"
+        assert skip_result == "UNAVAILABLE"
+        assert dispatch_result == "UNAVAILABLE"
+        namespace = {"raw_events": raw_events, "_ts_ge": _ts_ge, "arc_start": arc_start}
+        _exec_documented_chain(
+            _backticked_expression(q5, "raw_dispatch_site ="), namespace
+        )
+        assert len(namespace["raw_dispatch_site"]) == 1
+
+        # Clean-zero controls: empty snapshot/skip are legitimate, not unbound or mismatched.
+        clean = tmp_path / "clean"
+        _write_event(
+            clean, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        clean_raw = _documented_raw_events(clean)
+        assert _run_direct_guard(
+            q5, "snapshot_events", "raw_snapshots", [], clean_raw,
+            "task_metadata_snapshot", arc_start,
+        ) == "LEGITIMATE ZERO"
+        assert _run_direct_guard(
+            q5, "skip_events", "raw_skip_events", [], clean_raw,
+            "journal_emit_skipped", arc_start,
+        ) == "LEGITIMATE ZERO"
+        assert _run_direct_guard(
+            q5, "events", "raw_dispatch_site", [], clean_raw,
+            "dispatch_site", arc_start,
+        ) == "LEGITIMATE ZERO"
+
+    def test_q6_q7_first_empty_binds_when_all_q5_streams_are_nonempty(self, tmp_path):
+        """Q6/Q7 bind on their first empty read, then share it without reacquiring."""
+        arc_start = "2026-06-14T12:00:00Z"
+        session = tmp_path / "session"
+        _write_event(session, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_event(session, "dispatch_site", task_id="2", variety=_stamp(8), ts=arc_start)
+        _write_event(session, "task_metadata_snapshot", task_id="9", metadata={}, ts=arc_start)
+        _write_event(
+            session, "journal_emit_skipped", skipped_type="dispatch_site",
+            cause="returned_false", ts=arc_start,
+        )
+        _write_event(
+            session, "teachback_ack", task_id="41",
+            rationale_articulates_this_dispatch="no", ts=arc_start,
+        )
+        _write_event(
+            session, "handoff_refusal_degraded", agent_type="pact-backend-coder",
+            detail="PACT Handoff Refusal: missing produced",
+            classes=["missing_handoff"], ts=arc_start,
+        )
+        # Every Q5 direct stream is nonempty, so Q5 performs no raw acquisition.
+        assert _read_events(session, "dispatch_site", arc_start)
+        assert _read_events(session, "task_metadata_snapshot", arc_start)
+        assert _read_events(session, "variety_assessed", arc_start)
+        assert _read_events(session, "journal_emit_skipped", arc_start)
+        real_open = open
+        open_calls = 0
+
+        def counting_open(*args, **kwargs):
+            nonlocal open_calls
+            open_calls += 1
+            return real_open(*args, **kwargs)
+
+        with patch("builtins.open", new=counting_open):
+            raw_events = _documented_raw_events(session)
+            q6 = _question_line(
+                WRAPUP_PATH.read_text(encoding="utf-8"),
+                "6. **Variety acknowledgment signals**",
+            )
+            q6_result = _run_direct_guard(
+                q6, "events", "raw_teachback_ack", [], raw_events,
+                "teachback_ack", arc_start,
+            )
+            q7 = _question_line(
+                WRAPUP_PATH.read_text(encoding="utf-8"),
+                "7. **HANDOFF refusal degradations**",
+            )
+            q7_result = _run_direct_guard(
+                q7, "events", "raw_refusal_degraded", [], raw_events,
+                "handoff_refusal_degraded", arc_start,
+            )
+        assert open_calls == 1
+        assert q6_result == "UNAVAILABLE"
+        assert q7_result == "UNAVAILABLE"
+
+        clean = tmp_path / "clean"
+        _write_event(clean, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_event(clean, "dispatch_site", task_id="2", variety=_stamp(8), ts=arc_start)
+        _write_event(clean, "task_metadata_snapshot", task_id="9", metadata={}, ts=arc_start)
+        _write_event(
+            clean, "journal_emit_skipped", skipped_type="dispatch_site",
+            cause="returned_false", ts=arc_start,
+        )
+        assert _read_events(clean, "dispatch_site", arc_start)
+        assert _read_events(clean, "task_metadata_snapshot", arc_start)
+        assert _read_events(clean, "variety_assessed", arc_start)
+        assert _read_events(clean, "journal_emit_skipped", arc_start)
+        open_calls = 0
+        with patch("builtins.open", new=counting_open):
+            clean_raw = _documented_raw_events(clean)
+            clean_q6 = _run_direct_guard(
+                q6, "events", "raw_teachback_ack", [], clean_raw,
+                "teachback_ack", arc_start,
+            )
+            clean_q7 = _run_direct_guard(
+                q7, "events", "raw_refusal_degraded", [], clean_raw,
+                "handoff_refusal_degraded", arc_start,
+            )
+        assert open_calls == 1
+        assert clean_q6 == "LEGITIMATE ZERO"
+        assert clean_q7 == "LEGITIMATE ZERO"
+
+    def test_va_feature_anchor_process_and_derived_empty_are_distinct(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        va_events = _read_events(session, "variety_assessed", arc_start)
+        dispatch_assessed = [
+            event for event in va_events if event.get("scope") == "dispatch"
+        ]
+        assert va_events and dispatch_assessed == []
+        raw_va = _raw_journal_events(session)
+        line = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"), "5. **Variety divergence**"
+        )
+        assert _run_direct_guard(
+            line, "va_events", "raw_va_events", va_events, raw_va,
+            "variety_assessed", arc_start,
+        ) == "NONEMPTY"
+        _write_event(
+            session, "variety_assessed", task_id="2", scope="dispatch",
+            variety=_stamp(14), ts="2026-06-14T13:00:00Z",
+        )
+        dispatch_assessed = [
+            event for event in _read_events(session, "variety_assessed", arc_start)
+            if event.get("scope") == "dispatch"
+        ]
+        assert len(dispatch_assessed) == 1
+
+    def test_process_consumers_sites_snapshots_skips_and_refusals(self):
+        """PROCESS rows reach their actual consumers with the supplied values."""
+        sites = [
+            {"type": "dispatch_site", "task_id": "2", "variety": _stamp(8)},
+            {"type": "dispatch_site", "task_id": "3"},
+        ]
+        coverage = extract_final_dispatch_coverage(sites, [], [])
+        assert coverage["sites"] == 2
+        assert coverage["variety_totals"] == [8]
+        assert coverage["fallback_used"] == 2
+
+        snapshots = [{
+            "type": "task_metadata_snapshot",
+            "task_id": "2",
+            "ts": "2026-06-14T13:00:00Z",
+            "metadata": {"variety": _stamp(14)},
+        }]
+        coverage = extract_final_dispatch_coverage(sites[:1], snapshots, [])
+        assert coverage["variety_totals"] == [14]
+        assert coverage["superseded"] == 1
+        assert coverage["fallback_used"] == 0
+
+        skip_events = [
+            {
+                "type": "journal_emit_skipped",
+                "skipped_type": "dispatch_site",
+                "cause": "returned_false",
+            },
+            {
+                "type": "journal_emit_skipped",
+                "skipped_type": "dispatch_site",
+                "cause": "raised",
+            },
+        ]
+        skips = count_emit_skips(skip_events)
+        assert skips["total"] == 2
+        assert skips["by_type"] == {"dispatch_site": 2}
+        assert skips["by_cause"] == {"returned_false": 1, "raised": 1}
+        assert count_emit_skips([])["total"] == 0
+
+        refusal_events = [
+            {"type": "handoff_refusal_degraded", "agent_type": "pact-backend-coder"},
+            {"type": "handoff_refusal_degraded", "agent_type": "pact-backend-coder"},
+            {"type": "handoff_refusal_degraded", "agent_type": "pact-architect"},
+        ]
+        breakdown = Counter(event["agent_type"] for event in refusal_events)
+        assert len(refusal_events) == 2 + 1
+        assert breakdown == {"pact-backend-coder": 2, "pact-architect": 1}
+        assert Counter(event["agent_type"] for event in []) == Counter()
+
+    def test_q6_creation_witness_accepts_ordinary_setup_and_current_candidate(self, tmp_path):
+        """Ordinary setup is neutral; a post-feature creation admits the candidate."""
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(
+            session, "session_start", session_id="sid",
+            project_dir="/tmp/project", ts="2026-06-13T12:00:00Z",
+        )
+        _write_event(session, "session_resumption_surfaced", ts="2026-06-13T13:00:00Z")
+        _write_event(session, "checkpoint", phase="CODE", ts="2026-06-13T14:00:00Z")
+        _write_event(
+            session, "dispatch_site", task_id="42",
+            variety=_stamp(8), ts="2026-06-13T14:30:00Z",
+        )
+        _write_creation(
+            session, _candidate("umbrella", "Review: Q5 guards", "yes"),
+            "2026-06-13T15:00:00Z",
+        )
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        candidate = _candidate()
+        _write_creation(session, candidate, arc_start)
+        raw = _raw_journal_events(session)
+        feature = next(event for event in raw if event["type"] == "variety_assessed")
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        result = _run_q6_creation_model(
+            q6, raw, feature, [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "LEGACY"
+        assert result["flags"] == ["no"]
+        assert result["unwitnessed_count"] == 0
+
+    def test_q6_timestamp_tie_resolves_by_raw_order_in_both_directions(self, tmp_path):
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        after = tmp_path / "after"
+        _write_event(after, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_creation(after, candidate, arc_start)
+        raw = _raw_journal_events(after)
+        result = _run_q6_creation_model(
+            q6, raw, raw[0], [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "LEGACY"
+
+        before = tmp_path / "before"
+        _write_creation(before, candidate, arc_start)
+        _write_event(before, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        raw = _raw_journal_events(before)
+        result = _run_q6_creation_model(
+            q6, raw, raw[1], [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "UNAVAILABLE"
+
+    @pytest.mark.parametrize("prior_kind", ["stamped", "unstamped", "same-id-stamped"])
+    def test_q6_prior_arc_creation_is_never_current(
+        self, tmp_path, prior_kind
+    ):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        if prior_kind != "unstamped":
+            _write_event(
+                session, "variety_assessed",
+                task_id="100" if prior_kind == "same-id-stamped" else "prior-feature",
+                variety=_stamp(8), ts="2026-06-13T11:00:00Z",
+            )
+        else:
+            _write_event(
+                session, "dispatch_site", task_id="42",
+                variety=_stamp(8), ts="2026-06-13T11:00:00Z",
+            )
+        _write_creation(session, candidate, "2026-06-13T12:00:00Z")
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        raw = _raw_journal_events(session)
+        feature = next(
+            event for event in raw
+            if event["type"] == "variety_assessed"
+            and event["task_id"] == "100"
+            and event["ts"] == arc_start
+        )
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        result = _run_q6_creation_model(
+            q6, raw, feature, [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "UNAVAILABLE"
+        assert result["flags"] == []
+
+    def test_q6_partitions_current_unwitnessed_and_withheld_candidates(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        current = _candidate("41", flag="no")
+        prior = _candidate("42", flag="no")
+        unwitnessed = _candidate("43", flag="concern")
+        bad_team = _candidate("45", flag="no")
+        withheld = _candidate(
+            "44", flag="yes", concern="WITHHELD: ignorance-dependent dispatch"
+        )
+        _write_creation(session, prior, "2026-06-13T12:00:00Z")
+        _write_event(
+            session, "teachback_ack", task_id=prior["id"],
+            rationale_articulates_this_dispatch="no",
+            ts="2026-06-13T13:00:00Z",
+        )
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        _write_creation(session, current, arc_start)
+        _write_creation(session, withheld, arc_start)
+        _write_creation(session, bad_team, arc_start, team="other-team")
+        raw = _raw_journal_events(session)
+        feature = next(event for event in raw if event["type"] == "variety_assessed")
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        result = _run_q6_creation_model(
+            q6, raw, feature, [current, prior, unwitnessed, bad_team, withheld],
+            arc_start, "test-team",
+        )
+        assert result == {
+            "outcome": "LEGACY",
+            "flags": ["no"],
+            "unwitnessed_count": 3,
+            "unreadable_withheld_count": 1,
+        }
+
+    def test_q6_no_readable_candidates_is_genuine_zero(self):
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        result = _run_q6_creation_model(q6, [], {}, [], "2026-06-14T12:00:00Z", "test-team")
+        assert result == {"outcome": "GENUINE ZERO", "flags": []}
+
+    def test_q6_missing_creation_and_deletion_mutation_is_unavailable(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        raw = _raw_journal_events(session)
+        result = _run_q6_creation_model(
+            q6, raw, raw[0], [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "UNAVAILABLE"
+
+        _write_creation(session, candidate, arc_start)
+        raw = _raw_journal_events(session)
+        result = _run_q6_creation_model(
+            q6, raw, raw[0], [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "LEGACY"
+        without_creation = [event for event in raw if event["type"] != "task_created"]
+        result = _run_q6_creation_model(
+            q6, without_creation, raw[0], [candidate], arc_start, "test-team"
+        )
+        assert result["outcome"] == "UNAVAILABLE"
+
+    def test_q6_duplicate_creation_is_ambiguous(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        _write_event(session, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_creation(session, candidate, arc_start)
+        _write_creation(session, candidate, arc_start)
+        raw = _raw_journal_events(session)
+        q6 = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), "6. **Variety acknowledgment signals**")
+        result = _run_q6_creation_model(q6, raw, raw[0], [candidate], arc_start, "test-team")
+        assert result["outcome"] == "UNAVAILABLE"
+
+    def test_q6_same_id_with_different_subject_is_not_a_witness(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        _write_event(session, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_creation(session, candidate, arc_start)
+        raw = _raw_journal_events(session)
+        q6 = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), "6. **Variety acknowledgment signals**")
+        different = _candidate(candidate["id"], "different subject", "no")
+        result = _run_q6_creation_model(q6, raw, raw[0], [different], arc_start, "test-team")
+        assert result["outcome"] == "UNAVAILABLE"
+
+    def test_q6_absent_team_is_legal_and_mismatched_team_is_rejected(self, tmp_path):
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        q6 = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), "6. **Variety acknowledgment signals**")
+        absent = tmp_path / "absent"
+        _write_event(absent, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_creation(absent, candidate, arc_start, team=None)
+        raw = _raw_journal_events(absent)
+        result = _run_q6_creation_model(q6, raw, raw[0], [candidate], arc_start, "test-team")
+        assert result["outcome"] == "LEGACY"
+
+        mismatched = tmp_path / "mismatched"
+        _write_event(mismatched, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_creation(mismatched, candidate, arc_start, team="other-team")
+        raw = _raw_journal_events(mismatched)
+        result = _run_q6_creation_model(q6, raw, raw[0], [candidate], arc_start, "test-team")
+        assert result["outcome"] == "UNAVAILABLE"
+
+    @pytest.mark.parametrize("bad_record", ["not-a-record", "not-a-time", "missing-ts"])
+    def test_q6_malformed_raw_input_is_unavailable_before_matching(self, tmp_path, bad_record):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        candidate = _candidate()
+        _write_event(session, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        _write_creation(session, candidate, arc_start)
+        raw = _raw_journal_events(session)
+        if bad_record == "not-a-time":
+            raw[-1]["ts"] = bad_record
+        elif bad_record == "missing-ts":
+            del raw[-1]["ts"]
+        else:
+            raw.append(bad_record)
+        q6 = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), "6. **Variety acknowledgment signals**")
+        result = _run_q6_creation_model(q6, raw, raw[0], [candidate], arc_start, "test-team")
+        assert result == {"outcome": "UNAVAILABLE", "flags": []}
+
+    def test_q6_witnessed_flag_and_withholding_aggregation(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(session, "variety_assessed", task_id="100", variety=_stamp(9), ts=arc_start)
+        candidates = [
+            _candidate("41", flag="yes"),
+            _candidate("42", flag="no"),
+            _candidate("43", flag="concern"),
+            _candidate("44", flag="yes", concern="WITHHELD: ignorance-dependent dispatch"),
+        ]
+        for candidate in candidates:
+            _write_creation(session, candidate, arc_start)
+        raw = _raw_journal_events(session)
+        q6 = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), "6. **Variety acknowledgment signals**")
+        result = _run_q6_creation_model(q6, raw, raw[0], candidates, arc_start, "test-team")
+        assert result == {
+            "outcome": "LEGACY",
+            "flags": ["yes", "no", "concern"],
+            "unwitnessed_count": 0,
+            "unreadable_withheld_count": 1,
+        }
+
+        withheld_only = [_candidate("44", flag="yes", concern="WITHHELD: ignorance-dependent dispatch")]
+        result = _run_q6_creation_model(q6, raw, raw[0], withheld_only, arc_start, "test-team")
+        assert result == {
+            "outcome": "EXCLUSION",
+            "flags": [],
+            "unwitnessed_count": 0,
+            "unreadable_withheld_count": 1,
+        }
+
+    def test_q6_unreadable_withheld_counting_controls(self, tmp_path):
+        """§9 exclusion accounting covers every retained record exactly once."""
+        arc_start = "2026-06-14T12:00:00Z"
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        case_number = 0
+
+        def run(witnessed, unwitnessed, prior=()):
+            nonlocal case_number
+            case_number += 1
+            session = tmp_path / f"case-{case_number}"
+            for candidate in prior:
+                _write_creation(session, candidate, "2026-06-13T12:00:00Z")
+            _write_event(
+                session, "variety_assessed", task_id="100",
+                variety=_stamp(9), ts=arc_start,
+            )
+            for candidate in witnessed:
+                _write_creation(session, candidate, arc_start)
+            raw = _raw_journal_events(session)
+            feature = next(
+                event for event in raw
+                if event["type"] == "variety_assessed"
+                and event["ts"] == arc_start
+            )
+            return _run_q6_creation_model(
+                q6, raw, feature, [*prior, *witnessed, *unwitnessed],
+                arc_start, "test-team",
+            )
+
+        readable = _candidate("41", flag="no")
+        unreadable = _candidate("42", flag=None)
+        result = run([readable, unreadable], [])
+        assert result["outcome"] == "LEGACY"
+        assert result["flags"] == ["no"]
+        assert result["unreadable_withheld_count"] == 1
+        assert result["unwitnessed_count"] == 0
+
+        prior_unreadable = _candidate("43", flag=None)
+        result = run([readable], [], prior=[prior_unreadable])
+        assert result["outcome"] == "LEGACY"
+        assert result["unwitnessed_count"] == 1
+        assert result["unreadable_withheld_count"] == 0
+
+        witnessed_unreadable = _candidate("44", flag=None)
+        unwitnessed_unreadable = _candidate("45", flag=None)
+        result = run([witnessed_unreadable], [unwitnessed_unreadable])
+        assert result["outcome"] == "EXCLUSION"
+        assert result["flags"] == []
+        assert result["unwitnessed_count"] == 1
+        assert result["unreadable_withheld_count"] == 1
+
+        result = run([unreadable], [readable])
+        assert result["outcome"] == "UNAVAILABLE"
+        assert result["flags"] == []
+
+        withheld = _candidate(
+            "44", flag="yes", concern="WITHHELD: ignorance-dependent dispatch"
+        )
+        result = run([withheld], [])
+        assert result["outcome"] == "EXCLUSION"
+        assert result["flags"] == []
+        assert result["unreadable_withheld_count"] == 1
+        assert result["unwitnessed_count"] == 0
+
+    def test_q6_direct_and_legacy_exclusions_are_independent(self, tmp_path):
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        _write_event(
+            session, "teachback_ack", task_id="41",
+            rationale_articulates_this_dispatch="yes",
+            concern="WITHHELD: ignorance-dependent dispatch",
+            ts="2026-06-14T13:01:00Z",
+        )
+        with (session / "session-journal.jsonl").open("a") as journal:
+            journal.write(json.dumps({
+                "v": 1, "type": "teachback_ack", "task_id": "40",
+                "rationale_articulates_this_dispatch": None,
+                "ts": "2026-06-14T13:00:00Z",
+            }) + "\n")
+        direct_events = _read_events(session, "teachback_ack", arc_start)
+        direct_flags = [
+            event["rationale_articulates_this_dispatch"]
+            for event in direct_events
+            if isinstance(event.get("rationale_articulates_this_dispatch"), str)
+            and "WITHHELD: ignorance-dependent dispatch" not in (
+                event.get("concern") or ""
+            )
+        ]
+        direct_excluded = len(direct_events) - len(direct_flags)
+        assert direct_excluded == 2
+
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        witnessed_unreadable = _candidate("42", flag=None)
+        unwitnessed_unreadable = _candidate("43", flag=None)
+        _write_creation(session, witnessed_unreadable, arc_start)
+        raw = _raw_journal_events(session)
+        feature = next(
+            event for event in raw
+            if event["type"] == "variety_assessed"
+            and event["ts"] == arc_start
+        )
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        result = _run_q6_creation_model(
+            q6, raw, feature,
+            [witnessed_unreadable, unwitnessed_unreadable],
+            arc_start, "test-team",
+        )
+        assert result["outcome"] == "EXCLUSION"
+        assert result["unreadable_withheld_count"] == 1
+        assert result["unwitnessed_count"] == 1
+        assert direct_excluded == 2
+        assert result["unreadable_withheld_count"] != direct_excluded
+
+    def test_q6_documented_inputs_bind_parser_and_team(self, tmp_path):
+        """The instruction itself supplies parser and team, with no test injection."""
+        session = tmp_path / "session"
+        arc_start = "2026-06-14T12:00:00Z"
+        valid = _candidate("41", flag="no")
+        mismatched = _candidate("42", flag="no")
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts=arc_start,
+        )
+        _write_creation(session, valid, arc_start, team="test-team")
+        _write_creation(session, mismatched, arc_start, team="other-team")
+        raw = _raw_journal_events(session)
+        feature = next(
+            event for event in raw
+            if event["type"] == "variety_assessed"
+            and event["ts"] == arc_start
+        )
+        q6 = _question_line(
+            WRAPUP_PATH.read_text(encoding="utf-8"),
+            "6. **Variety acknowledgment signals**",
+        )
+        namespace = {}
+        _exec_documented_chain(
+            _backticked_expression(
+                q6, "from shared.session_journal import _parse_ts"
+            ),
+            namespace,
+        )
+        assert "_parse_ts" in namespace
+        assert "_ts_ge" in namespace
+        binding = _backticked_expression(q6, "current_team_name =")
+        binding = binding.replace("{team_name}", "test-team")
+        _exec_documented_chain(binding, namespace)
+        assert namespace["current_team_name"] == "test-team"
+
+        result = _run_q6_creation_model(
+            q6, raw, feature, [valid], arc_start,
+            namespace["current_team_name"], parse_ts=namespace["_parse_ts"],
+        )
+        assert result["outcome"] == "LEGACY"
+        assert result["flags"] == ["no"]
+
+        result = _run_q6_creation_model(
+            q6, raw, feature, [mismatched], arc_start,
+            namespace["current_team_name"], parse_ts=namespace["_parse_ts"],
+        )
+        assert result["outcome"] == "UNAVAILABLE"
+        assert result["flags"] == []
+
+    @pytest.mark.parametrize(
+        ("question", "failure_text"),
+        [
+            ("5. **Variety divergence**", "Q5 UNAVAILABLE"),
+            ("6. **Variety acknowledgment signals**", "Q6 UNAVAILABLE"),
+            ("7. **HANDOFF refusal degradations**", "Q7 UNAVAILABLE"),
+        ],
+    )
+    def test_invalid_jsonl_is_affected_question_unavailable(
+        self, tmp_path, question, failure_text
+    ):
+        """Invalid JSONL is a raw parse failure, never a legitimate zero."""
+        session = tmp_path / "session"
+        _write_event(
+            session, "variety_assessed", task_id="100",
+            variety=_stamp(9), ts="2026-06-14T12:00:00Z",
+        )
+        with (session / "session-journal.jsonl").open("a") as journal:
+            journal.write("{not-valid-json\n")
+        with pytest.raises(json.JSONDecodeError):
+            _raw_journal_events(session)
+        line = _question_line(WRAPUP_PATH.read_text(encoding="utf-8"), question)
+        assert failure_text in line
+        assert "parse failure" in line

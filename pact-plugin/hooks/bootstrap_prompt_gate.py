@@ -499,7 +499,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 pass
         parts = [
             format_session_substitutions(
-                team, session_dir, plugin_root, pact_context.get_lead_address()
+                team, session_dir, plugin_root, pact_context.get_lead_address(),
+                session_id,
             )
             + " These replace any session values earlier in this conversation."
         ]

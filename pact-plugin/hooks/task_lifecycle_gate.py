@@ -806,9 +806,18 @@ def _emit_dispatch_site(
     Both come from one stream, so the distribution and the site count can
     never be sourced over different populations.
 
-    MEMBERSHIP IS OWNER-WITNESSED, NEVER INFERRED. One event means one
-    dispatch BY CONSTRUCTION: the owner write on the task is the witness.
-    Two shapes are OUT and stay out:
+    MEMBERSHIP IS OWNER-WITNESSED, NEVER INFERRED, and PATH-BLIND: one
+    event witnesses a dispatch and contributes ONE COUNTED SITE PER (team, task), never by inference; it does not prove one dispatch per task across arcs, the owner write on the task
+    is the witness, and the dispatching path (work, review, otherwise) is
+    never a membership input — a reviewer dispatch with owner wiring is a
+    site exactly like a work dispatch. The stream counts ONE SITE PER
+    (team, task), not one per owner-bearing write: the dedup marker is
+    task-scoped, so a repeat owner write on the same task, and a later arc
+    reusing the same task id, each leave no second event. The second is
+    UNREPORTABLE: no counter records a deduped emit, so a reused-task-id
+    dispatch is silently absent and the arc cannot be reported as fully
+    accounted for. Two GROUPS are OUT and stay out — a grouping of the
+    mechanism legs below, never a second enumeration:
 
       * Teachback Task-A gates — excluded by the SUBJECT carve-out at step
         (5). DEPENDENCE, named where the membership is defined: under the
@@ -817,13 +826,23 @@ def _emit_dispatch_site(
         discriminator — membership depends on the TEACHBACK subject
         convention. A gate whose subject loses that marker is counted as a
         site.
-      * Review-panel dispatches — the peer-review path dispatches reviewers
-        WITHOUT ever writing owner on the task, so no owner write witnesses
-        them and no emit leg can cover them without inferring ownership from
-        a display convention. Wanting them counted is remedied by canonical
-        owner wiring at dispatch (a practice-side change), never by widening
-        this emit's inference; they stay visible through the
-        ``review_dispatch`` stream.
+      * Everything failing a leg of the witness — owner absent, owner not
+        resolving to a pact specialist, teachback-exempt owner — plus
+        writes whose emit preconditions fail (a non-canonical journal
+        frame, an unresolvable team or task id, a write that also sets
+        ``status`` to ``completed``), plus dispatches with no task at all,
+        plus lead-owned coordination umbrellas, which are tasks and are
+        dark through the SAME owner leg, never through a separate umbrella
+        rule. Those lanes are examples of the mechanism, never its
+        definition. Review panels dispatched by the peer-review command
+        are IN this population — each owner-wired reviewer dispatch is
+        itself a site — and the ``review_dispatch`` stream is a second,
+        independent record of the panel roster, never a substitute; an
+        external review lane has no command-specific
+        ``review_dispatch`` roster event, but an owner-wired review task
+        still emits ``dispatch_site``; the peer-review cold lane is taskless,
+        so it has no ``dispatch_site`` while its roster entry remains in
+        ``review_dispatch``.
 
     READ BY Q5, AND IT IS THE ONLY SOURCE: commands/wrap-up.md sources the
     retrospective's dispatch population from this stream and says so under a

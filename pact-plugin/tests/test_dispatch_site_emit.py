@@ -12,9 +12,17 @@ another), so the population leg is the owner-BEARING shape, not the composite
 owner+addBlockedBy the ordering gate keys on — a composite-keyed population is
 dark by construction on every real arc. Teachback Task-A gates are excluded by
 the SUBJECT carve-out alone (the named dependence: an owner-only write is
-exactly the split wiring a gate receives); review-panel dispatches are EXCLUDED
-because no owner write ever witnesses them (documented exclusion — their
-dispatches stay visible via the review_dispatch stream).
+exactly the split wiring a gate receives); membership is otherwise PATH-BLIND
+— a reviewer dispatch with owner wiring is a site like any work dispatch.
+
+THE DARK SET AND ITS CARDINALITY ARE THE SSOT'S, NOT THIS FILE'S. The
+authoritative text is `protocols/pact-protocols.md` § "Q5 Dispatch Variety
+Calibration (Wrap-Up Aggregation)", the Population paragraph — which also owns
+the task-scoped dedup and the `review_dispatch` relationship. Do not restate
+the enumeration here: a mirrored copy drifts silently whenever the SSOT
+changes, which is what falsified this docstring twice in this change. The arms
+below pin two of the dark-set legs — the teachback carve-out (T2) and the
+owner-resolution leg (T1/T6).
 
 WHY THE TaskUpdate BRANCH AND NOT BESIDE dispatch_variety: that emit lives in
 the TaskCreate branch and keys on metadata.variety PRESENCE, because
@@ -422,8 +430,9 @@ class TestEvaluationOrderNegations:
         )
 
     def test_partial_wiring_blockers_only_does_not_emit(self, env, events):
-        """No owner named → no witness. This is the review-dispatch shape too:
-        a write that never names owner cannot witness a dispatch site."""
+        """No owner named → no witness, whatever the lane: membership is
+        path-blind, so any dispatch's write — work, review, coordination —
+        that never names owner cannot witness a dispatch site."""
         seed(env, metadata={"variety": STAMP})
         tlg.evaluate_lifecycle(wiring(owner=None))
         assert sites(events) == []
@@ -647,13 +656,11 @@ class TestLiveDispatchShapes:
         )
 
     def test_review_dispatch_shape_never_owner_wired_no_site(self, env, events):
-        """Review-panel dispatches are EXCLUDED BY DOCUMENTED SEMANTICS: the
-        peer-review path dispatches reviewers without ever writing owner on
-        the task, so no owner write witnesses them. Whatever else lands on
-        such a task — status flips, blocker writes — witnesses nothing. Their
-        dispatches stay visible through the review_dispatch stream; wanting
-        them in this population is remedied by canonical owner wiring at
-        dispatch (practice-side), never by inferring ownership here."""
+        """A review-shaped task that is never owner-wired is dark BY
+        MECHANISM, not by lane: membership is path-blind, so a reviewer
+        dispatch WITH owner wiring would be a site — but this task never
+        receives one, and whatever else lands on it (status flips, blocker
+        writes) witnesses nothing."""
         seed(env, owner="", subject="review-coder: review PR #99 on the thing",
              metadata={"variety": STAMP})
         # The writes a never-owner-wired task receives: blockers-only and
@@ -664,6 +671,141 @@ class TestLiveDispatchShapes:
                                                "status": "in_progress"},
                                 "agent_type": LEAD})
         assert sites(events) == []
+
+
+class TestReviewerInclusionPin:
+    """The inclusion pin: an owner-wired reviewer dispatch IS a dispatch_site.
+
+    Membership is PATH-BLIND — the same ladder legs that witness a work
+    dispatch witness a review dispatch — so the reviewer lane needs no
+    special-case arm of the ladder. These arms are the executable
+    counterpart of the rewritten owner-less arm's rationale ("a reviewer
+    dispatch WITH owner wiring would be a site"): a lane-shaped carve-out
+    (any predicate dropping reviewer-shaped subjects) reddens T1, and the
+    cruder subject-TEXT carve-out reddens T5 too — the collision argument
+    against widening the inference made executable, because at the
+    owner-witnessing write a work subject containing 'review' is
+    indistinguishable from a reviewer subject.
+
+    Mutation teeth, MEASURED and reverted (a future verifier can re-derive
+    these without redesigning the runs): a lane-keyed carve-out (subject
+    name-prefix 'review-') reddens exactly T1 — cardinality 1; a
+    'review'-substring carve-out reddens T1 and T5 together — cardinality 2;
+    breaking the registration leg itself (a no-op _register_reviewer)
+    reddens T1, T2 and T6 together — cardinality 3 — because each no-site
+    arm self-checks that registration landed.
+
+    T2 and T6 are SELF-ATTRIBUTING on the registration leg: each asserts
+    the reviewer is present in the team config after _register_reviewer, so
+    a failed or skipped registration reddens the arm directly instead of
+    leaving its darkness to pass for any broken leg. T1 remains the
+    positive control for the other shared legs (frame, team resolution,
+    owner-bearing write), which cannot be distinguished inside a no-site
+    arm.
+    """
+
+    REVIEWER = "review-coder"  # deliberately NOT in MEMBERS: registered per-arm
+
+    def _register_reviewer(self, env, agent_type="pact-backend-coder"):
+        """Register the reviewer owner in team config, PRESERVING every key
+        already present (merge, never rebuild — a rebuild-from-scratch would
+        silently drop unknown config keys). Registration is LOAD-BEARING for
+        the emit itself (the owner must resolve to a pact specialist or step
+        4 fails closed), not merely for a count."""
+        cfg = env / ".claude" / "teams" / TEAM / "config.json"
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data.setdefault("members", []).append(
+            {"name": self.REVIEWER, "agentType": agent_type})
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+
+    def _assert_reviewer_registered(self, env):
+        """The member must be ON DISK before the owner-bearing write:
+        resolution fail-closes on member-not-found, so without this check a
+        no-site arm would pass for a failed registration rather than its own
+        exclusion leg."""
+        cfg = env / ".claude" / "teams" / TEAM / "config.json"
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        members = data.get("members", [])
+        assert any(m.get("name") == self.REVIEWER for m in members), (
+            "reviewer must be registered before the write — an absent member "
+            "makes this arm's darkness unattributable"
+        )
+
+    def test_T1_owner_wired_reviewer_dispatch_IS_a_site(self, env, events):
+        """A reviewer-shaped Task B (the peer-review subject convention
+        '{name}: review {feature}') whose owner write names a registered
+        specialist emits ONE dispatch_site carrying the stamp. Live-confirmed
+        before this pin existed: reviewer Task Bs emitted with their stamps
+        while their TEACHBACK gates stayed dark."""
+        self._register_reviewer(env)
+        seed(env, owner=self.REVIEWER,
+             subject="review-coder: review PR #99 on the thing",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
+        s = sites(events)
+        assert len(s) == 1, "an owner-wired reviewer dispatch is a site"
+        assert s[0]["variety"]["total"] == 11, "and it carries the stamp"
+
+    def test_T2_reviewer_teachback_gate_stays_dark(self, env, events):
+        """The reviewer TEACHBACK Task A carries the SAME owner wiring its
+        Task B does, so the anchored subject predicate is the sole thing
+        keeping it dark — one site per reviewer pair, never two. The arm
+        asserts registration landed before the write, so a failed
+        registration reddens it rather than passing it dark for the wrong
+        reason; the frame and owner-write legs are shared with T1."""
+        self._register_reviewer(env)
+        self._assert_reviewer_registered(env)
+        seed(env, owner=self.REVIEWER,
+             subject="review-coder: TEACHBACK for review of PR #99",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
+        assert sites(events) == []
+
+    def test_T5_work_subject_containing_review_still_emits(self, env, events):
+        """COLLISION ARM. A WORK dispatch whose subject merely contains
+        'review' emits like any work dispatch: membership keys on the
+        owner-witnessing write rather than the dispatching path or a
+        subject-text heuristic, so a subject-TEXT carve-out eats work lanes."""
+        seed(env, owner="backend-coder",
+             subject="backend-coder: review the failing suite",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner="backend-coder"))
+        s = sites(events)
+        assert len(s) == 1, "a work subject containing 'review' is still a site"
+
+    def test_T6_registered_owner_with_non_specialist_agentType_stays_dark(
+        self, env, events
+    ):
+        """RESOLVED-NON-SPECIALIST leg, reviewer-lane variant: the owner IS
+        a registered member but its agentType is not a pact specialist, so
+        member resolution SUCCEEDS and the specialist check fails closed —
+        no site. The generic leg is pinned by
+        test_non_specialist_owner_does_not_emit (explorer); this variant
+        guards the registration helper's own agentType boundary. The arm
+        asserts registration landed, so a missing member reddens it rather
+        than passing it dark."""
+        self._register_reviewer(env, agent_type="general-purpose")
+        self._assert_reviewer_registered(env)
+        seed(env, owner=self.REVIEWER,
+             subject="review-coder: review PR #99 on the thing",
+             metadata={"variety": STAMP})
+        tlg.evaluate_lifecycle(wiring(owner=self.REVIEWER))
+        assert sites(events) == []
+
+    def test_registration_round_trip_preserves_unknown_config_keys(self, env):
+        """FIX-E pin: _register_reviewer MERGES into the config, never
+        rebuilds it — an unknown top-level key seeded before registration
+        SURVIVES the round-trip. A rebuild-from-scratch helper drops it and
+        this reddens."""
+        cfg = env / ".claude" / "teams" / TEAM / "config.json"
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data["umbrellaTaskId"] = "99"
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+        self._register_reviewer(env)
+        after = json.loads(cfg.read_text(encoding="utf-8"))
+        assert after.get("umbrellaTaskId") == "99", (
+            "registration must merge into the config, not rebuild it"
+        )
 
 
 class TestRealJournalSeam:

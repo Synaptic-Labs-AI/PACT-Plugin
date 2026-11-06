@@ -122,10 +122,9 @@ _LEAD_AGENT_TYPE = "pact-orchestrator"
 _UNKNOWN_ROLE_FRAGMENT = "relaunch with `--agent PACT:pact-orchestrator`"
 
 
-def _run_compact_main(tmp_path, monkeypatch, session_id,
-                      agent_type=_LEAD_AGENT_TYPE):
-    """Drive session_init.main() at source='compact' and return the emitted
-    additionalContext.
+def _run_main(tmp_path, monkeypatch, session_id, agent_type=_LEAD_AGENT_TYPE,
+              source="compact"):
+    """Drive session_init.main() at the given source and return additionalContext.
 
     ``agent_type=None`` OMITS the key and builds an UNKNOWN frame, which is the
     only way to reach the unknown branch of the role gate. The DEFAULT is the
@@ -144,7 +143,7 @@ def _run_compact_main(tmp_path, monkeypatch, session_id,
 
     import session_init
 
-    payload: dict = {"source": "compact"}
+    payload: dict = {"source": source}
     if session_id is not None:
         payload["session_id"] = session_id
     if agent_type is not None:
@@ -169,6 +168,24 @@ def _run_compact_main(tmp_path, monkeypatch, session_id,
 
     assert exc.value.code == 0
     return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+
+
+class TestRunningSessionIdRealSeam:
+    @pytest.mark.parametrize("source", ["startup", "resume", "compact"])
+    def test_input_id_reaches_additional_context(
+        self, tmp_path, monkeypatch, source
+    ):
+        sid = "aabb1122-0000-0000-0000-000000000000"
+        ctx = _run_main(tmp_path, monkeypatch, sid, source=source)
+        assert ctx.count(f"Running session id: `{sid}`.") == 1
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "compact"])
+    def test_missing_id_is_unavailable_without_a_sentinel(
+        self, tmp_path, monkeypatch, source
+    ):
+        ctx = _run_main(tmp_path, monkeypatch, None, source=source)
+        assert "Running session id unavailable (missing or unsafe)" in ctx
+        assert "unknown-" not in ctx
 
 
 class TestCompactReadInstructionRealSeam:
@@ -215,7 +232,7 @@ class TestCompactReadInstructionRealSeam:
         survives composition and is not an artefact of the unit mocks.
         """
         sid = "aabb1122-0000-0000-0000-000000000000"
-        ctx = _run_compact_main(tmp_path, monkeypatch, sid, agent_type=None)
+        ctx = _run_main(tmp_path, monkeypatch, sid, agent_type=None)
 
         assert _UNKNOWN_ROLE_FRAGMENT in ctx
         assert "YOUR PACT ROLE: orchestrator." not in ctx
@@ -225,7 +242,7 @@ class TestCompactReadInstructionRealSeam:
         self, tmp_path, monkeypatch
     ):
         sid = "aabb1122-0000-0000-0000-000000000000"
-        ctx = _run_compact_main(tmp_path, monkeypatch, sid)
+        ctx = _run_main(tmp_path, monkeypatch, sid)
 
         # The READ TARGET is session-scoped (#1504): the instruction names the
         # file inside the resolved session dir — the writer put it there, so
@@ -248,7 +265,7 @@ class TestCompactReadInstructionRealSeam:
         promoted, so compact-summary.txt can be absent without an archive. The
         lead is told to continue from its own context, and is never pointed at a
         parked file, which may hold a teammate's summary."""
-        ctx = _run_compact_main(tmp_path, monkeypatch, "aabb1122-0000-0000-0000-000000000000")
+        ctx = _run_main(tmp_path, monkeypatch, "aabb1122-0000-0000-0000-000000000000")
 
         assert f"(if it is absent, either the secretary archived it into {tmp_path}" in ctx
         assert (
@@ -260,7 +277,7 @@ class TestCompactReadInstructionRealSeam:
     def test_missing_session_id_falls_back_instead_of_naming_an_empty_dir(
         self, tmp_path, monkeypatch
     ):
-        ctx = _run_compact_main(tmp_path, monkeypatch, None)
+        ctx = _run_main(tmp_path, monkeypatch, None)
 
         # The DEGRADED branch must follow the degraded WRITE: no session_id
         # means the writer fell back to the root singleton, so the pointer

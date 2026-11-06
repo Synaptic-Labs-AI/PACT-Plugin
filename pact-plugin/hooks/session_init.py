@@ -2231,7 +2231,7 @@ def main():
         # replace {team_name}, {session_dir}, {plugin_root} and {lead_address} in
         # command snippets and spawn prompts.
         _substitutions = format_session_substitutions(
-            team_name, session_dir, plugin_root, lead_address
+            team_name, session_dir, plugin_root, lead_address, session_id
         )
         # Single platform-managed directive for every session source. The
         # platform pre-creates exactly one team per session (Claude Code
