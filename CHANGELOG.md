@@ -40,6 +40,25 @@ The five Q5 dispatch-variety counter definitions now each resolve to exactly one
 
 Three of the five defects had one root: "as-dispatched" carried two senses in one section — the `dispatch_site` value, which is the partition key, and any non-snapshot source, which is `fallback_used`. A reader could not tell which one `superseded` compared, and the answer is not what the issue assumed: the helper compares only the site value and reads the `variety_assessed` fallback solely inside the branch that rescues a member. The other defects were stale two-source wording written before the third input existed, an unstated exclusion of unresolved members from `variety_totals`, and a partition whose stated justification was wrong even though its conclusion was right. All five are read-time defects, so the fix is wording and the behavior stays where it is.
 
+## v4.8.25: verify-only re-review reports carry two required lines
+
+### Summary
+
+Every warm verify-only re-review report now carries two required lines: **Reader false flags**, naming each check's relevant input scope and outcome and each result it got wrong, and **Declined items**, naming each checklist item the reviewer did not satisfy together with the measured evidence that the artifact is correct. Checks that error, have empty input or an empty test selection, cannot read their target, or target the wrong input make verification incomplete: they cannot use the clean empty form or support `resolved`. For a completed, correctly scoped check with no false flags, the empty case is an explicit token rather than an omission, so an omitted line is unauditable and is sent back instead of being read as a clean pass. The contract has a single home in the verify-only section of the peer-review command, and the Format row names it. The cold lane keeps its existing finding-status `RE-REVIEW CHECKLIST` and coverage-boundary receipt; only the two new report lines are warm-only.
+
+### What landed
+
+- `commands/peer-review.md` carries the contract immediately below the verify-only comparison table. Both lines are mandatory; line one carries each check's relevant input scope and outcome, and its clean empty form names that scope and outcome, so "none" is a claim about a completed, correctly scoped check rather than silence. Checks that error, have empty input or an empty test selection, cannot read their target, or target the wrong input make verification incomplete and cannot support `resolved`.
+- The Format row in the same table is extended to read `Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below`, so a lead reading only the table still sees that the report owes more than the checklist and cannot apply it to the cold lane.
+- The block names both dispatch routes: the description of the warm reviewer task the round creates for the review work, and the `SendMessage` when the warm reviewer is reused. Both carry the full line definitions, never a pointer, because a warm reviewer never loads the command file.
+- Neither line is a finding: neither is journaled as a `review_finding` and neither is counted in a finding class, so a diligent report cannot fail the cycle it is verifying by re-raising a closed class.
+- The cold lane keeps its existing finding-status `RE-REVIEW CHECKLIST` and coverage-boundary receipt; only the two new report lines are warm-only, so the exclusion cannot be read as weakening either cold obligation.
+- A new presence pin guards the contract: the block exactly once inside its section and once in the file, the amended Format row, the two labels absent from a cold-lane section proven live by a known-present token, and the relay and journal-exclusion tokens. Its liveness control reads the command file, re-wraps the verify-only region, splices it back, and proves the block arm still matches, so a harmless reflow cannot redden the pin and a raw comparison would; the module docstring states the ceiling, that a presence pin certifies text and never behaviour.
+
+### Why
+
+A verify-only report said "all resolved" whether the check had run correctly or could not see, and it said nothing about checklist items a reviewer declined to satisfy. The first case hides a broken check behind a green verdict; the second invites editing a correct artifact to make an over-specified checklist green. Naming both, and binding the first to a completed, correctly scoped check, makes the report auditable against the artifact, and keeping them out of the finding journal keeps them report-level evidence rather than reopened findings.
+
 ## v4.8.24: reviewer dispatches count in the Q5 dispatch_site population (issue #1701)
 
 ### Summary

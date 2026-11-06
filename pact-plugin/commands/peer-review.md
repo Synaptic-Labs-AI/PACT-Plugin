@@ -88,8 +88,15 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | **Scope** | Warm: only files changed during remediation; cold: the whole PR, per the Cold Reviewer Lane | Full PR diff |
 | **Depth** | Confirm each finding was addressed | Fresh architectural analysis |
 | **Agent** | Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings per the Cold Reviewer Lane | Multiple reviewers in parallel |
-| **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
+| **Format** | Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
+
+**Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the description of the warm reviewer task the round creates for the review work, and in the `SendMessage` when the reviewer is reused:
+
+- **Reader false flags**: for each check you ran, give its relevant input scope and outcome — its exit status, or its test summary with passed, failed, and error counts, including the error when it failed — each result it reported as absent or changed that was in fact present, and each correction you made in the check rather than in the artifact. A check that errors, has empty input or an empty test selection, cannot read its target, or targets the wrong input makes verification incomplete: it cannot use the clean empty form or support `resolved`. When a completed, correctly scoped check reported no false flags, write `Reader false flags: none — <the check, its input scope, and its outcome>`; otherwise write `Reader false flags: <the check, its input scope, and its outcome> — <each wrong result>; <each correction in the check>`.
+- **Declined items**: each checklist item or review criterion you did not satisfy, with the measured evidence that the artifact is correct. When you satisfied every item, write `Declined items: none`.
+
+Neither line is a finding: journal neither as a `review_finding`, and count neither in a finding class. A warm verify-only report that omits either line is unauditable: send it back for the missing line instead of synthesizing its verdict. Neither line applies to the cold lane: its existing finding-status `RE-REVIEW CHECKLIST` and coverage boundary with its receipt govern there.
 
 > **New issue verification**: When a verify-only reviewer reports a "new issue" not in the original checklist, verify the finding against the actual file state before dispatching a fix agent. Warm verify-only reviewers see a narrow remediation diff and may flag issues that were already addressed in the original code or earlier commits. Check the file directly (`grep` or `Read`) before treating it as actionable.
 
