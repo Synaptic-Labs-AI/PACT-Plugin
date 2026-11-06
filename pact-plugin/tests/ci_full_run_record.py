@@ -149,10 +149,17 @@ def aggregate_worker_collection_counts(worker_triples, collected,
     collection fields null, so the verifier fails closed on BAD-FIELD instead
     of certifying a collection measured by a subset.
 
-    A restarted node fires ``pytest_testnodeready`` again, so under
-    ``--max-worker-restart`` a run that lost a worker and recovered on a
-    replacement is refused although it completed. That is a false red in the
-    safe direction, and the certifying run uses no restart flags.
+    Any worker lost before it publishes therefore refuses the aggregate, by
+    either path: a crash dispatches ``errordown`` with nothing published, so a
+    None arrives and is rejected below, and an internal error dispatches no
+    down event at all, so the population comes up short and the ready count
+    rejects it. Worker restarts are ON by default - xdist defaults
+    ``--max-worker-restart`` to four times the worker count whenever ``-n``
+    is given - so a run that lost a worker and recovered on a replacement is
+    refused although it completed. That is a deliberate false red in the safe
+    direction, and the response is to re-run the certifying run. Disabling
+    restarts does not change it: a crashed worker still contributes the None
+    that refuses the aggregate.
 
     This guarantees only ``after == collected``; the second verifier identity,
     ``after + deselected == before``, is enforced in
