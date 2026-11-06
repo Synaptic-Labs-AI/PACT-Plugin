@@ -1807,13 +1807,11 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
 
         `superseded` stays 0 because its comparator is the `dispatch_site`
         event's own variety, which is ABSENT here, not the assessed value
-        (8). This is the only fixture where a RESOLVING SNAPSHOT and a
-        DIVERGENT assessed value coexist, and that combination is what makes
-        the assertion bite: with a snapshot present the member stays on the
-        site path, so the assessed value can reach the result only if the
-        comparator wrongly uses it. Other fixtures carry a divergent assessed
-        value too, but with no snapshot, where the assessed value is a
-        legitimate fallback and the comparator is never consulted.
+        (8). This is the ABSENT-site denial case: the resolving snapshot keeps
+        the member on the site path, so the divergent assessed value can reach
+        the result only if the comparator wrongly uses it. The present-null
+        sibling, `test_a_present_but_null_variety_reaches_dispatch_malformed`,
+        pins the distinct `dispatch_malformed` denial case.
         """
         sites = [self._site("1")]
         snapshots = [
