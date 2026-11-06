@@ -18,6 +18,25 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.25: verify-only re-review reports carry two required lines
+
+### Summary
+
+Every warm verify-only re-review report now carries two required lines: **Reader false flags**, naming the check that ran and each result it got wrong, and **Declined items**, naming each checklist item the reviewer did not satisfy together with the measured evidence that the artifact is correct. The empty case is an explicit token rather than an omission, so an omitted line is unauditable and is sent back instead of being read as a clean pass. The contract has a single home in the verify-only section of the peer-review command, the Format row names it, and the cold lane is excluded normatively because it receives findings rather than a checklist.
+
+### What landed
+
+- `commands/peer-review.md` carries the contract immediately below the verify-only comparison table. Both lines are mandatory; line one's empty form names the check it ran, so "none" stays a claim about a run instrument and cannot be satisfied by silence.
+- The Format row in the same table is extended to read `Checklist: finding → resolved / not resolved / new issue, plus the two report lines below`, so a lead reading only the table still sees that the report owes more than the checklist.
+- The block names both dispatch routes: the Task B description when a round creates a fresh review task, and the `SendMessage` when the warm reviewer is reused. Both carry the full line definitions, never a pointer, because a warm reviewer never loads the command file.
+- Neither line is a finding: neither is journaled as a `review_finding` and neither is counted in a finding class, so a diligent report cannot fail the cycle it is verifying by re-raising a closed class.
+- The cold lane is excluded in the contract itself, citing the coverage-boundary receipt it already owes, so the warm-only rule cannot be read as a gap in that receipt.
+- A new presence pin guards the contract: the block exactly once inside its section and once in the file, the amended Format row, the two labels absent from the cold-lane section, and the relay and journal-exclusion tokens. Its wrapped-line liveness control proves the whitespace normalization that keeps a reflow from reddening the pin; the module docstring states the ceiling, that a presence pin certifies text and never behaviour.
+
+### Why
+
+A verify-only report said "all resolved" whether the check had run correctly or could not see, and it said nothing about checklist items a reviewer declined to satisfy. The first case hides a broken check behind a green verdict; the second invites editing a correct artifact to make an over-specified checklist green. Naming both makes the report auditable against the artifact, and keeping them out of the finding journal keeps them report-level evidence rather than reopened findings.
+
 ## v4.8.24: reviewer dispatches count in the Q5 dispatch_site population (issue #1701)
 
 ### Summary

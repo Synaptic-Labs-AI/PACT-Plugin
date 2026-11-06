@@ -88,8 +88,15 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | **Scope** | Warm: only files changed during remediation; cold: the whole PR, per the Cold Reviewer Lane | Full PR diff |
 | **Depth** | Confirm each finding was addressed | Fresh architectural analysis |
 | **Agent** | Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings per the Cold Reviewer Lane | Multiple reviewers in parallel |
-| **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
+| **Format** | Checklist: finding → resolved / not resolved / new issue, plus the two report lines below | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
+
+**Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the Task B description when the round creates a fresh review task, and in the `SendMessage` when the reviewer is reused:
+
+- **Reader false flags**: the check you ran, each result it reported as absent or changed that was in fact present, and each correction you made in the check rather than in the artifact. When it reported none, write `Reader false flags: none — <the check you ran>`.
+- **Declined items**: each checklist item you did not satisfy, with the measured evidence that the artifact is correct. When you satisfied every item, write `Declined items: none`.
+
+Neither line is a finding: journal neither as a `review_finding`, and count neither in a finding class. A warm verify-only report that omits either line is unauditable: send it back for the missing line instead of synthesizing its verdict. Neither line applies to the cold lane: it receives findings rather than a checklist, and its coverage-boundary receipt already requires what it read, what it did not, and why.
 
 > **New issue verification**: When a verify-only reviewer reports a "new issue" not in the original checklist, verify the finding against the actual file state before dispatching a fix agent. Warm verify-only reviewers see a narrow remediation diff and may flag issues that were already addressed in the original code or earlier commits. Check the file directly (`grep` or `Read`) before treating it as actionable.
 
