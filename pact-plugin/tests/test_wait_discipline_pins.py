@@ -8,9 +8,10 @@ Pins the amendment surfaces:
   §5 Wait in Silence:
     - the narration-versus-milestone rule (a milestone is a dispatch's
       result, a measured number, or a state change the user cannot
-      otherwise see; a long dispatch reports at its milestones
-      unprompted, and "no actionable content" means nothing the team
-      needs AND nothing the user is owed);
+      otherwise see; relayed in one line that is not a running tally of
+      the same work; a long dispatch reports at its milestones unprompted,
+      and "no actionable content" means nothing the team needs AND
+      nothing the user is owed);
     - the filler-call compulsion block (names the reflex, states the
       turn-manufacture mechanics, states the terminal action);
     - the termination test — the discriminator stated ONCE at its §5 home:
@@ -147,6 +148,12 @@ SECTION_PHRASE_PINS = [
     # everything, which is the defect this block exists to prevent) ---
     (WAIT_IN_SILENCE, "Narration is not a milestone"),
     (WAIT_IN_SILENCE, "A milestone is a dispatch's result, a measured number, or a state change the user cannot otherwise see"),
+    # The relay sentence's anti-tally clause: the part of that sentence which
+    # cannot be re-derived from the definition, and the one that closes the
+    # repeated-status-report defect. "to the user" and "a number where there
+    # is one" are left unpinned on purpose — narrower, and recoverable once
+    # this sentence is protected.
+    (WAIT_IN_SILENCE, "not a running tally of the same work"),
     # The redefinition is pinned separately: it is the clause that reverses the
     # old safe reading, so a presence pin on the definition alone would stay
     # green if a later edit softened this back to a contrast.

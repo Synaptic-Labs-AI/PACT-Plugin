@@ -26,12 +26,12 @@ The orchestrator's wait-in-silence rule now separates narration from a milestone
 
 ### What landed
 
-- `agents/pact-orchestrator.md` §Wait in Silence gains one paragraph, placed immediately after the rule that emits no reply on a turn with no actionable content. It defines a milestone as a dispatch's result, a measured number, or a state change the user cannot otherwise see, requires the relay to be one line addressed to the user, carrying the concrete fact only when it is new since the last report, and states that "No actionable content" means nothing the team needs AND nothing the user is owed.
+- `agents/pact-orchestrator.md` §Wait in Silence gains one paragraph, placed immediately after the rule that emits no reply on a turn with no actionable content. It defines a milestone as a dispatch's result, a measured number, or a state change the user cannot otherwise see, requires the relay to be one line addressed to the user, carrying the concrete fact only when it is new since the last report and not a running tally of the same work, and states that "No actionable content" means nothing the team needs AND nothing the user is owed.
 - The paragraph separates narration from a milestone rather than carving an exception out of the silence rule, so the surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
 
 ### Why
 
-The silence rule named only what is actionable for the team, so its safe reading was silence on everything. Between dispatch and the awaited event the only interim progress signal arrived in teammate notifications the user never sees — completion reports the watcher rules already require — so the user had to ask for status repeatedly. Naming the milestone case changes what the orchestrator does on a teammate turn, without reopening the narrate-the-wait and filler-call failures the section exists to prevent.
+The silence rule named only what is actionable for the team, so its safe reading was silence on everything. Between dispatch and the awaited event the only interim progress signal arrived in teammate notifications the user never sees. The watcher rules already require the completion report; nothing required an interim one, so the user had to ask for status repeatedly. Naming the milestone case changes what the orchestrator does on a teammate turn, without reopening the narrate-the-wait and filler-call failures the section exists to prevent.
 
 ## v4.8.25: verify-only re-review reports carry two required lines
 
