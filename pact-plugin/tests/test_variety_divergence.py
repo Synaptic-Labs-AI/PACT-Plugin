@@ -860,16 +860,28 @@ class TestExtractFinalDispatchCoverage:
         is what keeps this fixture from silently degrading to the absent case.
 
         This is the ARM-1 leg: the member has a resolving snapshot, so it
-        lands in the dispatch_malformed cell and NOT in late_stamped.
+        lands in the dispatch_malformed cell and NOT in late_stamped. The
+        divergent assessed value is NOT a comparator: with no resolvable site
+        total, the member must stay OUT of superseded as well.
         """
         null_site = make_event("dispatch_site", task_id="1", variety=None)
         assert "variety" in null_site and null_site["variety"] is None
 
+        assessed = [
+            make_event(
+                "variety_assessed",
+                task_id="1",
+                scope="dispatch",
+                variety={"total": 8},
+                ts="2026-06-15T12:00:01Z",
+            )
+        ]
         result = extract_final_dispatch_coverage(
-            [null_site], [self._snap("1", {"variety": {"total": 10}})]
+            [null_site], [self._snap("1", {"variety": {"total": 10}})], assessed
         )
         assert result["dispatch_malformed"] == 1
         assert result["late_stamped"] == 0
+        assert result["superseded"] == 0
 
     def test_a_present_but_null_variety_reaches_the_malformed_list(self):
         """The ARM-3 leg of the same predicate: no snapshot and no assessed
@@ -1756,6 +1768,11 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
         assert result["fallback_used"] == 1
         assert result["total_unresolved"] == 0
         assert result["malformed"] == []
+        assert result["superseded"] == 0
+        assert result["late_stamped"] == 0
+        assert result["dispatch_malformed"] == 0
+        assert result["superseded_dimensions_only"] == 0
+        assert result["dimensions_incomparable"] == 0
 
     def test_junk_site_variety_with_resolving_assessed_leaves_malformed(self):
         """A PRESENT-but-unresolvable dispatch_site variety that arm 2b
@@ -1768,6 +1785,11 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
         assert result["variety_totals"] == [8]
         assert result["total_unresolved"] == 0
         assert result["malformed"] == []
+        assert result["superseded"] == 0
+        assert result["late_stamped"] == 0
+        assert result["dispatch_malformed"] == 0
+        assert result["superseded_dimensions_only"] == 0
+        assert result["dimensions_incomparable"] == 0
 
     def test_site_value_still_wins_over_the_assessed_event(self):
         """Arm 2 order is pinned: the dispatch_site event's own variety
