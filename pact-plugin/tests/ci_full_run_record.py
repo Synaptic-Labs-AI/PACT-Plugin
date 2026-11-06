@@ -41,6 +41,19 @@ two cannot see it. The outermost wrapper records the item count before and
 after every other implementation, and the verifier requires
 ``after + deselected == before``.
 
+UNDER XDIST THE CONTROLLER NEVER RUNS THAT HOOK. Collection is distributed:
+every worker performs the WHOLE collection and the controller schedules only
+execution, so the controller's wrapper never fires and both counts would be
+None. Each worker therefore PUBLISHES its own ``(before, after)`` pair in
+``config.workeroutput``, and the controller reads the pairs in
+``pytest_testnodedown``. THE PAIRS ARE NOT ADDITIVE: every worker collected
+the whole corpus, so summing N workers yields N x the corpus while the
+verifier requires ``after == collected``. The only faithful aggregate is the
+pair every worker AGREES on; disagreement, or an ``after`` that does not
+equal the certifying session's own ``testscollected``, leaves both fields
+None and prints why. A wrong integer here would turn a fail-closed gate into
+a fail-open one, so None is the correct answer when no aggregate is provable.
+
 WHY EACH SKIP IS RECORDED BY SITE. The verifier admits only skips listed in
 a committed allowlist keyed on (file, reason), so the record carries every
 skip as the file and verbatim reason the `-ra` summary prints for it: the
@@ -65,6 +78,7 @@ import pytest
 SCHEMA_VERSION = 3
 RECORD_NAME = ".full-run-record.json"
 OWNER_ENV = "PACT_FULL_RUN_RECORD_OWNER"
+WORKER_OUTPUT_KEY = "pact_collection_item_counts"
 
 
 def _gated_repo_root():
@@ -98,6 +112,38 @@ def record_path():
     return Path(workspace) / RECORD_NAME
 
 
+def aggregate_worker_collection_counts(worker_pairs, collected):
+    """The (before, after) pair every xdist worker agreed on, or None.
+
+    Every worker collects the WHOLE corpus, so these pairs are not additive:
+    summing N workers yields N x the corpus while the verifier requires
+    ``after == collected``. The only faithful cross-worker value is a pair
+    every worker reports identically. Disagreement, a non-integer entry, or
+    an ``after`` inconsistent with the certifying session's own collected
+    count means no aggregate is provable; None is returned so the verifier's
+    BAD-FIELD failure stands rather than an invented integer turning a
+    fail-closed gate into a fail-open one.
+    """
+    if not worker_pairs:
+        return None
+    pairs = []
+    for pair in worker_pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return None
+        before, after = pair
+        for value in (before, after):
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+        pairs.append((before, after))
+    if any(pair != pairs[0] for pair in pairs[1:]):
+        return None
+    if not isinstance(collected, int) or isinstance(collected, bool):
+        return None
+    if pairs[0][1] != collected:
+        return None
+    return pairs[0]
+
+
 def _format_duration(seconds):
     """Match pytest's own summary duration rendering."""
     if seconds < 60:
@@ -116,6 +162,7 @@ class FullRunRecord:
         self._seen_node_ids = set()
         self._items_before = None
         self._items_after = None
+        self._worker_pairs = []
         self._skips = []
         self._collection_skips = 0
 
@@ -143,6 +190,20 @@ class FullRunRecord:
             self._seen_node_ids.add(node_id)
             self._terminal_node_ids.append(node_id)
         self._note_skip(report)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node, error):
+        """Collect each xdist worker's published pair (controller only).
+
+        OPTIONAL HOOK: this spec comes from xdist, and the suite spawns
+        child sessions with ``-p no:xdist``. Pluggy rejects a plugin that
+        defines an unknown hook, so without ``optionalhook`` every such
+        child session dies with PluginValidationError before running.
+        """
+        if self._root is None:
+            return
+        self._worker_pairs.append(
+            getattr(node, "workeroutput", {}).get(WORKER_OUTPUT_KEY))
 
     def pytest_collectreport(self, report):
         """A module-level skip is a collection report, not a test report."""
@@ -182,6 +243,13 @@ class FullRunRecord:
         return f"{text} in {_format_duration(elapsed)}"
 
     def pytest_sessionfinish(self, session, exitstatus):
+        if getattr(session.config, "workerinput", None) is not None:
+            # An xdist worker of a distributed run: publish this worker's own
+            # counts for the controller. The controller aggregates by
+            # agreement; see aggregate_worker_collection_counts.
+            session.config.workeroutput[WORKER_OUTPUT_KEY] = (
+                self._items_before, self._items_after)
+            return
         if self._root is None or session.config.option.collectonly:
             return
         path = record_path()
@@ -209,6 +277,22 @@ class FullRunRecord:
                 print(f"CI-FULL-RUN-RECORD: summary unavailable: {exc!r}",
                       file=sys.stderr)
                 summary_line = None
+        items_before = self._items_before
+        items_after = self._items_after
+        if items_before is None:
+            collected = int(session.testscollected)
+            aggregate = aggregate_worker_collection_counts(
+                self._worker_pairs, collected)
+            if aggregate is None:
+                print(
+                    "CI-FULL-RUN-RECORD: no faithful cross-worker collection "
+                    f"aggregate (workers reported {self._worker_pairs!r}, "
+                    f"collected={collected}); items_before/after_modifyitems "
+                    "stay null so the verifier fails closed.",
+                    file=sys.stderr,
+                )
+            else:
+                items_before, items_after = aggregate
         record = {
             "schema_version": SCHEMA_VERSION,
             "collected": int(session.testscollected),
@@ -222,8 +306,8 @@ class FullRunRecord:
             "exitstatus": int(exitstatus),
             "summary_line": summary_line,
             "terminal_node_ids": list(self._terminal_node_ids),
-            "items_before_modifyitems": self._items_before,
-            "items_after_modifyitems": self._items_after,
+            "items_before_modifyitems": items_before,
+            "items_after_modifyitems": items_after,
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "owner_pid": os.getpid(),

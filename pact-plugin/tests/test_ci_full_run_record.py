@@ -19,8 +19,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import ci_contract
-from ci_full_run_record import OWNER_ENV, RECORD_NAME
+from ci_full_run_record import (
+    OWNER_ENV,
+    RECORD_NAME,
+    aggregate_worker_collection_counts,
+)
 
 PLUGIN = Path(__file__).with_name("ci_full_run_record.py")
 COLLECTION_RECORD_NAME = ".full-collection-record.json"
@@ -330,6 +336,78 @@ def test_an_unreported_item_removal_fails_the_verifier(tmp_path):
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 1, verdict.stdout + verdict.stderr
     assert "RUN-VERIFY-FAILURE COLLECTION-HOOK-NARROWING:" in verdict.stderr
+
+
+# --- xdist aggregation: the policy runs in CI; the seam is probe-only ---
+
+
+def test_the_aggregate_is_the_pair_every_worker_agrees_on():
+    assert aggregate_worker_collection_counts([(4, 4), (4, 4)], 4) == (4, 4)
+
+
+def test_the_aggregate_is_not_a_sum_of_workers():
+    """Every worker collected the whole corpus; a sum would be 16."""
+    assert aggregate_worker_collection_counts([(4, 4)] * 4, 4) == (4, 4)
+
+
+def test_disagreeing_workers_have_no_faithful_aggregate():
+    assert aggregate_worker_collection_counts([(4, 4), (4, 3)], 4) is None
+
+
+def test_an_aggregate_inconsistent_with_collected_is_refused():
+    assert aggregate_worker_collection_counts([(4, 4)], 3) is None
+
+
+def test_no_worker_reports_have_no_aggregate():
+    assert aggregate_worker_collection_counts([], 4) is None
+    assert aggregate_worker_collection_counts([None], 4) is None
+
+
+def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
+    """PROBE-ONLY COVERAGE: skips until pytest-xdist is in the CI pins.
+
+    The agreement rule itself is covered in CI by the pure-function tests
+    above. This test exercises the real workeroutput/testnodedown seam, and
+    it deliberately skips rather than mocking that seam: a skip is not a
+    pass, and the probe arms in the HANDOFF are the evidence until the pin
+    lands.
+    """
+    pytest.importorskip("xdist")
+    root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
+    proc = _run(plugin_root, workspace,
+                args=("-n", "2", "--dist", "loadfile"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = _record(workspace)
+    assert record["items_before_modifyitems"] == 4, record
+    assert record["items_after_modifyitems"] == 4, record
+    assert record["collected"] == 4, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 0, verdict.stdout + verdict.stderr
+    assert "FULL-RUN-OK" in verdict.stdout, verdict.stdout
+
+
+def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
+    """PROBE-ONLY COVERAGE (see the test above): the negative arm.
+
+    An xdist run whose collection hook silently drops an item must fail on
+    COLLECTION-HOOK-NARROWING, not on an earlier condition. The assertion on
+    the reason token is the point: an arm that reds for the wrong reason
+    proves nothing about this check.
+    """
+    pytest.importorskip("xdist")
+    root, plugin_root, workspace = _rig(
+        tmp_path, PASSING_SUITE, extra_conftest=SILENT_REMOVAL_CONFTEST)
+    proc = _run(plugin_root, workspace,
+                args=("-n", "2", "--dist", "loadfile"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = _record(workspace)
+    assert record["items_before_modifyitems"] == 4, record
+    assert record["items_after_modifyitems"] == 3, record
+    assert record["deselected"] == 0, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "RUN-VERIFY-FAILURE COLLECTION-HOOK-NARROWING:" in verdict.stderr, (
+        verdict.stderr)
 
 
 MODULE_SKIP_SUITE = '''\
