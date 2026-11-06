@@ -27,11 +27,11 @@ Every warm verify-only re-review report now carries two required lines: **Reader
 ### What landed
 
 - `commands/peer-review.md` carries the contract immediately below the verify-only comparison table. Both lines are mandatory; line one's empty form names the check it ran, so "none" stays a claim about a run instrument and cannot be satisfied by silence.
-- The Format row in the same table is extended to read `Checklist: finding → resolved / not resolved / new issue, plus the two report lines below`, so a lead reading only the table still sees that the report owes more than the checklist.
-- The block names both dispatch routes: the Task B description when a round creates a fresh review task, and the `SendMessage` when the warm reviewer is reused. Both carry the full line definitions, never a pointer, because a warm reviewer never loads the command file.
+- The Format row in the same table is extended to read `Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below`, so a lead reading only the table still sees that the report owes more than the checklist and cannot apply it to the cold lane.
+- The block names both dispatch routes: the review task's description when a round creates a fresh review task, and the `SendMessage` when the warm reviewer is reused. Both carry the full line definitions, never a pointer, because a warm reviewer never loads the command file.
 - Neither line is a finding: neither is journaled as a `review_finding` and neither is counted in a finding class, so a diligent report cannot fail the cycle it is verifying by re-raising a closed class.
 - The cold lane is excluded in the contract itself, citing the coverage-boundary receipt it already owes, so the warm-only rule cannot be read as a gap in that receipt.
-- A new presence pin guards the contract: the block exactly once inside its section and once in the file, the amended Format row, the two labels absent from the cold-lane section, and the relay and journal-exclusion tokens. Its wrapped-line liveness control proves the whitespace normalization that keeps a reflow from reddening the pin; the module docstring states the ceiling, that a presence pin certifies text and never behaviour.
+- A new presence pin guards the contract: the block exactly once inside its section and once in the file, the amended Format row, the two labels absent from a cold-lane section proven live by a known-present token, and the relay and journal-exclusion tokens. Its liveness control reads the command file, re-wraps the verify-only region, splices it back, and proves the block arm still matches, so a harmless reflow cannot redden the pin and a raw comparison would; the module docstring states the ceiling, that a presence pin certifies text and never behaviour.
 
 ### Why
 
