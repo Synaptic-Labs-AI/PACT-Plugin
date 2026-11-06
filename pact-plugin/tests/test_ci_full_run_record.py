@@ -408,6 +408,85 @@ def test_an_input_of_the_wrong_length_has_no_aggregate():
     assert aggregate_worker_collection_counts([(4, 4, 0, 0)], 4) is None
 
 
+def test_a_lost_worker_has_no_aggregate():
+    """A ready worker that never reported leaves no aggregate.
+
+    One triple from two ready workers is indistinguishable, by content, from
+    a faithful aggregate over the survivors; only the population count tells
+    them apart.
+    """
+    assert aggregate_worker_collection_counts(
+        [(4, 4, 0)], 4, workers_ready=2) is None
+    # Control: the same population with every ready worker reporting does
+    # aggregate, so the refusal is not a blanket one.
+    assert aggregate_worker_collection_counts(
+        [(4, 4, 0), (4, 4, 0)], 4, workers_ready=2) == (4, 4, 0)
+
+
+def test_the_default_workers_ready_does_not_refuse():
+    """Callers that pass no ready count keep the pre-refusal behaviour."""
+    assert aggregate_worker_collection_counts([(4, 4, 0)], 4) == (4, 4, 0)
+
+
+def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
+                                                     capsys):
+    """The refusal reaches the record, and the diagnostic names both counts.
+
+    A null field is what makes the verifier fail closed; the printed counts
+    are what lets a lost worker be told from a disagreement in the log.
+    """
+    monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+
+    class _Option:
+        collectonly = False
+        numprocesses = 2
+
+    class _PluginManager:
+        @staticmethod
+        def get_plugin(name):
+            return None
+
+    class _InvocationParams:
+        dir = tmp_path
+
+    class _Config:
+        option = _Option()
+        workerinput = None
+        pluginmanager = _PluginManager()
+        invocation_params = _InvocationParams()
+
+    class _Session:
+        config = _Config()
+        testscollected = 4
+
+    record = FullRunRecord()
+    record._root = tmp_path
+    record._workers_ready = 2
+    record._worker_triples = [(4, 4, 0)]
+    record.pytest_sessionfinish(_Session(), 0)
+
+    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert written["items_before_modifyitems"] is None, written
+    assert written["items_after_modifyitems"] is None, written
+    err = capsys.readouterr().err
+    assert "ready workers 2" in err, err
+    assert "[(4, 4, 0)]" in err, err
+
+
+def test_the_recorder_counts_worker_ready_events(monkeypatch):
+    """The population count comes from pytest_testnodeready.
+
+    Without this hook the refusal is inert: workers_ready stays 0 and a lost
+    worker's short population aggregates as if it were complete.
+    """
+    monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
+    record = FullRunRecord()
+    record.pytest_testnodeready(None)
+    record.pytest_testnodeready(None)
+    assert record._workers_ready == 2
+
+
 def test_the_recorder_counts_deselected_items_from_the_hook(monkeypatch):
     """The published deselected count comes from pytest_deselected.
 

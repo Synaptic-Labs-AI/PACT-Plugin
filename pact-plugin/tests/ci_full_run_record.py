@@ -118,7 +118,8 @@ def record_path():
     return Path(workspace) / RECORD_NAME
 
 
-def aggregate_worker_collection_counts(worker_triples, collected):
+def aggregate_worker_collection_counts(worker_triples, collected,
+                                       workers_ready=None):
     """The (before, after, deselected) triple every worker agreed on, or None.
 
     Every worker collects the WHOLE corpus, so these triples are not
@@ -136,23 +137,30 @@ def aggregate_worker_collection_counts(worker_triples, collected):
     arithmetically and leave the verifier's narrowing detector unable to
     distinguish a reported deselection from an item removed without one.
 
-    The population is NOT complete, and must not be read as if it were. The
-    two normal down paths (``workerfinished`` and ``errordown``) both
-    dispatch ``pytest_testnodedown``, so a node that published nothing
-    arrives here as None and is rejected. A third path does not dispatch
-    it: xdist's ``DSession.worker_internal_error`` removes the node and
-    raises ``pytest_internalerror``, so a worker lost that way is simply
-    ABSENT and the surviving nodes can still agree - measured, the aggregate
-    succeeded on a population missing the failed worker. That run is caught
-    downstream by the verifier's off-test accounting and, in CI, by the
-    session's exit status 3 failing the test step before the verifier runs.
-    This function guarantees no such completeness.
+    The population is ENFORCED, not assumed. The controller counts the nodes
+    that announced themselves (``pytest_testnodeready``) and passes that
+    count in, because a node that never published is indistinguishable here
+    from a node that never existed. When fewer triples arrive than nodes
+    became ready, a worker was lost and no aggregate is provable. The path
+    that makes this necessary is xdist's ``DSession.worker_internal_error``:
+    it removes the node and raises ``pytest_internalerror`` without
+    dispatching a node-down event, so the worker simply never appears, and
+    the surviving nodes can still agree among themselves. Refusal leaves both
+    collection fields null, so the verifier fails closed on BAD-FIELD instead
+    of certifying a collection measured by a subset.
+
+    A restarted node fires ``pytest_testnodeready`` again, so under
+    ``--max-worker-restart`` a run that lost a worker and recovered on a
+    replacement is refused although it completed. That is a false red in the
+    safe direction, and the certifying run uses no restart flags.
 
     This guarantees only ``after == collected``; the second verifier identity,
     ``after + deselected == before``, is enforced in
     ``scripts/verify_full_run.py``, where a non-zero ``deselected`` is a hard
     failure before it is reached.
     """
+    if workers_ready is not None and len(worker_triples) < workers_ready:
+        return None
     if not worker_triples:
         return None
     triples = []
@@ -193,6 +201,7 @@ class FullRunRecord:
         self._items_after = None
         self._deselected = 0
         self._worker_triples = []
+        self._workers_ready = 0
         self._skips = []
         self._collection_skips = 0
 
@@ -230,6 +239,18 @@ class FullRunRecord:
             self._seen_node_ids.add(node_id)
             self._terminal_node_ids.append(node_id)
         self._note_skip(report)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodeready(self, node):
+        """Count xdist workers that announced themselves (controller only).
+
+        This is the only way to tell a worker that was lost from one that
+        never existed: a node can become ready and then never dispatch
+        ``pytest_testnodedown`` (the ``worker_internal_error`` path), leaving
+        no trace in ``_worker_triples``. The count is passed to the aggregate
+        so the refusal is a pure function rather than a branch here.
+        """
+        self._workers_ready += 1
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node, error):
@@ -330,11 +351,12 @@ class FullRunRecord:
         if items_before is None and distributed:
             collected = int(session.testscollected)
             aggregate = aggregate_worker_collection_counts(
-                self._worker_triples, collected)
+                self._worker_triples, collected, self._workers_ready)
             if aggregate is None:
                 print(
                     "CI-FULL-RUN-RECORD: no faithful cross-worker collection "
-                    f"aggregate (workers reported {self._worker_triples!r}, "
+                    f"aggregate (ready workers {self._workers_ready}, "
+                    f"triples {self._worker_triples!r}, "
                     f"collected={collected}); items_before/after_modifyitems "
                     "stay null so the verifier fails closed.",
                     file=sys.stderr,
