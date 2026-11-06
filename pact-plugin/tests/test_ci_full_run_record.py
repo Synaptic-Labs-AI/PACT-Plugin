@@ -442,10 +442,28 @@ def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
         collectonly = False
         numprocesses = 2
 
+    class _Elapsed:
+        seconds = 0
+
+    class _SessionStart:
+        @staticmethod
+        def elapsed():
+            return _Elapsed()
+
+    class _Reporter:
+        # One passing test keeps the verifier's NOTHING-PASSED check from
+        # masking the BAD-FIELD failure this test is about.
+        stats = {"passed": [object()], "deselected": []}
+        _session_start = _SessionStart()
+
+        @staticmethod
+        def build_summary_stats_line():
+            return ([("1 passed", None)], None)
+
     class _PluginManager:
         @staticmethod
         def get_plugin(name):
-            return None
+            return _Reporter() if name == "terminalreporter" else None
 
     class _InvocationParams:
         dir = tmp_path
@@ -466,12 +484,18 @@ def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
     record._worker_triples = [(4, 4, 0)]
     record.pytest_sessionfinish(_Session(), 0)
 
-    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    record_path = tmp_path / RECORD_NAME
+    written = json.loads(record_path.read_text(encoding="utf-8"))
     assert written["items_before_modifyitems"] is None, written
     assert written["items_after_modifyitems"] is None, written
     err = capsys.readouterr().err
     assert "ready workers 2" in err, err
     assert "[(4, 4, 0)]" in err, err
+
+    # The nulls are only worth anything if the gate fails closed on them.
+    verdict = _verify(tmp_path, record_path)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "BAD-FIELD-ITEMS_BEFORE_MODIFYITEMS" in verdict.stderr, verdict.stderr
 
 
 def test_the_recorder_counts_worker_ready_events(monkeypatch):
