@@ -38,6 +38,13 @@ REPORT_BLOCK_START = "**Verify-only report lines.**"
 # "and why." it replaces, no stray sentence inside the block can reproduce it
 # and truncate the extraction.
 REPORT_BLOCK_TERMINATOR = "\n> "
+# The block's final sentence, asserted as a post-condition so a truncation
+# names its cause rather than surfacing as an unexplained missing token.
+COLD_LANE_EXCLUSION = (
+    "Neither line applies to the cold lane: it receives findings rather than a "
+    "checklist, and its coverage-boundary receipt already requires what it "
+    "read, what it did not, and why."
+)
 
 FORMAT_ROW = (
     "| **Format** | Checklist: finding → resolved / not resolved / new issue, "
@@ -106,11 +113,10 @@ def _report_block(region: str) -> str:
     block = _bounded(
         region, REPORT_BLOCK_START, REPORT_BLOCK_TERMINATOR, "contract block"
     )
-    if "and why." not in _normalize(block):
+    if not _normalize(block).endswith(COLD_LANE_EXCLUSION):
         pytest.fail(
-            "contract block: the extracted block does not reach its final "
-            "sentence — a blockquote was added inside the block, so the "
-            "structural end cuts it short"
+            "report block truncated — expected the cold-lane exclusion "
+            "sentence at the end"
         )
     return block
 
