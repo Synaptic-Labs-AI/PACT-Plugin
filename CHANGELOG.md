@@ -26,7 +26,7 @@ The five Q5 dispatch-variety counter definitions now each resolve to exactly one
 
 ### What landed
 
-- `superseded` names its comparator as the `dispatch_site` event's own `variety`, and states that the dispatch-marked `variety_assessed` value is never that comparator even though it is a fallback source for `variety_totals`. A member with no resolvable `variety` on its `dispatch_site` event is `late_stamped` or `dispatch_malformed`, never `superseded`.
+- `superseded` names its comparator as the total resolved from the `dispatch_site` event's own `variety`, and states that the dispatch-marked `variety_assessed` value is never that comparator even though it is a fallback source for `variety_totals`. A member with no resolvable `variety` on its `dispatch_site` event is never `superseded`: where a snapshot supplies the final value it is `late_stamped` or `dispatch_malformed`; otherwise it is on the fallback path.
 - `late_stamped` and `dispatch_malformed` key on presence versus resolution of the `variety` key on the `dispatch_site` event: `late_stamped` requires `"variety" in event` to be false, `dispatch_malformed` requires it true while `resolve_variety_total` returns None. The pair is exhaustive over members whose site value does not resolve.
 - `malformed` names all three inputs it tests — the latest `task_metadata_snapshot`, the `dispatch_site` event's own `variety`, and the task's dispatch-marked `variety_assessed` event — and `total_unresolved` points at that same three-input set instead of saying "any stream".
 - `variety_totals` states that it holds one entry for each member that resolves a total, in member order, and that a member resolving none contributes no entry. This list is the one `len()` is taken of, so the definition can no longer revive the retired denominator.
@@ -34,7 +34,7 @@ The five Q5 dispatch-variety counter definitions now each resolve to exactly one
 - The sample-loss paragraph attributes the `coverage` key to `compute_variety_divergence` by name, so the sentence cannot be attached to the ten-value helper the section opens with.
 - `commands/wrap-up.md` carries the same three corrections in its Q5 reporting step: the three-input denominator for `total_unresolved`, the site-value comparator for `superseded`, and the presence-versus-resolution key test for `late_stamped` and `dispatch_malformed`.
 - The `protocols/pact-variety.md` extract mirrors the protocol region byte-identically.
-- Two behavioral assertions pin what the new prose states: `superseded == 0` in the existing site-absent, assessed-and-snapshot fixture, which covers the comparator and its denial clause; and two present-but-null `variety` tests, one asserting `dispatch_malformed == 1` and `late_stamped == 0` against a resolving snapshot, the other asserting `malformed == [that event]` and `total_unresolved == 1` with no snapshot.
+- Behavioral assertions pin what the new prose states: `superseded == 0` in the existing site-absent, assessed-and-snapshot fixture, which covers the comparator and its denial clause; and two present-but-null `variety` tests, one asserting `dispatch_malformed == 1` and `late_stamped == 0` against a resolving snapshot, the other asserting `malformed == [that event]` and `total_unresolved == 1` with no snapshot.
 
 ### Why
 

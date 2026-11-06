@@ -569,6 +569,36 @@ class TestExtractFinalDispatchCoverage:
         assert result["malformed"] == []
         assert result["superseded"] == 0
 
+    def test_a_fallback_member_reaches_no_snapshot_resolved_cell(self):
+        """The snapshot-resolved cells are keyed on the SNAPSHOT, so a member
+        with no resolving snapshot is outside all of them.
+
+        ONE MEMBER ALONE WOULD NOT SHOW THIS. A single fallback member only
+        proves the five cells read 0; it cannot show the ladder is GATED on
+        the snapshot rather than merely not reached by that input. The second
+        member makes the counts attributable: it lands in `superseded` (site 5
+        against snapshot 7), and that 1 is the whole arm-1 population. A
+        ladder evaluated before the snapshot check would compare the fallback
+        member's site value against a None snapshot, add a second
+        `superseded`, and read 2 here.
+
+        BOTH TOTALS ARE IN RANGE ON PURPOSE. `resolve_variety_total` accepts
+        only 4..16, so a total of 3 resolves to None and would silently turn
+        the "resolved" member into another fallback member — the fixture
+        would then prove the domain claim with no arm-1 member in it at all.
+        """
+        fallback = self._site("1", {"total": 9})  # no snapshot -> fallback
+        resolved = self._site("2", {"total": 5})
+        snapshots = [self._snap("2", {"variety": {"total": 7}})]
+        result = extract_final_dispatch_coverage([fallback, resolved], snapshots)
+        assert result["fallback_used"] == 1
+        # The resolved member is the ONLY member in an arm-1 cell.
+        assert result["superseded"] == 1
+        assert result["late_stamped"] == 0
+        assert result["dispatch_malformed"] == 0
+        assert result["superseded_dimensions_only"] == 0
+        assert result["dimensions_incomparable"] == 0
+
     # -- Which value wins --------------------------------------------------
 
     def test_snapshot_value_wins_and_the_member_counts_as_superseded(self):
@@ -1755,9 +1785,13 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
 
         `superseded` stays 0 because its comparator is the `dispatch_site`
         event's own variety, which is ABSENT here, not the assessed value
-        (8). This is the only fixture carrying a divergent assessed value,
-        so this assertion is what denies arm-2b contamination of the
-        comparator.
+        (8). This is the only fixture where a RESOLVING SNAPSHOT and a
+        DIVERGENT assessed value coexist, and that combination is what makes
+        the assertion bite: with a snapshot present the member stays on the
+        site path, so the assessed value can reach the result only if the
+        comparator wrongly uses it. Other fixtures carry a divergent assessed
+        value too, but with no snapshot, where the assessed value is a
+        legitimate fallback and the comparator is never consulted.
         """
         sites = [self._site("1")]
         snapshots = [
@@ -1774,6 +1808,29 @@ class TestExtractFinalDispatchCoverageDispatchAssessed:
         assert result["fallback_used"] == 0
         assert result["late_stamped"] == 1
         assert result["superseded"] == 0
+
+    def test_the_site_value_is_the_comparator_when_both_values_resolve(self):
+        """The comparator is the `dispatch_site` value even when a
+        dispatch-marked `variety_assessed` value ALSO resolves.
+
+        THE TWO CANDIDATES DISAGREE BY CONSTRUCTION: site 9, assessed 11,
+        snapshot 11. The site comparator reads 9 != 11 and counts 1; an
+        assessed-value comparator reads 11 == 11 and counts 0. The denial
+        case — no resolvable site value — is pinned by the arm above, and
+        cannot see this shape.
+        """
+        sites = [self._site("1", {"total": 9})]
+        snapshots = [
+            make_event(
+                "task_metadata_snapshot",
+                task_id="1",
+                metadata={"variety": {"total": 11}},
+                ts=self._TS,
+            )
+        ]
+        assessed = [self._va("1", "2026-06-15T12:00:01Z", total=11)]
+        result = extract_final_dispatch_coverage(sites, snapshots, assessed)
+        assert result["superseded"] == 1
 
     # -- The stream boundary -------------------------------------------------
 
