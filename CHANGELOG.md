@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.23: reviewer dispatches count in the Q5 dispatch_site population (issue #1701)
+## v4.8.24: reviewer dispatches count in the Q5 dispatch_site population (issue #1701)
 
 ### Summary
 
@@ -44,6 +44,25 @@ The Q5 `dispatch_site` population is now documented as matching the owner-witnes
 ### Why
 
 The exclusion premise never described the shipped path: peer review wired owner on reviewer tasks with #578 and #692, months before the exclusion was added in #1532, so the premise was false when written. Owner-wired reviewer dispatches already emit. Documents that excluded them keyed membership on the dispatching path, which moves, instead of on the owner write the stream already defines.
+## v4.8.23: preserve memory identity after worktree removal
+
+### Summary
+
+Pact-memory now recovers a removed linked worktree's project identity from the session's verified worktree record instead of deriving a different project from the dead path. When no identity can be resolved, saves refuse and project-scoped reads return no records rather than writing an unaddressable row or reading across the store. The CLI, agent instructions, and regression tests now expose and enforce those outcomes consistently.
+
+### What landed
+
+- Removed-worktree identity: a declaration that no longer exists can resolve through the session record written while its repository relationship was verifiable. Declaration matching, containment, and the recorded checkout are re-verified before the main project name is used; an unverified or out-of-tree record declines instead of redirecting the scope.
+- Fail-closed unresolved behavior: `save()` raises `ProjectIdentityUnresolvedError` before store work when no project resolves. `list()`, `search()`, and `search_by_file()` return empty results, status counters are zeroed, and `sync()` reports `empty` without touching the project document instead of treating a missing identity as no project filter.
+- Explicit project selection and CLI errors: a safe, non-empty payload `project_id` remains an authorized destination and also scopes its linked-file rows. Empty, non-string, or C0/DEL/C1-control-bearing payload ids are rejected before store work. The CLI reports unresolved identity as `PROJECT_IDENTITY_UNRESOLVED`, distinct from an actual `SCOPE_DISAGREEMENT`.
+- Malformed paths and records: production readers decline declarations or worktree records whose paths cannot be canonicalised rather than crashing. Disagreement reporting distinguishes a malformed recorded path from a removed one, and the declaration predicate keeps its existing-file and broken-symlink behavior explicit.
+- Outcome and instruction alignment: searches clear any previous sync status at entry, the memory skill documents the new error codes and empty-read meanings, and stale empty-sync help now covers unresolved identity as well as a project with no records.
+- Regression coverage: real worktree creation/removal, the real identity writer, SQLite stores, and CLI subprocesses cover recovery, refusal, empty reads, payload validation, and malformed inputs. Detector tests call the production methods rather than maintaining replicas, and empty-string payload tests require the documented refusal.
+
+### Why
+
+A linked worktree's declared directory can disappear during wrap-up, after which deriving identity from its basename silently selects a different memory bucket. A missing identity also used to permit NULL-keyed writes and unfiltered reads. Recovering only from a verified record preserves continuity where the evidence survives; refusing or returning no project records elsewhere makes the loss of scope visible without inventing one. Matching error codes, instructions, and strict regression pins keep the remedy clear and prevent the old behavior from returning unnoticed.
+
 ## v4.8.22: name the boundary and scope of test runs in instruction text
 
 ### Summary

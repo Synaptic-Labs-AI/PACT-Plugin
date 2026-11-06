@@ -208,9 +208,9 @@ def test_search_keeps_the_retrieved_sync_reason(monkeypatch):
         assert memory.last_sync_status == reason
 
 
-def test_search_without_a_sync_leaves_the_status_alone(monkeypatch):
-    """Control: `sync_to_claude=False` performs no write, so it must not
-    overwrite a status left by an earlier write on this instance."""
+def test_search_without_a_sync_clears_the_previous_status(monkeypatch):
+    """`sync_to_claude=False` performs no write, and an empty search clears
+    any status left by an earlier write on this instance at method entry."""
     from scripts import memory_api
 
     memory = memory_api.PACTMemory(
@@ -224,4 +224,4 @@ def test_search_without_a_sync_leaves_the_status_alone(monkeypatch):
 
     memory.search("query", sync_to_claude=False)
 
-    assert memory.last_sync_status == "wrote"
+    assert memory.last_sync_status is None

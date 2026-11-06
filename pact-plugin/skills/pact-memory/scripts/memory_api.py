@@ -79,6 +79,7 @@ try:
         format_project_dir_disagreement,
         get_project_dir_from_session_record,
         get_session_id_from_context_file,
+        get_worktree_identity_from_session_record,
     )
 except ImportError:
     from pact_session import (
@@ -87,6 +88,7 @@ except ImportError:
         format_project_dir_disagreement,
         get_project_dir_from_session_record,
         get_session_id_from_context_file,
+        get_worktree_identity_from_session_record,
     )
 
 # Configure logging
@@ -229,6 +231,47 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
         return None
 
 
+def _declared_path_exists(declared_dir: str) -> bool:
+    """Whether a DECLARED project directory is still present on disk.
+
+    The predicate that separates the live arm from the declined one. It is
+    deliberately `exists()` (following symlinks), NOT `is_dir()` and NOT
+    `lexists()`:
+
+    - an existing non-directory keeps today's basename behaviour, so the live
+      arm stays byte-identical;
+    - a broken symlink is not a usable declaration: `exists()` follows the
+      link and reports False, so it takes the declined arm. (This predicate
+      makes no claim about what `record_resolution` would conclude; the
+      decline is decided here, before the record is consulted.)
+
+    Never raises: an unreadable or invalid path is "does not exist", which
+    routes to the record lookup and then to the decline, never to a crash.
+    """
+    try:
+        return Path(declared_dir).exists()
+    except (OSError, RuntimeError, ValueError):
+        # ValueError is listed for a contract reason, not a measured one:
+        # `Path.exists()` happens to swallow it on Python 3.12, so this arm is
+        # unreachable today. The "Never raises" guarantee above belongs to
+        # THIS function and must not depend on a library's internal exception
+        # policy, so the type is named here rather than left implicit.
+        return False
+
+
+class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
+    """A WRITE was refused because no project identity could be resolved.
+
+    Distinct from the base class, whose cause is an env/record disagreement.
+    Subclassed rather than replacing it so the existing
+    `except ProjectScopeDisagreementError` sites keep catching this refusal,
+    while the message names the real cause.
+
+    Raised by `save()` only: every other write path either writes by
+    `memory_id`, already refuses a None id, or funnels through `save()`.
+    """
+
+
 class PACTMemory:
     """
     High-level interface for PACT Memory operations.
@@ -275,7 +318,7 @@ class PACTMemory:
             # A caller-supplied project_id short-circuits detection entirely —
             # measured end to end, not inferred. It is also invisible to the
             # env/record scope guard, which takes no arguments and never sees
-            # a payload, so "supplied" is the least-checked source of the five
+            # a payload, so "supplied" is the least-checked source of the six
             # and is exactly the one worth naming in the disclosure.
             self._project_id: Optional[str] = project_id
             self._project_id_source = "supplied"
@@ -381,8 +424,10 @@ class PACTMemory:
         return start  # fallback: use original
 
     @staticmethod
-    def _project_name_for_declared_dir(declared_dir: str, source: str) -> str:
-        """Name the project a DECLARED directory belongs to.
+    def _project_name_for_declared_dir(
+        declared_dir: str, source: str
+    ) -> "tuple[Optional[str], str]":
+        """Name the project a DECLARED directory belongs to, and its label.
 
         Shared by Strategy 1 (CLAUDE_PROJECT_DIR) and Strategy 1.5 (the
         session record): both carry one directory naming the session's scope,
@@ -402,13 +447,36 @@ class PACTMemory:
         already record. A path that will not resolve keeps its unresolved
         basename.
 
+        WHEN THE DECLARED PATH IS GONE, none of the live derivations above can
+        answer: git cannot resolve a directory that no longer exists. The
+        session's own worktree identity record can, because session_init wrote
+        it while the relationship was still provable, and it names the main
+        checkout the declaration belonged to. That record is trusted only
+        through `recorded_main_root`, which requires it to name THIS
+        declaration exactly and re-verifies the recorded checkout (see
+        `record_resolution`); a record that proves nothing is not followed.
+        When no verified record answers, the function DECLINES rather than
+        deriving a basename from a dead path: a worktree folder name would key
+        a second project, and the reads that followed would silently miss
+        every row saved while the worktree was live.
+
         Args:
             declared_dir: The directory value (env var or session record).
             source: Label for the debug log naming where the value came from.
+
+        Returns:
+            ``(name, label)``. ``name`` is a non-empty string, or None on the
+            declined arm — never ``""``, because an empty name is not a
+            project. ``label`` is what a caller discloses as the resolution
+            source when this call wins: the declaring strategy on the live
+            arms, and ``worktree identity record`` when the record answered.
         """
         try:
             declared_root = Path(declared_dir).resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
+            # ValueError: a NUL byte (or another embedded invalid value) in a
+            # session record must read as "cannot resolve", not crash the
+            # resolver. Same tuple `main_repo_root` already catches.
             declared_root = None
         # The local name is declared_main_root, NOT main_repo_root: rebinding
         # the module-level helper's own name would make it local for the whole
@@ -427,10 +495,50 @@ class PACTMemory:
                 source,
                 declared_main_root.name,
             )
-            return declared_main_root.name
+            return declared_main_root.name, source
+        # GONE-DECLARATION ARM. Reached only when the live rewrite could not
+        # fire AND the declared path does not resolve to an existing target —
+        # absent, unreadable, or a broken symlink. A path that exists never
+        # enters here, so live behaviour stays byte-identical.
+        if not _declared_path_exists(declared_dir):
+            # Function-level: the shared package is importable only after
+            # pact_session's sys.path bootstrap has run at module import.
+            from shared.project_scope import recorded_main_root
+
+            # AN INVALID DECLARATION MUST NOT CRASH THE RESOLVER. A corrupt
+            # session record can carry a NUL byte, which `os.path.realpath`
+            # (reached inside `record_resolution`) rejects with ValueError.
+            # Catch it HERE, at the boundary this module owns, so the
+            # never-raises contract holds for the whole method rather than
+            # only for the `resolve()` call above. The outcome is the same as
+            # any other unverifiable record: no recorded root, then decline.
+            try:
+                recorded_root = recorded_main_root(
+                    Path(declared_dir),
+                    get_worktree_identity_from_session_record(),
+                )
+            except (OSError, RuntimeError, ValueError):
+                recorded_root = None
+            if recorded_root is not None:
+                logger.debug(
+                    "project_id resolved from the worktree identity record for "
+                    "%s via %s: %s",
+                    declared_dir,
+                    source,
+                    recorded_root.name,
+                )
+                return recorded_root.name, "worktree identity record"
+            logger.warning(
+                "the directory declared via %s could not be resolved: %s "
+                "does not exist and no verified worktree identity record "
+                "names it. No name was derived from the path.",
+                source,
+                declared_dir,
+            )
+            return None, source
         project_name = (declared_root or Path(declared_dir)).name
         logger.debug("project_id detected from %s: %s", source, project_name)
-        return project_name
+        return project_name, source
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:
@@ -467,9 +575,29 @@ class PACTMemory:
            shares one memory space, and silent home scope is a mis-scope
            vector.
 
+        A DECLARED DIRECTORY THAT NO LONGER EXISTS declines. Either declared
+        rung may answer from the session's worktree identity record (label
+        `worktree identity record`); when a rung was PRESENT and named no
+        project, `declined_declaration` is set. Strategy 2 still runs, because
+        a live git root is a real answer about this process. If it fails too,
+        Strategy 3 is SKIPPED and the result is `(None, "unresolved")` with a
+        warning: Strategy 3 describes the PROCESS, not the session, and is the
+        only rung that can return HOME or an unrelated directory. The ordinary
+        path with NO declaration keeps Strategy 3 and its HOME warning
+        unchanged.
+
         Returns:
-            Project ID string (directory basename), or None if all methods fail.
+            (project_id, source). `project_id` is a non-empty directory
+            basename, or None when nothing resolved. `source` names the
+            resolution that won; it is disclosed by a save so an
+            otherwise-invisible resolution is diagnosable.
         """
+        # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
+        # instance, module or thread state. This flag is what separates the
+        # decline arm from the ordinary no-declaration path, which keeps
+        # Strategy 3 and its HOME warning.
+        declined_declaration = False
+
         # Strategy 1: Environment variable (original behavior)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
@@ -478,16 +606,20 @@ class PACTMemory:
             # `_project_name_for_declared_dir(project_dir,`. Wrapping this call
             # breaks that marker without changing behaviour, which is a silent
             # way to disarm a working pin.
-            name = PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
-            return name, "CLAUDE_PROJECT_DIR"
+            name, label = PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
+            if name:
+                return name, label
+            declined_declaration = True
 
         # Strategy 1.5: session record (inert under pytest — the discovery
         # refuses test processes — so the replica in test_project_id.py needs
         # no record leg to stay equivalent here).
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            name = PACTMemory._project_name_for_declared_dir(record_dir, "session record")
-            return name, "session record"
+            name, label = PACTMemory._project_name_for_declared_dir(record_dir, "session record")
+            if name:
+                return name, label
+            declined_declaration = True
 
         # Strategy 2: Git repository root (worktree-safe)
         # main_repo_root() carries the --git-common-dir resolution and the
@@ -506,6 +638,24 @@ class PACTMemory:
             return project_name, "git root"
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
+
+        # THE DECLINE ARM (D10, and it subsumes D11's outcome). A declaration
+        # was made and could not be honoured, and the process's own git root
+        # did not answer either. Strategy 3 is SKIPPED rather than consulted:
+        # it names the PROCESS, not the session, and it is the only rung that
+        # can return the HOME directory or an unrelated checkout. Returning
+        # None here is what makes the miss loud downstream (a refused write,
+        # an empty read) instead of a basename-derived bucket nobody looks in.
+        if declined_declaration:
+            # The per-declaration warning (naming the path) is emitted by
+            # `_project_name_for_declared_dir`; repeating it here would report
+            # one event twice. This line adds what the helper cannot know: the
+            # git-root rung also failed and the cwd rung was skipped.
+            logger.warning(
+                "project_id unresolved: the git root did not answer either, "
+                "so Strategy 3 is skipped and no project scope was derived."
+            )
+            return None, "unresolved"
 
         # Strategy 3: Current working directory — walk UP to nearest project marker.
         # Fixes subdirectory invocation (e.g., running CLI from .claude/ or src/
@@ -567,10 +717,14 @@ class PACTMemory:
         """How the most recent save resolved its project, and from where.
 
         Keys: `project_id` (what it was filed under), `source` (which of
-        supplied / CLAUDE_PROJECT_DIR / session record / git root / cwd /
-        unresolved decided it), `cwd_repo` (the main repo root of the working
-        directory, or None when not in one) and `location_divergence` (True
-        when those last two name different projects).
+        supplied / CLAUDE_PROJECT_DIR / session record / worktree identity
+        record / git root / cwd decided it), `cwd_repo` (the main repo root of
+        the working directory, or None when not in one) and
+        `location_divergence` (True when those last two name different
+        projects). `unresolved` never appears here: it cannot reach a
+        completed filing, because save() refuses an unresolved instance
+        identity unless the payload itself names the project (which then
+        discloses as `supplied`).
 
         `location_divergence` IS NOT A MISFILE FLAG. It compares where the
         PROCESS was against what the record was filed under. It cannot see
@@ -706,6 +860,55 @@ class PACTMemory:
             f"correct directory, produces no warning and is still misfiled."
         )
 
+    def _unresolved_identity_message(self) -> str:
+        """Explain a refusal caused by NO project identity resolving.
+
+        Re-derived at raise time from BOTH declarations, deliberately without
+        short-circuiting: when the env var is set the session record may still
+        name a second declaration that ALSO failed, and the message must be
+        able to name every declaration that was present. The resolver keeps no
+        state for this; nothing here is cached.
+
+        The wording reports causes it OBSERVED. It never claims the two
+        sources disagree — that is a different refusal with a different remedy
+        — and it never advises re-exporting the recorded value, because the
+        recorded directory may not exist.
+        """
+        # THE DISPATCHER IS THE AUTHORITY for which declarations exist and in
+        # what order: `_detect_project_id_with_source` reads the same two
+        # sources to decide precedence. This method re-reads them because the
+        # message must name every declaration that was PRESENT, not only the
+        # first one tried. A THIRD declared rung added to the dispatcher must
+        # be added here too, or the refusal message will silently omit it.
+        env_dir = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+        record_dir = get_project_dir_from_session_record() or ""
+        declarations = []
+        if env_dir:
+            declarations.append(f"declared via CLAUDE_PROJECT_DIR: {env_dir!r}")
+        if record_dir:
+            declarations.append(f"declared via the session record: {record_dir!r}")
+        if declarations:
+            # OBSERVATION, never a comparison: the message names what was
+            # present and what could not be verified, and does not imply the
+            # declarations caused each other to fail or that they disagree.
+            cause = (
+                "Declarations present — "
+                + "; ".join(declarations)
+                + ". None could be verified against a repository. "
+            )
+        else:
+            cause = (
+                "No project directory was declared (CLAUDE_PROJECT_DIR is "
+                "unset and the session record names none). "
+            )
+        return (
+            "no project identity could be resolved, so the write was refused "
+            "rather than filed under an unknown project. Nothing was written. "
+            f"{cause}"
+            "Run from inside the project directory, or set CLAUDE_PROJECT_DIR "
+            "to an existing project root."
+        )
+
     @_with_store_scope
     def save(
         self,
@@ -756,13 +959,13 @@ class PACTMemory:
         # an OUTCOME channel and REFUSED is a member of its value set, so
         # setting it on a refusal uses that domain. `last_project_scope`
         # DESCRIBES A COMPLETED FILING -- which project, decided by which of
-        # the five sources, against which repo -- and no member of THAT domain
+        # the six sources, against which repo -- and no member of THAT domain
         # means "no filing occurred" except absence. A refusal forced into it
         # would have to emit `location_divergence: False`, which reads as "these
         # agree" when the truth is "nothing was compared": a false negative in
         # the one field whose purpose is removing ambiguous silence. Putting a
         # refusal into `source` instead would overload a key whose documented
-        # domain is the five resolution strategies.
+        # domain is the six resolution sources.
         #
         # AT ENTRY RATHER THAN BESIDE EACH EARLY EXIT, because the set of early
         # exits is NOT RELIABLY ENUMERABLE. Grepping `raise` between here and
@@ -802,6 +1005,55 @@ class PACTMemory:
                 format_project_dir_disagreement(*disagreement)
             )
 
+        # A PAYLOAD project_id THAT IS PRESENT MUST BE USABLE. Omission means
+        # "auto-detect"; an empty string (or any other falsy-but-present value)
+        # cannot mean that, so it is rejected as bad input rather than treated
+        # as a warrant or silently replaced by the detected id. This check is
+        # unconditional on the instance's identity, because on a RESOLVED
+        # instance a falsy payload id would otherwise survive the defaulting
+        # and be written to the memory row AND its file rows under a key no
+        # `PACTMemory` instance can ever hold (`__init__` routes falsy input to
+        # detection), so no reader could address those rows.
+        #
+        # ValueError is this module's payload-validation channel; the CLI
+        # already envelopes it as invalid input (exit 2), so it cannot read as
+        # an env/record disagreement.
+        payload_project = memory.get("project_id")
+        if payload_project is not None and (
+            not isinstance(payload_project, str)
+            or not payload_project
+            or any(
+                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                for char in payload_project
+            )
+        ):
+            # Reject C0, DEL and C1 controls without restricting other Unicode.
+            raise ValueError(
+                "project_id, when supplied, must be a non-empty string without "
+                "control characters (U+0000-U+001F, U+007F-U+009F); omit it "
+                "to auto-detect the project. Nothing was written."
+            )
+
+        # AND FAIL CLOSED WHEN NO IDENTITY RESOLVED AT ALL. A None id is not a
+        # neutral default here: `create_memory` would stamp a NULL project_id,
+        # which `list_memories`/search then treat as "no filter" or as a
+        # shared NULL bucket — a cross-project read path. Refuse BEFORE any
+        # store work, on the same status channel as the disagreement above,
+        # and name the real cause: this is not an env/record disagreement.
+        #
+        # AN EXPLICIT PAYLOAD project_id IS A WARRANT, exactly as an explicit
+        # sync target is a warrant elsewhere in this module: the caller has
+        # NAMED the destination, so the record is not NULL-keyed and the
+        # cross-project read this guard closes cannot arise. Refusing it would
+        # be an over-block of a route the disclosure code treats as
+        # first-class ("supplied"). The defaulting below runs after this
+        # guard, so `memory` still holds the caller's raw value here.
+        if self._project_id is None and not memory.get("project_id"):
+            self._last_sync_status = SyncResult.REFUSED
+            raise ProjectIdentityUnresolvedError(
+                self._unresolved_identity_message()
+            )
+
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
@@ -814,7 +1066,7 @@ class PACTMemory:
         # memory dict rather than as a constructor argument, so reporting
         # `self._project_id_source` here would label a payload-supplied
         # project with whatever strategy the instance happened to detect --
-        # wrong on precisely the least-checked of the five routes.
+        # wrong on precisely the least-checked of the six routes.
         payload_supplied_project = memory.get("project_id") is not None
         if "project_id" not in memory or memory["project_id"] is None:
             memory["project_id"] = self._project_id
@@ -850,9 +1102,17 @@ class PACTMemory:
 
             # Link files to memory
             if files_to_link:
+                # THE EFFECTIVE ID, NOT THE INSTANCE DEFAULT. The memory row
+                # above was filed under `memory["project_id"]`, which may be a
+                # payload-supplied id on a path where the instance resolved
+                # nothing. Passing `self._project_id` here would then key the
+                # FILE rows NULL while the memory itself is scoped: the memory
+                # becomes invisible to `search_by_file` and to
+                # `graph_stats["files"]` in its own project, and the link is a
+                # cross-scope edge in a table with no project column.
                 link_memory_to_paths(
                     conn, memory_id, files_to_link,
-                    self._project_id, "modified"
+                    memory.get("project_id"), "modified"
                 )
 
             # Store embedding for semantic search
@@ -1219,6 +1479,16 @@ class PACTMemory:
         Returns:
             List of matching MemoryObject instances.
         """
+        # A search with no results or no identity attempts no sync. Clear any
+        # previous save's outcome before either early-return path.
+        self._last_sync_status = None
+        # NO IDENTITY MEANS NO PROJECT'S RECORDS, never all projects'. The
+        # search layer drops its project filter on None, so an unguarded call
+        # would return the whole store and, on a non-empty result, follow it
+        # with a Retrieved Context write. Return before _ensure_ready(): a
+        # call that returns nothing must not initialize the store either.
+        if self._project_id is None:
+            return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
@@ -1240,9 +1510,7 @@ class PACTMemory:
                 # KEEP THE RESULT (F5). This call used to discard it, so the
                 # reason it produced -- including ROOT_UNKNOWN, "git could not
                 # answer, so the project memory target is unknown" -- reached
-                # no reader. Clearing first mirrors save(): a status left from
-                # an earlier write must not be read as this one's.
-                self._last_sync_status = None
+                # no reader.
                 result = sync_retrieved_to_claude_md(
                     memory_dicts, query, None, memory_ids,
                     claude_md_root=claude_md_root
@@ -1270,6 +1538,12 @@ class PACTMemory:
         Returns:
             List of related MemoryObject instances.
         """
+        # NO IDENTITY MEANS NO RECORDS. A None id reaches graph's NULL-safe
+        # filter as "match rows whose project_id IS NULL" — the shared
+        # unknown-scope bucket, not this project's records. Return before
+        # _ensure_ready(): a no-op call must not initialize the store.
+        if self._project_id is None:
+            return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
@@ -1524,6 +1798,12 @@ class PACTMemory:
         Returns:
             List of MemoryObject instances ordered by creation time.
         """
+        # NO IDENTITY MEANS NO RECORDS. `list_memories` applies its
+        # `project_id = ?` condition only when the id is non-None, so a None
+        # id would return the newest records of EVERY project. Return before
+        # _ensure_ready(): a no-op call must not initialize the store.
+        if self._project_id is None:
+            return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
@@ -1625,6 +1905,43 @@ class PACTMemory:
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
+
+        # NO IDENTITY MEANS NO STATUS QUERY. Both the memory count and the graph
+        # stats report WHOLE-STORE numbers when the id is None, so an unguarded
+        # report would present every project's counts as this session's. The
+        # guard sits AFTER _ensure_ready() (capabilities and the catch-up
+        # report are process facts and stay meaningful) and BEFORE
+        # db_connection(), so THIS METHOD performs no status query and opens
+        # no store connection. It is NOT "no store work": _ensure_ready() runs
+        # first and may do store work itself, including a whole-store
+        # embedding catch-up on the process's first memory surface.
+        #
+        # WHAT ZERO HERE GUARANTEES: `memory_count`, `graph_stats["files"]` and
+        # `graph_stats["memories"]` — the three project-scoped counters.
+        # `graph_stats["memory_file_links"]` and `graph_stats["file_relations"]`
+        # are UNCONDITIONAL global counts even when a real project id is passed;
+        # they are not project-scoped, are pre-existing, and are not part of
+        # this fix. They read 0 here only because the guard performs no query —
+        # an implementation choice, not a guarantee.
+        if self._project_id is None:
+            return {
+                "project_id": None,
+                "session_id": self._session_id,
+                "memory_count": 0,
+                "tracked_files_count": len(self._session_files),
+                "graph_stats": {
+                    "files": 0,
+                    "memories": 0,
+                    "memory_file_links": 0,
+                    "file_relations": 0,
+                },
+                "capabilities": get_search_capabilities(),
+                "embedding_catchup": get_embedding_catchup_status(),
+                # A PROCESS fact, like session_id and capabilities, and part of
+                # the envelope every other status call returns. Dropping it on
+                # this arm alone would change the envelope's key set.
+                "db_path": str(resolve_db_path()),
+            }
 
         from .database import get_memory_count
         from .graph import get_graph_stats
