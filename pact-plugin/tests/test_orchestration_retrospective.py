@@ -1320,11 +1320,17 @@ class TestQ5Q7ReportingContract:
         assert "exactly one of five `{form}` values" in content
         assert "Q6 actually ran and its dual-trigger fired" in content
         suffix = content.split("**One common suffix**", 1)[1]
+        assert (
+            '2. When `coverage["total_unresolved"] > 0`: '
+            '`- {coverage["total_unresolved"]} recorded dispatch_site events '
+            "had no resolvable variety total"
+        ) in suffix
+        assert "2. When `len(malformed) > 0`" not in suffix
         ordered = [
             "dispatch sites left no sample",
             "recorded dispatch_site events had no resolvable variety total",
             "fallback_used",
-            "total_unresolved",
+            "- total_unresolved:",
             "superseded:",
             "late_stamped",
             "dispatch_malformed",
