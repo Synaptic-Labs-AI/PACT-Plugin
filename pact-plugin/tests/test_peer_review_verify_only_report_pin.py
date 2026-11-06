@@ -33,7 +33,11 @@ COLD_LANE_START = "### Cold Reviewer Lane"
 COLD_LANE_END = "### Reviewer Teachback"
 
 REPORT_BLOCK_START = "**Verify-only report lines.**"
-REPORT_BLOCK_END = "and why."
+# The block is three paragraphs and ends where the following blockquote note
+# begins. A blockquote boundary is structural: unlike the short phrase
+# "and why." it replaces, no stray sentence inside the block can reproduce it
+# and truncate the extraction.
+REPORT_BLOCK_TERMINATOR = "\n> "
 
 FORMAT_ROW = (
     "| **Format** | Checklist: finding → resolved / not resolved / new issue, "
@@ -91,14 +95,24 @@ def _verify_only_region(text: str) -> str:
 
 
 def _report_block(region: str) -> str:
-    """The contract block itself, bounded by its own first and last words."""
-    start_at = region.find(REPORT_BLOCK_START)
-    if start_at < 0:
-        pytest.fail(f"contract block: missing start marker {REPORT_BLOCK_START!r}")
-    end_at = region.find(REPORT_BLOCK_END, start_at)
-    if end_at < 0:
-        pytest.fail(f"contract block: missing end marker {REPORT_BLOCK_END!r}")
-    return region[start_at : end_at + len(REPORT_BLOCK_END)]
+    """The contract block, from its first words to the following blockquote.
+
+    The end is structural: the block's three paragraphs run until the next
+    block type, the `> **New issue verification**` note. The final-sentence
+    check below is a post-condition, not the boundary — a blockquote added
+    inside the block is what could still cut the extraction short, and the
+    message names that cause rather than leaving a truncated relay failure.
+    """
+    block = _bounded(
+        region, REPORT_BLOCK_START, REPORT_BLOCK_TERMINATOR, "contract block"
+    )
+    if "and why." not in _normalize(block):
+        pytest.fail(
+            "contract block: the extracted block does not reach its final "
+            "sentence — a blockquote was added inside the block, so the "
+            "structural end cuts it short"
+        )
+    return block
 
 
 class TestContractBlock:
