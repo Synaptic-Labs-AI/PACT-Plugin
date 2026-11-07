@@ -1015,6 +1015,81 @@ def test_api_carries_the_launch_key():
     )
 
 
+TASKS_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+function node(tag) {
+  return {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, style: {}, dataset: {}, className: "", textContent: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); return child; },
+  };
+}
+globalThis.document = { createElement: node, createTextNode: (t) => ({ textContent: t, children: [] }) };
+globalThis.Node = Object;
+const walk = (n, out = []) => { out.push(n); for (const c of n.children || []) walk(c, out); return out; };
+const texts = (n) => walk(n).map((x) => x.textContent).filter(Boolean);
+(async () => {
+  const { Panels } = await import("./panels.js");
+  const host = Object.create(Panels.prototype);
+  const card = (task) => host._taskCard(task);
+  const gate = card({ id: "7", key: "7:architect", kind: "gate", status: "completed", subject: "TEACHBACK" });
+  check("a gate card is tagged GATE", texts(gate).includes("GATE"));
+  check("the card identity is the task key", gate.dataset.taskKey === "7:architect");
+  check("a blocker card is marked", texts(card({ id: "9", key: "9:", kind: "blocker", status: "pending" })).includes("BLOCKER"));
+  check("an algedonic card is marked", texts(card({ id: "9", key: "9:", kind: "algedonic", status: "pending" })).includes("ALGEDONIC"));
+  host.model = { tasks: ["pending", "active", "handoff", "completed"].map((status, i) => ({ id: String(i), key: `${i}:`, status })), metrics: {} };
+  const columns = walk(host._tasksTab()).filter((n) => n.className === "task-col-label").map((n) => n.textContent);
+  check("the board has one column per closed status",
+    JSON.stringify(columns) === JSON.stringify(["ACTIVE", "HANDOFF", "PENDING", "COMPLETED"]));
+  const halt = host._alertItem({ kind: "algedonic", level: "halt", category: "Security", category_key: "security", summary: "s", resolved: false });
+  const level = walk(halt).find((n) => String(n.className).startsWith("alert-level"));
+  check("a halt is styled as danger", level.className.includes("is-alert") && level.textContent === "HALT");
+  check("the category is shown as written", texts(halt).includes("Security"));
+  check("an unresolved alert says so", texts(halt).includes("Unresolved"));
+  const done = host._alertItem({ kind: "blocker", level: "alert", category: "blocker", summary: "s", resolved: true, resolution: "fixed in 3" });
+  const doneLevel = walk(done).find((n) => String(n.className).startsWith("alert-level"));
+  check("an alert-level alert is styled as a warning", doneLevel.className.includes("is-warn"));
+  check("a resolved alert shows its resolution", texts(done).includes("Resolved: fixed in 3"));
+  host.model = { tasks: [{ id: "7", key: "7:architect", status: "handoff" }], metrics: {} };
+  const link = host._taskCardLink("7:architect", "TASK #7", "handoff-task");
+  check("a reference to a card on the board is a button", link.tagName === "BUTTON");
+  check("a reference to a card not on the board is plain text",
+    host._taskCardLink("9:coder", "TASK #9", "handoff-task").tagName === "SPAN"
+    && host._taskCardLink("", "unattached", "handoff-task").tagName === "SPAN");
+  let rendered = 0;
+  host._renderModal = () => { rendered += 1; };
+  host._showTaskCard("7:architect");
+  check("following the link opens the board on that card",
+    host.modalTab === "tasks" && host._pendingTaskKey === "7:architect" && rendered === 1);
+  const handoff = host._handoffCard({ agent: "architect", task_id: "7", task_key: "7:architect", fields: {} });
+  const kept = host._alertItem({ kind: "blocker", level: "alert", category: "blocker", summary: "capped out", task_id: "12", task_key: "12:coder", status: "pending", resolved: false });
+  check("an alert whose card is not on the board stays, with its text and no link",
+    texts(kept).includes("capped out") && texts(kept).includes("task #12") && texts(kept).includes("pending")
+    && !walk(kept).some((n) => n.tagName === "BUTTON"));
+  const linked = host._alertItem({ kind: "blocker", level: "alert", category: "blocker", summary: "s", task_id: "7", task_key: "7:architect", resolved: false });
+  check("an alert whose card is on the board links to it", walk(linked).some((n) => n.tagName === "BUTTON"));
+  check("a handoff links to its card", walk(handoff).some((n) => n.tagName === "BUTTON" && n.textContent.startsWith("TASK #7")));
+  if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+  console.log("PINS OK");
+})().catch((err) => { console.error("PIN SCRIPT ERROR: " + (err && err.stack ? err.stack : err)); process.exit(1); });
+"""
+
+
+def test_task_board_and_alerts_follow_the_payload_shape():
+    """Cards carry their key and kind tag; columns are the closed status set;
+    alerts style by level and show category and resolution as written."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", TASKS_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"task and alert pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))

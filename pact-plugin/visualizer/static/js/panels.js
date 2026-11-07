@@ -83,12 +83,21 @@ const TAB_ALIASES = {
   log: "raw",
 };
 
+/* tasks[].status is a closed set: one board column per value. */
 const STATUS_GROUPS = [
-  { id: "active", label: "ACTIVE", statuses: ["active", "in_progress", "in-progress", "working", "doing", "claimed", "running"] },
-  { id: "handoff", label: "HANDOFF / REVIEW", statuses: ["handoff", "review", "reviewing", "awaiting_review", "awaiting-review", "in_review"] },
-  { id: "pending", label: "PENDING", statuses: ["pending", "todo", "queued", "blocked", "open", "backlog", "draft"] },
-  { id: "completed", label: "COMPLETED", statuses: ["completed", "complete", "done", "passed", "cancelled", "canceled", "closed"] },
+  { id: "active", label: "ACTIVE", statuses: ["active"] },
+  { id: "handoff", label: "HANDOFF", statuses: ["handoff"] },
+  { id: "pending", label: "PENDING", statuses: ["pending"] },
+  { id: "completed", label: "COMPLETED", statuses: ["completed"] },
 ];
+
+/* Task kinds the board marks: teachback gates, and signal tasks that raised
+ * a blocker or an algedonic alert. */
+const TASK_KIND_TAGS = {
+  gate: { text: "GATE", tone: "is-gate" },
+  blocker: { text: "BLOCKER", tone: "is-danger" },
+  algedonic: { text: "ALGEDONIC", tone: "is-danger" },
+};
 
 const HANDOFF_FIELDS = [
   { key: "produced", label: "PRODUCED", aliases: ["produced_artifacts", "artifacts"] },
@@ -1308,6 +1317,16 @@ export class Panels {
         }
       }
     }
+    if (this._pendingTaskKey && typeof this.modal.querySelectorAll === "function") {
+      const key = this._pendingTaskKey;
+      this._pendingTaskKey = "";
+      const target = [...this.modal.querySelectorAll("[data-task-key]")].find((node) => node.dataset.taskKey === key);
+      if (target) {
+        target.setAttribute("tabindex", "-1");
+        toggleClass(target, "is-target", true);
+        try { target.focus({ preventScroll: false }); } catch (_) { /* focus is best-effort */ }
+      }
+    }
     if (this.modalView === "tab" && tab === "variety") {
       this._drawCharts();
       if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => this._drawCharts());
@@ -1484,16 +1503,23 @@ export class Panels {
       )
       : 0;
     const flags = [];
+    const kindTag = TASK_KIND_TAGS[String(task.kind || "")];
+    if (kindTag) flags.push(el("span", { class: `task-flag ${kindTag.tone}`, text: kindTag.text }));
     if (task.teachback) flags.push(el("span", { class: "task-flag is-ok", text: "TEACHBACK" }));
     if (task.handoff) flags.push(el("span", { class: "task-flag", text: "HANDOFF" }));
-    const card = el("article", { class: "task-card" }, [
+    /* tasks[].key (id plus occupant) is the card identity; ids repeat when a
+     * task id is reused by a different occupant. */
+    const card = el("article", {
+      class: `task-card${kindTag ? ` task-kind-${safeClass(task.kind)}` : ""}`,
+      dataset: { taskKey: visible(task.key) || visible(task.id) },
+    }, [
       el("div", { class: "task-card-top" }, [
         el("span", { class: "task-id", text: `#${visible(task.id) || "?"}` }),
         el("span", { class: "task-status", text: (visible(task.status) || "unknown").toUpperCase() }),
       ]),
       el("div", { class: "task-subject", text: visible(task.subject) || "(untitled task)" }),
       el("div", { class: "task-meta-row" }, [this._phaseChip(task.phase), ...flags]),
-      el("div", { class: "task-time", text: `upd ${clockTime(task.updated_at) || "—"} · ${visible(task.owner) || "unowned"}${variety ? ` · variety ${total}/16` : ""}` }),
+      el("div", { class: "task-time", text: `upd ${clockTime(task.updated_at) || "—"} · ${visible(task.occupant) || visible(task.owner) || "unowned"}${variety ? ` · variety ${total}/16` : ""}` }),
     ]);
     if (variety) {
       const bar = el("div", { class: "task-variety" });
@@ -1503,6 +1529,30 @@ export class Panels {
       card.appendChild(bar);
     }
     return card;
+  }
+
+  /* A reference to a task card. When the board holds a card with that key
+   * the reference is a button that opens the board on it; otherwise (no key,
+   * or the card fell to a cap) it is plain text. */
+  _taskCardLink(taskKey, text, className) {
+    const key = visible(taskKey);
+    const onBoard = Boolean(key) && asArray(this.model && this.model.tasks).some((task) => visible(task.key) === key);
+    if (!onBoard) return el("span", { class: className, text });
+    return el("button", {
+      class: `${className} task-link`,
+      text,
+      dataset: { focusKey: `task:${key}` },
+      attrs: { type: "button", title: "Show this task on the board" },
+      on: { click: () => this._showTaskCard(key) },
+    });
+  }
+
+  _showTaskCard(key) {
+    this.modalTab = "tasks";
+    this.modalView = "tab";
+    this.detailEvent = null;
+    this._pendingTaskKey = key;
+    this._renderModal();
   }
 
   /* --- debrief: handoffs ------------------------------------------------- */
@@ -1538,12 +1588,13 @@ export class Panels {
     card.appendChild(el("div", { class: "handoff-head" }, [
       el("div", { class: "handoff-who" }, [
         el("span", { class: "handoff-agent", text: visible(handoff && handoff.agent) || "unknown" }),
-        el("span", {
-          class: "handoff-task",
-          text: handoff && handoff.task_id
+        this._taskCardLink(
+          handoff && handoff.task_key,
+          handoff && handoff.task_id
             ? `TASK #${handoff.task_id}${handoff.task_subject ? ` · ${handoff.task_subject}` : ""}`
             : visible(handoff && handoff.task_subject) || "unattached",
-        }),
+          "handoff-task",
+        ),
       ]),
       el("div", { class: "handoff-when" }, [
         el("span", { class: `handoff-badge ${schemaComplete ? "is-ok" : "is-warn"}`, text: schemaComplete ? "SCHEMA COMPLETE" : "SCHEMA INCOMPLETE" }),
@@ -1666,18 +1717,34 @@ export class Panels {
       "ALERTS",
       alerts.length ? `${alerts.length} recorded` : "none",
       alerts.length
-        ? alerts.map((alert) => el("div", { class: "alert-item" }, [
-          el("div", { class: "alert-line" }, [
-            el("span", { class: `alert-level ${String(alert.level || "alert").toLowerCase() === "alert" ? "is-alert" : "is-warn"}`, text: String(alert.level || "alert").toUpperCase() }),
-            el("span", { class: "alert-kind", text: String(alert.kind || "signal").toUpperCase() }),
-            el("span", { class: "alert-cat", text: String(alert.category || "GENERAL").toUpperCase() }),
-            el("span", { class: "alert-time", text: clockTime(alert.ts) || "—" }),
-          ]),
-          el("div", { class: "alert-summary", text: visible(alert.summary) || "(no summary)" }),
-        ]))
+        ? alerts.map((alert) => this._alertItem(alert))
         : [this._emptyBlock("NO ALERTS", "No algedonic signals or blockers were recorded.")]
     ));
     return wrap;
+  }
+
+  /* One alert. A halt is danger and an alert is a warning; the category is
+   * shown as the writer spelled it; a resolved alert says how. */
+  _alertItem(alert) {
+    const level = String(alert.level || "alert").toLowerCase();
+    const resolved = alert.resolved === true;
+    const resolution = visible(alert.resolution);
+    return el("div", { class: `alert-item${resolved ? " is-resolved" : ""}`, dataset: { category: visible(alert.category_key) } }, [
+      el("div", { class: "alert-line" }, [
+        el("span", { class: `alert-level ${level === "halt" ? "is-alert" : "is-warn"}`, text: level.toUpperCase() }),
+        el("span", { class: "alert-kind", text: String(alert.kind || "signal").toUpperCase() }),
+        el("span", { class: "alert-cat", text: visible(alert.category) || "general" }),
+        /* Linked by key; an alert whose card fell to the task cap keeps its
+         * place and its text, without a link. */
+        alert.task_id ? this._taskCardLink(alert.task_key, `task #${alert.task_id}`, "alert-task") : null,
+        visible(alert.status) ? el("span", { class: "alert-status", text: visible(alert.status) }) : null,
+        el("span", { class: "alert-time", text: clockTime(alert.ts) || "—" }),
+      ]),
+      el("div", { class: "alert-summary", text: visible(alert.summary) || "(no summary)" }),
+      resolved
+        ? el("div", { class: "alert-resolution", text: resolution ? `Resolved: ${resolution}` : "Resolved" })
+        : el("div", { class: "alert-resolution is-open", text: "Unresolved" }),
+    ]);
   }
 
   /* --- debrief: reviews + wrap-up ---------------------------------------- */

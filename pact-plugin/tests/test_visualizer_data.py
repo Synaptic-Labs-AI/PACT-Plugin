@@ -981,7 +981,8 @@ class TestRoster:
         assert info.tasks[1].variety == {
             "novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4,
         }
-        assert info.tasks[0].status == "active"
+        # The store keeps the platform status; the model maps it.
+        assert info.tasks[0].status == "in_progress"
 
     def test_invalid_team_name_is_empty(self, tmp_path):
         root = make_root(tmp_path)

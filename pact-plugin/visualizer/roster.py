@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -103,10 +104,12 @@ class StoredTask:
     """One task-store record (tasks/<team>/<id>.json).
 
     Location: roster.StoredTask.
-    Summary: Normalized view of the platform task file: id/subject/owner/phase,
-             lower-case status, optional variety stamp and the flags the model
-             needs to enrich derived tasks.
-    Used by: model.derive_tasks, tests.
+    Summary: Normalized view of the platform task file: id/subject/owner,
+             the platform status (pending/in_progress/completed/deleted, or
+             ""), optional variety stamp, the flags the model needs to enrich
+             derived tasks, the signal fields of a blocker/algedonic task, the
+             ids it ``blocks`` and the file mtime.
+    Used by: model.derive_tasks, model.derive_alerts, tests.
     """
 
     id: str
@@ -119,6 +122,10 @@ class StoredTask:
     teachback: bool = False
     handoff: bool = False
     updated_at: str = ""
+    level: str = ""
+    category: str = ""
+    resolution: str | None = None
+    blocks: tuple[str, ...] = ()
 
 
 @dataclass
@@ -334,6 +341,22 @@ def _regular_file(path: Path) -> bool:
         return False
 
 
+_PLATFORM_STATUSES = frozenset({"pending", "in_progress", "completed", "deleted"})
+
+
+def resolution_text(value: object) -> str | None:
+    """A signal task's resolution as bounded text: a str as is, a dict as JSON."""
+    if isinstance(value, str):
+        return as_text(value, MAX_FIELD_CHARS) or None
+    if isinstance(value, (dict, list)) and value:
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return None
+        return as_text(encoded, MAX_FIELD_CHARS) or None
+    return None
+
+
 def _task_from_file(path: Path, payload: object) -> StoredTask | None:
     """Build a StoredTask from one task-store JSON file."""
     if not isinstance(payload, dict):
@@ -352,52 +375,88 @@ def _task_from_file(path: Path, payload: object) -> StoredTask | None:
     teachback = bool(meta.get("teachback_submit")) or bool(meta.get("teachback"))
     handoff = bool(meta.get("handoff"))
     completion_type = meta.get("type")
-    kind = completion_type if isinstance(completion_type, str) and completion_type else "task"
-    phase = meta.get("phase")
-    phase_text = phase if isinstance(phase, str) else ""
+    kind = as_text(completion_type, 40) if isinstance(completion_type, str) else ""
+    status = payload.get("status")
+    status_text = status.strip().lower() if isinstance(status, str) else ""
+    blocks = payload.get("blocks")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     return StoredTask(
-        id=task_id,
+        id=as_text(task_id, 60),
         subject=as_text(subject, MAX_FIELD_CHARS) if isinstance(subject, str) else "",
         owner=as_text(owner, _NAME_CHARS) if isinstance(owner, str) else "",
-        phase=as_text(phase_text, 40).upper(),
-        status=normalize_status(payload.get("status")),
-        kind=kind,
+        status=status_text if status_text in _PLATFORM_STATUSES else "",
+        kind=kind or "task",
         variety=variety,
         teachback=teachback,
         handoff=handoff,
+        updated_at=_iso(mtime),
+        level=as_text(meta.get("level"), 40).lower(),
+        category=as_text(meta.get("category"), 80),
+        resolution=resolution_text(meta.get("resolution")),
+        blocks=tuple(
+            as_text(item, 60) for item in blocks[:MAX_STORED_TASKS]
+            if isinstance(item, (str, int)) and not isinstance(item, bool)
+        ) if isinstance(blocks, list) else (),
     )
 
 
-def _load_tasks(tasks_root: Path, team_name: str) -> list[StoredTask]:
-    """Read one team's task-store JSON files in sorted file order, bounded.
-
-    Only files ``discovery.contained`` accepts under ``<root>/tasks`` are
-    read, so a symlinked team task dir or task file is skipped.
-    """
-    tasks: list[StoredTask] = []
-    tasks_dir = tasks_root / team_name
-    if not contained(tasks_root, tasks_dir):
-        return tasks
+def _iso(mtime: float) -> str:
+    """An mtime as ``YYYY-MM-DDTHH:MM:SSZ`` ("" when unknown)."""
+    if not mtime:
+        return ""
     try:
-        entries = sorted(tasks_dir.iterdir(), key=lambda item: item.name)
+        return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def task_order_key(task_id: str) -> tuple[int, int, str]:
+    """Numeric ids in numeric order, then any other id in text order."""
+    return (0, int(task_id), "") if task_id.isdigit() else (1, 0, task_id)
+
+
+def task_files(tasks_root: Path, team_name: str) -> list[Path]:
+    """The team's task files the viewer reads: numeric order, NEWEST kept.
+
+    Location: roster.task_files.
+    Summary: Regular ``*.json`` files ``discovery.contained`` accepts under
+             ``<root>/tasks/<team>/``, sorted by task_order_key; past
+             MAX_STORED_TASKS the highest ids (the newest tasks) are kept.
+             The task loader and the activity clock share this one selection,
+             so an edit to any task the board shows refreshes the clock.
+    Used by: _load_tasks, activity_mtime_ns.
+    """
+    tasks_dir = tasks_root / team_name
+    if not valid_component(team_name) or not contained(tasks_root, tasks_dir):
+        return []
+    try:
+        entries = list(tasks_dir.iterdir())
     except OSError:
-        return tasks
+        return []
+    selected: list[Path] = []
     for entry in entries:
-        if len(tasks) >= MAX_STORED_TASKS:
-            break
-        if not contained(tasks_root, entry):
+        if entry.name.startswith(".") or entry.suffix != ".json":
+            continue
+        if not valid_component(entry.stem) or not contained(tasks_root, entry):
             continue
         try:
             if not entry.is_file():
                 continue
         except OSError:
             continue
-        if entry.name.startswith(".") or entry.suffix != ".json":
-            continue
-        if not valid_component(entry.stem):
-            continue
-        payload = _read_json(entry)
-        task = _task_from_file(entry, payload)
+        selected.append(entry)
+    selected.sort(key=lambda entry: task_order_key(entry.stem))
+    return selected[-MAX_STORED_TASKS:]
+
+
+def _load_tasks(tasks_root: Path, team_name: str) -> list[StoredTask]:
+    """Read the files task_files selects, in its order."""
+    tasks: list[StoredTask] = []
+    for entry in task_files(tasks_root, team_name):
+        task = _task_from_file(entry, _read_json(entry))
         if task is not None:
             tasks.append(task)
     return tasks
@@ -462,7 +521,7 @@ def activity_mtime_ns(config_root: Path, team_name: str) -> int:
 
     Location: roster.activity_mtime_ns.
     Summary: The run's activity clock beyond its journal: ``tasks/<team>/``
-             and each ``*.json`` in it (at most MAX_STORED_TASKS files),
+             and each file task_files selects (the same set the board reads),
              ``teams/<team>/config.json`` and ``teams/<team>/pact-roster.jsonl``.
              Teammates update task files while the lead's journal is quiet,
              so a run stays live while its team works. Only paths
@@ -485,22 +544,7 @@ def activity_mtime_ns(config_root: Path, team_name: str) -> int:
     if not contained(tasks_root, tasks_dir):
         return newest
     newest = max(newest, _mtime_ns(tasks_dir))
-    try:
-        entries = sorted(tasks_dir.iterdir(), key=lambda item: item.name)
-    except OSError:
-        return newest
-    counted = 0
-    for entry in entries:
-        if counted >= MAX_STORED_TASKS:
-            break
-        if entry.suffix != ".json" or entry.name.startswith("."):
-            continue
-        try:
-            if entry.is_symlink() or not entry.is_file():
-                continue
-        except OSError:
-            continue
-        counted += 1
+    for entry in task_files(tasks_root, team_name):
         newest = max(newest, _mtime_ns(entry))
     return newest
 

@@ -337,6 +337,8 @@
  "tasks": [
   {
    "id": "1",
+   "key": "1:",
+   "occupant": "",
    "subject": "Build JWT authentication",
    "owner": "team-lead",
    "phase": "TEST",
@@ -351,16 +353,18 @@
    },
    "teachback": false,
    "handoff": false,
-   "updated_at": "2026-11-02T23:42:00Z",
+   "updated_at": "2026-11-02T23:00:30Z",
    "source": "derived"
   },
   {
    "id": "2",
+   "key": "2:",
+   "occupant": "",
    "subject": "preparer: research JWT auth",
    "owner": "preparer",
    "phase": "PREPARE",
    "status": "completed",
-   "kind": "task",
+   "kind": "gate",
    "variety": {
     "novelty": 2,
     "scope": 2,
@@ -374,12 +378,29 @@
    "source": "derived"
   },
   {
+   "id": "3",
+   "key": "3:",
+   "occupant": "",
+   "subject": "task #3",
+   "owner": "secretary",
+   "phase": "PREPARE",
+   "status": "active",
+   "kind": "task",
+   "variety": null,
+   "teachback": false,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:02:00Z",
+   "source": "derived"
+  },
+  {
    "id": "4",
+   "key": "4:",
+   "occupant": "",
    "subject": "architect: design the auth flow",
    "owner": "architect",
    "phase": "ARCHITECT",
    "status": "completed",
-   "kind": "task",
+   "kind": "gate",
    "variety": {
     "novelty": 2,
     "scope": 3,
@@ -389,16 +410,33 @@
    },
    "teachback": true,
    "handoff": true,
-   "updated_at": "2026-11-02T23:13:00Z",
+   "updated_at": "2026-11-02T23:12:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "5",
+   "key": "5:",
+   "occupant": "",
+   "subject": "task #5",
+   "owner": "auditor",
+   "phase": "ARCHITECT",
+   "status": "active",
+   "kind": "task",
+   "variety": null,
+   "teachback": false,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:09:00Z",
    "source": "derived"
   },
   {
    "id": "6",
+   "key": "6:",
+   "occupant": "",
    "subject": "backend-coder: implement auth service",
    "owner": "backend-coder",
    "phase": "CODE",
    "status": "completed",
-   "kind": "task",
+   "kind": "gate",
    "variety": {
     "novelty": 1,
     "scope": 3,
@@ -408,16 +446,18 @@
    },
    "teachback": true,
    "handoff": true,
-   "updated_at": "2026-11-02T23:25:00Z",
+   "updated_at": "2026-11-02T23:23:00Z",
    "source": "derived"
   },
   {
    "id": "7",
+   "key": "7:",
+   "occupant": "",
    "subject": "frontend-coder: build auth UI",
    "owner": "frontend-coder",
    "phase": "CODE",
    "status": "completed",
-   "kind": "task",
+   "kind": "gate",
    "variety": {
     "novelty": 1,
     "scope": 2,
@@ -427,16 +467,18 @@
    },
    "teachback": true,
    "handoff": true,
-   "updated_at": "2026-11-02T23:25:00Z",
+   "updated_at": "2026-11-02T23:24:00Z",
    "source": "derived"
   },
   {
    "id": "8",
+   "key": "8:",
+   "occupant": "",
    "subject": "test-engineer: verify auth flows",
    "owner": "test-engineer",
    "phase": "TEST",
-   "status": "active",
-   "kind": "task",
+   "status": "completed",
+   "kind": "gate",
    "variety": {
     "novelty": 1,
     "scope": 3,
@@ -451,6 +493,8 @@
   },
   {
    "id": "9",
+   "key": "9:",
+   "occupant": "",
    "subject": "security-engineer: adversarial auth review",
    "owner": "security-engineer",
    "phase": "TEST",
@@ -465,11 +509,13 @@
    },
    "teachback": true,
    "handoff": true,
-   "updated_at": "2026-11-02T23:28:00Z",
+   "updated_at": "2026-11-02T23:28:30Z",
    "source": "derived"
   },
   {
    "id": "10",
+   "key": "10:",
+   "occupant": "",
    "subject": "backend-coder: fix refresh rotation",
    "owner": "backend-coder",
    "phase": "TEST",
@@ -485,32 +531,6 @@
    "teachback": false,
    "handoff": false,
    "updated_at": "2026-11-02T23:32:00Z",
-   "source": "derived"
-  },
-  {
-   "id": "3",
-   "subject": "task #3",
-   "owner": "secretary",
-   "phase": "PREPARE",
-   "status": "completed",
-   "kind": "task",
-   "variety": null,
-   "teachback": false,
-   "handoff": false,
-   "updated_at": "2026-11-02T23:05:00Z",
-   "source": "derived"
-  },
-  {
-   "id": "5",
-   "subject": "task #5",
-   "owner": "auditor",
-   "phase": "ARCHITECT",
-   "status": "active",
-   "kind": "task",
-   "variety": null,
-   "teachback": false,
-   "handoff": false,
-   "updated_at": "2026-11-02T23:13:00Z",
    "source": "derived"
   }
  ],
@@ -2031,6 +2051,7 @@
    "ts": "2026-11-02T23:05:30Z",
    "agent": "preparer",
    "task_id": "2",
+   "task_key": "2:",
    "task_subject": "preparer: research JWT auth",
    "fields": {
     "produced": "docs/preparation/jwt-research.md",
@@ -2047,6 +2068,7 @@
    "ts": "2026-11-02T23:12:00Z",
    "agent": "architect",
    "task_id": "4",
+   "task_key": "4:",
    "task_subject": "architect: design the auth flow",
    "fields": {
     "produced": "docs/architecture/auth-flow.md",
@@ -2063,6 +2085,7 @@
    "ts": "2026-11-02T23:23:00Z",
    "agent": "backend-coder",
    "task_id": "6",
+   "task_key": "6:",
    "task_subject": "backend-coder: implement auth service",
    "fields": {
     "produced": "src/auth/service.ts, token-store.ts, middleware.ts",
@@ -2079,6 +2102,7 @@
    "ts": "2026-11-02T23:24:00Z",
    "agent": "frontend-coder",
    "task_id": "7",
+   "task_key": "7:",
    "task_subject": "frontend-coder: build auth UI",
    "fields": {
     "produced": "src/ui/auth/*.tsx",
@@ -2181,15 +2205,27 @@
    "kind": "algedonic",
    "level": "alert",
    "category": "SECURITY",
-   "summary": "Refresh-token replay accepted; fix before merge."
+   "category_key": "security",
+   "summary": "Refresh-token replay accepted; fix before merge.",
+   "task_id": "",
+   "task_key": "",
+   "status": "",
+   "resolved": false,
+   "resolution": null
   },
   {
    "seq": 45,
    "ts": "2026-11-02T23:31:00Z",
    "kind": "blocker",
    "level": "alert",
-   "category": "TEST",
-   "summary": "Rotation reuse detection missing."
+   "category": "blocker",
+   "category_key": "blocker",
+   "summary": "Rotation reuse detection missing.",
+   "task_id": "",
+   "task_key": "",
+   "status": "",
+   "resolved": false,
+   "resolution": null
   }
  ],
  "checkpoints": [
@@ -2204,12 +2240,12 @@
     {
      "name": "preparer",
      "task_id": "2",
-     "status": "completed"
+     "note": "completed"
     },
     {
      "name": "secretary",
      "task_id": "3",
-     "status": "completed"
+     "note": "completed"
     }
    ],
    "variety": {
@@ -2232,12 +2268,12 @@
     {
      "name": "architect",
      "task_id": "4",
-     "status": "completed"
+     "note": "completed"
     },
     {
      "name": "auditor",
      "task_id": "5",
-     "status": "active"
+     "note": "active"
     }
    ],
    "variety": {
@@ -2261,12 +2297,12 @@
     {
      "name": "backend-coder",
      "task_id": "6",
-     "status": "completed"
+     "note": "completed"
     },
     {
      "name": "frontend-coder",
      "task_id": "7",
-     "status": "completed"
+     "note": "completed"
     }
    ],
    "variety": {

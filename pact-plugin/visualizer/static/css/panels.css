@@ -1185,6 +1185,8 @@
   line-height: 1.5;
 }
 .task-flag.is-ok { color: var(--prepare); border-color: rgba(45, 212, 191, 0.4); }
+.task-flag.is-gate { color: var(--violet); border-color: rgba(167, 139, 250, 0.4); }
+.task-flag.is-danger { color: var(--danger); border-color: rgba(251, 113, 133, 0.5); }
 
 .task-time {
   margin-top: 4px;
@@ -1424,6 +1426,20 @@
 .alert-level.is-warn { color: var(--warning); border-color: rgba(251, 191, 36, 0.45); }
 .alert-kind { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; }
 .alert-cat { color: var(--dim); font-size: 11px; letter-spacing: 0.08em; }
+.alert-task { color: var(--muted); font-size: 11px; }
+.alert-status { color: var(--dim); font-size: 11px; }
+.alert-resolution { color: var(--success); font-size: 11px; margin-top: 4px; }
+.alert-resolution.is-open { color: var(--warning); }
+.task-link {
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  text-align: left;
+  text-decoration: underline;
+}
+.task-card.is-target { outline: 2px solid var(--accent); outline-offset: 2px; }
 .alert-time { margin-left: auto; color: var(--dim); font-size: 11px; }
 .alert-summary { color: var(--text); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 

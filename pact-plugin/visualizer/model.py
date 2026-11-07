@@ -77,8 +77,6 @@ _LEAD_EVENT_TYPES = frozenset(
     }
 )
 
-# Task statuses that must not be overwritten by later lifecycle evidence.
-_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "deleted", "cancelled"})
 
 
 def utcnow(now: datetime | None = None) -> datetime:
@@ -553,10 +551,40 @@ def derive_agents(
     return agents[:MAX_AGENTS], total
 
 
-def _new_task(task_id: str, source: str) -> dict:
-    """A blank contract-shaped task."""
+# Task status is a closed set raised by evidence in this precedence order.
+_TASK_STATUS_RANK = {"pending": 0, "active": 1, "handoff": 2, "completed": 3}
+_PLATFORM_TO_TASK_STATUS = {
+    "pending": "pending",
+    "in_progress": "active",
+    "completed": "completed",
+}
+_SIGNAL_KINDS = frozenset({"blocker", "algedonic"})
+# What the snapshot writer records for a task with no subject.
+_NO_SUBJECT = "(no subject)"
+_TEACHBACK_SUBJECT = re.compile(r"\bTEACHBACK\b", re.IGNORECASE)
+# Journal evidence that a task is being worked on.
+_ACTIVE_EVIDENCE = frozenset({"agent_dispatch", "dispatch_site", "remediation"})
+
+
+def task_key(task_id: str, occupant: str) -> str:
+    """A task card's identity: ``<task_id>:<occupant>`` (ids are reused)."""
+    return f"{task_id}:{occupant}"
+
+
+def _raise_status(task: dict, status: str) -> None:
+    """Raise a task's status by precedence completed > handoff > active > pending."""
+    if status in _TASK_STATUS_RANK and (
+        _TASK_STATUS_RANK[status] > _TASK_STATUS_RANK.get(task["status"], -1)
+    ):
+        task["status"] = status
+
+
+def _new_task(task_id: str, occupant: str, source: str, first_seq: int | None) -> dict:
+    """A blank contract-shaped task (``_``-prefixed keys are internal)."""
     return {
         "id": task_id,
+        "key": task_key(task_id, occupant),
+        "occupant": occupant,
         "subject": "",
         "owner": "",
         "phase": "",
@@ -567,26 +595,131 @@ def _new_task(task_id: str, source: str) -> dict:
         "handoff": False,
         "updated_at": "",
         "source": source,
+        "_first_seq": first_seq,
+        "_signal": None,
     }
 
 
-def _task_from_store(stored: roster.StoredTask) -> dict:
-    """Convert a task-store record to the contract task shape."""
-    task = _new_task(stored.id, "store")
-    task.update(
-        {
-            "subject": stored.subject,
-            "owner": stored.owner,
-            "phase": stored.phase,
-            "status": stored.status,
-            "kind": stored.kind or "task",
-            "variety": stored.variety,
-            "teachback": bool(stored.teachback),
-            "handoff": bool(stored.handoff),
-            "updated_at": stored.updated_at,
-        }
-    )
-    return task
+def _set_kind(task: dict, kind: str) -> None:
+    """Record a task kind; a signal kind is never overwritten by another."""
+    if kind and task["kind"] not in _SIGNAL_KINDS:
+        task["kind"] = kind
+
+
+def task_segments(events: Sequence[Mapping[str, Any]]) -> dict[str, list[tuple[int, str]]]:
+    """Each task id's cards as (boundary seq, occupant) in seq order.
+
+    Location: model.task_segments.
+    Summary: An id's snapshots are cut into SUBJECT segments: a new segment
+             starts at a snapshot whose subject differs from the current
+             segment's (an owner change never splits — the occupant hash
+             includes the owner, so it changes when an owner is assigned). A
+             blank subject (empty, or the writers' "(no subject)") is no
+             change and never splits.
+             A segment's boundary is the newest session_start strictly
+             between the previous segment's last snapshot and its own first
+             snapshot, else that first snapshot; the first segment's boundary
+             is -1, so every earlier record joins it. A segment's occupant is
+             its first snapshot's, which keeps the key stable as the journal
+             grows; when that occupant already names an earlier segment of the
+             same id (subjects A, B, A under one owner), the later segment's
+             term gains ``:<segment index>`` so no two cards share a key.
+    Used by: occupant_keys, segment_key, derive_tasks.
+    """
+    starts = [
+        event["seq"] for event in events
+        if event.get("type") == "session_start" and isinstance(event.get("seq"), int)
+    ]
+    raw_segments: dict[str, list[dict]] = {}
+    for event in events:
+        if event.get("type") != "task_metadata_snapshot":
+            continue
+        task_id = _text(event.get("task_id"), 60)
+        seq = event.get("seq")
+        if not task_id or not isinstance(seq, int):
+            continue
+        data = _mapping(event.get("raw"))
+        subject = _text(data.get("subject"), MAX_FIELD_CHARS)
+        if subject == _NO_SUBJECT:
+            subject = ""
+        segments = raw_segments.setdefault(task_id, [])
+        if segments and (not subject or not segments[-1]["subject"]):
+            # A blank subject is "no change": it neither opens a segment nor,
+            # in the segment it lands in, counts as a different subject.
+            segments[-1]["last"] = seq
+            segments[-1]["subject"] = segments[-1]["subject"] or subject
+        elif not segments or segments[-1]["subject"] != subject:
+            segments.append({"subject": subject, "first": seq, "last": seq,
+                             "occupant": _text(data.get("occupant"), 64)})
+        else:
+            segments[-1]["last"] = seq
+    result: dict[str, list[tuple[int, str]]] = {}
+    for task_id, segments in raw_segments.items():
+        cards: list[tuple[int, str]] = []
+        used: set[str] = set()
+        for index, segment in enumerate(segments):
+            term = segment["occupant"]
+            if term in used:
+                term = f"{term}:{index}"
+            used.add(term)
+            if index == 0:
+                boundary = -1
+            else:
+                previous_last = segments[index - 1]["last"]
+                between = [seq for seq in starts if previous_last < seq < segment["first"]]
+                boundary = between[-1] if between else segment["first"]
+            cards.append((boundary, term))
+        result[task_id] = cards
+    return result
+
+
+def segment_key(
+    segments: Mapping[str, Sequence[tuple[int, str]]], task_id: str, seq: int | None
+) -> str:
+    """The card key a record of ``task_id`` at ``seq`` joins.
+
+    The segment whose span [boundary, next boundary) contains ``seq``; a seq
+    of None (a live task file) joins the newest segment; an id with no
+    snapshot is one card with the empty occupant.
+    """
+    cards = segments.get(task_id)
+    if not cards:
+        return task_key(task_id, "")
+    if seq is None:
+        return task_key(task_id, cards[-1][1])
+    chosen = cards[0][1]
+    for boundary, occupant in cards:
+        if boundary <= seq:
+            chosen = occupant
+        else:
+            break
+    return task_key(task_id, chosen)
+
+
+def occupant_keys(events: Sequence[Mapping[str, Any]]) -> dict[int, str]:
+    """The task card key each task-bearing event joins, by event seq.
+
+    Location: model.occupant_keys.
+    Summary: segment_key over task_segments for every event that names a
+             task id, snapshots included.
+    Used by: derive_tasks, derive_handoffs, fill_task_agents.
+    """
+    segments = task_segments(events)
+    keys: dict[int, str] = {}
+    for event in events:
+        task_id = _text(event.get("task_id"), 60)
+        seq = event.get("seq")
+        if task_id and isinstance(seq, int):
+            keys[seq] = segment_key(segments, task_id, seq)
+    return keys
+
+
+def _seed_status(value: object) -> str:
+    """A demo/explicit seed status mapped onto the closed task status set."""
+    text = value.strip().lower() if isinstance(value, str) else ""
+    if text in _TASK_STATUS_RANK:
+        return text
+    return _PLATFORM_TO_TASK_STATUS.get(text, "pending")
 
 
 def _task_from_seed(seed: Mapping[str, Any]) -> dict | None:
@@ -597,13 +730,13 @@ def _task_from_seed(seed: Mapping[str, Any]) -> dict | None:
     task_id = _text(raw_id, 60)
     if not task_id:
         return None
-    task = _new_task(task_id, _text(seed.get("source"), 20) or "derived")
+    task = _new_task(task_id, _text(seed.get("occupant"), 64), _text(seed.get("source"), 20) or "derived", None)
     task.update(
         {
             "subject": _text(seed.get("subject"), MAX_FIELD_CHARS),
             "owner": _text(seed.get("owner"), 200),
             "phase": _normalize_phase(seed.get("phase")),
-            "status": roster.normalize_status(seed.get("status")),
+            "status": _seed_status(seed.get("status")),
             "kind": _text(seed.get("kind"), 40) or "task",
             "variety": normalize_variety(seed.get("variety")),
             "teachback": bool(seed.get("teachback")),
@@ -618,184 +751,245 @@ def derive_tasks(
     events: Sequence[Mapping[str, Any]],
     team_info: roster.TeamInfo,
     task_seeds: Sequence[Mapping[str, Any]] | None = None,
-) -> tuple[list[dict], int]:
-    """Derive the tasks array and the full (pre-cap) task count.
+) -> tuple[list[dict], int, list[dict]]:
+    """Derive (capped tasks, full count, every task) — internal keys kept.
 
     Location: model.derive_tasks.
-    Summary: Starts from explicit seeds (demo) or the task store, then folds
-             lifecycle evidence in event order: dispatches set owner/phase,
-             teachbacks set the teachback flag, handoffs set owner/status and
-             task_subject, metadata snapshots carry subject/owner/variety,
-             dispatch variety events stamp the variety score, checkpoints name
-             active tasks, and remediation names the fixer. IDs seen only in
-             events are created with a ``task #<id>`` fallback subject.
+    Summary: One card per subject segment of a task id — see
+             task_segments. Explicit
+             seeds (demo) start the board; journal evidence is folded in event
+             order; then the live task store joins each id's newest occupant.
+             Status is the closed set {pending, active, handoff, completed},
+             raised by precedence: dispatch, dispatch_site and remediation
+             mean active, a handoff means handoff, and the platform status
+             maps pending/in_progress/completed (a deleted live task drops its
+             card). A teachback_ack completes its own gate card and gives it
+             kind "gate"; a card whose subject matches TEACHBACK is a gate too,
+             and each task a gate's live file ``blocks`` gets teachback. No
+             teachback evidence changes the work task's status.
+             Signal tasks keep kind blocker/algedonic. Cards are ordered by
+             numeric id then first seq, and the cap keeps the NEWEST.
     Used by: derive_model, tests.
     """
     tasks: dict[str, dict] = {}
-    order: list[str] = []
+    keys = occupant_keys(events)
 
-    def ensure(task_id: object) -> dict | None:
-        tid = _text(task_id, 60)
-        if not tid:
+    def ensure(event: Mapping[str, Any]) -> dict | None:
+        seq = event.get("seq")
+        key = keys.get(seq) if isinstance(seq, int) else None
+        if key is None:
             return None
-        task = tasks.get(tid)
+        task = tasks.get(key)
         if task is None:
-            task = _new_task(tid, "derived")
-            tasks[tid] = task
-            order.append(tid)
+            task_id, occupant = key.split(":", 1)
+            task = _new_task(task_id, occupant, "derived", seq)
+            tasks[key] = task
         return task
 
     if task_seeds is not None:
         for seed in task_seeds:
             task = _task_from_seed(seed)
-            if task is not None and task["id"] not in tasks:
-                tasks[task["id"]] = task
-                order.append(task["id"])
-    else:
-        for stored in team_info.tasks:
-            if stored.id in tasks:
-                continue
-            tasks[stored.id] = _task_from_store(stored)
-            order.append(stored.id)
+            if task is not None and task["key"] not in tasks:
+                tasks[task["key"]] = task
 
+    segments = task_segments(events)
     for event in events:
         event_type = event.get("type")
         data = _mapping(event.get("raw"))
         ts = _text(event.get("ts"), 64)
-        task_id = event.get("task_id")
-        if event_type == "agent_dispatch":
-            task = ensure(task_id)
-            if task is not None:
-                owner = _text(event.get("agent"), 200)
-                if owner:
-                    task["owner"] = owner
-                phase = _normalize_phase(event.get("phase"))
-                if phase:
-                    task["phase"] = phase
-                if not task["status"]:
-                    task["status"] = "dispatched"
-                task["updated_at"] = ts or task["updated_at"]
-        elif event_type == "teachback_ack":
-            task = ensure(task_id)
-            if task is not None:
-                task["teachback"] = True
-                if task["status"] in {"", "pending"}:
-                    task["status"] = "active"
-                task["updated_at"] = ts or task["updated_at"]
-        elif event_type == "agent_handoff":
-            task = ensure(task_id)
-            if task is not None:
-                subject = _text(data.get("task_subject"), MAX_FIELD_CHARS)
-                if subject:
-                    task["subject"] = subject
-                owner = _text(event.get("agent"), 200)
-                if owner:
-                    task["owner"] = owner
-                task["handoff"] = True
-                if task["status"] not in _TERMINAL_TASK_STATUSES:
-                    task["status"] = "handoff"
-                task["updated_at"] = ts or task["updated_at"]
-        elif event_type == "task_created":
-            # The creation leg is the board's only durable evidence once the
-            # task store has been reaped. The writer emits task_id plus
-            # optional team/subject, so the branch reads no other field and
-            # seeds id/subject/status only.
-            task = ensure(task_id)
-            if task is not None:
-                subject = _text(data.get("subject"), MAX_FIELD_CHARS)
-                if subject:
-                    task["subject"] = subject
-                if not task["status"]:
-                    task["status"] = "pending"
-                task["updated_at"] = ts or task["updated_at"]
-        elif event_type == "task_metadata_snapshot":
-            task = ensure(task_id)
-            if task is not None:
-                subject = _text(data.get("subject"), MAX_FIELD_CHARS)
-                if subject:
-                    task["subject"] = subject
-                owner = _text(data.get("owner"), 200)
-                if owner:
-                    task["owner"] = owner
-                metadata = _mapping(data.get("metadata"))
-                variety = normalize_variety(metadata.get("variety"))
-                if variety is not None:
-                    task["variety"] = variety
-                if metadata.get("teachback_submit"):
-                    task["teachback"] = True
-                if metadata.get("handoff"):
-                    task["handoff"] = True
-                kind = _text(metadata.get("type"), 40)
-                if kind:
-                    task["kind"] = kind
-                if not task["status"]:
-                    normalized = roster.normalize_status(metadata.get("status"))
-                    if normalized:
-                        task["status"] = normalized
-                task["updated_at"] = ts or task["updated_at"]
-        elif event_type in {"variety_assessed", "dispatch_variety", "dispatch_site"}:
-            variety = normalize_variety(data.get("variety"))
-            if variety is not None:
-                task = ensure(task_id)
-                if task is not None:
-                    task["variety"] = variety
-        elif event_type == "remediation":
-            task = ensure(task_id)
-            if task is not None:
-                fixer = _text(data.get("fixer"), 200) or _text(event.get("agent"), 200)
-                if fixer:
-                    task["owner"] = fixer
-                if not task["status"]:
-                    task["status"] = "remediation"
-                task["updated_at"] = ts or task["updated_at"]
-        elif event_type == "review_finding":
-            if task_id:
-                ensure(task_id)
-        elif event_type == "checkpoint":
+        if event_type == "checkpoint":
+            # Checkpoints name tasks inside active_agents; the free-text
+            # status there is a note, never a task status.
             phase = _normalize_phase(data.get("phase"))
             for active in _list(data.get("active_agents")):
                 if not isinstance(active, Mapping):
                     continue
-                task = ensure(active.get("task_id"))
-                if task is None:
+                task_id = _text(active.get("task_id"), 60)
+                if not task_id:
                     continue
+                key = segment_key(segments, task_id, event.get("seq"))
+                task = tasks.setdefault(
+                    key, _new_task(task_id, key.split(":", 1)[1], "derived", event.get("seq"))
+                )
                 name = _text(active.get("name"), 200)
                 if name:
                     task["owner"] = name
                 if phase and not task["phase"]:
                     task["phase"] = phase
-                status = roster.normalize_status(active.get("status"))
-                if status:
-                    task["status"] = status
-                task["updated_at"] = ts or task["updated_at"]
+            continue
+        task = ensure(event)
+        if task is None:
+            continue
+        if event_type in _ACTIVE_EVIDENCE:
+            owner = _text(data.get("fixer"), 200) if event_type == "remediation" else ""
+            owner = owner or _text(event.get("agent"), 200)
+            if owner and event_type != "dispatch_site":
+                task["owner"] = owner
+            phase = _normalize_phase(event.get("phase"))
+            if phase and event_type == "agent_dispatch":
+                task["phase"] = phase
+            _raise_status(task, "active")
+        elif event_type == "teachback_ack":
+            # The ack is written when the lead completes the gate that accepts
+            # a teachback, so it completes ITS OWN card, whatever the subject.
+            task["teachback"] = True
+            _raise_status(task, "completed")
+            _set_kind(task, "gate")
+        elif event_type == "agent_handoff":
+            subject = _text(data.get("task_subject"), MAX_FIELD_CHARS)
+            if subject:
+                task["subject"] = subject
+            owner = _text(event.get("agent"), 200)
+            if owner:
+                task["owner"] = owner
+            task["handoff"] = True
+            _raise_status(task, "handoff")
+        elif event_type == "task_created":
+            subject = _text(data.get("subject"), MAX_FIELD_CHARS)
+            if subject:
+                task["subject"] = subject
+            _raise_status(task, "pending")
+        elif event_type == "task_metadata_snapshot":
+            subject = _text(data.get("subject"), MAX_FIELD_CHARS)
+            if subject and subject != _NO_SUBJECT:
+                task["subject"] = subject
+            owner = _text(data.get("owner"), 200)
+            if owner:
+                task["owner"] = owner
+            metadata = _mapping(data.get("metadata"))
+            variety = normalize_variety(metadata.get("variety"))
+            if variety is not None:
+                task["variety"] = variety
+            if metadata.get("teachback_submit"):
+                task["teachback"] = True
+            kind = _text(metadata.get("type"), 40) or _text(data.get("task_type"), 40)
+            _set_kind(task, kind)
+            if kind in _SIGNAL_KINDS and task["_signal"] is None:
+                task["_signal"] = {
+                    "seq": event.get("seq"),
+                    "ts": ts,
+                    "level": _text(metadata.get("level"), 40).lower(),
+                    "category": _text(metadata.get("category"), 80),
+                    "resolution": roster.resolution_text(metadata.get("resolution")),
+                }
+            elif kind in _SIGNAL_KINDS:
+                resolution = roster.resolution_text(metadata.get("resolution"))
+                if resolution:
+                    task["_signal"]["resolution"] = resolution
+        elif event_type in {"variety_assessed", "dispatch_variety"}:
+            variety = normalize_variety(data.get("variety"))
+            if variety is not None:
+                task["variety"] = variety
+        if event_type == "dispatch_site":
+            variety = normalize_variety(data.get("variety"))
+            if variety is not None:
+                task["variety"] = variety
+        task["updated_at"] = ts or task["updated_at"]
+
+    if task_seeds is None:
+        _fold_task_store(tasks, team_info.tasks, task_segments(events))
 
     final: list[dict] = []
-    for task_id in order:
-        task = tasks[task_id]
+    for task in tasks.values():
         if not task["subject"]:
-            task["subject"] = f"task #{task_id}"
-        if not task["status"]:
+            task["subject"] = f"task #{task['id']}"
+        if task["status"] not in _TASK_STATUS_RANK:
             task["status"] = "pending"
+        if _TEACHBACK_SUBJECT.search(task["subject"]) and task["kind"] not in _SIGNAL_KINDS:
+            task["kind"] = "gate"
         final.append(task)
+    final.sort(key=lambda task: (
+        roster.task_order_key(task["id"]),
+        task["_first_seq"] if isinstance(task["_first_seq"], int) else -1,
+    ))
     total = len(final)
-    return final[:MAX_TASKS], total
+    return _cap_tasks(final), total, final
+
+
+def _cap_tasks(tasks: list[dict]) -> list[dict]:
+    """The newest MAX_TASKS cards, never dropping a signal (alert) card.
+
+    Every alert names a card, so blocker/algedonic cards are always kept and
+    the remaining slots go to the newest other cards; order is preserved.
+    """
+    if len(tasks) <= MAX_TASKS:
+        return tasks
+    signal = {id(task) for task in tasks if task["kind"] in _SIGNAL_KINDS}
+    room = max(0, MAX_TASKS - len(signal))
+    others = [task for task in tasks if id(task) not in signal]
+    kept = signal | {id(task) for task in (others[-room:] if room else [])}
+    return [task for task in tasks if id(task) in kept]
+
+
+def _fold_task_store(
+    tasks: dict[str, dict],
+    stored_tasks: Sequence[roster.StoredTask],
+    segments: Mapping[str, Sequence[tuple[int, str]]],
+) -> None:
+    """Join each live task file to its id's newest card (segment)."""
+    blocked_by_gates: list[str] = []
+    for stored in stored_tasks:
+        key = segment_key(segments, stored.id, None)
+        if stored.status == "deleted":
+            tasks.pop(key, None)
+            continue
+        task = tasks.get(key)
+        if task is None:
+            task = _new_task(stored.id, key.split(":", 1)[1], "store", None)
+            tasks[key] = task
+        task["source"] = "store"
+        if stored.subject:
+            task["subject"] = stored.subject
+        if stored.owner:
+            task["owner"] = stored.owner
+        if stored.variety is not None:
+            task["variety"] = stored.variety
+        task["teachback"] = task["teachback"] or stored.teachback
+        if stored.handoff:
+            task["handoff"] = True
+            _raise_status(task, "handoff")
+        _raise_status(task, _PLATFORM_TO_TASK_STATUS.get(stored.status, ""))
+        _set_kind(task, stored.kind if stored.kind != "task" else "")
+        if stored.kind in _SIGNAL_KINDS:
+            signal = task["_signal"] or {
+                "seq": None, "ts": stored.updated_at, "level": "", "category": "",
+                "resolution": None,
+            }
+            signal["level"] = signal["level"] or stored.level
+            signal["category"] = signal["category"] or stored.category
+            signal["resolution"] = stored.resolution or signal["resolution"]
+            task["_signal"] = signal
+        task["updated_at"] = task["updated_at"] or stored.updated_at
+        if _TEACHBACK_SUBJECT.search(stored.subject or task["subject"]):
+            blocked_by_gates.extend(stored.blocks)
+    for blocked_id in blocked_by_gates:
+        blocked = tasks.get(segment_key(segments, blocked_id, None))
+        if blocked is not None:
+            blocked["teachback"] = True
+
+
+def public_task(task: Mapping[str, Any]) -> dict:
+    """A task without its internal (``_``-prefixed) keys."""
+    return {name: value for name, value in task.items() if not name.startswith("_")}
 
 
 def derive_handoffs(
     events: Sequence[Mapping[str, Any]],
-    tasks_by_id: Mapping[str, Mapping[str, Any]],
+    tasks_by_key: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict], int]:
     """Derive the handoffs array and the full (pre-cap) count.
 
     Location: model.derive_handoffs.
-    Summary: One row per agent_handoff event, in seq order. ``fields`` always
-             carries the six canonical keys (None when absent) and legacy
-             spellings are resolved server-side, but schema_complete is
-             decided on the RAW payload with the SSOT's presence-only rule
-             (every required key — all but recommended reasoning_chain — is
-             present, whatever its value).
+    Summary: One row per agent_handoff event, in seq order, linked to its
+             card by ``task_key`` (occupant_keys). ``fields`` always carries
+             the six canonical keys (None when absent) and legacy spellings
+             are resolved server-side, but schema_complete is decided on the
+             RAW payload with the SSOT's presence-only rule (every required
+             key — all but recommended reasoning_chain — is present, whatever
+             its value).
     Used by: derive_model, tests.
     """
+    keys = occupant_keys(events)
     handoffs: list[dict] = []
     for event in events:
         if event.get("type") != "agent_handoff":
@@ -804,17 +998,20 @@ def derive_handoffs(
         raw_handoff = data.get("handoff")
         fields = classify.extract_handoff_fields(raw_handoff)
         task_id = _text(event.get("task_id"), 60)
+        seq = event.get("seq")
+        key = keys.get(seq, "") if isinstance(seq, int) else ""
         task_subject = _text(data.get("task_subject"), MAX_FIELD_CHARS)
-        if not task_subject and task_id:
-            known = tasks_by_id.get(task_id)
+        if not task_subject and key:
+            known = tasks_by_key.get(key)
             if known is not None:
                 task_subject = _text(known.get("subject"), MAX_FIELD_CHARS)
         handoffs.append(
             {
-                "seq": event.get("seq"),
+                "seq": seq,
                 "ts": _text(event.get("ts"), 64),
                 "agent": _text(event.get("agent"), 200),
                 "task_id": task_id,
+                "task_key": key,
                 "task_subject": task_subject,
                 "fields": fields,
                 "schema_complete": classify.handoff_schema_complete_raw(raw_handoff),
@@ -891,46 +1088,106 @@ def derive_findings(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], in
     return findings[-MAX_FINDINGS:], total
 
 
-def derive_alerts(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], int]:
+def _alert(
+    *,
+    seq: object,
+    ts: str,
+    kind: str,
+    level: str,
+    category: str,
+    summary: str,
+    task_id: str,
+    key: str,
+    status: str,
+    resolution: str | None,
+) -> dict:
+    """One alert in the contract shape."""
+    level_text = level.lower() or "alert"
+    category_text = category or kind
+    return {
+        "seq": seq if isinstance(seq, int) else None,
+        "ts": ts,
+        "kind": kind,
+        "level": level_text,
+        "category": category_text,
+        "category_key": category_text.lower(),
+        "summary": summary,
+        "task_id": task_id,
+        "task_key": key,
+        "status": status,
+        "resolved": bool(resolution) or status == "completed",
+        "resolution": resolution,
+    }
+
+
+def derive_alerts(
+    events: Sequence[Mapping[str, Any]],
+    tasks: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict], int]:
     """Derive the alerts array and the full count.
 
     Location: model.derive_alerts.
-    Summary: ``algedonic_signal`` becomes kind "algedonic" with its level and
-             category; ``blocker_raised`` becomes kind "blocker" at level
-             "alert". Both carry the event's summary/detail as plain text.
+    Summary: A task whose metadata type (or snapshot task_type) is blocker or
+             algedonic is an alert: level lower-cased (blocker default
+             "alert"), category verbatim with a lower-cased category_key,
+             the subject as summary, and resolved when it carries a
+             resolution or is completed. seq/ts come from the first snapshot
+             that showed the type, else null plus the task file's mtime. The
+             algedonic_signal / blocker_raised journal types are accepted as
+             forward-compatible inputs in the same shape.
     Used by: derive_model, tests.
     """
     alerts: list[dict] = []
+    for task in tasks:
+        signal = task.get("_signal")
+        if task.get("kind") not in _SIGNAL_KINDS or not isinstance(signal, Mapping):
+            continue
+        alerts.append(
+            _alert(
+                seq=signal.get("seq"),
+                ts=_text(signal.get("ts"), 64) or _text(task.get("updated_at"), 64),
+                kind=str(task["kind"]),
+                level=_text(signal.get("level"), 40),
+                category=_text(signal.get("category"), 80),
+                summary=_text(task.get("subject"), MAX_FIELD_CHARS),
+                task_id=_text(task.get("id"), 60),
+                key=_text(task.get("key"), 140),
+                status=_text(task.get("status"), 20),
+                resolution=signal.get("resolution") if isinstance(signal.get("resolution"), str) else None,
+            )
+        )
     for event in events:
         event_type = event.get("type")
         if event_type not in {"algedonic_signal", "blocker_raised"}:
             continue
         data = _mapping(event.get("raw"))
-        if event_type == "algedonic_signal":
-            kind = "algedonic"
-            level = _text(data.get("level"), 20).lower() or "alert"
-        else:
-            kind = "blocker"
-            level = "alert"
+        kind = "algedonic" if event_type == "algedonic_signal" else "blocker"
         alerts.append(
-            {
-                "seq": event.get("seq"),
-                "ts": _text(event.get("ts"), 64),
-                "kind": kind,
-                "level": level,
-                "category": _text(data.get("category"), 60).upper()
-                or _normalize_phase(event.get("phase"))
-                or (kind.upper()),
-                "summary": _text(data.get("summary"), MAX_FIELD_CHARS)
+            _alert(
+                seq=event.get("seq"),
+                ts=_text(event.get("ts"), 64),
+                kind=kind,
+                level=_text(data.get("level"), 40) if kind == "algedonic" else "alert",
+                category=_text(data.get("category"), 80),
+                summary=_text(data.get("summary"), MAX_FIELD_CHARS)
                 or _text(event.get("detail"), MAX_DETAIL_CHARS),
-            }
+                task_id=_text(event.get("task_id"), 60),
+                key="",
+                status="",
+                resolution=roster.resolution_text(data.get("resolution")),
+            )
         )
+    alerts.sort(key=lambda alert: (alert["seq"] is None, alert["seq"] or 0))
     total = len(alerts)
     return alerts[-MAX_ALERTS:], total
 
 
 def derive_checkpoints(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], int]:
-    """Derive the checkpoints array and the full count."""
+    """Derive the checkpoints array and the full count.
+
+    ``active_agents[].note`` carries the free-text status a checkpoint
+    records for each agent; it is prose, not a task status.
+    """
     checkpoints: list[dict] = []
     for event in events:
         if event.get("type") != "checkpoint":
@@ -944,7 +1201,7 @@ def derive_checkpoints(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict],
                 {
                     "name": _text(active.get("name"), 200),
                     "task_id": _text(active.get("task_id"), 60),
-                    "status": roster.normalize_status(active.get("status")),
+                    "note": _text(active.get("status"), MAX_DETAIL_CHARS),
                 }
             )
         checkpoints.append(
@@ -1348,13 +1605,17 @@ def derive_model(
         meta=meta,
         agent_seeds=agent_seeds,
     )
-    tasks, tasks_total = derive_tasks(events=classified, team_info=info, task_seeds=task_seeds)
-    tasks_by_id = {task["id"]: task for task in tasks}
-    handoffs, handoffs_total = derive_handoffs(classified, tasks_by_id)
+    tasks, tasks_total, all_tasks = derive_tasks(
+        events=classified, team_info=info, task_seeds=task_seeds
+    )
+    handoffs, handoffs_total = derive_handoffs(
+        classified, {task["key"]: task for task in all_tasks}
+    )
     commits, commits_total = derive_commits(classified)
     reviews, reviews_total = derive_reviews(classified)
     findings, findings_total = derive_findings(classified)
-    alerts, alerts_total = derive_alerts(classified)
+    alerts, alerts_total = derive_alerts(classified, all_tasks)
+    tasks = [public_task(task) for task in tasks]
     checkpoints, checkpoints_total = derive_checkpoints(classified)
     gates = derive_gates(classified)
     health_total = int(gates.pop("_health_total", 0))

@@ -717,3 +717,304 @@ class TestRunStatus:
         _pin_mtime(path, _T0)
         model_view, list_view = _both_views(root, _IDLE_NOW)
         assert model_view == list_view == ("ended", "idle")
+
+# --- tasks: identity by id plus occupant, a closed status set, alerts, gates --
+
+_TEAM = "session-abc12345"
+
+
+def _t(second: int) -> str:
+    return f"2026-01-01T00:00:{second:02d}Z"
+
+
+def _task_payload(root: Path, events: list[dict]) -> dict:
+    write_journal(root, "proj", "sess", [census.session_start(_t(0), team=_TEAM)] + events)
+    return build_payload(root, "proj", "sess")
+
+
+def _by_key(payload: dict) -> dict:
+    return {task["key"]: task for task in payload["tasks"]}
+
+
+class TestTaskIdentity:
+    """A card is a subject segment of a task id: a store drain reuses ids,
+    and a new subject after a restart is a new task. The occupant hash also
+    changes when a task gets its owner, which must never split a card."""
+
+    def test_an_owner_assignment_on_the_same_subject_keeps_one_card(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(1), "3", subject="architect: design", occupant="o-unowned"),
+            census.task_snapshot(_t(2), "3", subject="architect: design", occupant="o-owned",
+                                 owner="architect"),
+            census.agent_dispatch(_t(3), "architect", "3", "ARCHITECT"),
+        ])
+        cards = _by_key(payload)
+        assert list(cards) == ["3:o-unowned"]
+        assert cards["3:o-unowned"]["status"] == "active"
+
+    def test_a_new_subject_after_a_restart_is_a_second_card(self, tmp_path):
+        """The restart is the drain boundary: a record after it, before the
+        new subject's first snapshot, already belongs to the new task."""
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(1), "3", subject="architect: design", occupant="occA",
+                                 owner="architect"),
+            census.session_start(_t(2), source="resume", team=_TEAM),
+            census.agent_dispatch(_t(3), "backend-coder", "3", "CODE"),
+            census.task_snapshot(_t(4), "3", subject="backend-coder: build", occupant="occB",
+                                 owner="backend-coder"),
+        ])
+        cards = _by_key(payload)
+        assert set(cards) == {"3:occA", "3:occB"}
+        assert cards["3:occA"]["subject"] == "architect: design"
+        assert cards["3:occA"]["status"] == "pending"
+        assert cards["3:occB"]["subject"] == "backend-coder: build"
+        assert cards["3:occB"]["status"] == "active"
+
+    def test_without_a_restart_the_new_card_starts_at_its_first_snapshot(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(1), "3", subject="architect: design", occupant="occA"),
+            census.agent_dispatch(_t(2), "architect", "3", "ARCHITECT"),
+            census.task_snapshot(_t(3), "3", subject="backend-coder: build", occupant="occB"),
+            census.agent_handoff(_t(4), "backend-coder", "3", "backend-coder: build",
+                                 census.full_handoff()),
+        ])
+        cards = _by_key(payload)
+        assert cards["3:occA"]["status"] == "active"
+        assert cards["3:occB"]["status"] == "handoff"
+        assert [row["task_key"] for row in payload["handoffs"]] == ["3:occB"]
+
+    def test_a_record_before_the_first_snapshot_joins_the_first_card(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.event("task_created", _t(1), task_id="4", team=_TEAM, subject="qa: verify"),
+            census.agent_dispatch(_t(2), "qa-engineer", "4", "TEST"),
+            census.task_snapshot(_t(3), "4", subject="qa: verify", occupant="occQ"),
+        ])
+        cards = _by_key(payload)
+        assert list(cards) == ["4:occQ"]
+        assert cards["4:occQ"]["status"] == "active"
+
+    def test_the_live_task_file_joins_the_newest_card(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "3", subject="backend-coder: build",
+                               status="completed")
+        payload = _task_payload(root, [
+            census.task_snapshot(_t(1), "3", subject="architect: design", occupant="occA"),
+            census.session_start(_t(2), source="resume", team=_TEAM),
+            census.task_snapshot(_t(3), "3", subject="backend-coder: build", occupant="occB"),
+        ])
+        cards = _by_key(payload)
+        assert cards["3:occB"]["status"] == "completed"
+        assert cards["3:occA"]["status"] == "pending"
+
+    def test_a_blank_subject_snapshot_is_no_change_of_task(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(1), "7", subject="architect: design", occupant="occA"),
+            census.task_snapshot(_t(2), "7", subject="", occupant="occBlank"),
+            census.agent_dispatch(_t(3), "architect", "7", "ARCHITECT"),
+        ])
+        cards = _by_key(payload)
+        assert list(cards) == ["7:occA"]
+        assert cards["7:occA"]["subject"] == "architect: design"
+        assert cards["7:occA"]["status"] == "active"
+
+    def test_a_subject_that_returns_gets_a_distinct_key(self, tmp_path):
+        """Subjects A, B, A on one id are three cards; the third would reuse
+        the first card's key, so it is suffixed with its segment index."""
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(1), "6", subject="A", occupant="occX"),
+            census.task_snapshot(_t(2), "6", subject="B", occupant="occY"),
+            census.task_snapshot(_t(3), "6", subject="A", occupant="occX"),
+        ])
+        keys = [task["key"] for task in payload["tasks"]]
+        assert len(keys) == len(set(keys)) == 3
+        assert keys[:2] == ["6:occX", "6:occY"]
+        assert keys[2].startswith("6:occX:")
+
+    def test_an_id_with_no_snapshot_at_all_has_the_empty_occupant(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.event("task_created", _t(1), task_id="5", team=_TEAM, subject="qa: verify"),
+            census.agent_dispatch(_t(2), "qa-engineer", "5", "TEST"),
+        ])
+        assert list(_by_key(payload)) == ["5:"]
+
+    def test_cards_are_ordered_by_numeric_id(self, tmp_path):
+        root = make_root(tmp_path)
+        for task_id in ("10", "2", "9"):
+            census.write_task_file(root, _TEAM, task_id, subject=f"task {task_id}")
+        payload = _task_payload(root, [])
+        assert [task["id"] for task in payload["tasks"]] == ["2", "9", "10"]
+
+    def test_the_task_cap_keeps_the_newest(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        for task_id in ("1", "2", "10", "11"):
+            census.write_task_file(root, _TEAM, task_id, subject=f"task {task_id}")
+        monkeypatch.setattr(model, "MAX_TASKS", 2)
+        payload = _task_payload(root, [])
+        assert [task["id"] for task in payload["tasks"]] == ["10", "11"]
+
+
+    def test_the_cap_never_drops_a_signal_task(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "1", subject="blocked", metadata={"type": "blocker"})
+        for task_id in ("2", "10", "11"):
+            census.write_task_file(root, _TEAM, task_id, subject=f"task {task_id}")
+        monkeypatch.setattr(model, "MAX_TASKS", 2)
+        ids = [task["id"] for task in _task_payload(root, [])["tasks"]]
+        assert "1" in ids
+        assert "11" in ids
+
+
+class TestTaskStatus:
+    _CLOSED = {"pending", "active", "handoff", "completed"}
+
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [("pending", "pending"), ("in_progress", "active"), ("completed", "completed")],
+    )
+    def test_platform_statuses_map_into_the_closed_set(self, tmp_path, platform, expected):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "5", subject="s", status=platform)
+        assert _by_key(_task_payload(root, []))["5:"]["status"] == expected
+
+    def test_a_deleted_task_has_no_card(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "5", subject="s", status="deleted")
+        assert _task_payload(root, [])["tasks"] == []
+
+    def test_journal_evidence_raises_but_never_lowers_status(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "6", subject="s", status="completed")
+        census.write_task_file(root, _TEAM, "7", subject="s", status="pending")
+        payload = _task_payload(root, [
+            census.agent_dispatch(_t(1), "preparer", "6", "PREPARE"),
+            census.agent_dispatch(_t(2), "preparer", "7", "PREPARE"),
+        ])
+        cards = _by_key(payload)
+        assert cards["6:"]["status"] == "completed"
+        assert cards["7:"]["status"] == "active"
+        assert {task["status"] for task in payload["tasks"]} <= self._CLOSED
+
+    def test_free_text_checkpoint_status_is_a_note_not_a_task_status(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.event("task_created", _t(1), task_id="8", team=_TEAM, subject="s"),
+            census.event("checkpoint", _t(2), phase="CODE", completed_phases=[],
+                         pending_phases=["TEST"], safe_to_retry=True, variety=None,
+                         active_agents=[{"name": "auditor", "status": "observing a2ea5a0",
+                                         "task_id": "8"}]),
+        ])
+        assert _by_key(payload)["8:"]["status"] == "pending"
+        agent = payload["checkpoints"][0]["active_agents"][0]
+        assert agent["note"] == "observing a2ea5a0"
+        assert "status" not in agent
+
+
+class TestAlertsFromSignalTasks:
+    def test_an_algedonic_task_is_an_alert_in_the_contract_shape(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(
+            root, _TEAM, "12", subject="HALT: credential in fixture",
+            metadata={"type": "algedonic", "level": "HALT", "category": "META-BLOCK",
+                      "resolution": {"by": "lead", "note": "rotated"}},
+        )
+        alerts = _task_payload(root, [])["alerts"]
+        assert len(alerts) == 1
+        alert = alerts[0]
+        assert alert["kind"] == "algedonic"
+        assert alert["level"] == "halt"
+        assert alert["category"] == "META-BLOCK"
+        assert alert["category_key"] == "meta-block"
+        assert alert["summary"] == "HALT: credential in fixture"
+        assert alert["task_id"] == "12"
+        assert alert["task_key"] == "12:"
+        assert alert["resolved"] is True
+        assert json.loads(alert["resolution"]) == {"by": "lead", "note": "rotated"}
+
+    def test_a_blocker_defaults_to_alert_level_and_resolves_on_completion(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "13", subject="blocked on env", status="completed",
+                               metadata={"type": "blocker", "category": "test-environment"})
+        alert = _task_payload(root, [])["alerts"][0]
+        assert alert["kind"] == "blocker"
+        assert alert["level"] == "alert"
+        assert alert["resolved"] is True
+        assert alert["resolution"] is None
+
+    def test_a_drained_signal_task_is_found_in_its_snapshot(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(5), "14", subject="memory cli broken", occupant="o14",
+                                 task_type="blocker",
+                                 metadata={"type": "blocker", "category": "memory-cli"}),
+        ])
+        alert = payload["alerts"][0]
+        assert alert["task_key"] == "14:o14"
+        assert alert["category_key"] == "memory-cli"
+        assert alert["resolved"] is False
+        assert alert["ts"] == _t(5)
+        assert isinstance(alert["seq"], int)
+
+    def test_a_journal_signal_event_maps_to_the_same_shape(self, tmp_path):
+        """algedonic_signal has no writer today; it is accepted forward-
+        compatibly and must come out in the task alerts' shape."""
+        payload = _task_payload(make_root(tmp_path), [
+            census.event("algedonic_signal", _t(6), level="HALT", category="Security",
+                         summary="token in a log"),
+        ])
+        alert = payload["alerts"][0]
+        assert alert["kind"] == "algedonic"
+        assert alert["level"] == "halt"
+        assert alert["category"] == "Security"
+        assert alert["category_key"] == "security"
+        assert alert["summary"] == "token in a log"
+
+    def test_an_ordinary_task_is_not_an_alert(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "15", subject="feature", metadata={"type": "feature"})
+        assert _task_payload(root, [])["alerts"] == []
+
+
+class TestTeachbackGate:
+    """A teachback_ack is the lead's acceptance: the hook writes it when the
+    lead completes the gate. It completes its own card and never the work."""
+
+    def test_the_ack_completes_its_gate_and_leaves_the_work_alone(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "20", subject="test-engineer: TEACHBACK for review",
+                               owner="test-engineer", blocks=["21"])
+        census.write_task_file(root, _TEAM, "21", subject="test-engineer: review",
+                               owner="test-engineer")
+        payload = _task_payload(root, [census.teachback_ack(_t(1), "20")])
+        cards = _by_key(payload)
+        assert cards["20:"]["kind"] == "gate"
+        assert cards["20:"]["status"] == "completed"
+        assert cards["21:"]["teachback"] is True
+        assert cards["21:"]["status"] == "pending"
+
+    def test_an_ack_makes_a_gate_even_without_a_teachback_subject(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [census.teachback_ack(_t(1), "30")])
+        assert [(task["key"], task["kind"], task["status"]) for task in payload["tasks"]] == [
+            ("30:", "gate", "completed")
+        ]
+
+    def test_an_ack_on_a_signal_task_keeps_its_signal_kind(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "31", subject="blocked on env",
+                               metadata={"type": "blocker", "category": "test-environment"})
+        payload = _task_payload(root, [census.teachback_ack(_t(1), "31")])
+        assert _by_key(payload)["31:"]["kind"] == "blocker"
+        assert len(payload["alerts"]) == 1
+
+    def test_an_ack_after_a_signal_snapshot_keeps_the_signal_kind(self, tmp_path):
+        """The journal order: the snapshot names the blocker, then the ack."""
+        payload = _task_payload(make_root(tmp_path), [
+            census.task_snapshot(_t(1), "33", subject="blocked on env", occupant="o33",
+                                 task_type="blocker", metadata={"type": "blocker"}),
+            census.teachback_ack(_t(2), "33"),
+        ])
+        assert _by_key(payload)["33:o33"]["kind"] == "blocker"
+
+    def test_a_teachback_subject_alone_is_a_gate(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "32", subject="architect: TEACHBACK for design")
+        card = _by_key(_task_payload(root, []))["32:"]
+        assert card["kind"] == "gate"
+        assert card["status"] == "pending"

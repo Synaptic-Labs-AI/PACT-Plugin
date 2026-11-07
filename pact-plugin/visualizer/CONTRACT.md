@@ -302,6 +302,8 @@ Otherwise return the full model:
   }],
   "tasks": [{
     "id": "8",
+    "key": "8:3f2a9c1e",
+    "occupant": "3f2a9c1e",
     "subject": "preparer: research the spec",
     "owner": "preparer",
     "phase": "PREPARE",
@@ -328,6 +330,7 @@ Otherwise return the full model:
     "raw": {"v": 1, "type": "agent_handoff", "agent": "preparer"}
   }],
   "handoffs": [{
+    "task_key": "8:3f2a9c1e",
     "seq": 40,
     "ts": "2026-10-29T10:31:00Z",
     "agent": "preparer",
@@ -346,8 +349,8 @@ Otherwise return the full model:
   "commits": [{"seq": 88, "ts": "2026-10-29T11:00:00Z", "sha": "94c2da8", "message": "Add PREPARE research", "phase": "PREPARE"}],
   "reviews": [{"seq": 120, "ts": "2026-10-29T11:30:00Z", "pr_number": 1151, "pr_url": "https://github.com/...", "reviewers": ["architect-reviewer"]}],
   "findings": [{"seq": 122, "ts": "2026-10-29T11:31:00Z", "severity": "blocking", "finding": "missing auth check", "reviewer": "security-engineer", "task_id": "30"}],
-  "alerts": [{"seq": 130, "ts": "2026-10-29T11:35:00Z", "kind": "algedonic", "level": "alert", "category": "SECURITY", "summary": "..."}],
-  "checkpoints": [{"seq": 41, "ts": "2026-10-29T10:32:00Z", "phase": "PREPARE", "completed_phases": ["PREPARE"], "active_agents": [{"name": "preparer", "task_id": "8", "status": "completed"}], "variety": {"novelty": 2, "scope": 2, "uncertainty": 3, "risk": 1, "total": 8}}],
+  "alerts": [{"seq": 130, "ts": "2026-10-29T11:35:00Z", "kind": "algedonic", "level": "halt", "category": "META-BLOCK", "category_key": "meta-block", "summary": "...", "task_id": "30", "task_key": "30:9d1b2c4a", "status": "active", "resolved": false, "resolution": null}],
+  "checkpoints": [{"seq": 41, "ts": "2026-10-29T10:32:00Z", "phase": "PREPARE", "completed_phases": ["PREPARE"], "active_agents": [{"name": "preparer", "task_id": "8", "note": "completed"}], "variety": {"novelty": 2, "scope": 2, "uncertainty": 3, "risk": 1, "total": 8}}],
   "gates": {
     "allowed": 33986,
     "advisory": 8943,
@@ -430,10 +433,54 @@ Field rules:
 - `wrapup` is the LATEST `session_end` whose `source` is `wrap-up`, or `null`.
   A bare `session_end` (the SessionEnd hook's record of a process exit) is never
   a wrap-up.
-- `alerts` is built only from `algedonic_signal` and `blocker_raised` journal
-  events. No current PACT writer emits either (algedonic signals travel as
-  task metadata), so a real run's alerts array is normally empty; the demo
-  synthesizes both to exercise the visual.
+- Task identity: a task id is reused after the task store drains, so one id can
+  name several tasks. The snapshots of an id form segments; a new segment (a
+  new card) starts at a snapshot whose `subject` differs from the current
+  card's. A blank subject (empty, or the writers' `(no subject)` placeholder)
+  means no change. It never starts a card, and a card that began blank takes
+  the first real subject without splitting. An owner change never splits a card. A segment begins at its
+  boundary: the newest `session_start` before its first snapshot and after the
+  previous card's last one (the store drain), or that first snapshot when there
+  is no such restart. A record without an occupant joins the card whose span
+  contains it; one before the first boundary joins the first card, and a live
+  task file joins the newest card. `key` is `<id>:<occupant of the card's first
+  snapshot>`. When an earlier card of the same id already holds that
+  occupant, `:<segment index>` (counted from 0) is appended. `occupant`
+  carries the same term, suffix included, so `key` is always
+  `<id>:<occupant>`. `id` alone is not unique. Cards are ordered by numeric id, then
+  first appearance. When capped to `MAX_TASKS`, blocker and algedonic cards are
+  always kept, and the remaining slots go to the newest other cards.
+- `tasks[].status` is one of `pending|active|handoff|completed`.
+  - Task-file statuses map `pending` → pending, `in_progress` → active,
+    `completed` → completed. A `deleted` live task drops its card.
+  - Journal evidence only raises the status, never lowers it: `agent_dispatch`,
+    `dispatch_site` or `remediation` → active; `agent_handoff` → handoff;
+    `teachback_ack` → completed, on its own gate card only.
+  - Free-text checkpoint statuses never become a task status. They appear as
+    `checkpoints[].active_agents[].note`.
+- `tasks[].kind` is `task` unless the task's metadata `type` names another
+  kind (`blocker`, `algedonic`, `feature`, …; a signal kind is never
+  overwritten). A non-signal task whose subject contains `TEACHBACK` is a
+  `gate`. A `teachback_ack` is written when the lead accepts a
+  teachback, by completing its gate task. So an ack raises its own task's card
+  to `completed` and marks it `kind: "gate"`, whatever that card's subject
+  says. It never touches the work task. A task the gate's live file lists in
+  `blocks` gets `teachback: true`.
+- `handoffs[].task_key` links a handoff to its card.
+- `alerts` come from signal tasks: a task whose metadata `type` (or snapshot
+  `task_type`) is `blocker` or `algedonic`, read from both live task files and
+  snapshots.
+  - `level` is lower-cased (`halt`, `alert`); a blocker without one is `alert`.
+  - `category` is kept as written for display (it defaults to the kind);
+    `category_key` is its lower-cased copy, which the alerts list exposes as
+    each item's `data-category` attribute for matching.
+  - `resolved` is true when a resolution is recorded or the task is completed.
+    `resolution` is bounded text (a dict becomes compact JSON) or null.
+  - `task_key` names the alert's card. When no card with that key is on the
+    board (the task cap dropped it), the alert still shows its summary and
+    status, without a card link.
+  - The `algedonic_signal` and `blocker_raised` journal types are accepted as
+    forward-compatible inputs to the same shape. No current writer emits them.
 - `warnings` is a short bounded list; never crash on malformed input.
 
 ### GET /api/demo?since=…

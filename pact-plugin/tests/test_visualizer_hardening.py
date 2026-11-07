@@ -1023,7 +1023,6 @@ class TestCloudFollowsTheRealWriters:
                         "pact-roster.jsonl": roster_lines + "\n"},
         )
         assert "ghost" not in {agent["name"] for agent in payload["agents"]}
-
     def test_a_team_lead_member_and_a_main_lead_address_are_one_lead(self, tmp_path):
         config = json.dumps({"members": [
             {"name": "team-lead", "agentType": "team-lead"},
@@ -1040,3 +1039,263 @@ class TestCloudFollowsTheRealWriters:
         assert [lead["name"] for lead in leads] == ["main"]
         assert "team-lead" not in {agent["name"] for agent in payload["agents"]}
         assert leads[0]["stats"]["events"] >= 1
+
+
+def _build(tmp_path, events, *, tasks=None, team="team-t"):
+    from visualizer import discovery, model
+
+    root_dir = tmp_path / "root"
+    _write_session(root_dir, [{**_START, "team": team}, *events])
+    if tasks is not None:
+        tasks_dir = root_dir / "tasks" / team
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        for record in tasks:
+            (tasks_dir / f"{record['id']}.json").write_text(json.dumps(record))
+    roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+    return model.build_model(discovery.find_session(roots, "proj", "s1"))
+
+
+def _snapshot(task_id, occupant, **metadata):
+    return {"type": "task_metadata_snapshot", "task_id": task_id, "occupant": occupant,
+            "subject": metadata.pop("subject", f"subject {occupant}"),
+            "metadata": metadata}
+
+
+class TestTaskIdentityAndOrder:
+    def test_a_reused_id_keeps_one_card_per_occupant(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("3", "occA", subject="first task"),
+            {"type": "agent_handoff", "agent": "a", "task_id": "3", "task_subject": "first task",
+             "handoff": {}},
+            _snapshot("3", "occB", subject="second task"),
+            {"type": "agent_dispatch", "agent": "b", "task_id": "3", "phase": "CODE"},
+        ])
+        cards = {task["key"]: task for task in payload["tasks"]}
+        assert set(cards) == {"3:occA", "3:occB"}
+        assert cards["3:occA"]["status"] == "handoff"
+        assert cards["3:occB"]["status"] == "active"
+        assert payload["handoffs"][0]["task_key"] == "3:occA"
+
+    def test_cards_are_numeric_and_the_cap_keeps_the_newest(self, tmp_path):
+        from visualizer import settings as viz_settings
+
+        count = viz_settings.MAX_TASKS + 5
+        payload = _build(tmp_path, [], tasks=[{"id": str(i), "subject": f"t{i}",
+                                               "status": "pending"} for i in range(1, count + 1)])
+        ids = [int(task["id"]) for task in payload["tasks"]]
+        assert ids == sorted(ids)
+        assert ids[-1] == count and ids[0] == 6
+        assert "tasks" in " ".join(payload["warnings"])
+
+    def test_the_activity_clock_watches_the_same_newest_task_files(self, tmp_path):
+        from visualizer import roster
+
+        root_dir = tmp_path / "root"
+        tasks_dir = root_dir / "tasks" / "team-x"
+        tasks_dir.mkdir(parents=True)
+        for i in range(1, roster.MAX_STORED_TASKS + 3):
+            path = tasks_dir / f"{i}.json"
+            path.write_text("{}")
+            os.utime(path, (1_000_000, 1_000_000))
+        os.utime(tasks_dir, (1_000_000, 1_000_000))
+        selected = roster.task_files(root_dir / "tasks", "team-x")
+        assert [path.stem for path in selected][-1] == str(roster.MAX_STORED_TASKS + 2)
+        assert selected[0].stem == "3"
+        base = roster.activity_mtime_ns(root_dir, "team-x")
+        os.utime(tasks_dir / "1.json", (2_000_000, 2_000_000))
+        assert roster.activity_mtime_ns(root_dir, "team-x") == base
+        newest = tasks_dir / f"{roster.MAX_STORED_TASKS + 2}.json"
+        os.utime(newest, (3_000_000, 3_000_000))
+        assert roster.activity_mtime_ns(root_dir, "team-x") == 3_000_000 * 10**9
+
+
+class TestTaskStatusClosedSet:
+    def test_status_vocabulary_and_precedence(self, tmp_path):
+        payload = _build(
+            tmp_path,
+            [
+                {"type": "agent_dispatch", "agent": "a", "task_id": "1", "phase": "CODE"},
+                {"type": "remediation", "task_id": "2", "cycle": 1, "items": [], "fixer": "f"},
+                {"type": "agent_handoff", "agent": "c", "task_id": "3", "task_subject": "s",
+                 "handoff": {}},
+                {"type": "checkpoint", "phase": "CODE",
+                 "active_agents": [{"name": "d", "task_id": "4", "status": "observing a2ea5a0"}]},
+            ],
+            tasks=[{"id": "3", "subject": "s", "status": "in_progress"},
+                   {"id": "5", "subject": "done", "status": "completed"},
+                   {"id": "6", "subject": "gone", "status": "deleted"}],
+        )
+        status = {task["id"]: task["status"] for task in payload["tasks"]}
+        assert status == {"1": "active", "2": "active", "3": "handoff", "4": "pending",
+                          "5": "completed"}
+        assert {task["status"] for task in payload["tasks"]} <= {
+            "pending", "active", "handoff", "completed"}
+        assert payload["checkpoints"][0]["active_agents"][0]["note"] == "observing a2ea5a0"
+        assert "status" not in payload["checkpoints"][0]["active_agents"][0]
+
+
+class TestAlertsFromSignalTasks:
+    def test_blocker_and_algedonic_tasks_become_alerts(self, tmp_path):
+        payload = _build(
+            tmp_path,
+            [_snapshot("7", "o7", subject="Security HALT", type="algedonic", level="HALT",
+                       category="META-BLOCK")],
+            tasks=[{"id": "8", "subject": "tests cannot run", "status": "completed",
+                    "metadata": {"type": "blocker", "category": "test-environment",
+                                 "resolution": {"by": "lead", "how": "fixed venv"}}},
+                   {"id": "9", "subject": "ordinary", "status": "pending"}],
+        )
+        alerts = {alert["task_id"]: alert for alert in payload["alerts"]}
+        assert set(alerts) == {"7", "8"}
+        halt = alerts["7"]
+        assert (halt["kind"], halt["level"], halt["category"], halt["category_key"]) == (
+            "algedonic", "halt", "META-BLOCK", "meta-block")
+        assert isinstance(halt["seq"], int) and halt["resolved"] is False
+        blocker = alerts["8"]
+        assert (blocker["kind"], blocker["level"], blocker["seq"]) == ("blocker", "alert", None)
+        assert blocker["resolved"] is True and '"how": "fixed venv"' in blocker["resolution"]
+        assert set(halt) == {"seq", "ts", "kind", "level", "category", "category_key",
+                             "summary", "task_id", "task_key", "status", "resolved",
+                             "resolution"}
+        assert payload["metrics"]["alerts"] == 2
+        kinds = {task["id"]: task["kind"] for task in payload["tasks"]}
+        assert kinds["7"] == "algedonic" and kinds["8"] == "blocker"
+        assert all("_signal" not in task for task in payload["tasks"])
+
+
+class TestTeachbackAttachesToItsGate:
+    def test_ack_marks_the_gate_and_blocks_carry_teachback_to_the_work_task(self, tmp_path):
+        payload = _build(
+            tmp_path,
+            [{"type": "teachback_ack", "task_id": "10", "rationale_articulates_this_dispatch": "yes"}],
+            tasks=[{"id": "10", "subject": "coder: TEACHBACK for x", "status": "completed",
+                    "blocks": ["11"]},
+                   {"id": "11", "subject": "coder: implement x", "status": "pending"}],
+        )
+        tasks = {task["id"]: task for task in payload["tasks"]}
+        assert tasks["10"]["kind"] == "gate"
+        assert tasks["10"]["teachback"] is True
+        assert tasks["11"]["teachback"] is True
+        assert tasks["11"]["status"] == "pending"
+
+
+class TestTaskCardsAreSubjectSegments:
+    """Owner changes never split a card; a new subject after a restart does."""
+
+    def test_records_before_the_first_snapshot_join_it(self, tmp_path):
+        payload = _build(tmp_path, [
+            {"type": "task_created", "task_id": "5", "subject": "work"},
+            {"type": "agent_dispatch", "agent": "coder", "task_id": "5", "phase": "CODE"},
+            {"type": "checkpoint", "phase": "CODE",
+             "active_agents": [{"name": "coder", "task_id": "5", "status": "working"}]},
+            _snapshot("5", "occ5", subject="work"),
+        ])
+        cards = [task for task in payload["tasks"] if task["id"] == "5"]
+        assert [card["key"] for card in cards] == ["5:occ5"]
+        assert cards[0]["status"] == "active"
+
+    def test_owner_assignment_on_the_same_subject_is_one_card(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("7", "occ-no-owner", subject="build x"),
+            {"type": "agent_dispatch", "agent": "coder", "task_id": "7", "phase": "CODE"},
+            _snapshot("7", "occ-with-owner", subject="build x"),
+            {"type": "agent_handoff", "agent": "coder", "task_id": "7",
+             "task_subject": "build x", "handoff": {}},
+        ])
+        cards = [task for task in payload["tasks"] if task["id"] == "7"]
+        assert [card["key"] for card in cards] == ["7:occ-no-owner"]
+        assert cards[0]["status"] == "handoff"
+        assert payload["handoffs"][0]["task_key"] == "7:occ-no-owner"
+
+    def test_a_new_subject_after_a_restart_is_a_second_card(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("8", "occ-old", subject="old task"),
+            {"type": "agent_handoff", "agent": "a", "task_id": "8", "task_subject": "old task",
+             "handoff": {}},
+            {"type": "session_start", "session_id": "s1", "project_dir": "/x/proj",
+             "source": "resume"},
+            {"type": "agent_dispatch", "agent": "b", "task_id": "8", "phase": "CODE"},
+            _snapshot("8", "occ-new", subject="new task"),
+        ], tasks=[{"id": "8", "subject": "new task", "status": "in_progress"}])
+        cards = {task["key"]: task for task in payload["tasks"] if task["id"] == "8"}
+        assert set(cards) == {"8:occ-old", "8:occ-new"}
+        assert cards["8:occ-old"]["status"] == "handoff"
+        assert cards["8:occ-new"]["status"] == "active"
+        assert cards["8:occ-new"]["owner"] == "b"
+
+    def test_a_new_subject_without_a_restart_splits_at_its_snapshot(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("9", "occ-a", subject="first"),
+            {"type": "agent_dispatch", "agent": "a", "task_id": "9", "phase": "CODE"},
+            _snapshot("9", "occ-b", subject="second"),
+            {"type": "agent_handoff", "agent": "b", "task_id": "9", "task_subject": "second",
+             "handoff": {}},
+        ])
+        cards = {task["key"]: task["status"] for task in payload["tasks"] if task["id"] == "9"}
+        assert cards == {"9:occ-a": "active", "9:occ-b": "handoff"}
+
+    def test_an_id_with_no_snapshot_keeps_the_empty_occupant(self, tmp_path):
+        payload = _build(tmp_path, [
+            {"type": "agent_dispatch", "agent": "coder", "task_id": "6", "phase": "CODE"},
+        ])
+        assert [task["key"] for task in payload["tasks"]] == ["6:"]
+
+
+class TestCapNeverDropsAnAlertCard:
+    def test_an_old_signal_task_survives_the_cap(self, tmp_path):
+        from visualizer import settings as viz_settings
+
+        count = viz_settings.MAX_TASKS + 10
+        records = [{"id": str(i), "subject": f"t{i}", "status": "pending"}
+                   for i in range(2, count + 2)]
+        records.append({"id": "1", "subject": "old blocker", "status": "pending",
+                        "metadata": {"type": "blocker"}})
+        payload = _build(tmp_path, [], tasks=records)
+        keys = {task["key"] for task in payload["tasks"]}
+        assert len(payload["tasks"]) == viz_settings.MAX_TASKS
+        assert all(alert["task_key"] in keys for alert in payload["alerts"])
+        assert payload["alerts"] and payload["alerts"][0]["task_id"] == "1"
+
+
+class TestGateCardsAndKeyCollisions:
+    def test_a_teachback_ack_completes_its_own_gate_card(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("20", "occ20", subject="plain subject without the word"),
+            {"type": "teachback_ack", "task_id": "20", "rationale_articulates_this_dispatch": "yes"},
+            {"type": "agent_dispatch", "agent": "coder", "task_id": "21", "phase": "CODE"},
+        ])
+        cards = {task["id"]: task for task in payload["tasks"]}
+        assert (cards["20"]["status"], cards["20"]["kind"]) == ("completed", "gate")
+        assert cards["21"]["status"] == "active"
+
+    def test_subjects_a_b_a_under_one_owner_get_three_distinct_keys(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("12", "same", subject="A"),
+            _snapshot("12", "other", subject="B"),
+            _snapshot("12", "same", subject="A"),
+        ])
+        keys = [task["key"] for task in payload["tasks"] if task["id"] == "12"]
+        assert keys == ["12:same", "12:other", "12:same:2"]
+
+
+class TestBlankSubjectNeverSplits:
+    @pytest.mark.parametrize("blank", ["", "(no subject)"])
+    def test_a_blank_subject_snapshot_stays_on_its_card(self, tmp_path, blank):
+        payload = _build(tmp_path, [
+            _snapshot("2", "occ-real", subject="real subject"),
+            {"type": "session_start", "session_id": "s1", "project_dir": "/x/proj",
+             "source": "compact"},
+            _snapshot("2", "occ-blank", subject=blank),
+            _snapshot("2", "occ-real-2", subject="real subject"),
+        ])
+        cards = [task for task in payload["tasks"] if task["id"] == "2"]
+        assert [card["key"] for card in cards] == ["2:occ-real"]
+        assert cards[0]["subject"] == "real subject"
+
+    def test_a_blank_first_subject_takes_the_later_real_one(self, tmp_path):
+        payload = _build(tmp_path, [
+            _snapshot("3", "occ-blank", subject=""),
+            _snapshot("3", "occ-real", subject="named later"),
+        ])
+        cards = [task for task in payload["tasks"] if task["id"] == "3"]
+        assert [card["key"] for card in cards] == ["3:occ-blank"]
