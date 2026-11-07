@@ -430,6 +430,19 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   Stage.prototype._updateChrome.call(chrome);
   check("with no run the caption says no run is open", chrome.captionEl.textContent.startsWith("NO RUN OPEN"));
 
+  /* Achievements unlock from the rule their name states. */
+  const { createAchievements } = await import("./achievements.js");
+  const unlocked = (model) => createAchievements(`probe-${Math.random()}`).evaluate(model, { live: false }).map((a) => a.id);
+  const src = (sid) => ({ kind: "real", root: "r", slug: "s", session_id: sid });
+  check("a closed PR number alone is not Launch Window",
+    !unlocked({ source: src("a"), wrapup: { pr_number: 7, pr_state: "CLOSED" }, metrics: {} }).includes("pr_ready"));
+  check("a recorded pr_ready is Launch Window",
+    unlocked({ source: src("b"), metrics: { prs_ready: 1 } }).includes("pr_ready"));
+  check("four completed phases that are not the canonical four are not Four-Phase Orbit",
+    !unlocked({ source: src("c"), phases: { completed: ["PREPARE", "ARCHITECT", "CODE", "QA"] }, metrics: { phases_completed: 4 } }).includes("four_phases"));
+  check("the canonical four plus extras is Four-Phase Orbit",
+    unlocked({ source: src("d"), phases: { order: ["PREPARE", "ARCHITECT", "CODE", "TEST", "REVIEW"], completed: ["PREPARE", "ARCHITECT", "CODE", "TEST"] } }).includes("four_phases"));
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);

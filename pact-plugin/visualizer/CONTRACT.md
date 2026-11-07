@@ -815,8 +815,11 @@ export function createAchievements(storageKey, onUnlock);
 ```
 
 Achievements from real metrics only: first handoff, 5+ gate advisories,
-3+ findings, first commit, pr_ready, all four phases completed, first alert,
-500+ events, wrap-up MERGED. Persist per session in `localStorage`.
+3+ findings, first commit, a recorded `pr_ready` (`metrics.prs_ready` or a
+`pr_ready` event; a wrap-up's `pr_number` alone does not count), the four
+canonical phases PREPARE, ARCHITECT, CODE and TEST all in `phases.completed`
+(extra families are ignored), first alert, 500+ events, wrap-up MERGED. Persist
+per session in `localStorage`.
 
 ### app.js
 

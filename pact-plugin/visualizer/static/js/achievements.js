@@ -8,6 +8,8 @@
 const VERSION = 1;
 const PREFIX = "pact-viz:achievements";
 
+const CANONICAL_PHASES = ["PREPARE", "ARCHITECT", "CODE", "TEST"];
+
 const ACHIEVEMENTS = [
   {
     id: "first_handoff",
@@ -47,9 +49,9 @@ const ACHIEVEMENTS = [
     title: "Launch Window",
     body: "A pull request reached the ready state.",
     test(model) {
+      /* Only a recorded pr_ready counts. A wrap-up naming a PR number says
+       * nothing about readiness: a closed or abandoned PR carries one too. */
       if (metricNumber(model, "prs_ready") >= 1) return true;
-      const wrapup = model && model.wrapup;
-      if (wrapup && wrapup.pr_number) return true;
       const events = modelList(model, "events");
       return events.some((event) => event && event.type === "pr_ready");
     },
@@ -59,14 +61,11 @@ const ACHIEVEMENTS = [
     title: "Four-Phase Orbit",
     body: "PREPARE, ARCHITECT, CODE and TEST all completed.",
     test(model) {
+      /* The four canonical families, whatever extra phases the run also had;
+       * a count of completed phases would accept any four. */
       const phases = model && model.phases ? model.phases : {};
       const completed = Array.isArray(phases.completed) ? phases.completed : [];
-      const order = Array.isArray(phases.order) && phases.order.length
-        ? phases.order
-        : ["PREPARE", "ARCHITECT", "CODE", "TEST"];
-      if (order.length && order.every((name) => completed.includes(name))) return true;
-      const metrics = model && model.metrics ? model.metrics : {};
-      return number(metrics.phases_completed) >= 4;
+      return CANONICAL_PHASES.every((name) => completed.includes(name));
     },
   },
   {
