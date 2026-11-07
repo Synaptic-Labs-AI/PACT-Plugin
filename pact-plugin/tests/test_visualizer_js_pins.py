@@ -5,13 +5,15 @@ Summary: Regression pins for the front-end behaviours that had no coverage:
          an empty window, and the bundled dev-demo fixture matching
          demo.build_demo_model(). The JS pins run only when `node` is on PATH:
          they import the pure module functions, with no browser, no server and
-         no build step. The fixture parity pin is pure Python and always runs.
+         no build step. They skip when node is absent locally and fail under
+         CI. The fixture parity pin is pure Python and always runs.
 Used by: pytest (front-end regression gate for pact-plugin/visualizer).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -326,16 +328,27 @@ def test_dev_demo_fixture_matches_build_demo_model():
     )
 
 
-@pytest.mark.skipif(
-    _NODE is None,
-    reason="node executable not found on PATH; JS behaviour pins skipped "
-    "(the Python dev-demo parity pin still runs)",
-)
+def _require_node() -> str:
+    """Return the node path; skip locally without node, fail under CI.
+
+    A CI runner image without node would otherwise retire every JS pin
+    silently: a skip reads as green.
+    """
+    if _NODE is None:
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("node is not on PATH under CI; the JS behaviour pins must run there")
+        pytest.skip(
+            "node executable not found on PATH; JS behaviour pins skipped "
+            "(the Python dev-demo parity pin still runs)"
+        )
+    return _NODE
+
+
 def test_js_behaviour_pins():
     """Import the pure stage/dom functions and assert the fixed behaviours."""
-    assert _NODE is not None  # narrowing for type-checkers; skipif guarantees it
+    node = _require_node()
     proc = subprocess.run(
-        [_NODE, "--input-type=module", "-e", PIN_SCRIPT],
+        [node, "--input-type=module", "-e", PIN_SCRIPT],
         cwd=STATIC_JS_DIR,
         capture_output=True,
         text=True,

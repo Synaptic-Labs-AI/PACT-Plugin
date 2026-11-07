@@ -475,11 +475,22 @@ def test_hero_asset_is_a_png_under_two_megabytes():
 # ─── JS syntax ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.skipif(
-    _NODE is None,
-    reason="node executable not found on PATH; JS module syntax check skipped "
-    "(URL, DOM-sink, transport, and CSP scans still run)",
-)
+def _require_node() -> str:
+    """Return the node path; skip locally without node, fail under CI.
+
+    A CI runner image without node would otherwise retire the JS checks
+    silently: a skip reads as green.
+    """
+    if _NODE is None:
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("node is not on PATH under CI; the JS checks must run there")
+        pytest.skip(
+            "node executable not found on PATH; JS module syntax check skipped "
+            "(URL, DOM-sink, transport, and CSP scans still run)"
+        )
+    return _NODE
+
+
 def test_js_modules_parse():
     """Parse every ES module with `node --check`.
 
@@ -487,15 +498,15 @@ def test_js_modules_parse():
     modules regardless of the checkout's package.json situation; the copy is
     content-identical.
     """
+    node = _require_node()
     js_files = _js_files()
     assert js_files, "no JS modules to check"
-    assert _NODE is not None  # narrowing for type-checkers; skipif guarantees it
     with tempfile.TemporaryDirectory() as tmp_dir:
         for path in js_files:
             target = Path(tmp_dir) / f"{path.name}.mjs"
             target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
             proc = subprocess.run(
-                [_NODE, "--check", str(target)],
+                [node, "--check", str(target)],
                 capture_output=True,
                 text=True,
             )
