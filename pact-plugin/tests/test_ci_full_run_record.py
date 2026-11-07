@@ -137,6 +137,7 @@ def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
     env = os.environ.copy()
     env.pop("GITHUB_ACTIONS", None)
     env.pop("GITHUB_WORKSPACE", None)
+    env.pop("PYTEST_XDIST_WORKER", None)
     # The certifying session that runs THIS module has claimed ownership;
     # the rig session is a fresh outermost session and must claim its own.
     env.pop(OWNER_ENV, None)
@@ -767,6 +768,32 @@ def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
         verdict.stderr)
 
 
+NESTED_WORKER_ID_CONFTEST = '''
+
+import os
+
+
+def pytest_sessionstart(session):
+    if getattr(session.config, "workerinput", None) is not None:
+        return
+    marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".controller-worker-id"
+    marker.write_text(
+        os.environ.get("PYTEST_XDIST_WORKER", "<absent>"), encoding="utf-8")
+'''
+
+
+def test_nested_session_does_not_inherit_outer_xdist_worker_id(
+        tmp_path, monkeypatch):
+    """The nested controller starts without the parent's xdist worker ID."""
+    _, plugin_root, workspace = _rig(
+        tmp_path, PASSING_SUITE, extra_conftest=NESTED_WORKER_ID_CONFTEST)
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+    proc = _run(plugin_root, workspace)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = workspace / ".controller-worker-id"
+    assert marker.read_text(encoding="utf-8") == "<absent>"
+
+
 EIGHT_PASSING_SUITE = "".join(
     f"def test_{name}():\n    assert True\n\n" for name in "abcdefgh")
 
@@ -778,12 +805,34 @@ import time
 import pytest
 
 
+def pytest_testnodedown(node, error):
+    if (node.gateway.id != "gw0"
+            or os.environ.get("RIG_SUPPRESS_GW0_DOWN_MARKER")):
+        return
+    marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".gw0-down"
+    marker.write_text("down\\n", encoding="utf-8")
+
+
+def _wait_for_gw0_down():
+    marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".gw0-down"
+    deadline = time.monotonic() + 10
+    while not marker.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "LATE-WORKER-SYNCHRONIZATION-FAILURE: "
+                "gw0 down marker not observed")
+        time.sleep(0.01)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtestloop(session):
+    worker = getattr(session.config, "workerinput", {}).get("workerid")
+    # The no-marker arm fails before tests; a late exception can exit 0 here.
+    if worker == "gw1" and os.environ.get("RIG_SUPPRESS_GW0_DOWN_MARKER"):
+        _wait_for_gw0_down()
     yield
-    if os.environ.get("PYTEST_XDIST_WORKER") == "gw1":
-        # The pause lets gw0 report first, so gw1 is the node left unreported.
-        time.sleep(2)
+    if worker == "gw1":
+        _wait_for_gw0_down()
         raise RuntimeError("internal error on gw1 after its tests")
 '''
 
@@ -806,6 +855,21 @@ def test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set(
     assert verdict.returncode == 1, verdict.stdout + verdict.stderr
     assert "RUN-VERIFY-FAILURE BAD-FIELD-DESELECTED:" in verdict.stderr, (
         verdict.stderr)
+
+
+def test_xdist_late_worker_missing_down_marker_is_a_named_failure(tmp_path):
+    """A missing gw0-down event fails synchronization, never the exit-0 arm."""
+    pytest.importorskip("xdist")
+    _, plugin_root, workspace = _rig(
+        tmp_path, EIGHT_PASSING_SUITE,
+        extra_conftest=LATE_WORKER_INTERNAL_ERROR_CONFTEST)
+    proc = _run(
+        plugin_root, workspace, args=("-n", "2"),
+        extra_env={"RIG_SUPPRESS_GW0_DOWN_MARKER": "1"})
+    output = proc.stdout + proc.stderr
+    assert proc.returncode != 0, output
+    assert ("LATE-WORKER-SYNCHRONIZATION-FAILURE: "
+            "gw0 down marker not observed") in output, output
 
 
 MODULE_SKIP_SUITE = '''\

@@ -32,12 +32,16 @@ Witness
 multi-anchor retry cost. Each ``x`` is a non-verb token, so the scan runs every
 prefix pattern to completion (no early dangerous-match short-circuit).
 
-Assertion strategy (scaling, not machine-specific milliseconds)
----------------------------------------------------------------
+Assertion strategy (scaling plus normalized absolute cost)
+-------------------------------------------------------------
 The four multi-anchor cases measure three sizes and require both doubling
 ratios to stay below 3.0. Linear work is ~2.0x per doubling; quadratic work
-is ~4.0x. Each case prints its three CPU times and both ratios before the
-assertions, so a failure carries the measurements needed to classify it.
+is ~4.0x. Those ratios cannot detect a constant-factor slowdown, so the
+largest measurement is also divided by a same-process known-linear reference:
+``str.split`` on the same witness. The normalized absolute budget catches a
+linear 4x regression without restoring a machine-specific millisecond bound.
+Every timing, ratio, reference, normalized value, and threshold is printed
+before the assertions.
 
 TIMED ON CPU TIME (``time.process_time``), NOT WALL CLOCK. Wall clock also
 counts time waiting for a core, which concurrent suites needlessly include.
@@ -51,8 +55,9 @@ does not produce a quadratic counterfactual for them.
 Counter-test-by-revert (non-vacuity)
 ------------------------------------
 Restore the unbounded ``*`` form in either shared prefix constant: both
-corresponding git or gh cases go red on the doubling ratios, while the normal
-bounded controls stay green.
+corresponding git or gh cases go red on the doubling ratios and normalized
+absolute budget, while the normal bounded controls stay green. A 4x linear
+workload preserves the raw doubling ratios but reds the normalized budget.
 """
 
 import time
@@ -77,6 +82,12 @@ _K = 5
 
 # Linear ~2.0x per doubling; quadratic ~4.0x. 3.0 is the midpoint.
 RATIO_CEILING = 3.0
+
+# Normalized target/reference cost at N_LARGE. Normal controls measure about
+# 1600-2200; a 4x linear workload measures above 6500 and unbounded quadratic
+# prefixes are larger still. 4000 separates those classes with margin on both
+# sides; counterfactuals below must prove that separation on each surface.
+NORMALIZED_ABSOLUTE_CEILING = 4000.0
 
 
 def _best_time(fn, arg, k=_K):
@@ -124,17 +135,17 @@ def _measure_scaling(fn, build, sizes=(N_SMALL, N_LARGE)):
     return tuple(_best_time(fn, build(n)) for n in sizes)
 
 
-# (id, function, witness builder build(N)->str, absolute-ceiling-seconds or
-#  None for scaling-only cases, ratio-ceiling or None for absolute-only cases)
+# (id, function, witness builder build(N)->str, normalized absolute budget or
+# raw seconds for absolute-only cases, ratio-ceiling or None for absolute-only)
 _CASES = [
     ("is_dangerous_command/git", is_dangerous_command,
-     lambda n: "git x " * n, None, RATIO_CEILING),
+     lambda n: "git x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
     ("detect_command_operation_type/git", detect_command_operation_type,
-     lambda n: "git x " * n, None, RATIO_CEILING),
+     lambda n: "git x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
     ("is_dangerous_command/gh", is_dangerous_command,
-     lambda n: "gh x " * n, None, RATIO_CEILING),
+     lambda n: "gh x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
     ("detect_command_operation_type/gh", detect_command_operation_type,
-     lambda n: "gh x " * n, None, RATIO_CEILING),
+     lambda n: "gh x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
     ("is_dangerous_command/push-flag-walk", is_dangerous_command,
      lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK, None),
     ("detect_command_operation_type/push-flag-walk", detect_command_operation_type,
@@ -162,8 +173,11 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
         )
         return
 
-    t_small, t_intermediate, t_large = _measure_scaling(
-        fn, build, sizes=(N_MULTI_SMALL, N_SMALL, N_LARGE))
+    sizes = (N_MULTI_SMALL, N_SMALL, N_LARGE)
+    t_small, t_intermediate, t_large = _measure_scaling(fn, build, sizes=sizes)
+    reference_times = tuple(_best_time(str.split, build(n)) for n in sizes)
+    normalized = tuple(t / r for t, r in zip(
+        (t_small, t_intermediate, t_large), reference_times))
     first_ratio = (t_intermediate / t_small) if t_small > 0 else float("inf")
     second_ratio = (t_large / t_intermediate) if t_intermediate > 0 else float("inf")
     print(
@@ -172,7 +186,10 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
         f"t_intermediate={t_intermediate * 1000:.1f} ms, "
         f"t_large={t_large * 1000:.1f} ms, "
         f"ratio_small_to_intermediate={first_ratio:.2f}, "
-        f"ratio_intermediate_to_large={second_ratio:.2f}"
+        f"ratio_intermediate_to_large={second_ratio:.2f}, "
+        f"reference_times_ms={tuple(round(v * 1000, 3) for v in reference_times)}, "
+        f"normalized={tuple(round(v, 1) for v in normalized)}, "
+        f"normalized_ceiling={abs_ceiling:.1f}"
     )
     for label, ratio in (("small-to-intermediate", first_ratio),
                          ("intermediate-to-large", second_ratio)):
@@ -183,6 +200,12 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
             f"t_intermediate={t_intermediate * 1000:.1f} ms, "
             f"t_large={t_large * 1000:.1f} ms)?"
         )
+    assert normalized[-1] < abs_ceiling, (
+        f"{fn.__name__} on {witness!r}: normalized absolute cost "
+        f"{normalized[-1]:.1f} >= {abs_ceiling:.1f} — constant-factor or "
+        f"quadratic regression (target={t_large:.6f}s, "
+        f"reference={reference_times[-1]:.6f}s)?"
+    )
 
 
 # ---------------------------------------------------------------------------
