@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -371,6 +372,21 @@ def _filters(args: argparse.Namespace) -> dict[str, str]:
     return filters
 
 
+_TERMINAL_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _terminal(value: object) -> str:
+    """``value`` as text with every C0/C1 control character removed.
+
+    Location: cli._terminal.
+    Summary: Journal- and state-file-derived text reaches the operator's
+             terminal through --list and --status; an embedded escape
+             sequence must not be able to rewrite or hide what is printed.
+    Used by: cmd_list, cmd_status.
+    """
+    return _TERMINAL_CONTROL.sub("", str(value))
+
+
 def _utc_now_iso() -> str:
     """Current UTC time in the journal's timestamp shape."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -397,7 +413,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     if not roots:
         print("(no roots configured)")
     else:
-        print("roots: " + ", ".join(f"{root.id} ({root.path})" for root in roots))
+        print("roots: " + ", ".join(_terminal(f"{root.id} ({root.path})") for root in roots))
     sessions = payload.get("sessions", [])
     if not sessions:
         print("No PACT session journals found.")
@@ -406,11 +422,11 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(header)
     for session in sessions:
         print(
-            f"{session.get('root', ''):<18.18} "
-            f"{session.get('project', ''):<22.22} "
-            f"{session.get('session_id', ''):<26.26} "
-            f"{(session.get('updated_at') or '-'):<21.21} "
-            f"{session.get('status', ''):<7.7} "
+            f"{_terminal(session.get('root', '')):<18.18} "
+            f"{_terminal(session.get('project', '')):<22.22} "
+            f"{_terminal(session.get('session_id', '')):<26.26} "
+            f"{_terminal(session.get('updated_at') or '-'):<21.21} "
+            f"{_terminal(session.get('status', '')):<7.7} "
             f"{int(session.get('size_bytes') or 0):>9}"
         )
     return 0
@@ -438,11 +454,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     if state.get("demo"):
         status_url = _demo_url(status_url)
     print("PACT Mission Control: running")
-    print(f"URL: {status_url}")
+    print(f"URL: {_terminal(status_url)}")
     print(f"PID: {state['pid']}")
-    print(f"Instance: {state['instance_id']}")
+    print(f"Instance: {_terminal(state['instance_id'])}")
     if state.get("roots"):
-        print("Roots: " + ", ".join(str(root) for root in state["roots"]))
+        print("Roots: " + ", ".join(_terminal(root) for root in state["roots"]))
     return 0
 
 

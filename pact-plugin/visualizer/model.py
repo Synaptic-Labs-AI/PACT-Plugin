@@ -1507,8 +1507,8 @@ def build_sessions_list(
             "slug": ref.slug,
             "session_id": ref.session_id,
             "project": project,
-            "project_dir": summary.project_dir,
-            "team": summary.team
+            "project_dir": classify.redact(summary.project_dir),
+            "team": classify.as_text(summary.team, 200)
             or (f"session-{ref.session_id[:8]}" if ref.session_id else ""),
             "started_at": summary.started_at,
             "updated_at": summary.updated_at,

@@ -553,3 +553,121 @@ class TestOneContainmentRule:
         assert info.members == []
         assert not info.team_dir_present
         assert [task.id for task in info.tasks] == ["8"]
+
+
+# Built from fragments at runtime so the source never holds a contiguous
+# credential or key header; the values under test are the full shapes.
+_PEM_KIND = "RSA " + "PRIVATE " + "KEY"
+_PLANTED_SECRETS = (
+    "gh" + "p_" + "A" * 30,
+    "github" + "_pat_" + "B" * 30,
+    "sk" + "-ant-" + "C" * 30,
+    "sk" + "-" + "D" * 30,
+    "AK" + "IA" + "E" * 16,
+    "xo" + "xb-" + "1234567890abc",
+    "Bear" + "er " + "F" * 20,
+    "-----" + "BEGIN " + _PEM_KIND + "-----\nMIIBOGUS\n-----" + "END " + _PEM_KIND + "-----",
+)
+_PLANTED_ASSIGNMENT = ("pass" + "word") + ": " + "hunter" + "2"
+
+
+class TestServerSideRedaction:
+    """No planted credential reaches a model payload, whatever field carries it."""
+
+    def test_model_payload_carries_no_planted_secret(self, tmp_path):
+        from visualizer import discovery, model
+
+        root_dir = tmp_path / "root"
+        session = root_dir / "pact-sessions" / "proj" / "s1"
+        session.mkdir(parents=True)
+        events = [
+            {"type": "session_start", "ts": "2026-11-07T15:00:00Z", "session_id": "s1",
+             "project_dir": "/x/proj", "team": "team-r"},
+        ]
+        for index, secret in enumerate(_PLANTED_SECRETS):
+            events.append({"type": "review_finding", "ts": "2026-11-07T15:01:00Z",
+                           "severity": "minor", "reviewer": "r", "finding": f"saw {secret}"})
+            events.append({"type": "agent_handoff", "ts": "2026-11-07T15:02:00Z",
+                           "agent": "a", "task_id": str(index), "task_subject": secret,
+                           "handoff": {"produced": secret, "decisions": [secret],
+                                       "uncertainty": "", "integration": "",
+                                       "open_questions": []}})
+            events.append({"type": "commit", "ts": "2026-11-07T15:03:00Z", "sha": "abc",
+                           "message": "m", "phase": "CODE",
+                           "nested": {"deeper": {"value": secret}}})
+        events.append({"type": "commit", "ts": "2026-11-07T15:04:00Z", "sha": "abc",
+                       "message": _PLANTED_ASSIGNMENT, "phase": "CODE",
+                       "api_key": {"anything": "plain"}})
+        deep = {"type": "commit", "ts": "2026-11-07T15:05:00Z", "sha": "abc",
+                "message": "m", "phase": "CODE"}
+        node = deep
+        for level in range(7):
+            node["d"] = {"leaf": f"{_PLANTED_SECRETS[0]} at {level}", "list": [_PLANTED_SECRETS[4]]}
+            node = node["d"]
+        events.append(deep)
+        (session / "session-journal.jsonl").write_text(
+            "".join(json.dumps(event) + "\n" for event in events)
+        )
+        tasks = root_dir / "tasks" / "team-r"
+        tasks.mkdir(parents=True)
+        (tasks / "1.json").write_text(json.dumps({"id": "1", "subject": _PLANTED_SECRETS[0]}))
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        ref = discovery.find_session(roots, "proj", "s1")
+        text = json.dumps(model.build_model(ref))
+        text += json.dumps(model.build_sessions_list(roots))
+        for secret in _PLANTED_SECRETS:
+            assert secret not in text
+            assert secret.splitlines()[0] not in text
+        assert "hunter" + "2" not in text
+        assert '"plain"' not in text
+        assert "[redacted]" in text
+
+
+class TestDepthCappedLeavesAreRedacted:
+    """A string leaf at or past the depth cap is redacted and bounded too."""
+
+    @pytest.mark.parametrize("depth", [4, 5, 6])
+    def test_string_leaf_at_depth(self, depth):
+        from visualizer import classify
+
+        leaf = _PLANTED_SECRETS[2] + " " + "x" * (settings.MAX_FIELD_CHARS + 50)
+        data: dict = {"type": "commit"}
+        node = data
+        for _ in range(depth):
+            node["k"] = {}
+            node = node["k"]
+        node["leaf"] = leaf
+        trimmed = classify.trim_raw(data)
+        text = json.dumps(trimmed)
+        assert _PLANTED_SECRETS[2] not in text
+        value = trimmed
+        while isinstance(value, dict) and "k" in value:
+            value = value["k"]
+        if isinstance(value, dict):
+            assert value["leaf"].startswith("[redacted]")
+            assert len(value["leaf"]) <= settings.MAX_FIELD_CHARS
+        else:
+            assert value == "[truncated]"
+
+
+class TestTerminalOutputStripsControls:
+    def test_list_and_status_strip_control_characters(self, tmp_path, capsys, monkeypatch):
+        root_dir = tmp_path / "root"
+        session = root_dir / "pact-sessions" / "proj" / "s1"
+        session.mkdir(parents=True)
+        (session / "session-journal.jsonl").write_text(
+            json.dumps({"type": "session_start", "ts": "2026-11-07T15:00:00\x1b[2J",
+                        "session_id": "s1"}) + "\n"
+        )
+        rc = cli.main(["--list", "--root", str(root_dir)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "\x1b" not in out
+        state_dir = tmp_path / "state"
+        cli.write_state(state_dir, {"pid": os.getpid(), "port": 1, "url": "http://x/\x1b]0;t\x07",
+                                    "instance_id": "i\x9b1", "roots": ["r\x1bx"]})
+        monkeypatch.setattr(cli, "_health_for_instance", lambda *a, **k: {"pid": os.getpid()})
+        rc = cli.main(["--status", "--state-dir", str(state_dir)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert not any(ch in out for ch in ("\x1b", "\x07", "\x9b"))

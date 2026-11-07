@@ -15,6 +15,7 @@ here, because the page renders these strings with textContent.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -60,6 +61,59 @@ HANDOFF_LEGACY_ALIASES: dict[str, str] = {
     "areas_of_uncertainty": "uncertainty",
     "integration_points": "integration",
 }
+
+# --- Redaction --------------------------------------------------------------
+
+REDACTED = "[redacted]"
+
+# Credential-shaped values. Each match is replaced whole by REDACTED.
+_SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"gh[opusr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+    ),
+)
+
+# ``name = value`` / ``name: value`` assignments: the name stays, the value goes.
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|access[_-]?token"
+    r"|client[_-]?secret)\b(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
+)
+
+# Mapping keys whose whole value is withheld, whatever its type.
+_SECRET_KEY = re.compile(
+    r"(?i)token|secret|password|passwd|authorization|api[_-]?key|credential|cookie"
+)
+
+
+def redact(text: str) -> str:
+    """Replace credential-shaped substrings of ``text`` with ``[redacted]``.
+
+    Location: classify.redact.
+    Summary: Applied to every payload string before it is bounded, so a
+             truncation can never cut a secret into a shape the patterns no
+             longer match. Value patterns are replaced whole; assignments
+             keep the name and lose the value. Pure; never raises.
+    Used by: as_text, trim_raw (every string leaf, at any depth), model
+             (session-list project_dir), roster loaders through as_text.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    for pattern in _SECRET_VALUE_PATTERNS:
+        text = pattern.sub(REDACTED, text)
+    return _SECRET_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+
+
+def is_secret_key(key: object) -> bool:
+    """True when a mapping key names a credential, so its value is withheld."""
+    return isinstance(key, str) and bool(_SECRET_KEY.search(key))
+
 
 SEVERITIES = frozenset({"info", "success", "warning", "danger", "muted"})
 
@@ -141,11 +195,12 @@ def as_text(value: Any, limit: int = MAX_TITLE_CHARS) -> str:
     Summary: Strings pass through (bounded); ints/floats/bools become their
              str form; containers become "" because they are not display text.
              Newlines and control characters are collapsed to spaces so a
-             single event can never inject extra feed rows.
-    Used by: classify renderers, model, demo.
+             single event can never inject extra feed rows. Credential-shaped
+             text is redacted first, before the bound is applied.
+    Used by: classify renderers, model, roster, demo.
     """
     if isinstance(value, str):
-        text = value
+        text = redact(value)
     elif isinstance(value, (int, float, bool)):
         text = str(value)
     else:
@@ -208,25 +263,25 @@ def trim_raw(data: Mapping[str, Any]) -> dict:
     Summary: Caps strings at settings.MAX_FIELD_CHARS, containers at 40
              entries, and recursion at depth 5 so a hostile or huge event can
              never balloon the payload. Keys are preserved in insertion order.
+             Every string leaf is redacted before it is capped, and the value
+             of a credential-named key becomes ``[redacted]`` whatever it is.
     Used by: classify_event, model.
     """
     return _trim_mapping(data, depth=0)
 
 
 def _trim_value(value: Any, depth: int) -> Any:
-    if depth >= 5:
-        if isinstance(value, (dict, list)):
-            return "[truncated]"
-        return value
+    if depth >= 5 and isinstance(value, (Mapping, list, tuple)):
+        return "[truncated]"
     if isinstance(value, str):
-        return value[:MAX_FIELD_CHARS]
+        return redact(value)[:MAX_FIELD_CHARS]
     if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
         return value
     if isinstance(value, Mapping):
         return _trim_mapping(value, depth + 1)
     if isinstance(value, (list, tuple)):
         return [_trim_value(item, depth + 1) for item in list(value)[:40]]
-    return str(value)[:MAX_FIELD_CHARS]
+    return redact(str(value))[:MAX_FIELD_CHARS]
 
 
 def _trim_mapping(data: Mapping[str, Any], depth: int) -> dict:
@@ -235,7 +290,7 @@ def _trim_mapping(data: Mapping[str, Any], depth: int) -> dict:
         if index >= 40:
             out["_truncated_keys"] = True
             break
-        out[str(key)[:200]] = _trim_value(value, depth)
+        out[str(key)[:200]] = REDACTED if is_secret_key(key) else _trim_value(value, depth)
     return out
 
 

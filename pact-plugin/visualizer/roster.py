@@ -18,14 +18,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .classify import as_text
 from .discovery import contained, valid_component
 from .settings import (
     ROSTER_FILENAME,
     TASKS_DIRNAME,
     TEAMS_DIRNAME,
+    MAX_FIELD_CHARS,
     TEAM_CONFIG_FILENAME,
     normalize_variety,
 )
+
+# Bound for names, agent types, owners and other short identity strings.
+_NAME_CHARS = 200
 
 MAX_STATE_FILE_BYTES = 512 * 1024
 MAX_TEAM_MEMBERS = 200
@@ -221,20 +226,23 @@ def _member_from_config(entry: object) -> MemberSeed | None:
     """Build a MemberSeed from one config.json members[] entry."""
     if not isinstance(entry, dict):
         return None
-    name = entry.get("name")
-    if not isinstance(name, str) or not name.strip():
+    name = as_text(entry.get("name"), _NAME_CHARS) if isinstance(entry.get("name"), str) else ""
+    if not name:
         return None
-    agent_type = entry.get("agentType")
-    agent_type_text = agent_type if isinstance(agent_type, str) else ""
-    role = role_from_agent_type(agent_type_text, fallback=name.strip())
-    color = entry.get("color")
-    model = entry.get("model")
+    agent_type_text = (
+        as_text(entry.get("agentType"), _NAME_CHARS)
+        if isinstance(entry.get("agentType"), str)
+        else ""
+    )
+    role = role_from_agent_type(agent_type_text, fallback=name)
+    color = as_text(entry.get("color"), 40) if isinstance(entry.get("color"), str) else ""
+    model = as_text(entry.get("model"), _NAME_CHARS) if isinstance(entry.get("model"), str) else ""
     return MemberSeed(
-        name=name.strip(),
+        name=name,
         role=role,
         agent_type=agent_type_text,
-        color=color if isinstance(color, str) and color else color_for_role(role),
-        model=model if isinstance(model, str) else "",
+        color=color or color_for_role(role),
+        model=model,
         cloud=False,
         kind="specialist",
         source="team-config",
@@ -245,14 +253,14 @@ def _intent_from_record(record: object) -> MemberSeed | None:
     """Build a MemberSeed from one cloud roster ``intent`` record."""
     if not isinstance(record, dict) or record.get("kind") != "intent":
         return None
-    name = record.get("name")
-    declared_type = record.get("type")
-    if not isinstance(name, str) or not name.strip():
+    name = as_text(record.get("name"), _NAME_CHARS) if isinstance(record.get("name"), str) else ""
+    if not name:
         return None
-    type_text = declared_type if isinstance(declared_type, str) else ""
-    role = role_from_agent_type(type_text, fallback=name.strip())
+    declared_type = record.get("type")
+    type_text = as_text(declared_type, _NAME_CHARS) if isinstance(declared_type, str) else ""
+    role = role_from_agent_type(type_text, fallback=name)
     return MemberSeed(
-        name=name.strip(),
+        name=name,
         role=role,
         agent_type=type_text,
         color=color_for_role(role),
@@ -313,9 +321,9 @@ def _task_from_file(path: Path, payload: object) -> StoredTask | None:
     phase_text = phase if isinstance(phase, str) else ""
     return StoredTask(
         id=task_id,
-        subject=subject if isinstance(subject, str) else "",
-        owner=owner if isinstance(owner, str) else "",
-        phase=phase_text.upper(),
+        subject=as_text(subject, MAX_FIELD_CHARS) if isinstance(subject, str) else "",
+        owner=as_text(owner, _NAME_CHARS) if isinstance(owner, str) else "",
+        phase=as_text(phase_text, 40).upper(),
         status=normalize_status(payload.get("status")),
         kind=kind,
         variety=variety,

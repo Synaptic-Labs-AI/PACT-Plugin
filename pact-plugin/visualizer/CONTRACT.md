@@ -12,6 +12,16 @@ truth for the HTTP payloads, DOM shell, and JS module boundaries.
 - Single-user. Loopback is reachable by any local UID: the API serves the
   journals and the `/api/health` instance token without authentication, so the
   documented posture is one trusted user per machine.
+- Redacted. Every string derived from journals, task records and team files
+  (titles, details, subjects, handoff fields, raw payloads, the session list's
+  `team` and `project_dir`) passes `classify.redact` before it is bounded: credential-shaped values (GitHub, Anthropic/OpenAI-style,
+  AWS, Slack tokens, bearer tokens, PEM private keys) become `[redacted]`,
+  `name=value` assignments for password/secret/token/api key/authorization
+  names keep the name and lose the value, and a raw mapping key naming a
+  credential (token, secret, password, authorization, api key, credential,
+  cookie) has its whole value replaced. Redaction is unconditional.
+- Terminal-safe. `--list` and `--status` strip C0/C1 control characters from
+  every field they print.
 - Python 3.12+, stdlib only. Front-end is plain ES modules, no build step.
 - Runtime uses no model/API tokens. `/PACT:visualize` and direct
   `bin/pact-viz` are two equal launch paths over the same server.
@@ -315,7 +325,8 @@ Field rules:
   (0-based) and must be stable across polls. An event type outside the visual
   set is counted in `warnings` and omitted from `events`, so it appears in
   neither the feed nor the raw-log view.
-- `title` / `detail` are plain text, no HTML, truncated to 240/500 chars.
+- `title` / `detail` are plain text, no HTML, redacted, then truncated to
+  240/500 chars.
 - `severity` ∈ `info|success|warning|danger|muted`. `icon` is a short token
   (`phase`, `dispatch`, `handoff`, `commit`, `review`, `bug`, `pr`, `gate`,
   `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`,

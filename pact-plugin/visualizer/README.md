@@ -185,6 +185,12 @@ command that closes the same instance. `--stop` prints one `Stop: ...` line:
   the machine, so anyone who can reach the port can read the journals the viewer
   serves and the `/api/health` instance token; there is no authentication. Run it
   on a single-user machine, and over SSH only through a tunnel you control.
+- **Credentials are masked.** Before any text reaches the page, the server
+  replaces credential-shaped values (GitHub, API-key and AWS-style tokens,
+  bearer tokens, private keys, and `password=`/`token=`-style assignments)
+  with `[redacted]`, and withholds the whole value of any raw field named like
+  a token, secret, password or credential. This is pattern-based: a secret in
+  an unrecognised shape can still appear.
 - **Journal content is private.** The UI renders agent names, task subjects,
   handoff notes, and review text from your journals. Treat screenshots and shared
   URLs as containing the same information as the journals themselves.
