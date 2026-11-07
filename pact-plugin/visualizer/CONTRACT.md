@@ -1,7 +1,8 @@
-# PACT Mission Control — build contract
+# PACT Mission Control — interface contract
 
-This file is the interface contract for the visualizer. It is the source of
-truth for the HTTP payloads, DOM shell, and JS module boundaries.
+This file is the interface contract for the visualizer: the HTTP payloads, the
+DOM shell, and the JS module boundaries. Change it together with the interface
+it describes.
 
 ## Product boundaries
 
@@ -34,7 +35,7 @@ truth for the HTTP payloads, DOM shell, and JS module boundaries.
 - Runtime uses no model/API tokens. `/PACT:visualize` and direct
   `bin/pact-viz` are two equal launch paths over the same server.
 
-## Package layout (final)
+## Package layout
 
 ```
 visualizer/
@@ -226,14 +227,14 @@ demo launch mode.
   "total": 612,
   "limit": 500,
   "hidden_trivial": 117,
-  "roots": [{"id": "~/.claude", "label": ".claude", "path": "/Users/x/.claude", "journals": 291, "default": true}],
+  "roots": [{"id": "~/.claude", "label": ".claude", "path": "/home/x/.claude", "journals": 291, "default": true}],
   "sessions": [{
-    "key": "~/.claude::PACT-prompt::d0964a9f",
+    "key": "~/.claude::my-app::d0964a9f",
     "root": "~/.claude",
-    "slug": "PACT-prompt",
+    "slug": "my-app",
     "session_id": "d0964a9f-1de9-4ed1-b845-5cf88b2d8a55",
-    "project": "PACT-prompt",
-    "project_dir": "/Users/x/Sites/PACT-prompt",
+    "project": "my-app",
+    "project_dir": "/home/x/code/my-app",
     "team": "session-d0964a9f",
     "started_at": "2026-10-29T10:00:00Z",
     "updated_at": "2026-10-29T12:00:00Z",
@@ -245,7 +246,7 @@ demo launch mode.
     "last_phase": "TEST",
     "run_kind": "orchestrate",
     "trivial": false,
-    "project_display": "PACT-prompt",
+    "project_display": "my-app",
     "project_collision": false
   }]
 }
@@ -331,15 +332,15 @@ Otherwise return the full model:
   "source": {
     "kind": "real",
     "root": "~/.claude",
-    "slug": "PACT-prompt",
+    "slug": "my-app",
     "session_id": "d0964a9f-...",
-    "journal": "pact-sessions/PACT-prompt/d0964a9f-.../session-journal.jsonl",
+    "journal": "pact-sessions/my-app/d0964a9f-.../session-journal.jsonl",
     "mtime": 1780000000.0,
     "size": 10193885
   },
   "meta": {
-    "project": "PACT-prompt",
-    "project_dir": "/Users/x/Sites/PACT-prompt",
+    "project": "my-app",
+    "project_dir": "/home/x/code/my-app",
     "team": "session-d0964a9f",
     "started_at": "2026-10-29T10:00:00Z",
     "ended_at": "2026-10-29T12:00:00Z",
@@ -662,8 +663,8 @@ IDs and their owners:
   #root-select           app.js populates
   #project-select        app.js populates
   #session-select        app.js populates
-  #btn-refresh #btn-random #btn-demo #btn-live #btn-sound
-  #btn-fullscreen #btn-help #btn-about
+  #btn-refresh #btn-random #btn-demo #btn-crew #btn-comms #btn-sound
+  #btn-fullscreen #btn-help #btn-about #btn-show-all
   #live-badge #mission-clock
 #layout
   #left-rail             panels.js renders
@@ -799,6 +800,8 @@ export class Panels {
   openDebrief(tab);                // "tasks" | "handoffs" | "gates" | "reviews" | "variety" | "raw"
   closeModal();
   setStatus(status);               // optional footer badge
+  renderLeft();                    // re-render the left rail; internal, called by the methods above, not by app.js
+  renderFeed();                    // re-render the comms feed; internal in the same way
 }
 ```
 
@@ -816,7 +819,7 @@ before it. At the head of the run it shows the run's latest `wrapup` and
 
 ```js
 export function createTimeline(root, {onSeek, onPlayPause, onSpeed, onToggleLive});
-// returns { setModel(model), setCursor(index), setMode({live, playing, speed}) }
+// returns { setModel(model), setCursor(index), setMode({live, playing, speed}), destroy() }
 ```
 
 Renders transport controls, phase bands, event markers, cursor, and mission
@@ -911,13 +914,15 @@ footer drop to 58px / 92px. Panels and stage must remain usable at 1024×768.
   resolved path must stay under the resolved base. Listing, fetch and the
   roster/task loaders apply the same rule, so a session is listed exactly
   when it can be opened.
-- Demo is always available; the UI should start demo with `?demo=1`.
-- The demo must cover: four phases, 8+ agents, dispatches, handoffs,
+- The demo is always available, and `?demo=1` opens it. It covers: four phases, 8+ agents, dispatches, handoffs,
   teachbacks, commits, findings/remediation, gate advisory + gate-health
   failure, alert, checkpoint, compaction, dispatch decisions, team realign,
-  wrap-up MERGED `session_end`, telemetry gap. No real data.
+  wrap-up MERGED `session_end`, telemetry gap. It holds no real data.
 
-## Testing expectations
+## Test gates
+
+The suite enforces these rules:
+
 
 - Server tests use a temporary config root and ephemeral loopback port.
 - No test or screenshot reads the operator's real `~/.claude` content;

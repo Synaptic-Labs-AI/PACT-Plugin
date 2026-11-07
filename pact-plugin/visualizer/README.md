@@ -71,7 +71,7 @@ version directory — that version directory IS the plugin root, with `agents/`,
 onto your `PATH` so it is callable from anywhere:
 
 ```bash
-ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/bin/pact-viz" \
+ln -s "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/pact-plugin/PACT/<version>/bin/pact-viz" \
       "$HOME/.local/bin/pact-viz"
 
 pact-viz --demo --open
@@ -109,6 +109,7 @@ Under each root it reads:
 | `<root>/teams/<team>/config.json` | Team roster and teammate identities |
 | `<root>/teams/<team>/pact-roster.jsonl` | Cloud roster. Its presence marks a cloud team; its records supply the crew when that team directory has no `config.json` |
 | `<root>/tasks/<team>/*.json` | Task records, when present; journal cues fill the gaps |
+| `<root>/pact-sessions/<slug>/<session_id>/pact-session-context.json` | The session's team name, project directory and lead address, when the journal does not carry them |
 
 Only exact journal paths at the depth above are discovered — nested scratch
 journals are ignored. `pact-sessions/`, `teams/` and `tasks/` may be symlinks
@@ -143,7 +144,7 @@ run bundled with the plugin, available even on a machine with no PACT history.
 The stage, the right-hand comms feed, the timeline, and the debrief all render
 the same journal events. Roughly:
 
-| Event type | Where it shows up |
+| Category | Where it shows up |
 | --- | --- |
 | `phase` | Phase track and room transitions on the floor |
 | `dispatch` | An agent walks into a room; a dispatch blip in the feed |
@@ -172,7 +173,7 @@ the same journal events. Roughly:
 | `--session <id>` | Open this session: its full id or a prefix of 8 or more characters (with `--list`, filter the table) |
 | `--root <path>` | Read a config root (repeatable; default order above) |
 | `--all-roots` | Also read sibling `~/.claude*` roots with `pact-sessions/` |
-| `--port <n>` | Listen on a chosen loopback port instead of the tool's default |
+| `--port <n>` | Listen on this loopback port (default `0`: an ephemeral port chosen at each launch) |
 | `--open` | Best-effort: open the viewer in the default browser after the server is up, through a private `launch.html` redirect so the key never appears in a process list. Skipped over SSH or with no display, and never waits more than 3 s (the `URL:` line is still printed) |
 | `--detach` | Start in the background, print the URL, and return only after a health check confirms it is reachable |
 | `--stop` | Stop the detached instance recorded in the state file; idempotent |
@@ -251,10 +252,9 @@ required for the runtime.
 ```bash
 cd pact-plugin
 
-# Backend, server, asset and command gates.
-python3 -m pytest \
-  tests/test_visualizer_data.py tests/test_visualizer_server.py \
-  tests/test_visualizer_assets.py tests/test_visualizer_command.py -q
+# Every visualizer test module (use an interpreter with pytest installed;
+# a system python3 often has none).
+python3 -m pytest tests/test_visualizer_*.py -q -rfEs
 
 # Lint the backend for unused imports / undefined names.
 ruff check --select F401,F821 --target-version py312 visualizer/
@@ -269,8 +269,7 @@ over `visualizer/`, so keep the package stdlib-only and import-clean.
 
 Front-end-only preview: serve `visualizer/static/` with any static file server
 and open the page with `?mock=1` — the API layer then reads the bundled
-`dev-demo.json` instead of calling the Python server. This is what front-end work
-uses before the backend is wired up.
+`dev-demo.json` instead of calling the Python server.
 
 Directory shape:
 
@@ -364,7 +363,3 @@ session is static by design. Use the timeline transport to replay it, or return
 to the live badge for an in-progress run. Sound stays silent until you toggle
 `SND` (browser autoplay rules require a click).
 
-**Hero image missing after a fresh checkout.** `assets/hero.png` is a captured
-screenshot of the running viewer; rebuild it by screenshotting the demo, or pull
-the tracked asset from the repo. The asset test requires it to exist and stay
-under 2 MB.

@@ -73,7 +73,7 @@ Plain `claude` in the project root then loads PACT automatically.
 The plugin ships a ready-to-use launcher script at `pact-plugin/bin/pact`. Symlink it onto a directory on your `PATH`:
 
 ```
-ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/bin/pact" \
       "$HOME/.local/bin/pact"
 ```
 
@@ -727,7 +727,7 @@ PACT-Plugin/
 │   ├── reference/              # VSM glossary
 │   ├── telegram/               # Telegram bridge MCP server
 │   ├── templates/              # Settings and environment-model templates
-│   ├── tests/                  # 147 test files
+│   ├── tests/                  # Test suite
 │   └── visualizer/             # Mission Control — local read-only run viewer
 └── docs/
 ```
@@ -796,7 +796,7 @@ Plain `claude` in the project root then auto-loads PACT.
   - **Global (recommended for cross-project use)** — symlink the bundled `pact` script onto your `PATH`:
 
 ```
-ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/bin/pact" \
       "$HOME/.local/bin/pact"
 ```
 Then `pact` invokes a PACT-loaded session from anywhere. Replace `<version>` with the installed version (`ls ~/.claude/plugins/cache/pact-plugin/PACT/`).
