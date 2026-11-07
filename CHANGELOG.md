@@ -27,10 +27,11 @@ The required full-suite CI job now runs with pinned `pytest-xdist` 3.8.0 using f
 ### What landed
 
 - `constraints-ci.txt` and `.github/workflows/tests.yml`: pin `pytest-xdist==3.8.0` and run the full suite as `python -m pytest -ra -n 4 --dist loadfile`. The workflow's dependency notes describe the new requirement; its job topology, model warm, environment checks, independent collection, and run verification are unchanged.
-- `tests/ci_contract.py` and `tests/test_memory_init.py`: the exact full-command guards match the xdist invocation while preserving the fast-runner profiles and environment-check placement.
-- `tests/test_ci_full_run_record.py`: the three existing real-xdist probes now execute in CI. Two new real-seam regressions cover xdist's refusal of same-count/different-node-ID collection and serial-versus-xdist module-level-skip accounting parity.
-- `tests/test_merge_guard_perf.py`: the four multi-anchor git/gh timing guards combine three-size/two-doubling ratios with a normalized absolute budget based on a same-process `str.split` reference. Raw timings, ratios, reference timings, normalized values, and threshold print before the assertions; the push-flag-walk guards are unchanged.
+- `tests/ci_contract.py` and `tests/test_memory_init.py`: the exact full-command guards match the xdist invocation while preserving the fast-runner profiles and environment-check placement. `test_memory_init.py` derives its command literals from the shared contract instead of repeating them.
+- `tests/test_ci_full_run_record.py`: the three existing real-xdist probes now execute in CI. Two new real-seam regressions cover xdist's refusal of same-count/different-node-ID collection and serial-versus-xdist module-level-skip accounting parity. Nested rig sessions strip every `PYTEST_XDIST_*` variable inherited from the outer run, and a new control asserts that none reaches the nested controller. The late-worker internal-error probe synchronizes on gw0's down event instead of a fixed sleep and asserts its intended error by name, so a failed handshake cannot pass as the exit-0 case.
+- `tests/test_merge_guard_perf.py`: the four multi-anchor git/gh timing guards combine three-size/two-doubling ratios with a normalized absolute budget based on a same-process `str.split` reference. Raw timings, ratios, reference timings, normalized values, and threshold print before the assertions. The comments state the constant-factor slowdown the shared normalized ceiling detects on each surface, and that the normalized band was measured on aarch64, with x86_64 bounded only by green CI runs; the ceiling itself is unchanged. The push-flag-walk guards are unchanged.
 - `scripts/full_suite_skip_allowlist.json`: remove the entry for the three xdist probes because they execute rather than skip once xdist is pinned.
+- `.cursor/install.sh`: the closing hint prints the CI invocation and notes that plain `-ra` runs serially.
 
 ### Why
 

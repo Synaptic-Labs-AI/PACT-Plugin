@@ -58,6 +58,8 @@ Restore the unbounded ``*`` form in either shared prefix constant: both
 corresponding git or gh cases go red on the doubling ratios and normalized
 absolute budget, while the normal bounded controls stay green. A 4x linear
 workload preserves the raw doubling ratios but reds the normalized budget.
+These are manual counter-tests run against a modified copy; no arm in this
+module runs them. The measured values are beside ``NORMALIZED_ABSOLUTE_CEILING``.
 """
 
 import time
@@ -68,12 +70,17 @@ import pytest
 from merge_guard_pre import is_dangerous_command  # noqa: E402
 from shared.merge_guard_common import detect_command_operation_type  # noqa: E402
 
-# The existing two-size instrument stays unchanged for its other consumers.
+# The multi-anchor cases measure all three sizes; the push-flag-walk cases
+# measure N_LARGE only.
 N_SMALL = 4000
 N_LARGE = 8000
 
-# Multi-anchor cases prepend one size, giving two doubling ratios while
-# preserving the existing 4000/8000 pair.
+# A ratio's noise grows as its denominator shrinks: an arm of ~33 ms once read
+# 3.85 against the 3.0 ceiling under load. At 2000 tokens every multi-anchor arm
+# measures ~130-180 ms of CPU time, and quiet or under three concurrent
+# four-worker runs the 2000->4000 ratio stayed within 1.96-2.06 (aarch64).
+# If a faster runner brings this arm down towards tens of milliseconds, raise
+# the sizes, not the ratio ceiling.
 N_MULTI_SMALL = 2000
 
 # best-of-K minimum: scheduler preemption and GC add upward noise, and a slow
@@ -83,10 +90,14 @@ _K = 5
 # Linear ~2.0x per doubling; quadratic ~4.0x. 3.0 is the midpoint.
 RATIO_CEILING = 3.0
 
-# Normalized target/reference cost at N_LARGE. Normal controls measure about
-# 1600-2200; a 4x linear workload measures above 6500 and unbounded quadratic
-# prefixes are larger still. 4000 separates those classes with margin on both
-# sides; counterfactuals below must prove that separation on each surface.
+# Normalized target/reference cost at N_LARGE, one ceiling for all four
+# multi-anchor cases. Measured on aarch64, quiet and under three concurrent
+# four-worker runs: git cases 2020-2160, gh cases 1520-1730. On x86_64 runners
+# these values are bounded only by green CI runs, which show they stay below
+# the ceiling but not by how much. The ceiling therefore detects a linear
+# constant-factor slowdown of about 1.9x on the git cases and 2.3x-2.6x on the
+# gh cases. Measured counter-tests: a 4x slowdown of is_dangerous_command gave
+# 8610-8720 (git) and 6500-6640 (gh); an unbounded gh prefix gave over 200000.
 NORMALIZED_ABSOLUTE_CEILING = 4000.0
 
 
@@ -109,10 +120,10 @@ _CEIL_PUSHWALK = 1.0
 
 # `_VALUE_TOKEN` HAS NO ARM IN THIS LADDER, AND THE ATTEMPT IS RECORDED SO IT IS
 # NOT REPEATED. A ratio arm on the `$''` witness was built, sized into the
-# hundreds-of-milliseconds band this N floor exists to reach (254 ms / 783 ms),
+# hundreds-of-milliseconds band the sizes above are chosen to reach (254 ms / 783 ms),
 # and it STILL FLAKED: measured 1.98 in isolation and 3.08 under a loaded
 # full-suite run, against the 3.0 ceiling. Being in the band is NECESSARY BUT
-# NOT SUFFICIENT — the floor fixes a small-denominator problem, and this is a
+# NOT SUFFICIENT — larger sizes fix a small-denominator problem, and this is a
 # different one. Contention inflated the two arms UNEQUALLY (1.5x on the small,
 # 2.4x on the large), and a ratio cannot subtract that: the asymmetry lands
 # entirely in the quotient.
@@ -166,7 +177,7 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
     """
     witness = build(1)
     if ratio_ceiling is None:
-        t_small, t_large = _measure_scaling(fn, build)
+        (t_large,) = _measure_scaling(fn, build, sizes=(N_LARGE,))
         assert t_large < abs_ceiling, (
             f"{fn.__name__} on {witness!r}*{N_LARGE}: {t_large * 1000:.1f} ms exceeds "
             f"{abs_ceiling * 1000:.0f} ms ceiling — unbounded O(n^2) backtracking regression?"

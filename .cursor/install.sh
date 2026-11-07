@@ -88,5 +88,5 @@ if [ -f "$BASHRC" ] && ! grep -Fqx "$LINE" "$BASHRC"; then
 fi
 
 echo "PACT plugin environment ready. Activate with: source .venv/bin/activate"
-echo "Run the suite with: cd pact-plugin && python -m pytest -ra"
+echo "Run the suite as CI does: cd pact-plugin && python -m pytest -ra -n 4 --dist loadfile (plain -ra runs it serially)"
 echo "Live plugin smoke test: bash .cursor/smoke-test.sh (needs ANTHROPIC_API_KEY or a Claude Code login for the live phase)"

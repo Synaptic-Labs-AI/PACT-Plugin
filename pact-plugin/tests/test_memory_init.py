@@ -458,7 +458,7 @@ class TestDependencyDriftIsDetectable:
     VERIFY_CMD = "python scripts/verify_ci_environment.py"
     # The test step's command, exactly: the placement arm pins it so the
     # tested process is the process the verify steps checked.
-    TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
+    TEST_CMD = ci_contract.TEST_CMD
     # A job is GOVERNED when any step's run text names one of these.
     _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
     _PYTEST_RE = re.compile(r"\bpytest\b")
@@ -469,7 +469,7 @@ class TestDependencyDriftIsDetectable:
     # exemption for a narrowed suite.
     _PROFILES = {
         (".github/workflows/tests.yml", "full-suite"): [
-            (r"^python -m pytest -ra -n 4 --dist loadfile$", 1),
+            ("^" + re.escape(TEST_CMD) + "$", 1),
         ],
         (".github/workflows/fast-tests.yml", "fast-suite"): [
             (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
@@ -487,7 +487,7 @@ class TestDependencyDriftIsDetectable:
     # ignore-bearing form is confined to the profiled pair above, so a future
     # workflow cannot run a narrowed suite while the bracketing rules pass
     # (the one-pair carve-out).
-    _GENERIC_ALLOWED = re.compile(r"^python -m pytest -ra -n 4 --dist loadfile$")
+    _GENERIC_ALLOWED = re.compile("^" + re.escape(TEST_CMD) + "$")
 
     # The pinned fast runner. A wrapper invocation names `python` but not
     # `pytest`, so without this classifier the verify bracket silently does
@@ -1407,7 +1407,7 @@ class TestDependencyDriftIsDetectable:
                 "        if: always()\n        run: " + self.VERIFY_CMD,
                 "        run: " + self.VERIFY_CMD, 1)),
             ("pytest-command-changed", real.replace(
-                test_line, "        run: python -m pytest -ra -n 4 --dist loadfile -p no:cacheprovider\n", 1)),
+                test_line, f"        run: {self.TEST_CMD} -p no:cacheprovider\n", 1)),
             ("env-on-test-step", real.replace(
                 test_line, test_line + "        env:\n          PYTHONPATH: extra\n", 1)),
             ("shell-on-verify-step", real.replace(
