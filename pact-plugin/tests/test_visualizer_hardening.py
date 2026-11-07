@@ -481,6 +481,7 @@ class TestLaunchPage:
         state_dir = tmp_path / "state"
         state_dir.mkdir(mode=0o700)
         opened: list[str] = []
+        monkeypatch.setattr(cli, "_headless", lambda: False)
         monkeypatch.setattr(cli.webbrowser, "open", lambda target: opened.append(target) or True)
         assert cli._open_keyed(state_dir, "http://127.0.0.1:5/#k=SECRETKEY")
         assert opened == [(state_dir / "launch.html").as_uri()]
@@ -1618,3 +1619,218 @@ class TestIncrementalParse:
         os.replace(replacement, path)
         assert [event.data["type"] for event in journal.read_journal(path).events] == [
             "y", "x", "w"]
+
+
+class _DeadChild:
+    """A Popen stand-in whose child has already exited."""
+
+    def poll(self):
+        return 1
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 1
+
+
+class TestCliChangesOnlyWhatItOwns:
+    def test_an_existing_state_dir_keeps_its_mode(self, tmp_path):
+        existing = tmp_path / "existing"
+        existing.mkdir(mode=0o755)
+        os.chmod(existing, 0o755)
+        cli.write_state(existing, _state(5, pid=1, instance_id="i"))
+        assert (existing.stat().st_mode & 0o777) == 0o755
+        assert (settings.state_file(existing).stat().st_mode & 0o777) == 0o600
+
+    def test_a_created_state_dir_is_private(self, tmp_path):
+        created = tmp_path / "new" / "pact-viz"
+        cli.write_state(created, _state(5, pid=1, instance_id="i"))
+        assert (created.stat().st_mode & 0o777) == 0o700
+
+    def test_a_symlinked_state_dir_is_refused_and_its_target_untouched(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir(mode=0o755)
+        os.chmod(target, 0o755)
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        with pytest.raises(cli.CliError):
+            cli.write_state(link, _state(5, pid=1, instance_id="i"))
+        assert (target.stat().st_mode & 0o777) == 0o755
+        assert not (target / "server.json").exists()
+
+    @pytest.mark.parametrize("mode, outcome", [
+        (0o777, "refused"), (0o722, "refused"), (0o1777, "refused"),
+        (0o770, "warned"), (0o775, "warned"),
+        (0o700, "silent"), (0o755, "silent"),
+    ])
+    def test_state_dir_write_bits(self, tmp_path, capsys, mode, outcome):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        os.chmod(shared, mode)
+        if outcome == "refused":
+            with pytest.raises(cli.CliError) as excinfo:
+                cli.write_state(shared, _state(5, pid=1, instance_id="i"))
+            message = str(excinfo.value)
+            assert "world-writable" in message and "chmod go-w" in message
+            assert not (shared / "server.json").exists()
+        else:
+            cli.write_state(shared, _state(5, pid=1, instance_id="i"))
+            assert cli.read_state(shared) is not None
+            err = capsys.readouterr().err
+            if outcome == "warned":
+                assert "group-writable" in err and "chmod go-w" in err
+                assert len(err.strip().splitlines()) == 1
+            else:
+                assert err == ""
+        assert (shared.stat().st_mode & 0o7777) == mode
+
+    def test_launch_page_open_is_exclusive_after_the_unlink(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        real_unlink = cli.Path.unlink
+
+        def unlink_then_race(self, missing_ok=False):
+            real_unlink(self, missing_ok=missing_ok)
+            self.write_text("planted by someone else")
+
+        monkeypatch.setattr(cli.Path, "unlink", unlink_then_race)
+        with pytest.raises(FileExistsError):
+            cli._write_launch_page(state_dir, "http://127.0.0.1:5/#k=SECRET")
+        assert "SECRET" not in (state_dir / "launch.html").read_text()
+
+    def test_bool_pid_or_port_is_not_a_state_file(self, tmp_path):
+        for broken in ({"pid": True}, {"port": True}):
+            state_dir = tmp_path / f"s{len(broken)}{list(broken)[0]}"
+            cli.write_state(state_dir, {**_state(5, pid=4, instance_id="i"), **broken})
+            assert cli.read_state(state_dir) is None
+
+    def test_a_non_http_listener_on_the_recorded_port_reads_as_not_ours(self, tmp_path, capsys):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        port = listener.getsockname()[1]
+
+        def answer_garbage():
+            for _ in range(4):
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    return
+                with conn:
+                    conn.recv(4096)
+                    conn.sendall(b"-ERR not http\r\n")
+
+        threading.Thread(target=answer_garbage, daemon=True).start()
+        try:
+            assert cli.health_check(port, "k") is None
+            state_dir = tmp_path / "state"
+            cli.write_state(state_dir, _state(port, pid=2**22 + 1, instance_id="i"))
+            assert cli.main(["--status", "--state-dir", str(state_dir)]) == 0
+            assert "Traceback" not in capsys.readouterr().err
+        finally:
+            listener.close()
+
+    def test_stop_keeps_the_record_of_a_silent_live_server(self, tmp_path, capsys, monkeypatch):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        try:
+            state_dir = tmp_path / "state"
+            cli.write_state(state_dir, _state(listener.getsockname()[1], pid=os.getpid(),
+                                              instance_id="i"))
+            monkeypatch.setattr(cli, "health_check", lambda *a, **k: None)
+            assert cli.main(["--stop", "--state-dir", str(state_dir)]) == 1
+            assert "Stop: unconfirmed pid" in capsys.readouterr().out
+            assert cli.read_state(state_dir) is not None
+        finally:
+            listener.close()
+
+    def test_a_dead_pid_with_no_listener_is_cleaned(self, tmp_path, capsys):
+        state_dir = tmp_path / "state"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            free_port = probe.getsockname()[1]
+        cli.write_state(state_dir, _state(free_port, pid=2**22 + 1, instance_id="i"))
+        assert cli.main(["--stop", "--state-dir", str(state_dir)]) == 0
+        assert cli.read_state(state_dir) is None
+
+
+class TestCliNeverHangs:
+    def test_open_is_skipped_on_a_headless_session(self, monkeypatch):
+        monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+        monkeypatch.setattr(cli.webbrowser, "open", lambda url: pytest.fail("opened"))
+        assert cli.open_browser("file:///x") is False
+
+    def test_a_slow_browser_does_not_hold_the_cli(self, monkeypatch):
+        import time
+
+        monkeypatch.setattr(cli, "_headless", lambda: False)
+        monkeypatch.setattr(cli, "_BROWSER_WAIT_S", 0.2)
+        monkeypatch.setattr(cli.webbrowser, "open", lambda url: time.sleep(5) or True)
+        started = time.monotonic()
+        cli.open_browser("file:///x")
+        assert time.monotonic() - started < 2
+
+    def test_a_closed_pipe_is_a_quiet_exit(self, tmp_path, monkeypatch, capsys):
+        def broken(args):
+            raise BrokenPipeError()
+
+        monkeypatch.setattr(cli, "cmd_list", broken)
+        assert cli.main(["--list", "--root", str(tmp_path)]) == 0
+        assert "Traceback" not in capsys.readouterr().err
+
+    def test_a_child_that_exits_says_so_and_leaves_no_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _DeadChild())
+        state_dir = tmp_path / "state"
+        args = cli.build_parser().parse_args(
+            ["--detach", "--root", str(tmp_path), "--state-dir", str(state_dir)])
+        with pytest.raises(cli.CliError) as excinfo:
+            cli.detach(args, cli._resolve_roots(args), state_dir)
+        assert "exited before it was ready" in str(excinfo.value)
+        assert not (state_dir / "server.log").exists()
+
+    def test_a_child_that_stepped_aside_is_a_reuse(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _DeadChild())
+        answers = iter([False, True])
+        monkeypatch.setattr(cli, "_reuse_if_running", lambda *a, **k: next(answers))
+        state_dir = tmp_path / "state"
+        args = cli.build_parser().parse_args(
+            ["--detach", "--root", str(tmp_path), "--state-dir", str(state_dir)])
+        assert cli.detach(args, cli._resolve_roots(args), state_dir) == 0
+
+    def test_a_planted_log_symlink_is_never_followed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _DeadChild())
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("keep")
+        os.chmod(victim, 0o644)
+        (state_dir / "server.log").symlink_to(victim)
+        args = cli.build_parser().parse_args(
+            ["--detach", "--root", str(tmp_path), "--state-dir", str(state_dir)])
+        with pytest.raises(cli.CliError):
+            cli.detach(args, cli._resolve_roots(args), state_dir)
+        assert victim.read_text() == "keep" and (victim.stat().st_mode & 0o777) == 0o644
+
+
+class TestCliOutputIsReadable:
+    def test_list_indexes_roots_instead_of_clipping_them(self, tmp_path, capsys):
+        root_dir = tmp_path / "a-very-long-root-directory-name-that-would-clip"
+        _write_session(root_dir, [_START])
+        assert cli.main(["--list", "--root", str(root_dir)]) == 0
+        out = capsys.readouterr().out
+        assert f"root #1: {root_dir}" in out
+        assert any(line.startswith("#1 ") for line in out.splitlines())
+
+    @pytest.mark.parametrize("suffix, message", [
+        ("missing", "does not exist"), ("pact-sessions", "looks like a pact-sessions directory")])
+    def test_odd_roots_are_named_on_stderr(self, tmp_path, capsys, suffix, message):
+        target = tmp_path / suffix
+        if suffix == "pact-sessions":
+            target.mkdir()
+        cli.main(["--list", "--root", str(target)])
+        assert message in capsys.readouterr().err

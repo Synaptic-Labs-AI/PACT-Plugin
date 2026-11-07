@@ -173,12 +173,12 @@ the same journal events. Roughly:
 | `--root <path>` | Read a config root (repeatable; default order above) |
 | `--all-roots` | Also read sibling `~/.claude*` roots with `pact-sessions/` |
 | `--port <n>` | Listen on a chosen loopback port instead of the tool's default |
-| `--open` | Best-effort: open the viewer in the default browser after the server is up, through a private `launch.html` redirect so the key never appears in a process list (the `URL:` line is still printed) |
+| `--open` | Best-effort: open the viewer in the default browser after the server is up, through a private `launch.html` redirect so the key never appears in a process list. Skipped over SSH or with no display, and never waits more than 3 s (the `URL:` line is still printed) |
 | `--detach` | Start in the background, print the URL, and return only after a health check confirms it is reachable |
 | `--stop` | Stop the detached instance recorded in the state file; idempotent |
 | `--status` | Report whether a detached instance is running, with its full URL (key included), PID, and instance id |
-| `--list` | List the sessions discovered in the selected roots as a plain-text table and exit |
-| `--state-dir <path>` | Keep the detached-instance state file elsewhere |
+| `--list` | List the sessions discovered in the selected roots as a plain-text table (roots numbered `#1`, `#2`, …) and exit |
+| `--state-dir <path>` | Keep the detached-instance state file elsewhere. A new directory is created 0700. An existing one is used as it is: it must be a real directory you own and not world-writable (that is refused until you run `chmod go-w` on it). A group-writable one, such as a `0775` directory from a plain `mkdir` under umask `002`, gets a warning suggesting `chmod go-w` and is still used |
 | `--verbose` | More logging on stderr |
 | `--version` | Print the version and exit |
 
@@ -193,8 +193,10 @@ pasted in any shell. `--stop` prints one `Stop: ...` line:
   exit 0.
 - `Stop: not running` — nothing healthy was running and any stale state file
   was removed; exit 0.
-- `Stop: unconfirmed pid <pid>` — the process was signalled but did not confirm
-  exit; the next line is `PACT Mission Control: stop was signalled but the process did not confirm exit`; exit 1.
+- `Stop: unconfirmed pid <pid>` — exit 1. Either the server is alive but did not
+  answer its health check (nothing is signalled and the record is kept; run the
+  Stop line again once it responds), or it was signalled and did not confirm
+  exit.
 - `Stop: refused` — the server answers with this instance's key and id but
   under another pid or start time. Nothing is signalled, the next line names
   both pids and the state file, and the state file is deliberately kept:
@@ -323,10 +325,9 @@ they live under a different config dir. Pass `--root <path>` or `--all-roots`,
 or use `--demo` to confirm the viewer itself works.
 
 **Nothing opens after a headless launch.** That is expected: `--open` is skipped
-or unavailable over SSH and in display-less sessions. Read the printed `URL:`
-line and forward the port, for example
-`ssh -L <port>:127.0.0.1:<port> user@host`, then open the URL locally. Adding
-`--open` on a machine with a browser is the only case where a window appears.
+over SSH (`SSH_CONNECTION` or `SSH_TTY` set) and on Linux with no `DISPLAY` or
+`WAYLAND_DISPLAY`. Read the printed `URL:` line and forward the port, for
+example `ssh -L <port>:127.0.0.1:<port> user@host`, then open the URL locally.
 
 **Address already in use.** Choose another loopback port with `--port`, or stop
 the old instance with `--stop` first. The tool reuses a healthy detached instance

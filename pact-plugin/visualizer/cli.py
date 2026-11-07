@@ -16,13 +16,17 @@ here: starting/stopping the detached child and the wait-for-ready health poll.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
+import http.client
 import json
 import os
 import re
 import secrets
 import shlex
 import signal
+import socket
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -57,6 +61,8 @@ _INSTANCE_ENV = "PACT_VIZ_INSTANCE_ID"
 
 _LOG_FILENAME = "server.log"
 _LAUNCH_FILENAME = "launch.html"
+_LOCK_FILENAME = ".launch.lock"
+_BROWSER_WAIT_S = 3.0
 _READY_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 5.0
 _POLL_INTERVAL_S = 0.05
@@ -190,6 +196,48 @@ def _state_dir(args: argparse.Namespace) -> Path:
     return settings.default_state_dir()
 
 
+def prepare_state_dir(state_dir: Path) -> None:
+    """Create the state directory 0700, or accept an existing one as it is.
+
+    Location: cli.prepare_state_dir.
+    Summary: A directory this call creates is made 0700. An existing
+             directory is never chmod-ed — ``--state-dir ~`` must not change
+             the home directory — but it must be a real directory (not a
+             symlink) owned by this user and not world-writable; a
+             group-writable one gets a one-line warning. The state file itself
+             is always 0600.
+    Used by: write_state, detach.
+    """
+    try:
+        state_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            state_dir.mkdir(mode=0o700)
+            os.chmod(state_dir, 0o700)
+            return
+        except FileExistsError:
+            pass
+        info = os.lstat(state_dir)
+    except OSError as error:
+        raise CliError(f"cannot create state directory {state_dir}: {error}") from error
+    if stat_module.S_ISLNK(info.st_mode) or not stat_module.S_ISDIR(info.st_mode):
+        raise CliError(f"state directory {state_dir} is not a real directory")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise CliError(f"state directory {state_dir} is not owned by this user")
+    mode = oct(stat_module.S_IMODE(info.st_mode))
+    advice = f"run chmod go-w {shlex.quote(str(state_dir))}"
+    if info.st_mode & 0o002:
+        # Any local user could plant launch.html, server.json or the lock.
+        raise CliError(f"state directory {state_dir} is world-writable (mode {mode}); {advice}")
+    if info.st_mode & 0o020:
+        # Group write is the umask-002 default for a user-private group, so it
+        # is not refused; the exclusive opens already close the keyed-URL race.
+        print(
+            f"pact-viz: warning: state directory {state_dir} is group-writable "
+            f"(mode {mode}); {advice}",
+            file=sys.stderr,
+        )
+
+
 def read_state(state_dir: Path) -> dict | None:
     """Read and validate the server state file, or None.
 
@@ -211,6 +259,8 @@ def read_state(state_dir: Path) -> dict | None:
         return None
     port = payload.get("port")
     pid = payload.get("pid")
+    if isinstance(port, bool) or isinstance(pid, bool):
+        return None
     if not isinstance(port, int) or not isinstance(pid, int):
         return None
     if not (0 < port <= 65535) or pid <= 0:
@@ -225,17 +275,13 @@ def write_state(state_dir: Path, payload: dict) -> Path:
     """Atomically write the server state file (dir 0700, file 0600).
 
     Location: cli.write_state.
-    Summary: The directory is created/forced to 0700, the JSON is written to a
-             temp file in the same directory with mode 0600, then
-             ``os.replace`` makes it visible atomically. Partial files are
-             removed on failure.
+    Summary: The directory is prepared by prepare_state_dir, the JSON is
+             written to a temp file in it with mode 0600, then ``os.replace``
+             makes it visible atomically. Partial files are removed on
+             failure.
     Used by: serve_foreground, tests.
     """
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(state_dir, 0o700)
-    except OSError as error:
-        raise CliError(f"cannot create state directory {state_dir}: {error}") from error
+    prepare_state_dir(state_dir)
     target = settings.state_file(state_dir)
     descriptor = -1
     temporary = ""
@@ -345,7 +391,12 @@ def health_check(port: int, key: str, timeout: float = 1.0) -> dict | None:
     try:
         with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+    except (
+        OSError, urllib.error.URLError, http.client.HTTPException,
+        json.JSONDecodeError, ValueError,
+    ):
+        # A non-HTTP service now holding the recorded port (BadStatusLine)
+        # or a truncated answer (IncompleteRead) is "not our server".
         return None
     if isinstance(payload, dict) and payload.get("ok"):
         return payload
@@ -410,6 +461,15 @@ def _pid_gone(pid: int) -> bool:
     return False
 
 
+def _port_accepts(port: int) -> bool:
+    """True when something accepts a TCP connection on the loopback port."""
+    try:
+        with socket.create_connection((LOOPBACK_HOST, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def _terminate(pid: int) -> None:
     """SIGTERM one process, ignoring an already-gone pid."""
     try:
@@ -439,12 +499,36 @@ def _stop_verified(state: dict) -> bool:
     return stopped
 
 
+def _headless() -> bool:
+    """True over SSH, or on Linux with no display server to open a window on."""
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return True
+    return sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
+
+
 def open_browser(url: str) -> bool:
-    """Best-effort browser open (only ever called with --open); never raises."""
-    try:
-        return bool(webbrowser.open(url))
-    except Exception:  # noqa: BLE001 — a broken browser launch is not an error
+    """Best-effort browser open (only ever called with --open); never raises.
+
+    Skipped on a headless session, and never waits more than _BROWSER_WAIT_S:
+    a console browser can run for as long as the user keeps it open, which
+    must not hold the CLI (or the session that ran it).
+    """
+    if _headless():
         return False
+    result: list[bool] = []
+
+    def launch() -> None:
+        try:
+            result.append(bool(webbrowser.open(url)))
+        except Exception:  # noqa: BLE001 — a broken browser launch is not an error
+            result.append(False)
+
+    worker = threading.Thread(target=launch, daemon=True)
+    worker.start()
+    worker.join(_BROWSER_WAIT_S)
+    return result[0] if result else True
 
 
 def _write_launch_page(state_dir: Path, url: str) -> Path:
@@ -467,7 +551,9 @@ def _write_launch_page(state_dir: Path, url: str) -> Path:
         f"<meta http-equiv=\"refresh\" content=\"0;url={html.escape(url, quote=True)}\">\n"
         "<title>PACT Mission Control</title>\n"
     ).encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    # O_EXCL after the unlink: if anything reappeared at the path in between,
+    # the open fails instead of writing the keyed URL into it.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
         os.write(descriptor, body)
@@ -592,21 +678,23 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(f"{APP_LABEL} · sessions")
     if not roots:
         print("(no roots configured)")
-    else:
-        print("roots: " + ", ".join(_terminal(f"{root.id} ({root.path})") for root in roots))
+    index_by_root = {root.id: f"#{number}" for number, root in enumerate(roots, 1)}
+    for root in roots:
+        print(f"root {index_by_root[root.id]}: {_terminal(root.id)} ({_terminal(root.path)})")
     sessions = payload.get("sessions", [])
     if not sessions:
         print("No PACT session journals found.")
         return 0
-    header = f"{'ROOT':<18} {'PROJECT':<22} {'SESSION':<26} {'UPDATED':<21} {'STATUS':<7} {'SIZE':>9}"
+    header = f"{'ROOT':<5} {'PROJECT':<22} {'SESSION':<38} {'UPDATED':<21} {'STATUS':<9} {'SIZE':>9}"
     print(header)
     for session in sessions:
+        root_label = index_by_root.get(str(session.get("root", "")), "?")
         print(
-            f"{_terminal(session.get('root', '')):<18.18} "
+            f"{root_label:<5} "
             f"{_terminal(session.get('project', '')):<22.22} "
-            f"{_terminal(session.get('session_id', '')):<26.26} "
+            f"{_terminal(session.get('session_id', '')):<38.38} "
             f"{_terminal(session.get('updated_at') or '-'):<21.21} "
-            f"{_terminal(session.get('status', '')):<7.7} "
+            f"{_terminal(session.get('status', '')):<9.9} "
             f"{int(session.get('size_bytes') or 0):>9}"
         )
     return 0
@@ -663,6 +751,16 @@ def cmd_stop(args: argparse.Namespace) -> int:
     instance_id = str(state["instance_id"])
     pid = int(state["pid"])
     health = health_check(int(state["port"]), str(state["key"]))
+    if health is None and not _pid_gone(pid) and _port_accepts(int(state["port"])):
+        # The pid lives and the port still accepts connections, yet health
+        # did not answer: a stopped or overloaded server. Its record is the
+        # only way to stop it later, so keep it.
+        print(f"Stop: unconfirmed pid {pid}")
+        print(
+            "PACT Mission Control: the server did not answer its health check; "
+            "the record is kept — run the Stop line again once it responds"
+        )
+        return 1
     if health is None or health.get("instance_id") != instance_id:
         if _clear_state_if_instance(state_dir, instance_id):
             _remove_residue(state_dir)
@@ -891,13 +989,47 @@ def detach(
              and Stop lines.
     Used by: main, tests.
     """
+    prepare_state_dir(state_dir)
+    # One launcher at a time per state dir: a second concurrent --detach
+    # waits here and then reuses the instance the first one started.
+    with _launch_lock(state_dir):
+        return _detach_locked(args, roots, state_dir)
+
+
+@contextlib.contextmanager
+def _launch_lock(state_dir: Path):
+    """An exclusive advisory lock on ``<state-dir>/.launch.lock`` (POSIX)."""
+    try:
+        import fcntl
+    except ImportError:  # not POSIX: no lock, the reuse retry still applies
+        yield
+        return
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(state_dir / _LOCK_FILENAME, flags, 0o600)
+    except OSError as error:
+        raise CliError(f"cannot lock state directory {state_dir}: {error}") from error
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _open_log(path: Path):
+    """Open the child's log for append, 0600, refusing a symlink."""
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    return os.fdopen(os.open(path, flags, 0o600), "ab")
+
+
+def _detach_locked(
+    args: argparse.Namespace,
+    roots: Sequence[RootSpec],
+    state_dir: Path,
+) -> int:
+    """detach() under the launch lock."""
     if _reuse_if_running(state_dir, args, roots):
         return 0
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(state_dir, 0o700)
-    except OSError as error:
-        raise CliError(f"cannot create state directory {state_dir}: {error}") from error
     instance_id = secrets.token_hex(16)
     key = secrets.token_urlsafe(32)
     environment = dict(os.environ)
@@ -912,11 +1044,7 @@ def detach(
     log_path = state_dir / _LOG_FILENAME
     command = _child_command(args, roots, state_dir)
     try:
-        with log_path.open("ab") as log_handle:
-            try:
-                os.chmod(log_path, 0o600)
-            except OSError:
-                pass
+        with _open_log(log_path) as log_handle:
             process = subprocess.Popen(
                 command,
                 cwd=str(PLUGIN_ROOT),
@@ -942,7 +1070,8 @@ def detach(
                 break
         time.sleep(_POLL_INTERVAL_S)
     if ready is None:
-        if process.poll() is None:
+        exited = process.poll() is not None
+        if not exited:
             try:
                 process.terminate()
                 process.wait(timeout=3)
@@ -954,10 +1083,20 @@ def detach(
         # Same instance guard as every other clear site: a concurrent detach
         # that already published its state must not lose its record here.
         _clear_state_if_instance(state_dir, instance_id)
+        if exited and _reuse_if_running(state_dir, args, roots):
+            # The child found a healthy instance and stepped aside for it.
+            return 0
         tail = _log_tail(log_path)
-        message = "server did not become healthy in time"
+        try:
+            log_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        message = (
+            "the server exited before it was ready" if exited
+            else "server did not become healthy in time"
+        )
         if tail:
-            message += f"; last log lines from {log_path}:\n{tail}"
+            message += f"; its log said:\n{tail}"
         raise CliError(message)
     url = keyed_url(str(ready["url"]), _selection_query(args), key)
     # Reap the child without blocking: this process returns immediately, but a
@@ -1079,8 +1218,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.status:
             return cmd_status(args)
         if args.list:
+            _warn_odd_roots(_resolve_roots(args))
             return cmd_list(args)
         roots = _resolve_roots(args)
+        _warn_odd_roots(roots)
         state_dir = _state_dir(args)
         if args.detach:
             return detach(args, roots, state_dir)
@@ -1090,6 +1231,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CliError as error:
         print(f"pact-viz: {error}", file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # `pact-viz --list | head`: the reader left; that is not an error.
+        with contextlib.suppress(OSError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+
+
+def _warn_odd_roots(roots: Sequence[RootSpec]) -> None:
+    """One stderr line for a root that cannot hold sessions as given."""
+    for root in roots:
+        if root.path.name == settings.PACT_SESSIONS_DIRNAME:
+            print(
+                f"pact-viz: root {root.path} looks like a pact-sessions directory; "
+                "pass its parent",
+                file=sys.stderr,
+            )
+        elif not root.path.is_dir():
+            print(f"pact-viz: root {root.path} does not exist", file=sys.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point parity

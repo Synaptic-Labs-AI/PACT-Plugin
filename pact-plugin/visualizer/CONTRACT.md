@@ -102,9 +102,15 @@ starts a fresh server, and its record replaces the old one.
   instance stopped answering; exit 0.
 - `Stop: not running`. Nothing confirmed was running, and a stale record was
   removed; exit 0.
-- `Stop: unconfirmed pid <pid>`. The process was signalled but did not confirm
-  exit; the next line is `PACT Mission Control: stop was signalled but the
-  process did not confirm exit`; exit 1.
+- `Stop: unconfirmed pid <pid>`, in two cases, both exit 1:
+  - The server did not answer its health check, but its pid is alive and its
+    port still accepts connections (a stopped or overloaded server). Nothing is
+    signalled and the record is kept; the next line is `PACT Mission Control:
+    the server did not answer its health check; the record is kept — run the
+    Stop line again once it responds`.
+  - The process was signalled but did not confirm exit; the next line is
+    `PACT Mission Control: stop was signalled but the process did not confirm
+    exit`.
 - `Stop: refused`. The server answers with this instance's key and id but
   under another pid or start time. Nothing is signalled; the next line is
   `PACT Mission Control: state file pid <state-pid> does not match the
@@ -112,7 +118,29 @@ starts a fresh server, and its record replaces the old one.
   the record` (the path is shell-quoted). The state file is kept; exit 1.
 
 One recorded instance per state directory is deliberate; a second would
-overwrite the record and orphan the first.
+overwrite the record and orphan the first. Launches take an exclusive lock on
+`<state-dir>/.launch.lock`, so concurrent `--detach` runs share one server.
+
+State directory: a directory the CLI creates (the default `<config>/pact-viz`
+included) is made 0700. An existing one is never chmod-ed, but it must be a
+real directory (not a symlink) owned by the user, and not world-writable.
+Otherwise the CLI exits 1 with `state directory <dir> is not a real
+directory`, `… is not owned by this user`, or `… is world-writable (mode
+<mode>); run chmod go-w <dir>` (a `1777` directory included). A group-writable
+one is accepted with one stderr line, `pact-viz: warning: state directory <dir>
+is group-writable (mode <mode>); run chmod go-w <dir>`, and the launch
+continues. The launch page `launch.html` is
+unlinked and recreated with `O_EXCL | O_NOFOLLOW`, mode 0600.
+
+`--open` is skipped on a headless session (`SSH_CONNECTION` or `SSH_TTY` set,
+or Linux with neither `DISPLAY` nor `WAYLAND_DISPLAY`) and never holds the CLI
+more than 3 s. A detached child that exits before it is healthy is reported as
+`the server exited before it was ready`, with the tail of its log. `--list`
+numbers the roots (`#1`, `#2`, …) in its header and ROOT column, and exits
+quietly when its output pipe closes. A `--root` that does not exist, or that
+names a `pact-sessions` directory itself, gets one stderr warning
+(`pact-viz: root <path> does not exist` / `… looks like a pact-sessions
+directory; pass its parent`).
 
 ## HTTP API
 
