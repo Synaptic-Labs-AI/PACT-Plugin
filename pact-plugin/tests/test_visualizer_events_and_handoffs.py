@@ -1,10 +1,11 @@
 """Location: pact-plugin/tests/test_visualizer_events_and_handoffs.py
-Summary: Regression tests for the backend review findings on the PACT Mission
-         Control visualizer: raw-payload handoff completeness, the windowed
+Summary: Behaviour tests for the PACT Mission Control model built from real
+         journal shapes: raw-payload handoff completeness, the windowed
          backward scan's boundary handling, the `task_created` board source,
-         the exact `--project` filter, the constrained project label, the
-         single run-kind rule shared by the list and the model, and per-agent
-         commit attribution.
+         the project and session matcher, the constrained project label, the
+         run-kind and run-status rules shared by the list and the model,
+         per-agent commit attribution, task identity and status, alerts,
+         teachback gates, event agents and phase families.
 Used by: CI (`pytest tests/`), the visualizer's own test suite.
 
 Every fixture here is constructed: journals are written byte-for-byte so a
@@ -81,7 +82,7 @@ def handoff_event(task_id: str, handoff: object) -> dict:
     }
 
 
-# --- 1. handoff completeness is decided on the RAW payload ------------------
+# --- handoff completeness is decided on the RAW payload ---------------------
 
 
 class TestHandoffCompletenessRaw:
@@ -149,7 +150,7 @@ class TestHandoffCompletenessRaw:
         assert complete["2"]["fields"]["decisions"] == "legacy decisions"
 
 
-# --- 2. the backward scan carries the straddling line -----------------------
+# --- the backward scan carries the straddling line --------------------------
 
 _LINE_SHELL_PREFIX = '{"v":1,"type":"note","pad":"'
 _LINE_SHELL_SUFFIX = '"}\n'
@@ -273,7 +274,7 @@ class TestBackwardScanBoundary:
         assert journal._scan_back(path, len(data), {"phase_transition"}) == {}
 
 
-# --- 3. task_created keeps the board after the task store is reaped ---------
+# --- task_created keeps the board after the task store is reaped ------------
 
 
 class TestTaskCreated:
@@ -342,7 +343,7 @@ class TestTaskCreated:
         assert {"task_created", "handoff_emit_suppressed"} <= registered
 
 
-# --- 4 & 7. the --project filter and the constrained project label ---------
+# --- the --project filter and the constrained project label -----------------
 
 
 def project_session(root: Path, slug: str, project_dir: str) -> None:
@@ -442,7 +443,7 @@ class TestProjectLabelConstraint:
         assert "project_altered" not in meta
 
 
-# --- 5. one run-kind rule for the list and the model ------------------------
+# --- one run-kind rule for the list and the model ---------------------------
 
 
 class TestRunKindAgreement:
@@ -492,9 +493,6 @@ class TestRunKindAgreement:
         )
         assert "session_end" not in ORCHESTRATION_MARKER_TYPES
         assert list_payload(root)["sessions"][0]["run_kind"] == "session"
-
-
-# --- 6. commit attribution counts agent-carrying commits too ----------------
 
 
 class TestHealthIdentity:
@@ -556,6 +554,9 @@ class TestSelectionMatcher:
         ]
         assert self._ids(root, session_filter="012345678") == ["0123456789abcdef"]
         assert self._ids(root, session_filter="0123456") == []
+
+
+# --- commit attribution counts agent-carrying commits too -------------------
 
 
 class TestCommitAttribution:
@@ -809,10 +810,11 @@ class TestTaskIdentity:
         assert cards["3:occB"]["status"] == "completed"
         assert cards["3:occA"]["status"] == "pending"
 
-    def test_a_blank_subject_snapshot_is_no_change_of_task(self, tmp_path):
+    @pytest.mark.parametrize("blank", ["", "(no subject)"])
+    def test_a_blank_subject_snapshot_is_no_change_of_task(self, tmp_path, blank):
         payload = _task_payload(make_root(tmp_path), [
             census.task_snapshot(_t(1), "7", subject="architect: design", occupant="occA"),
-            census.task_snapshot(_t(2), "7", subject="", occupant="occBlank"),
+            census.task_snapshot(_t(2), "7", subject=blank, occupant="occBlank"),
             census.agent_dispatch(_t(3), "architect", "7", "ARCHITECT"),
         ])
         cards = _by_key(payload)
