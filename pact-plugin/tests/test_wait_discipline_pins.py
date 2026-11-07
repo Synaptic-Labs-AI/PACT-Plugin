@@ -189,6 +189,10 @@ SECTION_PHRASE_PINS = [
     # request in the dispatch brief.
     (WAIT_IN_SILENCE, "Relay each milestone as it reaches you, unprompted"),
     (WAIT_IN_SILENCE, "never poll or nudge a teammate to obtain one."),
+    # The ban's bound: the §12 state-resolving nudge stays the first move, and
+    # its reply's milestone is relayed. Pinned as one whole sentence so an
+    # edit to either clause (deletion or inversion) reddens it.
+    (WAIT_IN_SILENCE, "A nudge that resolves an ambiguous teammate state under §12 Intentional Waiting is not polling for a milestone; relay a milestone its reply carries like any other."),
     (WAIT_IN_SILENCE, "When you want a long dispatch reported mid-run, ask for progress signals in its brief."),
     # --- §5: the termination test (discriminator canonical phrase, §5 home) ---
     (WAIT_IN_SILENCE, "Legitimate wait-time activity terminates on the awaited event"),

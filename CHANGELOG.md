@@ -33,6 +33,7 @@ The orchestrator's wait-in-silence rule now separates narration from a milestone
   - It states the tally test for a fan-out: a count of members finished is a tally, and a member's result the user would act on is a milestone.
   - It states that "No actionable content" means nothing the team needs AND nothing the user is owed.
   - It makes the orchestrator relay each milestone as it reaches it, never poll or nudge a teammate to obtain one, and ask for progress signals in the brief of a dispatch it wants reported mid-run.
+  - It bounds that ban: a nudge that resolves an ambiguous teammate state under §12 Intentional Waiting is not polling for a milestone, and a milestone carried by its reply is relayed like any other.
 - The paragraph separates narration from a milestone rather than carving an exception out of the silence rule. Filler calls stay with the filler-call rule, not the narration list. The surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
 
 ### Why
