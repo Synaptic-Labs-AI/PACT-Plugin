@@ -477,6 +477,11 @@ def test_icon_buttons_and_selects_have_accessible_names():
     parser.feed((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
     assert parser.buttons and parser.selects, "the control scan found nothing"
     for attrs, text in parser.buttons:
+        label = (attrs.get("aria-label") or "").strip()
+        if label and re.search(r"[A-Za-z]{2,}", text):
+            assert text.lower() in label.lower(), (
+                f"button #{attrs.get('id')} shows {text!r} but is named {label!r} (label-in-name)"
+            )
         if re.fullmatch(r"[A-Za-z][A-Za-z ]{3,}", text):
             continue
         if attrs.get("id") in {"live-badge", "btn-demo", "error-retry", "error-demo"}:
