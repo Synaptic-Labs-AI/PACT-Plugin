@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ import ci_contract
 from ci_full_run_record import (
     OWNER_ENV,
     RECORD_NAME,
+    WORKER_OUTPUT_KEY,
     FullRunRecord,
     aggregate_worker_collection_counts,
 )
@@ -157,12 +159,14 @@ def _record(workspace):
 
 
 def _allowlist_for(record):
-    """An allowlist admitting exactly the record's own skip sites."""
+    """An allowlist admitting exactly the record's own skip sites.
+
+    A record with no skips gets an empty allowlist: the verifier fails on
+    any entry no skip uses, so a placeholder entry would fail the rig.
+    """
     return {"schema_version": 1, "about": "rig allowlist", "entries": [
         {"file": site["file"], "reason": site["reason"], "match": "exact",
-         "allowed": site["count"]} for site in record["skip_sites"]]
-        or [{"file": "tests/none.py", "reason": "none", "match": "exact",
-             "allowed": 1}]}
+         "allowed": site["count"]} for site in record["skip_sites"]]}
 
 
 def _verify(root, record_path, collection_count=None, allowlist=None):
@@ -342,23 +346,32 @@ def test_an_unreported_item_removal_fails_the_verifier(tmp_path):
 # --- xdist aggregation: the policy runs in CI; the seam is probe-only ---
 
 
+def _agg(triples, collected, ready=None):
+    """Aggregate triples reported by nodes gw0, gw1, ... in order.
+
+    ``ready`` defaults to exactly the reporting nodes, so a test about the
+    triples' content never refuses on the population.
+    """
+    by_node = {f"gw{index}": triple for index, triple in enumerate(triples)}
+    return aggregate_worker_collection_counts(
+        by_node, collected, set(by_node) if ready is None else ready)
+
+
 def test_the_aggregate_is_the_triple_every_worker_agrees_on():
-    assert aggregate_worker_collection_counts(
-        [(4, 4, 0), (4, 4, 0)], 4) == (4, 4, 0)
+    assert _agg([(4, 4, 0), (4, 4, 0)], 4) == (4, 4, 0)
 
 
 def test_the_aggregate_is_not_a_sum_of_workers():
     """Every worker collected the whole corpus; a sum would be 16."""
-    assert aggregate_worker_collection_counts([(4, 4, 0)] * 4, 4) == (4, 4, 0)
+    assert _agg([(4, 4, 0)] * 4, 4) == (4, 4, 0)
 
 
 def test_disagreeing_workers_have_no_faithful_aggregate():
-    assert aggregate_worker_collection_counts(
-        [(4, 4, 0), (4, 3, 0)], 4) is None
+    assert _agg([(4, 4, 0), (4, 3, 0)], 4) is None
 
 
 def test_an_aggregate_inconsistent_with_collected_is_refused():
-    assert aggregate_worker_collection_counts([(4, 4, 0)], 3) is None
+    assert _agg([(4, 4, 0)], 3) is None
 
 
 def test_the_aggregate_carries_a_narrowed_triple():
@@ -370,12 +383,12 @@ def test_the_aggregate_carries_a_narrowed_triple():
     The triple is a legitimate deselection (4 taken to 3, one reported), which
     must be RETURNED rather than refused so the verifier can see it.
     """
-    assert aggregate_worker_collection_counts([(4, 3, 1)], 3) == (4, 3, 1)
+    assert _agg([(4, 3, 1)], 3) == (4, 3, 1)
 
 
 def test_no_worker_reports_have_no_aggregate():
-    assert aggregate_worker_collection_counts([], 4) is None
-    assert aggregate_worker_collection_counts([None], 4) is None
+    assert _agg([], 4) is None
+    assert _agg([None], 4) is None
 
 
 def test_a_non_integer_triple_value_has_no_aggregate():
@@ -387,14 +400,14 @@ def test_a_non_integer_triple_value_has_no_aggregate():
     element is asserted separately: a guard that checked only before/after
     would miss it.
     """
-    assert aggregate_worker_collection_counts([(4.0, 4.0, 0)], 4) is None
-    assert aggregate_worker_collection_counts([(True, True, 0)], 1) is None
-    assert aggregate_worker_collection_counts([(4, 4, 0.0)], 4) is None
+    assert _agg([(4.0, 4.0, 0)], 4) is None
+    assert _agg([(True, True, 0)], 1) is None
+    assert _agg([(4, 4, 0.0)], 4) is None
 
 
 def test_a_non_integer_collected_has_no_aggregate():
-    assert aggregate_worker_collection_counts([(4, 4, 0)], 4.0) is None
-    assert aggregate_worker_collection_counts([(1, 1, 0)], True) is None
+    assert _agg([(4, 4, 0)], 4.0) is None
+    assert _agg([(1, 1, 0)], True) is None
 
 
 def test_an_input_of_the_wrong_length_has_no_aggregate():
@@ -404,43 +417,50 @@ def test_an_input_of_the_wrong_length_has_no_aggregate():
     migration trap (a value that used to be the shape now has to be refused),
     and a separate test could be deleted without this one noticing.
     """
-    assert aggregate_worker_collection_counts([(4, 3)], 3) is None
-    assert aggregate_worker_collection_counts([(4, 4, 0, 0)], 4) is None
+    assert _agg([(4, 3)], 3) is None
+    assert _agg([(4, 4, 0, 0)], 4) is None
 
 
 def test_a_lost_worker_has_no_aggregate():
     """A ready worker that never reported leaves no aggregate.
 
     One triple from two ready workers is indistinguishable, by content, from
-    a faithful aggregate over the survivors; only the population count tells
-    them apart.
+    a faithful aggregate over the survivors; only the ready set tells them
+    apart.
     """
-    assert aggregate_worker_collection_counts(
-        [(4, 4, 0)], 4, workers_ready=2) is None
+    assert _agg([(4, 4, 0)], 4, ready={"gw0", "gw1"}) is None
     # Control: the same population with every ready worker reporting does
     # aggregate, so the refusal is not a blanket one.
-    assert aggregate_worker_collection_counts(
-        [(4, 4, 0), (4, 4, 0)], 4, workers_ready=2) == (4, 4, 0)
+    assert _agg([(4, 4, 0), (4, 4, 0)], 4, ready={"gw0", "gw1"}) == (4, 4, 0)
 
 
-def test_the_default_workers_ready_does_not_refuse():
-    """Callers that pass no ready count keep the pre-refusal behaviour."""
-    assert aggregate_worker_collection_counts([(4, 4, 0)], 4) == (4, 4, 0)
+def test_a_report_from_a_node_that_never_became_ready_has_no_aggregate():
+    """The reporting set must EQUAL the ready set, not merely cover it.
 
-
-def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
-                                                     capsys):
-    """The refusal reaches the record, and the diagnostic names both counts.
-
-    A null field is what makes the verifier fail closed; the printed counts
-    are what lets a lost worker be told from a disagreement in the log.
+    Equal sizes are kept on purpose: a size comparison would accept a report
+    from gw1 standing in for a ready gw2 that never reported.
     """
-    monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
-    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    assert _agg([(4, 4, 0), (4, 4, 0)], 4, ready={"gw0", "gw2"}) is None
+
+
+_DISTRIBUTED = {"numprocesses": 2, "tx": ["popen", "popen"], "dist": "load"}
+
+
+def _fake_session(tmp_path, *, testscollected, options=None,
+                  workerinput=None, workeroutput=None):
+    """A session carrying only the attributes the recorder's finish hook reads.
+
+    Nothing of xdist is imitated beyond its contract with this plugin: a
+    worker's config has ``workerinput`` and ``workeroutput``, a controller's
+    has neither, and ``options`` are the option values xdist leaves after
+    parsing (``-n 2`` sets ``tx`` to two popen specs and ``dist`` to load).
+    """
 
     class _Option:
         collectonly = False
-        numprocesses = 2
+
+    for name, value in (_DISTRIBUTED if options is None else options).items():
+        setattr(_Option, name, value)
 
     class _Elapsed:
         seconds = 0
@@ -452,7 +472,7 @@ def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
 
     class _Reporter:
         # One passing test keeps the verifier's NOTHING-PASSED check from
-        # masking the BAD-FIELD failure this test is about.
+        # masking the collection failure a test is about.
         stats = {"passed": [object()], "deselected": []}
         _session_start = _SessionStart()
 
@@ -470,45 +490,200 @@ def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
 
     class _Config:
         option = _Option()
-        workerinput = None
         pluginmanager = _PluginManager()
         invocation_params = _InvocationParams()
 
+    _Config.workerinput = workerinput
+    if workeroutput is not None:
+        _Config.workeroutput = workeroutput
+
     class _Session:
         config = _Config()
-        testscollected = 4
 
+    _Session.testscollected = testscollected
+    return _Session()
+
+
+def _node(gateway_id, triple=None):
+    """A worker node as the controller's hooks see it: an id and its output."""
+    output = {} if triple is None else {WORKER_OUTPUT_KEY: triple}
+    return SimpleNamespace(gateway=SimpleNamespace(id=gateway_id),
+                           workeroutput=output)
+
+
+def _controller(tmp_path, monkeypatch):
+    """A recorder that owns the record, as the certifying controller does."""
+    monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
     record = FullRunRecord()
     record._root = tmp_path
-    record._workers_ready = 2
-    record._worker_triples = [(4, 4, 0)]
-    record.pytest_sessionfinish(_Session(), 0)
+    return record
+
+
+def test_a_lost_worker_leaves_the_record_fields_null(tmp_path, monkeypatch,
+                                                     capsys):
+    """The refusal reaches the record, and the diagnostic names both sets.
+
+    A null field is what makes the verifier fail closed; the printed ready
+    nodes and triples are what lets a lost worker be told from a
+    disagreement in the log.
+    """
+    record = _controller(tmp_path, monkeypatch)
+    record.pytest_testnodeready(_node("gw0"))
+    record.pytest_testnodeready(_node("gw1"))
+    record.pytest_testnodedown(_node("gw0", (4, 4, 0)), None)
+    record.pytest_sessionfinish(_fake_session(tmp_path, testscollected=4), 0)
 
     record_path = tmp_path / RECORD_NAME
     written = json.loads(record_path.read_text(encoding="utf-8"))
     assert written["items_before_modifyitems"] is None, written
     assert written["items_after_modifyitems"] is None, written
     err = capsys.readouterr().err
-    assert "ready workers 2" in err, err
-    assert "[(4, 4, 0)]" in err, err
+    assert "ready nodes ['gw0', 'gw1']" in err, err
+    assert "(4, 4, 0)" in err, err
+    # The controller never collects, so its own deselected count (0) is a
+    # number nobody measured; with no aggregate it must not be recorded.
+    assert written["deselected"] is None, written
 
-    # The nulls are only worth anything if the gate fails closed on them.
+    # The nulls are only worth anything if the gate fails closed on them,
+    # and on one of the nulled fields rather than on an unrelated condition.
     verdict = _verify(tmp_path, record_path)
     assert verdict.returncode == 1, verdict.stdout + verdict.stderr
-    assert "BAD-FIELD-ITEMS_BEFORE_MODIFYITEMS" in verdict.stderr, verdict.stderr
+    assert any(f"RUN-VERIFY-FAILURE BAD-FIELD-{field}:" in verdict.stderr
+               for field in ("DESELECTED", "ITEMS_BEFORE_MODIFYITEMS",
+                             "ITEMS_AFTER_MODIFYITEMS")), verdict.stderr
 
 
-def test_the_recorder_counts_worker_ready_events(monkeypatch):
-    """The population count comes from pytest_testnodeready.
+def test_a_worker_publishes_its_own_triple_for_the_controller(tmp_path,
+                                                            monkeypatch):
+    """A worker's finish hook puts (before, after, deselected) under the key.
 
-    Without this hook the refusal is inert: workers_ready stays 0 and a lost
-    worker's short population aggregates as if it were complete.
+    The counts differ in every position, so publishing one count in another's
+    place cannot pass: before-as-after in particular would hide a collection
+    hook that dropped an item, because every worker would agree on it.
+    A worker never owns the record, so this also pins that the publish runs
+    ahead of the ownership guard.
     """
     monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
     record = FullRunRecord()
-    record.pytest_testnodeready(None)
-    record.pytest_testnodeready(None)
-    assert record._workers_ready == 2
+    record._items_before = 4
+    record._items_after = 3
+    record.pytest_deselected(["x"])
+    output = {}
+    session = _fake_session(tmp_path, testscollected=3, workerinput={},
+                            workeroutput=output)
+    record.pytest_sessionfinish(session, 0)
+    assert output == {WORKER_OUTPUT_KEY: (4, 3, 1)}
+
+
+def test_the_controller_records_the_triple_its_workers_agreed_on(
+        tmp_path, monkeypatch):
+    """Ready and down events carry the agreed triple into the record.
+
+    The deselected count is deliberately not ``before - after``: a record
+    that derived it, or took the controller's own stats (always 0 under
+    xdist), would show a different number here.
+    """
+    record = _controller(tmp_path, monkeypatch)
+    for gateway_id in ("gw0", "gw1"):
+        record.pytest_testnodeready(_node(gateway_id))
+    for gateway_id in ("gw0", "gw1"):
+        record.pytest_testnodedown(_node(gateway_id, (5, 3, 1)), None)
+    record.pytest_sessionfinish(_fake_session(tmp_path, testscollected=3), 0)
+
+    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert (written["items_before_modifyitems"],
+            written["items_after_modifyitems"],
+            written["deselected"]) == (5, 3, 1), written
+
+
+def test_the_recorder_identifies_ready_workers(tmp_path, monkeypatch):
+    """The ready set comes from pytest_testnodeready, keyed on the node id.
+
+    Without this hook the refusal is inert: the ready set stays empty and a
+    lost worker's short population aggregates as if it were complete. A
+    repeated announcement from one node stays one node.
+    """
+    record = _controller(tmp_path, monkeypatch)
+    for gateway_id in ("gw0", "gw1", "gw1"):
+        record.pytest_testnodeready(_node(gateway_id))
+    assert record._ready_nodes == {"gw0", "gw1"}
+
+
+def test_a_recorder_that_does_not_own_the_record_ignores_worker_events(
+        monkeypatch):
+    """Both node hooks are inert in a session that never claimed the record.
+
+    A nested session carries the recorder too; only the owning controller's
+    population may decide the aggregate.
+    """
+    monkeypatch.setattr("ci_full_run_record._gated_repo_root", lambda: None)
+    record = FullRunRecord()
+    assert record._root is None
+    record.pytest_testnodeready(_node("gw0"))
+    record.pytest_testnodedown(_node("gw0", (4, 4, 0)), None)
+    assert record._ready_nodes == set()
+    assert record._worker_triples == {}
+
+
+def test_a_repeated_down_event_cannot_stand_in_for_a_lost_worker(
+        tmp_path, monkeypatch):
+    """xdist can report one node down twice; that is still one worker.
+
+    Two ready nodes and two down events, both from gw0: counted, the events
+    would match the ready population and aggregate; identified, gw1 is
+    missing and the aggregate is refused.
+    """
+    record = _controller(tmp_path, monkeypatch)
+    for gateway_id in ("gw0", "gw1"):
+        record.pytest_testnodeready(_node(gateway_id))
+    record.pytest_testnodedown(_node("gw0", (4, 4, 0)), None)
+    record.pytest_testnodedown(_node("gw0", (4, 4, 0)), None)
+    record.pytest_sessionfinish(_fake_session(tmp_path, testscollected=4), 0)
+    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert written["items_after_modifyitems"] is None, written
+
+
+def test_a_repeated_down_event_with_a_different_report_is_unprovable(
+        tmp_path, monkeypatch):
+    """A node that reports two different triples has no trustworthy one.
+
+    Neither report may win: keeping the last would let a late report replace
+    the one the node first gave, and keeping the first would ignore the
+    contradiction.
+    """
+    record = _controller(tmp_path, monkeypatch)
+    record.pytest_testnodeready(_node("gw0"))
+    record.pytest_testnodedown(_node("gw0", (4, 4, 0)), None)
+    record.pytest_testnodedown(_node("gw0", (4, 3, 0)), None)
+    assert record._worker_triples == {"gw0": None}
+
+
+def test_distribution_by_tx_without_n_reaches_the_diagnostic(
+        tmp_path, monkeypatch, capsys):
+    """``--tx`` with a dist mode distributes without ``-n``.
+
+    xdist then leaves ``numprocesses`` unset, so a check on ``-n`` alone
+    would treat the run as serial: no diagnostic, and the controller's own
+    deselected count recorded as if measured. The control is the same
+    session with distribution off, which must stay silent.
+    """
+    tx_only = {"numprocesses": None, "tx": ["popen", "popen"], "dist": "load"}
+    record = _controller(tmp_path, monkeypatch)
+    record.pytest_sessionfinish(
+        _fake_session(tmp_path, testscollected=4, options=tx_only), 0)
+    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert "no faithful cross-worker collection aggregate" in (
+        capsys.readouterr().err)
+    assert written["deselected"] is None, written
+
+    serial = {"numprocesses": 0, "tx": [], "dist": "no"}
+    record = _controller(tmp_path, monkeypatch)
+    record.pytest_sessionfinish(
+        _fake_session(tmp_path, testscollected=4, options=serial), 0)
+    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert "cross-worker" not in capsys.readouterr().err
+    assert written["deselected"] == 0, written
 
 
 def test_the_recorder_counts_deselected_items_from_the_hook(monkeypatch):
@@ -532,8 +707,9 @@ def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
     The agreement rule itself is covered in CI by the pure-function tests
     above. This test exercises the real workeroutput/testnodedown seam, and
     it deliberately skips rather than mocking that seam: a skip is not a
-    pass, and the probe arms in the HANDOFF are the evidence until the pin
-    lands.
+    pass. Until the pin lands, the plugin's side of the seam is pinned in CI
+    by the worker-publish and controller-record tests above, which drive the
+    recorder's own hooks with only the attributes it reads.
     """
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)

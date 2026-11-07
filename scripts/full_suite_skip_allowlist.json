@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "about": "Every skip the certifying full-suite run may report, keyed on the file and the verbatim reason the -ra summary prints (never on a line number). scripts/verify_full_run.py fails on a skip site missing from this list or on more skips at a site than 'allowed'; scripts/verify_fast_summary.py reports the same comparison for the fast lane as a warning. To admit a new legitimate skip, add its entry in the SAME commit that adds the skip. 'match' is 'exact', or 'prefix' when the reason embeds variable text (key on the stable leading part and say so in the entry). 'allowed' is the most skips at the site, an integer of at least 1.",
+  "about": "Every skip the certifying full-suite run may report, keyed on the file and the verbatim reason the -ra summary prints (never on a line number). scripts/verify_full_run.py fails on a skip site missing from this list, on more skips at a site than 'allowed', or on an entry that admits no skip of the certifying run; scripts/verify_fast_summary.py reports the same comparison for the fast lane as a warning. To admit a new legitimate skip, add its entry in the SAME commit that adds the skip, and remove an entry in the SAME commit that stops its skip. 'match' is 'exact', or 'prefix' when the reason embeds variable text (key on the stable leading part and say so in the entry). 'allowed' is the most skips at the site, an integer of at least 1.",
   "entries": [
     {
       "file": "tests/test_ci_full_run_record.py",

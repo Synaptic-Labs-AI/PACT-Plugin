@@ -54,9 +54,10 @@ arithmetically and leave the narrowing detector unable to tell a reported
 deselection from an item removed without one. THE TRIPLES ARE NOT ADDITIVE:
 every worker collected the whole corpus, so summing N workers yields N x the
 corpus while the verifier requires ``after == collected``. The only faithful
-aggregate is the triple every worker AGREES on; disagreement, or an
-``after`` that does not equal the certifying session's own
-``testscollected``, leaves the collection fields null and prints why. A
+aggregate is the triple every worker AGREES on, and only when every node
+that became ready reported; disagreement, a missing node, or an ``after``
+that does not equal the certifying session's own ``testscollected``,
+leaves the collection fields and ``deselected`` null and prints why. A
 wrong integer here would turn a fail-closed gate into a fail-open one, so
 None is the correct answer when no aggregate is provable.
 
@@ -118,9 +119,14 @@ def record_path():
     return Path(workspace) / RECORD_NAME
 
 
-def aggregate_worker_collection_counts(worker_triples, collected,
-                                       workers_ready=None):
+def aggregate_worker_collection_counts(triples_by_node, collected,
+                                       ready_nodes):
     """The (before, after, deselected) triple every worker agreed on, or None.
+
+    ``triples_by_node`` maps each xdist node id (``node.gateway.id``) that
+    dispatched ``pytest_testnodedown`` to the triple it published, or None
+    when it published nothing. ``ready_nodes`` is the set of node ids that
+    dispatched ``pytest_testnodeready``.
 
     Every worker collects the WHOLE corpus, so these triples are not
     additive: summing N workers yields N x the corpus while the verifier
@@ -137,41 +143,41 @@ def aggregate_worker_collection_counts(worker_triples, collected,
     arithmetically and leave the verifier's narrowing detector unable to
     distinguish a reported deselection from an item removed without one.
 
-    The population is ENFORCED, not assumed. The controller counts the nodes
-    that announced themselves (``pytest_testnodeready``) and passes that
-    count in, because a node that never published is indistinguishable here
-    from a node that never existed. When fewer triples arrive than nodes
-    became ready, a worker was lost and no aggregate is provable. The path
-    that makes this necessary is xdist's ``DSession.worker_internal_error``:
-    it removes the node and raises ``pytest_internalerror`` without
-    dispatching a node-down event, so the worker simply never appears, and
-    the surviving nodes can still agree among themselves. Refusal leaves both
-    collection fields null, so the verifier fails closed on BAD-FIELD instead
-    of certifying a collection measured by a subset.
+    The population is ENFORCED, not assumed, and nodes are IDENTIFIED rather
+    than counted. The set of nodes that reported must equal the set that
+    became ready, because a node that never reported is indistinguishable
+    here from a node that never existed, and xdist can dispatch
+    ``pytest_testnodedown`` twice for one node (its keyboard-interrupt path),
+    so a count of events could stand in for a missing node. The path that
+    makes the ready set necessary is a worker internal error: the failing
+    worker still finishes its session and reports a valid triple, but the
+    controller then aborts inside ``DSession.worker_workerfinished``, so the
+    HEALTHY workers that were ready never report. Their absence is visible
+    only against the ready set. Refusal leaves the collection fields null,
+    so the verifier fails closed on BAD-FIELD instead of certifying a
+    collection measured by a subset.
 
     Any worker lost before it publishes therefore refuses the aggregate, by
     either path: a crash dispatches ``errordown`` with nothing published, so a
-    None arrives and is rejected below, and an internal error dispatches no
-    down event at all, so the population comes up short and the ready count
-    rejects it. Worker restarts are ON by default - xdist defaults
-    ``--max-worker-restart`` to four times the worker count whenever ``-n``
-    is given - so a run that lost a worker and recovered on a replacement is
-    refused although it completed. That is a deliberate false red in the safe
-    direction, and the response is to re-run the certifying run. Disabling
-    restarts does not change it: a crashed worker still contributes the None
-    that refuses the aggregate.
+    None arrives and is rejected below, and an internal error aborts the
+    controller before the remaining ready nodes report, so the reporting set
+    falls short of the ready set. Worker restarts are ON by default - xdist
+    defaults ``--max-worker-restart`` to four times the worker count whenever
+    ``-n`` is given - so a run that lost a worker and recovered on a
+    replacement is refused although it completed. That is a deliberate false
+    red in the safe direction, and the response is to re-run the certifying
+    run. Disabling restarts does not change it: a crashed worker still
+    contributes the None that refuses the aggregate.
 
     This guarantees only ``after == collected``; the second verifier identity,
     ``after + deselected == before``, is enforced in
     ``scripts/verify_full_run.py``, where a non-zero ``deselected`` is a hard
     failure before it is reached.
     """
-    if workers_ready is not None and len(worker_triples) < workers_ready:
-        return None
-    if not worker_triples:
+    if not triples_by_node or set(triples_by_node) != set(ready_nodes):
         return None
     triples = []
-    for triple in worker_triples:
+    for triple in triples_by_node.values():
         if not isinstance(triple, (list, tuple)) or len(triple) != 3:
             return None
         before, after, deselected = triple
@@ -207,8 +213,8 @@ class FullRunRecord:
         self._items_before = None
         self._items_after = None
         self._deselected = 0
-        self._worker_triples = []
-        self._workers_ready = 0
+        self._worker_triples = {}
+        self._ready_nodes = set()
         self._skips = []
         self._collection_skips = 0
 
@@ -249,15 +255,18 @@ class FullRunRecord:
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodeready(self, node):
-        """Count xdist workers that announced themselves (controller only).
+        """Record the id of each xdist worker that announced itself.
 
-        This is the only way to tell a worker that was lost from one that
-        never existed: a node can become ready and then never dispatch
-        ``pytest_testnodedown`` (the ``worker_internal_error`` path), leaving
-        no trace in ``_worker_triples``. The count is passed to the aggregate
-        so the refusal is a pure function rather than a branch here.
+        Controller only. This is the only way to tell a worker that was lost
+        from one that never existed: when a worker hits an internal error the
+        controller aborts while handling that worker's report, so the other
+        ready nodes never dispatch ``pytest_testnodedown`` and leave no trace
+        in ``_worker_triples``. The ready set is passed to the aggregate so
+        the refusal is a pure function rather than a branch here.
         """
-        self._workers_ready += 1
+        if self._root is None:
+            return
+        self._ready_nodes.add(node.gateway.id)
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node, error):
@@ -267,11 +276,19 @@ class FullRunRecord:
         child sessions with ``-p no:xdist``. Pluggy rejects a plugin that
         defines an unknown hook, so without ``optionalhook`` every such
         child session dies with PluginValidationError before running.
+
+        Keyed on ``node.gateway.id``: xdist can dispatch this hook twice for
+        one node, and a repeat must not count as a second worker. A repeat
+        that reports a different value leaves the node unprovable (None).
         """
         if self._root is None:
             return
-        self._worker_triples.append(
-            getattr(node, "workeroutput", {}).get(WORKER_OUTPUT_KEY))
+        node_id = node.gateway.id
+        triple = getattr(node, "workeroutput", {}).get(WORKER_OUTPUT_KEY)
+        if (node_id in self._worker_triples
+                and self._worker_triples[node_id] != triple):
+            triple = None
+        self._worker_triples[node_id] = triple
 
     def pytest_collectreport(self, report):
         """A module-level skip is a collection report, not a test report."""
@@ -350,22 +367,27 @@ class FullRunRecord:
         items_before = self._items_before
         items_after = self._items_after
         deselected = len(stats.get("deselected", []))
-        # xdist's -n is absent without xdist, None for a serial run, and 0
-        # for -n 0, which does not distribute; only a positive count is
-        # distributed.
-        numprocesses = getattr(session.config.option, "numprocesses", None)
-        distributed = isinstance(numprocesses, int) and numprocesses > 0
+        # xdist's own distribution predicate: tx specs present and a dist
+        # mode other than "no". It covers -n and --tx alike; without xdist
+        # neither option exists and the run is serial.
+        option = session.config.option
+        distributed = (bool(getattr(option, "tx", None))
+                       and getattr(option, "dist", "no") != "no")
         if items_before is None and distributed:
             collected = int(session.testscollected)
             aggregate = aggregate_worker_collection_counts(
-                self._worker_triples, collected, self._workers_ready)
+                self._worker_triples, collected, self._ready_nodes)
             if aggregate is None:
+                # The controller never collects, so its own deselected count
+                # is 0 whatever the workers deselected. With no aggregate it
+                # is a number nobody measured, so it is nulled with the rest.
+                deselected = None
                 print(
                     "CI-FULL-RUN-RECORD: no faithful cross-worker collection "
-                    f"aggregate (ready workers {self._workers_ready}, "
+                    f"aggregate (ready nodes {sorted(self._ready_nodes)}, "
                     f"triples {self._worker_triples!r}, "
                     f"collected={collected}); items_before/after_modifyitems "
-                    "stay null so the verifier fails closed.",
+                    "and deselected stay null so the verifier fails closed.",
                     file=sys.stderr,
                 )
             else:
