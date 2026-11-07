@@ -13,7 +13,6 @@ Used by: pytest (front-end regression gate for pact-plugin/visualizer).
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -22,12 +21,11 @@ from pathlib import Path
 import pytest
 
 from visualizer import demo
+from visualizer_node import ci_is_declared, require_node
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 STATIC_JS_DIR = PLUGIN_ROOT / "visualizer" / "static" / "js"
 DEV_DEMO = PLUGIN_ROOT / "visualizer" / "static" / "dev-demo.json"
-
-_NODE = shutil.which("node")
 
 # Runs inside static/js so the modules' relative imports resolve. Each check
 # names the behaviour, not the file, so a failure says what broke.
@@ -583,19 +581,7 @@ def test_dev_demo_fixture_matches_build_demo_model():
 
 
 def _require_node() -> str:
-    """Return the node path; skip locally without node, fail under CI.
-
-    A CI runner image without node would otherwise retire every JS pin
-    silently: a skip reads as green.
-    """
-    if _NODE is None:
-        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail("node is not on PATH under CI; the JS behaviour pins must run there")
-        pytest.skip(
-            "node executable not found on PATH; JS behaviour pins skipped "
-            "(the Python dev-demo parity pin still runs)"
-        )
-    return _NODE
+    return require_node("the JS behaviour pins (the Python dev-demo parity pin still runs)")
 
 
 def test_js_behaviour_pins():
@@ -673,3 +659,51 @@ def test_poll_path_uses_the_banner_rules():
         "the poll error banner is no longer tagged with source \"poll\"; "
         "another source changes which banner a poll may clear or displace"
     )
+
+
+# The node gate itself. A truthiness check on the environment reads CI=false
+# as CI, so the falsy spellings are listed as inputs: only they separate a
+# correct predicate from a bare `os.environ.get`.
+_NOT_CI = ["", "0", "false", "no", "False", "NO", "  false  "]
+_CI = ["true", "1", "yes", "TRUE", "on"]
+
+
+def _clear_ci(monkeypatch):
+    for name in ("CI", "GITHUB_ACTIONS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("variable", ["CI", "GITHUB_ACTIONS"])
+@pytest.mark.parametrize("value", _NOT_CI)
+def test_falsy_ci_spellings_are_not_ci(monkeypatch, variable, value):
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv(variable, value)
+    assert ci_is_declared() is False, f"{variable}={value!r} means NOT CI"
+
+
+@pytest.mark.parametrize("variable", ["CI", "GITHUB_ACTIONS"])
+@pytest.mark.parametrize("value", _CI)
+def test_other_ci_values_are_ci(monkeypatch, variable, value):
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv(variable, value)
+    assert ci_is_declared() is True, f"{variable}={value!r} means CI"
+
+
+def test_missing_node_skips_when_ci_is_false(monkeypatch):
+    import visualizer_node
+
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("CI", "false")
+    monkeypatch.setattr(visualizer_node.shutil, "which", lambda name: None)
+    with pytest.raises(pytest.skip.Exception):
+        require_node("the probe")
+
+
+def test_missing_node_fails_under_ci(monkeypatch):
+    import visualizer_node
+
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(visualizer_node.shutil, "which", lambda name: None)
+    with pytest.raises(pytest.fail.Exception):
+        require_node("the probe")

@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from visualizer_node import require_node
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 VISUALIZER = PLUGIN_ROOT / "visualizer"
@@ -104,9 +104,6 @@ FORBIDDEN_DOM_SINKS = (
     "eval(",
     "new Function(",
 )
-
-_NODE = shutil.which("node")
-
 
 def _text_assets() -> list[Path]:
     return [
@@ -475,22 +472,6 @@ def test_hero_asset_is_a_png_under_two_megabytes():
 # ─── JS syntax ──────────────────────────────────────────────────────────────
 
 
-def _require_node() -> str:
-    """Return the node path; skip locally without node, fail under CI.
-
-    A CI runner image without node would otherwise retire the JS checks
-    silently: a skip reads as green.
-    """
-    if _NODE is None:
-        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail("node is not on PATH under CI; the JS checks must run there")
-        pytest.skip(
-            "node executable not found on PATH; JS module syntax check skipped "
-            "(URL, DOM-sink, transport, and CSP scans still run)"
-        )
-    return _NODE
-
-
 def test_js_modules_parse():
     """Parse every ES module with `node --check`.
 
@@ -498,7 +479,7 @@ def test_js_modules_parse():
     modules regardless of the checkout's package.json situation; the copy is
     content-identical.
     """
-    node = _require_node()
+    node = require_node("the JS module syntax check (the URL, DOM-sink, transport and CSP scans still run)")
     js_files = _js_files()
     assert js_files, "no JS modules to check"
     with tempfile.TemporaryDirectory() as tmp_dir:
