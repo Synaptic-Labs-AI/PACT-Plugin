@@ -356,6 +356,45 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("?project= selects the project", launchSelection("?project=p").kind === "project");
   check("no query is the default", launchSelection("").kind === "default");
 
+  /* Past the event cap the window slides at constant length; the stage must
+   * still animate what is new, found by seq. */
+  const animated = [];
+  const slid = Object.assign(Object.create(Stage.prototype), {
+    model: {}, reducedMotion: false, effects: [],
+    events: Array.from({ length: 6000 }, (_, i) => ({ seq: i })),
+    cursor: 6000, cursorSeq: 5999,
+    _computePhaseState() {}, _syncAgents() {}, _updateChrome() {},
+    _spawnForEvent: (event) => animated.push(event.seq),
+  });
+  slid.events = Array.from({ length: 6000 }, (_, i) => ({ seq: i + 2 }));
+  slid.setCursor(6000, { animate: true, live: true });
+  check("a slid window animates its new events by seq",
+    JSON.stringify(animated) === JSON.stringify([6000, 6001]));
+  animated.length = 0;
+  slid.setCursor(6000, { animate: true, live: true });
+  check("an unchanged window animates nothing", animated.length === 0);
+
+  /* Review deck: a reviewer named by a review_dispatch stands on the deck
+   * until it acts; a review-family event keeps it there; a room event moves
+   * it to that room; an OTHER-family event keeps the last room. */
+  const zones = (events, cursor) => {
+    const host = Object.assign(Object.create(Stage.prototype), {
+      roster: [{ name: "reviewer-1", role: "security-engineer" }],
+      events, cursor, phaseState: { current: "", completed: new Set() },
+    });
+    return host._computeViews()[0];
+  };
+  const dispatch = { type: "review_dispatch", category: "review", agents: ["reviewer-1"], phase_family: "REVIEW" };
+  check("a dispatched reviewer stands on the deck before it acts", zones([dispatch], 1).zone === "review");
+  check("a finding keeps it on the deck even when it inherits TEST",
+    zones([dispatch, { type: "review_finding", agent: "reviewer-1", category: "finding", phase_family: "TEST" }], 2).zone === "review");
+  check("a dispatch that inherits TEST still seats its reviewers on the deck",
+    zones([Object.assign({}, dispatch, { phase_family: "TEST" })], 1).zone === "review");
+  check("a room event moves it to that room",
+    (() => { const v = zones([dispatch, { type: "commit", agent: "reviewer-1", phase_family: "CODE" }], 2); return v.zone === "room" && v.family === "CODE"; })());
+  check("an OTHER-family event keeps the last room",
+    zones([dispatch, { type: "commit", agent: "reviewer-1", phase_family: "CODE" }, { type: "checkpoint", agent: "reviewer-1", phase_family: "OTHER" }], 3).family === "CODE");
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);

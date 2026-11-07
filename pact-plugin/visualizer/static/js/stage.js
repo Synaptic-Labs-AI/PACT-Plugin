@@ -126,17 +126,6 @@ const MASCOT_LINES = [
   "WAITING…",
 ];
 
-const WORK_EVENT_TYPES = new Set([
-  "agent_dispatch",
-  "teachback_ack",
-  "commit",
-  "remediation",
-  "review_finding",
-  "dispatch_decision",
-  "task_metadata_snapshot",
-  "checkpoint",
-]);
-
 /* ---- small helpers ----------------------------------------------------- */
 
 /* A session_end recorded by wrap-up (the server flags it; the raw source is
@@ -206,6 +195,18 @@ function mixColor(a, b, t) {
   );
 }
 
+/* Event categories that keep a reviewer on the review deck. */
+const REVIEW_CATEGORIES = new Set(["review", "finding"]);
+
+/* The room an event places its agent in: its phase_family when that is one
+ * of the four rooms, else its own phase. REVIEW and OTHER name no room. */
+function roomFamilyOf(event) {
+  if (!event) return "";
+  const family = String(event.phase_family || "").toUpperCase();
+  if (PHASE_ORDER.indexOf(family) >= 0) return family;
+  return familyOf(event.phase);
+}
+
 function familyOf(phase) {
   const name = String(phase || "").toUpperCase();
   return PHASE_ORDER.indexOf(name) >= 0 ? name : "";
@@ -261,6 +262,7 @@ export class Stage {
     this.agents = new Map();
     this.effects = [];
     this.cursor = 0;
+    this.cursorSeq = -1;
     this.live = false;
     this.selectedAgent = "";
     this.hover = null;
@@ -355,6 +357,7 @@ export class Stage {
       this.views = [];
       this.effects.length = 0;
       this.cursor = 0;
+      this.cursorSeq = -1;
       this.lastBug = null;
       this.shake = { t: 0, dur: 0, mag: 0 };
       this.selectedAgent = "";
@@ -372,14 +375,19 @@ export class Stage {
     const total = this.events.length;
     const raw = Number.isFinite(Number(index)) ? Math.floor(Number(index)) : 0;
     const next = clamp(raw, 0, total);
-    const previous = clamp(this.cursor, 0, total);
     this.cursor = next;
     this.live = Boolean(live);
 
-    const forward = next > previous;
+    /* New and rewound events are told apart by journal seq, not by array
+     * index: above MAX_EVENTS the window keeps its length while its contents
+     * slide, so an index range would read "nothing new" forever. */
+    const previousSeq = this.cursorSeq;
+    const nextSeq = next > 0 ? Number(this.events[next - 1].seq) : -1;
+    this.cursorSeq = nextSeq;
+    const forward = nextSeq > previousSeq;
     const canAnimate = Boolean(animate) && !this.reducedMotion;
 
-    if (!forward && next < previous) {
+    if (nextSeq < previousSeq) {
       /* a seek backwards rewinds the floor: drop in-flight effects */
       this.effects.length = 0;
     }
@@ -388,12 +396,13 @@ export class Stage {
     this._syncAgents(canAnimate);
 
     if (canAnimate && forward) {
-      /* newly revealed events are events[previous .. next - 1] */
-      const delta = next - previous;
-      const from = delta > 6 ? Math.max(previous, next - 3) : previous;
-      for (let i = from; i < next; i += 1) {
-        this._spawnForEvent(this.events[i]);
+      const fresh = [];
+      for (let i = next - 1; i >= 0 && Number(this.events[i].seq) > previousSeq; i -= 1) {
+        fresh.push(this.events[i]);
       }
+      /* fresh is newest-first; a large jump animates only its last three */
+      const shown = fresh.length > 6 ? fresh.slice(0, 3) : fresh;
+      for (let i = shown.length - 1; i >= 0; i -= 1) this._spawnForEvent(shown[i]);
     }
 
     this._updateChrome();
@@ -580,10 +589,16 @@ export class Stage {
       roster.push(raw);
     }
     for (const event of this.events) {
-      const name = event && typeof event.agent === "string" ? event.agent : "";
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      roster.push({ name, role: name, color: "" });
+      /* Reviewers a review_dispatch names belong on the floor too, even
+       * before they write an event of their own. */
+      const names = [event && typeof event.agent === "string" ? event.agent : ""];
+      if (event && event.type === "review_dispatch" && Array.isArray(event.agents)) names.push(...event.agents);
+      for (const raw of names) {
+        const name = String(raw || "");
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        roster.push({ name, role: name, color: "" });
+      }
     }
     return roster;
   }
@@ -635,16 +650,27 @@ export class Stage {
     this.phaseState = { current, completed };
   }
 
+  /* Per agent, up to the cursor: its latest event and that event's index,
+   * the last of the four rooms its events placed it in, and the index of the
+   * latest review_dispatch that named it as a reviewer. */
   _lastEventsByAgent() {
     const lastByName = new Map();
     const lastIdxByName = new Map();
+    const lastRoomByName = new Map();
+    const reviewIdxByName = new Map();
     for (let i = 0; i < this.cursor && i < this.events.length; i += 1) {
       const event = this.events[i];
-      if (!event || typeof event.agent !== "string" || !event.agent) continue;
+      if (!event) continue;
+      if (event.type === "review_dispatch" && Array.isArray(event.agents)) {
+        for (const reviewer of event.agents) if (reviewer) reviewIdxByName.set(String(reviewer), i);
+      }
+      if (typeof event.agent !== "string" || !event.agent) continue;
       lastByName.set(event.agent, event);
       lastIdxByName.set(event.agent, i);
+      const room = roomFamilyOf(event);
+      if (room) lastRoomByName.set(event.agent, room);
     }
-    return { lastByName, lastIdxByName };
+    return { lastByName, lastIdxByName, lastRoomByName, reviewIdxByName };
   }
 
   /* The run's lifecycle as of the cursor, walked over the events shown so
@@ -670,7 +696,7 @@ export class Stage {
   }
 
   _computeViews() {
-    const { lastByName, lastIdxByName } = this._lastEventsByAgent();
+    const { lastByName, lastIdxByName, lastRoomByName, reviewIdxByName } = this._lastEventsByAgent();
     const lifecycle = this._lifecycleAtCursor();
     this.endEventIdx = lifecycle.endIdx;
     this.cursorWrapup = lifecycle.wrapup;
@@ -696,11 +722,18 @@ export class Stage {
         zone = "tower";
         active = true;
         family = familyOf(latest && latest.phase) || current;
-      } else if (latest) {
-        family = familyOf(latest.phase);
+      } else if (latest || reviewIdxByName.has(name)) {
+        /* The room is the latest event's phase family; an OTHER-family event
+         * keeps the agent in the last room it had. A reviewer stands on the
+         * deck while its latest event is a review or a finding, or while a
+         * review_dispatch names it and it has done nothing since. Real
+         * reviews rarely open a REVIEW phase, so their events inherit TEST:
+         * the category, not the phase family, keeps a reviewer on the deck. */
+        family = roomFamilyOf(latest) || lastRoomByName.get(name) || "";
         const phaseDone = Boolean(family && completed.has(family));
-        const type = String(latest.type || "");
-        const isReview = type === "review_dispatch" || type === "review";
+        const reviewIdx = reviewIdxByName.has(name) ? reviewIdxByName.get(name) : -1;
+        const isReview = Boolean(latest && (REVIEW_CATEGORIES.has(latest.category) || latest.phase_family === "REVIEW"))
+          || reviewIdx > latestIdx;
         if (ended) {
           zone = "lounge";
         } else if (isReview) {
@@ -708,9 +741,6 @@ export class Stage {
           active = true;
         } else if (phaseDone) {
           zone = "lounge";
-        } else if (family && (current === family || WORK_EVENT_TYPES.has(type))) {
-          zone = "room";
-          active = true;
         } else if (family) {
           zone = "room";
           active = true;

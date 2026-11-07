@@ -631,6 +631,20 @@ it up to the cursor, the same rule as the server's run status (a later
 `session_start` or any other event brings it back); the SHIPPED stamp
 fires only for a wrap-up `session_end` (`source` is `wrap-up`), the PR stamp
 uses the wrap-up at or before the cursor, and confetti only a MERGED one.
+Placement at the cursor, per agent:
+- Room: the agent's latest event's `phase_family` when it is PREPARE,
+  ARCHITECT, CODE or TEST. An event whose family is REVIEW or OTHER keeps the
+  agent in the last room it had.
+- Review deck: the agent stands on the deck while its latest event has
+  category `review` or `finding` (or `phase_family` REVIEW), or while a
+  `review_dispatch` names it in `agents` and it has no later event of its own.
+  Real reviews seldom open a REVIEW phase, so their events usually inherit
+  TEST; the category, not the phase family, keeps a reviewer on the deck.
+- Every reviewer a `review_dispatch` names is on the floor, even before it acts.
+- New-event detection uses journal `seq`, not array position. Events with a
+  seq above the last one shown are new; a cursor moving back by seq is a
+  rewind. Effects therefore keep firing after the capped window starts
+  sliding.
 Canvas is internally laid out at 960×440 logical pixels and scaled by CSS; use
 devicePixelRatio for sharpness. It owns `#stage-caption` text.
 
