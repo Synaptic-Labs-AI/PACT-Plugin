@@ -357,7 +357,7 @@ class TestDiscovery:
 
     def test_hidden_and_malformed_components_are_skipped(self, tmp_path):
         root = make_root(tmp_path)
-        write_journal(root, "PACT-prompt", "..", basic_events())
+        write_journal(root, "PACT-prompt", ".sess-dot", basic_events())
         write_journal(root, ".hidden", "sess", basic_events())
         write_journal(root, "PACT-prompt", "sess-1", basic_events())
         refs = discovery.discover_sessions(roots_for(root, tmp_path))
@@ -525,16 +525,14 @@ class TestJournalRead:
         inside 4 x SUMMARY_TAIL_BYTES (512KB) is recovered; one just beyond
         it is out of budget and leaves last_phase empty.
 
-        The budget is pinned ABSOLUTELY (CONTRACT.md documents 512KB), not
-        derived from the constant under test — a fixture derived from
-        journal._PHASE_SCAN_MAX_WINDOWS adapts to a mutation of that constant
-        and stays green through a silent contract change.
+        The budget is pinned as an absolute byte count, not derived from
+        the window size or the window count: a fixture derived from either
+        constant adapts to a change of it and stays green.
         """
+        scan_budget = 512 * 1024
         assert (
-            journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES
-            == 4 * settings.SUMMARY_TAIL_BYTES
+            journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES == scan_budget
         ), "the documented 512KB scan budget changed; update CONTRACT.md with it"
-        scan_budget = 4 * settings.SUMMARY_TAIL_BYTES
         phase = (
             json.dumps(
                 {"v": 1, "type": "phase_transition", "ts": "2026-01-01T00:00:00Z",
@@ -644,16 +642,21 @@ class TestJournalRead:
             {"v": 1, "type": "phase_transition", "phase": "CODE",
              "status": "started", "ts": "2026-01-01T00:01:00Z"},
         ]
-        events += [
-            {"v": 1, "type": "lifecycle_decision",
-             "ts": f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z",
-             "tool_name": "X", "verdict": "allow"}
-            for index in range(120)
-        ]
+        filler = {"v": 1, "type": "lifecycle_decision", "ts": "2026-01-01T00:02:00Z",
+                  "tool_name": "X", "advisories_count": 0, "rules": [],
+                  "advisories": [], "verdict": "allow", "pad": "x" * 400}
+        filler_len = len(json.dumps(filler, separators=(",", ":"))) + 1
+        # Push the markers past every backward-scan window, but keep them in
+        # the head window, so only the head read can see them.
+        budget = journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES
+        events += [filler] * (budget // filler_len + 50)
         events.append({"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"})
-        summary = journal.summarize_journal(
-            write_journal(root, "proj", "wrapup", events), now=now
-        )
+        path = write_journal(root, "proj", "wrapup", events)
+        assert path.stat().st_size > budget
+        assert journal._scan_back(
+            path, path.stat().st_size, frozenset({"phase_transition"})
+        ) == {}
+        summary = journal.summarize_journal(path, now=now)
         assert summary.run_kind == "orchestrate"
         assert summary.status == "ended"
 
@@ -717,6 +720,7 @@ class TestClassify:
     def test_handoff_schema_complete_for_full_payload(self):
         payload = {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
         fields = classify.extract_handoff_fields(payload)
+        assert fields == {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
         assert classify.handoff_schema_complete_raw(payload) is True
 
     def test_handoff_list_valued_fields_are_joined_not_dropped(self):
@@ -735,7 +739,7 @@ class TestClassify:
     def test_handoff_empty_list_field_counts_as_present(self):
         """An explicit empty list is PRESENT under the presence-only schema.
 
-        The real-world shape (measured by qa): all five required keys carry
+        A common real shape: all five required keys carry
         values and open_questions is an empty list. Dropping it to None would
         badge a valid handoff incomplete; it renders "(none)" instead.
         """
@@ -886,6 +890,121 @@ class TestClassify:
 # ---------------------------------------------------------------------------
 # Team config, cloud roster and task store
 # ---------------------------------------------------------------------------
+
+
+class TestRedaction:
+    """Credential-shaped text never survives a payload string helper."""
+
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "ghp_" + "a1" * 12,
+            "gho_" + "B" * 22,
+            "ghu_" + "c" * 22,
+            "ghs_" + "D" * 22,
+            "ghr_" + "e" * 22,
+            "github_pat_" + "F_1" * 8,
+            "sk-ant-api03-" + "G" * 24,
+            "sk-proj-" + "h" * 24,
+            "AKIA" + "ABCDEFGH12345678",
+            "ASIA" + "ABCDEFGH12345678",
+            "xoxa-" + "1" * 12,
+            "xoxb-" + "2" * 12,
+            "xoxp-" + "3" * 12,
+            "xoxr-" + "4" * 12,
+            "xoxs-" + "5" * 12,
+            "Bearer " + "abc.def_ghi",
+            "bearer " + "Z" * 12,
+            "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH " + "PRIVATE KEY-----",
+        ],
+        ids=lambda secret: secret.split("\n")[0][:16],
+    )
+    def test_a_credential_value_is_replaced(self, secret):
+        text = classify.redact(f"before {secret} after")
+        assert text == f"before {classify.REDACTED} after"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("password=hunter2", "password=[redacted]"),
+            ("PASSWD: hunter2 next", "PASSWD: [redacted] next"),
+            ('secret = "two words"', "secret = [redacted]"),
+            ("token: 'abc def'", "token: [redacted]"),
+            ("api_key=k1", "api_key=[redacted]"),
+            ("api-key=k1", "api-key=[redacted]"),
+            ("apikey=k1", "apikey=[redacted]"),
+            ("Authorization: Basic", "Authorization: [redacted]"),
+            ("access_token=t1", "access_token=[redacted]"),
+            ("client-secret=c1", "client-secret=[redacted]"),
+        ],
+    )
+    def test_an_assignment_keeps_its_name_and_loses_its_value(self, raw, expected):
+        assert classify.redact(raw) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the token count rose",
+            "ghp_short",
+            "sk-tooshort",
+            "AKIA lowercase akiaabcdefgh12345678",
+            "a bearer of news",
+            "passwords are discussed here",
+        ],
+    )
+    def test_ordinary_prose_is_left_alone(self, text):
+        assert classify.redact(text) == text
+
+    def test_redaction_runs_before_the_length_cap(self):
+        """A secret straddling the cap must not leave a matchable-no-longer
+        prefix behind: the text is redacted first, then bounded."""
+        secret = "ghp_" + "A" * 30
+        lead = "x" * (settings.MAX_TITLE_CHARS - 10) + " "
+        text = classify.as_text(lead + secret)
+        assert len(text) <= settings.MAX_TITLE_CHARS
+        assert "ghp_" not in text
+
+    def test_a_credential_named_key_withholds_its_whole_value(self):
+        trimmed = classify.trim_raw(
+            {
+                "cookie": "session=abc",
+                "Credential": {"user": "u", "pass": "p"},
+                "x_api_key": ["k1", "k2"],
+                "authorization": 12345,
+                "note": "plain",
+            }
+        )
+        for key in ("cookie", "Credential", "x_api_key", "authorization"):
+            assert trimmed[key] == classify.REDACTED, key
+        assert trimmed["note"] == "plain"
+
+    def test_a_nested_string_leaf_is_redacted(self):
+        secret = "sk-ant-" + "Q" * 24
+        trimmed = classify.trim_raw({"a": {"b": [{"c": f"see {secret}"}]}})
+        assert secret not in json.dumps(trimmed)
+        assert classify.REDACTED in json.dumps(trimmed)
+
+    @pytest.mark.parametrize("depth", [4, 5, 6, 9])
+    def test_a_string_at_and_past_the_depth_cap_is_redacted(self, depth):
+        secret = "ghp_" + "N" * 24
+        nested: object = f"leaf {secret}"
+        for _ in range(depth):
+            nested = {"a": nested}
+        dumped = json.dumps(classify.trim_raw({"root": nested}))
+        assert secret not in dumped
+
+    def test_a_list_item_at_the_depth_cap_is_redacted(self):
+        secret = "ghp_" + "L" * 24
+        nested: object = [f"leaf {secret}"]
+        for _ in range(4):
+            nested = {"a": nested}
+        assert secret not in json.dumps(classify.trim_raw({"root": nested}))
+
+    def test_a_list_valued_handoff_field_is_redacted(self):
+        secret = "xoxb-" + "9" * 14
+        fields = classify.extract_handoff_fields({"produced": [f"used {secret}", "ok"]})
+        assert secret not in fields["produced"]
+        assert classify.REDACTED in fields["produced"]
 
 
 class TestRoster:
@@ -1414,24 +1533,35 @@ class TestPhasesRerunSkip:
 
 
 class TestCaps:
-    def test_gates_by_tool_is_capped_with_an_honest_total(self):
-        """by_tool must not grow without bound with distinct tool names."""
+    def test_gates_by_tool_keeps_the_busiest_tools_with_an_honest_total(self):
+        """by_tool is capped, and the cap keeps the tools with the MOST
+        decisions: tool<i> has i+1 decisions, so the busiest are the highest
+        indexes and the kept order is strictly descending."""
+        total = settings.MAX_GATE_TOOLS + 20
         events = [
             {
                 "type": "lifecycle_decision",
-                "seq": index,
-                "raw": {"tool_name": f"tool{index}", "verdict": "allow"},
+                "seq": index * 100 + repeat,
+                "raw": {"tool_name": f"tool{index:03d}", "verdict": "allow"},
             }
-            for index in range(settings.MAX_GATE_TOOLS + 20)
+            for index in range(total)
+            for repeat in range(index + 1)
         ]
         gates = model.derive_gates(events)
-        assert len(gates["by_tool"]) == settings.MAX_GATE_TOOLS
-        assert gates["by_tool_total"] == settings.MAX_GATE_TOOLS + 20
-        # the kept tools are the busiest, deterministically ordered
-        kept = list(gates["by_tool"])
-        assert kept == sorted(
-            kept, key=lambda name: (-sum(gates["by_tool"][name].values()), name)
-        )
+        assert gates["by_tool_total"] == total
+        expected = [f"tool{index:03d}" for index in reversed(range(20, total))]
+        assert list(gates["by_tool"]) == expected
+        assert gates["by_tool"][expected[0]]["allow"] == total
+
+    def test_top_rules_are_ranked_by_count(self):
+        events = [
+            {"type": "lifecycle_decision", "seq": seq,
+             "raw": {"tool_name": "T", "verdict": "advisory", "rules": [rule]}}
+            for seq, rule in enumerate(["alpha"] + ["zulu"] * 3 + ["mike"] * 2)
+        ]
+        ranked = [entry["rule"] for entry in model.derive_gates(events)["top_rules"]]
+        # Count order differs from name order, so either sort key is visible.
+        assert ranked == ["zulu", "mike", "alpha"]
 
     def test_event_cap_keeps_most_recent_and_marks_truncated(self, tmp_path):
         root = make_root(tmp_path)
@@ -1823,6 +1953,122 @@ class TestDemo:
         assert "/Users/demo/Sites/pact-demo" in blob  # obviously synthetic
         home = str(Path.home())
         assert home not in blob
+
+
+# ---------------------------------------------------------------------------
+# Bounds and validators on untrusted input
+# ---------------------------------------------------------------------------
+
+
+class TestComponentValidation:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "a/b",
+            "a\\b",
+            "a\x00b",
+            "a\x01b",
+            "a\nb",
+            "a\x7fb",
+            "x" * (discovery._MAX_COMPONENT + 1),
+            42,
+            None,
+        ],
+        ids=lambda value: repr(value)[:24],
+    )
+    def test_unsafe_component_is_refused(self, value):
+        assert discovery.valid_component(value) is False
+
+    @pytest.mark.parametrize(
+        "value", ["PACT-prompt", "sess-1", "My_App.v2", "x" * discovery._MAX_COMPONENT]
+    )
+    def test_ordinary_component_is_accepted(self, value):
+        assert discovery.valid_component(value) is True
+
+
+class TestJournalReadBounds:
+    def test_blank_type_string_is_a_skipped_line(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(
+            root,
+            "proj",
+            "sess",
+            [
+                {"v": 1, "type": "session_start", "ts": stamp(0)},
+                {"v": 1, "type": "   ", "ts": stamp(1)},
+            ],
+        )
+        read = journal.read_journal(path)
+        assert [event.data["type"] for event in read.events] == ["session_start"]
+        assert read.skipped_lines == 1
+
+    def test_warnings_are_capped_while_every_skip_is_counted(self, tmp_path):
+        root = make_root(tmp_path)
+        bad = settings.MAX_WARNINGS + 5
+        path = write_journal(root, "proj", "sess", b"{not json\n" * bad)
+        read = journal.read_journal(path)
+        assert read.skipped_lines == bad
+        assert len(read.warnings) == settings.MAX_WARNINGS
+
+    def test_summary_reports_the_newest_event_of_a_long_tail(self, tmp_path):
+        """More events than the tail keeps: the summary still names the last."""
+        root = make_root(tmp_path)
+        events = [{"v": 1, "type": "session_start", "ts": stamp(0)}]
+        events += [
+            {"v": 1, "type": "lifecycle_decision", "ts": stamp(1, second % 60),
+             "tool_name": "X", "advisories_count": 0, "rules": [],
+             "advisories": [], "verdict": "allow"}
+            for second in range(200)
+        ]
+        events.append({"v": 1, "type": "commit", "ts": stamp(30), "sha": "abc1234",
+                       "message": "m", "phase": "CODE"})
+        path = write_journal(root, "proj", "sess", events)
+        summary = journal.summarize_journal(path, now=datetime(2026, 11, 2, tzinfo=UTC))
+        assert summary.last_event_type == "commit"
+        assert summary.updated_at == stamp(30)
+
+
+class TestBoundedText:
+    def test_line_breaks_collapse_to_spaces(self):
+        assert classify.as_text("a\nb\r\nc\rd") == "a b c d"
+
+    def test_raw_nesting_is_cut_at_the_depth_cap(self):
+        nested: dict = {"leaf": "deep-value"}
+        for _ in range(10):
+            nested = {"a": nested}
+        trimmed = json.dumps(classify.trim_raw(nested))
+        assert "[truncated]" in trimmed
+        assert "deep-value" not in trimmed
+
+    def test_raw_mapping_keys_are_capped_and_marked(self):
+        trimmed = classify.trim_raw({f"k{index}": index for index in range(60)})
+        assert trimmed["_truncated_keys"] is True
+        assert len(trimmed) == 41
+
+
+class TestVarietyNormalisation:
+    def test_a_boolean_dimension_is_not_a_score(self):
+        assert settings.normalize_variety({"novelty": True}) is None
+
+    def test_dimensions_are_clamped(self):
+        variety = settings.normalize_variety({"scope": 500, "risk": -3})
+        assert variety["scope"] == 99
+        assert variety["risk"] == 0
+
+
+class TestPythonFloor:
+    @pytest.mark.parametrize(
+        ("version", "ok"),
+        [((3, 12, 0), True), ((3, 13, 1), True), ((4, 0), True),
+         ((3, 11, 99), False), ((2, 7), False), ((), False)],
+    )
+    def test_floor_is_inclusive_at_the_minimum(self, version, ok):
+        assert settings.python_version_ok(version) is ok
+
 
 # ---------------------------------------------------------------------------
 # Caps keep the newest and say so
