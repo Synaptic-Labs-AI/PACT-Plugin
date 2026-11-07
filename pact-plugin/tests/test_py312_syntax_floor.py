@@ -131,18 +131,7 @@ class TestDiscoveryFloor:
         # and the aggregate rules pass vacuously over those files — silently
         # green. Floor rather than exact count so adding files never breaks
         # it; bump the floor as the scanned roots grow, never lower it
-        # without a deliberate scope decision. History: lowered 63 -> 55
-        # when the dormant hooks/refresh/ package (8 modules) was removed;
-        # raised 55 -> 71 when skills/pact-memory/scripts and scripts were
-        # added; raised 71 -> 106 when this guard was rebuilt for the 3.12
-        # floor (measured 2026-10-30 at f1c44200: hooks 86 +
-        # skills/pact-memory/scripts 14 + scripts 6); raised 106 -> 117 when
-        # visualizer/ (the Mission Control backend) joined the scanned roots
-        # (measured 2026-11-03 at 68b34e08: hooks 86 +
-        # skills/pact-memory/scripts 14 + scripts 6 + visualizer 11 = 117);
-        # raised 117 -> 118 after the rebase onto main brought hooks/ to 87
-        # (measured 2026-11-04 at HEAD: hooks 87 +
-        # skills/pact-memory/scripts 14 + scripts 6 + visualizer 11 = 118).
+        # without a deliberate scope decision.
         #
         # COUNTING RULE, so the next reader RE-DERIVES instead of inheriting a
         # number: _SCANNED_FILES is every *.py that Path.rglob finds under
@@ -151,8 +140,8 @@ class TestDiscoveryFloor:
         # the day it was written.
         #
         # SLACK IS NOT A PROPERTY THIS COMMENT CAN PIN: it is today's count
-        # minus the current floor assertion (118 today), and it WIDENS on its
-        # own as files are added. The wider the slack, the more of a root can
+        # minus the floor asserted below, and it WIDENS on its own as files
+        # are added. The wider the slack, the more of a root can
         # disappear unnoticed. Re-measure and raise the floor when it has
         # drifted.
         #
