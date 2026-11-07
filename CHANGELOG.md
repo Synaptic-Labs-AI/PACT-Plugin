@@ -35,6 +35,28 @@ The merge-gate run record can now be certified when the suite runs under `pytest
 
 Under `pytest-xdist` the controller never collects, so every distributed run failed certification on a null collection count and xdist could not be adopted. The counts are not additive: every worker collects the whole suite, so a sum would be several times the corpus. The only faithful aggregate is the value every worker reports identically, and anything short of that must leave the record unprovable rather than plausible.
 
+## v4.8.27: the orchestrator relays milestones instead of falling silent
+
+### Summary
+
+The orchestrator's wait-in-silence rule now separates narration from a milestone. It stays silent on "waiting on X" and "still running". It reports a milestone, meaning something the user would act on and cannot otherwise see: a dispatch's result, a measured number, or a state change. The report is one line that carries the concrete fact rather than a description of the activity. The orchestrator relays each milestone as it reaches it, without being asked, and never polls or nudges a teammate to get one. When it wants a long dispatch reported mid-run, it asks for progress signals in that dispatch's brief, so the user sees milestones as they land rather than asking for status.
+
+### What landed
+
+- `agents/pact-orchestrator.md` §Wait in Silence: the list that defines a turn with no actionable content now includes "no milestone the user is owed", so that sentence is complete on its own.
+- The same section gains one paragraph, placed immediately after that rule. It does the following:
+  - It defines a milestone as something the user would act on and cannot otherwise see. That qualifier governs all three kinds: a dispatch's result, a measured number, and a state change.
+  - It requires the relay to be one line addressed to the user. The line carries the concrete fact, and is sent only when the fact is new since the last report to the user and is not a running tally of the same work.
+  - It states the tally test for a fan-out: a count of members finished is a tally, and a member's result the user would act on is a milestone.
+  - It states that "No actionable content" means nothing the team needs AND nothing the user is owed.
+  - It makes the orchestrator relay each milestone as it reaches it, never poll or nudge a teammate to obtain one, and ask for progress signals in the brief of a dispatch it wants reported mid-run.
+  - It bounds that ban: a nudge that resolves an ambiguous teammate state under §12 Intentional Waiting is not polling for a milestone, and a milestone carried by its reply is relayed like any other.
+- The paragraph separates narration from a milestone rather than carving an exception out of the silence rule. Filler calls stay with the filler-call rule, not the narration list. The surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
+
+### Why
+
+The silence rule named only what is actionable for the team, so its safe reading was silence on everything. Between dispatch and the awaited event the only interim progress signal arrived in teammate notifications the user never sees. The watcher rules already require the completion report; nothing required an interim one, so the user had to ask for status repeatedly. Naming the milestone case changes what the orchestrator does on a teammate turn, without reopening the narrate-the-wait and filler-call failures the section exists to prevent.
+
 ## v4.8.26: resolve all five Q5 counter definitions from the prose (issue #1705)
 
 ### Summary
