@@ -123,6 +123,10 @@ def _basename(value: object) -> str:
 # rather than trusted by every future consumer (select options, CLI output,
 # docs snippets). Anything else is replaced, and the caller adds a marker.
 _PROJECT_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# A non-orchestration session smaller than this that is not live is a
+# headless one-shot run, hidden from the session list by default.
+TRIVIAL_SESSION_BYTES = 2048
 
 
 def project_label(raw: object) -> tuple[str, bool]:
@@ -1604,6 +1608,7 @@ def derive_model(
     mtime: float = 0.0,
     activity_ts: float = 0.0,
     version: str = VERSION,
+    journal_caps: Sequence[str] = (),
 ) -> dict:
     """Derive the full contract model from an already-parsed journal.
 
@@ -1656,11 +1661,13 @@ def derive_model(
         )
 
     visible = classified
-    truncated = False
+    truncated_by: list[str] = [
+        name for name in ("journal_bytes",) if name in (journal_caps or ())
+    ]
     if len(visible) > MAX_EVENTS:
         dropped = len(visible) - MAX_EVENTS
         visible = visible[-MAX_EVENTS:]
-        truncated = True
+        truncated_by.append("events")
         collected_warnings.append(
             f"event feed truncated to the most recent {MAX_EVENTS} events "
             f"({dropped} earlier events omitted)"
@@ -1693,20 +1700,21 @@ def derive_model(
     variety.pop("_feature_source", None)
     wrapup = derive_wrapup(classified)
 
-    if handoffs_total > MAX_HANDOFFS or len(handoffs) < handoffs_total:
-        truncated = True
-        collected_warnings.append(
-            f"handoffs capped at the most recent {MAX_HANDOFFS}"
-        )
-    if tasks_total > MAX_TASKS:
-        truncated = True
-        collected_warnings.append(f"tasks capped at {MAX_TASKS}")
-    if findings_total > MAX_FINDINGS or len(findings) < findings_total:
-        truncated = True
-        collected_warnings.append(f"findings capped at {MAX_FINDINGS}")
-    if agents_total > MAX_AGENTS:
-        truncated = True
-        collected_warnings.append(f"agents capped at {MAX_AGENTS}")
+    # Every capped list keeps its NEWEST entries; each cap that bit is named
+    # in truncated_by and in one warning.
+    for name, kept, total, cap in (
+        ("tasks", len(tasks), tasks_total, MAX_TASKS),
+        ("handoffs", len(handoffs), handoffs_total, MAX_HANDOFFS),
+        ("commits", len(commits), commits_total, MAX_COMMITS),
+        ("reviews", len(reviews), reviews_total, MAX_REVIEWS),
+        ("findings", len(findings), findings_total, MAX_FINDINGS),
+        ("alerts", len(alerts), alerts_total, MAX_ALERTS),
+        ("checkpoints", len(checkpoints), checkpoints_total, MAX_CHECKPOINTS),
+        ("agents", len(agents), agents_total, MAX_AGENTS),
+    ):
+        if total > kept:
+            truncated_by.append(name)
+            collected_warnings.append(f"{name} capped at the most recent {cap} of {total}")
 
     # Finding severity breakdown counts the FULL stream (classified is not
     # capped), not just the bounded findings list carried in the response.
@@ -1771,7 +1779,8 @@ def derive_model(
         "wrapup": wrapup,
         "variety": variety,
         "metrics": metrics,
-        "truncated": truncated,
+        "truncated": bool(truncated_by),
+        "truncated_by": truncated_by,
         "warnings": collected_warnings[:MAX_WARNINGS],
     }
 
@@ -1899,6 +1908,7 @@ def build_model(ref: discovery.SessionRef, now: datetime | None = None) -> dict:
         now=now,
         mtime=read.mtime,
         activity_ts=activity_ts,
+        journal_caps=("journal_bytes",) if read.tail_only else (),
     )
 
 
@@ -1908,6 +1918,7 @@ def build_sessions_list(
     limit: int = DEFAULT_SESSIONS_LIMIT,
     project_filter: str = "",
     session_filter: str = "",
+    show_all: bool = False,
     now: datetime | None = None,
 ) -> dict:
     """Build the cheap /api/sessions payload.
@@ -1915,8 +1926,14 @@ def build_sessions_list(
     Location: model.build_sessions_list.
     Summary: One bounded head/tail read per journal (never a full parse), then
              filter with match_project / match_session, sort newest
-             updated_at first, and cap at ``limit``. ``started_at`` is None
-             when the head window has no timestamp.
+             updated_at first, and cap at ``limit``. Trivial sessions (not an
+             orchestration, under TRIVIAL_SESSION_BYTES and not live — the
+             headless one-shot runs) are hidden unless ``show_all``; entries
+             carry ``trivial``. The payload reports ``total`` (matches before
+             the limit), ``limit`` and ``hidden_trivial``. ``project_display``
+             is the original directory name for display, and
+             ``project_collision`` marks a label two different names fold to.
+             ``started_at`` is None when the head window has no timestamp.
     Used by: server (/api/sessions), cli (--list), tests.
     """
     reference = utcnow(now)
@@ -1948,15 +1965,32 @@ def build_sessions_list(
             "last_phase": summary.last_phase,
             "run_kind": summary.run_kind,
         }
+        entry["project_display"] = classify.redact(
+            _CONTROL_CHARS.sub("", raw_project)
+        )[:200]
+        entry["trivial"] = (
+            summary.run_kind != "orchestrate"
+            and int(summary.size) < TRIVIAL_SESSION_BYTES
+            and not summary.is_live
+        )
         if not project_conformed:
             # Visible marker, never a silent rewrite: the session stays in the
             # list and the payload says the label lost characters.
             entry["project_altered"] = True
         sessions.append(entry)
+    names_by_label: dict[str, set[str]] = {}
+    for entry in sessions:
+        names_by_label.setdefault(entry["project"], set()).add(raw_names[entry["key"]])
+    for entry in sessions:
+        entry["project_collision"] = len(names_by_label[entry["project"]]) > 1
     if project_filter:
         sessions = match_project(project_filter, sessions, raw_names)
     if session_filter:
         sessions = match_session(session_filter, sessions)
+    hidden_trivial = 0
+    if not show_all:
+        hidden_trivial = sum(1 for entry in sessions if entry["trivial"])
+        sessions = [entry for entry in sessions if not entry["trivial"]]
     sessions.sort(
         key=lambda entry: (
             entry.get("updated_at") or "",
@@ -1976,6 +2010,9 @@ def build_sessions_list(
         "generated_at": iso_utc(reference),
         "default_root": default_root,
         "roots": discovery.root_payload(roots),
+        "total": len(sessions),
+        "limit": int(limit),
+        "hidden_trivial": hidden_trivial,
         "sessions": sessions[:limit],
     }
 

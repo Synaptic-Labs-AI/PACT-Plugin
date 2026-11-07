@@ -837,7 +837,7 @@ def _both_views(root_dir, tmp_path, slug="proj", session_id="s1"):
     roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
     ref = discovery.find_session(roots, slug, session_id)
     full = model.build_model(ref)["meta"]
-    listed = model.build_sessions_list(roots)["sessions"][0]
+    listed = model.build_sessions_list(roots, show_all=True)["sessions"][0]
     return (full["status"], full["ended_by"]), (listed["status"], listed["ended_by"])
 
 
@@ -1396,3 +1396,72 @@ class TestClassifyFollowsTheWriters:
         variety = _events_of(payload, "variety_assessed")[0]
         assert variety["title"].startswith("Variety assessed")
         assert variety["detail"].startswith("novelty 3 ")
+
+
+class TestCapsKeepTheNewestAndSayWhich:
+    def test_events_cap_names_itself_and_keeps_the_newest(self, tmp_path, monkeypatch):
+        from visualizer import model
+
+        monkeypatch.setattr(model, "MAX_EVENTS", 5)
+        payload = _build(tmp_path, [{"type": "commit", "sha": str(i), "message": "m",
+                                     "phase": "CODE"} for i in range(9)])
+        assert payload["truncated"] is True and "events" in payload["truncated_by"]
+        assert payload["events"][-1]["title"].startswith("Commit 8")
+        assert payload["events"][0]["seq"] > 0
+
+    def test_over_cap_journal_parses_its_tail_with_true_seq(self, tmp_path, monkeypatch):
+        from visualizer import discovery, journal, model
+
+        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", 400)
+        root_dir = tmp_path / "root"
+        events = [_START] + [{"type": "commit", "sha": f"{i:03d}", "message": "m" * 20,
+                              "phase": "CODE"} for i in range(30)]
+        path = _write_session(root_dir, events)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        payload = model.build_model(discovery.find_session(roots, "proj", "s1"))
+        assert "journal_bytes" in payload["truncated_by"]
+        lines = path.read_text().splitlines()
+        for event in payload["events"]:
+            assert json.loads(lines[event["seq"]])["type"] == event["type"]
+        assert payload["events"][-1]["seq"] == len(lines) - 1
+        assert any("last 400 bytes" in warning for warning in payload["warnings"])
+
+    def test_trivial_headless_sessions_are_hidden_by_default(self, tmp_path):
+        from visualizer import model
+
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START], session_id="tiny", age_s=3600)
+        _write_session(root_dir, [_START, {"type": "phase_transition", "phase": "CODE",
+                                           "status": "started"}],
+                       session_id="orch", age_s=3600)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        listing = model.build_sessions_list(roots)
+        assert [entry["session_id"] for entry in listing["sessions"]] == ["orch"]
+        assert (listing["total"], listing["hidden_trivial"], listing["limit"]) == (1, 1, 500)
+        everything = model.build_sessions_list(roots, show_all=True)
+        assert {entry["session_id"]: entry["trivial"] for entry in everything["sessions"]} == {
+            "tiny": True, "orch": False}
+
+    def test_project_display_and_collision(self, tmp_path):
+        from visualizer import model
+
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [{**_START, "project_dir": "/x/My App"}], slug="a",
+                       session_id="s1")
+        _write_session(root_dir, [{**_START, "project_dir": "/x/My_App"}], slug="b",
+                       session_id="s2")
+        _write_session(root_dir, [{**_START, "project_dir": "/x/caf\u00e9\u0007"}], slug="c",
+                       session_id="s3")
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        entries = {entry["session_id"]: entry for entry in
+                   model.build_sessions_list(roots, show_all=True)["sessions"]}
+        assert entries["s1"]["project"] == entries["s2"]["project"] == "My_App"
+        assert entries["s1"]["project_collision"] and entries["s2"]["project_collision"]
+        assert entries["s1"]["project_display"] == "My App"
+        assert entries["s3"]["project_display"] == "caf\u00e9"
+        assert entries["s3"]["project_collision"] is False
+
+    def test_api_sessions_all_shows_trivial_and_echoes(self, live_server):
+        payload = _get_json(live_server.server_port, "/api/sessions?all=1", live_server.key)
+        assert payload["filters"] == {"all": "1"}
+        assert payload["hidden_trivial"] == 0

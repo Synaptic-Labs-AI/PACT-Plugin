@@ -278,6 +278,10 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
     events: [{ seq: 0, ts: "2026-01-01T00:00:12Z" }],
   }, 0) === 0);
 
+  /* Past the event cap, cursor 0 is the window's first event, not 0s. */
+  const capped = { meta, truncated_by: ["events"], events: [{ seq: 900, ts: "2026-01-01T01:00:00Z" }] };
+  check("a truncated window's cursor 0 reads its first event", missionSecondsAt(capped, 0) === 3600);
+
   /* A pending phase (null boundaries) must not become the current phase.
    * Number(null) is 0, which used to make every pending phase look started. */
   const staged = {
@@ -430,7 +434,8 @@ export const api = {
   healthCalls: 0,
   sessions: (args) => {
     api.sessionsCalls.push(Object.assign({}, args));
-    return api.sessionsDeferred ? deferred("sessions", args) : Promise.resolve(api.sessionsData);
+    if (api.sessionsDeferred) return deferred("sessions", args);
+    return Promise.resolve(api.sessionsFor ? api.sessionsFor(args || {}) : api.sessionsData);
   },
   session: (args) => deferred("session", args),
   demo: (args) => deferred("demo", args || {}),
@@ -882,6 +887,55 @@ check("the error names the id", document.getElementById("error-text").textConten
 """, tmp_path, search="?session=abcd1234")
 
 
+def test_the_run_list_says_when_it_is_capped_and_can_show_all(tmp_path):
+    """'showing N of total', and a toggle that refetches with all=1."""
+    _run_app_scenario(r"""
+const other = { root: "r", slug: "p", session_id: "S2", is_live: false, status: "ended", updated_at: "2026-10-01" };
+api.sessionsFor = (args) => ({
+  roots: [{ id: "r", label: "r" }], sessions: [ended, other], default_root: "r",
+  total: args.all ? 2 : 5, limit: 500, hidden_trivial: args.all ? 0 : 3, filters: {},
+});
+await import("./app.js");
+await tick();
+const note = document.getElementById("list-note");
+const toggle = document.getElementById("btn-show-all");
+check("a capped list says how many it shows", note.hidden === false && note.textContent === "showing 2 of 5");
+check("hidden trivial runs are offered", toggle.hidden === false && toggle.textContent === "SHOW 3 HIDDEN");
+toggle.fire("click");
+await tick();
+check("the toggle refetches with all", api.sessionsCalls.at(-1).all === true);
+check("the toggle then offers to hide them again", toggle.textContent === "HIDE TRIVIAL" && toggle.attrs["aria-pressed"] === "true");
+check("an uncapped list hides the note", note.hidden === true);
+""", tmp_path)
+
+
+def test_choosing_a_project_reaches_its_runs_past_the_cap(tmp_path):
+    """A project fetch adds that project's runs the capped list left out."""
+    _run_app_scenario(r"""
+const capped = { root: "r", slug: "q", session_id: "Q1", is_live: false, status: "ended", updated_at: "2026-11-01", project_display: "Café", project_collision: true };
+const older = { root: "r", slug: "q", session_id: "Q0", is_live: false, status: "ended", updated_at: "2026-09-01" };
+api.sessionsFor = (args) => ({
+  roots: [{ id: "r", label: "r" }], default_root: "r", filters: {},
+  sessions: args.project === "q" ? [capped, older] : [ended, capped],
+});
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "Q1", "e0"));
+await tick();
+const project = document.getElementById("project-select");
+const option = project.options.find((o) => o.value === "q");
+check("the option shows the original directory name and marks a collision",
+  option && option.textContent === "Café ⚠" && String(option.attrs["aria-label"]).includes("share this label"));
+project.value = "q";
+project.fire("change");
+await tick();
+await tick();
+check("the project's own list is fetched", api.sessionsCalls.at(-1).project === "q");
+check("its run past the cap becomes selectable",
+  document.getElementById("session-select").options.some((o) => o.value === "r::q::Q0"));
+""", tmp_path)
+
+
 def test_a_stale_poll_never_overwrites_a_reopened_run(tmp_path):
     """A poll in flight when the same run is reopened is dropped."""
     _run_app_scenario(r"""
@@ -1091,6 +1145,12 @@ const texts = (n) => walk(n).map((x) => x.textContent).filter(Boolean);
   const doneLevel = walk(done).find((n) => String(n.className).startsWith("alert-level"));
   check("an alert-level alert is styled as a warning", doneLevel.className.includes("is-warn"));
   check("a resolved alert shows its resolution", texts(done).includes("Resolved: fixed in 3"));
+  const summary = Object.assign(Object.create(Panels.prototype), {
+    _leftLivePills: [], _nodes: {}, cursor: 0, live: false,
+    model: { meta: {}, metrics: {}, events: [], truncated: true, truncated_by: ["events", "tasks"] },
+  });
+  check("the run card names what the caps dropped",
+    texts(summary._summaryCard()).includes("Showing the newest events, tasks only; counters remain authoritative."));
   host.model = { tasks: [{ id: "7", key: "7:architect", status: "handoff" }], metrics: {} };
   const link = host._taskCardLink("7:architect", "TASK #7", "handoff-task");
   check("a reference to a card on the board is a button", link.tagName === "BUTTON");

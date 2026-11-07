@@ -65,7 +65,8 @@ def build_payload(root: Path, slug: str, session_id: str) -> dict:
 
 
 def list_payload(root: Path, **filters) -> dict:
-    return model.build_sessions_list(roots_for(root), **filters)
+    """The session list with trivial sessions shown: these fixtures are small."""
+    return model.build_sessions_list(roots_for(root), show_all=True, **filters)
 
 
 def handoff_event(task_id: str, handoff: object) -> dict:
@@ -639,7 +640,7 @@ def _lifecycle_journal(root: Path, kinds: list[str]) -> Path:
 def _both_views(root: Path, now: datetime) -> tuple[tuple, tuple]:
     ref = discovery.find_session(roots_for(root), "proj", "sess")
     meta = model.build_model(ref, now=now)["meta"]
-    row = model.build_sessions_list(roots_for(root), now=now)["sessions"][0]
+    row = model.build_sessions_list(roots_for(root), now=now, show_all=True)["sessions"][0]
     return (meta["status"], meta["ended_by"]), (row["status"], row["ended_by"])
 
 

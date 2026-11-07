@@ -335,7 +335,7 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         self._send_json(200, payload)
 
     def _serve_sessions(self, query: str) -> None:
-        """GET /api/sessions?limit=&project=&session= -> the cheap session list.
+        """GET /api/sessions?limit=&project=&session=&all= -> the cheap session list.
 
         ``project`` must be a label (settings.PROJECT_LABEL_RE) and
         ``session`` an id or id prefix (settings.SESSION_ID_RE); either
@@ -355,6 +355,9 @@ class MissionControlHandler(BaseHTTPRequestHandler):
                 self._send_error(400, "session must match [A-Za-z0-9-]{8,64}")
                 return
             filters["session"] = session
+        show_all = _first_param(params, "all") in {"1", "true"}
+        if show_all:
+            filters["all"] = "1"
         limit = DEFAULT_SESSIONS_LIMIT
         raw_limit = _first_param(params, "limit")
         if raw_limit is not None:
@@ -370,6 +373,7 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             limit=limit,
             project_filter=filters.get("project", ""),
             session_filter=filters.get("session", ""),
+            show_all=show_all,
             now=_now(),
         )
         # Always present (empty when unfiltered) so the page can tell "no runs"

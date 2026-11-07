@@ -66,6 +66,7 @@ class JournalRead:
     skipped_lines: int = 0
     mtime: float = 0.0
     size: int = 0
+    tail_only: bool = False
 
     @property
     def etag(self) -> str:
@@ -195,29 +196,36 @@ def read_journal(path: Path) -> JournalRead:
              index. Blank lines are skipped silently; malformed JSON,
              non-object values, missing/blank type, non-UTF-8 bytes and a
              partially written final line are skipped with one bounded
-             warning each (counted, not enumerated forever). A missing,
-             unreadable, or larger-than-MAX_JOURNAL_BYTES file yields an
-             empty read with the stat zeroed.
+             warning each (counted, not enumerated forever). A journal larger
+             than MAX_JOURNAL_BYTES is parsed from its LAST MAX_JOURNAL_BYTES
+             only (``tail_only``, with a warning): the partial first line is
+             dropped and the skipped prefix's newlines are counted, so seq
+             stays the true file line index. A missing or unreadable file
+             yields an empty read.
     Used by: model.build_model, server, tests.
     """
     read = JournalRead()
     stat = journal_stat(path)
     if stat is not None:
         read.mtime, read.size = stat
-    if stat is not None and stat[1] > MAX_JOURNAL_BYTES:
-        _add_warning(
-            read.warnings,
-            f"journal is {stat[1]} bytes (over the {MAX_JOURNAL_BYTES} "
-            "byte cap); refusing the full parse",
-        )
-        return read
+    first_index = 0
     try:
-        data = path.read_bytes()
+        if stat is not None and stat[1] > MAX_JOURNAL_BYTES:
+            read.tail_only = True
+            data, first_index = _read_tail_lines(path, stat[1] - MAX_JOURNAL_BYTES)
+            _add_warning(
+                read.warnings,
+                f"journal is {stat[1]} bytes (over the {MAX_JOURNAL_BYTES} byte cap); "
+                f"showing only its last {MAX_JOURNAL_BYTES} bytes",
+            )
+        else:
+            data = path.read_bytes()
     except OSError:
         _add_warning(read.warnings, "journal could not be read")
         return read
 
-    for index, raw_line in _iter_lines(data):
+    for offset, raw_line in _iter_lines(data):
+        index = first_index + offset
         read.lines_total += 1
         if not raw_line.strip():
             continue
@@ -234,6 +242,32 @@ def read_journal(path: Path) -> JournalRead:
         read.events.append(RawEvent(seq=index, data=value))
         read.valid_events += 1
     return read
+
+
+def _read_tail_lines(path: Path, start: int) -> tuple[bytes, int]:
+    """The whole lines from byte ``start`` to EOF, and the first one's line index.
+
+    The bytes before ``start`` are only scanned for newlines (in chunks), so
+    the returned data's first line keeps its true file line index. A line cut
+    by ``start`` is dropped whole.
+    """
+    newlines = 0
+    with path.open("rb") as handle:
+        remaining = start
+        last = b"\n"
+        while remaining > 0:
+            chunk = handle.read(min(remaining, 1 << 20))
+            if not chunk:
+                break
+            newlines += chunk.count(b"\n")
+            last = chunk[-1:]
+            remaining -= len(chunk)
+        data = handle.read()
+    if last != b"\n":
+        cut = data.find(b"\n")
+        data = b"" if cut == -1 else data[cut + 1:]
+        newlines += 1
+    return data, newlines
 
 
 def _read_window(path: Path, start: int | None, end: int | None) -> bytes:

@@ -2620,5 +2620,6 @@
   "variety_total": 10
  },
  "truncated": false,
+ "truncated_by": [],
  "warnings": []
 }

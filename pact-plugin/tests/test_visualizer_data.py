@@ -11,6 +11,7 @@ Used by: pytest (data half of the visualizer backend acceptance suite).
 from __future__ import annotations
 
 import json
+import os
 import re
 import types
 from collections import UserDict
@@ -583,14 +584,22 @@ class TestJournalRead:
             summary = journal.summarize_journal(path)
             assert summary.last_phase == expected, distance
 
-    def test_read_journal_refuses_oversize_file(self, tmp_path, monkeypatch):
-        """A journal over the read cap yields an empty read with a warning."""
+    def test_an_oversize_journal_parses_its_tail_with_true_seqs(self, tmp_path, monkeypatch):
+        """Over the cap, the LAST bytes are parsed (a run is never shown empty),
+        the cut first line is dropped, and every seq is the real line index."""
         root = make_root(tmp_path)
-        path = write_journal(root, "proj", "sess", basic_events()[:4])
-        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", 10)
+        events = basic_events()[:6]
+        path = write_journal(root, "proj", "sess", events)
+        lines = path.read_bytes().splitlines(keepends=True)
+        keep = len(lines[-1]) + len(lines[-2]) + 5  # two whole lines and a fragment
+        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", keep)
         read = journal.read_journal(path)
-        assert read.events == []
-        assert read.warnings and "byte cap" in read.warnings[0]
+        assert read.tail_only is True
+        assert [event.seq for event in read.events] == [len(lines) - 2, len(lines) - 1]
+        assert [event.data["type"] for event in read.events] == [
+            events[-2]["type"], events[-1]["type"]
+        ]
+        assert read.warnings
 
     def test_summarize_run_kind_uses_the_shared_marker_set(self, tmp_path):
         """session_end must not mark orchestration in the cheap summary.
@@ -1642,7 +1651,7 @@ class TestSessionsListAndHealth:
             {"v": 1, "type": "session_end", "ts": "2026-10-02T10:01:00Z"},
         ])
         roots = settings.resolve_roots([first, second], env={}, home=tmp_path)
-        payload = model.build_sessions_list(roots)
+        payload = model.build_sessions_list(roots, show_all=True)
         assert payload["default_root"] == roots[0].id
         assert [root["journals"] for root in payload["roots"]] == [1, 1]
         assert [session["session_id"] for session in payload["sessions"]] == [
@@ -1814,3 +1823,110 @@ class TestDemo:
         assert "/Users/demo/Sites/pact-demo" in blob  # obviously synthetic
         home = str(Path.home())
         assert home not in blob
+
+# ---------------------------------------------------------------------------
+# Caps keep the newest and say so
+# ---------------------------------------------------------------------------
+
+
+class TestCapsSurface:
+    _NOW = datetime(2026, 11, 2, tzinfo=UTC)
+
+    def _session(self, root: Path, slug: str, session_id: str, events: list[dict]) -> Path:
+        path = write_journal(root, slug, session_id, events)
+        written = datetime(2026, 11, 1, 10, tzinfo=UTC).timestamp()
+        os.utime(path, (written, written))
+        return path
+
+    def _start_end(self, ts: str = "2026-11-01T10:00:00Z") -> list[dict]:
+        return [census.session_start(ts), census.bare_session_end(ts)]
+
+    def test_small_headless_runs_are_hidden_and_counted(self, tmp_path):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "trivial-1", self._start_end())
+        self._session(root, "proj", "orchestrated", self._start_end()[:1] + [
+            census.phase_transition("2026-11-01T10:01:00Z", "CODE", "started"),
+            census.bare_session_end("2026-11-01T10:02:00Z"),
+        ])
+        big = self._start_end()[:1] + [
+            census.event("lifecycle_decision", "2026-11-01T10:01:00Z", tool_name="X",
+                         advisories_count=0, rules=[], advisories=[], verdict="allow",
+                         pad="x" * (model.TRIVIAL_SESSION_BYTES + 10)),
+            census.bare_session_end("2026-11-01T10:02:00Z"),
+        ]
+        self._session(root, "proj", "large", big)
+        roots = roots_for(root, tmp_path)
+        default = model.build_sessions_list(roots, now=self._NOW)
+        assert sorted(row["session_id"] for row in default["sessions"]) == ["large", "orchestrated"]
+        assert default["hidden_trivial"] == 1
+        assert all(row["trivial"] is False for row in default["sessions"])
+        everything = model.build_sessions_list(roots, now=self._NOW, show_all=True)
+        trivial = {row["session_id"]: row["trivial"] for row in everything["sessions"]}
+        assert trivial == {"trivial-1": True, "orchestrated": False, "large": False}
+
+    def test_a_live_small_run_is_never_hidden(self, tmp_path):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "live-small", [census.session_start("2026-11-01T10:00:00Z")])
+        listed = model.build_sessions_list(
+            roots_for(root, tmp_path), now=datetime(2026, 11, 1, 10, 1, tzinfo=UTC)
+        )
+        assert [row["session_id"] for row in listed["sessions"]] == ["live-small"]
+        assert listed["hidden_trivial"] == 0
+
+    def test_the_limit_keeps_the_newest_and_reports_the_total(self, tmp_path):
+        root = make_root(tmp_path)
+        for day in (1, 2, 3):
+            self._session(root, "proj", f"sess-{day}", [
+                census.session_start(f"2026-11-0{day}T10:00:00Z"),
+                census.phase_transition(f"2026-11-0{day}T10:01:00Z", "CODE", "started"),
+                census.bare_session_end(f"2026-11-0{day}T10:02:00Z"),
+            ])
+        listed = model.build_sessions_list(roots_for(root, tmp_path), limit=2, now=self._NOW)
+        assert [row["session_id"] for row in listed["sessions"]] == ["sess-3", "sess-2"]
+        assert listed["total"] == 3
+        assert listed["limit"] == 2
+
+    def test_two_names_folding_to_one_label_are_marked(self, tmp_path):
+        root = make_root(tmp_path)
+        for slug, project_dir in (("a", "/w/My App"), ("b", "/w/My_App"), ("c", "/w/Other")):
+            self._session(root, slug, "sess-x" + slug, [
+                census.session_start("2026-11-01T10:00:00Z", project_dir=project_dir),
+                census.phase_transition("2026-11-01T10:01:00Z", "CODE", "started"),
+            ])
+        rows = {row["slug"]: row for row in model.build_sessions_list(
+            roots_for(root, tmp_path), now=self._NOW, show_all=True)["sessions"]}
+        assert rows["a"]["project"] == rows["b"]["project"] == "My_App"
+        assert rows["a"]["project_display"] == "My App"
+        assert rows["b"]["project_display"] == "My_App"
+        assert rows["a"]["project_collision"] is True
+        assert rows["b"]["project_collision"] is True
+        assert rows["c"]["project_collision"] is False
+
+    def test_an_event_cap_is_named_and_keeps_the_newest(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        events = [census.session_start("2026-11-01T10:00:00Z")] + [
+            census.phase_transition(f"2026-11-01T10:{minute:02d}:00Z", "CODE", "started")
+            for minute in range(1, 11)
+        ]
+        self._session(root, "proj", "sess-1", events)
+        monkeypatch.setattr(model, "MAX_EVENTS", 4)
+        payload = build_basic_model(root, tmp_path)
+        assert "events" in payload["truncated_by"]
+        assert payload["truncated"] is True
+        assert [event["seq"] for event in payload["events"]] == [7, 8, 9, 10]
+
+    def test_an_oversize_journal_is_named_in_truncated_by(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "sess-1", basic_events())
+        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", 600)
+        payload = build_basic_model(root, tmp_path)
+        assert "journal_bytes" in payload["truncated_by"]
+        assert payload["events"]
+        assert payload["events"][0]["seq"] > 0
+
+    def test_an_uncapped_run_reports_no_truncation(self, tmp_path):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "sess-1", basic_events())
+        payload = build_basic_model(root, tmp_path)
+        assert payload["truncated_by"] == []
+        assert payload["truncated"] is False

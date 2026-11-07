@@ -4,6 +4,10 @@
 export const PROJECT_ALTERED_NOTE =
   "The directory name contains characters that are not shown verbatim; this label was altered for display.";
 
+/* User-facing explanation for a label two different directory names share. */
+export const PROJECT_COLLISION_NOTE =
+  "Two different directory names share this label; check the run's journal path to tell them apart.";
+
 export function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
@@ -121,14 +125,19 @@ export function fmtDate(iso) {
 }
 
 /* Mission time at a cursor that indexes the VISIBLE event window. Cursor 0
- * is the journal start, which is 0s by definition; an empty window must not
- * fall back to wall-clock time (that reads as a plausible wrong duration). */
+ * is the journal start, 0s by definition, unless the event cap dropped the
+ * start; an empty window must not fall back to wall-clock time (that reads
+ * as a plausible wrong duration). */
 export function missionSecondsAt(model, cursor) {
   if (!model || !model.meta || !model.meta.started_at) return 0;
   const start = new Date(model.meta.started_at).getTime();
   if (Number.isNaN(start)) return 0;
   const events = Array.isArray(model.events) ? model.events : [];
-  if (!events.length || cursor <= 0) return 0;
+  if (!events.length) return 0;
+  /* When the event cap dropped the journal's start, cursor 0 is the window's
+   * first event, not the journal start. */
+  const truncated = Array.isArray(model.truncated_by) && model.truncated_by.includes("events");
+  if (cursor <= 0 && !truncated) return 0;
   const event = events[clamp(cursor - 1, 0, events.length - 1)];
   const end = event && event.ts ? new Date(event.ts).getTime() : NaN;
   if (Number.isNaN(end)) return 0;

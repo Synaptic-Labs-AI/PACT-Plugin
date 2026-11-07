@@ -748,11 +748,12 @@ export class Panels {
     card.appendChild(this._varietyBlock());
 
     const warnings = asArray(model.warnings);
+    const cappedBy = asArray(model.truncated_by).map((name) => visible(name)).filter(Boolean);
     if (warnings.length || model.truncated) {
       card.appendChild(el("div", {
         class: "rail-note is-warning",
         text: model.truncated
-          ? "Journal truncated for display; counters remain authoritative."
+          ? `Showing the newest ${cappedBy.length ? cappedBy.join(", ") : "records"} only; counters remain authoritative.`
           : `${warnings.length} parser warning${warnings.length === 1 ? "" : "s"} recorded.`,
       }));
     }

@@ -23,6 +23,7 @@ import {
   pollClearsError,
   pollMayShowError,
   PROJECT_ALTERED_NOTE,
+  PROJECT_COLLISION_NOTE,
   runKey,
   cursorAfterRefresh,
   launchSelection,
@@ -59,6 +60,8 @@ const els = {
   project: $("project-select"),
   session: $("session-select"),
   refresh: $("btn-refresh"),
+  listNote: $("list-note"),
+  showAll: $("btn-show-all"),
   random: $("btn-random"),
   demo: $("btn-demo"),
   live: $("live-badge"),
@@ -511,10 +514,14 @@ function sessionsFor(rootId, slug) {
  * slug (directory name), which is what every caller compares against. */
 function projectInfoFor(rootId, slug) {
   const rows = state.sessions.filter((s) => s.root === rootId && s.slug === slug);
+  /* project_display is the original directory name (control characters
+   * stripped); the constrained project label is the fallback. */
+  const shown = rows.find((s) => s && typeof s.project_display === "string" && s.project_display);
   const named = rows.find((s) => s && typeof s.project === "string" && s.project);
   return {
-    label: named ? named.project : slug,
+    label: shown ? shown.project_display : named ? named.project : slug,
     altered: rows.some((s) => s && s.project_altered === true),
+    collision: rows.some((s) => s && s.project_collision === true),
   };
 }
 
@@ -523,11 +530,15 @@ function populateProjects(rootId) {
   clear(els.project);
   for (const p of projects) {
     const info = projectInfoFor(rootId, p);
+    const notes = [
+      info.altered ? PROJECT_ALTERED_NOTE : "",
+      info.collision ? PROJECT_COLLISION_NOTE : "",
+    ].filter(Boolean);
     els.project.appendChild(el("option", {
       value: p,
-      text: info.altered ? `${info.label} ⚠` : info.label,
-      attrs: info.altered
-        ? { title: PROJECT_ALTERED_NOTE, "aria-label": `${info.label}. ${PROJECT_ALTERED_NOTE}` }
+      text: notes.length ? `${info.label} ⚠` : info.label,
+      attrs: notes.length
+        ? { title: notes.join(" "), "aria-label": `${info.label}. ${notes.join(" ")}` }
         : { title: info.label },
     }));
   }
@@ -557,10 +568,41 @@ function fmtDateShort(iso) {
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+/* Add sessions from a narrower fetch without duplicating any already listed. */
+function mergeSessions(list) {
+  if (!Array.isArray(list)) return;
+  const known = new Set(state.sessions.map(sessionKey));
+  for (const entry of list) {
+    if (entry && !known.has(sessionKey(entry))) {
+      state.sessions.push(entry);
+      known.add(sessionKey(entry));
+    }
+  }
+}
+
+/* "showing N of total" and the hidden-trivial toggle, from the list response. */
+function updateListNote(data) {
+  if (!els.listNote || !els.showAll) return;
+  const shown = Array.isArray(data && data.sessions) ? data.sessions.length : 0;
+  const total = Number(data && data.total);
+  const hidden = Number(data && data.hidden_trivial) || 0;
+  const capped = Number.isFinite(total) && total > shown;
+  els.listNote.hidden = !capped;
+  els.listNote.textContent = capped ? `showing ${shown} of ${total}` : "";
+  const all = Boolean(state.listQuery.all);
+  els.showAll.hidden = !all && hidden <= 0;
+  els.showAll.textContent = all ? "HIDE TRIVIAL" : `SHOW ${hidden} HIDDEN`;
+  els.showAll.setAttribute("aria-pressed", all ? "true" : "false");
+  els.showAll.title = all
+    ? "Hide short headless runs again"
+    : `${hidden} short headless run${hidden === 1 ? " is" : "s are"} hidden; show them`;
+}
+
 async function refreshList(preferredRoot) {
   const data = await sessions(state.listQuery);
   state.roots = Array.isArray(data.roots) ? data.roots : [];
   state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  updateListNote(data);
   if (!state.roots.length && state.sessions.length) {
     state.roots = [{ id: state.sessions[0].root, label: state.sessions[0].root, journals: 0, default: true }];
   }
@@ -930,6 +972,21 @@ function bindHeader() {
     populateSessions(root, slug);
     const first = sessionsFor(root, slug)[0];
     if (first) openSession(first);
+    /* The list is capped across all projects; fetch this project's own list
+     * so its runs past the cap are reachable too. */
+    try {
+      const data = await sessions(Object.assign({}, state.listQuery, { project: slug }));
+      mergeSessions(data && data.sessions);
+      if (els.project.value === slug && !state.suppress) {
+        state.suppress = true;
+        const keep = els.session.value;
+        populateSessions(root, slug);
+        if ([...els.session.options].some((o) => o.value === keep)) els.session.value = keep;
+        state.suppress = false;
+      }
+    } catch (_) {
+      /* the capped list still works */
+    }
   });
   els.session.addEventListener("change", () => {
     if (state.suppress) return;
@@ -939,6 +996,20 @@ function bindHeader() {
     }
     const found = state.sessions.find((s) => sessionKey(s) === els.session.value);
     if (found) openSession(found);
+  });
+
+  els.showAll.addEventListener("click", async () => {
+    const all = !state.listQuery.all;
+    state.listQuery = Object.assign({}, state.listQuery);
+    if (all) state.listQuery.all = true;
+    else delete state.listQuery.all;
+    try {
+      await refreshList(els.root.value);
+      if (state.current && state.current.kind === "real") syncSelectors(state.current);
+      else selectRoot(els.root.value, { open: false });
+    } catch (err) {
+      showError(`Could not refresh the run list: ${err.message}`, () => refreshAll(), "refresh");
+    }
   });
 
   els.errorDemo.addEventListener("click", () => {

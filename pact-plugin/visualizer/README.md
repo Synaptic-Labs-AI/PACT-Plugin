@@ -117,6 +117,24 @@ journal, a team directory, or a file in it) is skipped, so every listed
 session can be opened. Malformed or partial journal lines are skipped with a
 warning rather than crashing the viewer.
 
+### Limits
+
+Every capped list keeps its newest entries, and the run says which caps
+applied (`truncated_by`, plus a warning):
+
+| What | Kept |
+| --- | --- |
+| Journal size | the last 64 MiB of a larger journal (the earlier part is not read) |
+| Events in the feed and on the stage | the newest 6,000 |
+| Tasks on the board | 400; blocker and algedonic tasks are always kept, then the newest |
+| Handoffs, findings, reviews, commits, checkpoints, alerts, crew | 400, 500, 300, 2,000, 500, 200, 200 |
+| Sessions in the list | the newest 500 (the page says "showing N of total") |
+
+Short one-off sessions are hidden from the session list by default: a session
+that is not an orchestration, has a journal under 2 KB, and is not live. The
+session list's `SHOW N HIDDEN` button includes them (`all=1` on the API), and
+`HIDE TRIVIAL` hides them again; `--list` always shows every session.
+
 The demo run (`--demo`) reads no journal at all: it is a deterministic scripted
 run bundled with the plugin, available even on a machine with no PACT history.
 

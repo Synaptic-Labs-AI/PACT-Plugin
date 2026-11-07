@@ -587,6 +587,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         limit=settings.DEFAULT_SESSIONS_LIMIT,
         project_filter=str(getattr(args, "selected_project", None) or ""),
         session_filter=str(getattr(args, "session", None) or ""),
+        show_all=True,
     )
     print(f"{APP_LABEL} · sessions")
     if not roots:

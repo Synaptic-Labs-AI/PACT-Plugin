@@ -228,6 +228,9 @@ body.no-crt #app::after { display: none; }
   box-shadow: inset 0 0 12px rgba(163, 230, 53, 0.12);
 }
 
+/* The run-list size note beside the selectors. */
+.list-note { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
 /* Drawer toggles: hidden while the rails fit, shown when a rail collapses. */
 .rail-toggle { display: none; font-size: 11px; letter-spacing: 0.12em; }
 .chip-btn {

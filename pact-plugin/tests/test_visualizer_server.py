@@ -328,7 +328,7 @@ class TestSessionsRoute:
                 {"v": 1, "type": "session_end", "ts": "2026-11-02T10:01:00Z"},
             ],
         )
-        response = http_request(srv.server_port, "/api/sessions")
+        response = http_request(srv.server_port, "/api/sessions?all=1")
         assert response.status == 200
         payload = response.json()
         assert payload["ok"] is True
@@ -343,6 +343,24 @@ class TestSessionsRoute:
         assert newest["is_live"] is False
         assert newest["last_event_type"] == "session_end"
         assert isinstance(newest["size_bytes"], int)
+
+    def test_trivial_runs_are_hidden_unless_all_is_asked_for(self, live_server):
+        srv, _thread = live_server
+        path = write_journal(
+            srv.roots[0].path, "Tiny", "sess-tiny",
+            [{"v": 1, "type": "session_start", "ts": "2026-11-02T10:00:00Z",
+              "session_id": "sess-tiny", "project_dir": "/Users/dev/Tiny"},
+             {"v": 1, "type": "session_end", "ts": "2026-11-02T10:01:00Z"}],
+        )
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+        default = http_request(srv.server_port, "/api/sessions").json()
+        assert "sess-tiny" not in [row["session_id"] for row in default["sessions"]]
+        assert default["hidden_trivial"] >= 1
+        assert "all" not in default["filters"]
+        everything = http_request(srv.server_port, "/api/sessions?all=1").json()
+        assert "sess-tiny" in [row["session_id"] for row in everything["sessions"]]
+        assert everything["filters"]["all"] == "1"
+        assert everything["total"] >= len(everything["sessions"])
 
     def test_limit_parameter(self, live_server):
         srv, _thread = live_server

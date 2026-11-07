@@ -154,6 +154,9 @@ demo launch mode.
   "generated_at": "2026-11-03T00:00:00Z",
   "default_root": "~/.claude",
   "filters": {},
+  "total": 612,
+  "limit": 500,
+  "hidden_trivial": 117,
   "roots": [{"id": "~/.claude", "label": ".claude", "path": "/Users/x/.claude", "journals": 291, "default": true}],
   "sessions": [{
     "key": "~/.claude::PACT-prompt::d0964a9f",
@@ -171,7 +174,10 @@ demo launch mode.
     "ended_by": "session_end",
     "last_event_type": "session_end",
     "last_phase": "TEST",
-    "run_kind": "orchestrate"
+    "run_kind": "orchestrate",
+    "trivial": false,
+    "project_display": "PACT-prompt",
+    "project_collision": false
   }]
 }
 ```
@@ -188,7 +194,18 @@ matched nothing.
 List entries are deliberately cheap: no full journal parse. `started_at` may be
 null when unavailable. `last_phase` reflects the last `phase_transition` within
 512KB of the journal's end; older transitions yield `""`. Sorted newest
-`updated_at` first, capped by `limit`.
+`updated_at` first, capped by `limit` (default 500, at most 2000).
+
+- `total` is the number of sessions that matched (after the filters and the
+  trivial-session rule), before `limit`; the page shows "showing N of total"
+  when it is larger than the list.
+- A session is `trivial` when it is not an orchestration, its journal is under
+  2048 bytes, and it is not live. Trivial sessions are left out unless the
+  request has `all=1`; `hidden_trivial` counts the ones left out, and
+  `filters` echoes `all` when it was given. `--list` always shows them.
+- `project_display` is the original directory basename (control characters
+  removed, redacted, at most 200 chars) for display. `project_collision` is
+  true when two different names fold to the same `project` label.
 
 `project` is constrained to `[A-Za-z0-9._-]`; a basename carrying any other
 character has those characters replaced with `_` and the entry carries
@@ -388,6 +405,7 @@ Otherwise return the full model:
     "variety_total": 8
   },
   "truncated": false,
+  "truncated_by": [],
   "warnings": []
 }
 ```
@@ -433,6 +451,12 @@ Field rules:
   titled "Dispatch variety" only when its `scope` is `dispatch`; an old
   `{score, rationale}` variety dimension reads its `score`; a dispatch-gate
   `WARN` has severity `warning`.
+- Caps keep the NEWEST entries. `truncated_by` names every cap that applied:
+  `journal_bytes` (a journal over 64 MiB is parsed from its last 64 MiB only,
+  dropping the partial first line, with a warning), `events` (6000),
+  `tasks` (400), `handoffs` (400), `commits` (2000), `reviews` (300),
+  `findings` (500), `alerts` (200), `checkpoints` (500), `agents` (200).
+  `truncated` is true exactly when `truncated_by` is non-empty.
 - `severity` ∈ `info|success|warning|danger|muted`. `icon` is a short token
   (`phase`, `dispatch`, `handoff`, `commit`, `review`, `bug`, `pr`, `gate`,
   `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`,
