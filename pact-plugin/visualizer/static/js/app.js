@@ -54,7 +54,6 @@ function writePreference(key, value) {
   }
 }
 
-
 const els = {
   root: $("root-select"),
   project: $("project-select"),
@@ -116,7 +115,6 @@ const state = {
   cursor: 0,
   playing: false,
   speed: 1,
-  filter: "all",
   selectedAgent: null,
   sound: false,
   followLive: false,
@@ -799,10 +797,10 @@ async function openDemo({ keepError = false } = {}) {
   }
 }
 
-async function openSession(ref, opts = {}) {
+async function openSession(ref) {
   if (!ref || !ref.root || !ref.slug || !ref.session_id) return;
   closeDrawers();
-  if (!opts.since) stopPolling();
+  stopPolling();
   hideError();
   setLoading(true, "decoding journal");
   const token = ++sessionRequest;
@@ -811,14 +809,9 @@ async function openSession(ref, opts = {}) {
       root: ref.root,
       slug: ref.slug,
       session_id: ref.session_id,
-      since: opts.since || undefined,
     });
     /* A later selection (or the demo) owns the screen now. */
     if (token !== sessionRequest) return;
-    if (model && model.unchanged) {
-      setLoading(false);
-      return;
-    }
     const live = Boolean(ref.is_live || (model.meta && model.meta.status === "live"));
     state.current = {
       kind: "real",
@@ -1203,10 +1196,7 @@ function frame(now) {
       const total = state.model.events.length;
       const next = Math.min(total, state.cursor + step);
       setCursor(next, { animate: true });
-      if (next >= total) {
-        setPlaying(false);
-        if (state.mode !== "demo") setModeLabel();
-      }
+      if (next >= total) setPlaying(false);
     }
     if (now - state.lastClock > 250) {
       state.lastClock = now;
@@ -1244,10 +1234,6 @@ function initModules() {
       setCursor(index, { animate: false, fromUser: true });
       setPlaying(false);
     },
-    onFilter: (category) => {
-      state.filter = category;
-    },
-    onClose: () => {},
   });
 
   timeline = createTimeline(els.recorder, {
@@ -1274,11 +1260,11 @@ function initModules() {
     if (audio && state.sound) audio.play("achievement");
   });
 
-  const resize = () => {
-    if (stage) stage.resize();
-  };
-  window.addEventListener("resize", resize);
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize).catch(() => {});
+  /* The stage tracks window and element size itself; web fonts settling can
+   * still change the layout without a resize event. */
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => stage && stage.resize()).catch(() => {});
+  }
 }
 
 /* The page without its launch key makes no /api call: it says how to get

@@ -691,9 +691,7 @@ the header. They only render their own roots and call callbacks.
 export const PROJECT_ALTERED_NOTE;  // user-facing explanation for a sanitised project label
 export function el(tag, props = {}, children = []); // props: class, text, attrs, on, style, dataset, value (unknown props throw)
 export function clear(node);
-export function text(node, value);
 export function toggleClass(node, name, on);
-export function on(node, type, fn, opts);  // adds listener
 export function clamp(n, lo, hi);
 export function fmtClock(seconds);   // "01:23:45"
 export function fmtDuration(seconds);
@@ -789,7 +787,7 @@ mirrored in the DOM first.
 
 ```js
 export class Panels {
-  constructor({left, right, modal, toast, onSelectAgent, onSeek, onFilter, onClose});
+  constructor({left, right, modal, toast, onSelectAgent, onSeek});
   setModel(model);
   setCursor(index);
   setFilter(category);            // "all" | category
@@ -859,7 +857,7 @@ per session in `localStorage`.
 
 Wires everything. It owns:
 - root/project/session selects and header buttons;
-- `state = {roots, sessions, current, model, mode, cursor, playing, speed, filter, selectedAgent, sound, followLive, etag, …}`,
+- `state = {roots, sessions, current, model, mode, cursor, playing, speed, selectedAgent, sound, followLive, etag, …}`,
   where `mode` ∈ `idle|live|replay|demo` and `followLive` is true only while
   the cursor rides the newest event of a live run;
 - polling with ETag/`since`: an open real run is always polled, about every

@@ -64,12 +64,6 @@ export function clear(node) {
   return node;
 }
 
-export function text(node, value) {
-  if (!node) return node;
-  node.textContent = value === undefined || value === null ? "" : String(value);
-  return node;
-}
-
 export function toggleClass(node, name, on) {
   if (!node) return;
   if (node.classList && typeof node.classList.toggle === "function") {
@@ -80,12 +74,6 @@ export function toggleClass(node, name, on) {
   if (on) set.add(name);
   else set.delete(name);
   node.className = [...set].join(" ");
-}
-
-export function on(node, type, fn, opts) {
-  if (!node || typeof fn !== "function") return () => {};
-  node.addEventListener(type, fn, opts);
-  return () => node.removeEventListener(type, fn, opts);
 }
 
 export function clamp(n, lo, hi) {

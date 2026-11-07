@@ -116,7 +116,6 @@ const HANDOFF_FIELDS = [
  * an unknown severity sorts last. */
 const SEVERITY_ORDER = ["blocking", "high", "medium", "minor", "suggestion", "low", "nitpick", "nit", "future", "info"];
 
-
 const ICON_GLYPHS = {
   phase: "▸",
   dispatch: "»",
@@ -313,8 +312,6 @@ export class Panels {
     this.cb = {
       onSelectAgent: isFunction(options.onSelectAgent) ? options.onSelectAgent : null,
       onSeek: isFunction(options.onSeek) ? options.onSeek : null,
-      onFilter: isFunction(options.onFilter) ? options.onFilter : null,
-      onClose: isFunction(options.onClose) ? options.onClose : null,
     };
     this.model = null;
     this.cursor = 0;
@@ -543,7 +540,6 @@ export class Panels {
         /* focus is best-effort */
       }
     }
-    if (this.cb.onClose) this.cb.onClose();
   }
 
   setStatus(status) {
@@ -1088,7 +1084,6 @@ export class Panels {
       });
       chip.addEventListener("click", () => {
         this.setFilter(filter.id);
-        if (this.cb.onFilter) this.cb.onFilter(filter.id);
       });
       this._chipNodes.set(filter.id, chip);
       chips.appendChild(chip);

@@ -129,7 +129,6 @@ const MASCOT_LINES = [
 /* ---- small helpers ----------------------------------------------------- */
 
 
-
 function clamp(value, lo, hi) {
   const n = Number(value);
   if (!Number.isFinite(n)) return lo;
@@ -267,10 +266,7 @@ export class Stage {
     this.viewH = LOGICAL_H;
     this.offsetX = 0;
     this.offsetY = 0;
-    this.cssW = 0;
-    this.cssH = 0;
     this.bgCanvas = null;
-    this.bgDirty = true;
     this.twinkles = [];
     this.mastLights = [];
     this.consoleLeds = [];
@@ -424,8 +420,6 @@ export class Stage {
       return;
     }
     this.dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-    this.cssW = cssW;
-    this.cssH = cssH;
     this.fit = Math.min(cssW / LOGICAL_W, cssH / LOGICAL_H);
     if (!Number.isFinite(this.fit) || this.fit <= 0) this.fit = 1;
 
@@ -673,7 +667,6 @@ export class Stage {
     const lifecycle = this._lifecycleAtCursor();
     this.endEventIdx = lifecycle.endIdx;
     this.cursorWrapup = lifecycle.wrapup;
-
     const ended = this.endEventIdx >= 0;
     const completed = this.phaseState.completed;
     const current = this.phaseState.current;
@@ -722,7 +715,7 @@ export class Stage {
         }
       }
 
-      const scale = role === "lead" ? 1.46 : role === "n8n" ? 1.34 : 1.34;
+      const scale = role === "lead" ? 1.46 : 1.34;
       views.push({
         name,
         role,
@@ -1024,7 +1017,6 @@ export class Stage {
     this._paintGroundExtension(g);
     this._paintForeground(g);
     this.bgCanvas = cache;
-    this.bgDirty = false;
   }
 
   _paintBackdrop(g) {
@@ -2627,11 +2619,6 @@ export class Stage {
 
   _pushEffect(effect) {
     if (!effect || this.destroyed) return;
-    if (this.reducedMotion && effect.kind !== "stamp" && effect.kind !== "banner"
-      && effect.kind !== "gateFlash" && effect.kind !== "flag" && effect.kind !== "check"
-      && effect.kind !== "ring" && effect.kind !== "siren") {
-      return;
-    }
     effect.t = 0;
     if (!Number.isFinite(effect.dur)) effect.dur = 1;
     if (effect.kind === "banner") {

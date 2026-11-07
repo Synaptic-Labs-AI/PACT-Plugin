@@ -7,8 +7,6 @@
  *
  * Public surface:
  *   SPRITE_W / SPRITE_H                 nominal grid in pixel units
- *   ROLES                               canonical role ids
- *   PALETTES / TEAM_COLORS              palettes for PACT team colours
  *   paletteFor(color)                   palette lookup with fallback
  *   normalizeRole(roleOrName)           tolerant role matcher
  *   drawAgent(ctx, role, palette, x, y, frame, scale, opts)
@@ -39,14 +37,8 @@ const GLASS = "#bfe9ff";
 const HAIR = "#2b1d16";
 const COAT = "#1a2338";
 
-export const TEAM_COLORS = Object.freeze([
+const TEAM_COLORS = Object.freeze([
   "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
-]);
-
-export const ROLES = Object.freeze([
-  "lead", "preparer", "architect", "backend-coder", "frontend-coder",
-  "database-engineer", "devops-engineer", "auditor", "test-engineer",
-  "qa-engineer", "security-engineer", "secretary", "n8n", "unknown",
 ]);
 
 /* ---- colour helpers ---------------------------------------------------- */
@@ -110,7 +102,7 @@ function makePalette(name, base) {
   });
 }
 
-export const PALETTES = Object.freeze({
+const PALETTES = Object.freeze({
   red: makePalette("red", "#fb7185"),
   blue: makePalette("blue", "#60a5fa"),
   green: makePalette("green", "#4ade80"),

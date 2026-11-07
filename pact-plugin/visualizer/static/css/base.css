@@ -116,7 +116,6 @@ a { color: var(--accent); }
   opacity: 0.5;
 }
 
-body.no-crt #app::after { display: none; }
 
 /* Top bar --------------------------------------------------------------- */
 
