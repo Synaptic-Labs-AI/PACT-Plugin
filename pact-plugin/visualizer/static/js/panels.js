@@ -36,7 +36,7 @@ const FILTERS = [
   { id: "bugs", label: "BUGS", cats: ["finding", "remediation"] },
   { id: "gates", label: "GATES", cats: ["gate"] },
   { id: "alerts", label: "ALERTS", cats: ["alert"] },
-  { id: "session", label: "SESSION", cats: ["session", "phase", "checkpoint", "compact", "wake", "task", "teachback", "variety", "raw"] },
+  { id: "session", label: "SESSION", cats: ["session", "phase", "checkpoint", "compact", "wake", "task", "teachback", "variety", "memory", "raw"] },
 ];
 
 const FILTER_ALIASES = {
@@ -99,16 +99,21 @@ const TASK_KIND_TAGS = {
   algedonic: { text: "ALGEDONIC", tone: "is-danger" },
 };
 
+/* handoffs[].fields always carries these six canonical keys; the server
+ * resolves legacy spellings, so the page reads only the canonical name. */
 const HANDOFF_FIELDS = [
-  { key: "produced", label: "PRODUCED", aliases: ["produced_artifacts", "artifacts"] },
-  { key: "decisions", label: "DECISIONS", aliases: ["decision"] },
-  { key: "reasoning_chain", label: "REASONING CHAIN", aliases: ["reasoning", "reasoningChain", "chain"] },
-  { key: "uncertainty", label: "UNCERTAINTY", aliases: ["uncertainties"] },
-  { key: "integration", label: "INTEGRATION", aliases: ["integration_points", "integrationPoints"] },
-  { key: "open_questions", label: "OPEN QUESTIONS", aliases: ["openQuestions", "questions", "open_question"] },
+  { key: "produced", label: "PRODUCED" },
+  { key: "decisions", label: "DECISIONS" },
+  { key: "reasoning_chain", label: "REASONING CHAIN" },
+  { key: "uncertainty", label: "UNCERTAINTY" },
+  { key: "integration", label: "INTEGRATION" },
+  { key: "open_questions", label: "OPEN QUESTIONS" },
 ];
 
-const SEVERITY_ORDER = ["blocking", "critical", "major", "high", "danger", "warning", "moderate", "minor", "low", "suggestion", "nit", "info", "trivial"];
+/* Review-finding severities as the reviewers write them, most severe first;
+ * an unknown severity sorts last. */
+const SEVERITY_ORDER = ["blocking", "high", "medium", "minor", "suggestion", "low", "nitpick", "nit", "future", "info"];
+
 
 const ICON_GLYPHS = {
   phase: "▸",
@@ -256,17 +261,17 @@ function statusGroupFor(status) {
 
 function fieldValue(fields, definition) {
   if (!fields || typeof fields !== "object") return "";
-  const keys = [definition.key, ...(definition.aliases || [])];
-  for (const key of keys) {
-    const value = fields[key];
-    if (value === undefined || value === null) continue;
-    let text = "";
-    if (typeof value === "string") text = value.trim();
-    else if (Array.isArray(value)) text = value.map((item) => String(item)).join(", ");
-    else text = String(value);
-    if (text) return text;
-  }
-  return "";
+  const value = fields[definition.key];
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(", ");
+  return String(value);
+}
+
+/* A wrap-up's PR state. NONE and UNKNOWN mean the run recorded no PR. */
+function prState(wrapup) {
+  const state = wrapup ? visible(wrapup.pr_state).toUpperCase() : "";
+  return state === "NONE" || state === "UNKNOWN" ? "" : state;
 }
 
 function groupFindings(findings) {
@@ -776,11 +781,11 @@ export class Panels {
 
   _wrapupPill(model, metrics) {
     const wrapup = model.wrapup;
-    if (wrapup && visible(wrapup.pr_state)) {
-      const state = visible(wrapup.pr_state).toUpperCase();
+    const state = prState(wrapup);
+    if (wrapup && state) {
       const shipped = state === "MERGED";
       const label = shipped ? `SHIPPED · PR ${wrapup.pr_number || "?"}` : `PR ${wrapup.pr_number || "?"} · ${state}`;
-      const tone = shipped ? "is-shipped" : state === "OPEN" || state === "DRAFT" ? "is-warning" : "is-muted";
+      const tone = shipped ? "is-shipped" : state === "OPEN" ? "is-warning" : "is-muted";
       return el("span", {
         class: `mc-pill pr-pill ${tone}`,
         text: label,
@@ -790,7 +795,7 @@ export class Panels {
     if (firstNumber(metrics.prs_ready) > 0) {
       return el("span", { class: "mc-pill pr-pill is-warning", text: "PR READY" });
     }
-    return el("span", { class: "mc-pill pr-pill is-muted", text: "NO WRAP-UP" });
+    return el("span", { class: "mc-pill pr-pill is-muted", text: wrapup ? "NO PR" : "NO WRAP-UP" });
   }
 
   _varietyBlock() {
@@ -1758,14 +1763,16 @@ export class Panels {
     const wrapup = model.wrapup && typeof model.wrapup === "object" ? model.wrapup : null;
     const metrics = model.metrics || {};
     const wrap = el("div");
-    const state = wrapup ? visible(wrapup.pr_state).toUpperCase() : "";
+    const state = prState(wrapup);
     const shipped = state === "MERGED";
     const stamp = el("div", {
       class: `pr-stamp${shipped ? " is-shipped" : state ? " is-open" : " is-muted"}`,
       text: shipped ? "SHIPPED" : state || "NO PR",
     });
-    const prLine = wrapup
-      ? `PR #${wrapup.pr_number === undefined || wrapup.pr_number === null ? "?" : wrapup.pr_number} · ${state || "UNKNOWN"} · ${clockTime(wrapup.ts) || "no timestamp"}`
+    const prLine = wrapup && state
+      ? `PR #${wrapup.pr_number === undefined || wrapup.pr_number === null ? "?" : wrapup.pr_number} · ${state} · ${clockTime(wrapup.ts) || "no timestamp"}`
+      : wrapup
+        ? "Wrap-up recorded no PR"
       : firstNumber(metrics.prs_ready) ? "PR ready; no wrap-up event recorded" : "No pull request recorded";
     wrap.appendChild(el("div", { class: "pr-banner" }, [
       stamp,

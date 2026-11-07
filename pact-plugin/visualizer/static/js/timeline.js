@@ -19,7 +19,7 @@ import {
 const SPEEDS = [1, 2, 4, 8];
 
 const LANES = [
-  { key: "ops", cats: ["session", "phase", "checkpoint", "compact", "wake", "task", "teachback", "variety", "raw"] },
+  { key: "ops", cats: ["session", "phase", "checkpoint", "compact", "wake", "task", "teachback", "variety", "memory", "raw"] },
   { key: "dispatch", cats: ["dispatch"] },
   { key: "handoff", cats: ["handoff"] },
   { key: "commit", cats: ["commit", "pr"] },

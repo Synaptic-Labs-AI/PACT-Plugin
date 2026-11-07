@@ -86,18 +86,17 @@
 .phase-chip.phase-test { color: var(--test); border-color: rgba(244, 114, 182, 0.4); }
 .phase-chip.phase-other { color: var(--dim); }
 
-.sev-chip.sev-blocking,
-.sev-chip.sev-critical,
-.sev-chip.sev-danger { color: var(--danger); border-color: rgba(251, 113, 133, 0.5); }
-.sev-chip.sev-major,
+/* One rule per severity in SEVERITY_ORDER (panels.js). */
+.sev-chip.sev-blocking { color: var(--danger); border-color: rgba(251, 113, 133, 0.5); }
 .sev-chip.sev-high,
-.sev-chip.sev-warning,
-.sev-chip.sev-moderate { color: var(--warning); border-color: rgba(251, 191, 36, 0.45); }
-.sev-chip.sev-suggestion,
+.sev-chip.sev-medium { color: var(--warning); border-color: rgba(251, 191, 36, 0.45); }
 .sev-chip.sev-minor,
+.sev-chip.sev-suggestion,
 .sev-chip.sev-low { color: var(--muted); }
-.sev-chip.sev-info,
-.sev-chip.sev-nit { color: var(--architect); border-color: rgba(96, 165, 250, 0.4); }
+.sev-chip.sev-nitpick,
+.sev-chip.sev-nit,
+.sev-chip.sev-info { color: var(--architect); border-color: rgba(96, 165, 250, 0.4); }
+.sev-chip.sev-future { color: var(--violet); border-color: rgba(167, 139, 250, 0.4); }
 
 .mini-btn {
   border: 1px solid var(--line);
@@ -732,7 +731,7 @@
 .feed-row.sev-success { border-left-color: var(--success); }
 .feed-row.sev-warning { border-left-color: var(--warning); }
 .feed-row.sev-danger { border-left-color: var(--danger); background: rgba(40, 14, 24, 0.55); }
-.feed-row.sev-muted { border-left-color: var(--dim); opacity: 0.85; }
+.feed-row.sev-muted { border-left-color: var(--dim); }
 
 .feed-time {
   color: var(--dim);

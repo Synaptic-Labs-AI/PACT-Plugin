@@ -486,6 +486,21 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("the canonical four plus extras is Four-Phase Orbit",
     unlocked({ source: src("d"), phases: { order: ["PREPARE", "ARCHITECT", "CODE", "TEST", "REVIEW"], completed: ["PREPARE", "ARCHITECT", "CODE", "TEST"] } }).includes("four_phases"));
 
+  /* Pin events (category memory) belong to the SESSION filter. */
+  const memoryFeed = makeFeedNode();
+  Panels.prototype._rebuildFeed.call({
+    model: { events: [{ seq: 1, category: "memory" }, { seq: 2, category: "commit" }] },
+    cursor: 2,
+    filter: "session",
+    _nodes: { feed: memoryFeed, feedCount: null },
+    _feed: { key: null, filter: "session", count: 0, matched: 0, rendered: 0, list: null, capNote: null },
+    _feedRow: (event) => ({ seq: event.seq }),
+    _ensureCapNote: () => {},
+    _updateFeedCount: () => {},
+  }, memoryFeed);
+  check("the SESSION filter shows memory events",
+    JSON.stringify(memoryFeed.nodes.map((node) => node.seq)) === JSON.stringify([1]));
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);
@@ -1412,6 +1427,61 @@ def test_saved_sound_preference_plays_after_the_first_gesture():
     assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
         f"audio pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
+
+
+VOCAB_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+function node(tag) {
+  return {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, style: {}, dataset: {}, className: "", textContent: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); return child; },
+  };
+}
+globalThis.document = { createElement: node, createTextNode: (t) => ({ textContent: t, children: [] }) };
+globalThis.Node = Object;
+const walk = (n, out = []) => { out.push(n); for (const c of n.children || []) walk(c, out); return out; };
+(async () => {
+  const { Panels } = await import("./panels.js");
+  const pill = (wrapup) => Panels.prototype._wrapupPill.call({}, { wrapup }, {}).textContent;
+  check("a NONE wrap-up reads NO PR", pill({ pr_state: "NONE" }) === "NO PR");
+  check("an UNKNOWN wrap-up reads NO PR", pill({ pr_state: "UNKNOWN" }) === "NO PR");
+  check("a MERGED wrap-up reads SHIPPED", pill({ pr_state: "MERGED", pr_number: 4 }) === "SHIPPED · PR 4");
+  const host = Object.assign(Object.create(Panels.prototype), {
+    model: { findings: ["future", "nitpick", "blocking", "minor", "odd", "medium"].map((severity) => ({ severity, finding: severity })) },
+  });
+  const chips = walk(host._reviewsTab()).filter((n) => String(n.className).includes("sev-chip"));
+  const order = chips.map((n) => n.textContent);
+  check("findings group by the reviewers' severity order, unknown last",
+    JSON.stringify(order) === JSON.stringify(["BLOCKING", "MEDIUM", "MINOR", "NITPICK", "FUTURE", "ODD"]));
+  if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+  console.log("PINS OK");
+})().catch((err) => { console.error("PIN SCRIPT ERROR: " + (err && err.stack ? err.stack : err)); process.exit(1); });
+"""
+
+
+def test_panels_speak_the_writers_vocabulary():
+    """PR state, severity order and filter membership follow the real values."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", VOCAB_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"vocabulary pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
+def test_every_finding_severity_has_a_style():
+    """Each severity in the panels order has its own chip rule."""
+    panels = (STATIC_JS_DIR / "panels.js").read_text(encoding="utf-8")
+    order = re.search(r"const SEVERITY_ORDER = \[([^\]]*)\]", panels)
+    assert order, "SEVERITY_ORDER not found"
+    css = (STATIC_JS_DIR.parent / "css" / "panels.css").read_text(encoding="utf-8")
+    for severity in re.findall(r'"([a-z]+)"', order.group(1)):
+        assert f".sev-chip.sev-{severity}" in css, f"no chip rule for severity {severity}"
 
 
 def test_dev_demo_fixture_matches_build_demo_model():
