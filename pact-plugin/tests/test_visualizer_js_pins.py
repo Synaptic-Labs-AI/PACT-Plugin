@@ -318,6 +318,260 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
 """
 
 
+# app.js wires the DOM at import time, so its orchestration is driven through a
+# harness: the real app.js and dom.js are copied next to stub view modules and
+# a stub api.js whose calls return promises the scenario resolves by hand. The
+# fake DOM implements only what app.js touches.
+APP_STUBS = {
+    "stubs.js": r"""
+export const log = { stage: [], urls: [], toasts: [], notices: [], modes: [] };
+export const pending = { session: [], demo: [], sessions: [] };
+function deferred(kind, args) {
+  let resolve, reject;
+  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
+  pending[kind].push({ args, resolve, reject });
+  return promise;
+}
+export const api = {
+  sessionsData: null,
+  sessionsDeferred: false,
+  sessions: (args) => (api.sessionsDeferred ? deferred("sessions", args) : Promise.resolve(api.sessionsData)),
+  session: (args) => deferred("session", args),
+  demo: (args) => deferred("demo", args || {}),
+  health: async () => ({ demo_available: true }),
+};
+""",
+    "api.js": r"""
+import { api } from "./stubs.js";
+export const USE_MOCK = false;
+export const sessions = (...a) => api.sessions(...a);
+export const session = (...a) => api.session(...a);
+export const demo = (...a) => api.demo(...a);
+export const health = (...a) => api.health(...a);
+""",
+    "stage.js": r"""
+import { log } from "./stubs.js";
+export class Stage {
+  setModel(m) { log.stage.push(m ? `${m.source.kind}:${m.source.session_id}:${m.etag}` : "null"); }
+  setCursor() {}
+  setSelectedAgent() {}
+  resize() {}
+}
+""",
+    "panels.js": r"""
+import { log } from "./stubs.js";
+export class Panels {
+  setModel() {} setCursor() {} setSelectedAgent() {} setLive() {}
+  toast(t) { log.toasts.push(t.title); }
+  setNotice(n) { log.notices.push(n); }
+  openDebrief() {} closeModal() {}
+}
+""",
+    "timeline.js": r"""
+import { log } from "./stubs.js";
+export function createTimeline() {
+  return { setModel() {}, setCursor() {}, setMode(m) { log.modes.push(Object.assign({}, m)); } };
+}
+""",
+    "audio.js": "export function createAudio() { return { setEnabled() {}, play() {} }; }\n",
+    "achievements.js": "export function createAchievements() { return { evaluate() {} }; }\n",
+}
+
+APP_PRELUDE = r"""
+import { log, pending, api } from "./stubs.js";
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function fakeEl(id, tag = "DIV") {
+  const listeners = {};
+  const classes = new Set();
+  const node = {
+    id, tagName: tag, hidden: false, textContent: "", className: "", value: "",
+    options: [], children: [], style: {}, dataset: {}, attrs: {},
+    classList: {
+      add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c),
+      toggle: (c, on) => { const v = on === undefined ? !classes.has(c) : Boolean(on); if (v) classes.add(c); else classes.delete(c); return v; },
+    },
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k]; },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    fire(type, extra = {}) {
+      const event = Object.assign({ target: node, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }, extra);
+      for (const fn of listeners[type] || []) fn(event);
+      return event;
+    },
+    appendChild(child) { this.children.push(child); if (child.tagName === "OPTION") this.options.push(child); return child; },
+    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); this.options = this.options.filter((o) => o !== child); return child; },
+    get firstChild() { return this.children[0] || null; },
+    getBoundingClientRect() { return { height: 64, width: 100 }; },
+    closest() { return null; },
+    focus() { globalThis.document.activeElement = node; },
+  };
+  return node;
+}
+const byId = new Map();
+const windowListeners = {};
+globalThis.document = {
+  title: "",
+  activeElement: null,
+  getElementById(id) { if (!byId.has(id)) byId.set(id, fakeEl(id)); return byId.get(id); },
+  createElement(tag) { return fakeEl("", tag.toUpperCase()); },
+  createTextNode(text) { return { nodeType: 3, textContent: text }; },
+  body: fakeEl("body", "BODY"),
+  documentElement: fakeEl("html", "HTML"),
+  addEventListener() {},
+};
+globalThis.document.documentElement.style.setProperty = () => {};
+globalThis.Node = Object;
+globalThis.window = {
+  location: { search: globalThis.__SEARCH__ || "", hash: globalThis.__HASH__ || "", pathname: "/" },
+  addEventListener(type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); },
+};
+globalThis.fireWindow = (type, extra) => {
+  const event = Object.assign({ defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }, extra);
+  for (const fn of windowListeners[type] || []) fn(event);
+  return event;
+};
+globalThis.history = { replaceState(_s, _t, url) { log.urls.push(url); } };
+const store = new Map();
+globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) };
+globalThis.requestAnimationFrame = () => 0;
+const intervals = [];
+globalThis.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
+globalThis.clearInterval = (id) => { if (intervals[id - 1]) intervals[id - 1].cleared = true; };
+const activeInterval = () => [...intervals].reverse().find((entry) => !entry.cleared) || null;
+
+const model = (kind, sid, etag, status = "ended") => ({
+  source: { kind, session_id: sid },
+  meta: { status, started_at: "2026-11-01T00:00:00Z" },
+  events: [{ seq: 1, ts: "2026-11-01T00:00:01Z", category: "session" }],
+  etag,
+});
+const ended = { root: "r", slug: "p", session_id: "S1", is_live: false, status: "ended", updated_at: "2026-11-01" };
+const live = { root: "r", slug: "p", session_id: "L1", is_live: true, status: "live", updated_at: "2026-11-02" };
+"""
+
+APP_EPILOGUE = r"""
+if (failed.length) {
+  console.error("FAILED PINS: " + failed.join("; "));
+  process.exit(1);
+}
+console.log("PINS OK");
+"""
+
+
+def _run_app_scenario(scenario: str, tmp_path: Path) -> None:
+    """Run one app.js scenario under the harness and assert it passed."""
+    node = _require_node()
+    for name in ("app.js", "dom.js"):
+        shutil.copy(STATIC_JS_DIR / name, tmp_path / name)
+    for name, body in APP_STUBS.items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
+    (tmp_path / "harness.js").write_text(APP_PRELUDE + scenario + APP_EPILOGUE, encoding="utf-8")
+    proc = subprocess.run([node, "harness.js"], cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"app.js scenario failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
+def test_a_slow_demo_never_overwrites_a_later_session(tmp_path):
+    """openDemo checks its own request token after its await."""
+    _run_app_scenario(r"""
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "S1", "e0"));
+await tick();
+const loading = document.getElementById("loading");
+const select = document.getElementById("session-select");
+
+/* DEMO, then a session; the session answers first, the demo last. */
+document.getElementById("btn-demo").fire("click");
+await tick();
+select.value = "r::p::S1";
+select.fire("change");
+await tick();
+pending.session.shift().resolve(model("real", "S1", "e1"));
+await tick();
+pending.demo.shift().resolve(model("demo", "demo", "demo-v1"));
+await tick();
+check("the later session stays on screen", log.stage.at(-1) === "real:S1:e1");
+check("the URL names the session, not the demo", !String(log.urls.at(-1)).includes("demo=1"));
+
+/* DEMO, then a session; the demo answers first: it is dropped and the
+ * overlay stays up for the pending session. */
+document.getElementById("btn-demo").fire("click");
+await tick();
+select.value = "r::p::S1";
+select.fire("change");
+await tick();
+const before = log.stage.length;
+pending.demo.shift().resolve(model("demo", "demo", "demo-v1"));
+await tick();
+check("a superseded demo does not render", log.stage.length === before);
+check("a superseded demo leaves the overlay to the pending load", loading.hidden === false);
+pending.session.shift().resolve(model("real", "S1", "e2"));
+await tick();
+check("the pending session renders", log.stage.at(-1) === "real:S1:e2");
+check("the session load clears the overlay", loading.hidden === true);
+""", tmp_path)
+
+
+def test_a_refresh_does_not_reopen_a_run_after_a_newer_selection(tmp_path):
+    """refreshAll drops the intent it captured once a view switch happened."""
+    _run_app_scenario(r"""
+const other = { root: "r", slug: "p", session_id: "S2", is_live: false, status: "ended", updated_at: "2026-10-01" };
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended, other], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "S1", "e0"));
+await tick();
+
+/* Refresh starts; the list answer is held while the user picks S2. */
+api.sessionsDeferred = true;
+document.getElementById("btn-refresh").fire("click");
+await tick();
+const select = document.getElementById("session-select");
+select.value = "r::p::S2";
+select.fire("change");
+await tick();
+pending.sessions.shift().resolve(api.sessionsData);
+await tick();
+check("the refresh opens nothing after the newer selection", pending.session.length === 1);
+pending.session.shift().resolve(model("real", "S2", "s2"));
+await tick();
+check("the newer selection is shown", log.stage.at(-1) === "real:S2:s2");
+""", tmp_path)
+
+
+def test_a_stale_poll_never_overwrites_a_reopened_run(tmp_path):
+    """A poll in flight when the same run is reopened is dropped."""
+    _run_app_scenario(r"""
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [live], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "L1", "e1", "live"));
+await tick();
+const poll = activeInterval();
+check("an open live run polls", Boolean(poll));
+poll.fn();
+await tick();
+check("the poll is in flight", pending.session.length === 1);
+const stalePoll = pending.session.shift();
+
+/* Refresh reopens the same run while the older poll is still out. */
+document.getElementById("btn-refresh").fire("click");
+await tick();
+pending.session.shift().resolve(model("real", "L1", "e3", "live"));
+await tick();
+stalePoll.resolve(model("real", "L1", "e2", "live"));
+await tick();
+check("the reopened run keeps its newer journal", log.stage.at(-1) === "real:L1:e3");
+""", tmp_path)
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))

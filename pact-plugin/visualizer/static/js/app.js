@@ -109,8 +109,13 @@ let achievements;
 
 /* One live poll at a time: a slow response must not overlap the next tick. */
 let pollBusy = false;
-/* Monotonic token: a slow openSession must not overwrite a later selection. */
+/* Monotonic token: every view switch (openSession, openDemo, clearRunView)
+ * takes a new value, and each async switch checks it after its await, so a
+ * slow response never overwrites a later selection. */
 let sessionRequest = 0;
+/* Bumped whenever polling stops or a run is (re)opened: a poll that was in
+ * flight at that moment belongs to an older view and must not apply. */
+let pollGeneration = 0;
 
 function setLoading(on, sub) {
   els.loading.hidden = !on;
@@ -249,6 +254,7 @@ function setSpeed(speed) {
 }
 
 function stopPolling() {
+  pollGeneration += 1;
   if (state.pollTimer) {
     clearInterval(state.pollTimer);
     state.pollTimer = 0;
@@ -266,6 +272,11 @@ async function pollLive() {
   if (pollBusy) return;
   if (state.mode !== "live" || !state.current || state.current.kind === "demo") return;
   const ref = state.current;
+  const generation = pollGeneration;
+  /* A stale poll belongs to a view that is gone (another run, or the same run
+   * reopened since this request left): it must not touch the error banner
+   * either. */
+  const stale = () => generation !== pollGeneration || !state.current || state.current.key !== ref.key;
   pollBusy = true;
   try {
     const data = await session({
@@ -274,9 +285,7 @@ async function pollLive() {
       session_id: ref.session_id,
       since: state.etag,
     });
-    /* A stale poll belongs to a view that is gone: it must not touch the
-     * error banner either. */
-    if (!state.current || state.current.key !== ref.key) return;
+    if (stale()) return;
     /* Clear only a banner this poll raised: a failed navigation or refresh
      * banner must survive a successful poll. */
     if (state.lastError && pollClearsError(state.errorSource)) hideError();
@@ -317,8 +326,8 @@ async function pollLive() {
     }
   } catch (err) {
     /* Mirror the success arm: surface a failure only while this poll still
-     * belongs to the displayed run (state.current exists and matches ref). */
-    if (!state.current || state.current.key !== ref.key) return;
+     * belongs to the displayed view. */
+    if (stale()) return;
     /* A poll failure is silent while a navigation or refresh banner is
      * showing: that banner owns the retry, and this poll keeps retrying on its
      * own timer. */
@@ -631,10 +640,12 @@ async function loadInitial() {
 async function openDemo() {
   closeDrawers();
   hideError();
-  sessionRequest += 1; /* supersede any in-flight openSession */
+  const token = ++sessionRequest; /* supersede any in-flight load */
   setLoading(true, "loading training simulation");
   try {
     const model = await demo();
+    /* A later selection (or a cleared view) owns the screen now. */
+    if (token !== sessionRequest) return;
     state.current = {
       kind: "demo",
       key: "__demo__",
@@ -656,9 +667,9 @@ async function openDemo() {
     updateTimeline();
     updateUrl("demo");
   } catch (err) {
-    showError(`Demo failed to load: ${err.message}`, openDemo, "navigation");
+    if (token === sessionRequest) showError(`Demo failed to load: ${err.message}`, openDemo, "navigation");
   } finally {
-    setLoading(false);
+    if (token === sessionRequest) setLoading(false);
   }
 }
 
@@ -761,11 +772,22 @@ function returnToLive() {
   toast("Back on the live head", "Following the journal again.", "success");
 }
 
+/* A list refresh re-populates the selectors. When a view switch happened
+ * while it was in flight, the refresh must not act on the intent it captured
+ * before its await; it only points the selectors back at what is shown. */
+function superseded(token) {
+  if (token === sessionRequest) return false;
+  if (state.current) syncSelectors(state.current);
+  return true;
+}
+
 async function refreshAll() {
   hideError();
+  const token = sessionRequest;
   try {
     const keep = state.current && state.current.kind === "real" ? state.current : null;
     await refreshList(keep ? keep.root : els.root.value);
+    if (superseded(token)) return;
     if (keep) {
       const still = state.sessions.find((s) => sessionKey(s) === keep.key);
       if (still) await openSession(still);
@@ -808,9 +830,12 @@ function bindHeader() {
       openDemo();
       return;
     }
+    const token = sessionRequest;
     try {
-      await refreshList(els.root.value);
-      selectRoot(els.root.value);
+      const rootId = els.root.value;
+      await refreshList(rootId);
+      if (superseded(token)) return;
+      selectRoot(rootId);
     } catch (err) {
       showError(`Could not switch root: ${err.message}`, () => refreshAll(), "refresh");
     }
