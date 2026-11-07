@@ -134,9 +134,11 @@ export function missionSecondsAt(model, cursor) {
   if (Number.isNaN(start)) return 0;
   const events = Array.isArray(model.events) ? model.events : [];
   if (!events.length) return 0;
-  /* When the event cap dropped the journal's start, cursor 0 is the window's
-   * first event, not the journal start. */
-  const truncated = Array.isArray(model.truncated_by) && model.truncated_by.includes("events");
+  /* When the event cap or a tail-only parse of an oversized journal dropped
+   * the journal's start, cursor 0 is the window's first event, not the
+   * journal start. */
+  const cuts = Array.isArray(model.truncated_by) ? model.truncated_by : [];
+  const truncated = cuts.includes("events") || cuts.includes("journal_bytes");
   if (cursor <= 0 && !truncated) return 0;
   const event = events[clamp(cursor - 1, 0, events.length - 1)];
   const end = event && event.ts ? new Date(event.ts).getTime() : NaN;

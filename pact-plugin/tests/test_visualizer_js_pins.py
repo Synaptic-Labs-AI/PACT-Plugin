@@ -281,6 +281,8 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   /* Past the event cap, cursor 0 is the window's first event, not 0s. */
   const capped = { meta, truncated_by: ["events"], events: [{ seq: 900, ts: "2026-01-01T01:00:00Z" }] };
   check("a truncated window's cursor 0 reads its first event", missionSecondsAt(capped, 0) === 3600);
+  check("a tail-only parse's cursor 0 reads its first event",
+    missionSecondsAt(Object.assign({}, capped, { truncated_by: ["journal_bytes"] }), 0) === 3600);
 
   /* A pending phase (null boundaries) must not become the current phase.
    * Number(null) is 0, which used to make every pending phase look started. */

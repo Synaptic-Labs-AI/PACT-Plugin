@@ -675,7 +675,7 @@ export function fmtClock(seconds);   // "01:23:45"
 export function fmtDuration(seconds);
 export function fmtTime(iso);        // local HH:MM:SS
 export function fmtDate(iso);        // short local date
-export function missionSecondsAt(model, cursor);
+export function missionSecondsAt(model, cursor); // mission clock; when truncated_by has "events" or "journal_bytes", cursor 0 is events[0].ts
 export function shortSha(sha);
 export function rootChangeAction({ hasSession, requestedFilter, hasRun });
 export function requestedFilterLabel(filters);  // named-empty label from the server's echoed filters
