@@ -23,7 +23,7 @@ Run exactly one of these, from any directory. Append `--open` only when the user
 | `stop` | `"${CLAUDE_PLUGIN_ROOT}/bin/pact-viz" --stop` |
 
 For the empty / `live` row:
-- When this session's id is known (the `Resume:` line of the project's CLAUDE.md names it), append `--session '<session id>'`.
+- When this session's id is known (the `Resume:` line of the project's CLAUDE.md names it) and it fully matches `^[A-Za-z0-9-]{8,64}$`, append `--session '<session id>'`. Otherwise leave `--session` off.
 - When `$CLAUDE_PROJECT_DIR` is empty, drop `--project-dir "$CLAUDE_PROJECT_DIR"`, and tell the user the newest run on the config root opened, not necessarily this project's.
 
 ## Report

@@ -75,7 +75,9 @@ Reuse, when a confirmed instance is already recorded:
 1. Another plugin build (different plugin root or version): the CLI stops it
    with a verified stop, prints
    `PACT Mission Control: replaced an instance from another plugin build`,
-   and starts a fresh server.
+   and starts a fresh server. Only if that stop does not take effect does it
+   exit 1 with `pact-viz: a running instance from another plugin build did not
+   stop; stop it first with <Stop command>`.
 2. Different roots: refused, exit 1, with
    `pact-viz: a running instance serves different roots (<running>) than
    requested (<wanted>); stop it first with <Stop command>`.
@@ -86,8 +88,9 @@ Reuse, when a confirmed instance is already recorded:
    URL (stored key, this invocation's selection) and the Stop line. Reuse never
    mints a new key.
 
-An unconfirmed record (no answer, a 401, or a different instance) is not
-reused; a fresh server replaces the record.
+An instance that keyed health cannot confirm (no answer, a 401, or another
+instance id, pid or start time) is never reused and never refused: the CLI
+starts a fresh server, and its record replaces the old one.
 
 `--status` prints `PACT Mission Control: running`, the keyed `URL:`, `PID:`
 (from the server's own health answer) and `Instance:`, or

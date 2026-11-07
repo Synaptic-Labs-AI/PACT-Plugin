@@ -201,6 +201,20 @@ class TestLaunchInstructions:
             "it is known, so a peer session in the same project is not opened"
         )
 
+    def test_session_id_is_validated_before_use(self):
+        """The id comes from a file the model reads, and a quote in it would
+        break the single-quoted argument before the CLI could reject it, so
+        the allowlist check must sit in the same instruction as the flag."""
+        lines = [
+            line for line in _body().splitlines()
+            if "--session '<session id>'" in line
+        ]
+        assert len(lines) == 1, "visualize.md must name --session once"
+        assert "`^[A-Za-z0-9-]{8,64}$`" in lines[0], (
+            "the --session instruction must require the id to fully match "
+            "^[A-Za-z0-9-]{8,64}$ before it is appended"
+        )
+
     def test_project_argument_is_validated_before_use(self):
         """$ARGUMENTS is free text substituted into a shell command, so the
         label must be checked against the allowlist before anything runs."""
