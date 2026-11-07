@@ -151,33 +151,39 @@ def aggregate_worker_collection_counts(triples_by_node, collected,
     so a count of events could stand in for a missing node.
 
     The ready comparison refuses any node that became ready and never
-    reported, whatever the cause, so the reporting survivors cannot agree
-    among themselves and certify a collection measured by a subset. For a
-    worker internal error it can be the only refusal. Measured with xdist
-    3.8.0: a worker that raised an internal error after its own tests never
-    reported, the controller logged the error and carried on, the session
-    exited 0 with every test passed, and only the null fields this
-    comparison leaves failed the verifier, on BAD-FIELD-DESELECTED. A worker
-    that raised one during collection made the controller abort in
-    ``DSession.worker_workerfinished``; the session exited 3 with a record
-    written, and the healthy ready nodes never reported, so the verifier
-    again failed on BAD-FIELD-DESELECTED, which it checks before the exit
-    status. A reviewer's probe saw the controller abort in
-    ``DSession.loop_once`` ("Unexpectedly no active workers available")
-    instead. A run that writes no record fails RECORD-ABSENT, and EXITSTATUS
-    is what a non-zero exit prints only when every ready node reported. A
-    crashed worker dispatches ``errordown`` with nothing published
-    (measured, and in the xdist 3.8.0 source), so a None arrives and is
-    rejected below. Any refusal leaves the collection fields and
-    ``deselected`` null, so the verifier fails closed instead of certifying
-    a collection measured by a subset.
+    reported, whatever the cause. Agreement among the nodes that did report
+    is not enough: every worker collects the whole corpus, so the survivors
+    agree with each other exactly as a complete population would, and only
+    the ready set shows that one is missing. Under xdist 3.8.0 a worker is
+    lost in one of three ways:
+
+    - A worker that crashes dispatches ``errordown`` with nothing
+      published, so a None arrives and is rejected below.
+    - A worker that raises an internal error after its own tests is
+      reported through ``DSession.worker_internal_error``; the controller
+      keeps running, the worker never reports, and the session exits 0 when
+      every test passed. The ready comparison is then the only refusal:
+      its null fields fail the verifier on BAD-FIELD-DESELECTED.
+      ``test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set``
+      pins this path.
+    - A worker that raises an internal error during collection makes the
+      controller abort in its event loop, at a site that depends on the
+      order the events arrive, and the session exits non-zero. Either no
+      record is written and the verifier fails RECORD-ABSENT, or it fails
+      the record: on BAD-FIELD-DESELECTED when a ready node did not report,
+      which it checks before the exit status, otherwise on EXITSTATUS.
+
+    EXITSTATUS is what a non-zero exit prints only when every ready node
+    reported. Any refusal leaves the collection fields and ``deselected``
+    null, so the verifier fails closed instead of certifying a collection
+    counted by a subset.
 
     Worker restarts are ON by default - xdist defaults
     ``--max-worker-restart`` to four times the worker count whenever ``-n``
     is given - so a run that lost a worker and recovered on a replacement is
-    refused although it completed. That is a deliberate false
-    red in the safe direction, and the response is to re-run the certifying
-    run. Disabling restarts does not change it: a crashed worker still
+    refused although it completed. That is a deliberate false red in the
+    safe direction, and the response is to re-run the certifying run.
+    Disabling restarts does not change it: a crashed worker still
     contributes the None that refuses the aggregate.
 
     This guarantees only ``after == collected``; the second verifier identity,
@@ -271,9 +277,9 @@ class FullRunRecord:
         Controller only. A node that became ready and never dispatched
         ``pytest_testnodedown`` leaves no trace in ``_worker_triples``, so
         this set is how the aggregate tells a lost worker from one that never
-        existed. A worker internal error raised after that worker's tests
-        leaves the session exiting 0, and this set is then the only thing
-        that fails the run. The ready set is passed to the aggregate so the
+        existed. When a worker raises an internal error after its own tests,
+        the session can exit 0, and this set is then the only thing that
+        fails certification. The ready set is passed to the aggregate so the
         refusal is a pure function rather than a branch here.
         """
         if self._root is None:
