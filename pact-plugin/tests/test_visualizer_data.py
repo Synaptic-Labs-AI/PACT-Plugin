@@ -1274,6 +1274,19 @@ class TestCloudAndRoster:
         census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
         assert self._leads(build_basic_model(root, tmp_path)) == ["team-lead"]
 
+    def test_a_team_lead_member_and_a_main_address_are_one_lead(self, tmp_path):
+        """A config that lists the platform's `team-lead` member, on a run whose
+        latest start names lead address `main`, still has ONE lead: both
+        names are the same lead."""
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z",
+                                              lead_address=census.CLOUD_LEAD)])
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        payload = build_basic_model(root, tmp_path)
+        assert len(self._leads(payload)) == 1, self._leads(payload)
+        names = [agent["name"] for agent in payload["agents"]]
+        assert names.count("team-lead") + names.count("main") == 1, names
+
     def test_a_cloud_lead_is_main_once(self, tmp_path):
         root = make_root(tmp_path)
         self._run(root, [census.session_start("2026-11-01T10:00:00Z",
