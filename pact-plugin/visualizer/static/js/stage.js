@@ -398,7 +398,12 @@ export class Stage {
 
   setReducedMotion(enabled) {
     this.reducedExplicit = true;
-    const next = Boolean(enabled);
+    this._applyReducedMotion(Boolean(enabled));
+  }
+
+  /* Both the explicit setter and the OS preference listener land here, so
+   * turning reduced motion on always stops in-flight effects and shake. */
+  _applyReducedMotion(next) {
     if (next === this.reducedMotion) return;
     this.reducedMotion = next;
     if (next) {
@@ -486,7 +491,7 @@ export class Stage {
       this.reducedMotion = Boolean(this.motionQuery.matches);
       this.onMotionChange = (event) => {
         if (this.reducedExplicit) return;
-        this.reducedMotion = Boolean(event.matches);
+        this._applyReducedMotion(Boolean(event.matches));
       };
       if (this.motionQuery.addEventListener) {
         this.motionQuery.addEventListener("change", this.onMotionChange);
@@ -3533,7 +3538,9 @@ export class Stage {
 
   _drawGlitch(ctx, effect, p) {
     const intensity = 1 - p;
-    const seed = Math.floor(this.time * 24);
+    /* At most three changes a second: faster full-width flicker can cross
+     * the photosensitive flash threshold. */
+    const seed = Math.floor(this.time * 3);
     const rand = seededRandom(seed * 9973 + 17);
     for (let i = 0; i < 6; i += 1) {
       const y = -this.offsetY + rand() * this.viewH;

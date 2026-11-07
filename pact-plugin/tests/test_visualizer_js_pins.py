@@ -501,6 +501,23 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("the SESSION filter shows memory events",
     JSON.stringify(memoryFeed.nodes.map((node) => node.seq)) === JSON.stringify([1]));
 
+  /* Turning reduced motion on, by the setter or by the OS preference, stops
+   * in-flight effects and shake. */
+  const motion = {
+    reducedMotion: false, reducedExplicit: false,
+    effects: [{ kind: "ring" }], shake: { t: 1, dur: 1, mag: 3 },
+    _updateChrome() {},
+    _applyReducedMotion: Stage.prototype._applyReducedMotion,
+  };
+  let osListener = null;
+  const savedWindow = globalThis.window;
+  globalThis.window = { matchMedia: () => ({ matches: false, addEventListener: (_t, fn) => { osListener = fn; } }) };
+  Stage.prototype._initMotionPreference.call(motion);
+  globalThis.window = savedWindow;
+  osListener({ matches: true });
+  check("an OS switch to reduced motion stops in-flight effects",
+    motion.reducedMotion === true && motion.effects.length === 0 && motion.shake.t === 0);
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);
@@ -1535,6 +1552,15 @@ def test_the_wrapup_pill_follows_the_cursor():
     assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
         f"pill pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
+
+
+def test_the_glitch_effect_changes_at_most_three_times_a_second():
+    """A full-width flicker faster than 3 Hz can cross the flash threshold."""
+    source = (STATIC_JS_DIR / "stage.js").read_text(encoding="utf-8")
+    body = source[source.index("_drawGlitch(ctx, effect, p) {"):]
+    body = body[:body.index("\n  }\n")]
+    rates = [float(rate) for rate in re.findall(r"Math\.floor\(this\.time \* ([0-9.]+)\)", body)]
+    assert rates and max(rates) <= 3, f"glitch reseeds {rates} times a second"
 
 
 def test_dev_demo_fixture_matches_build_demo_model():

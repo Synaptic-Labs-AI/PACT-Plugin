@@ -742,7 +742,7 @@ export class Stage {
   setModel(model);                 // full snapshot; roster, phases, events
   setCursor(index, {animate = false, live = false} = {});
   setSelectedAgent(name);
-  setReducedMotion(bool);
+  setReducedMotion(bool);         // same effect as the OS preference changing: in-flight effects and shake stop at once
   resize();
   destroy();
 }
