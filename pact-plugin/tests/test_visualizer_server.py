@@ -1769,27 +1769,28 @@ class TestResponseContract:
 
 
 class TestServerBounds:
-    def test_connections_past_the_cap_are_closed_at_accept(self, live_server, monkeypatch):
+    def test_idle_connections_at_the_cap_never_lock_out_the_key_holder(
+        self, live_server, monkeypatch
+    ):
+        """Sockets that hold every slot with an unfinished request must not
+        stop the page: a keyed API request is still answered."""
         srv, _thread = live_server
-        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2)
+        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 3)
         held = [socket.create_connection(("127.0.0.1", srv.server_port), timeout=5)
-                for _ in range(2)]
+                for _ in range(3)]
         try:
             for sock in held:
-                sock.sendall(b"GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1\r\n")
-            time.sleep(0.2)
-            refused = _raw_exchange(
-                srv.server_port,
-                b"GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-            )
-            assert refused == b""
+                sock.sendall(b"GET /api/hea")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and srv.connections < 3:
+                time.sleep(0.02)
+            assert srv.connections == 3
+            response = http_request(srv.server_port, "/api/health")
+            assert response.status == 200
+            assert response.json()["instance_id"] == srv.instance_id
         finally:
             for sock in held:
                 sock.close()
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and srv.connections:
-            time.sleep(0.05)
-        assert http_request(srv.server_port, "/favicon.svg").status == 200
 
     def test_an_unchanged_session_is_built_once(self, live_server, monkeypatch):
         srv, _thread = live_server

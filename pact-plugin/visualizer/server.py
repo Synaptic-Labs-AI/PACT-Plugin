@@ -21,6 +21,7 @@ import math
 import os
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -111,18 +112,41 @@ class MissionControlServer(ThreadingHTTPServer):
         self.body_lock = threading.Lock()
         self.connections = 0
         self.connections_lock = threading.Lock()
+        # Admitted sockets -> [time it last became evictable, serving a
+        # key-verified request]. Only the key holder can make a slot keyed.
+        self.tracked: dict[Any, list] = {}
         self.started_at = _now()
         self.started_monotonic = time.monotonic()
         super().__init__(address, handler_class)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        """Serve a connection on its own thread, or close it past the cap."""
+        """Serve a connection on its own thread; at the cap, make room first.
+
+        At MAX_CONNECTIONS the oldest connection that is NOT serving a
+        key-verified request (still sending headers, idle between keep-alive
+        requests, or serving an unkeyed static file) is shut down and the new
+        connection is admitted. Only when every slot is serving a keyed request
+        is the new connection closed. A slow or idle client therefore never
+        locks the key holder out: it is always the oldest evictable slot.
+        """
+        victim = None
         with self.connections_lock:
-            if self.connections >= MAX_CONNECTIONS:
-                admitted = False
-            else:
+            if len(self.tracked) >= MAX_CONNECTIONS:
+                evictable = [sock for sock, (_since, keyed) in self.tracked.items() if not keyed]
+                if evictable:
+                    victim = min(evictable, key=lambda sock: self.tracked[sock][0])
+                    del self.tracked[victim]
+            admitted = len(self.tracked) < MAX_CONNECTIONS
+            if admitted:
                 self.connections += 1
-                admitted = True
+                self.tracked[request] = [time.monotonic(), False]
+        if victim is not None:
+            # Its handler thread sees the closed socket, ends, and releases
+            # its own count; it is already out of `tracked`.
+            try:
+                victim.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         if not admitted:
             self.shutdown_request(request)
             return
@@ -131,6 +155,7 @@ class MissionControlServer(ThreadingHTTPServer):
         except Exception:
             with self.connections_lock:
                 self.connections -= 1
+                self.tracked.pop(request, None)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
@@ -140,6 +165,20 @@ class MissionControlServer(ThreadingHTTPServer):
         finally:
             with self.connections_lock:
                 self.connections -= 1
+                self.tracked.pop(request, None)
+
+    def mark_keyed(self, request: Any, keyed: bool) -> None:
+        """Record whether a connection is serving a key-verified request.
+
+        Leaving the keyed state restarts the connection's evictable clock, so
+        an idle keep-alive connection ages from the end of its last request.
+        """
+        with self.connections_lock:
+            entry = self.tracked.get(request)
+            if entry is not None:
+                if not keyed:
+                    entry[0] = time.monotonic()
+                entry[1] = keyed
 
     def cached_body(self, key: tuple[str, str]) -> bytes | None:
         """An encoded body for (journal path, etag), or None."""
@@ -192,6 +231,13 @@ class MissionControlHandler(BaseHTTPRequestHandler):
     _headers_sent: bool = False
 
     # -- lifecycle -------------------------------------------------------
+
+    def handle_one_request(self) -> None:
+        """One request; afterwards the connection is evictable again."""
+        try:
+            super().handle_one_request()
+        finally:
+            self.mission_server.mark_keyed(self.connection, False)
 
     def version_string(self) -> str:
         """The Server header: product and version, nothing else."""
@@ -325,9 +371,11 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         path = unquote(split.path)
         # The key check runs before any route work, so an unkeyed request
         # costs O(1): no discovery, summary or parse.
-        if path.startswith("/api/") and not self._key_ok():
-            self._send_error(401, "key required")
-            return
+        if path.startswith("/api/"):
+            if not self._key_ok():
+                self._send_error(401, "key required")
+                return
+            self.mission_server.mark_keyed(self.connection, True)
         if path == "/":
             self._serve_index()
         elif path == "/api/health":

@@ -1528,27 +1528,83 @@ class TestServerAnswersOnlyWellFormedRequests:
 
 
 class TestServerBoundsItsWork:
-    def test_connections_past_the_cap_are_closed(self, live_server, monkeypatch):
-        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2)
-        idle = [socket.create_connection(("127.0.0.1", live_server.server_port)) for _ in range(2)]
-        try:
-            import time
-
-            time.sleep(0.2)
-            with socket.create_connection(("127.0.0.1", live_server.server_port), timeout=5) as extra:
-                extra.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-                extra.settimeout(2)
-                assert extra.recv(100) == b""
-        finally:
-            for sock in idle:
-                sock.close()
+    def test_trickling_connections_never_lock_out_the_key_holder(self, live_server, monkeypatch):
         import time
 
+        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 3)
+        tricklers = []
+        for _ in range(3):
+            sock = socket.create_connection(("127.0.0.1", live_server.server_port))
+            sock.sendall(b"GET /api/hea")
+            tricklers.append(sock)
+        try:
+            time.sleep(0.2)
+            for _ in range(3):
+                status, _ = _get(live_server.server_port, "/api/health", live_server.key)
+                assert status == 200
+            closed = 0
+            for sock in tricklers:
+                sock.settimeout(2)
+                try:
+                    closed += sock.recv(100) == b""
+                except OSError:
+                    closed += 1
+            assert closed >= 1
+        finally:
+            for sock in tricklers:
+                sock.close()
+
+    def test_evicting_a_static_response_closes_it_cleanly(self, live_server, monkeypatch, tmp_path):
+        """A victim mid-static-response gets a short body then EOF, never a full one."""
+        import time
+
+        static = tmp_path / "static"
+        static.mkdir()
+        size = 16 * 1024 * 1024  # far beyond loopback socket buffers
+        (static / "big.txt").write_bytes(b"x" * size)
+        monkeypatch.setattr(server_module, "_static_root", lambda: static)
+        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 1)
+        victim = socket.create_connection(("127.0.0.1", live_server.server_port))
+        try:
+            # Ask for the big file and do not read, so the server blocks
+            # mid-body on an unkeyed (evictable) request.
+            victim.sendall(b"GET /static/big.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            time.sleep(0.3)
+            status, _ = _get(live_server.server_port, "/api/health", live_server.key)
+            assert status == 200
+            victim.settimeout(5)
+            received = 0
+            try:
+                while True:
+                    chunk = victim.recv(1 << 20)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+            except OSError:
+                pass
+            assert received < size
+        finally:
+            victim.close()
         deadline = time.time() + 5
         while live_server.connections and time.time() < deadline:
             time.sleep(0.05)
-        status, _ = _get(live_server.server_port, "/api/health", live_server.key)
-        assert status == 200
+        assert live_server.connections == 0
+
+    def test_slots_serving_keyed_requests_are_never_evicted(self, live_server, monkeypatch):
+        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2)
+        keyed = [object(), object()]
+        with live_server.connections_lock:
+            for marker in keyed:
+                live_server.tracked[marker] = [0.0, True]
+        closed: list = []
+        monkeypatch.setattr(live_server, "shutdown_request", lambda request: closed.append(request))
+        newcomer = object()
+        live_server.process_request(newcomer, ("127.0.0.1", 1))
+        assert closed == [newcomer]
+        with live_server.connections_lock:
+            assert all(marker in live_server.tracked for marker in keyed)
+            for marker in keyed:
+                del live_server.tracked[marker]
 
     def test_an_unchanged_session_is_built_once(self, tmp_path, monkeypatch):
         from visualizer import model

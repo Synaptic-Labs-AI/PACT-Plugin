@@ -155,8 +155,15 @@ ASCII digits. An HTTP/0.9 request line is closed with no response. JSON never
 carries NaN or Infinity; they become `null`.
 
 Server bounds: at most 2 model builds run at once; the 4 most recent encoded
-session bodies are cached by (journal, etag); at most 32 connections are open,
-and a connection past the cap is closed at accept. A journal is parsed
+session bodies are cached by (journal, etag); at most 32 connections are open. At the cap, the
+server closes the oldest connection that is not serving a key-verified `/api`
+request (one still sending headers, an idle keep-alive, or an unkeyed static
+request) and admits the new one. It refuses a new connection only when every
+slot is serving a keyed request, so unkeyed connections can never lock out
+the key holder. Under a sustained connection flood from a local process,
+unkeyed requests can also be evicted, including the page's static assets on
+its first load. Keyed `/api` requests always get through, so a page that is
+already open keeps updating. A journal is parsed
 incrementally: a poll reads only the bytes appended since the last parse of
 the same file (same device and inode), and reparses in full when the file
 shrinks or is replaced. The `Server` header is `pact-mission-control/<version>`.
