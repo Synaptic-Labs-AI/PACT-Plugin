@@ -21,7 +21,6 @@ from . import classify, discovery, journal, roster
 from .settings import (
     APP_NAME,
     DEFAULT_SESSIONS_LIMIT,
-    LIVE_WINDOW_S,
     MAX_AGENTS,
     MAX_ALERTS,
     MAX_CHECKPOINTS,
@@ -466,7 +465,7 @@ def derive_agents(
             if accumulator is not None:
                 accumulator.commits += 1
 
-    ended = _text(settings_meta.get("status"), 20) == "ended"
+    ended = _text(settings_meta.get("status"), 20) not in {"", "live"}
     agents: list[dict] = []
     for name in order:
         accumulator = accumulators[name]
@@ -1094,22 +1093,21 @@ def derive_wrapup(events: Sequence[Mapping[str, Any]]) -> dict | None:
     """The last wrap-up session_end, or None.
 
     Location: model.derive_wrapup.
-    Summary: A session_end counts as a wrap-up when its ``source`` is
-             "wrap-up" or when it carries a PR state (MERGED/OPEN/CLOSED/
-             NONE/UNKNOWN). The block carries source, upper-case pr_state,
-             pr_number and ts.
+    Summary: A session_end counts as a wrap-up only when its ``source`` is
+             "wrap-up"; a bare session_end is a process exit. The block
+             carries source, upper-case pr_state, pr_number and ts of the
+             LATEST wrap-up record.
     Used by: derive_model, tests.
     """
-    pr_states = {"MERGED", "OPEN", "CLOSED", "NONE", "UNKNOWN"}
     wrapup: dict | None = None
     for event in events:
         if event.get("type") != "session_end":
             continue
         data = _mapping(event.get("raw"))
         source = _text(data.get("source"), 40)
-        state = _text(data.get("pr_state"), 20).upper()
-        if source != "wrap-up" and state not in pr_states:
+        if source != "wrap-up":
             continue
+        state = _text(data.get("pr_state"), 20).upper()
         wrapup = {
             "source": source,
             "pr_state": state,
@@ -1131,8 +1129,15 @@ def _build_meta(
     meta_seed: Mapping[str, Any] | None,
     now: datetime,
     event_count: int,
+    activity_ts: float = 0.0,
 ) -> dict:
-    """Assemble the meta block (project/team/times/status/run_kind/cloud)."""
+    """Assemble the meta block (project/team/times/status/run_kind/cloud).
+
+    Status is journal.run_status over the whole event list: ended by its own
+    session_end only when that is the newest lifecycle event with nothing but
+    end trailers after it; otherwise the activity clock (``activity_ts``, the
+    newest of the journal and team/task file mtimes) decides.
+    """
     seed = meta_seed or {}
     session_start = _session_start(events) or {}
     session_end = _last_of_type(events, "session_end") or {}
@@ -1164,15 +1169,18 @@ def _build_meta(
     if not started_at and events:
         started_at = _text(events[0].data.get("ts"), 64) or None
 
+    clock = max(float(mtime or 0.0), float(activity_ts or 0.0))
+    lifecycle = journal.lifecycle_of_events(raw.data for raw in reversed(events))
+    status, ended_by = journal.run_status(lifecycle, clock, now.timestamp())
     if _text(seed.get("status"), 20):
         status = _text(seed.get("status"), 20)
-    elif session_end:
-        status = "ended"
-    else:
-        age = max(0.0, now.timestamp() - mtime) if mtime else None
-        status = "live" if age is not None and age <= LIVE_WINDOW_S else "ended"
+        ended_by = None if status == "live" else (_text(seed.get("ended_by"), 20) or "session_end")
+    if ended_by != "session_end":
+        # A session_end that is not the newest lifecycle event (a resume, or
+        # work after a wrap-up record) does not end the run.
+        ended_at = _text(seed.get("ended_at"), 64)
 
-    if not ended_at and status == "ended" and events:
+    if not ended_at and status != "live" and events:
         ended_at = _text(events[-1].data.get("ts"), 64) or None
 
     duration_s: int | None = None
@@ -1202,6 +1210,8 @@ def _build_meta(
         "started_at": started_at,
         "ended_at": ended_at,
         "status": status,
+        "ended_by": ended_by,
+        "activity_at": iso_utc(datetime.fromtimestamp(clock, timezone.utc)) if clock else None,
         "duration_s": duration_s,
         "run_kind": run_kind,
         "cloud": bool(cloud),
@@ -1232,6 +1242,7 @@ def derive_model(
     event_count: int | None = None,
     now: datetime | None = None,
     mtime: float = 0.0,
+    activity_ts: float = 0.0,
 ) -> dict:
     """Derive the full contract model from an already-parsed journal.
 
@@ -1260,6 +1271,7 @@ def derive_model(
         meta_seed=meta_seed,
         now=reference,
         event_count=total_events,
+        activity_ts=activity_ts,
     )
     render_context = {
         "project": meta["project"],
@@ -1433,23 +1445,63 @@ def resolve_team_name(
     return f"session-{session_id[:8]}" if session_id else ""
 
 
+def session_team(ref: discovery.SessionRef) -> str:
+    """The team directory a session belongs to, from bounded reads only.
+
+    Location: model.session_team.
+    Summary: resolve_team_name over the journal's head window and the session
+             context file, so the ETag short-circuit, the session list and the
+             full model all name the same team without a full parse.
+    Used by: session_token, build_model, build_sessions_list.
+    """
+    head = journal.read_head_events(ref.journal)
+    return resolve_team_name(head, roster.read_session_context(ref.session_dir), ref.session_id)
+
+
+def session_token(
+    ref: discovery.SessionRef, now: datetime | None = None, team_name: str | None = None
+) -> tuple[str, float]:
+    """(ETag token, activity clock seconds) for one session, from stats only.
+
+    Location: model.session_token.
+    Summary: ``<journal mtime_ns>-<journal size>-<activity_ns>-<status>-
+             <ended_by|->-<build version>``. Every input the model's freshness
+             depends on is in it: the journal identity, the newest team/task
+             file mtime, and the derived run status, which changes when the
+             activity clock crosses the live window even if no file changed.
+             Costs one cached bounded lifecycle walk plus a few stats.
+    Used by: build_model, server (/api/session since short-circuit).
+    """
+    lifecycle, stat = journal.lifecycle_scan(ref.journal)
+    team = session_team(ref) if team_name is None else team_name
+    activity_ns = roster.activity_mtime_ns(ref.root.path, team) if team else 0
+    journal_ns = int(stat.st_mtime_ns) if stat is not None else 0
+    size = int(stat.st_size) if stat is not None else 0
+    activity_ns = max(activity_ns, journal_ns)
+    activity_ts = activity_ns / 1e9
+    status, ended_by = journal.run_status(lifecycle, activity_ts, utcnow(now).timestamp())
+    token = f"{journal_ns}-{size}-{activity_ns}-{status}-{ended_by or '-'}-{VERSION}"
+    return token, activity_ts
+
+
 def build_model(ref: discovery.SessionRef, now: datetime | None = None) -> dict:
     """Read one discovered journal and return its full contract model.
 
     Location: model.build_model.
     Summary: Journal read + session-context read + team/task-store load +
-             derive_model. ``since``/unchanged handling lives in the server,
-             which compares the returned etag.
+             derive_model. The payload's ``etag`` is session_token, the same
+             token the server's since short-circuit compares.
     Used by: server (/api/session), tests.
     """
+    team_name = session_team(ref)
+    token, activity_ts = session_token(ref, now, team_name)
     read = journal.read_journal(ref.journal)
     session_context = roster.read_session_context(ref.session_dir)
-    team_name = resolve_team_name(read.events, session_context, ref.session_id)
     team_info = roster.load_team(ref.root.path, team_name) if team_name else roster.TeamInfo()
     return derive_model(
         read.events,
         source=build_source(ref, read),
-        etag=read.etag,
+        etag=token,
         root_id=ref.root_id,
         slug=ref.slug,
         session_id=ref.session_id,
@@ -1459,6 +1511,7 @@ def build_model(ref: discovery.SessionRef, now: datetime | None = None) -> dict:
         event_count=len(read.events),
         now=now,
         mtime=read.mtime,
+        activity_ts=activity_ts,
     )
 
 
@@ -1483,7 +1536,9 @@ def build_sessions_list(
     reference = utcnow(now)
     sessions: list[dict] = []
     for ref in discovery.discover_sessions(roots):
-        summary = journal.summarize_journal(ref.journal, reference)
+        team_name = session_team(ref)
+        activity_ns = roster.activity_mtime_ns(ref.root.path, team_name) if team_name else 0
+        summary = journal.summarize_journal(ref.journal, reference, activity_ns / 1e9)
         raw_project = _basename(summary.project_dir) or ref.slug
         project, project_conformed = project_label(raw_project)
         if project_filter:
@@ -1515,6 +1570,7 @@ def build_sessions_list(
             "size_bytes": int(summary.size),
             "is_live": bool(summary.is_live),
             "status": summary.status,
+            "ended_by": summary.ended_by,
             "last_event_type": summary.last_event_type,
             "last_phase": summary.last_phase,
             "run_kind": summary.run_kind,

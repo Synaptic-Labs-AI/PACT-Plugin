@@ -415,6 +415,62 @@ def load_team(config_root: Path, team_name: str) -> TeamInfo:
     return info
 
 
+def _mtime_ns(path: Path) -> int:
+    """A path's mtime in ns, or 0 when it cannot be stat'd."""
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+def activity_mtime_ns(config_root: Path, team_name: str) -> int:
+    """Newest mtime (ns) among a team's task and team files, or 0.
+
+    Location: roster.activity_mtime_ns.
+    Summary: The run's activity clock beyond its journal: ``tasks/<team>/``
+             and each ``*.json`` in it (at most MAX_STORED_TASKS files),
+             ``teams/<team>/config.json`` and ``teams/<team>/pact-roster.jsonl``.
+             Teammates update task files while the lead's journal is quiet,
+             so a run stays live while its team works. Only paths
+             ``discovery.contained`` accepts count. Never raises.
+    Used by: model (run status, ETag token, session list).
+    """
+    if not isinstance(team_name, str) or not valid_component(team_name):
+        return 0
+    root = Path(config_root)
+    newest = 0
+    teams_dir = root / TEAMS_DIRNAME
+    for path in (
+        teams_dir / team_name / TEAM_CONFIG_FILENAME,
+        teams_dir / team_name / ROSTER_FILENAME,
+    ):
+        if contained(teams_dir, path):
+            newest = max(newest, _mtime_ns(path))
+    tasks_root = root / TASKS_DIRNAME
+    tasks_dir = tasks_root / team_name
+    if not contained(tasks_root, tasks_dir):
+        return newest
+    newest = max(newest, _mtime_ns(tasks_dir))
+    try:
+        entries = sorted(tasks_dir.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return newest
+    counted = 0
+    for entry in entries:
+        if counted >= MAX_STORED_TASKS:
+            break
+        if entry.suffix != ".json" or entry.name.startswith("."):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_file():
+                continue
+        except OSError:
+            continue
+        counted += 1
+        newest = max(newest, _mtime_ns(entry))
+    return newest
+
+
 def read_session_context(session_dir: Path) -> dict:
     """Read a session directory's pact-session-context.json, or {}.
 

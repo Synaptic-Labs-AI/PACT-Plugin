@@ -127,6 +127,7 @@ demo can be opened in either mode.
     "size_bytes": 10193885,
     "is_live": false,
     "status": "ended",
+    "ended_by": "session_end",
     "last_event_type": "session_end",
     "last_phase": "TEST",
     "run_kind": "orchestrate"
@@ -148,6 +149,25 @@ null when unavailable. `last_phase` reflects the last `phase_transition` within
 character has those characters replaced with `_` and the entry carries
 `project_altered: true` (the session is never dropped).
 
+Run status — one rule, shared by the list and the full model:
+
+- The run is ended by its own `session_end` only when that is the newest
+  lifecycle event (`session_start` / `session_end`) and only end trailers
+  (`session_end`, `cleanup_summary`) follow it. Then `status` is `paused` or
+  `refreshed` when a `session_paused` / `session_refreshed` lies after the
+  newest `session_start`, else `ended`; `ended_by` is `session_end`.
+- Otherwise the activity clock decides: the newest mtime of the journal,
+  `tasks/<team>/` and its task files, and `teams/<team>/config.json` and
+  `pact-roster.jsonl` (paths the containment rule accepts). Within 300 s of
+  now the run is `live` with `ended_by: null`; later it is `ended` with
+  `ended_by: "idle"`, and it returns to `live` when activity resumes.
+- A resumed or compacted session appends `session_start` to the same journal
+  after the previous process's `session_end`, so the run is live again.
+
+The list reads the lifecycle from a bounded backward walk of the journal's
+tail and the model from the full parse. Both views agree: a `session_end` far
+from the end of the file always has other events after it.
+
 `run_kind` in the session list is derived from the first 64KB (at most its
 first 40 valid events) and the last 512KB of the journal; a run whose only
 orchestration markers fall outside both windows lists as `session`, while
@@ -156,12 +176,19 @@ orchestration markers fall outside both windows lists as `session`, while
 ### GET /api/session?root=…&slug=…&session_id=…&since=…
 
 `root` is a root id from `/api/sessions`; omit for the default root.
-`since` is an etag previously returned. When it matches the current journal
-identity, return:
+`since` is an etag previously returned. The etag token is
+`<journal mtime_ns>-<journal size>-<activity mtime_ns>-<status>-<ended_by or ->-<build version>`,
+computed from stats and the cached lifecycle walk without parsing the journal.
+It changes on any journal append, any task or team file change, and when the
+status flips (for example, a quiet run crossing the live window). When `since`
+equals the current token, return:
 
 ```json
-{"ok": true, "unchanged": true, "etag": "178...-10193885"}
+{"ok": true, "unchanged": true, "etag": "1780000000000000000-10193885-1780000000000000000-ended-session_end-0.1.0"}
 ```
+
+The JSON `etag` field carries the bare token; the HTTP `ETag` header carries
+it quoted (`"…"`). Send the JSON value back as `since`.
 
 Otherwise return the full model:
 
@@ -169,7 +196,7 @@ Otherwise return the full model:
 {
   "ok": true,
   "version": "0.1.0",
-  "etag": "178...-10193885",
+  "etag": "1780000000000000000-10193885-1780000000000000000-ended-session_end-0.1.0",
   "source": {
     "kind": "real",
     "root": "~/.claude",
@@ -186,6 +213,8 @@ Otherwise return the full model:
     "started_at": "2026-10-29T10:00:00Z",
     "ended_at": "2026-10-29T12:00:00Z",
     "status": "ended",
+    "ended_by": "session_end",
+    "activity_at": "2026-10-29T12:00:00Z",
     "duration_s": 7200,
     "run_kind": "orchestrate",
     "cloud": false,
@@ -336,8 +365,12 @@ Field rules:
   `schema_complete` is true when the five REQUIRED keys are present;
   `reasoning_chain` is recommended in the PACT schema, so a five-key handoff is
   complete.
-- `wrapup` is `null` unless a wrap-up `session_end` (or explicit PR state)
-  exists.
+- `meta.status` ∈ `live|paused|refreshed|ended`; `meta.ended_by` ∈
+  `session_end|idle|null` (null while live); `meta.activity_at` is the activity
+  clock as ISO UTC, or null.
+- `wrapup` is the LATEST `session_end` whose `source` is `wrap-up`, or `null`.
+  A bare `session_end` (the SessionEnd hook's record of a process exit) is never
+  a wrap-up.
 - `alerts` is built only from `algedonic_signal` and `blocker_raised` journal
   events. No current PACT writer emits either (algedonic signals travel as
   task metadata), so a real run's alerts array is normally empty; the demo

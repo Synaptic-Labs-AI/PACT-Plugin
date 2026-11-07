@@ -1048,9 +1048,13 @@ class TestModelBasics:
         payload = build_basic_model(root, tmp_path)
 
         assert payload["ok"] is True
-        assert payload["etag"] == journal.read_journal(
-            root / "pact-sessions" / "PACT-prompt" / "sess-1" / "session-journal.jsonl"
-        ).etag
+        ref = discovery.find_session(roots_for(root, tmp_path), "PACT-prompt", "sess-1")
+        assert payload["etag"] == model.session_token(ref)[0]
+        assert re.fullmatch(
+            rf"\d+-\d+-\d+-(live|ended|paused|refreshed)-(session_end|idle|-)-"
+            rf"{re.escape(settings.VERSION)}",
+            payload["etag"],
+        ), payload["etag"]
         assert payload["source"]["kind"] == "real"
         assert isinstance(payload["source"]["root"], str) and payload["source"]["root"]
         assert payload["source"]["journal"] == (

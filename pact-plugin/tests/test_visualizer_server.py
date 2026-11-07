@@ -291,7 +291,7 @@ class TestSessionRoute:
         assert payload["events"]
         assert payload["handoffs"][0]["schema_complete"] is True
         assert payload["wrapup"]["pr_state"] == "MERGED"
-        assert payload["etag"] == response.headers["etag"]
+        assert response.headers["etag"] == f'"{payload["etag"]}"'
         assert payload["metrics"]["handoffs"] == 1
 
     def test_since_returns_unchanged(self, live_server):
@@ -301,7 +301,7 @@ class TestSessionRoute:
         unchanged = http_request(srv.server_port, self._path(since=etag))
         assert unchanged.status == 200
         assert unchanged.json() == {"ok": True, "unchanged": True, "etag": etag}
-        assert unchanged.headers["etag"] == etag
+        assert unchanged.headers["etag"] == f'"{etag}"'
         stale = http_request(srv.server_port, self._path(since="1-1"))
         assert stale.status == 200
         assert stale.json()["ok"] is True
@@ -367,6 +367,62 @@ class TestSessionRoute:
         assert len({tuple(event["seq"] for event in payload["events"]) for payload in payloads}) == 1
 
 
+class TestEtagCoversEveryInput:
+    """`since` answers unchanged only while nothing the model reads changed."""
+
+    _PATH = "/api/session?slug=PACT-prompt&session_id=sess-1"
+
+    def _etag(self, srv) -> str:
+        return http_request(srv.server_port, self._PATH).json()["etag"]
+
+    def _since(self, srv, etag: str) -> dict:
+        return http_request(srv.server_port, f"{self._PATH}&since={etag}").json()
+
+    def test_a_task_file_change_alone_invalidates_since(self, live_server):
+        srv, _thread = live_server
+        root = srv.roots[0].path
+        tasks = root / "tasks" / "session-abc"
+        tasks.mkdir(parents=True)
+        etag = self._etag(srv)
+        assert self._since(srv, etag)["unchanged"] is True
+        (tasks / "5.json").write_text(
+            json.dumps({"id": "5", "subject": "architect: design", "status": "pending",
+                        "description": "", "blocks": [], "blockedBy": []}),
+            encoding="utf-8",
+        )
+        stamp_ns = time.time_ns() + 5_000_000_000
+        os.utime(tasks / "5.json", ns=(stamp_ns, stamp_ns))
+        fresh = self._since(srv, etag)
+        assert fresh.get("unchanged") is not True
+        assert any(task["id"] == "5" for task in fresh["tasks"])
+
+    def test_the_clock_alone_can_end_a_quiet_run(self, live_server, monkeypatch):
+        """A run with no session_end turns idle as time passes, and a poll
+        holding the old token must see the change."""
+        srv, _thread = live_server
+        root = srv.roots[0].path
+        path = write_journal(
+            root,
+            "PACT-prompt",
+            "sess-q",
+            [{"v": 1, "type": "session_start", "ts": "2026-11-01T10:00:00Z",
+              "session_id": "sess-q", "project_dir": "/Users/dev/PACT-prompt",
+              "team": "session-q", "worktree": "", "source": "startup",
+              "lead_address": "team-lead"}],
+        )
+        written = datetime(2026, 11, 1, 10, 0, 0, tzinfo=UTC)
+        os.utime(path, (written.timestamp(), written.timestamp()))
+        quiet = "/api/session?slug=PACT-prompt&session_id=sess-q"
+        monkeypatch.setattr(server_module, "_now", lambda: written.replace(minute=1))
+        live = http_request(srv.server_port, quiet).json()
+        assert live["meta"]["status"] == "live"
+        monkeypatch.setattr(server_module, "_now", lambda: written.replace(hour=12))
+        later = http_request(srv.server_port, f"{quiet}&since={live['etag']}").json()
+        assert later.get("unchanged") is not True
+        assert later["meta"]["status"] == "ended"
+        assert later["meta"]["ended_by"] == "idle"
+
+
 class TestSymlinkedSessionDirs:
     """A symlinked slug or session directory is not a session.
 
@@ -425,7 +481,7 @@ class TestDemoRoute:
         assert payload["phases"]["completed"] == ["PREPARE", "ARCHITECT", "CODE", "TEST"]
         assert len(payload["agents"]) >= 8
         assert payload["wrapup"]["pr_state"] == "MERGED"
-        assert response.headers["etag"] == "demo-v1"
+        assert response.headers["etag"] == '"demo-v1"'
 
     def test_demo_since_unchanged(self, live_server):
         srv, _thread = live_server

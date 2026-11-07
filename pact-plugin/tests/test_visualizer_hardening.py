@@ -671,3 +671,125 @@ class TestTerminalOutputStripsControls:
         out = capsys.readouterr().out
         assert rc == 0
         assert not any(ch in out for ch in ("\x1b", "\x07", "\x9b"))
+
+
+def _write_session(root_dir, events, *, slug="proj", session_id="s1", age_s=0.0):
+    session = root_dir / "pact-sessions" / slug / session_id
+    session.mkdir(parents=True, exist_ok=True)
+    path = session / "session-journal.jsonl"
+    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    stamp = __import__("time").time() - age_s
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _both_views(root_dir, tmp_path, slug="proj", session_id="s1"):
+    from visualizer import discovery, model
+
+    roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+    ref = discovery.find_session(roots, slug, session_id)
+    full = model.build_model(ref)["meta"]
+    listed = model.build_sessions_list(roots)["sessions"][0]
+    return (full["status"], full["ended_by"]), (listed["status"], listed["ended_by"])
+
+
+_START = {"type": "session_start", "ts": "2026-11-07T15:00:00Z", "session_id": "s1",
+          "project_dir": "/x/proj", "team": "team-l"}
+_END = {"type": "session_end", "ts": "2026-11-07T15:10:00Z"}
+
+
+class TestRunStatusOneRule:
+    """Both views take status from the newest lifecycle event, then the clock."""
+
+    def test_resumed_run_is_live_in_both_views(self, tmp_path):
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START, _END, {**_START, "source": "resume"},
+                                  {"type": "phase_transition", "phase": "CODE",
+                                   "status": "started"}])
+        assert _both_views(root_dir, tmp_path) == (("live", None), ("live", None))
+
+    def test_work_after_wrap_up_record_is_not_ended(self, tmp_path):
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START, {**_END, "source": "wrap-up", "pr_state": "OPEN"},
+                                  {"type": "commit", "sha": "a", "message": "m",
+                                   "phase": "CODE"}])
+        assert _both_views(root_dir, tmp_path) == (("live", None), ("live", None))
+
+    def test_end_followed_only_by_trailers_is_ended_by_session_end(self, tmp_path):
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START, _END, {"type": "cleanup_summary"}])
+        assert _both_views(root_dir, tmp_path) == (
+            ("ended", "session_end"), ("ended", "session_end"),
+        )
+
+    def test_paused_before_exit_reads_paused(self, tmp_path):
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START, {"type": "session_paused", "pr_number": 1}, _END])
+        assert _both_views(root_dir, tmp_path) == (
+            ("paused", "session_end"), ("paused", "session_end"),
+        )
+
+    def test_old_end_beyond_scan_budget_agrees(self, tmp_path):
+        pad = [{"type": "lifecycle_decision", "verdict": "allow", "tool_name": "Bash",
+                "pad": "x" * 900} for _ in range(700)]
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START, _END, *pad])
+        assert _both_views(root_dir, tmp_path) == (("live", None), ("live", None))
+
+    def test_quiet_journal_with_busy_task_store_stays_live(self, tmp_path):
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START], age_s=3600)
+        tasks = root_dir / "tasks" / "team-l"
+        tasks.mkdir(parents=True)
+        (tasks / "1.json").write_text(json.dumps({"id": "1", "status": "in_progress"}))
+        assert _both_views(root_dir, tmp_path) == (("live", None), ("live", None))
+
+    def test_quiet_run_ends_idle(self, tmp_path):
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START], age_s=3600)
+        assert _both_views(root_dir, tmp_path) == (("ended", "idle"), ("ended", "idle"))
+
+
+class TestEtagCoversEveryInput:
+    """A since-poll must see status crossing the live window and task-store writes."""
+
+    @staticmethod
+    def _get(port, query):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/api/session?{query}", timeout=5) as response:
+            return json.loads(response.read()), response.headers.get("ETag")
+
+    def test_since_poll_sees_status_change_and_task_write(self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START], age_s=10)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        srv = server_module.create_server(roots)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            first, header = self._get(srv.server_port, "slug=proj&session_id=s1")
+            assert first["meta"]["status"] == "live"
+            assert header == f'"{first["etag"]}"'
+            same, _ = self._get(srv.server_port, f"slug=proj&session_id=s1&since={first['etag']}")
+            assert same.get("unchanged") is True
+
+            later = datetime.now(timezone.utc) + timedelta(seconds=settings.LIVE_WINDOW_S + 5)
+            monkeypatch.setattr(server_module, "_now", lambda: later)
+            moved, _ = self._get(srv.server_port, f"slug=proj&session_id=s1&since={first['etag']}")
+            assert moved.get("unchanged") is not True
+            assert moved["meta"]["status"] == "ended"
+            assert moved["meta"]["ended_by"] == "idle"
+            monkeypatch.undo()
+
+            tasks = root_dir / "tasks" / "team-l"
+            tasks.mkdir(parents=True)
+            (tasks / "9.json").write_text(json.dumps({"id": "9", "subject": "new"}))
+            fresh, _ = self._get(srv.server_port, f"slug=proj&session_id=s1&since={first['etag']}")
+            assert fresh.get("unchanged") is not True
+            assert any(task["id"] == "9" for task in fresh["tasks"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)

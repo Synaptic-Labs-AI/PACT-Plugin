@@ -386,7 +386,7 @@ def classify_event(
     agent = _agent_name(event_type, data)
     task_id = as_text(data.get("task_id"), 200) or None
     phase = as_text(data.get("phase"), 40).upper() or None
-    return {
+    event = {
         "seq": raw.seq,
         "ts": as_text(data.get("ts"), 64),
         "type": event_type,
@@ -400,6 +400,9 @@ def classify_event(
         "icon": icon,
         "raw": trim_raw(data),
     }
+    if event_type == "session_end" and as_text(data.get("source"), 40) == "wrap-up":
+        event["wrapup"] = True
+    return event
 
 
 def _agent_name(event_type: str, data: Mapping[str, Any]) -> str | None:

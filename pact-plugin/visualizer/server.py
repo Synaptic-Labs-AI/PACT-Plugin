@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import demo, discovery, journal, model, settings
+from . import demo, discovery, model, settings
 from .settings import (
     APP_NAME,
     DEFAULT_SESSIONS_LIMIT,
@@ -359,19 +359,22 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         if ref is None:
             self._send_error(404, "session not found")
             return
-        stat = journal.journal_stat(ref.journal)
-        if stat is not None:
-            current_etag = journal.make_etag(stat[0], stat[1])
-            since = _first_param(params, "since")
-            if since is not None and since == current_etag:
+        since = _first_param(params, "since")
+        if since is not None:
+            # Short-circuit before any parse: the token covers every input
+            # the model depends on, so an equal token means an equal model.
+            current_etag, _activity = model.session_token(ref, now=_now())
+            if since == current_etag:
                 self._send_json(
                     200,
                     {"ok": True, "unchanged": True, "etag": current_etag},
-                    extra_headers=(("ETag", current_etag),),
+                    extra_headers=(("ETag", _quoted(current_etag)),),
                 )
                 return
         payload = model.build_model(ref, now=_now())
-        self._send_json(200, payload, extra_headers=(("ETag", payload.get("etag", "")),))
+        self._send_json(
+            200, payload, extra_headers=(("ETag", _quoted(str(payload.get("etag", "")))),)
+        )
 
     def _serve_demo(self, query: str) -> None:
         """GET /api/demo?since=demo-v1 -> the deterministic scripted model."""
@@ -381,11 +384,11 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             self._send_json(
                 200,
                 {"ok": True, "unchanged": True, "etag": settings.DEMO_ETAG},
-                extra_headers=(("ETag", settings.DEMO_ETAG),),
+                extra_headers=(("ETag", _quoted(settings.DEMO_ETAG)),),
             )
             return
         payload = demo.build_demo_model()
-        self._send_json(200, payload, extra_headers=(("ETag", settings.DEMO_ETAG),))
+        self._send_json(200, payload, extra_headers=(("ETag", _quoted(settings.DEMO_ETAG)),))
 
     # -- static routes ----------------------------------------------------
 
@@ -457,6 +460,11 @@ def _alias_relative_path(path: str) -> str | None:
             return None
         return f"{prefix[1:-1]}/{filename}"
     return None
+
+
+def _quoted(token: str) -> str:
+    """An HTTP entity tag: the token in double quotes (RFC 9110 strong ETag)."""
+    return '"' + token.replace('"', "") + '"'
 
 
 def _first_param(params: Mapping[str, list[str]], key: str) -> str | None:

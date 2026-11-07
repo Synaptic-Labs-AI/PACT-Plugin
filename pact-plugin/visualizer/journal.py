@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from .settings import (
     JOURNAL_FILENAME,
@@ -91,9 +92,12 @@ class JournalSummary:
     project_dir: str = ""
     run_kind: str = "session"
     status: str = "ended"
+    ended_by: str | None = "idle"
     is_live: bool = False
     mtime: float = 0.0
+    mtime_ns: int = 0
     size: int = 0
+    lifecycle: Lifecycle | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -321,9 +325,9 @@ def read_tail_events(path: Path, limit: int = 80) -> list[RawEvent]:
 # deliberately absent because every run ends.
 _ORCHESTRATION_TYPES = frozenset(ORCHESTRATION_MARKER_TYPES)
 
-# Types the cheap summary looks for in ONE pass: the marker set plus the two
-# fields it derives itself (last_phase, ended).
-_SUMMARY_SCAN_TYPES = _ORCHESTRATION_TYPES | {"session_end"}
+# Types the cheap summary records the newest of in its backward walk: the
+# marker set (run_kind) plus phase_transition (last_phase).
+_SUMMARY_SCAN_TYPES = _ORCHESTRATION_TYPES | {"phase_transition"}
 
 
 def _timestamp_of(value: object) -> str | None:
@@ -339,37 +343,29 @@ def _timestamp_of(value: object) -> str | None:
 _PHASE_SCAN_MAX_WINDOWS = 4
 
 
-def _scan_back(path: Path, size: int, wanted: frozenset[str]) -> dict[str, dict]:
-    """Newest event of each requested type within the scan budget.
+def _iter_back(path: Path, size: int) -> Iterator[dict]:
+    """Yield the journal's valid events newest-first within the scan budget.
 
-    Location: journal._scan_back.
+    Location: journal._iter_back.
     Summary: Walks tail-sized windows from the end of the file toward the
-             start (at most _PHASE_SCAN_MAX_WINDOWS of them) and returns
-             ``{type: event data}`` for the first — i.e. newest — event of
-             each requested type. Each window's LEADING partial line is
-             carried into the next (earlier) window instead of being dropped:
-             a line that straddles a window boundary is a fragment in both
-             windows, so without the carry a marker sitting on a boundary
-             would be invisible to every bounded scan. A window that begins
-             exactly ON a line boundary keeps its first line whole — one byte
-             of look-behind tells the two cases apart, and getting it wrong
-             would lose an aligned marker at the outermost budget edge.
-    Used by: summarize_journal (phase, run_kind, ended) and tests.
+             start (at most _PHASE_SCAN_MAX_WINDOWS of them). Each window's
+             LEADING partial line is carried into the next (earlier) window
+             instead of being dropped: a line that straddles a window boundary
+             is a fragment in both windows, so without the carry an event on
+             a boundary would be invisible to every bounded scan. A window that
+             begins exactly ON a line boundary keeps its first line whole — one
+             byte of look-behind tells the two cases apart, and getting it
+             wrong would lose an aligned event at the outermost budget edge.
+    Used by: _scan_back, summarize_journal, lifecycle_scan.
     """
-    found: dict[str, dict] = {}
     offset = size
     carry = b""
     for _ in range(_PHASE_SCAN_MAX_WINDOWS):
         if offset <= 0:
-            break
+            return
         start = max(0, offset - SUMMARY_TAIL_BYTES)
-        # Read ONE byte of look-behind to learn whether the window begins ON a
-        # line boundary. If it does, its first line is WHOLE and must not be
-        # carried: carrying it would lose an aligned marker at the outermost
-        # budget edge, where no earlier window is left to carry it into. The
-        # probe byte itself is dropped from `data` — the next (earlier) window
-        # already covers it as its last byte, and keeping it here would
-        # duplicate a character into a carried line.
+        # The probe byte is dropped from `data`: the next (earlier) window
+        # already covers it as its last byte.
         if start > 0:
             head = _read_window(path, start - 1, offset - start + 1)
             starts_on_boundary = head[:1] == b"\n"
@@ -395,35 +391,168 @@ def _scan_back(path: Path, size: int, wanted: frozenset[str]) -> dict[str, dict]
             if text is None:
                 continue
             value = _parse_object(text)
-            if value is None:
-                continue
-            event_type = value.get("type")
-            if event_type in wanted and event_type not in found:
-                found[event_type] = value
-                if len(found) == len(wanted):
-                    return found
+            if value is not None:
+                yield value
         offset = start
+
+
+def _scan_back(path: Path, size: int, wanted: frozenset[str]) -> dict[str, dict]:
+    """Newest event of each requested type within the scan budget.
+
+    Location: journal._scan_back.
+    Summary: ``{type: event data}`` for the first — i.e. newest — event of
+             each requested type that _iter_back yields.
+    Used by: tests (the summary itself folds the same walk with the
+             lifecycle reader in summarize_journal).
+    """
+    found: dict[str, dict] = {}
+    for value in _iter_back(path, size):
+        event_type = value.get("type")
+        if event_type in wanted and event_type not in found:
+            found[event_type] = value
+            if len(found) == len(wanted):
+                break
     return found
 
 
-def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary:
+# --- Run status: one rule for the summary and the full model ---------------
+
+LIFECYCLE_TYPES = frozenset({"session_start", "session_end"})
+# What the SessionEnd hook may write after its own session_end.
+END_TRAILER_TYPES = frozenset({"session_end", "cleanup_summary"})
+_PAUSE_STATUS = {"session_paused": "paused", "session_refreshed": "refreshed"}
+
+
+@dataclass
+class Lifecycle:
+    """What the newest lifecycle events say about a run.
+
+    Location: journal.Lifecycle.
+    Summary: Fed events NEWEST FIRST. ``last`` is the newest lifecycle event
+             type (None when none was seen); ``trailers_only`` is True when
+             only END_TRAILER_TYPES follow the newest session_end; ``pause``
+             is "paused"/"refreshed" when the newest such event lies after the
+             newest session_start and before that session_end. The full model
+             feeds the whole reversed event list and the cheap summary feeds
+             the bounded backward walk, so both derive status with one rule.
+    Used by: run_status, summarize_journal, lifecycle_scan, model.
+    """
+
+    last: str | None = None
+    trailers_only: bool = False
+    pause: str | None = None
+    done: bool = False
+    _saw_other: bool = False
+
+    def feed(self, event_type: object) -> bool:
+        """Fold one event (newest first); True once nothing older matters."""
+        if self.done:
+            return True
+        if self.last is None:
+            if event_type == "session_start":
+                self.last = "session_start"
+                self.done = True
+            elif event_type == "session_end":
+                self.last = "session_end"
+                self.trailers_only = not self._saw_other
+                self.done = not self.trailers_only
+            elif event_type not in END_TRAILER_TYPES:
+                self._saw_other = True
+            return self.done
+        if event_type == "session_start":
+            self.done = True
+        elif self.pause is None and event_type in _PAUSE_STATUS:
+            self.pause = _PAUSE_STATUS[str(event_type)]
+        return self.done
+
+
+def run_status(lifecycle: Lifecycle, activity_ts: float, now_ts: float) -> tuple[str, str | None]:
+    """(status, ended_by) for a run.
+
+    Location: journal.run_status.
+    Summary: Ended by its own session_end only when that is the newest
+             lifecycle event and nothing but end trailers follows it — then
+             the status is "paused"/"refreshed" when a pause or refresh was
+             recorded since the newest session_start, else "ended". Otherwise
+             the activity clock decides: "live" within settings.LIVE_WINDOW_S
+             of ``now_ts`` (ended_by None), else ("ended", "idle").
+    Used by: summarize_journal, model, server (ETag short-circuit).
+    """
+    if lifecycle.last == "session_end" and lifecycle.trailers_only:
+        return lifecycle.pause or "ended", "session_end"
+    if activity_ts and now_ts - activity_ts <= LIVE_WINDOW_S:
+        return "live", None
+    return "ended", "idle"
+
+
+def lifecycle_of_events(events_newest_first: Iterable[dict]) -> Lifecycle:
+    """Feed event payloads newest-first into a fresh Lifecycle."""
+    lifecycle = Lifecycle()
+    for data in events_newest_first:
+        if lifecycle.feed(data.get("type")):
+            break
+    return lifecycle
+
+
+_LIFECYCLE_CACHE: dict[str, tuple[tuple[int, int, int], Lifecycle]] = {}
+_LIFECYCLE_CACHE_MAX = 512
+_LIFECYCLE_LOCK = threading.Lock()
+
+
+def lifecycle_scan(path: Path) -> tuple[Lifecycle, os.stat_result | None]:
+    """The bounded-walk Lifecycle of a journal plus its stat, cached by identity.
+
+    Location: journal.lifecycle_scan.
+    Summary: Keyed by (inode, mtime_ns, size), so an append re-scans and an
+             unchanged journal costs one stat. The cache is bounded and
+             thread-safe; a stat failure returns an empty Lifecycle.
+    Used by: model (ETag token), server (since short-circuit).
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return Lifecycle(), None
+    identity = (int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size))
+    key = str(path)
+    with _LIFECYCLE_LOCK:
+        cached = _LIFECYCLE_CACHE.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1], stat
+    lifecycle = lifecycle_of_events(_iter_back(path, int(stat.st_size)))
+    with _LIFECYCLE_LOCK:
+        if len(_LIFECYCLE_CACHE) >= _LIFECYCLE_CACHE_MAX and key not in _LIFECYCLE_CACHE:
+            _LIFECYCLE_CACHE.pop(next(iter(_LIFECYCLE_CACHE)))
+        _LIFECYCLE_CACHE[key] = (identity, lifecycle)
+    return lifecycle, stat
+
+
+def summarize_journal(
+    path: Path,
+    now: datetime | None = None,
+    activity_ts: float | None = None,
+) -> JournalSummary:
     """Build the cheap /api/sessions summary from bounded head/tail reads.
 
     Location: journal.summarize_journal.
     Summary: Provides started_at/updated_at/last_event_type/last_phase/team/
-             project_dir/run_kind/status without parsing the whole journal.
-             last_phase, run_kind and ended all come from ONE backward pass
-             over the shared 512KB budget. ``status`` is "live" only when no
-             session_end is inside that budget and the file mtime is within
-             settings.LIVE_WINDOW_S of ``now``; otherwise "ended". All
-             failures read as empty fields.
+             project_dir/run_kind/status/ended_by without parsing the whole
+             journal. last_phase, run_kind and the lifecycle all come from ONE
+             backward walk over the shared 512KB budget, and status comes from
+             run_status — the same rule the full model applies to the whole
+             file. ``activity_ts`` (the newest mtime of the run's journal and
+             team/task files, when the caller knows it) drives the clock; the
+             journal mtime alone is used otherwise. All failures read as empty
+             fields.
     Used by: model.build_sessions_list, cli (--list), tests.
     """
     summary = JournalSummary()
-    stat = journal_stat(path)
-    if stat is None:
+    try:
+        stat = os.stat(path)
+    except OSError:
         return summary
-    summary.mtime, summary.size = stat
+    summary.mtime, summary.mtime_ns, summary.size = (
+        float(stat.st_mtime), int(stat.st_mtime_ns), int(stat.st_size)
+    )
     current = now if now is not None else datetime.now(timezone.utc)
 
     head = read_head_events(path)
@@ -449,29 +578,33 @@ def summarize_journal(path: Path, now: datetime | None = None) -> JournalSummary
         summary.updated_at = _timestamp_of(last.data.get("ts")) or summary.updated_at
         summary.last_event_type = str(last.data.get("type", ""))
 
-    # ONE backward pass over ONE budget answers three questions that must not
-    # drift apart: the newest phase, whether a marker makes this an
-    # orchestration, and whether the run ended. session_end answers only the
-    # last of those — every run ends, so it marks no kind.
-    found = _scan_back(path, summary.size, _SUMMARY_SCAN_TYPES) if summary.size else {}
+    # ONE backward walk over ONE budget answers: the newest phase, whether a
+    # marker makes this an orchestration, and the run's lifecycle.
+    found: dict[str, dict] = {}
+    lifecycle = Lifecycle()
+    wanted = _SUMMARY_SCAN_TYPES
+    for value in _iter_back(path, summary.size) if summary.size else ():
+        event_type = value.get("type")
+        if event_type in wanted and event_type not in found:
+            found[event_type] = value
+        lifecycle.feed(event_type)
+        if lifecycle.done and len(found) == len(wanted):
+            break
+    summary.lifecycle = lifecycle
     phase = (found.get("phase_transition") or {}).get("phase")
     if isinstance(phase, str) and phase:
         summary.last_phase = phase
     if _ORCHESTRATION_TYPES.intersection(found):
         summary.run_kind = "orchestrate"
 
-    if "session_end" in found:
-        summary.status = "ended"
-    else:
-        age = max(0.0, current.timestamp() - summary.mtime)
-        summary.status = "live" if age <= LIVE_WINDOW_S else "ended"
+    clock = max(summary.mtime, float(activity_ts or 0.0))
+    summary.status, summary.ended_by = run_status(lifecycle, clock, current.timestamp())
 
     if summary.run_kind != "orchestrate" and head:
         # A run's opening markers sit in the first 64KB even when every marker
         # older than the 512KB tail budget has scrolled out of the backward
-        # scan. The head window is already loaded for started_at/team, so the
-        # extra reach is free. Markers between the two windows stay invisible
-        # to the cheap summary — the documented residual.
+        # walk. Markers between the two windows stay invisible to the cheap
+        # summary — the documented residual.
         for event in head:
             if event.data.get("type") in _ORCHESTRATION_TYPES:
                 summary.run_kind = "orchestrate"

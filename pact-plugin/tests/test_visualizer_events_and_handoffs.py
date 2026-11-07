@@ -15,11 +15,13 @@ real ~/.claude.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import visualizer_census as census
 
 from visualizer import classify, discovery, journal, model
 from visualizer.settings import (
@@ -558,3 +560,129 @@ class TestCommitAttribution:
         )
         agents = {row["name"]: row for row in build_payload(root, "proj", "sess")["agents"]}
         assert agents["backend-coder"]["stats"]["commits"] == 1
+
+
+# --- run status: the newest lifecycle event plus an activity clock ----------
+
+
+_T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+_LIVE_NOW = _T0.replace(minute=1)
+_IDLE_NOW = _T0.replace(hour=13)
+
+
+def _ts(second: int) -> str:
+    return _T0.replace(second=second).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pin_mtime(path: Path, moment: datetime) -> None:
+    os.utime(path, (moment.timestamp(), moment.timestamp()))
+
+
+def _lifecycle_journal(root: Path, kinds: list[str]) -> Path:
+    events = []
+    for index, kind in enumerate(kinds):
+        ts = _ts(index)
+        if kind.startswith("start"):
+            source = kind.partition(":")[2] or "startup"
+            events.append(census.session_start(ts, source=source))
+        elif kind == "end":
+            events.append(census.bare_session_end(ts))
+        elif kind == "wrapup":
+            events.append(census.wrapup_end(ts))
+        elif kind == "cleanup":
+            events.append(census.cleanup_summary(ts))
+        elif kind == "paused":
+            events.append(census.session_paused(ts))
+        elif kind == "refreshed":
+            events.append(census.session_refreshed(ts))
+        elif kind == "work":
+            events.append(census.phase_transition(ts, "CODE", "started"))
+        else:  # pragma: no cover - a typo in a case table
+            raise AssertionError(kind)
+    path = write_journal(root, "proj", "sess", events)
+    _pin_mtime(path, _T0)
+    return path
+
+
+def _both_views(root: Path, now: datetime) -> tuple[tuple, tuple]:
+    ref = discovery.find_session(roots_for(root), "proj", "sess")
+    meta = model.build_model(ref, now=now)["meta"]
+    row = model.build_sessions_list(roots_for(root), now=now)["sessions"][0]
+    return (meta["status"], meta["ended_by"]), (row["status"], row["ended_by"])
+
+
+_ENDED = ("ended", "session_end")
+_CLOCK = {_LIVE_NOW: ("live", None), _IDLE_NOW: ("ended", "idle")}
+
+# Lifecycle orders seen in real journals, plus the trailer and pause cases.
+_LIFECYCLE_CASES = {
+    "start-end": (["start", "work", "end"], _ENDED),
+    "start-only": (["start", "work"], None),
+    "two-ends": (["start", "work", "end", "end"], _ENDED),
+    "resumed-no-end": (["start", "work", "end", "start:resume"], None),
+    "compacted-then-ended": (["start", "end", "start:compact", "work", "end"], _ENDED),
+    "end-without-start": (["end"], _ENDED),
+    "end-then-cleanup": (["start", "work", "end", "cleanup"], _ENDED),
+    "end-then-more-work": (["start", "end", "work"], None),
+    "wrapup": (["start", "work", "wrapup", "end", "cleanup"], _ENDED),
+    "paused": (["start", "work", "paused", "end"], ("paused", "session_end")),
+    "refreshed-after-pause": (
+        ["start", "paused", "refreshed", "end"], ("refreshed", "session_end")
+    ),
+    "pause-before-resume": (
+        ["start", "paused", "end", "start:resume", "work", "end"], _ENDED
+    ),
+}
+
+
+class TestRunStatus:
+    @pytest.mark.parametrize("now", [_LIVE_NOW, _IDLE_NOW], ids=["recent", "stale"])
+    @pytest.mark.parametrize("case", sorted(_LIFECYCLE_CASES))
+    def test_model_and_list_agree_on_every_lifecycle_order(self, tmp_path, case, now):
+        kinds, expected = _LIFECYCLE_CASES[case]
+        root = make_root(tmp_path)
+        _lifecycle_journal(root, kinds)
+        expected = expected or _CLOCK[now]
+        model_view, list_view = _both_views(root, now)
+        assert model_view == expected, case
+        assert list_view == expected, case
+
+    def test_the_live_window_is_inclusive(self):
+        lifecycle = journal.lifecycle_of_events([{"type": "session_start"}])
+        edge = journal.LIVE_WINDOW_S
+        assert journal.run_status(lifecycle, 1000.0, 1000.0 + edge) == ("live", None)
+        assert journal.run_status(lifecycle, 1000.0, 1000.0 + edge + 1) == ("ended", "idle")
+
+    def test_a_task_store_write_keeps_a_quiet_journal_live(self, tmp_path):
+        """The activity clock reads the run's task files, not only the journal."""
+        config_root = make_root(tmp_path)
+        _lifecycle_journal(config_root, ["start", "work"])
+        task = census.write_task_file(
+            config_root, "session-abc12345", "3", subject="backend-coder: build", status="in_progress"
+        )
+        _pin_mtime(task.parent, _T0)
+        # Control: with the task file as old as the journal the run is idle.
+        _pin_mtime(task, _T0)
+        quiet = _IDLE_NOW.replace(minute=59, second=30)
+        assert _both_views(config_root, quiet) == (("ended", "idle"), ("ended", "idle"))
+        _pin_mtime(task, _IDLE_NOW.replace(minute=59))
+        model_view, list_view = _both_views(config_root, quiet)
+        assert model_view == ("live", None)
+        assert list_view == ("live", None)
+        assert model.build_model(
+            discovery.find_session(roots_for(config_root), "proj", "sess"),
+            now=_IDLE_NOW.replace(minute=59, second=30),
+        )["meta"]["activity_at"] == _IDLE_NOW.replace(minute=59).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_an_end_beyond_the_scan_budget_still_agrees(self, tmp_path):
+        """A session_end farther from EOF than the summary can scan has work
+        after it, so both views fall back to the clock."""
+        root = make_root(tmp_path)
+        events = [census.session_start(_ts(0)), census.bare_session_end(_ts(1))]
+        filler = census.event("lifecycle_decision", _ts(2), tool_name="X", advisories_count=0,
+                              rules=[], advisories=[], verdict="allow", pad="x" * 400)
+        events += [filler] * ((4 * SUMMARY_TAIL_BYTES) // 480 + 50)
+        path = write_journal(root, "proj", "sess", events)
+        _pin_mtime(path, _T0)
+        model_view, list_view = _both_views(root, _IDLE_NOW)
+        assert model_view == list_view == ("ended", "idle")

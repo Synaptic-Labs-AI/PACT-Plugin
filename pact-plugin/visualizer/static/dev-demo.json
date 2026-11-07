@@ -18,6 +18,8 @@
   "started_at": "2026-11-02T23:00:00Z",
   "ended_at": "2026-11-02T23:46:00Z",
   "status": "ended",
+  "ended_by": "session_end",
+  "activity_at": "2026-11-02T23:00:00Z",
   "duration_s": 2760,
   "run_kind": "orchestrate",
   "cloud": false,
@@ -2019,7 +2021,8 @@
     "source": "wrap-up",
     "pr_state": "MERGED",
     "pr_number": 42
-   }
+   },
+   "wrapup": true
   }
  ],
  "handoffs": [
