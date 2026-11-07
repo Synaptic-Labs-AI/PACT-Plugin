@@ -1040,7 +1040,9 @@ export class Panels {
     }
     right.appendChild(chips);
 
-    const feed = el("div", { class: "feed", attrs: { role: "list", "aria-label": "Comms feed" } });
+    /* A group, not a list: its rows are buttons, and a list may hold only list
+     * items. */
+    const feed = el("div", { class: "feed", attrs: { role: "group", "aria-label": "Comms feed" } });
     this._nodes.feed = feed;
     right.appendChild(feed);
     this._rebuildFeed(feed);
@@ -1321,14 +1323,16 @@ export class Panels {
       ]),
       el("div", { class: "debrief-run", text: this._runLabel() }),
     ]));
-    const tabs = el("div", { class: "debrief-tabs", attrs: { role: "tablist", "aria-label": "Debrief sections" } });
+    /* Plain section buttons that mark the shown one with aria-current: the
+     * full tabs pattern (roving focus, arrow keys, tab panels) is not built. */
+    const tabs = el("div", { class: "debrief-tabs", attrs: { role: "group", "aria-label": "Debrief sections" } });
     for (const definition of TABS) {
       const active = this.modalView === "tab" && definition.id === tab;
       const button = el("button", {
         class: `debrief-tab${active ? " is-active" : ""}`,
         text: definition.label,
         dataset: { focusKey: `tab:${definition.id}` },
-        attrs: { type: "button", role: "tab", "aria-selected": active ? "true" : "false" },
+        attrs: { type: "button", "aria-current": active ? "true" : false },
       });
       button.addEventListener("click", () => {
         this.modalTab = definition.id;

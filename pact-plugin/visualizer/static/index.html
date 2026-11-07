@@ -15,7 +15,7 @@
 
   <div class="crt" id="app">
     <header id="topbar">
-      <div class="brand" aria-label="PACT Mission Control">
+      <div class="brand">
         <span class="brand-mark" aria-hidden="true">▚</span>
         <span class="brand-name">PACT</span>
         <span class="brand-slash" aria-hidden="true">//</span>
@@ -25,7 +25,7 @@
       <div class="topbar-controls">
         <label class="pick">
           <span class="pick-label">ROOT</span>
-          <select id="root-select" aria-label="Config root"></select>
+          <select id="root-select" aria-label="Root"></select>
         </label>
         <label class="pick">
           <span class="pick-label">PROJECT</span>
@@ -33,11 +33,11 @@
         </label>
         <label class="pick pick-wide">
           <span class="pick-label">RUN</span>
-          <select id="session-select" aria-label="Session"></select>
+          <select id="session-select" aria-label="Run"></select>
         </label>
 
-        <button id="btn-refresh" class="icon-btn" type="button" title="Refresh session list">↻</button>
-        <button id="btn-random" class="icon-btn" type="button" title="Surprise me: random historical run">🎲</button>
+        <button id="btn-refresh" class="icon-btn" type="button" title="Refresh session list" aria-label="Refresh the run list">↻</button>
+        <button id="btn-random" class="icon-btn" type="button" title="Surprise me: random historical run" aria-label="Open a random past run">🎲</button>
         <button id="btn-demo" class="chip-btn" type="button" title="Open the training simulation">DEMO</button>
 
         <button id="live-badge" class="live-badge" type="button" title="Return to live / show run mode">● LIVE</button>
@@ -45,10 +45,10 @@
 
         <button id="btn-crew" class="icon-btn rail-toggle" type="button" title="Toggle the crew rail" aria-expanded="false" aria-controls="left-rail">CREW</button>
         <button id="btn-comms" class="icon-btn rail-toggle" type="button" title="Toggle the comms rail" aria-expanded="false" aria-controls="right-rail">COMMS</button>
-        <button id="btn-sound" class="icon-btn" type="button" title="Toggle 8-bit sound" aria-pressed="false">SND</button>
-        <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen">⛶</button>
-        <button id="btn-help" class="icon-btn" type="button" title="Keyboard shortcuts and legend">?</button>
-        <button id="btn-about" class="icon-btn" type="button" title="About and privacy">i</button>
+        <button id="btn-sound" class="icon-btn" type="button" title="Toggle 8-bit sound" aria-label="Sound" aria-pressed="false">SND</button>
+        <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen" aria-label="Fullscreen">⛶</button>
+        <button id="btn-help" class="icon-btn" type="button" title="Keyboard shortcuts and legend" aria-label="Help and keyboard shortcuts">?</button>
+        <button id="btn-about" class="icon-btn" type="button" title="About and privacy" aria-label="About and privacy">i</button>
       </div>
     </header>
 

@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -424,6 +425,82 @@ def test_index_html_has_skip_link():
     assert 'href="#layout"' in html, (
         "the skip-link does not target the main layout anchor; it would be a "
         "decorative no-op."
+    )
+
+
+class _Controls(HTMLParser):
+    """Collect each header button and labelled select from index.html."""
+
+    def __init__(self):
+        super().__init__()
+        self.buttons = []  # (attrs, text)
+        self.selects = []  # (attrs, visible label text)
+        self._button = None
+        self._pick_label = None
+        self._in_pick_label = False
+        self._label_text = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "button":
+            self._button = (attrs, [])
+        elif tag == "span" and "pick-label" in (attrs.get("class") or ""):
+            self._in_pick_label = True
+            self._label_text = ""
+        elif tag == "select":
+            self.selects.append((attrs, self._label_text))
+
+    def handle_endtag(self, tag):
+        if tag == "button" and self._button is not None:
+            attrs, parts = self._button
+            self.buttons.append((attrs, "".join(parts).strip()))
+            self._button = None
+        elif tag == "span" and self._in_pick_label:
+            self._in_pick_label = False
+
+    def handle_data(self, data):
+        if self._button is not None:
+            self._button[1].append(data)
+        if self._in_pick_label:
+            self._label_text += data
+
+
+def test_icon_buttons_and_selects_have_accessible_names():
+    """A glyph is not a name, and a name must contain its visible label.
+
+    A button's content wins over its title in name computation, so a button
+    whose text is a glyph or a terse code needs aria-label. A select's
+    aria-label overrides its visible label, so it must contain that text
+    (WCAG label-in-name).
+    """
+    parser = _Controls()
+    parser.feed((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    assert parser.buttons and parser.selects, "the control scan found nothing"
+    for attrs, text in parser.buttons:
+        if re.fullmatch(r"[A-Za-z][A-Za-z ]{3,}", text):
+            continue
+        if attrs.get("id") in {"live-badge", "btn-demo", "error-retry", "error-demo"}:
+            continue
+        assert (attrs.get("aria-label") or "").strip(), (
+            f"button #{attrs.get('id')} shows {text!r} and has no aria-label"
+        )
+    for attrs, label in parser.selects:
+        name = (attrs.get("aria-label") or "").lower()
+        assert label.strip().lower() in name, (
+            f"select #{attrs.get('id')} is labelled {label!r} on screen but named {name!r}"
+        )
+
+
+def test_widget_roles_match_their_children():
+    """No list of buttons, and no tab roles without the tab pattern."""
+    panels = _strip_js_comments((STATIC_JS_DIR / "panels.js").read_text(encoding="utf-8"))
+    assert 'role: "list"' not in panels, "a role=list container holds button rows"
+    assert 'role: "tab"' not in panels and '"tablist"' not in panels, (
+        "tab roles promise arrow-key navigation and tab panels the debrief does not have"
+    )
+    stage = _strip_js_comments((STATIC_JS_DIR / "stage.js").read_text(encoding="utf-8"))
+    assert "Interactive:" not in stage, (
+        "the canvas label promises interaction the canvas does not offer to the keyboard"
     )
 
 

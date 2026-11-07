@@ -3619,7 +3619,7 @@ export class Stage {
         ? `Shipped pull request ${wrapup.pr_number}${state ? ` ${state}` : ""}.`
         : "Run shipped.");
     }
-    ariaParts.push("Interactive: select a crew member, a room, or the floor mascot.");
+    ariaParts.push("Select a crew member in the crew roster to highlight them here.");
     const aria = ariaParts.join(" ");
     if (this.canvas && aria !== this.aria) {
       this.aria = aria;

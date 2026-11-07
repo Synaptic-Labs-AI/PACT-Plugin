@@ -144,7 +144,7 @@ export function createTimeline(root, options = {}) {
   const playButton = el("button", {
     class: "rec-btn rec-play",
     text: "▶",
-    attrs: { type: "button", title: "Play or pause replay (space)", "aria-label": "Play replay", "aria-pressed": "false" },
+    attrs: { type: "button", title: "Play or pause replay (space)", "aria-label": "Play replay" },
   });
   playButton.addEventListener("click", () => callbacks.onPlayPause());
 
@@ -245,7 +245,6 @@ export function createTimeline(root, options = {}) {
     toggleClass(shell, "is-playing", state.playing);
     playButton.textContent = state.playing ? "❚❚" : "▶";
     playButton.setAttribute("aria-label", state.playing ? "Pause replay" : "Play replay");
-    playButton.setAttribute("aria-pressed", state.playing ? "true" : "false");
     toggleClass(playButton, "is-active", state.playing);
     for (const [speed, button] of speedButtons) {
       const active = state.speed === speed;
