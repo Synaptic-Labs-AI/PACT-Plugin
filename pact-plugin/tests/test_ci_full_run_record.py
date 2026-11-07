@@ -701,16 +701,20 @@ def test_the_recorder_counts_deselected_items_from_the_hook(monkeypatch):
     assert record._deselected == 4
 
 
-def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
-    """PROBE-ONLY COVERAGE: skips until pytest-xdist is in the CI pins.
+WORKER_ITEM_ID_MISMATCH_CONFTEST = '''
 
-    The agreement rule itself is covered in CI by the pure-function tests
-    above. This test exercises the real workeroutput/testnodedown seam, and
-    it deliberately skips rather than mocking that seam: a skip is not a
-    pass. Until the pin lands, the plugin's side of the seam is pinned in CI
-    by the worker-publish and controller-record tests above, which drive the
-    recorder's own hooks with only the attributes it reads.
-    """
+def pytest_collection_modifyitems(session, config, items):
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    if worker is None:
+        return
+    for item in items:
+        if item.name == "test_pass":
+            item._id = item.nodeid.replace("test_pass", f"test_pass_{worker}")
+'''
+
+
+def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
+    """Identical worker collections produce a verifiable schema-v3 record."""
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
     proc = _run(plugin_root, workspace,
@@ -725,14 +729,28 @@ def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
     assert "FULL-RUN-OK" in verdict.stdout, verdict.stdout
 
 
-def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
-    """PROBE-ONLY COVERAGE (see the test above): the negative arm.
+def test_xdist_same_count_different_item_ids_are_refused(tmp_path):
+    """A same-count collection ID mismatch fails pytest and the verifier."""
+    pytest.importorskip("xdist")
+    root, plugin_root, workspace = _rig(
+        tmp_path, PASSING_SUITE,
+        extra_conftest=WORKER_ITEM_ID_MISMATCH_CONFTEST)
+    proc = _run(plugin_root, workspace,
+                args=("-n", "2", "--dist", "loadfile"))
+    output = proc.stdout + proc.stderr
+    assert proc.returncode != 0, output
+    assert "Different tests were collected" in output, output
+    record = _record(workspace)
+    assert record["collected"] == 4, record
+    assert record["errors"] == 1, record
+    assert record["exitstatus"] != 0, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "RUN-VERIFY-FAILURE ERRORS:" in verdict.stderr, verdict.stderr
 
-    An xdist run whose collection hook silently drops an item must fail on
-    COLLECTION-HOOK-NARROWING, not on an earlier condition. The assertion on
-    the reason token is the point: an arm that reds for the wrong reason
-    proves nothing about this check.
-    """
+
+def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
+    """A silent per-worker item removal fails the narrowing verifier check."""
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(
         tmp_path, PASSING_SUITE, extra_conftest=SILENT_REMOVAL_CONFTEST)
@@ -772,15 +790,7 @@ def pytest_runtestloop(session):
 
 def test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set(
         tmp_path):
-    """PROBE-ONLY COVERAGE (see the tests above): a run that exits 0 short.
-
-    gw1 runs its share of the tests, then raises an internal error. xdist
-    logs it, gw1 never reports down, and the session still exits 0 with every
-    test passed. Nothing but the ready-node comparison stands between that
-    run and a certificate measured by gw0 alone: the record must carry null
-    collection fields, and the verifier must fail on the first of them it
-    reads rather than certify.
-    """
+    """A worker lost after passing its tests fails closed on the ready set."""
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(
         tmp_path, EIGHT_PASSING_SUITE,
@@ -860,6 +870,36 @@ def test_a_module_level_skip_is_recorded_as_a_site(tmp_path):
     assert record["skipped_at_collection"] == 1, record
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 0, verdict.stderr
+
+
+def test_xdist_module_skip_accounting_matches_serial(tmp_path):
+    """Serial and xdist runs record the same module-skip accounting."""
+    pytest.importorskip("xdist")
+    records = []
+    for label, args in (
+            ("serial", ("-ra",)),
+            ("xdist", ("-ra", "-n", "2", "--dist", "loadfile"))):
+        root, plugin_root, workspace = _rig(tmp_path / label, PASSING_SUITE)
+        (plugin_root / "tests" / "test_module_skip.py").write_text(
+            MODULE_SKIP_SUITE, encoding="utf-8")
+        proc = _run(plugin_root, workspace, args)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        record = _record(workspace)
+        verdict = _verify(root, workspace / RECORD_NAME)
+        assert verdict.returncode == 0, verdict.stdout + verdict.stderr
+        assert "FULL-RUN-OK" in verdict.stdout, verdict.stdout
+        records.append(record)
+
+    serial, distributed = records
+    for key in ("collected", "passed", "skipped", "skipped_at_collection",
+                "deselected", "exitstatus", "skip_sites"):
+        assert distributed[key] == serial[key], (key, serial, distributed)
+    assert len(distributed["terminal_node_ids"]) == len(
+        serial["terminal_node_ids"])
+    for record in records:
+        terminal_ids = record["terminal_node_ids"]
+        assert len(terminal_ids) == record["collected"], record
+        assert len(set(terminal_ids)) == len(terminal_ids), record
 
 
 def test_the_verifier_and_the_recorder_name_the_same_record_file():

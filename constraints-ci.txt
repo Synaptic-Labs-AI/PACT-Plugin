@@ -31,6 +31,7 @@ pytest==9.2.0
 hypothesis==6.170.14
 httpx==0.28.1
 pytest-asyncio==1.4.1
+pytest-xdist==3.8.0
 pyyaml==6.0.3
 pysqlite3==0.6.1
 sqlite-vec==0.1.9

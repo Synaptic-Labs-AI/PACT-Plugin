@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.29: run the full CI suite with pytest-xdist
+
+### Summary
+
+The required full-suite CI job now runs with pinned `pytest-xdist` 3.8.0 using four workers and whole-file scheduling. The advisory fast suite remains serial, and the full invocation remains unrestricted with the existing collection, run-record, and verifier evidence.
+
+### What landed
+
+- `constraints-ci.txt` and `.github/workflows/tests.yml`: pin `pytest-xdist==3.8.0` and run the full suite as `python -m pytest -ra -n 4 --dist loadfile`. The workflow's dependency notes describe the new requirement; its job topology, model warm, environment checks, independent collection, and run verification are unchanged.
+- `tests/ci_contract.py` and `tests/test_memory_init.py`: the exact full-command guards match the xdist invocation while preserving the fast-runner profiles and environment-check placement.
+- `tests/test_ci_full_run_record.py`: the three existing real-xdist probes now execute in CI. Two new real-seam regressions cover xdist's refusal of same-count/different-node-ID collection and serial-versus-xdist module-level-skip accounting parity.
+- `scripts/full_suite_skip_allowlist.json`: remove the entry for the three xdist probes because they execute rather than skip once xdist is pinned.
+
+### Why
+
+The serial full gate spent most of its time in one pytest process. Whole-file xdist execution addresses that serialization while retaining whole-corpus collection, worker agreement, and fail-closed certification.
+
 ## v4.8.28: certify the full-suite run record under pytest-xdist
 
 ### Summary

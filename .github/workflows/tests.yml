@@ -81,6 +81,11 @@
 #                          An unhandled async test FAILS (measured on pytest
 #                          9.2.0, the pinned runner: one failure per async
 #                          test). Without this plugin that whole cohort is RED.
+#     - pytest-xdist     : the full suite's `-n 4 --dist loadfile` execution.
+#                          Without it those options are unknown and the full
+#                          suite does not start; the real xdist probes also
+#                          skip instead of exercising worker collection and
+#                          worker-loss evidence.
 #     - hypothesis       : property tests guard it with try/except + skipif, so
 #                          it is technically optional, but it is installed so the
 #                          property tests actually RUN rather than silently skip.
@@ -491,7 +496,7 @@ jobs:
 
       - name: Run test suite
         working-directory: pact-plugin
-        run: python -m pytest -ra
+        run: python -m pytest -ra -n 4 --dist loadfile
 
       # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
       # inspects a separate --collect-only run; this reads the in-band record

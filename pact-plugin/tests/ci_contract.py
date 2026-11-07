@@ -26,7 +26,7 @@ FULL_WORKFLOW = Path(".github") / "workflows" / "tests.yml"
 FAST_WORKFLOW = Path(".github") / "workflows" / "fast-tests.yml"
 
 VERIFY_CMD = "python scripts/verify_ci_environment.py"
-TEST_CMD = "python -m pytest -ra"
+TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
 
 # The files that together make up the fast lane. Used to distinguish a
 # WHOLLY deleted lane (a loud skip) from a half-deleted one (a failure).
