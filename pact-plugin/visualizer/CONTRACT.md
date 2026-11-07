@@ -522,7 +522,11 @@ Field rules:
   `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`,
   `teachback`, `raw`).
 - `handoffs[].fields` always carries all six canonical keys; absent values are
-  `null` (renderer shows a dash). Legacy spellings are resolved server-side.
+  `null` (renderer shows a dash). Legacy spellings are resolved server-side
+  with the hooks' rule: an empty canonical value (`None`, `""`, `[]`, `{}`)
+  falls through to its legacy alias, while `0` and `false` are content. A dict
+  value, or a dict inside a list, renders as compact JSON with credential-named
+  keys withheld; `(none)` appears only for an empty list or dict.
   `schema_complete` is true when the five REQUIRED keys are present;
   `reasoning_chain` is recommended in the PACT schema, so a five-key handoff is
   complete.
@@ -839,7 +843,10 @@ footer drop to 58px / 92px. Panels and stage must remain usable at 1024×768.
 
 ## Data roots and demo
 
-- Real roots follow `--root` → `$CLAUDE_CONFIG_DIR` → `~/.claude`;
+- Real roots follow `--root` → `$CLAUDE_CONFIG_DIR` → `~/.claude`. As in the
+  hooks, only `~` and `~/x` expand; any other form, `~user/…` included, is
+  taken literally, and a relative path is made absolute against the working
+  directory;
   `--all-roots` adds `~/.claude*` siblings containing `pact-sessions/`.
 - Containment: one predicate decides what is visible and readable. Under
   each root, `pact-sessions/`, `teams/` and `tasks/` may themselves be

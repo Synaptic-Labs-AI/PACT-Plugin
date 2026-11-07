@@ -302,20 +302,15 @@ def _expanded(path: str | os.PathLike[str], home: Path) -> Path:
     """Expand a user-supplied path and make it absolute (never resolved).
 
     ``~`` and ``~/x`` expand against the INJECTED ``home``, exactly as
-    hooks/shared/paths.get_claude_config_dir does. Using os.path.expanduser
-    for those two forms reads the process HOME instead, so a test that passes
-    ``home=tmp_path`` would silently touch the operator's real home, and the
-    two resolvers would disagree whenever the injected home is not the real
-    one. Bare ``~user`` forms still go through expanduser: they need the
-    passwd database, and the hooks do not support them either.
+    hooks/shared/paths.get_claude_config_dir does; any other form, ``~user``
+    included, is taken literally as the hooks take it (a relative path is
+    made absolute against the working directory).
     """
     text = os.fspath(path)
     if text == "~":
         text = os.fspath(home)
     elif text.startswith("~/"):
         text = os.fspath(home / text[2:])
-    elif text.startswith("~"):
-        text = os.path.expanduser(text)
     candidate = Path(text)
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate

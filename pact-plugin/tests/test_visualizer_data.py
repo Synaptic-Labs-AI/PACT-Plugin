@@ -259,6 +259,9 @@ class TestRoots:
             "relative-dir",
             "~",
             "~/sub",
+            "~root",
+            "~root/x",
+            "~no-such-user-here",
         ):
             environment = {"CLAUDE_CONFIG_DIR": value}
             ours = settings.resolve_roots((), env=environment, home=tmp_path)[0].path
@@ -784,6 +787,34 @@ class TestClassify:
         assert classify.HANDOFF_CANONICAL_FIELDS == ssot.HANDOFF_CANONICAL_FIELDS
         assert classify.HANDOFF_RECOMMENDED_FIELDS == ssot.HANDOFF_RECOMMENDED_FIELDS
         assert classify.HANDOFF_LEGACY_ALIASES == ssot.HANDOFF_LEGACY_ALIASES
+
+    def test_each_handoff_field_reads_the_same_source_as_the_hooks(self):
+        """Canonical value or legacy alias: the viewer picks the value the
+        hooks' resolver picks, by membership in the empty set and never by
+        truthiness, so 0 and False are content and an empty list falls
+        through to a non-empty alias."""
+        from shared.handoff_schema import resolve_handoff_field
+
+        canonical_values = [None, "", [], {}, 0, False, "text", ["a", "b"], {"k": "v"}]
+        alias_values = [None, "", [], "legacy", ["x"]]
+        checked = 0
+        for field, alias in (("decisions", "key_decisions"),
+                             ("uncertainty", "areas_of_uncertainty"),
+                             ("integration", "integration_points")):
+            for canonical in canonical_values:
+                for legacy in alias_values:
+                    payload = {field: canonical, alias: legacy}
+                    expected = classify._handoff_field_text(
+                        resolve_handoff_field(payload, field)
+                    )
+                    got = classify.extract_handoff_fields(payload)[field]
+                    assert got == expected, (field, canonical, legacy, got, expected)
+                    checked += 1
+                absent = {alias: "legacy"}
+                assert classify.extract_handoff_fields(absent)[field] == (
+                    classify._handoff_field_text(resolve_handoff_field(absent, field))
+                )
+        assert checked == 3 * len(canonical_values) * len(alias_values)
 
     def test_handoff_predicate_agrees_with_the_hooks_validator_on_json_shapes(self):
         """Every shape a journal can produce must get the same verdict.

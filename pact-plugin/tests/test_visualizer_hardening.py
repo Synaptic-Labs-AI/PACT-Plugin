@@ -1998,3 +1998,60 @@ class TestStateFilesMustBeOwned:
         assert cli._log_tail(log) == ""
         os.chmod(log, 0o600)
         assert cli._log_tail(log) == "planted text"
+
+
+class TestHandoffAndConfigRootMirrorTheHooks:
+    """The viewer resolves handoff fields and the config root like the hooks."""
+
+    _CASES = [
+        {"decisions": "", "key_decisions": "alias"},
+        {"decisions": [], "key_decisions": ["alias item"]},
+        {"decisions": {}, "key_decisions": "alias"},
+        {"decisions": None, "key_decisions": "alias"},
+        {"decisions": 0, "key_decisions": "alias"},
+        {"decisions": False, "key_decisions": "alias"},
+        {"decisions": "canonical", "key_decisions": "alias"},
+        {"uncertainty": [], "areas_of_uncertainty": []},
+        {"integration": "", "integration_points": ""},
+        {},
+    ]
+
+    @pytest.mark.parametrize("handoff", _CASES)
+    def test_field_resolution_matches_the_ssot(self, handoff):
+        from shared import handoff_schema
+
+        from visualizer import classify
+
+        for field in classify.HANDOFF_CANONICAL_FIELDS:
+            assert classify._resolve_handoff_field(handoff, field) == (
+                handoff_schema.resolve_handoff_field(handoff, field)
+            ), field
+
+    def test_structured_values_render_and_never_read_as_empty(self):
+        from visualizer import classify
+
+        fields = classify.extract_handoff_fields({
+            "produced": {"files": ["a.py"], "api_token": "kept-out"},
+            "decisions": [{"decision": "use x", "why": "y"}, "plain"],
+            "uncertainty": 0,
+            "integration": [],
+            "integration_points": "alias content",
+            "open_questions": [],
+        })
+        assert '"files": ["a.py"]' in fields["produced"]
+        assert "kept-out" not in fields["produced"] and "[redacted]" in fields["produced"]
+        assert fields["decisions"] == '{"decision": "use x", "why": "y"} · plain'
+        assert fields["uncertainty"] == "0"
+        assert fields["integration"] == "alias content"
+        assert fields["open_questions"] == "(none)"
+        assert fields["reasoning_chain"] is None
+
+    @pytest.mark.parametrize("raw", ["~", "~/x", "~other/x", "/abs/root", "rel/root"])
+    def test_config_root_matches_get_claude_config_dir(self, tmp_path, monkeypatch, raw):
+        from shared.paths import get_claude_config_dir
+
+        monkeypatch.chdir(tmp_path)
+        environment = {"CLAUDE_CONFIG_DIR": raw}
+        ours = settings.resolve_roots((), env=environment, home=tmp_path / "home")[0].path
+        theirs = get_claude_config_dir(env=environment, home=tmp_path / "home")
+        assert ours == cli.Path(os.path.abspath(theirs))

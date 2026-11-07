@@ -15,6 +15,7 @@ here, because the page renders these strings with textContent.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -296,54 +297,95 @@ def _trim_mapping(data: Mapping[str, Any], depth: int) -> dict:
     return out
 
 
-def _handoff_field_text(value: Any) -> str:
-    """Render one handoff field value as bounded text.
+# The values the SSOT (hooks/shared/handoff_schema._EMPTY_VALUES) counts as
+# EMPTY. Membership, never truthiness: 0 and False are content.
+_HANDOFF_EMPTY_VALUES: tuple[Any, ...] = (None, "", [], {})
+
+
+def _without_secret_keys(value: Any, depth: int = 0) -> Any:
+    """A JSON-like value with every credential-named key's value withheld."""
+    if depth >= 5:
+        return "[truncated]" if isinstance(value, (Mapping, list)) else value
+    if isinstance(value, Mapping):
+        return {
+            str(key): REDACTED if is_secret_key(key) else _without_secret_keys(item, depth + 1)
+            for key, item in list(value.items())[:40]
+        }
+    if isinstance(value, list):
+        return [_without_secret_keys(item, depth + 1) for item in value[:40]]
+    return value
+
+
+def _compact_json(value: Any) -> str:
+    """Bounded, redacted compact JSON text for a structured handoff value."""
+    try:
+        text = json.dumps(_without_secret_keys(value), ensure_ascii=False,
+                          separators=(", ", ": "), default=str)
+    except (TypeError, ValueError):
+        return ""
+    return as_text(text, MAX_FIELD_CHARS)
+
+
+def _handoff_field_text(value: Any) -> str | None:
+    """Render one handoff field value as bounded text (None when absent/blank).
 
     Location: classify._handoff_field_text.
-    Summary: The handoff schema is presence-only, so a field may legitimately
-             carry a LIST (open_questions is commonly list-shaped); as_text
-             alone would coerce it to "" and a schema-valid handoff would read
-             as incomplete. Lists are therefore joined with a middle dot, each
-             item bounded like any other field value. An explicitly empty list
-             renders "(none)": the key IS present under the presence-only
-             rule, so it must count for schema completeness.
+    Summary: Strings and numbers render as text (0 and False are content).
+             A list joins its items with a middle dot — a dict item renders
+             as compact JSON, so structured decisions are never dropped — and
+             an empty list or dict renders "(none)", because under the
+             presence-only schema the key IS present. A dict renders as
+             compact JSON. Credential-named keys are withheld and every
+             string is redacted.
     Used by: extract_handoff_fields.
     """
+    if value is None:
+        return None
     if isinstance(value, list):
-        joined = " · ".join(part for part in as_str_list(value, 40) if part)
-        return joined or "(none)"
-    return as_text(value, MAX_FIELD_CHARS)
+        parts = [
+            _compact_json(item) if isinstance(item, (Mapping, list)) else as_text(item, MAX_FIELD_CHARS)
+            for item in value[:40]
+        ]
+        joined = " · ".join(part for part in parts if part)
+        return as_text(joined, MAX_FIELD_CHARS) or "(none)"
+    if isinstance(value, Mapping):
+        return _compact_json(value) if value else "(none)"
+    return as_text(value, MAX_FIELD_CHARS) or None
+
+
+def _resolve_handoff_field(source: Mapping[str, Any], field: str) -> Any:
+    """hooks/shared/handoff_schema.resolve_handoff_field, mirrored exactly.
+
+    The canonical value when it is not EMPTY, else the first alias value
+    that is not EMPTY, else the canonical value unchanged.
+    """
+    value = source.get(field)
+    if value not in _HANDOFF_EMPTY_VALUES:
+        return value
+    for alias, canonical in HANDOFF_LEGACY_ALIASES.items():
+        if canonical == field:
+            alias_value = source.get(alias)
+            if alias_value not in _HANDOFF_EMPTY_VALUES:
+                return alias_value
+    return value
 
 
 def extract_handoff_fields(handoff: Any) -> dict[str, str | None]:
     """Project a handoff payload onto the six canonical fields.
 
     Location: classify.extract_handoff_fields.
-    Summary: Every canonical key is always present in the result; an absent or
-             empty scalar value is None (the renderer shows a dash). The
-             canonical spelling wins; a falsy canonical value falls through to
-             its legacy alias so a handoff written under an old spelling still
-             reads. List-valued fields (schema-valid) are joined, not dropped —
-             including an explicit empty list, which renders "(none)".
+    Summary: Every canonical key is always present in the result. Each field
+             is resolved like the hooks' resolve_handoff_field (membership in
+             the EMPTY set, never truthiness, so a canonical 0 or False wins
+             and an empty canonical value falls through to its legacy alias),
+             then rendered by _handoff_field_text: absent or blank is None.
     Used by: model (handoffs array), demo, tests.
     """
-    result: dict[str, str | None] = {}
     source: Mapping[str, Any] = handoff if isinstance(handoff, Mapping) else {}
-    for field in HANDOFF_CANONICAL_FIELDS:
-        value = source.get(field)
-        if isinstance(value, list):
-            # Present-as-list wins over the legacy alias: the schema is
-            # presence-only and the canonical key is right here.
-            result[field] = _handoff_field_text(value)
-            continue
-        if not value:
-            for alias, canonical in HANDOFF_LEGACY_ALIASES.items():
-                if canonical == field:
-                    value = source.get(alias)
-                    break
-        text = _handoff_field_text(value) if value else ""
-        result[field] = text or None
-    return result
+    return {
+        field: _handoff_field_text(_resolve_handoff_field(source, field))
+        for field in HANDOFF_CANONICAL_FIELDS
+    }
 
 
 def handoff_schema_complete_raw(handoff: object) -> bool:
