@@ -2055,3 +2055,74 @@ class TestHandoffAndConfigRootMirrorTheHooks:
         ours = settings.resolve_roots((), env=environment, home=tmp_path / "home")[0].path
         theirs = get_claude_config_dir(env=environment, home=tmp_path / "home")
         assert ours == cli.Path(os.path.abspath(theirs))
+
+
+class TestPlantedFifosNeverHang:
+    """A FIFO at a state-dir path is rejected promptly, never opened blocking."""
+
+    @staticmethod
+    def _run_bounded(function, *args):
+        import time
+
+        result: list = []
+        worker = threading.Thread(target=lambda: result.append(function(*args)), daemon=True)
+        started = time.monotonic()
+        worker.start()
+        worker.join(3)
+        assert not worker.is_alive(), "the open blocked on a FIFO"
+        assert time.monotonic() - started < 1.5
+        return result[0]
+
+    def test_a_fifo_at_server_json_is_ignored(self, tmp_path, capsys):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        os.mkfifo(settings.state_file(state_dir), 0o600)
+        assert self._run_bounded(cli.read_state, state_dir) is None
+        assert "not a regular file" in capsys.readouterr().err
+
+    def test_a_fifo_at_the_log_is_not_quoted(self, tmp_path, capsys):
+        log = tmp_path / "server.log"
+        os.mkfifo(log, 0o600)
+        assert self._run_bounded(cli._log_tail, log) == ""
+        assert "not a regular file" in capsys.readouterr().err
+
+    def test_a_fifo_at_the_lock_is_refused(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        os.mkfifo(state_dir / ".launch.lock", 0o600)
+
+        def take_lock():
+            try:
+                with cli._launch_lock(state_dir):
+                    return "locked"
+            except cli.CliError as error:
+                return str(error)
+
+        assert "not a regular file" in self._run_bounded(take_lock)
+
+    def test_a_fifo_at_the_log_path_fails_the_launch_promptly(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _DeadChild())
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        os.mkfifo(state_dir / "server.log", 0o600)
+        args = cli.build_parser().parse_args(
+            ["--detach", "--root", str(tmp_path), "--state-dir", str(state_dir)])
+
+        def launch():
+            try:
+                cli.detach(args, cli._resolve_roots(args), state_dir)
+            except cli.CliError as error:
+                return str(error)
+            return "launched"
+
+        message = self._run_bounded(launch)
+        assert "cannot start the server process" in message and "not a regular file" in message
+
+    @pytest.mark.parametrize("command, code", [("--stop", 1), ("--status", 0)])
+    def test_stop_and_status_leave_a_fifo_record_in_place(self, tmp_path, capsys, command, code):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        record = settings.state_file(state_dir)
+        os.mkfifo(record, 0o600)
+        assert self._run_bounded(cli.main, [command, "--state-dir", str(state_dir)]) == code
+        assert record.exists() and not record.is_file()

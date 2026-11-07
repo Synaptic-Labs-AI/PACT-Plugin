@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import html
 import http.client
 import json
@@ -284,13 +285,16 @@ def read_owned_file(path: Path, max_bytes: int = 1 << 20) -> bytes | None:
     """A state-dir file's bytes, or None when absent or not trustworthy.
 
     Location: cli.read_owned_file.
-    Summary: Opened O_NOFOLLOW and checked on the open descriptor (no race):
+    Summary: Opened O_NOFOLLOW|O_NONBLOCK (a planted FIFO cannot hang the
+             open) and checked on the open descriptor (no race):
              it must be a regular file, owned by os.getuid(), with no group or
              other write bit. A file that exists but fails a check is ignored
              with one stderr warning per path. Never raises.
     Used by: read_state, _log_tail.
     """
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK: a FIFO planted at the path must not block the open before
+    # the fstat check below can reject it. Regular files ignore the flag.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -1079,13 +1083,15 @@ def _launch_lock(state_dir: Path):
         yield
         return
     path = state_dir / _LOCK_FILENAME
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError as error:
         raise CliError(f"cannot lock state directory {state_dir}: {error}") from error
     try:
         info = os.fstat(descriptor)
+        if not stat_module.S_ISREG(info.st_mode):
+            raise CliError(f"lock file {path} is not a regular file; remove it")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise CliError(f"lock file {path} is not owned by this user; remove it")
         # Bounded: a lock held by anyone (a hung launch, another user in a
@@ -1108,9 +1114,30 @@ def _launch_lock(state_dir: Path):
 
 
 def _open_log(path: Path):
-    """Open the child's log for append, 0600, refusing a symlink."""
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    return os.fdopen(os.open(path, flags, 0o600), "ab")
+    """Open the child's log for append, 0600, refusing a symlink or non-file.
+
+    O_NONBLOCK keeps a planted FIFO from blocking the open; anything but a
+    regular file is then refused before the child's stderr is pointed at it.
+    """
+    flags = (
+        os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        if error.errno == errno.ENXIO:
+            # A FIFO with no reader: the write open fails instead of blocking.
+            raise OSError(f"{path} is not a regular file") from None
+        raise
+    try:
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        os.set_blocking(descriptor, True)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return os.fdopen(descriptor, "ab")
 
 
 def _detach_locked(

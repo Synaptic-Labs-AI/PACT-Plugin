@@ -129,8 +129,13 @@ with `another launch holds <path>; retry in a moment, or stop the process
 holding it`.
 
 Trusted files: `server.json`, and `server.log` when its tail is quoted, are read
-only when they are a regular file (opened without following a symlink), owned by
-the user, and not writable by group or others. Anything else gets one stderr
+only when they are a regular file (opened without following a symlink and
+without blocking), owned by the user, and not writable by group or others. A
+FIFO or other non-regular file is rejected at once, with the `not a regular
+file` warning, and is never waited on. A non-regular `.launch.lock` is refused
+(`lock file <path> is not a regular file; remove it`), and a non-regular file at
+the child log path fails the launch with `cannot start the server process: <path>
+is not a regular file`. `--stop` and `--status` leave such a record in place. Anything else gets one stderr
 line, `pact-viz: warning: ignoring <path>: <reason>`, and is treated as no
 record: it is never reused, stopped or signalled from. `--stop` and every
 cleanup path leave it in place; a new launch replaces it with its own record.
