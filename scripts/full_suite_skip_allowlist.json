@@ -6,7 +6,7 @@
       "file": "tests/test_ci_full_run_record.py",
       "reason": "could not import 'xdist': No module named 'xdist'",
       "match": "exact",
-      "allowed": 2
+      "allowed": 3
     },
     {
       "file": "tests/test_conftest_config_root_isolation.py",

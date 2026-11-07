@@ -150,25 +150,27 @@ def aggregate_worker_collection_counts(triples_by_node, collected,
     ``pytest_testnodedown`` twice for one node (its keyboard-interrupt path),
     so a count of events could stand in for a missing node.
 
-    The ready comparison is a SECOND line of defence. It refuses any node
-    that became ready and never reported, whatever the cause, so the
-    reporting survivors cannot agree among themselves and certify a
-    collection measured by a subset. The two ways a worker is known to be
-    lost are each caught first by something else. A crashed worker
-    dispatches ``errordown`` with nothing published, so a None arrives and
-    is rejected below. A worker internal error aborts the controller's event
-    loop, so the session exits non-zero. Where it aborts depends on the order
-    the events arrive: it has been observed in
-    ``DSession.worker_workerfinished``, when the failing worker's finish
-    event arrives after xdist removed that worker, and in
-    ``DSession.loop_once`` ("Unexpectedly no active workers available"),
-    when the healthy workers finished first. Either no record is written and
-    the verifier fails on the absent record, or the record carries a
-    non-zero ``exitstatus`` and the verifier fails EXITSTATUS. When a ready
-    node did not report, the ready comparison also keeps the collection
-    fields null. Any refusal
-    leaves the collection fields null, so the verifier fails closed on
-    BAD-FIELD instead of certifying a collection measured by a subset.
+    The ready comparison refuses any node that became ready and never
+    reported, whatever the cause, so the reporting survivors cannot agree
+    among themselves and certify a collection measured by a subset. For a
+    worker internal error it can be the only refusal. Measured with xdist
+    3.8.0: a worker that raised an internal error after its own tests never
+    reported, the controller logged the error and carried on, the session
+    exited 0 with every test passed, and only the null fields this
+    comparison leaves failed the verifier, on BAD-FIELD-DESELECTED. A worker
+    that raised one during collection made the controller abort in
+    ``DSession.worker_workerfinished``; the session exited 3 with a record
+    written, and the healthy ready nodes never reported, so the verifier
+    again failed on BAD-FIELD-DESELECTED, which it checks before the exit
+    status. A reviewer's probe saw the controller abort in
+    ``DSession.loop_once`` ("Unexpectedly no active workers available")
+    instead. A run that writes no record fails RECORD-ABSENT, and EXITSTATUS
+    is what a non-zero exit prints only when every ready node reported. A
+    crashed worker dispatches ``errordown`` with nothing published
+    (measured, and in the xdist 3.8.0 source), so a None arrives and is
+    rejected below. Any refusal leaves the collection fields and
+    ``deselected`` null, so the verifier fails closed instead of certifying
+    a collection measured by a subset.
 
     Worker restarts are ON by default - xdist defaults
     ``--max-worker-restart`` to four times the worker count whenever ``-n``
@@ -269,11 +271,10 @@ class FullRunRecord:
         Controller only. A node that became ready and never dispatched
         ``pytest_testnodedown`` leaves no trace in ``_worker_triples``, so
         this set is how the aggregate tells a lost worker from one that never
-        existed. It is a second line of defence: a crashed worker is refused
-        by the None it reports, and a worker internal error already fails the
-        run through the exit status or the absent record. The ready set is
-        passed to the aggregate so the refusal is a pure function rather than
-        a branch here.
+        existed. A worker internal error raised after that worker's tests
+        leaves the session exiting 0, and this set is then the only thing
+        that fails the run. The ready set is passed to the aggregate so the
+        refusal is a pure function rather than a branch here.
         """
         if self._root is None:
             return

@@ -749,6 +749,55 @@ def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
         verdict.stderr)
 
 
+EIGHT_PASSING_SUITE = "".join(
+    f"def test_{name}():\n    assert True\n\n" for name in "abcdefgh")
+
+LATE_WORKER_INTERNAL_ERROR_CONFTEST = '''
+
+import os
+import time
+
+import pytest
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtestloop(session):
+    yield
+    if os.environ.get("PYTEST_XDIST_WORKER") == "gw1":
+        # The pause lets gw0 report first, so gw1 is the node left unreported.
+        time.sleep(2)
+        raise RuntimeError("internal error on gw1 after its tests")
+'''
+
+
+def test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set(
+        tmp_path):
+    """PROBE-ONLY COVERAGE (see the tests above): a run that exits 0 short.
+
+    gw1 runs its share of the tests, then raises an internal error. xdist
+    logs it, gw1 never reports down, and the session still exits 0 with every
+    test passed. Nothing but the ready-node comparison stands between that
+    run and a certificate measured by gw0 alone: the record must carry null
+    collection fields, and the verifier must fail on the first of them it
+    reads rather than certify.
+    """
+    pytest.importorskip("xdist")
+    root, plugin_root, workspace = _rig(
+        tmp_path, EIGHT_PASSING_SUITE,
+        extra_conftest=LATE_WORKER_INTERNAL_ERROR_CONFTEST)
+    proc = _run(plugin_root, workspace, args=("-n", "2"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = _record(workspace)
+    assert (record["exitstatus"], record["passed"]) == (0, 8), record
+    assert record["items_before_modifyitems"] is None, record
+    assert record["items_after_modifyitems"] is None, record
+    assert record["deselected"] is None, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "RUN-VERIFY-FAILURE BAD-FIELD-DESELECTED:" in verdict.stderr, (
+        verdict.stderr)
+
+
 MODULE_SKIP_SUITE = '''\
 import pytest
 
