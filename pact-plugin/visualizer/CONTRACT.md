@@ -538,6 +538,14 @@ footer drop to 58px / 92px. Panels and stage must remain usable at 1024×768.
 
 - Real roots follow `--root` → `$CLAUDE_CONFIG_DIR` → `~/.claude`;
   `--all-roots` adds `~/.claude*` siblings containing `pact-sessions/`.
+- Containment: one predicate decides what is visible and readable. Under
+  each root, `pact-sessions/`, `teams/` and `tasks/` may themselves be
+  symlinks (their resolved paths are the base), but any symlink below them,
+  whether a slug or session directory, a journal, a team directory, a
+  `config.json`, a `pact-roster.jsonl` or a task file, is skipped. The
+  resolved path must stay under the resolved base. Listing, fetch and the
+  roster/task loaders apply the same rule, so a session is listed exactly
+  when it can be opened.
 - Demo is always available; the UI should start demo with `?demo=1`.
 - The demo must cover: four phases, 8+ agents, dispatches, handoffs,
   teachbacks, commits, findings/remediation, gate advisory + gate-health

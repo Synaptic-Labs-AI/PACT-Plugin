@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .discovery import valid_component
+from .discovery import contained, valid_component
 from .settings import (
     ROSTER_FILENAME,
     TASKS_DIRNAME,
@@ -324,9 +324,16 @@ def _task_from_file(path: Path, payload: object) -> StoredTask | None:
     )
 
 
-def _load_tasks(tasks_dir: Path) -> list[StoredTask]:
-    """Read the task store's JSON files in sorted file order, bounded."""
+def _load_tasks(tasks_root: Path, team_name: str) -> list[StoredTask]:
+    """Read one team's task-store JSON files in sorted file order, bounded.
+
+    Only files ``discovery.contained`` accepts under ``<root>/tasks`` are
+    read, so a symlinked team task dir or task file is skipped.
+    """
     tasks: list[StoredTask] = []
+    tasks_dir = tasks_root / team_name
+    if not contained(tasks_root, tasks_dir):
+        return tasks
     try:
         entries = sorted(tasks_dir.iterdir(), key=lambda item: item.name)
     except OSError:
@@ -334,8 +341,10 @@ def _load_tasks(tasks_dir: Path) -> list[StoredTask]:
     for entry in entries:
         if len(tasks) >= MAX_STORED_TASKS:
             break
+        if not contained(tasks_root, entry):
+            continue
         try:
-            if entry.is_symlink() or not entry.is_file():
+            if not entry.is_file():
                 continue
         except OSError:
             continue
@@ -368,11 +377,12 @@ def load_team(config_root: Path, team_name: str) -> TeamInfo:
     teams_dir = Path(config_root) / TEAMS_DIRNAME
     team_dir = teams_dir / info.name
     try:
-        team_dir_present = team_dir.is_dir() and not team_dir.is_symlink()
+        team_dir_present = contained(teams_dir, team_dir) and team_dir.is_dir()
     except OSError:
         team_dir_present = False
     config_path = team_dir / TEAM_CONFIG_FILENAME
-    config = _read_json(config_path)
+    roster_path = team_dir / ROSTER_FILENAME
+    config = _read_json(config_path) if contained(teams_dir, config_path) else None
     info.config_present = isinstance(config, dict)
     info.team_dir_present = bool(team_dir_present)
     if isinstance(config, dict):
@@ -382,14 +392,18 @@ def load_team(config_root: Path, team_name: str) -> TeamInfo:
                 seed = _member_from_config(entry)
                 if seed is not None:
                     info.members.append(seed)
-    intents, roster_present = _load_roster_intents(team_dir / ROSTER_FILENAME)
+    intents, roster_present = (
+        _load_roster_intents(roster_path)
+        if contained(teams_dir, roster_path)
+        else ([], False)
+    )
     info.intents = intents
     info.roster_present = roster_present
     info.cloud = team_dir_present and not info.config_present
     # Load the task store even when the team directory itself is gone: the
     # platform reaper can remove teams/ before tasks/, and losing the tasks
     # because of an unrelated directory is silent data loss.
-    info.tasks = _load_tasks(Path(config_root) / TASKS_DIRNAME / info.name)
+    info.tasks = _load_tasks(Path(config_root) / TASKS_DIRNAME, info.name)
     return info
 
 

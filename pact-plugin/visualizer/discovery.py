@@ -88,6 +88,37 @@ def valid_component(value: object) -> bool:
     return not _CONTROL_RE.search(value)
 
 
+def contained(base_dir: Path, path: Path) -> bool:
+    """True when ``path`` lies under ``base_dir`` with no symlink below it.
+
+    Location: discovery.contained.
+    Summary: ``base_dir`` itself may be a symlink (its resolved path is the
+             base). Every component from ``base_dir`` down to ``path`` is
+             lstat'd and any symlink refuses the path; the resolved path must
+             then stay under the resolved base. Listing, fetch and the roster
+             loaders share this one predicate, so a path is either visible and
+             readable everywhere or nowhere. Never raises.
+    Used by: discover_root, find_session, roster loaders, model activity clock.
+    """
+    try:
+        base = Path(base_dir).resolve()
+        relative = Path(path).relative_to(base_dir)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    current = Path(base_dir)
+    try:
+        for part in relative.parts:
+            if part in ("", ".", ".."):
+                return False
+            current = current / part
+            if current.is_symlink():
+                return False
+        Path(path).resolve().relative_to(base)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return True
+
+
 def _safe_dirs(parent: Path) -> list[Path]:
     """Sorted non-hidden, non-symlink directories under ``parent``."""
     try:
@@ -123,6 +154,8 @@ def discover_root(root: RootSpec) -> list[SessionRef]:
         slug = slug_dir.name
         for session_dir in _safe_dirs(slug_dir):
             journal = session_dir / JOURNAL_FILENAME
+            if not contained(sessions_root, journal):
+                continue
             try:
                 if not journal.is_file():
                     continue
@@ -225,32 +258,14 @@ def find_session(
     root = find_root(roots, root_id)
     if root is None:
         return None
-    # Same symlink policy as the listing (_safe_dirs skips symlinks): a
-    # symlinked slug or session directory is not a session here either, so a
-    # session cannot be fetchable via /api/session while invisible in
-    # /api/sessions.
-    slug_dir = root.path / PACT_SESSIONS_DIRNAME / str(slug)
-    session_dir = slug_dir / str(session_id)
-    try:
-        if slug_dir.is_symlink() or session_dir.is_symlink():
-            return None
-    except OSError:
-        return None
-    expected = (
-        root.path
-        / PACT_SESSIONS_DIRNAME
-        / str(slug)
-        / str(session_id)
-        / JOURNAL_FILENAME
-    )
-    try:
-        resolved_root = root.path.resolve()
-        resolved = expected.resolve()
-        resolved.relative_to(resolved_root)
-    except (OSError, ValueError):
+    # The listing's predicate, not a second rule: a session is fetchable
+    # exactly when discover_root lists it.
+    sessions_root = root.path / PACT_SESSIONS_DIRNAME
+    expected = sessions_root / str(slug) / str(session_id) / JOURNAL_FILENAME
+    if not contained(sessions_root, expected):
         return None
     try:
-        if not resolved.is_file():
+        if not expected.is_file():
             return None
     except OSError:
         return None
@@ -258,7 +273,7 @@ def find_session(
         root=root,
         slug=str(slug),
         session_id=str(session_id),
-        journal=resolved,
+        journal=expected,
     )
 
 

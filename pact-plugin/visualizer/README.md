@@ -102,7 +102,10 @@ Under each root it reads:
 | `<root>/tasks/<team>/*.json` | Task records, when present; journal cues fill the gaps |
 
 Only exact journal paths at the depth above are discovered — nested scratch
-journals are ignored. Malformed or partial journal lines are skipped with a
+journals are ignored. `pact-sessions/`, `teams/` and `tasks/` may be symlinks
+themselves, but a symlink anywhere below them (a slug or session directory, a
+journal, a team directory, or a file in it) is skipped, so every listed
+session can be opened. Malformed or partial journal lines are skipped with a
 warning rather than crashing the viewer.
 
 The demo run (`--demo`) reads no journal at all: it is a deterministic scripted

@@ -483,3 +483,73 @@ class TestChildIgnoresCallerCwd:
         assert result.returncode == 0, result.stderr
         assert result.stdout.startswith("pact-viz ")
         assert "DECOY" not in result.stdout + result.stderr
+
+
+class TestOneContainmentRule:
+    """Listing, fetch and the roster loaders accept and refuse the same paths."""
+
+    @staticmethod
+    def _journal(directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "session-journal.jsonl"
+        path.write_text('{"type":"session_start","ts":"2026-11-07T15:00:00Z"}\n')
+        return path
+
+    @staticmethod
+    def _views(root_dir, tmp_path, slug, session_id):
+        from visualizer import discovery
+
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        listed = [(ref.slug, ref.session_id) for ref in discovery.discover_root(roots[0])]
+        fetched = discovery.find_session(roots, slug, session_id)
+        return listed, fetched
+
+    def test_symlinked_pact_sessions_dir_is_listed_and_fetchable(self, tmp_path):
+        real = tmp_path / "elsewhere"
+        self._journal(real / "proj" / "s1")
+        root_dir = tmp_path / "root"
+        root_dir.mkdir()
+        (root_dir / "pact-sessions").symlink_to(real, target_is_directory=True)
+        listed, fetched = self._views(root_dir, tmp_path, "proj", "s1")
+        assert listed == [("proj", "s1")]
+        assert fetched is not None
+
+    @pytest.mark.parametrize("level", ["slug", "session", "journal"])
+    def test_symlink_below_pact_sessions_is_refused_by_both(self, tmp_path, level):
+        outside = tmp_path / "outside"
+        target_journal = self._journal(outside / "proj" / "s1")
+        root_dir = tmp_path / "root"
+        sessions = root_dir / "pact-sessions"
+        sessions.mkdir(parents=True)
+        if level == "slug":
+            (sessions / "proj").symlink_to(outside / "proj", target_is_directory=True)
+        elif level == "session":
+            (sessions / "proj").mkdir()
+            (sessions / "proj" / "s1").symlink_to(outside / "proj" / "s1", target_is_directory=True)
+        else:
+            (sessions / "proj" / "s1").mkdir(parents=True)
+            (sessions / "proj" / "s1" / "session-journal.jsonl").symlink_to(target_journal)
+        listed, fetched = self._views(root_dir, tmp_path, "proj", "s1")
+        assert listed == []
+        assert fetched is None
+
+    def test_roster_skips_symlinked_team_and_task_paths(self, tmp_path):
+        from visualizer import roster
+
+        root_dir = tmp_path / "root"
+        outside = tmp_path / "outside"
+        (outside / "team").mkdir(parents=True)
+        (outside / "team" / "config.json").write_text(
+            json.dumps({"members": [{"name": "planted", "agentType": "x"}]})
+        )
+        (outside / "7.json").write_text(json.dumps({"id": "7", "subject": "planted"}))
+        (root_dir / "teams").mkdir(parents=True)
+        (root_dir / "teams" / "team-a").symlink_to(outside / "team", target_is_directory=True)
+        tasks = root_dir / "tasks" / "team-a"
+        tasks.mkdir(parents=True)
+        (tasks / "7.json").symlink_to(outside / "7.json")
+        (tasks / "8.json").write_text(json.dumps({"id": "8", "subject": "real"}))
+        info = roster.load_team(root_dir, "team-a")
+        assert info.members == []
+        assert not info.team_dir_present
+        assert [task.id for task in info.tasks] == ["8"]
