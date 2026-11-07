@@ -964,6 +964,9 @@ function bindKeyboard() {
   window.addEventListener("keydown", (event) => {
     const target = event.target;
     const tag = (target && target.tagName) || "";
+    /* A widget that handled the key (a row activated by Space or Enter, a
+     * toast dismissed by Escape) has already acted on it. */
+    if (event.defaultPrevented) return;
     /* Escape is a global dismissal, so it runs before the form-control guard:
      * a focused drawer toggle is a BUTTON, and the drawer must still close. */
     if (event.key === "Escape") {
@@ -975,11 +978,9 @@ function bindKeyboard() {
     if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(tag) || (target && target.isContentEditable)) {
       return;
     }
-    /* A widget that handled the key (a row activated by Space or Enter, a
-     * dismissed toast) has already acted on it. Browser and OS chords keep
-     * their own meaning, and while the debrief dialog is open the page behind
-     * it must not react. */
-    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+    /* Browser and OS chords keep their own meaning, and while the debrief
+     * dialog is open the page behind it must not react. */
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (els.modal && !els.modal.hidden) return;
     if (event.key === " " || event.code === "Space") {
       event.preventDefault();

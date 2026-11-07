@@ -641,6 +641,11 @@ check("an open dialog blocks the page shortcuts", !playing() && pending.demo.len
 document.getElementById("modal-root").hidden = true;
 fireWindow("keydown", { key: " ", code: "Space", target: row });
 check("an unhandled Space still toggles playback", playing());
+document.body.classList.add("show-crew");
+fireWindow("keydown", { key: "Escape", target: row, defaultPrevented: true });
+check("Escape already handled by a toast leaves the drawers open", document.body.classList.contains("show-crew"));
+fireWindow("keydown", { key: "Escape", target: row });
+check("an unhandled Escape closes the drawers", !document.body.classList.contains("show-crew"));
 """, tmp_path)
 
 
