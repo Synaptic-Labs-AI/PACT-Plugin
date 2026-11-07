@@ -156,13 +156,17 @@ def aggregate_worker_collection_counts(triples_by_node, collected,
     collection measured by a subset. The two ways a worker is known to be
     lost are each caught first by something else. A crashed worker
     dispatches ``errordown`` with nothing published, so a None arrives and
-    is rejected below. A worker internal error aborts the controller inside
-    ``DSession.worker_workerfinished`` while it handles the failing worker's
-    report, so the session exits non-zero. Depending on where it aborts,
-    either no record is written and the verifier fails on the absent record,
-    or the record carries a non-zero ``exitstatus`` and the verifier fails
-    EXITSTATUS. In that case the ready comparison also keeps the collection
-    fields null, because the healthy ready nodes never reported. Any refusal
+    is rejected below. A worker internal error aborts the controller's event
+    loop, so the session exits non-zero. Where it aborts depends on the order
+    the events arrive: it has been observed in
+    ``DSession.worker_workerfinished``, when the failing worker's finish
+    event arrives after xdist removed that worker, and in
+    ``DSession.loop_once`` ("Unexpectedly no active workers available"),
+    when the healthy workers finished first. Either no record is written and
+    the verifier fails on the absent record, or the record carries a
+    non-zero ``exitstatus`` and the verifier fails EXITSTATUS. When a ready
+    node did not report, the ready comparison also keeps the collection
+    fields null. Any refusal
     leaves the collection fields null, so the verifier fails closed on
     BAD-FIELD instead of certifying a collection measured by a subset.
 
