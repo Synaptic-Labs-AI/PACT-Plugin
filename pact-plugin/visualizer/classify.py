@@ -121,7 +121,9 @@ SEVERITIES = frozenset({"info", "success", "warning", "danger", "muted"})
 # "unrecognized": counted in meta.event_count but omitted from the event feed.
 EVENT_TYPE_INFO: dict[str, tuple[str, str, str]] = {
     "session_start": ("session", "session", "success"),
-    "session_end": ("pr", "pr", "info"),
+    # A bare session_end is the SessionEnd hook's process-exit record; only
+    # a wrap-up record (source "wrap-up") is a PR mark — see classify_event.
+    "session_end": ("session", "session", "muted"),
     "phase_transition": ("phase", "phase", "info"),
     "agent_dispatch": ("dispatch", "dispatch", "info"),
     "dispatch_decision": ("dispatch", "dispatch", "info"),
@@ -165,6 +167,7 @@ EVENT_TYPE_INFO: dict[str, tuple[str, str, str]] = {
     "unflagged_background_wait": ("wake", "wake", "warning"),
     "background_stop_gate": ("gate", "gate", "muted"),
     "pin_pruned": ("memory", "raw", "info"),
+    "pin_marker_write": ("memory", "raw", "info"),
     "pin_prune_skipped": ("memory", "raw", "warning"),
 }
 
@@ -243,10 +246,9 @@ def trim_text(value: str, limit: int) -> str:
     Location: classify.trim_text.
     Summary: When truncation is needed the ellipsis is included INSIDE the
              cap (limit-1 chars + one ellipsis) so the contract's 240/500
-             bounds are upper bounds on the rendered string. The renderer
-             inputs are already bounded by as_text, so the ellipsis branch is
-             DEFENSIVE: it fires only for a future caller that hands trim_text
-             an unbounded string, not on today's classify_event path.
+             bounds are upper bounds on the rendered string. Titles composed
+             from several bounded parts can exceed their cap, so the ellipsis
+             branch is reached on the classify_event path.
     Used by: classify_event.
     """
     if len(value) <= limit:
@@ -402,6 +404,10 @@ def classify_event(
     }
     if event_type == "session_end" and as_text(data.get("source"), 40) == "wrap-up":
         event["wrapup"] = True
+        event["category"] = "pr"
+        event["icon"] = "pr"
+    if event_type == "review_dispatch":
+        event["agents"] = as_str_list(data.get("reviewers"), 40)
     return event
 
 
@@ -409,18 +415,23 @@ def _agent_name(event_type: str, data: Mapping[str, Any]) -> str | None:
     """Resolve the acting agent for a raw event.
 
     Location: classify._agent_name.
-    Summary: Most events name the actor in ``agent``; review findings name a
-             ``reviewer`` and remediation names a ``fixer``; task snapshots
-             name an ``owner``. All fall back through the same list so agent
-             statistics do not silently under-count those streams.
+    Summary: Most events name the actor in ``agent``; a review finding's
+             actor is its ``reviewer``, a dispatch decision's is the spawned
+             ``name`` (null stays null), remediation names a ``fixer`` and a
+             task snapshot an ``owner``. dispatch_site and teachback_ack carry
+             no actor; the model fills them from the task they name.
     Used by: classify_event.
     """
     candidates: tuple[str, ...]
     if event_type == "review_finding":
-        candidates = ("agent", "reviewer")
+        candidates = ("reviewer", "agent")
+    elif event_type == "dispatch_decision":
+        candidates = ("name",)
+    elif event_type in {"dispatch_site", "teachback_ack"}:
+        candidates = ()
     elif event_type == "remediation":
         candidates = ("fixer", "agent")
-    elif event_type in {"task_metadata_snapshot", "dispatch_site"}:
+    elif event_type == "task_metadata_snapshot":
         candidates = ("owner", "agent")
     else:
         candidates = ("agent", "owner", "reviewer", "fixer")
@@ -467,15 +478,16 @@ def _render_session_end(
     state = as_text(data.get("pr_state"), 20).upper()
     pr_number = as_int(data.get("pr_number"), None)
     source = as_text(data.get("source"), 40)
+    if source != "wrap-up":
+        return "Session process ended", f"source {source}" if source else "", "muted"
     if state == "MERGED":
         number = f" PR {pr_number}" if pr_number is not None else ""
-        return f"SHIPPED · wrap-up recorded{number}", f"PR {pr_number} MERGED" if pr_number is not None else "MERGED", "success"
-    if state:
-        detail = f"PR {pr_number} {state}" if pr_number is not None else state
-        return "Session ended", detail, "warning" if state == "CLOSED" else severity
-    if source:
-        return "Session ended", f"source {source}", severity
-    return "Session ended", "", severity
+        detail = f"PR {pr_number} MERGED" if pr_number is not None else "MERGED"
+        return f"SHIPPED · wrap-up recorded{number}", detail, "success"
+    if state in {"", "NONE", "UNKNOWN"}:
+        return "Wrap-up recorded", "no PR", "info"
+    detail = f"PR {pr_number} {state}" if pr_number is not None else state
+    return "Wrap-up recorded", detail, "warning" if state == "CLOSED" else "info"
 
 
 def _render_phase_transition(
@@ -527,8 +539,11 @@ def _render_dispatch_decision(
     if resolved:
         parts.append(f"resolved team {resolved}")
     detail = " · ".join(part for part in parts if part)
-    dangerous = decision in {"DENY", "DENIED", "BLOCK", "BLOCKED"}
-    return title, detail, "danger" if dangerous else "success"
+    if decision in {"DENY", "DENIED", "BLOCK", "BLOCKED"}:
+        return title, detail, "danger"
+    if decision in {"WARN", "WARNING"}:
+        return title, detail, "warning"
+    return title, detail, "success"
 
 
 def _render_handoff(
@@ -590,7 +605,7 @@ def _render_commit(
         title = f"Commit {sha}"
     else:
         title = "Commit"
-    return title, as_text(data.get("detail"), MAX_DETAIL_CHARS), severity
+    return title, as_text(data.get("note"), MAX_DETAIL_CHARS), severity
 
 
 def _render_review(
@@ -610,9 +625,7 @@ def _render_review(
 def _render_finding(
     data: Mapping[str, Any], context: Mapping[str, Any], severity: str
 ) -> tuple[str, str, str]:
-    finding = as_text(data.get("finding"), MAX_DETAIL_CHARS) or as_text(
-        data.get("detail"), MAX_DETAIL_CHARS
-    )
+    finding = as_text(data.get("finding"), MAX_DETAIL_CHARS)
     raw_severity = as_text(data.get("severity"), 40).lower()
     if raw_severity == "blocking":
         label, level = "Blocking", "danger"
@@ -757,10 +770,13 @@ def _render_session_lifecycle(
     pr_number = as_int(data.get("pr_number"), None)
     if pr_number is not None:
         parts.append(f"PR {pr_number}")
-    for key in ("branch", "worktree", "workflow"):
+    for key in ("branch", "worktree_path"):
         value = as_text(data.get(key), 160)
         if value:
             parts.append(value)
+    worktrees = as_str_list(data.get("worktrees"), 10)
+    if worktrees:
+        parts.append(", ".join(worktrees))
     if event_type == "cleanup_summary":
         teams = as_int(data.get("teams_reaped"), None)
         tasks = as_int(data.get("tasks_reaped"), None)
@@ -807,13 +823,18 @@ def _render_pin(
     data: Mapping[str, Any], context: Mapping[str, Any], severity: str
 ) -> tuple[str, str, str]:
     event_type = event_type_of(data)
-    heading = as_text(data.get("heading"), 160)
     outcome = as_text(data.get("outcome"), 80)
     if event_type == "pin_pruned":
-        title = "Memory pin pruned"
-        return title, heading, severity
+        return "Memory pin pruned", as_text(data.get("heading"), 160), severity
+    if event_type == "pin_marker_write":
+        title = f"Pin marker · {outcome}" if outcome else "Pin marker"
+        detail = " · ".join(
+            part for part in (as_text(data.get("route"), 120), as_text(data.get("command"), 120))
+            if part
+        )
+        return title, detail, severity
     title = f"Pin prune skipped · {outcome}" if outcome else "Pin prune skipped"
-    return title, heading, severity
+    return title, as_text(data.get("reason"), MAX_DETAIL_CHARS), severity
 
 
 def _basename(value: Any) -> str:
@@ -836,7 +857,9 @@ def _render_variety(
     variety = normalize_variety(data.get("variety"))
     task_id = as_text(data.get("task_id"), 60)
     scope = as_text(data.get("scope"), 40)
-    if scope == "dispatch" or task_id:
+    # Every variety_assessed carries a task_id; only ``scope`` tells a
+    # dispatch stamp from the feature assessment.
+    if scope == "dispatch":
         title = f"Dispatch variety · task {task_id}" if task_id else "Dispatch variety"
     elif variety:
         title = f"Variety assessed · {variety['total']}/16"
@@ -849,6 +872,15 @@ def _render_variety(
             f"uncertainty {variety['uncertainty']} · risk {variety['risk']}"
         )
     return title, detail, severity
+
+
+def _render_dispatch_site(
+    data: Mapping[str, Any], context: Mapping[str, Any], severity: str
+) -> tuple[str, str, str]:
+    task_id = as_text(data.get("task_id"), 60) or "?"
+    variety = normalize_variety(data.get("variety"))
+    detail = f"variety {variety['total']}" if variety else ""
+    return f"Dispatch site · task #{task_id}", detail, severity
 
 
 def _render_dispatch_variety(
@@ -867,7 +899,7 @@ _RENDERERS = {
     "phase_transition": _render_phase_transition,
     "agent_dispatch": _render_dispatch,
     "dispatch_decision": _render_dispatch_decision,
-    "dispatch_site": _render_dispatch,
+    "dispatch_site": _render_dispatch_site,
     "dispatch_variety": _render_dispatch_variety,
     "variety_assessed": _render_variety,
     "agent_handoff": _render_handoff,
@@ -902,4 +934,5 @@ _RENDERERS = {
     "background_stop_gate": _render_background_gate,
     "pin_pruned": _render_pin,
     "pin_prune_skipped": _render_pin,
+    "pin_marker_write": _render_pin,
 }

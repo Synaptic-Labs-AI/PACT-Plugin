@@ -1241,6 +1241,7 @@ class TestTaskCardsAreSubjectSegments:
         assert [task["key"] for task in payload["tasks"]] == ["6:"]
 
 
+
 class TestCapNeverDropsAnAlertCard:
     def test_an_old_signal_task_survives_the_cap(self, tmp_path):
         from visualizer import settings as viz_settings
@@ -1255,7 +1256,6 @@ class TestCapNeverDropsAnAlertCard:
         assert len(payload["tasks"]) == viz_settings.MAX_TASKS
         assert all(alert["task_key"] in keys for alert in payload["alerts"])
         assert payload["alerts"] and payload["alerts"][0]["task_id"] == "1"
-
 
 class TestGateCardsAndKeyCollisions:
     def test_a_teachback_ack_completes_its_own_gate_card(self, tmp_path):
@@ -1276,7 +1276,6 @@ class TestGateCardsAndKeyCollisions:
         ])
         keys = [task["key"] for task in payload["tasks"] if task["id"] == "12"]
         assert keys == ["12:same", "12:other", "12:same:2"]
-
 
 class TestBlankSubjectNeverSplits:
     @pytest.mark.parametrize("blank", ["", "(no subject)"])
@@ -1299,3 +1298,101 @@ class TestBlankSubjectNeverSplits:
         ])
         cards = [task for task in payload["tasks"] if task["id"] == "3"]
         assert [card["key"] for card in cards] == ["3:occ-blank"]
+
+
+def _events_of(payload, event_type):
+    return [event for event in payload["events"] if event["type"] == event_type]
+
+
+class TestEventsCarryStageInputs:
+    @pytest.mark.parametrize("phase, family", [
+        ("PREPARE", "PREPARE"), ("plan", "PREPARE"), ("INVESTIGATE", "PREPARE"),
+        ("ARCHITECT", "ARCHITECT"), ("EXECUTE", "CODE"), ("OPERATOR_DEV", "CODE"),
+        ("deploy", "CODE"), ("QA", "TEST"), ("VERIFY", "TEST"), ("REVIEW", "REVIEW"),
+        ("REVIEW-REMEDIATION", "REVIEW"), ("REVIEW_REMEDIATION", "REVIEW"),
+        ("peer-review", "REVIEW"), ("WRAP", "OTHER"), ("", "OTHER"),
+    ])
+    def test_phase_family_mapping(self, phase, family):
+        from visualizer import model
+
+        assert model.phase_family(phase) == family
+
+    def test_events_without_a_phase_inherit_the_current_phase(self, tmp_path):
+        payload = _build(tmp_path, [
+            {"type": "phase_transition", "phase": "REVIEW", "status": "started"},
+            {"type": "review_finding", "severity": "minor", "finding": "f", "reviewer": "rev-a"},
+        ])
+        finding = _events_of(payload, "review_finding")[0]
+        assert finding["phase_family"] == "REVIEW"
+        assert finding["agent"] == "rev-a"
+
+    def test_review_dispatch_lists_its_reviewers_and_they_join_the_crew(self, tmp_path):
+        payload = _build(tmp_path, [{"type": "review_dispatch", "pr_number": 5, "pr_url": "u",
+                                     "reviewers": ["rev-a", "rev-b"]}])
+        assert _events_of(payload, "review_dispatch")[0]["agents"] == ["rev-a", "rev-b"]
+        assert {"rev-a", "rev-b"} <= {agent["name"] for agent in payload["agents"]}
+
+    def test_dispatch_decision_agent_is_its_name_and_null_stays_null(self, tmp_path):
+        payload = _build(tmp_path, [
+            {"type": "dispatch_decision", "decision": "ALLOW", "name": "coder-a"},
+            {"type": "dispatch_decision", "decision": "WARN", "name": None},
+        ])
+        named, unnamed = _events_of(payload, "dispatch_decision")
+        assert named["agent"] == "coder-a" and named["severity"] == "success"
+        assert unnamed["agent"] is None and unnamed["severity"] == "warning"
+
+    def test_dispatch_site_and_teachback_ack_take_their_task_owner(self, tmp_path):
+        payload = _build(
+            tmp_path,
+            [{"type": "dispatch_site", "task_id": "4", "variety": {"novelty": 2, "scope": 2,
+                                                                  "uncertainty": 2, "risk": 2}},
+             {"type": "teachback_ack", "task_id": "3", "rationale_articulates_this_dispatch": "yes"},
+             {"type": "dispatch_site", "task_id": "99"}],
+            tasks=[{"id": "3", "subject": "x: TEACHBACK", "owner": "coder-g", "status": "completed"},
+                   {"id": "4", "subject": "x: work", "owner": "coder-w", "status": "in_progress"}],
+        )
+        site, unknown = _events_of(payload, "dispatch_site")
+        assert (site["title"], site["detail"], site["agent"]) == (
+            "Dispatch site · task #4", "variety 8", "coder-w")
+        assert unknown["agent"] is None
+        assert _events_of(payload, "teachback_ack")[0]["agent"] == "coder-g"
+
+
+class TestClassifyFollowsTheWriters:
+    def test_bare_and_wrap_up_session_ends(self, tmp_path):
+        payload = _build(tmp_path, [
+            {"type": "session_end"},
+            {"type": "session_start", "session_id": "s1", "project_dir": "/x/proj",
+             "source": "resume"},
+            {"type": "session_end", "source": "wrap-up", "pr_state": "NONE"},
+        ])
+        bare, wrap = _events_of(payload, "session_end")
+        assert (bare["category"], bare["icon"], bare["severity"], bare["title"]) == (
+            "session", "session", "muted", "Session process ended")
+        assert "wrapup" not in bare
+        assert (wrap["category"], wrap["icon"], wrap["wrapup"], wrap["detail"]) == (
+            "pr", "pr", True, "no PR")
+
+    def test_writer_field_names(self, tmp_path):
+        payload = _build(tmp_path, [
+            {"type": "commit", "sha": "abc", "message": "m", "phase": "CODE", "note": "amended"},
+            {"type": "session_paused", "pr_number": 1, "pr_url": "u", "branch": "b",
+             "worktree_path": "/w/one", "consolidation_completed": True},
+            {"type": "session_refreshed", "consolidation_completed": True, "halt_active": False,
+             "worktrees": ["/w/a", "/w/b"]},
+            {"type": "pin_marker_write", "route": "pin-memory", "command": "add",
+             "outcome": "written"},
+            {"type": "pin_prune_skipped", "outcome": "declined", "pin_count": 3,
+             "reason": "user kept them"},
+            {"type": "variety_assessed", "task_id": "1", "variety": {
+                "novelty": {"score": 3, "rationale": "r"}, "scope": 2, "uncertainty": 2, "risk": 1}},
+        ])
+        assert _events_of(payload, "commit")[0]["detail"] == "amended"
+        assert "/w/one" in _events_of(payload, "session_paused")[0]["detail"]
+        assert "/w/a, /w/b" in _events_of(payload, "session_refreshed")[0]["detail"]
+        pin = _events_of(payload, "pin_marker_write")[0]
+        assert (pin["title"], pin["detail"]) == ("Pin marker · written", "pin-memory · add")
+        assert _events_of(payload, "pin_prune_skipped")[0]["detail"] == "user kept them"
+        variety = _events_of(payload, "variety_assessed")[0]
+        assert variety["title"].startswith("Variety assessed")
+        assert variety["detail"].startswith("novelty 3 ")

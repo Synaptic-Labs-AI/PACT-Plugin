@@ -321,6 +321,7 @@ Otherwise return the full model:
     "type": "agent_handoff",
     "category": "handoff",
     "phase": "PREPARE",
+    "phase_family": "PREPARE",
     "agent": "preparer",
     "task_id": "8",
     "title": "preparer handed off task #8",
@@ -404,6 +405,34 @@ Field rules:
   neither the feed nor the raw-log view.
 - `title` / `detail` are plain text, no HTML, redacted, then truncated to
   240/500 chars.
+- `phase_family` ∈ `PREPARE|ARCHITECT|CODE|TEST|REVIEW|OTHER`, from the
+  event's own `phase`, else the run's current phase at that seq (the newest
+  `phase_transition` before it). Mapping, upper-cased with `_` read as `-`:
+  PREPARE, PLAN, INVESTIGATE → PREPARE; ARCHITECT → ARCHITECT; CODE, EXECUTE,
+  OPERATOR-DEV, DEPLOY → CODE; TEST, QA, VERIFY → TEST; anything starting
+  REVIEW, and PEER-REVIEW → REVIEW; anything else, or no phase → OTHER.
+- `agent` names the event's actor from the writer's own field: `agent` for most
+  types, `reviewer` for `review_finding`, the spawned `name` for
+  `dispatch_decision` (null for an unnamed spawn), `fixer` for `remediation`,
+  `owner` for `task_metadata_snapshot`. `dispatch_site` and `teachback_ack`
+  carry no actor; they take the owner of the task card they name (the gate
+  task, for an ack), else null. `review_dispatch` has no actor; it carries
+  `agents`, its `reviewers` list, and every reviewer it names joins the crew.
+- `session_end`: a bare record (the SessionEnd hook, a process exit) has
+  category `session`, severity `muted` and title `Session process ended`. A
+  record with `source` `wrap-up` has category `pr`, icon `pr`,
+  `wrapup: true`, and title `SHIPPED · wrap-up recorded` when the PR is
+  MERGED, else `Wrap-up recorded` (detail `no PR` for NONE/UNKNOWN).
+- `dispatch_site` renders as `Dispatch site · task #<id>`, with detail
+  `variety <total>` when it carries one.
+- Writer field names, as emitted: a `commit` detail is its `note`; a
+  `review_finding` detail is its `finding`; `session_paused` shows
+  `worktree_path` and `session_refreshed` its `worktrees` list;
+  `pin_prune_skipped` shows its `reason`; `pin_marker_write` is classified
+  (category `memory`, title `Pin marker · <outcome>`); a `variety_assessed` is
+  titled "Dispatch variety" only when its `scope` is `dispatch`; an old
+  `{score, rationale}` variety dimension reads its `score`; a dispatch-gate
+  `WARN` has severity `warning`.
 - `severity` ∈ `info|success|warning|danger|muted`. `icon` is a short token
   (`phase`, `dispatch`, `handoff`, `commit`, `review`, `bug`, `pr`, `gate`,
   `alert`, `save`, `session`, `compact`, `wake`, `variety`, `task`,

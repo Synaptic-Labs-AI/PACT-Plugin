@@ -178,7 +178,12 @@ MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 
 
 def _variety_int(value: object) -> int | None:
-    """Best-effort int for a variety dimension (rejects bools and text)."""
+    """Best-effort int for a variety dimension (rejects bools and text).
+
+    An older ``{"score": n, "rationale": ...}`` dimension reads its score.
+    """
+    if isinstance(value, Mapping):
+        value = value.get("score")
     if isinstance(value, bool):
         return None
     if isinstance(value, int):

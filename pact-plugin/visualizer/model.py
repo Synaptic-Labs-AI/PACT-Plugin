@@ -272,6 +272,67 @@ def _phase_items(events: Sequence[journal.RawEvent]) -> dict:
     }
 
 
+_PHASE_FAMILIES: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"PREPARE", "PLAN", "INVESTIGATE"}), "PREPARE"),
+    (frozenset({"ARCHITECT"}), "ARCHITECT"),
+    (frozenset({"CODE", "EXECUTE", "OPERATOR-DEV", "DEPLOY"}), "CODE"),
+    (frozenset({"TEST", "QA", "VERIFY"}), "TEST"),
+)
+
+
+def phase_family(phase: object) -> str:
+    """A phase's stage room: PREPARE/ARCHITECT/CODE/TEST/REVIEW, else OTHER.
+
+    Location: model.phase_family.
+    Summary: Upper-cased with ``_`` read as ``-``. Any phase starting REVIEW,
+             and PEER-REVIEW, is REVIEW.
+    Used by: assign_phase_families.
+    """
+    text = _text(phase, 40).upper().replace("_", "-")
+    if not text:
+        return "OTHER"
+    if text.startswith("REVIEW") or text == "PEER-REVIEW":
+        return "REVIEW"
+    for members, family in _PHASE_FAMILIES:
+        if text in members:
+            return family
+    return "OTHER"
+
+
+def assign_phase_families(events: Sequence[dict]) -> None:
+    """Give every classified event ``phase_family``.
+
+    Location: model.assign_phase_families.
+    Summary: From the event's own phase, else the run's current phase at that
+             seq (the newest phase_transition before it).
+    Used by: derive_model.
+    """
+    current = ""
+    for event in events:
+        if event.get("type") == "phase_transition" and event.get("phase"):
+            current = str(event["phase"])
+        event["phase_family"] = phase_family(event.get("phase") or current)
+
+
+def fill_task_agents(events: Sequence[dict], tasks: Sequence[Mapping[str, Any]]) -> None:
+    """Name the actor of dispatch_site and teachback_ack events.
+
+    Location: model.fill_task_agents.
+    Summary: Neither type carries an actor. dispatch_site takes the owner of
+             the task card it names; teachback_ack takes the owner of its gate
+             task. Unknown owners stay null.
+    Used by: derive_model.
+    """
+    owners = {str(task.get("key")): _text(task.get("owner"), 200) for task in tasks}
+    keys = occupant_keys(events)
+    for event in events:
+        if event.get("type") not in {"dispatch_site", "teachback_ack"}:
+            continue
+        seq = event.get("seq")
+        owner = owners.get(keys.get(seq, "")) if isinstance(seq, int) else ""
+        event["agent"] = owner or None
+
+
 def derive_phases(events: Sequence[journal.RawEvent]) -> dict:
     """Public alias for the phases derivation (used by tests/demo)."""
     return _phase_items(events)
@@ -432,6 +493,15 @@ def derive_agents(
     accumulators: dict[str, _AgentAccumulator] = {
         name: _AgentAccumulator(seed_by_name[name]) for name in order
     }
+    # Every reviewer a review_dispatch names is crew, even before it acts.
+    for event in events:
+        if event.get("type") != "review_dispatch":
+            continue
+        for reviewer in _list(event.get("agents")):
+            name = _text(reviewer, 200)
+            if name and name not in lead_aliases and name not in accumulators:
+                accumulators[name] = _AgentAccumulator(None)
+                order.append(name)
     for event in events:
         agent = event.get("agent")
         name = agent if isinstance(agent, str) and agent else ""
@@ -1070,9 +1140,7 @@ def derive_findings(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], in
         if event.get("type") != "review_finding":
             continue
         data = _mapping(event.get("raw"))
-        finding = _text(data.get("finding"), MAX_FIELD_CHARS) or _text(
-            event.get("detail"), MAX_DETAIL_CHARS
-        )
+        finding = _text(data.get("finding"), MAX_FIELD_CHARS)
         findings.append(
             {
                 "seq": event.get("seq"),
@@ -1599,14 +1667,16 @@ def derive_model(
         )
 
     phases = _phase_items(events)
+    assign_phase_families(classified)
+    tasks, tasks_total, all_tasks = derive_tasks(
+        events=classified, team_info=info, task_seeds=task_seeds
+    )
+    fill_task_agents(classified, all_tasks)
     agents, agents_total = derive_agents(
         classified,
         info,
         meta=meta,
         agent_seeds=agent_seeds,
-    )
-    tasks, tasks_total, all_tasks = derive_tasks(
-        events=classified, team_info=info, task_seeds=task_seeds
     )
     handoffs, handoffs_total = derive_handoffs(
         classified, {task["key"]: task for task in all_tasks}

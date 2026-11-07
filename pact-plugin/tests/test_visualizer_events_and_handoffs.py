@@ -28,6 +28,7 @@ from visualizer.settings import (
     ORCHESTRATION_MARKER_TYPES,
     SUMMARY_TAIL_BYTES,
     RootSpec,
+    normalize_variety,
 )
 
 STAMP = "2026-01-01T00:00:00Z"
@@ -718,6 +719,7 @@ class TestRunStatus:
         model_view, list_view = _both_views(root, _IDLE_NOW)
         assert model_view == list_view == ("ended", "idle")
 
+
 # --- tasks: identity by id plus occupant, a closed status set, alerts, gates --
 
 _TEAM = "session-abc12345"
@@ -1018,3 +1020,167 @@ class TestTeachbackGate:
         card = _by_key(_task_payload(root, []))["32:"]
         assert card["kind"] == "gate"
         assert card["status"] == "pending"
+
+class TestTeachbackAckAgent:
+    """The ack carries no agent; the viewer credits the gate task's owner."""
+
+    def test_the_ack_is_credited_to_the_gate_owner(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "20", subject="test-engineer: TEACHBACK for review",
+                               owner="test-engineer")
+        payload = _task_payload(root, [census.teachback_ack(_t(1), "20")])
+        ack = [event for event in payload["events"] if event["type"] == "teachback_ack"]
+        assert [event["agent"] for event in ack] == ["test-engineer"]
+
+    def test_an_ack_for_an_unknown_gate_names_no_agent(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [census.teachback_ack(_t(1), "99")])
+        ack = [event for event in payload["events"] if event["type"] == "teachback_ack"]
+        assert [event["agent"] for event in ack] == [None]
+
+
+# --- events carry the agent and phase family the stage needs -----------------
+
+
+def _classified(event: dict) -> dict:
+    result = classify.classify_event(
+        journal.RawEvent(seq=1, data=event), {"project": "P", "team": _TEAM, "cloud": False}
+    )
+    assert result is not None, event["type"]
+    return result
+
+
+def _events_of(payload: dict, event_type: str) -> list[dict]:
+    return [event for event in payload["events"] if event["type"] == event_type]
+
+
+class TestPhaseFamily:
+    @pytest.mark.parametrize(
+        ("phase", "family"),
+        [
+            ("PREPARE", "PREPARE"), ("PLAN", "PREPARE"), ("INVESTIGATE", "PREPARE"),
+            ("ARCHITECT", "ARCHITECT"),
+            ("CODE", "CODE"), ("code", "CODE"), ("EXECUTE", "CODE"),
+            ("OPERATOR-DEV", "CODE"), ("OPERATOR_DEV", "CODE"), ("deploy", "CODE"),
+            ("TEST", "TEST"), ("test", "TEST"), ("QA", "TEST"), ("VERIFY", "TEST"),
+            ("REVIEW", "REVIEW"), ("REVIEW-REMEDIATION", "REVIEW"),
+            ("REVIEW_REMEDIATION", "REVIEW"), ("peer-review", "REVIEW"),
+            ("ATOMIZE", "OTHER"), ("", "OTHER"), (None, "OTHER"),
+        ],
+    )
+    def test_each_real_phase_maps_to_its_room(self, phase, family):
+        assert model.phase_family(phase) == family
+
+    def test_an_event_without_a_phase_takes_the_current_one(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.review_finding(_t(1), "minor", "early", "reviewer-a", "9"),
+            census.phase_transition(_t(2), "peer-review", "started"),
+            census.review_finding(_t(3), "minor", "late", "reviewer-a", "9"),
+            census.agent_dispatch(_t(4), "backend-coder", "10", "CODE"),
+        ])
+        findings = _events_of(payload, "review_finding")
+        assert [event["phase_family"] for event in findings] == ["OTHER", "REVIEW"]
+        assert _events_of(payload, "agent_dispatch")[0]["phase_family"] == "CODE"
+
+
+class TestEventAgents:
+    def test_a_finding_is_credited_to_its_reviewer(self):
+        event = _classified(census.review_finding(_t(1), "blocking", "x", "cold-reviewer", "9"))
+        assert event["agent"] == "cold-reviewer"
+
+    def test_a_dispatch_decision_is_credited_to_the_spawned_name(self):
+        assert _classified(census.dispatch_decision(_t(1), "architect"))["agent"] == "architect"
+        assert _classified(census.dispatch_decision(_t(1), None))["agent"] is None
+
+    def test_a_review_dispatch_lists_its_reviewers(self):
+        event = _classified(census.review_dispatch(_t(1), ["reviewer-a", "cold-reviewer"]))
+        assert event["agents"] == ["reviewer-a", "cold-reviewer"]
+
+    def test_every_reviewer_seen_joins_the_crew(self, tmp_path):
+        payload = _task_payload(make_root(tmp_path), [
+            census.review_dispatch(_t(1), ["reviewer-a", "cold-reviewer"]),
+            census.review_finding(_t(2), "minor", "x", "cursor-bugbot", "9"),
+        ])
+        names = {agent["name"] for agent in payload["agents"]}
+        assert {"reviewer-a", "cold-reviewer", "cursor-bugbot"} <= names
+
+    def test_a_dispatch_site_names_its_task_and_its_owner(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_task_file(root, _TEAM, "12", subject="backend-coder: build",
+                               owner="backend-coder")
+        payload = _task_payload(root, [
+            census.event("dispatch_site", _t(1), task_id="12",
+                         variety={"novelty": 1, "scope": 2, "uncertainty": 3, "risk": 3,
+                                  "total": 9}),
+            census.event("dispatch_site", _t(2), task_id="77"),
+        ])
+        known, unknown = _events_of(payload, "dispatch_site")
+        assert known["title"] == "Dispatch site · task #12"
+        assert known["detail"] == "variety 9"
+        assert known["agent"] == "backend-coder"
+        assert unknown["agent"] is None
+
+
+class TestSessionEndKinds:
+    def test_a_bare_session_end_is_a_muted_process_exit(self):
+        event = _classified(census.bare_session_end(_t(1)))
+        assert (event["category"], event["icon"], event["severity"]) == (
+            "session", "session", "muted"
+        )
+        assert event["title"] == "Session process ended"
+        assert not event.get("wrapup")
+
+    @pytest.mark.parametrize("state", ["MERGED", "OPEN", "NONE"])
+    def test_a_wrapup_record_is_a_pr_mark(self, state):
+        event = _classified(census.wrapup_end(
+            _t(1), pr_state=state, pr_number=None if state == "NONE" else 7
+        ))
+        assert (event["category"], event["icon"]) == ("pr", "pr")
+        assert event["wrapup"] is True
+
+    def test_a_wrapup_without_a_pr_says_so(self):
+        event = _classified(census.wrapup_end(_t(1), pr_state="UNKNOWN", pr_number=None))
+        assert "UNKNOWN" not in event["detail"]
+        assert "no PR" in event["detail"]
+
+
+class TestRealWriterFields:
+    def test_a_commit_shows_its_note(self):
+        event = _classified(census.event("commit", _t(1), sha="abc1234", message="m",
+                                         phase="CODE", note="squashed review fixes"))
+        assert event["detail"] == "squashed review fixes"
+
+    def test_pause_and_refresh_show_their_worktree_fields(self):
+        paused = _classified(census.session_paused(_t(1)))
+        refreshed = _classified(census.session_refreshed(_t(1)))
+        assert "/work/.worktrees/feature" in paused["detail"]
+        assert "/work/.worktrees/feature" in refreshed["detail"]
+
+    def test_only_scope_dispatch_makes_a_dispatch_variety_title(self):
+        variety = {"novelty": 2, "scope": 2, "uncertainty": 2, "risk": 2, "total": 8}
+        feature = _classified(census.event("variety_assessed", _t(1), task_id="1",
+                                           variety=variety))
+        dispatch = _classified(census.event("variety_assessed", _t(1), task_id="1",
+                                            scope="dispatch", variety=variety))
+        assert not feature["title"].startswith("Dispatch variety")
+        assert dispatch["title"].startswith("Dispatch variety")
+
+    def test_an_old_score_shaped_dimension_is_read(self):
+        assert normalize_variety({"novelty": {"score": 3, "rationale": "x"},
+                                   "scope": {"score": 2, "rationale": "y"}}) == {
+            "novelty": 3, "scope": 2, "uncertainty": 0, "risk": 0, "total": 5,
+        }
+
+    def test_a_pin_marker_write_is_classified(self):
+        event = _classified(census.event("pin_marker_write", _t(1), route="skill",
+                                         command="pin", outcome="written"))
+        assert event["category"] == "memory"
+
+    def test_a_skipped_prune_has_no_heading_and_names_its_outcome(self):
+        event = _classified(census.event("pin_prune_skipped", _t(1), outcome="skipped",
+                                         pin_count=3, age_distribution={}, reason="none old"))
+        assert "skipped" in event["title"]
+        assert "None" not in event["title"]
+
+    def test_a_warn_gate_decision_is_a_warning(self):
+        assert _classified(census.dispatch_decision(_t(1), "a", "WARN"))["severity"] == "warning"
+        assert _classified(census.dispatch_decision(_t(1), "a", "DENY"))["severity"] != "success"

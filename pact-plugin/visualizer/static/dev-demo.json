@@ -104,7 +104,7 @@
    "first_seen": "2026-11-02T23:00:00Z",
    "last_seen": "2026-11-02T23:46:00Z",
    "stats": {
-    "events": 32,
+    "events": 30,
     "dispatches": 0,
     "handoffs": 0,
     "commits": 0,
@@ -131,7 +131,7 @@
    "first_seen": "2026-11-02T23:01:00Z",
    "last_seen": "2026-11-02T23:05:30Z",
    "stats": {
-    "events": 4,
+    "events": 5,
     "dispatches": 1,
     "handoffs": 1,
     "commits": 0,
@@ -239,7 +239,7 @@
    "first_seen": "2026-11-02T23:16:00Z",
    "last_seen": "2026-11-02T23:32:00Z",
    "stats": {
-    "events": 4,
+    "events": 5,
     "dispatches": 1,
     "handoffs": 1,
     "commits": 0,
@@ -332,6 +332,72 @@
     "type": "blocker_raised",
     "summary": "Blocker raised for TEST"
    }
+  },
+  {
+   "name": "architect-reviewer",
+   "role": "architect-reviewer",
+   "agent_type": "",
+   "color": "slate",
+   "model": "",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "standby",
+   "phase": "",
+   "task_id": null,
+   "first_seen": null,
+   "last_seen": null,
+   "stats": {
+    "events": 0,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": null
+  },
+  {
+   "name": "test-engineer-reviewer",
+   "role": "test-engineer-reviewer",
+   "agent_type": "",
+   "color": "slate",
+   "model": "",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "standby",
+   "phase": "",
+   "task_id": null,
+   "first_seen": null,
+   "last_seen": null,
+   "stats": {
+    "events": 0,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": null
+  },
+  {
+   "name": "security-engineer-reviewer",
+   "role": "security-engineer-reviewer",
+   "agent_type": "",
+   "color": "slate",
+   "model": "",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "standby",
+   "phase": "",
+   "task_id": null,
+   "first_seen": null,
+   "last_seen": null,
+   "stats": {
+    "events": 0,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": null
   }
  ],
  "tasks": [
@@ -555,7 +621,8 @@
     "project_dir": "/Users/demo/Sites/pact-demo",
     "team": "session-demo01",
     "source": "startup"
-   }
+   },
+   "phase_family": "OTHER"
   },
   {
    "seq": 1,
@@ -575,7 +642,8 @@
     "ts": "2026-11-02T23:00:00Z",
     "phase": "PREPARE",
     "status": "started"
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 2,
@@ -585,7 +653,7 @@
    "phase": null,
    "agent": null,
    "task_id": "1",
-   "title": "Dispatch variety \u00b7 task 1",
+   "title": "Variety assessed \u00b7 10/16",
    "detail": "novelty 3 \u00b7 scope 3 \u00b7 uncertainty 2 \u00b7 risk 2",
    "severity": "info",
    "icon": "variety",
@@ -601,7 +669,8 @@
      "risk": 2,
      "total": 10
     }
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 3,
@@ -625,7 +694,8 @@
     "scope": [
      "research JWT auth"
     ]
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 4,
@@ -633,7 +703,7 @@
    "type": "dispatch_decision",
    "category": "dispatch",
    "phase": null,
-   "agent": null,
+   "agent": "preparer",
    "task_id": null,
    "title": "Dispatch gate: ALLOW preparer",
    "detail": "dispatch_gate \u00b7 resolved team session-demo01",
@@ -648,7 +718,8 @@
     "name": "preparer",
     "team_name": "session-demo01",
     "resolved_team": "session-demo01"
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 5,
@@ -672,7 +743,8 @@
     "scope": [
      "record the plan"
     ]
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 6,
@@ -699,7 +771,8 @@
      "risk": 1,
      "total": 8
     }
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 7,
@@ -720,7 +793,8 @@
     "agent": "preparer",
     "task_id": "2",
     "rationale_articulates_this_dispatch": "yes"
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 8,
@@ -753,7 +827,8 @@
       "understanding": "rotate refresh tokens"
      }
     }
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 9,
@@ -794,7 +869,8 @@
      "risk": 2,
      "total": 10
     }
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 10,
@@ -823,7 +899,8 @@
      "integration": "AuthService, token middleware, and the users table.",
      "open_questions": "Should refresh tokens be rotated on every use?"
     }
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 11,
@@ -834,7 +911,7 @@
    "agent": null,
    "task_id": null,
    "title": "Commit 94c2da8 \u00b7 Add PREPARE research",
-   "detail": "docs/preparation/jwt-research.md",
+   "detail": "",
    "severity": "success",
    "icon": "commit",
    "raw": {
@@ -845,7 +922,8 @@
     "message": "Add PREPARE research",
     "phase": "PREPARE",
     "detail": "docs/preparation/jwt-research.md"
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 12,
@@ -865,7 +943,8 @@
     "ts": "2026-11-02T23:07:00Z",
     "phase": "PREPARE",
     "status": "completed"
-   }
+   },
+   "phase_family": "PREPARE"
   },
   {
    "seq": 13,
@@ -885,7 +964,8 @@
     "ts": "2026-11-02T23:08:00Z",
     "phase": "ARCHITECT",
     "status": "started"
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 14,
@@ -909,7 +989,8 @@
     "scope": [
      "design the auth flow"
     ]
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 15,
@@ -933,7 +1014,8 @@
     "scope": [
      "observe quality"
     ]
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 16,
@@ -960,7 +1042,8 @@
      "risk": 2,
      "total": 9
     }
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 17,
@@ -981,7 +1064,8 @@
     "agent": "architect",
     "task_id": "4",
     "rationale_articulates_this_dispatch": "yes"
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 18,
@@ -1010,7 +1094,8 @@
      "integration": "Router and error middleware.",
      "open_questions": "Whether to cache public keys."
     }
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 19,
@@ -1052,7 +1137,8 @@
      "risk": 2,
      "total": 10
     }
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 20,
@@ -1072,7 +1158,8 @@
     "ts": "2026-11-02T23:14:00Z",
     "phase": "ARCHITECT",
     "status": "completed"
-   }
+   },
+   "phase_family": "ARCHITECT"
   },
   {
    "seq": 21,
@@ -1092,7 +1179,8 @@
     "ts": "2026-11-02T23:15:00Z",
     "phase": "CODE",
     "status": "started"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 22,
@@ -1116,7 +1204,8 @@
     "scope": [
      "implement auth service"
     ]
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 23,
@@ -1140,7 +1229,8 @@
     "scope": [
      "build auth UI"
     ]
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 24,
@@ -1148,7 +1238,7 @@
    "type": "dispatch_decision",
    "category": "dispatch",
    "phase": null,
-   "agent": null,
+   "agent": "backend-coder",
    "task_id": null,
    "title": "Dispatch gate: ALLOW backend-coder",
    "detail": "dispatch_gate \u00b7 resolved team session-demo01",
@@ -1163,7 +1253,8 @@
     "name": "backend-coder",
     "team_name": "session-demo01",
     "resolved_team": "session-demo01"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 25,
@@ -1190,7 +1281,8 @@
      "risk": 3,
      "total": 9
     }
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 26,
@@ -1217,7 +1309,8 @@
      "risk": 1,
      "total": 6
     }
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 27,
@@ -1238,7 +1331,8 @@
     "agent": "backend-coder",
     "task_id": "6",
     "rationale_articulates_this_dispatch": "yes"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 28,
@@ -1260,7 +1354,8 @@
     "task_id": "7",
     "rationale_articulates_this_dispatch": "concern",
     "concern": "refresh race may need a test"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 29,
@@ -1281,7 +1376,8 @@
     "sha": "1a2b3c4",
     "message": "Add AuthService and token store",
     "phase": "CODE"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 30,
@@ -1302,7 +1398,8 @@
     "sha": "5d6e7f8",
     "message": "Add login and refresh endpoints",
     "phase": "CODE"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 31,
@@ -1324,7 +1421,8 @@
     "finding": "Duplicated cookie options in login and refresh handlers.",
     "reviewer": "auditor",
     "task_id": ""
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 32,
@@ -1345,7 +1443,8 @@
     "sha": "9a0b1c2",
     "message": "Add auth client and session guard",
     "phase": "CODE"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 33,
@@ -1374,7 +1473,8 @@
      "integration": "users table, router, error middleware.",
      "open_questions": "Should logout revoke all device tokens?"
     }
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 34,
@@ -1403,7 +1503,8 @@
      "integration": "App shell and route guard.",
      "open_questions": "None"
     }
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 35,
@@ -1446,7 +1547,8 @@
      "risk": 2,
      "total": 10
     }
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 36,
@@ -1466,7 +1568,8 @@
     "ts": "2026-11-02T23:26:00Z",
     "phase": "CODE",
     "status": "completed"
-   }
+   },
+   "phase_family": "CODE"
   },
   {
    "seq": 37,
@@ -1486,7 +1589,8 @@
     "ts": "2026-11-02T23:27:00Z",
     "phase": "TEST",
     "status": "started"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 38,
@@ -1510,7 +1614,8 @@
     "scope": [
      "verify auth flows"
     ]
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 39,
@@ -1534,7 +1639,8 @@
     "scope": [
      "adversarial auth review"
     ]
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 40,
@@ -1561,7 +1667,8 @@
      "risk": 2,
      "total": 8
     }
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 41,
@@ -1588,7 +1695,8 @@
      "risk": 4,
      "total": 10
     }
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 42,
@@ -1609,7 +1717,8 @@
     "agent": "test-engineer",
     "task_id": "8",
     "rationale_articulates_this_dispatch": "yes"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 43,
@@ -1631,7 +1740,8 @@
     "finding": "A replayed refresh token is accepted by the token store.",
     "reviewer": "security-engineer",
     "task_id": ""
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 44,
@@ -1653,7 +1763,8 @@
     "category": "SECURITY",
     "summary": "Refresh-token replay accepted; fix before merge.",
     "agent": "security-engineer"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 45,
@@ -1674,7 +1785,8 @@
     "phase": "TEST",
     "detail": "Rotation reuse detection missing.",
     "agent": "security-engineer"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 46,
@@ -1698,7 +1810,8 @@
     ],
     "fixer": "backend-coder",
     "task_id": "10"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 47,
@@ -1719,7 +1832,8 @@
     "sha": "2b3c4d5",
     "message": "Fix refresh reuse detection",
     "phase": "TEST"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 48,
@@ -1741,7 +1855,8 @@
     "finding": "Add a 30s clock-skew test case.",
     "reviewer": "test-engineer",
     "task_id": ""
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 49,
@@ -1762,7 +1877,8 @@
     "sha": "3c4d5e6",
     "message": "Add auth integration tests",
     "phase": "TEST"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 50,
@@ -1787,7 +1903,13 @@
      "test-engineer-reviewer",
      "security-engineer-reviewer"
     ]
-   }
+   },
+   "agents": [
+    "architect-reviewer",
+    "test-engineer-reviewer",
+    "security-engineer-reviewer"
+   ],
+   "phase_family": "TEST"
   },
   {
    "seq": 51,
@@ -1808,7 +1930,8 @@
     "pr_number": 42,
     "pr_url": "https://example.invalid/pull/42",
     "commits": 6
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 52,
@@ -1828,7 +1951,8 @@
     "ts": "2026-11-02T23:38:00Z",
     "verdict": "lead",
     "basis": "content"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 53,
@@ -1861,7 +1985,8 @@
      "risk": 2,
      "total": 10
     }
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 54,
@@ -1881,7 +2006,8 @@
     "ts": "2026-11-02T23:40:00Z",
     "phase": "TEST",
     "status": "completed"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 55,
@@ -1901,7 +2027,8 @@
     "ts": "2026-11-02T23:41:00Z",
     "from": "session-demo01",
     "to": "session-demo01-renamed"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 56,
@@ -1928,7 +2055,8 @@
      "Reasoning reconstruction band could not be resolved."
     ],
     "verdict": "advisory"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 57,
@@ -1951,7 +2079,8 @@
     "rules": [],
     "advisories": [],
     "verdict": "allow"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 58,
@@ -1978,7 +2107,8 @@
      "A dispatch task is missing its variety stamp."
     ],
     "verdict": "advisory"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 59,
@@ -2000,7 +2130,8 @@
     "status": "failed",
     "stage": "runtime",
     "error": "AttributeError: 'str' object has no attribute 'get'"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 60,
@@ -2020,7 +2151,8 @@
     "ts": "2026-11-02T23:45:00Z",
     "skipped_type": "dispatch_site",
     "cause": "schema"
-   }
+   },
+   "phase_family": "TEST"
   },
   {
    "seq": 61,
@@ -2042,7 +2174,8 @@
     "pr_state": "MERGED",
     "pr_number": 42
    },
-   "wrapup": true
+   "wrapup": true,
+   "phase_family": "TEST"
   }
  ],
  "handoffs": [
@@ -2464,7 +2597,7 @@
  "metrics": {
   "events_total": 62,
   "events_visible": 62,
-  "agents": 9,
+  "agents": 12,
   "tasks": 10,
   "handoffs": 4,
   "commits": 6,
