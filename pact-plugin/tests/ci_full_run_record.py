@@ -155,23 +155,24 @@ def aggregate_worker_collection_counts(triples_by_node, collected,
     is not enough: every worker collects the whole corpus, so the survivors
     agree with each other exactly as a complete population would, and only
     the ready set shows that one is missing. Under xdist 3.8.0 a worker is
-    lost in one of three ways:
+    lost in at least these ways:
 
     - A worker that crashes dispatches ``errordown`` with nothing
       published, so a None arrives and is rejected below.
-    - A worker that raises an internal error after its own tests is
-      reported through ``DSession.worker_internal_error``; the controller
-      keeps running, the worker never reports, and the session exits 0 when
-      every test passed. The ready comparison is then the only refusal:
-      its null fields fail the verifier on BAD-FIELD-DESELECTED.
+    - A worker that raises an internal error after all of its tests have
+      finished is reported through ``DSession.worker_internal_error``; the
+      controller keeps running, the worker never reports, and the session
+      exits 0 when every test passed. The ready comparison is then the only
+      refusal: its null fields fail the verifier on BAD-FIELD-DESELECTED.
       ``test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set``
       pins this path.
-    - A worker that raises an internal error during collection makes the
-      controller abort in its event loop, at a site that depends on the
-      order the events arrive, and the session exits non-zero. Either no
-      record is written and the verifier fails RECORD-ABSENT, or it fails
-      the record: on BAD-FIELD-DESELECTED when a ready node did not report,
-      which it checks before the exit status, otherwise on EXITSTATUS.
+    - A worker that raises an internal error during collection, or during
+      a test that is not its last, makes the controller abort in its event
+      loop, at a site that depends on the order the events arrive, and the
+      session exits non-zero. Either no record is written and the verifier
+      fails RECORD-ABSENT, or it fails the record: on BAD-FIELD-DESELECTED
+      when a ready node did not report, which it checks before the exit
+      status, otherwise on EXITSTATUS.
 
     EXITSTATUS is what a non-zero exit prints only when every ready node
     reported. Any refusal leaves the collection fields and ``deselected``
