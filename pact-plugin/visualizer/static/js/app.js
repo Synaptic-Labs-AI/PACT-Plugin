@@ -14,6 +14,7 @@ import {
   pollClearsError,
   pollMayShowError,
   PROJECT_ALTERED_NOTE,
+  runKey,
 } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
@@ -22,6 +23,25 @@ import { createAudio } from "./audio.js";
 import { createAchievements } from "./achievements.js";
 
 const $ = (id) => document.getElementById(id);
+
+/* Storage access can throw (blocked site data, some private modes). A missing
+ * preference falls back to its default; it must never stop the page. */
+function readPreference(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (_) {
+    return null;
+  }
+}
+
+function writePreference(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (_) {
+    /* the preference lasts for this page only */
+  }
+}
+
 
 const els = {
   root: $("root-select"),
@@ -192,20 +212,20 @@ function setCursor(index, opts = {}) {
   if (stage) {
     stage.setCursor(next, {
       animate: Boolean(opts.animate),
-      live: state.mode === "live" && state.followLive,
+      live: following(),
     });
   }
   if (panels) panels.setCursor(next);
   if (timeline) timeline.setCursor(next);
   updateClock();
 
-  if (opts.fromUser && state.mode === "live" && state.followLive) {
+  if (opts.fromUser && following()) {
     state.followLive = false;
     stopPolling();
     setModeLabel();
     if (panels) panels.setLive(false);
     if (timeline) timeline.setMode({ live: false, playing: state.playing, speed: state.speed });
-    toast("Replay buffered", "You are off the live head. Tap the LIVE badge to return.", "info");
+    toast("Live follow paused", "You moved off the live head. Press L or the LIVE badge to follow it again.", "info");
   }
 
   if (next > prev && audio && state.sound) {
@@ -215,11 +235,18 @@ function setCursor(index, opts = {}) {
   }
 }
 
+/* The page follows the live head only while the run is open in live mode AND
+ * the user has not scrubbed away from it. Every LIVE flag the page shows
+ * (badge, recorder button, rails, stage) reads this one predicate. */
+function following() {
+  return state.mode === "live" && state.followLive;
+}
+
 function setPlaying(playing) {
   const next = Boolean(playing);
   if (next && !state.playing) state.acc = 0;
   state.playing = next;
-  if (timeline) timeline.setMode({ live: state.mode === "live", playing: state.playing, speed: state.speed });
+  if (timeline) timeline.setMode({ live: following(), playing: state.playing, speed: state.speed });
 }
 
 function togglePlay() {
@@ -243,7 +270,7 @@ function togglePlay() {
 
 function updateTimeline() {
   if (!timeline) return;
-  timeline.setMode({ live: state.mode === "live", playing: state.playing, speed: state.speed });
+  timeline.setMode({ live: following(), playing: state.playing, speed: state.speed });
 }
 
 function setSpeed(speed) {
@@ -353,6 +380,13 @@ function updateHeader(model) {
 
 function applyModel(model, opts = {}) {
   if (!model) return;
+  /* A selection names an agent of the run it was made in; a different run
+   * starts with none, in every view at once. */
+  if (runKey(model) !== runKey(state.model)) {
+    state.selectedAgent = null;
+    if (stage) stage.setSelectedAgent(null);
+    if (panels) panels.setSelectedAgent(null);
+  }
   state.model = model;
   state.etag = model.etag || null;
   if (opts.mode) state.mode = opts.mode;
@@ -373,7 +407,7 @@ function applyModel(model, opts = {}) {
   if (timeline) timeline.setCursor(cursor);
   updateClock();
   setModeLabel();
-  if (panels) panels.setLive(state.mode === "live" && state.followLive);
+  if (panels) panels.setLive(following());
   updateTimeline();
   if (achievements) achievements.evaluate(model, { live: state.mode === "live" || state.mode === "demo" });
 }
@@ -519,7 +553,8 @@ function selectRoot(rootId, { open = true } = {}) {
       /* The displayed run belongs to the previous root; keeping it under a
        * NO SESSIONS caption would be the same lie in a different place. */
       clearRunView();
-      showEmptyFilter(state.requestedFilter);
+      const root = state.roots.find((entry) => entry.id === rootId);
+      showEmptyFilter(state.requestedFilter || `root ${(root && root.label) || rootId}`);
     } else if (action === "demo") {
       openDemo();
     }
@@ -945,18 +980,22 @@ function openDebrief(tab) {
 
 function toggleSound() {
   state.sound = !state.sound;
-  localStorage.setItem("pact-viz:sound", state.sound ? "1" : "0");
+  writePreference("pact-viz:sound", state.sound ? "1" : "0");
   els.sound.setAttribute("aria-pressed", state.sound ? "true" : "false");
   if (audio) audio.setEnabled(state.sound);
   toast("Sound", state.sound ? "8-bit comms enabled." : "Sound muted.", "info");
 }
 
 function toggleFullscreen() {
+  const refused = () => toast("Fullscreen unavailable", "Your browser refused the fullscreen request.", "warning");
   try {
-    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
-    else document.exitFullscreen();
+    /* Both calls return a promise; a refusal arrives as a rejection, not a throw. */
+    const request = !document.fullscreenElement
+      ? document.documentElement.requestFullscreen()
+      : document.exitFullscreen();
+    Promise.resolve(request).catch(refused);
   } catch (_) {
-    toast("Fullscreen unavailable", "Your browser refused the fullscreen request.", "warning");
+    refused();
   }
 }
 
@@ -1105,7 +1144,7 @@ function initModules() {
   });
 
   audio = createAudio();
-  state.sound = localStorage.getItem("pact-viz:sound") === "1";
+  state.sound = readPreference("pact-viz:sound") === "1";
   audio.setEnabled(state.sound);
   els.sound.setAttribute("aria-pressed", state.sound ? "true" : "false");
 

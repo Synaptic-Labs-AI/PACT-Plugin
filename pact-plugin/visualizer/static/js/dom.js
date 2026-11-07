@@ -140,13 +140,14 @@ export function shortSha(sha) {
   return String(sha).slice(0, 7);
 }
 
-/* What a root change should do. A filtered root with no sessions must not
- * leave the previous root's run on screen (that run belongs to another root),
- * and an unfiltered empty root keeps the existing keep-or-demo behaviour. */
+/* What a root change should do. A root with no sessions must not leave the
+ * previous root's run on screen (that run belongs to another root), filtered
+ * or not: the view clears and names what is empty. Only with nothing open and
+ * no filter does the demo stand in. */
 export function rootChangeAction({ hasSession, requestedFilter, hasRun }) {
   if (hasSession) return "open";
-  if (requestedFilter) return "empty";
-  return hasRun ? "keep" : "demo";
+  if (requestedFilter || hasRun) return "empty";
+  return "demo";
 }
 
 /* Display label for the launch filters the server echoes. The page never

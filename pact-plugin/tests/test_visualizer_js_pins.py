@@ -77,9 +77,9 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("a filtered empty root clears the open run", rootChangeAction({
     hasSession: false, requestedFilter: "P", hasRun: true,
   }) === "empty");
-  check("an unfiltered empty root keeps an open run", rootChangeAction({
+  check("an unfiltered empty root clears the open run", rootChangeAction({
     hasSession: false, requestedFilter: "", hasRun: true,
-  }) === "keep");
+  }) === "empty");
   check("an unfiltered empty root with nothing open opens the demo", rootChangeAction({
     hasSession: false, requestedFilter: "", hasRun: false,
   }) === "demo");
@@ -322,7 +322,7 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
 # fake DOM implements only what app.js touches.
 APP_STUBS = {
     "stubs.js": r"""
-export const log = { stage: [], urls: [], toasts: [], notices: [], modes: [] };
+export const log = { stage: [], urls: [], toasts: [], notices: [], modes: [], selected: [], stageOpts: null };
 export const pending = { session: [], demo: [], sessions: [] };
 function deferred(kind, args) {
   let resolve, reject;
@@ -350,6 +350,7 @@ export const health = (...a) => api.health(...a);
     "stage.js": r"""
 import { log } from "./stubs.js";
 export class Stage {
+  constructor(_canvas, opts) { log.stageOpts = opts; }
   setModel(m) { log.stage.push(m ? `${m.source.kind}:${m.source.session_id}:${m.etag}` : "null"); }
   setCursor() {}
   setSelectedAgent() {}
@@ -359,7 +360,8 @@ export class Stage {
     "panels.js": r"""
 import { log } from "./stubs.js";
 export class Panels {
-  setModel() {} setCursor() {} setSelectedAgent() {} setLive() {}
+  setModel() {} setCursor() {} setLive() {}
+  setSelectedAgent(name) { log.selected.push(name); }
   toast(t) { log.toasts.push(t.title); }
   setNotice(n) { log.notices.push(n); }
   openDebrief() {} closeModal() {}
@@ -433,7 +435,20 @@ globalThis.fireWindow = (type, extra) => {
 };
 globalThis.history = { replaceState(_s, _t, url) { log.urls.push(url); } };
 const store = new Map();
-globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) };
+const storage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) };
+/* A scenario may set globalThis.blockStorage before importing app.js to make
+ * every storage access throw, as blocked site data does. */
+const storageGetter = {
+  configurable: true,
+  get() {
+    if (globalThis.blockStorage) throw new Error("SecurityError: storage is blocked");
+    return storage;
+  },
+};
+Object.defineProperty(globalThis, "localStorage", storageGetter);
+Object.defineProperty(globalThis.window, "localStorage", storageGetter);
+/* The shell's overlays start hidden, as their markup declares. */
+for (const id of ["modal-root", "loading", "error-banner"]) document.getElementById(id).hidden = true;
 globalThis.requestAnimationFrame = () => 0;
 const intervals = [];
 globalThis.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
@@ -590,6 +605,61 @@ await tick();
 pending.sessions.shift().reject(new Error("boom"));
 await tick();
 check("an unsuperseded refresh failure still banners", banner.hidden === false);
+""", tmp_path)
+
+
+def test_the_live_flag_follows_only_the_live_head(tmp_path):
+    """Scrubbing off the live head clears LIVE everywhere, and it stays clear."""
+    _run_app_scenario(r"""
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [live], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(Object.assign(model("real", "L1", "e1", "live"), {
+  events: [{ seq: 1, ts: "2026-11-01T00:00:01Z" }, { seq: 2, ts: "2026-11-01T00:00:02Z" }],
+}));
+await tick();
+check("an open live run starts on the live head", log.modes.at(-1).live === true);
+fireWindow("keydown", { key: "ArrowLeft", target: { tagName: "DIV" } });
+check("after a scrub every recorder update says not live",
+  log.modes.length > 0 && log.modes.at(-1).live === false);
+""", tmp_path)
+
+
+def test_blocked_storage_does_not_stop_the_page(tmp_path):
+    """A storage access that throws leaves the sound preference at its default."""
+    _run_app_scenario(r"""
+globalThis.blockStorage = true;
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended], default_root: "r" };
+await import("./app.js");
+await tick();
+check("the page still asks for the run", pending.session.length === 1);
+pending.session.shift().resolve(model("real", "S1", "e0"));
+await tick();
+check("the run renders", log.stage.at(-1) === "real:S1:e0");
+document.getElementById("btn-sound").fire("click");
+check("toggling sound with blocked storage still works",
+  document.getElementById("btn-sound").attrs["aria-pressed"] === "true");
+""", tmp_path)
+
+
+def test_a_new_run_starts_with_no_selected_agent(tmp_path):
+    """A selection made in one run does not carry into the next."""
+    _run_app_scenario(r"""
+const other = { root: "r", slug: "p", session_id: "S2", is_live: false, status: "ended", updated_at: "2026-10-01" };
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended, other], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "S1", "e0"));
+await tick();
+log.stageOpts.onAgentClick("coder");
+check("a click selects the agent", log.selected.at(-1) === "coder");
+const select = document.getElementById("session-select");
+select.value = "r::p::S2";
+select.fire("change");
+await tick();
+pending.session.shift().resolve(model("real", "S2", "s2"));
+await tick();
+check("the next run starts with no selection", log.selected.at(-1) === null);
 """, tmp_path)
 
 
