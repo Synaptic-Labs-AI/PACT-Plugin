@@ -221,7 +221,8 @@ body.no-crt #app::after { display: none; }
   border-color: var(--line-bright);
   background: var(--panel-3);
 }
-.icon-btn[aria-pressed="true"] {
+.icon-btn[aria-pressed="true"],
+.icon-btn[aria-expanded="true"] {
   color: var(--accent);
   border-color: rgba(163, 230, 53, 0.55);
   box-shadow: inset 0 0 12px rgba(163, 230, 53, 0.12);

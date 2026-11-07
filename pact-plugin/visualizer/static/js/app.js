@@ -152,10 +152,10 @@ let lastAnnouncement = 0;
 
 /* Polite live-region text for screen readers. Only live polling calls this:
  * replay scrubbing must stay silent, or every tick would speak. */
-function announce(message, { force = false } = {}) {
+function announce(message) {
   if (!els.announcer || !message) return;
   const now = Date.now();
-  if (!force && now - lastAnnouncement < ANNOUNCE_MIN_MS) return;
+  if (now - lastAnnouncement < ANNOUNCE_MIN_MS) return;
   lastAnnouncement = now;
   /* A live region speaks a CHANGE; an identical repeated string is silent.
    * Toggle a zero-width space so the same sentence still re-announces. */
@@ -321,8 +321,9 @@ async function pollLive() {
       setModeLabel();
       if (panels) panels.setLive(false);
       updateTimeline();
+      /* The toast root is a polite live region, so the toast is the
+       * announcement; a second announce() would speak it twice. */
       toast("Run ended", "The journal recorded the end of this run.", "success");
-      announce("Run ended. The journal is complete.", { force: true });
     }
   } catch (err) {
     /* Mirror the success arm: surface a failure only while this poll still
@@ -902,17 +903,39 @@ function trackHeaderHeight() {
   }
 }
 
+const DRAWERS = [
+  { cls: "show-crew", button: () => els.crewToggle, rail: () => els.left },
+  { cls: "show-comms", button: () => els.commsToggle, rail: () => els.right },
+];
+
 function toggleDrawer(cls, button) {
   measureHeaderHeight(); /* content changes can re-wrap the header */
   const open = !document.body.classList.contains(cls);
   document.body.classList.toggle(cls, open);
-  if (button) button.setAttribute("aria-pressed", open ? "true" : "false");
+  if (button) button.setAttribute("aria-expanded", open ? "true" : "false");
+  const drawer = DRAWERS.find((entry) => entry.cls === cls);
+  const rail = drawer && drawer.rail();
+  /* The drawer sits later in the DOM than its toggle; move focus into it so
+   * Tab continues inside the panel the user just opened. */
+  if (open && rail && typeof rail.focus === "function") {
+    try { rail.focus({ preventScroll: true }); } catch (_) { /* focus is best-effort */ }
+  }
 }
 
 function closeDrawers() {
-  for (const [cls, button] of [["show-crew", els.crewToggle], ["show-comms", els.commsToggle]]) {
-    document.body.classList.remove(cls);
-    if (button) button.setAttribute("aria-pressed", "false");
+  const active = document.activeElement;
+  for (const drawer of DRAWERS) {
+    const button = drawer.button();
+    const rail = drawer.rail();
+    const hadFocus = Boolean(rail && active && typeof rail.contains === "function" && rail.contains(active));
+    document.body.classList.remove(drawer.cls);
+    if (button) button.setAttribute("aria-expanded", "false");
+    /* A closed overlay drawer is display:none, which would drop its focus to
+     * <body>. Hand focus back to the toggle that opened it. Above the drawer
+     * breakpoint the rail stays visible and keeps its focus. */
+    if (hadFocus && button && rail.offsetParent === null && typeof button.focus === "function") {
+      try { button.focus(); } catch (_) { /* focus is best-effort */ }
+    }
   }
 }
 
@@ -952,6 +975,12 @@ function bindKeyboard() {
     if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(tag) || (target && target.isContentEditable)) {
       return;
     }
+    /* A widget that handled the key (a row activated by Space or Enter, a
+     * dismissed toast) has already acted on it. Browser and OS chords keep
+     * their own meaning, and while the debrief dialog is open the page behind
+     * it must not react. */
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (els.modal && !els.modal.hidden) return;
     if (event.key === " " || event.code === "Space") {
       event.preventDefault();
       togglePlay();
@@ -985,6 +1014,7 @@ function bindKeyboard() {
     const target = event.target;
     const tag = (target && target.tagName) || "";
     if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(tag) || (target && target.isContentEditable)) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === KONAMI[index]) {
       index += 1;
       if (index === KONAMI.length) {

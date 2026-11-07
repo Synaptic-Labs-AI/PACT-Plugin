@@ -43,8 +43,8 @@
         <button id="live-badge" class="live-badge" type="button" title="Return to live / show run mode">● LIVE</button>
         <span id="mission-clock" class="mission-clock" title="Elapsed mission time">00:00:00</span>
 
-        <button id="btn-crew" class="icon-btn rail-toggle" type="button" title="Toggle the crew rail" aria-pressed="false">CREW</button>
-        <button id="btn-comms" class="icon-btn rail-toggle" type="button" title="Toggle the comms rail" aria-pressed="false">COMMS</button>
+        <button id="btn-crew" class="icon-btn rail-toggle" type="button" title="Toggle the crew rail" aria-expanded="false" aria-controls="left-rail">CREW</button>
+        <button id="btn-comms" class="icon-btn rail-toggle" type="button" title="Toggle the comms rail" aria-expanded="false" aria-controls="right-rail">COMMS</button>
         <button id="btn-sound" class="icon-btn" type="button" title="Toggle 8-bit sound" aria-pressed="false">SND</button>
         <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen">⛶</button>
         <button id="btn-help" class="icon-btn" type="button" title="Keyboard shortcuts and legend">?</button>
@@ -53,7 +53,7 @@
     </header>
 
     <main id="layout" tabindex="-1">
-      <aside id="left-rail" aria-label="Run summary and crew"></aside>
+      <aside id="left-rail" aria-label="Run summary and crew" tabindex="-1"></aside>
 
       <section id="stage-shell" aria-label="The floor">
         <div id="stage-frame">
@@ -69,7 +69,7 @@
         </div>
       </section>
 
-      <aside id="right-rail" aria-label="Comms feed"></aside>
+      <aside id="right-rail" aria-label="Comms feed" tabindex="-1"></aside>
     </main>
 
     <footer id="recorder" aria-label="Flight recorder"></footer>

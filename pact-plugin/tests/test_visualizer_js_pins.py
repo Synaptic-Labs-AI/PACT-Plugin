@@ -619,6 +619,98 @@ check("the reopened run keeps its newer journal", log.stage.at(-1) === "real:L1:
 """, tmp_path)
 
 
+def test_shortcuts_leave_handled_keys_chords_and_the_dialog_alone(tmp_path):
+    """The global keydown acts only on keys nothing else handled."""
+    _run_app_scenario(r"""
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "S1", "e0"));
+await tick();
+const playing = () => Boolean(log.modes.length && log.modes.at(-1).playing);
+const row = { tagName: "DIV" };
+fireWindow("keydown", { key: " ", code: "Space", target: row, defaultPrevented: true });
+check("Space already handled by a row does not toggle playback", !playing());
+fireWindow("keydown", { key: "d", target: row, ctrlKey: true });
+fireWindow("keydown", { key: "d", target: row, metaKey: true });
+check("a Ctrl/Cmd chord does not open the demo", pending.demo.length === 0);
+document.getElementById("modal-root").hidden = false;
+fireWindow("keydown", { key: " ", code: "Space", target: row });
+fireWindow("keydown", { key: "d", target: row });
+check("an open dialog blocks the page shortcuts", !playing() && pending.demo.length === 0);
+document.getElementById("modal-root").hidden = true;
+fireWindow("keydown", { key: " ", code: "Space", target: row });
+check("an unhandled Space still toggles playback", playing());
+""", tmp_path)
+
+
+TOAST_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+const timers = new Map();
+let nextTimer = 1;
+globalThis.setTimeout = (fn) => { const id = nextTimer++; timers.set(id, fn); return id; };
+globalThis.clearTimeout = (id) => { timers.delete(id); };
+const flush = () => { const due = [...timers.values()]; timers.clear(); for (const fn of due) fn(); };
+function node(tag) {
+  const listeners = {};
+  return {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, parentNode: null, style: {}, dataset: {},
+    className: "", textContent: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    fire(type) { for (const fn of listeners[type] || []) fn({ preventDefault() {}, key: "" }); },
+    appendChild(child) { child.parentNode = this; this.children.push(child); return child; },
+    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; return child; },
+    contains(other) { return other === this || this.children.some((c) => c.contains && c.contains(other)); },
+    focus() { globalThis.document.activeElement = this; },
+  };
+}
+const layout = node("main");
+globalThis.document = {
+  activeElement: null,
+  createElement: node,
+  createTextNode: (text) => ({ textContent: text }),
+  getElementById: (id) => (id === "layout" ? layout : null),
+};
+globalThis.Node = Object;
+(async () => {
+  const { Panels } = await import("./panels.js");
+  const root = node("div");
+  const host = { toastRoot: root, toasts: [], _toastTimers: new Map(), _dismissToast: Panels.prototype._dismissToast };
+  const card = Panels.prototype.toast.call(host, { title: "Hi", body: "there", kind: "info" });
+  check("a toast card carries no nested live role", card.attrs.role === undefined);
+  card.fire("mouseenter");
+  flush();
+  check("a hovered toast is not dismissed by its timer", card.parentNode === root);
+  card.fire("mouseleave");
+  card.focus();
+  card.fire("focusin");
+  flush();
+  check("a focused toast is not dismissed by its timer", card.parentNode === root);
+  card.fire("focusout");
+  card.focus();
+  flush();
+  check("a released toast is dismissed by its timer", card.parentNode === null);
+  check("dismissing the focused toast moves focus to the layout", document.activeElement === layout);
+  if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+  console.log("PINS OK");
+})().catch((err) => { console.error("PIN SCRIPT ERROR: " + (err && err.stack ? err.stack : err)); process.exit(1); });
+"""
+
+
+def test_toasts_hold_for_the_reader_and_keep_focus():
+    """Hover or focus pauses a toast; dismissing a focused toast keeps focus."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", TOAST_SCRIPT],
+        cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"toast pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))

@@ -424,11 +424,28 @@ export class Panels {
     const title = visible(options.title) || "Notice";
     const body = visible(options.body);
     const kind = TOAST_KINDS.has(options.kind) ? options.kind : "info";
-    const card = el("div", { class: `toast toast-${kind}`, attrs: { role: "status", tabindex: "0", title: "Dismiss" } }, [
+    /* The toast root is the polite live region, so a card carries no live
+     * role of its own: a nested region would speak the same text twice. */
+    const card = el("div", { class: `toast toast-${kind}`, attrs: { tabindex: "0", title: "Dismiss" } }, [
       el("div", { class: "toast-title", text: title }),
       body ? el("div", { class: "toast-body", text: body }) : null,
     ]);
     const dismiss = () => this._dismissToast(card);
+    const ms = TOAST_MS[kind] || TOAST_MS.info;
+    /* A reader who is pointing at or focused on a toast keeps it: the timer
+     * stops while either holds and restarts in full when both let go. */
+    let held = 0;
+    const hold = () => {
+      held += 1;
+      const timer = this._toastTimers.get(card);
+      if (timer) clearTimeout(timer);
+      this._toastTimers.set(card, 0);
+    };
+    const release = () => {
+      held = Math.max(0, held - 1);
+      if (held || !card.parentNode) return;
+      this._toastTimers.set(card, setTimeout(dismiss, ms));
+    };
     card.addEventListener("click", dismiss);
     card.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " " || event.key === "Escape") {
@@ -436,11 +453,14 @@ export class Panels {
         dismiss();
       }
     });
+    card.addEventListener("mouseenter", hold);
+    card.addEventListener("mouseleave", release);
+    card.addEventListener("focusin", hold);
+    card.addEventListener("focusout", release);
     this.toastRoot.appendChild(card);
     this.toasts.push(card);
     while (this.toasts.length > MAX_TOASTS) this._dismissToast(this.toasts[0]);
-    const timer = setTimeout(dismiss, TOAST_MS[kind] || TOAST_MS.info);
-    this._toastTimers.set(card, timer);
+    this._toastTimers.set(card, setTimeout(dismiss, ms));
     return card;
   }
 
@@ -538,7 +558,16 @@ export class Panels {
     this._toastTimers.delete(card);
     const index = this.toasts.indexOf(card);
     if (index >= 0) this.toasts.splice(index, 1);
+    /* Removing the focused card would drop focus to <body>; move it to the
+     * next toast, or to the main layout when none is left. */
+    const hadFocus = typeof card.contains === "function" && card.contains(document.activeElement);
     if (card.parentNode) card.parentNode.removeChild(card);
+    if (hadFocus) {
+      const next = this.toasts[this.toasts.length - 1] || document.getElementById("layout");
+      if (next && typeof next.focus === "function") {
+        try { next.focus({ preventScroll: true }); } catch (_) { /* focus is best-effort */ }
+      }
+    }
   }
 
   _renderErrorCard() {
