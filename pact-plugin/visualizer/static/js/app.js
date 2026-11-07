@@ -1269,7 +1269,7 @@ function initModules() {
     const list = Array.isArray(unlocked) ? unlocked : [unlocked];
     for (const item of list) {
       if (!item) continue;
-      toast(`ACHIEVEMENT · ${item.title || item.name || "Unlocked"}`, item.body || item.description || "", "success");
+      toast(`ACHIEVEMENT · ${item.title || item.name || "Unlocked"}`, item.body || item.description || "", "achievement");
     }
     if (audio && state.sound) audio.play("achievement");
   });

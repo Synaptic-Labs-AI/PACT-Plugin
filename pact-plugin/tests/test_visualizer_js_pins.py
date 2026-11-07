@@ -1601,6 +1601,57 @@ def test_reduced_motion_spawns_no_blinking_effects():
     )
 
 
+LABELS_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+function node(tag) {
+  return {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, style: {}, dataset: {}, className: "", textContent: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); return child; },
+  };
+}
+globalThis.document = { createElement: node, createTextNode: (t) => ({ textContent: t, children: [] }) };
+globalThis.Node = Object;
+const walk = (n, out = []) => { out.push(n); for (const c of n.children || []) walk(c, out); return out; };
+(async () => {
+  const { Panels } = await import("./panels.js");
+  const host = Object.assign(Object.create(Panels.prototype), { model: { events: [] }, cb: {}, _seqIndex: () => null });
+  const detail = host._eventDetail({ seq: 3, type: "commit", raw: { a: 1 } }, 0);
+  check("the raw payload is labelled as a trimmed, redacted copy",
+    walk(detail).some((n) => String(n.textContent).startsWith("trimmed copy of the journal event")));
+  host.model = { variety: { history: Array.from({ length: 200 }, (_, i) => ({ total: i % 16 })) }, metrics: {} };
+  const spark = walk(host._varietyTab()).find((n) => String(n.className).includes("spark-canvas"));
+  const label = spark.attrs["aria-label"];
+  check("the history chart label is a bounded summary",
+    label.startsWith("Variety history: 200 points") && label.length < 120);
+  if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+  console.log("PINS OK");
+})().catch((err) => { console.error("PIN SCRIPT ERROR: " + (err && err.stack ? err.stack : err)); process.exit(1); });
+"""
+
+
+def test_debrief_labels_say_what_is_shown():
+    """The raw payload is called a trimmed copy; the chart label is bounded."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", LABELS_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"label pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
+def test_achievement_toasts_use_the_achievement_style():
+    """The unlock toast is styled as an achievement, not a generic success."""
+    source = (STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+    assert re.search(r'toast\(`ACHIEVEMENT[^;]*"achievement"\)', source), (
+        "achievement unlocks are not toasted with the achievement style"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))

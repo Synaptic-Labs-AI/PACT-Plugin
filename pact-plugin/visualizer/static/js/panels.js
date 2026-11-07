@@ -275,6 +275,16 @@ function prState(wrapup) {
   return state === "NONE" || state === "UNKNOWN" ? "" : state;
 }
 
+/* A bounded description of the variety history for the chart's label: the
+ * point count, range and latest value, not every point. */
+function sparkSummary(values) {
+  if (!values.length) return "Variety history: no points";
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const latest = values[values.length - 1];
+  return `Variety history: ${values.length} point${values.length === 1 ? "" : "s"}, range ${low} to ${high}, latest ${latest}`;
+}
+
 function groupFindings(findings) {
   const groups = new Map();
   for (const finding of findings) {
@@ -1917,7 +1927,7 @@ export class Panels {
 
     const sparkCanvas = el("canvas", {
       class: "chart-canvas spark-canvas",
-      attrs: { role: "img", "aria-label": `Variety history totals: ${sparkValues.join(", ")}` },
+      attrs: { role: "img", "aria-label": sparkSummary(sparkValues) },
     });
     let historyNode;
     if (history.length) {
@@ -2208,7 +2218,7 @@ export class Panels {
     }
     const pre = el("pre", { class: "raw-pre event-raw-pre" });
     pre.textContent = rawText;
-    wrap.appendChild(this._section("RAW PAYLOAD", "exactly as received", [pre]));
+    wrap.appendChild(this._section("RAW PAYLOAD", "trimmed copy of the journal event; secrets redacted", [pre]));
     return wrap;
   }
 }
