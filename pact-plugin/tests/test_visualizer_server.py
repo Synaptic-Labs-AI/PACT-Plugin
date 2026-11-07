@@ -1619,8 +1619,11 @@ class TestStateRecord:
         assert "pact-viz: warning: ignoring" in capsys.readouterr().err
 
     def test_a_symlinked_record_is_refused(self, tmp_path):
+        """The target is this user's private regular file, so only the refusal
+        to follow a symlink can reject it."""
         real = tmp_path / "elsewhere.json"
         real.write_text(json.dumps(self._valid()), encoding="utf-8")
+        os.chmod(real, 0o600)
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         settings.state_file(state_dir).symlink_to(real)
