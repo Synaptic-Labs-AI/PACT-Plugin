@@ -747,10 +747,13 @@ def _child_command(
              the child runs with its working directory set to the plugin root;
              forwarding a relative --root/--state-dir verbatim would make the
              child resolve them against a different directory than the parent.
+             ``-P`` keeps the working directory off sys.path, so the child
+             imports the visualizer only through PYTHONPATH.
     Used by: detach.
     """
     command = [
         sys.executable,
+        "-P",
         "-m",
         "visualizer",
         "--port",

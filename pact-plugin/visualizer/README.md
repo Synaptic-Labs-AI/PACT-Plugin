@@ -208,8 +208,9 @@ python3 -m pytest \
 # Lint the backend for unused imports / undefined names.
 ruff check --select F401,F821 --target-version py312 visualizer/
 
-# Run the server directly from the checkout.
-python3 -m visualizer --demo --open
+# Run the server directly from the checkout. -P keeps the current directory
+# off the import path, so only the plugin's own package can load.
+PYTHONPATH=. python3 -P -m visualizer --demo --open
 ```
 
 The suite also runs a Python 3.12 syntax-floor scan and an unused-import sweep
@@ -295,8 +296,8 @@ Symlink installs keep the target's mode.
 
 **`python3` is too old.** Mission Control requires Python 3.12+; the launcher
 checks and prints the interpreter it found. Point `python3` at a 3.12+
-interpreter, or run the module with an explicit interpreter:
-`/path/to/python3.12 -m visualizer --demo`.
+interpreter, or set `PACT_VIZ_PYTHON=/path/to/python3.12` and run the launcher
+again.
 
 **Blank page.** Open the URL the server prints, not the static files over
 `file://` — the page is an ES-module app and needs the local HTTP server. The

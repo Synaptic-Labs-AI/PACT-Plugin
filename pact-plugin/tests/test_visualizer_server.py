@@ -677,15 +677,61 @@ class TestDirectCli:
         assert not state_path.exists()
 
 
+def _wrapper_code_lines() -> list[str]:
+    """bin/pact-viz with comment lines and blank lines removed."""
+    return [
+        line
+        for line in BIN_WRAPPER.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
 class TestBinWrapper:
     def test_wrapper_is_executable_bash_checking_python_floor(self):
         assert BIN_WRAPPER.is_file()
         assert os.access(BIN_WRAPPER, os.X_OK)
         text = BIN_WRAPPER.read_text(encoding="utf-8")
         assert text.startswith("#!/usr/bin/env bash")
-        assert "python3 -m visualizer" in text
-        assert "(3, 12)" in text
-        assert "PYTHONPATH" in text
+        code = "\n".join(_wrapper_code_lines())
+        assert "(3, 12)" in code
+        assert "PYTHONPATH" in code
+
+    def test_every_exec_line_isolates_the_import_path(self):
+        """Each exec of the package passes -P, so the caller's cwd is never
+        put first on sys.path. Read from code lines only: a comment naming the
+        command must not satisfy this."""
+        exec_lines = [
+            line for line in _wrapper_code_lines()
+            if re.search(r"\bexec\b", line) and "visualizer" in line
+        ]
+        assert exec_lines, "bin/pact-viz has no exec line that runs the package"
+        for line in exec_lines:
+            assert re.search(r"\s-P\s+-m\s+visualizer\b", line), line
+
+    def test_wrapper_ignores_a_shadowing_package_in_the_cwd(self, tmp_path):
+        """A project directory that holds its own `visualizer` package or a
+        top-level `json.py` must not replace the plugin's code: the launcher
+        is run from the user's project directory."""
+        decoy = tmp_path / "project"
+        (decoy / "visualizer").mkdir(parents=True)
+        (decoy / "visualizer" / "__init__.py").write_text("", encoding="utf-8")
+        (decoy / "visualizer" / "__main__.py").write_text(
+            "print('SHADOWED-BY-CWD')\nraise SystemExit(7)\n", encoding="utf-8"
+        )
+        (decoy / "json.py").write_text(
+            "raise SystemExit('SHADOWED-STDLIB-JSON')\n", encoding="utf-8"
+        )
+        result = subprocess.run(
+            [str(BIN_WRAPPER), "--version"],
+            cwd=str(decoy),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        assert "SHADOWED" not in combined, combined
+        assert result.returncode == 0, combined
+        assert "pact-viz" in result.stdout
 
     def test_wrapper_version_runs(self):
         result = subprocess.run(

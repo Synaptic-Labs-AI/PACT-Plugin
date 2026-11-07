@@ -449,3 +449,37 @@ class TestDetachFailureGuard:
             cli.detach(args, cli._resolve_roots(args), state_dir)
 
         assert cli.read_state(state_dir) == foreign
+
+
+class TestChildIgnoresCallerCwd:
+    """The detached child must import the plugin's visualizer, never a cwd copy."""
+
+    def test_child_argv_carries_dash_p_before_dash_m(self, tmp_path):
+        args = cli.build_parser().parse_args(
+            ["--detach", "--root", str(tmp_path / "root"), "--state-dir", str(tmp_path / "s")]
+        )
+        command = cli._child_command(args, cli._resolve_roots(args), tmp_path / "s")
+        assert command[1:4] == ["-P", "-m", "visualizer"]
+
+    def test_child_command_from_decoy_cwd_runs_plugin_code(self, tmp_path):
+        """Run the child's own interpreter prefix from a cwd holding a decoy package."""
+        import subprocess
+        from pathlib import Path
+
+        decoy = tmp_path / "decoy"
+        (decoy / "visualizer").mkdir(parents=True)
+        (decoy / "visualizer" / "__init__.py").write_text("raise SystemExit('DECOY')\n")
+        (decoy / "visualizer" / "__main__.py").write_text("raise SystemExit('DECOY')\n")
+        (decoy / "json.py").write_text("raise SystemExit('DECOY')\n")
+        args = cli.build_parser().parse_args(["--detach", "--state-dir", str(tmp_path / "s")])
+        command = cli._child_command(args, [], tmp_path / "s")
+        prefix = command[: command.index("visualizer") + 1]
+        plugin_root = str(Path(cli.__file__).resolve().parent.parent)
+        env = {**os.environ, "PYTHONPATH": plugin_root}
+        result = subprocess.run(
+            [*prefix, "--version"], cwd=decoy, env=env, capture_output=True, text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("pact-viz ")
+        assert "DECOY" not in result.stdout + result.stderr

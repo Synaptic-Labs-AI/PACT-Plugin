@@ -31,6 +31,7 @@ PACT Mission Control turns the session journal into a live control room: a loopb
 - The `pact-viz` CLI: foreground and detached serving with an atomic `0700`/`0600` state file, health-checked reuse that refuses when the running instance serves different roots or filters, and `--stop`/`--status`/`--list`/`--root`/`--project`/`--session` with a Python 3.12 floor.
 - A deterministic training simulation at `/api/demo` covering all four phases, nine agents, review findings and remediation, gate advisories, an algedonic alert, and a merged wrap-up.
 - The `/PACT:visualize` command with demo, live, project, and stop modes.
+- The launcher runs Python with `-P`, so a `visualizer/` package or a top-level `json.py` in the directory it is started from cannot replace the plugin's code or the standard library.
 
 ### Why
 

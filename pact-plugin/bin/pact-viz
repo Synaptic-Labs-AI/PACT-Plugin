@@ -3,8 +3,9 @@
 # Location: pact-plugin/bin/pact-viz
 # Summary: Direct launcher for PACT Mission Control. Resolves the plugin root
 #          (following an installed-cache symlink), enforces the Python >= 3.12
-#          floor, then execs `python3 -m visualizer "$@"` so the visualizer
-#          package is importable from any working directory.
+#          floor, then execs `python3 -P -m visualizer "$@"`. `-P` keeps the
+#          caller's working directory off sys.path, so a `visualizer/` package
+#          or a stdlib-named module there can never replace the plugin's code.
 # Used by: /PACT:visualize, README/command docs, humans and scripts that want
 #          the token-free direct launch path.
 #
@@ -40,6 +41,6 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
 fi
 
 if [ -n "${PYTHONPATH:-}" ]; then
-    exec env PYTHONPATH="${PLUGIN_ROOT}:${PYTHONPATH}" "$PYTHON_BIN" -m visualizer "$@"
+    exec env PYTHONPATH="${PLUGIN_ROOT}:${PYTHONPATH}" "$PYTHON_BIN" -P -m visualizer "$@"
 fi
-exec env PYTHONPATH="${PLUGIN_ROOT}" "$PYTHON_BIN" -m visualizer "$@"
+exec env PYTHONPATH="${PLUGIN_ROOT}" "$PYTHON_BIN" -P -m visualizer "$@"
