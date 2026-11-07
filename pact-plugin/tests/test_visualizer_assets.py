@@ -24,6 +24,7 @@ non-routable documentation domains plus the reserved XML namespaces.
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -244,19 +245,34 @@ def test_bin_pact_viz_has_bash_shebang():
     )
 
 
-def test_bin_pact_viz_checks_the_python_floor():
-    """The launcher must refuse an interpreter below the documented floor.
+FAKE_OLD_PYTHON = """#!/bin/sh
+# Answers the launcher's two version probes as Python 3.11.9; anything else
+# means the launcher went on to run the package.
+case "$*" in
+  *"version_info >="*) exit 1 ;;
+  *"print("*) echo 3.11.9; exit 0 ;;
+esac
+echo "the launcher ran the package on Python 3.11" >&2
+exit 99
+"""
 
-    Without the check, an old `python3` fails deep inside the package with a
-    traceback instead of a one-line reason. The visualizer requires 3.12+.
+
+def test_bin_pact_viz_refuses_an_interpreter_below_the_floor(tmp_path):
+    """Run the launcher against an interpreter that reports 3.11.
+
+    It must stop with the one-line reason before running anything. A text
+    scan for "3.12" is met by the comments alone, so only running it tells.
     """
-    text = BIN_PACT_VIZ.read_text(encoding="utf-8")
-    assert "python3" in text, "bin/pact-viz does not invoke python3"
-    assert re.search(r"3[.,]\s*12", text), (
-        "bin/pact-viz carries no Python 3.12 floor check. The package is "
-        "documented as 3.12+; the launcher must gate the interpreter version "
-        "so an older python3 fails with a clear message."
+    fake = tmp_path / "python3"
+    fake.write_text(FAKE_OLD_PYTHON, encoding="utf-8")
+    fake.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", str(BIN_PACT_VIZ), "--version"],
+        check=False, capture_output=True, text=True, timeout=60,
+        env={"PATH": os.environ.get("PATH", ""), "PACT_VIZ_PYTHON": str(fake)},
     )
+    assert proc.returncode == 1, f"rc={proc.returncode}\nstderr:\n{proc.stderr}"
+    assert "Python 3.12+ is required (found 3.11.9)" in proc.stderr, proc.stderr
 
 
 def test_bin_pact_viz_runs_the_visualizer_module():
@@ -387,21 +403,56 @@ def test_backend_sources_are_scannable():
     )
 
 
-def test_csp_header_is_defined_in_the_server():
-    joined = "\n".join(_backend_sources().values())
-    assert "Content-Security-Policy" in joined, (
-        "the visualizer server defines no Content-Security-Policy header. "
-        "The contract requires the CSP on every response so the local page "
-        "cannot be tricked into loading remote code."
-    )
-    for token in ("default-src", "script-src", "connect-src", "frame-ancestors", "base-uri"):
-        assert token in joined, (
-            f"the CSP in the visualizer server does not name {token!r}; the "
-            "policy documented in CONTRACT.md must stay complete."
+# The exact policy the page is built for. Every source is 'self' (images may
+# also be data: URIs), nothing is inline or evaluated, and the page can be
+# neither framed nor rebased.
+EXPECTED_CSP = {
+    "default-src": ["'self'"],
+    "img-src": ["'self'", "data:"],
+    "style-src": ["'self'"],
+    "script-src": ["'self'"],
+    "connect-src": ["'self'"],
+    "base-uri": ["'none'"],
+    "frame-ancestors": ["'none'"],
+}
+
+
+def _settings_constant(name: str):
+    """Evaluate one literal module constant from visualizer/settings.py
+    without importing the package."""
+    tree = ast.parse((VISUALIZER / "settings.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else (
+            [node.target] if isinstance(node, ast.AnnAssign) else []
         )
-    assert "'self'" in joined, (
-        "the CSP does not restrict sources to 'self'; the page is same-origin "
-        "only."
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            return node.value
+    raise AssertionError(f"visualizer/settings.py defines no {name}")
+
+
+def test_csp_is_exactly_the_same_origin_policy():
+    """The server's CSP is the exact policy, not merely a string naming it.
+
+    A token scan passes `default-src *` or an added 'unsafe-eval'; parsing
+    the directives does not.
+    """
+    csp = ast.literal_eval(_settings_constant("CSP"))
+    directives = {}
+    for part in csp.split(";"):
+        words = part.split()
+        if words:
+            assert words[0] not in directives, f"directive {words[0]} appears twice"
+            directives[words[0]] = words[1:]
+    assert directives == EXPECTED_CSP, f"CSP differs from the same-origin policy: {directives}"
+    headers = _settings_constant("SECURITY_HEADERS")
+    pairs = [
+        (ast.literal_eval(item.elts[0]), item.elts[1])
+        for item in headers.elts
+        if isinstance(item, ast.Tuple) and len(item.elts) == 2
+    ]
+    sent = [value for key, value in pairs if key == "Content-Security-Policy"]
+    assert len(sent) == 1 and isinstance(sent[0], ast.Name) and sent[0].id == "CSP", (
+        "SECURITY_HEADERS does not send the CSP constant as Content-Security-Policy"
     )
 
 
