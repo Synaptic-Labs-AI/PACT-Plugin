@@ -536,14 +536,8 @@ class TestEtagCoversEveryInput:
 class TestSymlinkedSessionDirs:
     """A symlinked slug or session directory is not a session.
 
-    Pinned on BOTH routes, because the two have separate guards: a run must
-    not be fetchable by /api/session while invisible in /api/sessions.
-
-    MEASURED, so a future reader does not credit the wrong line: this property
-    rests on the listing's symlink filter in discovery._safe_dirs. The early
-    symlink return in find_session is NOT load-bearing -- the containment
-    check below it rejects the escaped path on its own. Ablating the listing
-    filter fails both tests; ablating the early return fails neither.
+    Pinned on BOTH routes: a run must never be fetchable by /api/session
+    while invisible in /api/sessions, or listed there and then refused.
     """
 
     def test_symlinked_slug_is_invisible_on_both_routes(self, live_server, tmp_path):
@@ -630,18 +624,15 @@ class TestDemoWithNoSessions:
 class TestStaticRoutes:
     def test_index_served(self, live_server):
         srv, _thread = live_server
-        if not (STATIC_DIR / "index.html").is_file():
-            pytest.skip("static/index.html is owned by the Lead and not present yet")
         response = http_request(srv.server_port, "/")
         assert response.status == 200
         assert response.headers["content-type"].startswith("text/html")
         assert response.headers["content-security-policy"] == settings.CSP
-        assert b"Mission Control" in response.body or b"<!DOCTYPE html>" in response.body
+        assert response.body.startswith(b"<!DOCTYPE html>")
+        assert b"<title>PACT // Mission Control</title>" in response.body
 
     def test_static_files_mime(self, live_server):
         srv, _thread = live_server
-        if not (STATIC_DIR / "favicon.svg").is_file():
-            pytest.skip("static/favicon.svg is not present yet")
         response = http_request(srv.server_port, "/static/favicon.svg")
         assert response.status == 200
         assert response.headers["content-type"] == "image/svg+xml"
@@ -649,8 +640,6 @@ class TestStaticRoutes:
 
     def test_static_json_and_js_allowlisted(self, live_server):
         srv, _thread = live_server
-        if not (STATIC_DIR / "dev-demo.json").is_file():
-            pytest.skip("static/dev-demo.json is not present yet")
         response = http_request(srv.server_port, "/static/dev-demo.json")
         assert response.status == 200
         assert response.headers["content-type"].startswith("application/json")
@@ -1442,6 +1431,136 @@ class TestReuseAndStopGuards:
         finally:
             if settings.state_file(state_dir).exists():
                 _run_cli(["--stop", "--state-dir", str(state_dir)], tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Static containment, request parsing and failure status
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_static(tmp_path, monkeypatch):
+    """A throwaway static root the server serves instead of the shipped one,
+    with an outside file of an allowed type next to it."""
+    static = tmp_path / "static"
+    (static / "css").mkdir(parents=True)
+    (static / "css" / "base.css").write_text("body{}", encoding="utf-8")
+    (static / "notes.md").write_text("not an asset", encoding="utf-8")
+    (static / "server.py").write_text("SECRET = 1", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.json").write_text('{"leak": true}', encoding="utf-8")
+    (static / "leak.json").symlink_to(outside / "leak.json")
+    (static / "linked").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(server_module, "_static_root", lambda: static)
+    return static
+
+
+class TestStaticContainment:
+    def test_allowlisted_asset_is_served(self, live_server, fake_static):
+        srv, _thread = live_server
+        response = http_request(srv.server_port, "/static/css/base.css")
+        assert response.status == 200
+        assert response.body == b"body{}"
+
+    @pytest.mark.parametrize("path", ["/static/notes.md", "/static/server.py"])
+    def test_a_file_type_outside_the_allowlist_is_404(self, live_server, fake_static, path):
+        srv, _thread = live_server
+        response = http_request(srv.server_port, path)
+        assert response.status == 404, path
+        assert response.json() == {"ok": False, "error": "not found"}
+
+    @pytest.mark.parametrize("path", ["/static/leak.json", "/static/linked/leak.json"])
+    def test_a_symlink_out_of_the_static_root_is_404(self, live_server, fake_static, path):
+        srv, _thread = live_server
+        response = http_request(srv.server_port, path)
+        assert response.status == 404, path
+        assert b"leak" not in response.body
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/static/../assets/hero.png",
+            "/static/%2e%2e/assets/hero.png",
+            "/static/..%2fassets/hero.png",
+            "/css/..%2f..%2fassets/hero.png",
+        ],
+    )
+    def test_an_escape_to_an_allowed_file_type_is_404(self, live_server, path):
+        """The target exists and its type is allowlisted, so only the
+        traversal guards stand between the request and the file."""
+        assert (PLUGIN_ROOT / "visualizer" / "assets" / "hero.png").is_file()
+        srv, _thread = live_server
+        response = http_request(srv.server_port, path)
+        assert response.status == 404, path
+        assert not response.body.startswith(b"\x89PNG"), path
+
+    def test_a_dot_dot_segment_is_refused_even_inside_the_root(self, live_server):
+        """`js/../favicon.svg` resolves inside static/, so containment alone
+        would serve it; the segment rule refuses any `..`."""
+        srv, _thread = live_server
+        assert http_request(srv.server_port, "/static/favicon.svg").status == 200
+        response = http_request(srv.server_port, "/static/js/../favicon.svg")
+        assert response.status == 404
+
+
+class TestQueryParsing:
+    def test_a_blank_repeat_does_not_hide_the_real_value(self, live_server):
+        srv, _thread = live_server
+        response = http_request(
+            srv.server_port,
+            "/api/session?slug=&slug=PACT-prompt&session_id=&session_id=sess-1",
+        )
+        assert response.status == 200
+        assert response.json()["source"]["session_id"] == "sess-1"
+
+    def test_the_limit_ceiling_is_inclusive(self, live_server):
+        srv, _thread = live_server
+        ceiling = settings.MAX_SESSIONS_LIMIT
+        assert http_request(srv.server_port, f"/api/sessions?limit={ceiling}").status == 200
+        assert http_request(srv.server_port, f"/api/sessions?limit={ceiling + 1}").status == 400
+
+    @pytest.mark.parametrize("component", ["a%01b", "a%5Cb", "a%0Ab"])
+    def test_an_unsafe_component_is_400(self, live_server, component):
+        srv, _thread = live_server
+        response = http_request(
+            srv.server_port, f"/api/session?slug={component}&session_id=sess-1"
+        )
+        assert response.status == 400
+        assert response.json()["ok"] is False
+
+
+class TestFailureStatus:
+    def test_a_handler_crash_before_headers_is_a_500_with_the_contract(
+        self, live_server, monkeypatch
+    ):
+        srv, _thread = live_server
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(server_module.model, "build_health", boom)
+        response = http_request(srv.server_port, "/api/health")
+        assert response.status == 500
+        assert response.json() == {"ok": False, "error": "internal error"}
+        assert response.headers["content-security-policy"] == settings.CSP
+
+    @pytest.mark.parametrize("port", [-1, 65536, 70000])
+    def test_create_server_refuses_an_out_of_range_port(self, tmp_path, port):
+        roots = roots_for(make_root(tmp_path), tmp_path)
+        with pytest.raises(ValueError, match="between 0 and 65535"):
+            server_module.create_server(roots, port=port)
+
+
+class TestThreadedServing:
+    def test_a_stalled_connection_does_not_block_other_requests(self, live_server):
+        """A client that opens a connection and never finishes its request
+        must not hold the listener: each connection gets its own thread."""
+        srv, _thread = live_server
+        with socket.create_connection(("127.0.0.1", srv.server_port), timeout=5) as stalled:
+            stalled.sendall(b"GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            response = http_request(srv.server_port, "/favicon.svg", timeout=3)
+        assert response.status == 200
 
 
 # ---------------------------------------------------------------------------
