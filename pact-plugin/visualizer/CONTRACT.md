@@ -746,6 +746,15 @@ Placement at the cursor, per agent:
 Canvas is internally laid out at 960×440 logical pixels and scaled by CSS; use
 devicePixelRatio for sharpness. It owns `#stage-caption` text.
 
+Canvas text is decorative. Every piece of information the stage draws is also
+in the DOM: the run card, the crew rail, the comms feed, `#stage-caption`, a
+debrief tab, or the canvas `aria-label`. The aria-label carries the counts the
+canvas alone would otherwise show (`N on the review deck, M in the standby
+lounge.`); the rest of the canvas lettering is static signage. Canvas text is
+therefore exempt from the 11px type floor that applies to DOM text and stays at
+its logical-pixel size. A new canvas label that carries information must be
+mirrored in the DOM first.
+
 ### panels.js
 
 ```js

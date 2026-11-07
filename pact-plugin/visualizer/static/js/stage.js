@@ -3679,6 +3679,10 @@ export class Stage {
     ariaParts.push(`PACT Mission Control floor for ${project}.`);
     ariaParts.push(phase ? `Phase ${phase}.` : "No phase active.");
     ariaParts.push(`${crew} crew present, ${onDuty} active.`);
+    /* Where the crew stands is otherwise drawn only on the canvas. */
+    const onDeck = this.views.filter((view) => view.present && view.zone === "review").length;
+    const resting = this.views.filter((view) => view.present && view.zone === "lounge").length;
+    ariaParts.push(`${onDeck} on the review deck, ${resting} in the standby lounge.`);
     ariaParts.push(total > 0 ? `Showing ${clamp(cursor, 0, total)} of ${total} events.` : "No events yet.");
     if (wrapVisible && wrapup) {
       const state = String(wrapup.pr_state || "").toUpperCase();

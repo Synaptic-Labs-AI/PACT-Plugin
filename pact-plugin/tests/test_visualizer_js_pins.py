@@ -401,6 +401,24 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("an OTHER-family event keeps the last room",
     zones([dispatch, { type: "commit", agent: "reviewer-1", phase_family: "CODE" }, { type: "checkpoint", agent: "reviewer-1", phase_family: "OTHER" }], 3).family === "CODE");
 
+  /* The canvas label carries where the crew stands, which is otherwise
+   * drawn only on the canvas. */
+  const labelled = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+  Stage.prototype._updateChrome.call({
+    events: [], cursor: 0, live: false, aria: "",
+    phaseState: { current: "", completed: new Set() },
+    _wrapup: () => null, _wrapupVisible: () => false,
+    model: { meta: { project: "P" } }, canvas: labelled, captionEl: null,
+    views: [
+      { present: true, zone: "review", active: true },
+      { present: true, zone: "review", active: true },
+      { present: true, zone: "lounge", active: false },
+      { present: true, zone: "room", active: true },
+    ],
+  });
+  check("the canvas label says where the crew stands",
+    String(labelled.attrs["aria-label"]).includes("2 on the review deck, 1 in the standby lounge."));
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);
