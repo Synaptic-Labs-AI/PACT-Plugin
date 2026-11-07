@@ -1554,13 +1554,51 @@ def test_the_wrapup_pill_follows_the_cursor():
     )
 
 
-def test_the_glitch_effect_changes_at_most_three_times_a_second():
-    """A full-width flicker faster than 3 Hz can cross the flash threshold."""
+def test_no_stage_blink_changes_more_than_three_times_a_second():
+    """Every discrete on/off blink or random reseed in stage.js changes at most
+    3 times a second; faster flicker can cross the flash threshold. The
+    sprite frame counters are not blinks (their slowest visible change is far
+    below 3/s), and smooth Math.sin pulses are not matched."""
     source = (STATIC_JS_DIR / "stage.js").read_text(encoding="utf-8")
-    body = source[source.index("_drawGlitch(ctx, effect, p) {"):]
-    body = body[:body.index("\n  }\n")]
-    rates = [float(rate) for rate in re.findall(r"Math\.floor\(this\.time \* ([0-9.]+)\)", body)]
-    assert rates and max(rates) <= 3, f"glitch reseeds {rates} times a second"
+    rates = []
+    for line in source.splitlines():
+        if "frame" in line.lower():
+            continue
+        rates += [float(rate) for rate in re.findall(r"Math\.floor\((?:this\.)?(?:time|t) \* ([0-9.]+)\)", line)]
+    assert len(rates) >= 6, f"the blink scan found too few rates to be meaningful: {rates}"
+    assert max(rates) <= 3, f"stage.js blinks or reseeds at {sorted(rates)} changes a second"
+
+
+BLINK_MOTION_SCRIPT = r"""
+const { Stage } = await import("./stage.js");
+const spawned = [];
+const host = Object.assign(Object.create(Stage.prototype), {
+  model: {}, reducedMotion: true, effects: [], cursor: 0, cursorSeq: -1,
+  events: [{ seq: 0, type: "commit" }, { seq: 1, type: "session_end", wrapup: true, raw: { source: "wrap-up" } }],
+  _computePhaseState() {}, _syncAgents() {}, _updateChrome() {},
+  _spawnForEvent: (event) => spawned.push(event.type),
+});
+host.setCursor(2, { animate: true });
+if (spawned.length) { console.error("FAILED PINS: reduced motion spawned blinking effects: " + spawned); process.exit(1); }
+console.log("PINS OK");
+"""
+
+
+def test_reduced_motion_spawns_no_blinking_effects():
+    """Under reduced motion no event effect (flame, warning, save, gate lamp,
+    glitch) is spawned at all, so none of their blinks are drawn."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", BLINK_MOTION_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"reduced-motion pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    source = (STATIC_JS_DIR / "stage.js").read_text(encoding="utf-8")
+    assert "const beaconOn = this.reducedMotion ? true :" in source, (
+        "the tower beacon blinks under reduced motion"
+    )
 
 
 def test_dev_demo_fixture_matches_build_demo_model():

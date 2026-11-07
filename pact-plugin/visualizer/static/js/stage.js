@@ -2830,8 +2830,8 @@ export class Stage {
       }
     }
 
-    /* beacon blinking */
-    const beaconOn = Math.floor(t * 1.6) % 2 === 0;
+    /* beacon blinking (steady under reduced motion) */
+    const beaconOn = this.reducedMotion ? true : Math.floor(t * 1.6) % 2 === 0;
     const alert = this.effects.some((effect) => effect.kind === "siren");
     ctx.fillStyle = alert ? C.danger : beaconOn ? "#fb7185" : "#4a2231";
     ctx.fillRect(TOWER_X - 4, 43, 8, 5);
@@ -3038,7 +3038,10 @@ export class Stage {
     const scale = 1.32;
     const drawY = mascot.y + bob;
     mascot.hover = this.hover && this.hover.kind === "mascot";
-    drawMascot(ctx, mascot.x, drawY, Math.floor(this.time * 8), scale, {
+    /* A sprite frame counter, not a blink: the mascot's own blinks run on
+     * slow frame divisors. */
+    const mascotFrame = Math.floor(this.time * 8);
+    drawMascot(ctx, mascot.x, drawY, mascotFrame, scale, {
       hover: mascot.hover,
       alpha: 1,
     });
@@ -3281,7 +3284,7 @@ export class Stage {
     const y = Math.round(effect.y - travel);
     /* flame trail */
     for (let i = 0; i < 6; i += 1) {
-      const flicker = (Math.floor(this.time * 24) + i) % 3;
+      const flicker = (Math.floor(this.time * 3) + i) % 3;
       ctx.fillStyle = i % 2 === 0 ? rgba(C.warning, 0.8 - i * 0.1) : rgba(C.danger, 0.65 - i * 0.08);
       ctx.fillRect(x - 1 + (flicker - 1), y + 16 + i * 7, 4 - Math.floor(i / 3), 6);
     }
@@ -3339,7 +3342,7 @@ export class Stage {
     ctx.fillRect(Math.round(x) - 1, Math.round(y) - 2 + bob, 1, 2);
     ctx.fillRect(Math.round(x) + 1, Math.round(y) - 2 + bob, 1, 2);
     /* warning blink */
-    if (Math.floor(this.time * 6) % 2 === 0) {
+    if (Math.floor(this.time * 3) % 2 === 0) {
       this._panel(ctx, Math.round(x) - 2, Math.round(y) - 15, 6, 9, "rgba(6, 10, 20, 0.9)", 1, color);
       this._text(ctx, "!", Math.round(x) + 1, Math.round(y) - 10, 9, color, "center", "bold");
     }
@@ -3384,7 +3387,7 @@ export class Stage {
     ctx.fillRect(x + 2, baseY - height, 16, 9);
     ctx.fillStyle = "#0b1220";
     ctx.fillRect(x + 2, baseY - height + 4, 16, 1);
-    if (Math.floor(this.time * 8) % 2 === 0) {
+    if (Math.floor(this.time * 3) % 2 === 0) {
       ctx.fillStyle = rgba("#ffffff", 0.2);
       ctx.fillRect(x + 2, baseY - height, 16, 1);
     }
@@ -3507,7 +3510,7 @@ export class Stage {
     this._outline(ctx, x, y, GATES.w - 16, 26, 2, rgba(color, alpha));
     ctx.fillStyle = rgba(color, 0.18 * alpha);
     ctx.fillRect(x, y, GATES.w - 16, 26);
-    const lampOn = Math.floor(this.time * 8) % 2 === 0;
+    const lampOn = Math.floor(this.time * 3) % 2 === 0;
     if (lampOn) {
       ctx.fillStyle = color;
       ctx.fillRect(GATES.x + GATES.w / 2 - 2, y + 4, 4, 4);
