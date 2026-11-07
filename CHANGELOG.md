@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.26: the orchestrator relays milestones instead of falling silent
+## v4.8.27: the orchestrator relays milestones instead of falling silent
 
 ### Summary
 
@@ -32,6 +32,28 @@ The orchestrator's wait-in-silence rule now separates narration from a milestone
 ### Why
 
 The silence rule named only what is actionable for the team, so its safe reading was silence on everything. Between dispatch and the awaited event the only interim progress signal arrived in teammate notifications the user never sees. The watcher rules already require the completion report; nothing required an interim one, so the user had to ask for status repeatedly. Naming the milestone case changes what the orchestrator does on a teammate turn, without reopening the narrate-the-wait and filler-call failures the section exists to prevent.
+
+## v4.8.26: resolve all five Q5 counter definitions from the prose (issue #1705)
+
+### Summary
+
+The five Q5 dispatch-variety counter definitions now each resolve to exactly one behavior of `extract_final_dispatch_coverage` at 65c1db0a, so a cold reader can predict what the helper reports without reading it. Prose only: no executable line under `pact-plugin/hooks/` changed and the helper's behavior is identical.
+
+### What landed
+
+- `superseded` names its comparator as the total resolved from the `dispatch_site` event's own `variety`, and states that the dispatch-marked `variety_assessed` value is never that comparator even though it is a fallback source for `variety_totals`. A member with no resolvable `variety` on its `dispatch_site` event is never `superseded`: where a snapshot supplies the final value it is `late_stamped` or `dispatch_malformed`; otherwise it is on the fallback path.
+- `late_stamped` and `dispatch_malformed` key on presence versus resolution of the `variety` key on the `dispatch_site` event: `late_stamped` requires `"variety" in event` to be false, `dispatch_malformed` requires it true while `resolve_variety_total` returns None. The pair is exhaustive over members whose site value does not resolve AND whose snapshot supplies the final value.
+- `malformed` names all three inputs it tests — the latest `task_metadata_snapshot`, the `dispatch_site` event's own `variety`, and the task's selected dispatch-marked `variety_assessed` event — and `total_unresolved` names that same three-input set explicitly instead of saying "any stream".
+- `variety_totals` states that it holds one entry for each member that resolves a total, and that a member resolving none contributes no entry. Its fallback order is the `dispatch_site` value, then the selected dispatch-marked `variety_assessed` event. The selected event is the latest with a parseable, mutually comparable timestamp, last-wins on equal instants; only that event's total is resolved, and no earlier assessed event is consulted if it does not resolve. This list is the one `len()` is taken of, so the definition can no longer revive the retired denominator.
+- The relation paragraph states the partition as the snapshot-resolved cells, meaning every member not counted in `fallback_used`, keyed first on the `dispatch_site` value; it enumerates the six cells with their keying condition and places a fallback-path member outside all six. The previously undefined arm-1 label is now defined in the sentence that states the partition, so the surviving "arms 2 and 3" references resolve.
+- The sample-loss paragraph attributes the `coverage` key to `compute_variety_divergence` by name, so the sentence cannot be attached to the ten-value helper the section opens with. Recorded-dispatch sample loss uses `total_unresolved`, and the same warning renders `len(malformed)` alongside it so the present-`variety`-key diagnostic subset stays visible; an unresolved member with no `variety` key no longer disappears from the outer count.
+- `commands/wrap-up.md` carries the same counter corrections: the three-input denominator for `total_unresolved`, exact timestamp-valid assessed-event selection with no backward scan, the site-value comparator for `superseded`, and the presence-versus-resolution key test for `late_stamped` and `dispatch_malformed`. Its recorded-dispatch sample-loss instruction and common-suffix warning both use `coverage["total_unresolved"]` and render `len(malformed)` alongside it; the ordered-suffix pin binds that combined warning and distinguishes the join-counter line from the warning's earlier `total_unresolved` mention.
+- The `protocols/pact-variety.md` extract mirrors the protocol region byte-identically.
+- Behavioral assertions pin what the new prose states: `superseded == 0` in the existing site-absent, assessed-and-snapshot fixture, which covers the comparator and its denial clause; the present-null snapshot fixture adds a divergent assessed input and asserts `dispatch_malformed == 1`, `late_stamped == 0`, and `superseded == 0`; the second present-null fixture asserts `malformed == [that event]` and `total_unresolved == 1` with no snapshot; and both arm-2b rescue fixtures assert all five arm-1 counters are zero — `superseded`, `late_stamped`, `dispatch_malformed`, `superseded_dimensions_only`, and `dimensions_incomparable`. The older snapshot-fixture docstring now distinguishes the absent-site denial case from the present-null `dispatch_malformed` sibling, without changing assertions or behavior. A new selector regression places a resolving assessed total of 8 before a later junk total, with no snapshot or site total, and asserts `variety_totals=[]`, `fallback_used=1`, `total_unresolved=1`, and the present-junk site's membership in `malformed`, proving no backward scan rescues the earlier value.
+
+### Why
+
+Three of the five defects had one root: "as-dispatched" carried two senses in one section — the `dispatch_site` value, which is the partition key, and any non-snapshot source, which is `fallback_used`. A reader could not tell which one `superseded` compared, and the answer is not what the issue assumed: the helper compares only the site value and reads the `variety_assessed` fallback solely inside the branch that rescues a member. The other defects were stale two-source wording written before the third input existed, an unstated exclusion of unresolved members from `variety_totals`, and a partition whose stated justification was wrong even though its conclusion was right. All five are read-time defects, so the fix is wording and the behavior stays where it is.
 
 ## v4.8.25: verify-only re-review reports carry two required lines
 
