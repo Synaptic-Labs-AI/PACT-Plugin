@@ -1445,7 +1445,9 @@ globalThis.Node = Object;
 const walk = (n, out = []) => { out.push(n); for (const c of n.children || []) walk(c, out); return out; };
 (async () => {
   const { Panels } = await import("./panels.js");
-  const pill = (wrapup) => Panels.prototype._wrapupPill.call({}, { wrapup }, {}).textContent;
+  const pill = (wrapup) => Panels.prototype._wrapupPill.call(
+    Object.assign(Object.create(Panels.prototype), { _nodes: {}, cursor: 0 }), { wrapup, events: [] }, {}
+  ).textContent;
   check("a NONE wrap-up reads NO PR", pill({ pr_state: "NONE" }) === "NO PR");
   check("an UNKNOWN wrap-up reads NO PR", pill({ pr_state: "UNKNOWN" }) === "NO PR");
   check("a MERGED wrap-up reads SHIPPED", pill({ pr_state: "MERGED", pr_number: 4 }) === "SHIPPED · PR 4");
@@ -1482,6 +1484,57 @@ def test_every_finding_severity_has_a_style():
     css = (STATIC_JS_DIR.parent / "css" / "panels.css").read_text(encoding="utf-8")
     for severity in re.findall(r'"([a-z]+)"', order.group(1)):
         assert f".sev-chip.sev-{severity}" in css, f"no chip rule for severity {severity}"
+
+
+PILL_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+function node(tag) {
+  return {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, style: {}, dataset: {}, className: "", textContent: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); return child; },
+  };
+}
+globalThis.document = { createElement: node, createTextNode: (t) => ({ textContent: t, children: [] }) };
+globalThis.Node = Object;
+(async () => {
+  const { Panels } = await import("./panels.js");
+  const events = [
+    { seq: 1, type: "session_start", raw: {} },
+    { seq: 2, type: "session_end", wrapup: true, raw: { source: "wrap-up", pr_state: "open", pr_number: 4 } },
+    { seq: 3, type: "session_start", raw: {} },
+    { seq: 4, type: "session_end", wrapup: true, raw: { source: "wrap-up", pr_state: "merged", pr_number: 4 } },
+  ];
+  const host = Object.assign(Object.create(Panels.prototype), {
+    _nodes: {}, _phaseRows: [], cursor: 1,
+    model: { events, wrapup: { pr_state: "MERGED", pr_number: 4 }, metrics: {} },
+  });
+  const pill = host._wrapupPill(host.model, {});
+  check("before any wrap-up the pill says so", pill.textContent === "NO WRAP-UP");
+  host.cursor = 2;
+  host._updateCursorBits();
+  check("at the first wrap-up the pill shows that PR state", pill.textContent === "PR 4 · OPEN");
+  host.cursor = 4;
+  host._updateCursorBits();
+  check("at the head the pill shows the run's final wrap-up", pill.textContent === "SHIPPED · PR 4");
+  if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+  console.log("PINS OK");
+})().catch((err) => { console.error("PIN SCRIPT ERROR: " + (err && err.stack ? err.stack : err)); process.exit(1); });
+"""
+
+
+def test_the_wrapup_pill_follows_the_cursor():
+    """Replay shows the wrap-up at the cursor; the head shows the final one."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", PILL_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"pill pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
 
 
 def test_dev_demo_fixture_matches_build_demo_model():

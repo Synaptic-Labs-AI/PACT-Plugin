@@ -23,7 +23,7 @@
  * this module touches.
  */
 
-import { runKey, phasePasses } from "./dom.js";
+import { runKey, phasePasses, isWrapupEvent as isWrapup, wrapupFromEvent as wrapupOf } from "./dom.js";
 import {
   SPRITE_W,
   SPRITE_H,
@@ -128,24 +128,6 @@ const MASCOT_LINES = [
 
 /* ---- small helpers ----------------------------------------------------- */
 
-/* A session_end recorded by wrap-up (the server flags it; the raw source is
- * the fallback), as opposed to a bare process exit. */
-function isWrapup(event) {
-  if (!event || event.type !== "session_end") return false;
-  if (event.wrapup === true) return true;
-  return Boolean(event.raw && event.raw.source === "wrap-up");
-}
-
-/* The wrap-up fields carried by one wrap-up session_end event. */
-function wrapupOf(event) {
-  const raw = (event && event.raw) || {};
-  const number = Number(raw.pr_number);
-  return {
-    pr_state: String(raw.pr_state || "").toUpperCase(),
-    pr_number: raw.pr_number === undefined || raw.pr_number === null || !Number.isFinite(number) ? null : number,
-    ts: event && event.ts,
-  };
-}
 
 
 function clamp(value, lo, hi) {

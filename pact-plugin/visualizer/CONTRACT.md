@@ -701,6 +701,9 @@ export function fmtTime(iso);        // local HH:MM:SS
 export function fmtDate(iso);        // short local date
 export function missionSecondsAt(model, cursor); // mission clock; when truncated_by has "events" or "journal_bytes", cursor 0 is events[0].ts
 export function phasePasses(item); // phases.items[].runs as [{start, end}] seqs, oldest first; one pass from the item's own boundaries when runs is absent
+export function isWrapupEvent(event);       // a session_end with source wrap-up
+export function wrapupFromEvent(event);     // that event's wrap-up fields
+export function wrapupAtCursor(events, cursor); // latest wrap-up at or before the cursor; shared by stage and panels
 export function shortSha(sha);
 export function rootChangeAction({ hasSession, requestedFilter, hasRun });
 export function requestedFilterLabel(filters);  // named-empty label from the server's echoed filters
@@ -805,6 +808,11 @@ Panels renders: left rail (run summary, phase track, variety gauge, crew list),
 right rail (feed controls + feed list), and the full modal/debrief. It listens
 to its own rendered nodes and invokes the callbacks. It must not query header
 elements.
+The run card's wrap-up pill reads the same at-cursor rule as the stage
+(`dom.wrapupAtCursor`). While replaying, it shows the latest wrap-up at or
+before the cursor, and `PR READY` only when a `pr_ready` event lies at or
+before it. At the head of the run it shows the run's latest `wrapup` and
+`metrics.prs_ready`. The pill updates on every cursor move.
 
 ### timeline.js
 

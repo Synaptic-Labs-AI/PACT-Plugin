@@ -292,6 +292,36 @@ export function launchSelection(search) {
   return { kind: "default", root, query };
 }
 
+/* A session_end recorded by wrap-up (the server flags it; the raw source is
+ * the fallback), as opposed to a bare process exit. */
+export function isWrapupEvent(event) {
+  if (!event || event.type !== "session_end") return false;
+  if (event.wrapup === true) return true;
+  return Boolean(event.raw && event.raw.source === "wrap-up");
+}
+
+/* The wrap-up fields carried by one wrap-up session_end event. */
+export function wrapupFromEvent(event) {
+  const raw = (event && event.raw) || {};
+  const number = Number(raw.pr_number);
+  return {
+    pr_state: String(raw.pr_state || "").toUpperCase(),
+    pr_number: raw.pr_number === undefined || raw.pr_number === null || !Number.isFinite(number) ? null : number,
+    ts: event && event.ts,
+  };
+}
+
+/* The latest wrap-up among the first `cursor` events, or null. Replay shows
+ * this, never the whole run's final wrap-up. */
+export function wrapupAtCursor(events, cursor) {
+  const list = Array.isArray(events) ? events : [];
+  let wrapup = null;
+  for (let i = 0; i < cursor && i < list.length; i += 1) {
+    if (isWrapupEvent(list[i])) wrapup = wrapupFromEvent(list[i]);
+  }
+  return wrapup;
+}
+
 /* The passes of one phase item, oldest first, each {start, end} as journal
  * seqs or null. phases.items[].runs lists every pass; an item without it is
  * one pass made of its own boundaries. A pass with no start is a phase

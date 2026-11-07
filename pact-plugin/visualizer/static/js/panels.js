@@ -15,6 +15,7 @@ import {
   createSeqIndex,
   runKey,
   feedKey,
+  wrapupAtCursor,
   PROJECT_ALTERED_NOTE,
 } from "./dom.js";
 import { drawRadar, drawSparkline } from "./charts.js";
@@ -640,6 +641,7 @@ export class Panels {
     this._phaseRows = [];
     this._nodes.eventsVal = null;
     this._nodes.statusValue = null;
+    this._nodes.wrapupPill = null;
     const model = this.model;
     if (!model) {
       left.appendChild(
@@ -779,23 +781,35 @@ export class Panels {
     return el("span", { class: `mc-pill status-pill ${tone}`, text: label, attrs: { title: `Run status: ${raw}` } });
   }
 
-  _wrapupPill(model, metrics) {
-    const wrapup = model.wrapup;
+  /* The wrap-up the pill reports. At the head of the run it is the whole
+   * run's latest; while replaying it is the latest at or before the cursor,
+   * the same selection the stage draws, so a scrub shows the PR state of that
+   * moment, not the final one. */
+  _wrapupPillState(model, metrics) {
+    const events = asArray(model.events);
+    const atHead = this.cursor >= events.length;
+    const wrapup = atHead ? model.wrapup || null : wrapupAtCursor(events, this.cursor);
+    const prReady = atHead
+      ? firstNumber(metrics.prs_ready) > 0
+      : events.slice(0, this.cursor).some((event) => event && event.type === "pr_ready");
     const state = prState(wrapup);
     if (wrapup && state) {
       const shipped = state === "MERGED";
-      const label = shipped ? `SHIPPED · PR ${wrapup.pr_number || "?"}` : `PR ${wrapup.pr_number || "?"} · ${state}`;
-      const tone = shipped ? "is-shipped" : state === "OPEN" ? "is-warning" : "is-muted";
-      return el("span", {
-        class: `mc-pill pr-pill ${tone}`,
-        text: label,
-        attrs: { title: `Wrap-up PR state: ${state}` },
-      });
+      return {
+        text: shipped ? `SHIPPED · PR ${wrapup.pr_number || "?"}` : `PR ${wrapup.pr_number || "?"} · ${state}`,
+        tone: shipped ? "is-shipped" : state === "OPEN" ? "is-warning" : "is-muted",
+        title: `Wrap-up PR state: ${state}`,
+      };
     }
-    if (firstNumber(metrics.prs_ready) > 0) {
-      return el("span", { class: "mc-pill pr-pill is-warning", text: "PR READY" });
-    }
-    return el("span", { class: "mc-pill pr-pill is-muted", text: wrapup ? "NO PR" : "NO WRAP-UP" });
+    if (prReady) return { text: "PR READY", tone: "is-warning", title: "A pull request is ready" };
+    return { text: wrapup ? "NO PR" : "NO WRAP-UP", tone: "is-muted", title: "Wrap-up PR state" };
+  }
+
+  _wrapupPill(model, metrics) {
+    const pill = this._wrapupPillState(model, metrics);
+    const node = el("span", { class: `mc-pill pr-pill ${pill.tone}`, text: pill.text, attrs: { title: pill.title } });
+    this._nodes.wrapupPill = node;
+    return node;
   }
 
   _varietyBlock() {
@@ -1008,6 +1022,13 @@ export class Panels {
   _updateCursorBits() {
     const eventsValue = this._nodes.eventsVal;
     if (eventsValue) eventsValue.textContent = `${this.cursor} / ${this._eventTotal()}`;
+    const pillNode = this._nodes.wrapupPill;
+    if (pillNode && this.model) {
+      const pill = this._wrapupPillState(this.model, this.model.metrics || {});
+      pillNode.className = `mc-pill pr-pill ${pill.tone}`;
+      pillNode.textContent = pill.text;
+      pillNode.setAttribute("title", pill.title);
+    }
     for (const row of this._phaseRows) {
       if (row.startIndex === null) continue;
       toggleClass(row.node, "is-ahead", this.cursor <= row.startIndex);
