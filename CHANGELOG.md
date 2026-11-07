@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.28: certify the full-suite run record under pytest-xdist
+
+### Summary
+
+The merge-gate run record can now be certified when the suite runs under `pytest-xdist`. Each worker publishes its own collection counts, and the controller records them only when every worker that started reported the same counts and they match the session's collected total. When no faithful value exists, the count fields stay null and the verifier fails closed. The full-run verifier also refuses a run whose pytest exit status is not 0, and an allowlist entry that no skip used.
+
+### What landed
+
+- `tests/ci_full_run_record.py`: an xdist worker publishes its `(before, after, deselected)` triple through `workeroutput` and writes no record. The controller keys each published triple and each ready node by the node's gateway id, so a repeated down event cannot stand in for a missing worker. It writes the triple only when every ready node reported one, all agree, and `after` equals the session's collected count; otherwise both item fields and `deselected` are null and a diagnostic names the reason. Deselection comes from each worker's `pytest_deselected`, which keeps silent hook narrowing distinguishable from a reported deselection. Distribution is detected the way xdist detects it (`--tx` set and `--dist` not `no`), so a `--tx` run without `-n` is recorded too. Both node hooks share the same ownership guard, the ready-node population is a required argument, and the controller hook is an optional hook so sessions that run with `-p no:xdist` still load the plugin. A serial run's record is unchanged.
+- `scripts/verify_full_run.py`: a record whose `exitstatus` is not 0 fails with `EXITSTATUS`. An allowlist entry that matches no recorded skip site fails with `SKIP-ALLOWLIST-UNUSED`; this check runs in the full-run verifier only, not in the fast-lane summary. An empty allowlist is now valid, so a run with no skips can still certify.
+- `scripts/full_suite_skip_allowlist.json`: one entry admits the three xdist integration tests while xdist is not in the CI constraints; its description says an entry is removed in the commit that stops its skip.
+- `tests/test_ci_full_run_record.py` and `tests/test_verify_full_run.py`: pure-function tests cover every refusal branch of the aggregate, and seam-free tests drive the worker publish branch and the controller success path without xdist installed, so the wiring is guarded in CI. Three integration tests run the real xdist path when it is installed and skip otherwise; one drives a worker internal error raised after that worker's tests, where the session exits 0 and the ready-node comparison is the only refusal.
+
+### Why
+
+Under `pytest-xdist` the controller never collects, so every distributed run failed certification on a null collection count and xdist could not be adopted. The counts are not additive: every worker collects the whole suite, so a sum would be several times the corpus. The only faithful aggregate is the value every worker reports identically, and anything short of that must leave the record unprovable rather than plausible.
+
 ## v4.8.27: the orchestrator relays milestones instead of falling silent
 
 ### Summary

@@ -41,6 +41,26 @@ two cannot see it. The outermost wrapper records the item count before and
 after every other implementation, and the verifier requires
 ``after + deselected == before``.
 
+UNDER XDIST THE CONTROLLER NEVER RUNS THAT HOOK. Execution is distributed;
+collection is repeated in every worker, so the controller's wrapper never
+fires and both counts would be None. Each worker therefore PUBLISHES its own
+``(before, after, deselected)`` triple in ``config.workeroutput``, and the
+controller reads the triples in ``pytest_testnodedown``. The deselected count
+travels with the counts because the controller never collects: it never sees a
+worker's deselection, so its own stats report 0 and the record would claim a
+deselection nobody measured. It is taken from the workers, never derived
+from ``before - after``, which would satisfy the verifier's identity
+arithmetically and leave the narrowing detector unable to tell a reported
+deselection from an item removed without one. THE TRIPLES ARE NOT ADDITIVE:
+every worker collected the whole corpus, so summing N workers yields N x the
+corpus while the verifier requires ``after == collected``. The only faithful
+aggregate is the triple every worker AGREES on, and only when every node
+that became ready reported; disagreement, a missing node, or an ``after``
+that does not equal the certifying session's own ``testscollected``,
+leaves the collection fields and ``deselected`` null and prints why. A
+wrong integer here would turn a fail-closed gate into a fail-open one, so
+None is the correct answer when no aggregate is provable.
+
 WHY EACH SKIP IS RECORDED BY SITE. The verifier admits only skips listed in
 a committed allowlist keyed on (file, reason), so the record carries every
 skip as the file and verbatim reason the `-ra` summary prints for it: the
@@ -65,6 +85,7 @@ import pytest
 SCHEMA_VERSION = 3
 RECORD_NAME = ".full-run-record.json"
 OWNER_ENV = "PACT_FULL_RUN_RECORD_OWNER"
+WORKER_OUTPUT_KEY = "pact_collection_item_counts"
 
 
 def _gated_repo_root():
@@ -98,6 +119,99 @@ def record_path():
     return Path(workspace) / RECORD_NAME
 
 
+def aggregate_worker_collection_counts(triples_by_node, collected,
+                                       ready_nodes):
+    """The (before, after, deselected) triple every worker agreed on, or None.
+
+    ``triples_by_node`` maps each xdist node id (``node.gateway.id``) that
+    dispatched ``pytest_testnodedown`` to the triple it published, or None
+    when it published nothing. ``ready_nodes`` is the set of node ids that
+    dispatched ``pytest_testnodeready``.
+
+    Every worker collects the WHOLE corpus, so these triples are not
+    additive: summing N workers yields N x the corpus while the verifier
+    requires ``after == collected``. The only faithful cross-worker value is
+    a triple every worker reports identically. Disagreement, a non-integer
+    entry, or an ``after`` inconsistent with the certifying session's own
+    collected count means no aggregate is provable; None is returned so the
+    verifier's BAD-FIELD failure stands rather than an invented integer
+    turning a fail-closed gate into a fail-open one.
+
+    The ``deselected`` entry is what the worker's own ``pytest_deselected``
+    counted. It is taken from the workers rather than derived from
+    ``before - after``: a derived count would satisfy the second identity
+    arithmetically and leave the verifier's narrowing detector unable to
+    distinguish a reported deselection from an item removed without one.
+
+    The population is ENFORCED, not assumed, and nodes are IDENTIFIED rather
+    than counted. The set of nodes that reported must equal the set that
+    became ready, because a node that never reported is indistinguishable
+    here from a node that never existed, and xdist can dispatch
+    ``pytest_testnodedown`` twice for one node (its keyboard-interrupt path),
+    so a count of events could stand in for a missing node.
+
+    The ready comparison refuses any node that became ready and never
+    reported, whatever the cause. Agreement among the nodes that did report
+    is not enough: every worker collects the whole corpus, so the survivors
+    agree with each other exactly as a complete population would, and only
+    the ready set shows that one is missing. Under xdist 3.8.0 a worker is
+    lost in at least these ways:
+
+    - A worker that crashes dispatches ``errordown`` with nothing
+      published, so a None arrives and is rejected below.
+    - A worker that raises an internal error after all of its tests have
+      finished is reported through ``DSession.worker_internal_error``; the
+      controller keeps running, the worker never reports, and the session
+      exits 0 when every test passed. The ready comparison is then the only
+      refusal: its null fields fail the verifier on BAD-FIELD-DESELECTED.
+      ``test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set``
+      pins this path.
+    - A worker that raises an internal error during collection, or during
+      a test that is not its last, makes the controller abort in its event
+      loop, at a site that depends on the order the events arrive, and the
+      session exits non-zero. Either no record is written and the verifier
+      fails RECORD-ABSENT, or it fails the record: on BAD-FIELD-DESELECTED
+      when a ready node did not report, which it checks before the exit
+      status, otherwise on EXITSTATUS.
+
+    EXITSTATUS is what a non-zero exit prints only when every ready node
+    reported. Any refusal leaves the collection fields and ``deselected``
+    null, so the verifier fails closed instead of certifying a collection
+    counted by a subset.
+
+    Worker restarts are ON by default - xdist defaults
+    ``--max-worker-restart`` to four times the worker count whenever ``-n``
+    is given - so a run that lost a worker and recovered on a replacement is
+    refused although it completed. That is a deliberate false red in the
+    safe direction, and the response is to re-run the certifying run.
+    Disabling restarts does not change it: a crashed worker still
+    contributes the None that refuses the aggregate.
+
+    This guarantees only ``after == collected``; the second verifier identity,
+    ``after + deselected == before``, is enforced in
+    ``scripts/verify_full_run.py``, where a non-zero ``deselected`` is a hard
+    failure before it is reached.
+    """
+    if not triples_by_node or set(triples_by_node) != set(ready_nodes):
+        return None
+    triples = []
+    for triple in triples_by_node.values():
+        if not isinstance(triple, (list, tuple)) or len(triple) != 3:
+            return None
+        before, after, deselected = triple
+        for value in (before, after, deselected):
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+        triples.append((before, after, deselected))
+    if any(triple != triples[0] for triple in triples[1:]):
+        return None
+    if not isinstance(collected, int) or isinstance(collected, bool):
+        return None
+    if triples[0][1] != collected:
+        return None
+    return triples[0]
+
+
 def _format_duration(seconds):
     """Match pytest's own summary duration rendering."""
     if seconds < 60:
@@ -116,6 +230,9 @@ class FullRunRecord:
         self._seen_node_ids = set()
         self._items_before = None
         self._items_after = None
+        self._deselected = 0
+        self._worker_triples = {}
+        self._ready_nodes = set()
         self._skips = []
         self._collection_skips = 0
 
@@ -128,6 +245,16 @@ class FullRunRecord:
             if self._items_before is None:
                 self._items_before = before
                 self._items_after = len(items)
+
+    def pytest_deselected(self, items):
+        """Count the items reported as deselected in this session.
+
+        Under xdist the controller never collects, so it never sees a worker's
+        deselection and its own stats report 0. The worker sees every event,
+        which is why this count travels in the worker's (before, after,
+        deselected) triple rather than being left to the controller.
+        """
+        self._deselected += len(items)
 
     def pytest_runtest_logreport(self, report):
         """Record every node ID that reached ANY terminal outcome.
@@ -143,6 +270,44 @@ class FullRunRecord:
             self._seen_node_ids.add(node_id)
             self._terminal_node_ids.append(node_id)
         self._note_skip(report)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodeready(self, node):
+        """Record the id of each xdist worker that announced itself.
+
+        Controller only. A node that became ready and never dispatched
+        ``pytest_testnodedown`` leaves no trace in ``_worker_triples``, so
+        this set is how the aggregate tells a lost worker from one that never
+        existed. When a worker raises an internal error after its own tests,
+        the session can exit 0, and this set is then the only thing that
+        fails certification. The ready set is passed to the aggregate so the
+        refusal is a pure function rather than a branch here.
+        """
+        if self._root is None:
+            return
+        self._ready_nodes.add(node.gateway.id)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node, error):
+        """Collect each xdist worker's published triple (controller only).
+
+        OPTIONAL HOOK: this spec comes from xdist, and the suite spawns
+        child sessions with ``-p no:xdist``. Pluggy rejects a plugin that
+        defines an unknown hook, so without ``optionalhook`` every such
+        child session dies with PluginValidationError before running.
+
+        Keyed on ``node.gateway.id``: xdist can dispatch this hook twice for
+        one node, and a repeat must not count as a second worker. A repeat
+        that reports a different value leaves the node unprovable (None).
+        """
+        if self._root is None:
+            return
+        node_id = node.gateway.id
+        triple = getattr(node, "workeroutput", {}).get(WORKER_OUTPUT_KEY)
+        if (node_id in self._worker_triples
+                and self._worker_triples[node_id] != triple):
+            triple = None
+        self._worker_triples[node_id] = triple
 
     def pytest_collectreport(self, report):
         """A module-level skip is a collection report, not a test report."""
@@ -182,6 +347,15 @@ class FullRunRecord:
         return f"{text} in {_format_duration(elapsed)}"
 
     def pytest_sessionfinish(self, session, exitstatus):
+        # A worker's _root is None (the controller claimed ownership), so this
+        # branch must precede the guard below or no worker ever publishes.
+        if getattr(session.config, "workerinput", None) is not None:
+            # An xdist worker of a distributed run: publish this worker's own
+            # counts for the controller. The controller aggregates by
+            # agreement; see aggregate_worker_collection_counts.
+            session.config.workeroutput[WORKER_OUTPUT_KEY] = (
+                self._items_before, self._items_after, self._deselected)
+            return
         if self._root is None or session.config.option.collectonly:
             return
         path = record_path()
@@ -209,6 +383,34 @@ class FullRunRecord:
                 print(f"CI-FULL-RUN-RECORD: summary unavailable: {exc!r}",
                       file=sys.stderr)
                 summary_line = None
+        items_before = self._items_before
+        items_after = self._items_after
+        deselected = len(stats.get("deselected", []))
+        # xdist's own distribution predicate: tx specs present and a dist
+        # mode other than "no". It covers -n and --tx alike; without xdist
+        # neither option exists and the run is serial.
+        option = session.config.option
+        distributed = (bool(getattr(option, "tx", None))
+                       and getattr(option, "dist", "no") != "no")
+        if items_before is None and distributed:
+            collected = int(session.testscollected)
+            aggregate = aggregate_worker_collection_counts(
+                self._worker_triples, collected, self._ready_nodes)
+            if aggregate is None:
+                # The controller never collects, so its own deselected count
+                # is 0 whatever the workers deselected. With no aggregate it
+                # is a number nobody measured, so it is nulled with the rest.
+                deselected = None
+                print(
+                    "CI-FULL-RUN-RECORD: no faithful cross-worker collection "
+                    f"aggregate (ready nodes {sorted(self._ready_nodes)}, "
+                    f"triples {self._worker_triples!r}, "
+                    f"collected={collected}); items_before/after_modifyitems "
+                    "and deselected stay null so the verifier fails closed.",
+                    file=sys.stderr,
+                )
+            else:
+                items_before, items_after, deselected = aggregate
         record = {
             "schema_version": SCHEMA_VERSION,
             "collected": int(session.testscollected),
@@ -216,14 +418,14 @@ class FullRunRecord:
             "skipped": len(stats.get("skipped", [])),
             "failed": len(stats.get("failed", [])),
             "errors": len(stats.get("error", [])),
-            "deselected": len(stats.get("deselected", [])),
+            "deselected": deselected,
             "xfailed": len(stats.get("xfailed", [])),
             "xpassed": len(stats.get("xpassed", [])),
             "exitstatus": int(exitstatus),
             "summary_line": summary_line,
             "terminal_node_ids": list(self._terminal_node_ids),
-            "items_before_modifyitems": self._items_before,
-            "items_after_modifyitems": self._items_after,
+            "items_before_modifyitems": items_before,
+            "items_after_modifyitems": items_after,
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "owner_pid": os.getpid(),
