@@ -71,7 +71,8 @@ from merge_guard_pre import is_dangerous_command  # noqa: E402
 from shared.merge_guard_common import detect_command_operation_type  # noqa: E402
 
 # The multi-anchor cases measure all three sizes; the push-flag-walk cases
-# measure N_LARGE only.
+# measure N_LARGE only; the privileged-flag scanner linearity cases measure the
+# N_SMALL/N_LARGE pair.
 N_SMALL = 4000
 N_LARGE = 8000
 
@@ -296,7 +297,8 @@ class TestPrivilegedFlagScannerLinearity:
         t_small, t_large = _measure_scaling(fn, build)
         ratio = (t_large / t_small) if t_small > 0 else float("inf")
 
-        # PRIMARY: generous absolute ceiling (linear is sub-ms here even at N=4000).
+        # PRIMARY: generous absolute ceiling (linear measures ~25-28 ms of CPU
+        # time at N_LARGE on aarch64, so 1.0 s leaves ~35x of room).
         assert t_large < 1.0, (
             f"extract_privileged_flags({op}) on {build(1)!r}*{N_LARGE}: "
             f"{t_large * 1000:.1f} ms exceeds 1000 ms ceiling — backtracking regression?"
