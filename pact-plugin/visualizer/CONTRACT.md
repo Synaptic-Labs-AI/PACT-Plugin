@@ -116,10 +116,25 @@ starts a fresh server, and its record replaces the old one.
   `PACT Mission Control: state file pid <state-pid> does not match the
   server's pid <server-pid>; refusing to signal — delete <state-file> to clear
   the record` (the path is shell-quoted). The state file is kept; exit 1.
+  Also `Stop: refused` when `server.json` exists but is not trusted (below):
+  the next line is `PACT Mission Control: <state-file> is not a private file of
+  this user, so it was neither used nor removed`; exit 1.
 
 One recorded instance per state directory is deliberate; a second would
 overwrite the record and orphan the first. Launches take an exclusive lock on
-`<state-dir>/.launch.lock`, so concurrent `--detach` runs share one server.
+`<state-dir>/.launch.lock`, so concurrent `--detach` runs share one server. The
+lock file must be owned by the user (else `lock file <path> is not owned by
+this user; remove it`), and a launch waits at most 5 s for it, then exits 1
+with `another launch holds <path>; retry in a moment, or stop the process
+holding it`.
+
+Trusted files: `server.json`, and `server.log` when its tail is quoted, are read
+only when they are a regular file (opened without following a symlink), owned by
+the user, and not writable by group or others. Anything else gets one stderr
+line, `pact-viz: warning: ignoring <path>: <reason>`, and is treated as no
+record: it is never reused, stopped or signalled from. `--stop` and every
+cleanup path leave it in place; a new launch replaces it with its own record.
+The CLI's own 0600 record stays trusted inside a group-writable directory.
 
 State directory: a directory the CLI creates (the default `<config>/pact-viz`
 included) is made 0700. An existing one is never chmod-ed, but it must be a

@@ -1585,9 +1585,11 @@ def _live_state(srv) -> dict:
 
 
 class TestStateRecord:
-    def _write_raw(self, state_dir: Path, payload: dict) -> None:
+    def _write_raw(self, state_dir: Path, payload: dict, mode: int = 0o600) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
-        settings.state_file(state_dir).write_text(json.dumps(payload), encoding="utf-8")
+        path = settings.state_file(state_dir)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(path, mode)
 
     def _valid(self) -> dict:
         return {"pid": 4242, "port": 51234, "url": "http://127.0.0.1:51234/",
@@ -1608,6 +1610,13 @@ class TestStateRecord:
         state_dir = tmp_path / "state"
         self._write_raw(state_dir, self._valid())
         assert cli.read_state(state_dir) == self._valid()
+
+    @pytest.mark.parametrize("mode", [0o620, 0o602, 0o666], ids=oct)
+    def test_a_record_others_can_write_is_ignored_with_a_warning(self, tmp_path, capsys, mode):
+        state_dir = tmp_path / "state"
+        self._write_raw(state_dir, self._valid(), mode=mode)
+        assert cli.read_state(state_dir) is None
+        assert "pact-viz: warning: ignoring" in capsys.readouterr().err
 
     def test_a_symlinked_record_is_refused(self, tmp_path):
         real = tmp_path / "elsewhere.json"

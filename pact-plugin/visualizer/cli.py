@@ -63,6 +63,7 @@ _LOG_FILENAME = "server.log"
 _LAUNCH_FILENAME = "launch.html"
 _LOCK_FILENAME = ".launch.lock"
 _BROWSER_WAIT_S = 3.0
+_LOCK_WAIT_S = 5.0
 _READY_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 5.0
 _POLL_INTERVAL_S = 0.05
@@ -245,15 +246,20 @@ def read_state(state_dir: Path) -> dict | None:
     Summary: Returns the parsed object only when it has the required types
              (pid/port ints, url/instance_id/key strings); a truncated, hostile
              or older-format file reads as "no state", never as a partial
-             running server.
+             running server. The file must be a regular file (opened
+             O_NOFOLLOW) owned by this user and writable by no one else: in a
+             group-writable state directory another user could otherwise plant
+             a record that sends the key to their port or names a pid to
+             signal. Such a file is ignored with a one-line warning.
     Used by: cmd_status, cmd_stop, detach, serve_foreground, tests.
     """
     path = settings.state_file(state_dir)
+    data = read_owned_file(path)
+    if data is None:
+        return None
     try:
-        if not path.is_file() or path.is_symlink():
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError, RecursionError):
+        payload = json.loads(data.decode("utf-8"))
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -269,6 +275,64 @@ def read_state(state_dir: Path) -> dict | None:
         if not isinstance(payload.get(name), str) or not payload.get(name):
             return None
     return payload
+
+
+_WARNED_FILES: set[str] = set()
+
+
+def read_owned_file(path: Path, max_bytes: int = 1 << 20) -> bytes | None:
+    """A state-dir file's bytes, or None when absent or not trustworthy.
+
+    Location: cli.read_owned_file.
+    Summary: Opened O_NOFOLLOW and checked on the open descriptor (no race):
+             it must be a regular file, owned by os.getuid(), with no group or
+             other write bit. A file that exists but fails a check is ignored
+             with one stderr warning per path. Never raises.
+    Used by: read_state, _log_tail.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        problem = _untrusted(info)
+        if problem:
+            if str(path) not in _WARNED_FILES:
+                _WARNED_FILES.add(str(path))
+                print(f"pact-viz: warning: ignoring {path}: {problem}", file=sys.stderr)
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return handle.read(max_bytes)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def record_rejected(state_dir: Path) -> bool:
+    """True when server.json exists but read_owned_file would not trust it.
+
+    Such a record belongs to someone else: it is neither used nor deleted.
+    """
+    path = settings.state_file(state_dir)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return bool(_untrusted(info))
+
+
+def _untrusted(info: os.stat_result) -> str:
+    """Why a state-dir file must not be trusted ("" when it may be)."""
+    if not stat_module.S_ISREG(info.st_mode):
+        return "not a regular file"
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return "not owned by this user"
+    if info.st_mode & 0o022:
+        return "writable by group or others"
+    return ""
 
 
 def write_state(state_dir: Path, payload: dict) -> Path:
@@ -334,6 +398,8 @@ def _clear_state_if_instance(state_dir: Path, instance_id: str) -> bool:
     Used by: cmd_stop, detach, serve_foreground.
     """
     current = read_state(state_dir)
+    if current is None and record_rejected(state_dir):
+        return False
     if current is None or current.get("instance_id") == instance_id:
         clear_state(state_dir)
         return True
@@ -744,6 +810,14 @@ def cmd_stop(args: argparse.Namespace) -> int:
     """
     state_dir = _state_dir(args)
     state = read_state(state_dir)
+    if state is None and record_rejected(state_dir):
+        # Not ours to use or to clean: leave it and say so.
+        print("Stop: refused")
+        print(
+            f"PACT Mission Control: {settings.state_file(state_dir)} is not a private file "
+            "of this user, so it was neither used nor removed"
+        )
+        return 1
     if state is None:
         print("PACT Mission Control: not running")
         print("Stop: not running")
@@ -1004,13 +1078,30 @@ def _launch_lock(state_dir: Path):
     except ImportError:  # not POSIX: no lock, the reuse retry still applies
         yield
         return
+    path = state_dir / _LOCK_FILENAME
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(state_dir / _LOCK_FILENAME, flags, 0o600)
+        descriptor = os.open(path, flags, 0o600)
     except OSError as error:
         raise CliError(f"cannot lock state directory {state_dir}: {error}") from error
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        info = os.fstat(descriptor)
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise CliError(f"lock file {path} is not owned by this user; remove it")
+        # Bounded: a lock held by anyone (a hung launch, another user in a
+        # group-writable dir) must not hang every later launch.
+        deadline = time.monotonic() + _LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise CliError(
+                        f"another launch holds {path}; retry in a moment, or stop "
+                        "the process holding it"
+                    ) from None
+                time.sleep(0.1)
         yield
     finally:
         os.close(descriptor)
@@ -1113,10 +1204,12 @@ def _detach_locked(
 
 
 def _log_tail(path: Path, max_chars: int = 1200) -> str:
-    """The tail of the detached child's log (for the failure message)."""
-    try:
-        data = path.read_bytes()
-    except OSError:
+    """The tail of the detached child's log (for the failure message).
+
+    Read through read_owned_file, so a planted or foreign log is not quoted.
+    """
+    data = read_owned_file(path, max_bytes=1 << 22)
+    if data is None:
         return ""
     text = data.decode("utf-8", errors="replace").strip()
     return text[-max_chars:]

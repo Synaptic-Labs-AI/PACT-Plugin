@@ -1890,3 +1890,111 @@ class TestCliOutputIsReadable:
             target.mkdir()
         cli.main(["--list", "--root", str(target)])
         assert message in capsys.readouterr().err
+
+
+class TestStateFilesMustBeOwned:
+    """In a group-writable state dir, only this user's private files are trusted."""
+
+    @staticmethod
+    def _plant(state_dir, mode):
+        state_dir.mkdir(mode=0o775, exist_ok=True)
+        os.chmod(state_dir, 0o775)
+        path = settings.state_file(state_dir)
+        path.write_text(json.dumps(_state(5555, pid=4242, instance_id="forged")))
+        os.chmod(path, mode)
+        return path
+
+    @pytest.mark.parametrize("mode", [0o664, 0o646, 0o666])
+    def test_a_group_or_other_writable_record_is_ignored(self, tmp_path, capsys, mode):
+        state_dir = tmp_path / f"state{mode:o}"
+        self._plant(state_dir, mode)
+        assert cli.read_state(state_dir) is None
+        assert "writable by group or others" in capsys.readouterr().err
+
+    def test_a_foreign_owned_record_is_ignored_and_never_reused(self, tmp_path, monkeypatch, capsys):
+        state_dir = tmp_path / "state"
+        self._plant(state_dir, 0o600)
+        real_fstat = os.fstat
+
+        def foreign_fstat(descriptor):
+            info = real_fstat(descriptor)
+            values = list(info)
+            values[4] = info.st_uid + 1  # st_uid
+            return os.stat_result(values)
+
+        monkeypatch.setattr(cli.os, "fstat", foreign_fstat)
+        probed: list = []
+        monkeypatch.setattr(cli, "health_check", lambda *a, **k: probed.append(a) or None)
+        args = cli.build_parser().parse_args(["--detach", "--state-dir", str(state_dir)])
+        assert cli._reuse_if_running(state_dir, args, []) is False
+        assert probed == []
+        assert "not owned by this user" in capsys.readouterr().err
+
+    def test_stop_never_signals_from_or_deletes_an_untrusted_record(self, tmp_path, monkeypatch, capsys):
+        state_dir = tmp_path / "state"
+        path = self._plant(state_dir, 0o666)
+        signalled: list = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
+        assert cli.main(["--stop", "--state-dir", str(state_dir)]) == 1
+        assert signalled == []
+        assert path.exists()
+        out = capsys.readouterr()
+        assert "Stop: refused" in out.out and "ignoring" in out.err
+        assert cli._clear_state_if_instance(state_dir, "anything") is False
+        assert path.exists()
+
+    def test_our_private_record_in_a_group_writable_dir_stays_trusted(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        self._plant(state_dir, 0o600)
+        monkeypatch.setattr(cli, "health_check", lambda *a, **k: None)
+        monkeypatch.setattr(cli, "_pid_gone", lambda pid: True)
+        assert cli.main(["--stop", "--state-dir", str(state_dir)]) == 0
+        assert not settings.state_file(state_dir).exists()
+
+    def test_a_trusted_record_still_reads(self, tmp_path):
+        state_dir = tmp_path / "state"
+        self._plant(state_dir, 0o600)
+        assert cli.read_state(state_dir)["instance_id"] == "forged"
+
+    def test_a_held_launch_lock_fails_within_the_bound(self, tmp_path, monkeypatch):
+        import fcntl
+        import time
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        monkeypatch.setattr(cli, "_LOCK_WAIT_S", 0.5)
+        holder = os.open(state_dir / ".launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            started = time.monotonic()
+            with pytest.raises(cli.CliError) as excinfo:
+                with cli._launch_lock(state_dir):
+                    pass
+            assert time.monotonic() - started < 3
+            assert "another launch holds" in str(excinfo.value)
+        finally:
+            os.close(holder)
+
+    def test_a_foreign_lock_file_is_refused(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        real_fstat = os.fstat
+
+        def foreign_fstat(descriptor):
+            values = list(real_fstat(descriptor))
+            values[4] += 1
+            return os.stat_result(values)
+
+        monkeypatch.setattr(cli.os, "fstat", foreign_fstat)
+        with pytest.raises(cli.CliError) as excinfo:
+            with cli._launch_lock(state_dir):
+                pass
+        assert "not owned by this user" in str(excinfo.value)
+
+    def test_an_untrusted_log_is_not_quoted(self, tmp_path):
+        log = tmp_path / "server.log"
+        log.write_text("planted text")
+        os.chmod(log, 0o666)
+        assert cli._log_tail(log) == ""
+        os.chmod(log, 0o600)
+        assert cli._log_tail(log) == "planted text"
