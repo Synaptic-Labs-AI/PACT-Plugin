@@ -107,7 +107,7 @@ Under each root it reads:
 | --- | --- |
 | `<root>/pact-sessions/<slug>/<session_id>/session-journal.jsonl` | The run itself: phase transitions, dispatches, handoffs, commits, reviews, findings, gates, alerts, checkpoints, wrap-up |
 | `<root>/teams/<team>/config.json` | Team roster and teammate identities |
-| `<root>/teams/<team>/pact-roster.jsonl` | Cloud roster intents, read when that team directory has no `config.json` |
+| `<root>/teams/<team>/pact-roster.jsonl` | Cloud roster. Its presence marks a cloud team; its records supply the crew when that team directory has no `config.json` |
 | `<root>/tasks/<team>/*.json` | Task records, when present; journal cues fill the gaps |
 
 Only exact journal paths at the depth above are discovered — nested scratch

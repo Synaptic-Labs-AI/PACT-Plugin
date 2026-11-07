@@ -381,6 +381,9 @@ def derive_agents(
     Used by: derive_model, tests.
     """
     settings_meta = meta or {}
+    lead_address = _text(settings_meta.get("lead_address"), 200)
+    if lead_address in {"team-lead", "main"}:
+        lead_name = lead_address
     seeds: list[roster.MemberSeed] = []
     if agent_seeds is not None:
         seeds.extend(agent_seeds)
@@ -401,12 +404,30 @@ def derive_agents(
         seeds.extend(team_info.members)
         seeds.extend(team_info.intents)
 
+    # Every spelling of the lead collapses onto ONE entry: the first lead
+    # seed's name (the synthesized lead, named by lead_address, when there is
+    # one). A config member with agentType team-lead, or a member or event
+    # named team-lead/main/lead_address, is that same lead.
+    def is_lead_seed(seed: roster.MemberSeed) -> bool:
+        return (
+            seed.kind == "lead"
+            or seed.agent_type == "team-lead"
+            or seed.name.strip() in {lead_name, "team-lead", "main"}
+        )
+
+    lead_aliases = {lead_name, "team-lead", "main"}
+    lead_key: str | None = None
     order: list[str] = []
     seed_by_name: dict[str, roster.MemberSeed] = {}
     for seed in seeds:
         name = seed.name.strip()
         if not name or name in seed_by_name:
             continue
+        if is_lead_seed(seed):
+            lead_aliases.add(name)
+            if lead_key is not None:
+                continue
+            lead_key = name
         seed_by_name[name] = seed
         order.append(name)
 
@@ -418,6 +439,10 @@ def derive_agents(
         name = agent if isinstance(agent, str) and agent else ""
         if not name:
             continue
+        if name in lead_aliases:
+            if lead_key is None:
+                lead_key = name
+            name = lead_key
         accumulator = accumulators.get(name)
         if accumulator is None:
             accumulator = _AgentAccumulator(None)
@@ -475,9 +500,9 @@ def derive_agents(
         role = seed.role if seed is not None else name
         agent_type = seed.agent_type if seed is not None else ""
         is_lead = (
-            (seed is not None and seed.kind == "lead")
+            (seed is not None and (seed.kind == "lead" or seed.agent_type == "team-lead"))
             or name == lead_name
-            or name in {"lead", "main"}
+            or name in {"team-lead", "main"}
         )
         if is_lead:
             role, kind, color = "lead", "lead", roster.color_for_role("lead")
@@ -1161,10 +1186,18 @@ def _build_meta(
         or _text(session_context.get("team_name"), 200)
         or (f"session-{session_id[:8]}" if session_id else "")
     )
-    lead_address = _text(seed.get("lead_address"), 200) or _text(
-        session_start.get("lead_address"), 200
-    )
-    cloud = bool(seed.get("cloud")) or bool(lead_address) or team_info.cloud
+    # The LATEST session_start that records a lead address decides: older
+    # starts may lack it, and compact/resume starts carry it again.
+    lead_address = _text(seed.get("lead_address"), 200)
+    if not lead_address:
+        for raw in reversed(events):
+            if raw.data.get("type") == "session_start":
+                lead_address = _text(raw.data.get("lead_address"), 200)
+                if lead_address:
+                    break
+    if not lead_address:
+        lead_address = _text(session_context.get("lead_address"), 200)
+    cloud = bool(seed.get("cloud")) or lead_address == "main" or team_info.cloud
 
     ended_at = _text(seed.get("ended_at"), 64) or _text(session_end.get("ts"), 64)
     started_at = _text(seed.get("started_at"), 64) or _text(session_start.get("ts"), 64)

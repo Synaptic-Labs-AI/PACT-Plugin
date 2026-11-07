@@ -960,3 +960,83 @@ class TestSessionContextIsAnTokenInput:
         (journal_path.parent / "pact-session-context.json").write_text('{"team_name": "t"}')
         after, _ = model.session_token(ref)
         assert after != before
+
+
+class TestCloudFollowsTheRealWriters:
+    """Cloud is lead_address == "main" or a roster file; the roster uses key k."""
+
+    @staticmethod
+    def _model(tmp_path, starts, *, team_files=None):
+        from visualizer import discovery, model
+
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, starts)
+        team_dir = root_dir / "teams" / "team-c"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        for name, text in (team_files or {}).items():
+            (team_dir / name).write_text(text)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        return model.build_model(discovery.find_session(roots, "proj", "s1"))
+
+    _LOCAL = {**_START, "team": "team-c", "lead_address": "team-lead"}
+
+    def test_a_local_start_with_a_config_less_team_dir_is_not_cloud(self, tmp_path):
+        payload = self._model(tmp_path, [self._LOCAL], team_files={"file-edits.json": "{}"})
+        assert payload["meta"]["cloud"] is False
+        assert all(agent["cloud"] is False for agent in payload["agents"])
+
+    def test_lead_address_main_is_cloud_and_names_the_lead(self, tmp_path):
+        payload = self._model(tmp_path, [{**self._LOCAL, "lead_address": "main"}])
+        assert payload["meta"]["cloud"] is True
+        leads = [agent for agent in payload["agents"] if agent["kind"] == "lead"]
+        assert [lead["name"] for lead in leads] == ["main"]
+
+    def test_the_latest_start_with_a_lead_address_decides(self, tmp_path):
+        old = {key: value for key, value in self._LOCAL.items() if key != "lead_address"}
+        payload = self._model(tmp_path, [old, {**old, "source": "resume", "lead_address": "main"}])
+        assert payload["meta"]["cloud"] is True
+
+    def test_roster_intents_under_key_k_form_the_crew(self, tmp_path):
+        roster_lines = "\n".join(json.dumps(record) for record in [
+            {"v": 1, "k": "intent", "tu": "toolu_1", "name": "coder-a", "type": "PACT:pact-backend-coder"},
+            {"v": 1, "k": "intent", "tu": "toolu_1", "name": "dup", "type": "x"},
+            {"v": 2, "k": "intent", "tu": "toolu_2", "name": "future-version", "type": "x"},
+            {"v": 1, "kind": "intent", "tu": "toolu_3", "name": "legacy-kind", "type": "x"},
+            {"v": 1, "k": "foreign", "kind": "intent", "tu": "toolu_4", "name": "not-intent"},
+            {"v": 1, "k": "bind", "tu": "toolu_1", "aid": "agent-1", "type": "x"},
+        ]) + "\n"
+        payload = self._model(tmp_path, [{**self._LOCAL, "lead_address": "main"}],
+                              team_files={"pact-roster.jsonl": roster_lines})
+        names = {agent["name"] for agent in payload["agents"]}
+        assert {"coder-a", "legacy-kind"} <= names
+        assert not names & {"dup", "future-version", "not-intent"}
+        from visualizer import roster
+
+        intents = roster.load_team(tmp_path / "root", "team-c").intents
+        assert [(seed.name, seed.agent_id) for seed in intents][:1] == [("coder-a", "agent-1")]
+
+    def test_a_roster_beside_a_config_is_not_read(self, tmp_path):
+        roster_lines = json.dumps({"v": 1, "k": "intent", "tu": "t", "name": "ghost", "type": "x"})
+        payload = self._model(
+            tmp_path, [self._LOCAL],
+            team_files={"config.json": json.dumps({"members": []}),
+                        "pact-roster.jsonl": roster_lines + "\n"},
+        )
+        assert "ghost" not in {agent["name"] for agent in payload["agents"]}
+
+    def test_a_team_lead_member_and_a_main_lead_address_are_one_lead(self, tmp_path):
+        config = json.dumps({"members": [
+            {"name": "team-lead", "agentType": "team-lead"},
+            {"name": "coder", "agentType": "PACT:pact-backend-coder"},
+        ]})
+        payload = self._model(
+            tmp_path,
+            [{**self._LOCAL, "lead_address": "main"},
+             {"type": "phase_transition", "phase": "CODE", "status": "started",
+              "agent": "team-lead"}],
+            team_files={"config.json": config},
+        )
+        leads = [agent for agent in payload["agents"] if agent["kind"] == "lead"]
+        assert [lead["name"] for lead in leads] == ["main"]
+        assert "team-lead" not in {agent["name"] for agent in payload["agents"]}
+        assert leads[0]["stats"]["events"] >= 1

@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+import visualizer_census as census
+
 from visualizer import classify, demo, discovery, journal, model, roster, settings
 
 UTC = timezone.utc
@@ -910,16 +912,16 @@ class TestRoster:
         root = make_root(tmp_path)
         team_dir = root / "teams" / "session-cloud"
         team_dir.mkdir(parents=True)
+        ts = "2026-11-01T10:00:00Z"
         lines = [
-            {"v": 1, "kind": "intent", "tu": "toolu_1", "name": "preparer",
-             "type": "PACT:pact-preparer"},
-            {"v": 1, "kind": "intent", "tu": "toolu_1", "name": "ignored-duplicate",
-             "type": "PACT:pact-preparer"},
-            {"v": 1, "kind": "intent", "tu": "toolu_2", "name": "architect",
-             "type": "pact-architect"},
-            {"v": 1, "kind": "bind", "tu": "toolu_1", "aid": "a123"},
+            census.roster_intent("toolu_1", "preparer", "PACT:pact-preparer", ts),
+            census.roster_intent("toolu_1", "ignored-duplicate", "PACT:pact-preparer", ts),
+            census.roster_intent("toolu_2", "architect", "pact-architect", ts),
+            census.roster_bind("toolu_1", "a123", "PACT:pact-preparer", ts),
+            census.roster_confirm("toolu_1", "a123", ts),
             "not json at all",
-            {"v": 1, "kind": "intent", "tu": "toolu_3", "name": "", "type": "x"},
+            {"v": 2, "k": "intent", "tu": "toolu_4", "name": "future-shape", "type": "x"},
+            {"v": 1, "k": "intent", "tu": "toolu_3", "name": "", "type": "x"},
         ]
         (team_dir / "pact-roster.jsonl").write_text(
             "\n".join(item if isinstance(item, str) else json.dumps(item) for item in lines) + "\n",
@@ -931,6 +933,7 @@ class TestRoster:
         assert [intent.name for intent in info.intents] == ["preparer", "architect"]
         assert all(intent.cloud for intent in info.intents)
         assert info.intents[0].role == "preparer"
+        assert info.intents[0].agent_id == "a123"
 
     def test_task_store_loaded_and_normalized(self, tmp_path):
         root = make_root(tmp_path)
@@ -996,6 +999,133 @@ class TestRoster:
         context = roster.read_session_context(session_dir)
         assert context["team_name"] == "session-abc"
         assert roster.read_session_context(tmp_path / "nope") == {}
+
+
+class TestCloudAndRoster:
+    """Cloud follows the real writers: a `main` lead address or a roster
+    file. A team directory without a config is an ordinary local run."""
+
+    def _run(self, root: Path, starts: list[dict]) -> Path:
+        events = starts + [census.phase_transition("2026-11-01T10:05:00Z", "CODE", "started")]
+        return write_journal(root, "proj", "sess-1", events)
+
+    def _meta(self, root: Path, tmp_path: Path) -> dict:
+        return build_basic_model(root, tmp_path)["meta"]
+
+    def test_a_local_run_with_a_team_lead_is_not_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z")])
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        assert self._meta(root, tmp_path)["cloud"] is False
+
+    def test_a_config_less_team_dir_is_not_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z")])
+        (root / "teams" / "session-abc12345" / "inboxes").mkdir(parents=True)
+        info = roster.load_team(root, "session-abc12345")
+        assert info.cloud is False
+        assert self._meta(root, tmp_path)["cloud"] is False
+
+    def test_an_older_start_without_a_lead_address_is_not_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z", lead_address=None)])
+        assert self._meta(root, tmp_path)["cloud"] is False
+
+    def test_a_later_start_naming_main_makes_the_run_cloud(self, tmp_path):
+        """The first start may predate lead addresses; a compact or resume
+        start appended later carries it."""
+        root = make_root(tmp_path)
+        self._run(root, [
+            census.session_start("2026-11-01T10:00:00Z", lead_address=None),
+            census.bare_session_end("2026-11-01T10:01:00Z"),
+            census.session_start("2026-11-01T10:02:00Z", source="compact",
+                                 lead_address=census.CLOUD_LEAD),
+        ])
+        assert self._meta(root, tmp_path)["cloud"] is True
+
+    def test_a_session_context_naming_main_makes_the_run_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        path = self._run(root, [census.session_start("2026-11-01T10:00:00Z", lead_address=None)])
+        (path.parent / "pact-session-context.json").write_text(
+            json.dumps({"team_name": "session-abc12345", "session_id": "sess-1",
+                        "project_dir": "/work/PACT-prompt", "plugin_root": "/p",
+                        "started_at": "2026-11-01T10:00:00Z", "lead_address": "main"}),
+            encoding="utf-8",
+        )
+        assert self._meta(root, tmp_path)["cloud"] is True
+
+    def test_a_roster_file_makes_the_run_cloud_and_supplies_the_crew(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z", lead_address=None)])
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [census.roster_intent("toolu_9", "architect", "PACT:pact-architect",
+                                  "2026-11-01T10:00:30Z")],
+        )
+        payload = build_basic_model(root, tmp_path)
+        assert payload["meta"]["cloud"] is True
+        assert "architect" in {agent["name"] for agent in payload["agents"]}
+
+    def test_a_config_beside_the_roster_keeps_the_config_crew(self, tmp_path):
+        """The hooks read the roster as the crew only when no config exists."""
+        root = make_root(tmp_path)
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [census.roster_intent("toolu_9", "architect", "PACT:pact-architect",
+                                  "2026-11-01T10:00:30Z")],
+        )
+        info = roster.load_team(root, "session-abc12345")
+        assert [member.name for member in info.members] == ["team-lead", "preparer"]
+        assert info.intents == []
+
+    def test_a_symlinked_roster_is_ignored(self, tmp_path):
+        root = make_root(tmp_path)
+        real = census.write_lines(
+            tmp_path / "elsewhere.jsonl",
+            [census.roster_intent("toolu_9", "architect", "pact-architect", "2026-11-01T10:00:30Z")],
+        )
+        team_dir = root / "teams" / "session-abc12345"
+        team_dir.mkdir(parents=True)
+        (team_dir / "pact-roster.jsonl").symlink_to(real)
+        info = roster.load_team(root, "session-abc12345")
+        assert info.cloud is False
+        assert info.intents == []
+
+    def test_a_legacy_kind_key_is_read_only_when_k_is_absent(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [
+                {"v": 1, "kind": "intent", "tu": "t1", "name": "legacy", "type": "x"},
+                {"v": 1, "k": "bind", "kind": "intent", "tu": "t2", "name": "not-an-intent",
+                 "type": "x", "aid": "a"},
+            ],
+        )
+        info = roster.load_team(root, "session-abc12345")
+        assert [intent.name for intent in info.intents] == ["legacy"]
+
+    def _leads(self, payload: dict) -> list[str]:
+        return [agent["name"] for agent in payload["agents"] if agent["kind"] == "lead"]
+
+    def test_a_local_lead_is_the_team_lead_member_once(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z")])
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        assert self._leads(build_basic_model(root, tmp_path)) == ["team-lead"]
+
+    def test_a_cloud_lead_is_main_once(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z",
+                                              lead_address=census.CLOUD_LEAD)])
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [census.roster_intent("toolu_9", "architect", "PACT:pact-architect",
+                                  "2026-11-01T10:00:30Z")],
+        )
+        payload = build_basic_model(root, tmp_path)
+        assert self._leads(payload) == ["main"]
+        assert payload["meta"]["cloud"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ never writes team, task or memory state.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,7 @@ class MemberSeed:
     cloud: bool = False
     kind: str = "specialist"
     source: str = "team-config"
+    agent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,9 +129,10 @@ class TeamInfo:
     Summary: ``name`` is the resolved team directory name ("" when unknown);
              ``members`` the local config members; ``intents`` the cloud roster
              spawn intents; ``tasks`` the task-store records; ``cloud`` is True
-             when the team directory exists without a config.json (the cloud
-             topology switch); ``config_present``/``roster_present`` are kept
-             for diagnostics and tests.
+             when ``teams/<team>/pact-roster.jsonl`` exists as a regular file
+             (a config-less team dir alone is what a local team leaves behind,
+             so it is never cloud); ``config_present``/``roster_present`` are
+             kept for diagnostics and tests.
     Used by: model, server, demo.
     """
 
@@ -249,9 +252,17 @@ def _member_from_config(entry: object) -> MemberSeed | None:
     )
 
 
+def _record_kind(record: object) -> str:
+    """A v1 roster record's kind: ``k``, else legacy ``kind``; "" otherwise."""
+    if not isinstance(record, dict) or record.get("v") != 1:
+        return ""
+    kind = record["k"] if "k" in record else record.get("kind")
+    return kind if isinstance(kind, str) else ""
+
+
 def _intent_from_record(record: object) -> MemberSeed | None:
     """Build a MemberSeed from one cloud roster ``intent`` record."""
-    if not isinstance(record, dict) or record.get("kind") != "intent":
+    if not isinstance(record, dict) or _record_kind(record) != "intent":
         return None
     name = as_text(record.get("name"), _NAME_CHARS) if isinstance(record.get("name"), str) else ""
     if not name:
@@ -271,31 +282,56 @@ def _intent_from_record(record: object) -> MemberSeed | None:
     )
 
 
-def _load_roster_intents(path: Path) -> tuple[list[MemberSeed], bool]:
-    """Parse the cloud roster's intent records; first record per tool_use_id wins."""
-    lines = _read_text_lines(path)
-    present = bool(lines)
-    intents: list[MemberSeed] = []
+def _load_roster_intents(path: Path) -> list[MemberSeed]:
+    """The cloud roster's crew: first ``intent`` per ``tu``, with its agent id.
+
+    Only ``v == 1`` records count. ``bind`` and ``confirm`` records attach
+    their ``aid`` to the intent with the same ``tu``.
+    """
+    intents: list[tuple[str, MemberSeed]] = []
+    agent_ids: dict[str, str] = {}
     seen_tool_use_ids: set[str] = set()
-    for line in lines:
-        if not line.strip() or len(intents) >= MAX_ROSTER_INTENTS:
+    for line in _read_text_lines(path):
+        if not line.strip():
             continue
         try:
             record = json.loads(line)
         except (json.JSONDecodeError, ValueError, RecursionError):
             continue
+        kind = _record_kind(record)
+        tool_use_id = record.get("tu") if isinstance(record, dict) else None
+        tool_use_id = tool_use_id if isinstance(tool_use_id, str) else ""
+        if kind in {"bind", "confirm"}:
+            agent_id = record.get("aid")
+            if tool_use_id and isinstance(agent_id, str) and agent_id:
+                agent_ids.setdefault(tool_use_id, as_text(agent_id, _NAME_CHARS))
+            continue
+        if len(intents) >= MAX_ROSTER_INTENTS:
+            continue
         seed = _intent_from_record(record)
         if seed is None:
             continue
-        tool_use_id = record.get("tu")
-        if isinstance(tool_use_id, str) and tool_use_id:
+        if tool_use_id:
             if tool_use_id in seen_tool_use_ids:
                 continue
             seen_tool_use_ids.add(tool_use_id)
-        if any(existing.name == seed.name for existing in intents):
+        if any(existing.name == seed.name for _, existing in intents):
             continue
-        intents.append(seed)
-    return intents, present
+        intents.append((tool_use_id, seed))
+    return [
+        MemberSeed(**{**seed.__dict__, "agent_id": agent_ids.get(tool_use_id, "")})
+        if tool_use_id in agent_ids
+        else seed
+        for tool_use_id, seed in intents
+    ]
+
+
+def _regular_file(path: Path) -> bool:
+    """True for a regular (non-symlink) file; never raises."""
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
 
 
 def _task_from_file(path: Path, payload: object) -> StoredTask | None:
@@ -400,14 +436,12 @@ def load_team(config_root: Path, team_name: str) -> TeamInfo:
                 seed = _member_from_config(entry)
                 if seed is not None:
                     info.members.append(seed)
-    intents, roster_present = (
-        _load_roster_intents(roster_path)
-        if contained(teams_dir, roster_path)
-        else ([], False)
-    )
-    info.intents = intents
-    info.roster_present = roster_present
-    info.cloud = team_dir_present and not info.config_present
+    info.roster_present = contained(teams_dir, roster_path) and _regular_file(roster_path)
+    # The hooks' switch: the roster is the crew only for a team whose dir
+    # holds no config.json at all (a config present means a local team).
+    if info.roster_present and not os.path.lexists(config_path):
+        info.intents = _load_roster_intents(roster_path)
+    info.cloud = info.roster_present
     # Load the task store even when the team directory itself is gone: the
     # platform reaper can remove teams/ before tasks/, and losing the tasks
     # because of an unrelated directory is silent data loss.

@@ -410,6 +410,20 @@ Field rules:
 - `meta.status` ∈ `live|paused|refreshed|ended`; `meta.ended_by` ∈
   `session_end|idle|null` (null while live); `meta.activity_at` is the activity
   clock as ISO UTC, or null.
+- `meta.cloud` is true when the LATEST `session_start` that carries a
+  `lead_address` has `"main"` (the session context's `lead_address` decides
+  only when no start carries one), or when `teams/<team>/pact-roster.jsonl`
+  exists as a regular file the containment rule accepts. A cloud run resumed
+  locally is a local run. `"team-lead"` or no address means local, and a team
+  directory without `config.json` is never cloud on its own.
+- Cloud crew: when the team directory holds `pact-roster.jsonl` and no
+  `config.json`, the crew comes from the roster's `v: 1` records. The kind is
+  read from `k` (legacy `kind` only when `k` is absent); the first `intent`
+  per `tu` names the agent, and `bind`/`confirm` attach its `aid`.
+- One lead: the run has exactly one lead entry. It is named by `lead_address`
+  when that is `team-lead` or `main`. A config member with `agentType`
+  `team-lead`, or any member or event named `team-lead`, `main` or the
+  lead address, folds onto that entry.
 - `wrapup` is the LATEST `session_end` whose `source` is `wrap-up`, or `null`.
   A bare `session_end` (the SessionEnd hook's record of a process exit) is never
   a wrap-up.

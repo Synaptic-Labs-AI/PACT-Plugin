@@ -452,7 +452,7 @@ def _render_session_start(
         _basename(data.get("project_dir")), 120
     )
     team = as_text(context.get("team"), 120) or as_text(data.get("team"), 120)
-    cloud = bool(context.get("cloud")) or bool(as_text(data.get("lead_address"), 200))
+    cloud = bool(context.get("cloud")) or as_text(data.get("lead_address"), 200) == "main"
     title = f"Run started · {project}" if project else "Run started"
     parts = []
     if team:
