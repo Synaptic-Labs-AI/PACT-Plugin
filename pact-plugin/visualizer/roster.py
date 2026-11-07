@@ -1,0 +1,562 @@
+"""Location: pact-plugin/visualizer/roster.py
+Summary: Read-only adapters for the non-journal PACT state the visualizer can
+         join against: the team config (teams/<team>/config.json), the cloud
+         roster intents (teams/<team>/pact-roster.jsonl), the task store
+         (tasks/<team>/*.json), and the session context file that names the
+         team/project for a session directory.
+Used by: visualizer.model (agent/task derivation), visualizer.server, tests.
+
+Every loader is total: a missing, malformed, oversized or unsafe file reads as
+"nothing here" and never raises. The visualizer only READS these locations; it
+never writes team, task or memory state.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .classify import as_text
+from .discovery import contained, valid_component
+from .settings import (
+    ROSTER_FILENAME,
+    TASKS_DIRNAME,
+    TEAMS_DIRNAME,
+    MAX_FIELD_CHARS,
+    TEAM_CONFIG_FILENAME,
+    normalize_variety,
+)
+
+# Bound for names, agent types, owners and other short identity strings.
+_NAME_CHARS = 200
+
+MAX_STATE_FILE_BYTES = 512 * 1024
+MAX_TEAM_MEMBERS = 200
+MAX_ROSTER_INTENTS = 400
+MAX_STORED_TASKS = 600
+
+# Role -> sprite/crew colour token. Mirrors the palette names in the contract
+# tokens and the dev-demo exemplar so the stage/crew colour the same agent the
+# same way from /api/demo and from a real journal.
+ROLE_COLORS: dict[str, str] = {
+    "lead": "yellow",
+    "preparer": "green",
+    "secretary": "red",
+    "architect": "blue",
+    "auditor": "purple",
+    "backend-coder": "purple",
+    "frontend-coder": "pink",
+    "database-engineer": "teal",
+    "devops-engineer": "blue",
+    "test-engineer": "orange",
+    "qa-engineer": "orange",
+    "security-engineer": "red",
+    "n8n": "cyan",
+}
+
+_STATUS_MAP = {
+    "in_progress": "active",
+    "in-progress": "active",
+    "inprogress": "active",
+    "in progress": "active",
+    "pending": "pending",
+    "completed": "completed",
+    "complete": "completed",
+    "done": "completed",
+    "failed": "failed",
+    "blocked": "blocked",
+    "deleted": "deleted",
+    "handoff": "handoff",
+    "dispatched": "dispatched",
+    "active": "active",
+}
+
+
+@dataclass(frozen=True)
+class MemberSeed:
+    """A declared team member or cloud rosters intent.
+
+    Location: roster.MemberSeed.
+    Summary: ``name`` is the teammate's display name; ``role``/``agent_type``
+             come from the declared spawn type (``PACT:pact-backend-coder`` ->
+             role ``backend-coder``); ``cloud`` marks roster-derived members,
+             ``model`` stays empty when the declaration does not carry one.
+    Used by: model.derive_agents, demo.
+    """
+
+    name: str
+    role: str = ""
+    agent_type: str = ""
+    color: str = ""
+    model: str = ""
+    cloud: bool = False
+    kind: str = "specialist"
+    source: str = "team-config"
+    agent_id: str = ""
+
+
+@dataclass(frozen=True)
+class StoredTask:
+    """One task-store record (tasks/<team>/<id>.json).
+
+    Location: roster.StoredTask.
+    Summary: Normalized view of the platform task file: id/subject/owner,
+             the platform status (pending/in_progress/completed/deleted, or
+             ""), optional variety stamp, the flags the model needs to enrich
+             derived tasks, the signal fields of a blocker/algedonic task, the
+             ids it ``blocks`` and the file mtime.
+    Used by: model.derive_tasks, model.derive_alerts, tests.
+    """
+
+    id: str
+    subject: str = ""
+    owner: str = ""
+    phase: str = ""
+    status: str = ""
+    kind: str = "task"
+    variety: dict | None = None
+    teachback: bool = False
+    handoff: bool = False
+    updated_at: str = ""
+    level: str = ""
+    category: str = ""
+    resolution: str | None = None
+    blocks: tuple[str, ...] = ()
+
+
+@dataclass
+class TeamInfo:
+    """Everything the visualizer knows about a session's team, or an empty stub.
+
+    Location: roster.TeamInfo.
+    Summary: ``name`` is the resolved team directory name ("" when unknown);
+             ``members`` the local config members; ``intents`` the cloud roster
+             spawn intents; ``tasks`` the task-store records; ``cloud`` is True
+             when ``teams/<team>/pact-roster.jsonl`` exists as a regular file
+             (a config-less team dir alone is what a local team leaves behind,
+             so it is never cloud); ``config_present``/``roster_present`` are
+             kept for diagnostics and tests.
+    Used by: model, server, demo.
+    """
+
+    name: str = ""
+    members: list[MemberSeed] = field(default_factory=list)
+    intents: list[MemberSeed] = field(default_factory=list)
+    tasks: list[StoredTask] = field(default_factory=list)
+    cloud: bool = False
+    config_present: bool = False
+    roster_present: bool = False
+    team_dir_present: bool = False
+
+    @property
+    def known(self) -> bool:
+        """True when a team name resolved to an existing team on disk."""
+        return bool(self.name) and (
+            self.team_dir_present
+            or self.config_present
+            or self.roster_present
+            or bool(self.tasks)
+        )
+
+
+def _read_json(path: Path, max_bytes: int = MAX_STATE_FILE_BYTES) -> Any:
+    """Read one JSON file with a size cap; None on any failure."""
+    try:
+        if path.is_symlink():
+            return None
+        stat = path.stat()
+        if stat.st_size > max_bytes or not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return json.loads(text)
+    except (OSError, json.JSONDecodeError, ValueError, RecursionError):
+        return None
+
+
+def _read_text_lines(path: Path, max_bytes: int = MAX_STATE_FILE_BYTES) -> list[str]:
+    """Read a small text file's lines, or [] on any failure."""
+    try:
+        if path.is_symlink():
+            return []
+        stat = path.stat()
+        if stat.st_size > max_bytes or not path.is_file():
+            return []
+        data = path.read_bytes()
+    except OSError:
+        return []
+    if len(data) > max_bytes:
+        return []
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, ValueError):
+        return []
+    return text.splitlines()
+
+
+def strip_agent_type(agent_type: str) -> str:
+    """Normalize a declared agent type to its bare role spelling.
+
+    Location: roster.strip_agent_type.
+    Summary: Strips a ``PACT:`` namespace and a ``pact-`` role prefix:
+             ``PACT:pact-backend-coder`` -> ``backend-coder``.
+    Used by: roster loaders, model, tests.
+    """
+    text = agent_type.strip()
+    if text.startswith("PACT:"):
+        text = text[len("PACT:"):]
+    if text.startswith("pact-"):
+        text = text[len("pact-"):]
+    return text
+
+
+def role_from_agent_type(agent_type: str, fallback: str = "") -> str:
+    """The display role for a declared agent type (or the fallback)."""
+    role = strip_agent_type(agent_type)
+    return role or fallback
+
+
+def color_for_role(role: str) -> str:
+    """Palette token for a role, defaulting to the neutral ``slate``."""
+    return ROLE_COLORS.get(role.lower(), "slate")
+
+
+def normalize_status(value: object) -> str:
+    """Map a platform task status spelling to the visualizer's vocabulary."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    return _STATUS_MAP.get(text, text)
+
+
+def _member_from_config(entry: object) -> MemberSeed | None:
+    """Build a MemberSeed from one config.json members[] entry."""
+    if not isinstance(entry, dict):
+        return None
+    name = as_text(entry.get("name"), _NAME_CHARS) if isinstance(entry.get("name"), str) else ""
+    if not name:
+        return None
+    agent_type_text = (
+        as_text(entry.get("agentType"), _NAME_CHARS)
+        if isinstance(entry.get("agentType"), str)
+        else ""
+    )
+    role = role_from_agent_type(agent_type_text, fallback=name)
+    color = as_text(entry.get("color"), 40) if isinstance(entry.get("color"), str) else ""
+    model = as_text(entry.get("model"), _NAME_CHARS) if isinstance(entry.get("model"), str) else ""
+    return MemberSeed(
+        name=name,
+        role=role,
+        agent_type=agent_type_text,
+        color=color or color_for_role(role),
+        model=model,
+        cloud=False,
+        kind="specialist",
+        source="team-config",
+    )
+
+
+def _record_kind(record: object) -> str:
+    """A v1 roster record's kind: ``k``, else legacy ``kind``; "" otherwise."""
+    if not isinstance(record, dict) or record.get("v") != 1:
+        return ""
+    kind = record["k"] if "k" in record else record.get("kind")
+    return kind if isinstance(kind, str) else ""
+
+
+def _intent_from_record(record: object) -> MemberSeed | None:
+    """Build a MemberSeed from one cloud roster ``intent`` record."""
+    if not isinstance(record, dict) or _record_kind(record) != "intent":
+        return None
+    name = as_text(record.get("name"), _NAME_CHARS) if isinstance(record.get("name"), str) else ""
+    if not name:
+        return None
+    declared_type = record.get("type")
+    type_text = as_text(declared_type, _NAME_CHARS) if isinstance(declared_type, str) else ""
+    role = role_from_agent_type(type_text, fallback=name)
+    return MemberSeed(
+        name=name,
+        role=role,
+        agent_type=type_text,
+        color=color_for_role(role),
+        model="",
+        cloud=True,
+        kind="specialist",
+        source="cloud-roster",
+    )
+
+
+def _load_roster_intents(path: Path) -> list[MemberSeed]:
+    """The cloud roster's crew: first ``intent`` per ``tu``, with its agent id.
+
+    Only ``v == 1`` records count. ``bind`` and ``confirm`` records attach
+    their ``aid`` to the intent with the same ``tu``.
+    """
+    intents: list[tuple[str, MemberSeed]] = []
+    agent_ids: dict[str, str] = {}
+    seen_tool_use_ids: set[str] = set()
+    for line in _read_text_lines(path):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            continue
+        kind = _record_kind(record)
+        tool_use_id = record.get("tu") if isinstance(record, dict) else None
+        tool_use_id = tool_use_id if isinstance(tool_use_id, str) else ""
+        if kind in {"bind", "confirm"}:
+            agent_id = record.get("aid")
+            if tool_use_id and isinstance(agent_id, str) and agent_id:
+                agent_ids.setdefault(tool_use_id, as_text(agent_id, _NAME_CHARS))
+            continue
+        if len(intents) >= MAX_ROSTER_INTENTS:
+            continue
+        seed = _intent_from_record(record)
+        if seed is None:
+            continue
+        if tool_use_id:
+            if tool_use_id in seen_tool_use_ids:
+                continue
+            seen_tool_use_ids.add(tool_use_id)
+        if any(existing.name == seed.name for _, existing in intents):
+            continue
+        intents.append((tool_use_id, seed))
+    return [
+        MemberSeed(**{**seed.__dict__, "agent_id": agent_ids.get(tool_use_id, "")})
+        if tool_use_id in agent_ids
+        else seed
+        for tool_use_id, seed in intents
+    ]
+
+
+def _regular_file(path: Path) -> bool:
+    """True for a regular (non-symlink) file; never raises."""
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
+
+
+_PLATFORM_STATUSES = frozenset({"pending", "in_progress", "completed", "deleted"})
+
+
+def resolution_text(value: object) -> str | None:
+    """A signal task's resolution as bounded text: a str as is, a dict as JSON."""
+    if isinstance(value, str):
+        return as_text(value, MAX_FIELD_CHARS) or None
+    if isinstance(value, (dict, list)) and value:
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return None
+        return as_text(encoded, MAX_FIELD_CHARS) or None
+    return None
+
+
+def _task_from_file(path: Path, payload: object) -> StoredTask | None:
+    """Build a StoredTask from one task-store JSON file."""
+    if not isinstance(payload, dict):
+        return None
+    raw_id = payload.get("id")
+    if raw_id is None:
+        raw_id = path.stem
+    task_id = str(raw_id).strip()
+    if not task_id:
+        return None
+    metadata = payload.get("metadata")
+    meta = metadata if isinstance(metadata, dict) else {}
+    subject = payload.get("subject")
+    owner = payload.get("owner")
+    variety = normalize_variety(meta.get("variety"))
+    teachback = bool(meta.get("teachback_submit")) or bool(meta.get("teachback"))
+    handoff = bool(meta.get("handoff"))
+    completion_type = meta.get("type")
+    kind = as_text(completion_type, 40) if isinstance(completion_type, str) else ""
+    status = payload.get("status")
+    status_text = status.strip().lower() if isinstance(status, str) else ""
+    blocks = payload.get("blocks")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return StoredTask(
+        id=as_text(task_id, 60),
+        subject=as_text(subject, MAX_FIELD_CHARS) if isinstance(subject, str) else "",
+        owner=as_text(owner, _NAME_CHARS) if isinstance(owner, str) else "",
+        status=status_text if status_text in _PLATFORM_STATUSES else "",
+        kind=kind or "task",
+        variety=variety,
+        teachback=teachback,
+        handoff=handoff,
+        updated_at=_iso(mtime),
+        level=as_text(meta.get("level"), 40).lower(),
+        category=as_text(meta.get("category"), 80),
+        resolution=resolution_text(meta.get("resolution")),
+        blocks=tuple(
+            as_text(item, 60) for item in blocks[:MAX_STORED_TASKS]
+            if isinstance(item, (str, int)) and not isinstance(item, bool)
+        ) if isinstance(blocks, list) else (),
+    )
+
+
+def _iso(mtime: float) -> str:
+    """An mtime as ``YYYY-MM-DDTHH:MM:SSZ`` ("" when unknown)."""
+    if not mtime:
+        return ""
+    try:
+        return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def task_order_key(task_id: str) -> tuple[int, int, str]:
+    """Numeric ids in numeric order, then any other id in text order."""
+    return (0, int(task_id), "") if task_id.isdigit() else (1, 0, task_id)
+
+
+def task_files(tasks_root: Path, team_name: str) -> list[Path]:
+    """The team's task files the viewer reads: numeric order, NEWEST kept.
+
+    Location: roster.task_files.
+    Summary: Regular ``*.json`` files ``discovery.contained`` accepts under
+             ``<root>/tasks/<team>/``, sorted by task_order_key; past
+             MAX_STORED_TASKS the highest ids (the newest tasks) are kept.
+             The task loader and the activity clock share this one selection,
+             so an edit to any task the board shows refreshes the clock.
+    Used by: _load_tasks, activity_mtime_ns.
+    """
+    tasks_dir = tasks_root / team_name
+    if not valid_component(team_name) or not contained(tasks_root, tasks_dir):
+        return []
+    try:
+        entries = list(tasks_dir.iterdir())
+    except OSError:
+        return []
+    selected: list[Path] = []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.suffix != ".json":
+            continue
+        if not valid_component(entry.stem) or not contained(tasks_root, entry):
+            continue
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        selected.append(entry)
+    selected.sort(key=lambda entry: task_order_key(entry.stem))
+    return selected[-MAX_STORED_TASKS:]
+
+
+def _load_tasks(tasks_root: Path, team_name: str) -> list[StoredTask]:
+    """Read the files task_files selects, in its order."""
+    tasks: list[StoredTask] = []
+    for entry in task_files(tasks_root, team_name):
+        task = _task_from_file(entry, _read_json(entry))
+        if task is not None:
+            tasks.append(task)
+    return tasks
+
+
+def load_team(config_root: Path, team_name: str) -> TeamInfo:
+    """Load the team config, cloud roster intents and task store for a team.
+
+    Location: roster.load_team.
+    Summary: Resolves ``<root>/teams/<team>/config.json``,
+             ``<root>/teams/<team>/pact-roster.jsonl`` and
+             ``<root>/tasks/<team>/*.json``. Invalid team names and missing
+             files yield an empty TeamInfo; ``cloud`` is set when the team
+             directory exists but has no config.json (the same switch
+             hooks/shared/cloud_roster.py uses). Never raises.
+    Used by: model.build_model, tests.
+    """
+    info = TeamInfo(name=team_name if isinstance(team_name, str) else "")
+    if not info.name or not valid_component(info.name):
+        return TeamInfo()
+    teams_dir = Path(config_root) / TEAMS_DIRNAME
+    team_dir = teams_dir / info.name
+    try:
+        team_dir_present = contained(teams_dir, team_dir) and team_dir.is_dir()
+    except OSError:
+        team_dir_present = False
+    config_path = team_dir / TEAM_CONFIG_FILENAME
+    roster_path = team_dir / ROSTER_FILENAME
+    config = _read_json(config_path) if contained(teams_dir, config_path) else None
+    info.config_present = isinstance(config, dict)
+    info.team_dir_present = bool(team_dir_present)
+    if isinstance(config, dict):
+        members_raw = config.get("members")
+        if isinstance(members_raw, list):
+            for entry in members_raw[:MAX_TEAM_MEMBERS]:
+                seed = _member_from_config(entry)
+                if seed is not None:
+                    info.members.append(seed)
+    info.roster_present = contained(teams_dir, roster_path) and _regular_file(roster_path)
+    # The hooks' switch: the roster is the crew only for a team whose dir
+    # holds no config.json at all (a config present means a local team).
+    if info.roster_present and not os.path.lexists(config_path):
+        info.intents = _load_roster_intents(roster_path)
+    info.cloud = info.roster_present
+    # Load the task store even when the team directory itself is gone: the
+    # platform reaper can remove teams/ before tasks/, and losing the tasks
+    # because of an unrelated directory is silent data loss.
+    info.tasks = _load_tasks(Path(config_root) / TASKS_DIRNAME, info.name)
+    return info
+
+
+def _mtime_ns(path: Path) -> int:
+    """A path's mtime in ns, or 0 when it cannot be stat'd."""
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+def activity_mtime_ns(config_root: Path, team_name: str) -> int:
+    """Newest mtime (ns) among a team's task and team files, or 0.
+
+    Location: roster.activity_mtime_ns.
+    Summary: The run's activity clock beyond its journal: ``tasks/<team>/``
+             and each file task_files selects (the same set the board reads),
+             ``teams/<team>/config.json`` and ``teams/<team>/pact-roster.jsonl``.
+             Teammates update task files while the lead's journal is quiet,
+             so a run stays live while its team works. Only paths
+             ``discovery.contained`` accepts count. Never raises.
+    Used by: model (run status, ETag token, session list).
+    """
+    if not isinstance(team_name, str) or not valid_component(team_name):
+        return 0
+    root = Path(config_root)
+    newest = 0
+    teams_dir = root / TEAMS_DIRNAME
+    for path in (
+        teams_dir / team_name / TEAM_CONFIG_FILENAME,
+        teams_dir / team_name / ROSTER_FILENAME,
+    ):
+        if contained(teams_dir, path):
+            newest = max(newest, _mtime_ns(path))
+    tasks_root = root / TASKS_DIRNAME
+    tasks_dir = tasks_root / team_name
+    if not contained(tasks_root, tasks_dir):
+        return newest
+    newest = max(newest, _mtime_ns(tasks_dir))
+    for entry in task_files(tasks_root, team_name):
+        newest = max(newest, _mtime_ns(entry))
+    return newest
+
+
+def read_session_context(session_dir: Path) -> dict:
+    """Read a session directory's pact-session-context.json, or {}.
+
+    Location: roster.read_session_context.
+    Summary: The context file is the frame-independent record of
+             project_dir/team_name for a session; it is used only to resolve
+             the team whose config/tasks should be joined. Never raises.
+    Used by: model.build_model.
+    """
+    payload = _read_json(Path(session_dir) / "pact-session-context.json")
+    return payload if isinstance(payload, dict) else {}

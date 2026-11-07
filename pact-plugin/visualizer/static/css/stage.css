@@ -1,0 +1,63 @@
+/* PACT Mission Control — stage-owned chrome.
+ *
+ * base.css owns the stage shell, the canvas box and the caption typography;
+ * this file adds only the diorama-frame details that belong to the stage, so
+ * it never competes with base.css or panels.css.
+ */
+
+#stage {
+  /* Keep the 16-bit look: the canvas is laid out in logical pixels and never
+   * wants bilinear filtering when the browser scales it. */
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: manipulation;
+}
+
+/* Corner brackets + a faint camera glow over the floor. base.css already
+ * paints the vignette with #stage-frame::before; this is a lighter overlay. */
+#stage-frame::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.3;
+  background:
+    linear-gradient(var(--accent), var(--accent)) left top / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) left top / 2px 16px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right top / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right top / 2px 16px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) left bottom / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) left bottom / 2px 16px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right bottom / 16px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right bottom / 2px 16px no-repeat;
+}
+
+/* The caption gets a stage tick before the run summary. */
+#stage-shell .stage-caption::before {
+  content: "▸";
+  margin-right: 6px;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* Stage-specific caption accent: keep it readable when the summary is long. */
+#stage-shell .stage-caption {
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* On narrow screens shrink the camera brackets so they do not crowd the view. */
+@media (max-width: 1180px) {
+  #stage-frame::after {
+    inset: 6px;
+    opacity: 0.22;
+    background-size:
+      12px 2px, 2px 12px, 12px 2px, 2px 12px,
+      12px 2px, 2px 12px, 12px 2px, 2px 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #stage-frame::after { opacity: 0.2; }
+}

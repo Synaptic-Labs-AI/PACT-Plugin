@@ -18,6 +18,64 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.9.0: PACT Mission Control — a local, read-only run dashboard
+
+### Summary
+
+PACT Mission Control turns the session journal into a live control room: a loopback-only, stdlib-only Python server projects each run's phases, crew, dispatches, handoffs, commits, gates, findings, checkpoints, alerts, and wrap-up record into a no-build pixel-art dashboard. It adds no model calls and no external services, and it is reachable two ways: the `/PACT:visualize` command inside a Claude Code turn, or the `pact-plugin/bin/pact-viz` launcher with no model in the loop.
+
+### What landed
+
+**Launching and selecting a run**
+
+- The `/PACT:visualize` command (demo, live, project and stop modes) and the `pact-plugin/bin/pact-viz` launcher drive the same server. The command validates a `<project>` argument against `[A-Za-z0-9._-]` and single-quotes it before launching anything, passes this session's project directory and session id, and reports the keyed URL and an absolute `Stop:` command.
+- One server per config root serves every session. `--demo`, `--project`, `--project-dir` (the hooks' slug of a directory) and `--session` choose what the printed URL opens rather than what the server serves, so any launch reuses a running server. An instance from another plugin build is replaced; reuse is refused only for different roots or an explicit different port. The CLI offers `--stop`, `--status`, `--list` and `--root`, and refuses an interpreter older than Python 3.12.
+- The launcher runs Python with `-P` and drops empty `PYTHONPATH` entries, so a `visualizer/` package or a top-level `json.py` in the directory it is started from cannot replace the plugin's code or the standard library, unless the caller's own `PYTHONPATH` names that directory.
+- A deterministic training simulation at `/api/demo` covers all four phases, a full crew with reviewers, review findings and remediation, gate advisories, an algedonic alert and a merged wrap-up.
+
+**Security and the local machine**
+
+- A per-launch key guards the API. Every request must carry it in the `X-PACT-Key` header (401 otherwise, health included). The page receives it only in the URL fragment, and `--open` goes through a private redirect file, so the key never appears in a process list. Stop and reuse confirm the instance with the key, its pid and its process start time before signalling.
+- Redaction is unconditional and server-side. Credential-shaped values and credential-named fields in journals, handoffs, task records and raw payloads reach the page as `[redacted]`. Structured handoff values are redacted leaf by leaf, keys included, before they are encoded as JSON.
+- The server binds `127.0.0.1` only and checks the Host header strictly, so a DNS-rebinding page cannot read a run's journal. It serves only the page and its allowlisted assets, sends CSP, `no-store`, `nosniff`, no-referrer and same-origin CORP/COOP headers on every response, refuses HTTP/0.9, and answers HEAD for static files.
+- The server bounds its work: at most two model builds at once, a small cache of encoded bodies, an incremental parse that reads only appended journal bytes, and a 32-connection cap that evicts the oldest connection not serving a keyed request, so idle or unkeyed sockets cannot lock out the key holder.
+- One containment rule decides what is listed and read. A symlinked `pact-sessions/`, `teams/` or `tasks/` directory is followed; any symlink below it is skipped, and listing, fetch and the roster loaders apply the same rule.
+- The CLI changes nothing it does not own and never hangs:
+  - An existing `--state-dir` is not chmod-ed; a symlinked, foreign-owned or world-writable one is refused, and a group-writable one gets a warning.
+  - State files are opened without blocking, and one that is not a private regular file of the user is ignored with a warning and never reused or signalled from.
+  - Launches share one server through a 5-second launch lock.
+  - `--open` is skipped when headless and waits at most 3 s.
+  - A stop on a live but silent server keeps its record, and `--stop` refuses an untrusted record instead of deleting it.
+  - The launch lock must be the user's own.
+  - An early child exit or an odd `--root` gets a clear message.
+  - `--list` and `--status` strip terminal control characters, and `--list | head` exits quietly.
+
+**Reading the real writers**
+
+- The `visualizer` package reads journals tolerantly (malformed or partial lines are skipped with bounded warnings) and builds phases, crew, tasks, handoffs, gates, variety, metrics and the debrief from one pipeline shared by real sessions and the demo, served through four JSON routes.
+- One run-status rule serves the session list and the run view. A run is ended by its own `session_end` only when that is the newest lifecycle event, so a resumed or compacted session reads live again. Otherwise an activity clock over the journal and the team's task and team files decides, so a quiet or crashed run turns ended. Only a `session_end` with `source=wrap-up` counts as a wrap-up.
+- The ETag covers every input the run view depends on (journal, task and team files, derived status, build) and is answered from file stats alone. The page keeps polling an open run, about every 1.2 s while live and every 10 s otherwise, and keeps the cursor on the same event across polls.
+- Cloud runs are detected from the latest `session_start` lead address (`main`) or a cloud roster file, never from a team directory without `config.json`. Cloud crews come from the roster's `k` records, and every spelling of the lead folds onto one lead entry.
+- The task board follows the task store. Reused task ids show as separate cards keyed by id and occupant, ordered numerically, with the newest kept under the cap and blocker and algedonic cards always kept. Status is pending, active, handoff or completed, and a deleted task drops its card. A teachback gate is its own card, completed by its acknowledgement, and never marks the work task active. Blocker and algedonic tasks become the run's alerts, with their level, category and resolution.
+- Events use the writers' own fields: review findings, dispatch decisions, dispatch sites and teachback acks name their actor, a review dispatch names its reviewers, pin markers, commit notes and paused or refreshed worktrees are shown, a bare process-exit `session_end` is a session event rather than a PR mark, and each event carries a `phase_family` for the stage rooms, a REVIEW family included.
+- Each phase lists every pass it ran in `phases.items[].runs`; a repeated start or end marker is ignored rather than counted as a pass.
+- Handoff fields and config roots resolve as the hooks resolve them: an empty canonical field falls through to its legacy alias, structured values render as compact JSON, and a `~user/…` root is taken literally.
+- Caps keep the newest entries and say so in `truncated_by`. A journal over 64 MiB is read from its last 64 MiB. The session list reports its `total`, hides trivial headless sessions unless asked (`all=1`), and shows each project's original name and any label collision.
+
+**The page**
+
+- The stage reads the run at the replay cursor: lifecycle, wrap-up, phase passes and crew placement, with reviewers on the review deck. It detects new events by journal sequence, so live animation continues past the 6,000-event window. SHIPPED marks only a wrap-up, and replay never shows the final wrap-up early. The run card's wrap-up pill follows the cursor by the same rule. The stage is the only writer of its caption, which says so when no run is open.
+- The timeline draws one band per phase pass (`run N`), and the mission clock starts at the first event shown when the run's start was cut.
+- Everything the canvas shows is also in the DOM. The stage's accessible label carries the review-deck and standby-lounge counts (`N on the review deck, M in the standby lounge.`), so canvas text is decorative.
+- The panels use the writers' vocabulary: findings sort in the reviewers' severity order (blocking, high, medium, minor, suggestion, low, nitpick, nit, future, info, unknown last) with a chip style for each, a wrap-up without a PR reads `NO PR`, and pin events show under the SESSION filter and in the timeline's ops lane. Labels say what is shown: the raw payload is a trimmed, redacted copy of the journal event, the variety-history chart has a short summary label, and achievement toasts use the achievement style. An error banner names the HTTP status of a non-JSON response.
+- When the run list cannot be read, the fallback demo keeps the error banner and its retry, and a failure of the demo itself is added to that banner.
+- Crew sprites match roles on word boundaries, so a name like `latest-bot` does not draw the test-engineer sprite.
+- Accessibility and comfort: reduced motion takes effect at once and holds the tower beacon steady, no blink changes more than 3 times a second, muted rows keep readable contrast, a saved sound preference resumes on the first gesture, the variety charts redraw on resize, and achievements unlock only by the rule their name states.
+
+### Why
+
+PACT already writes a complete append-only journal of every run, but the only way to consume it was to read the JSONL or inspect task files one by one. Mission Control is a read-only projection of data PACT already owns, so a run becomes legible while it is happening and reviewable after the fact, without changing how the run works.
+
 ## v4.8.28: certify the full-suite run record under pytest-xdist
 
 ### Summary

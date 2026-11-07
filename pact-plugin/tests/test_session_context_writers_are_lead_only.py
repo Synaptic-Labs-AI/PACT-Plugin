@@ -6,8 +6,9 @@ recovered from it. So a writer that runs for a teammate or a no-role session
 would let that session be treated as the lead. Two pins keep every writer
 lead-gated:
 
-- CENSUS, over the shipped Python under hooks/, skills/, scripts/, bin/ and
-  telegram/ (plus a text scan of their non-Python, non-markdown files). Each
+- CENSUS, over the shipped Python under hooks/, skills/, scripts/, bin/,
+  telegram/ and visualizer/ (plus a text scan of their non-Python,
+  non-markdown files). Each
   scan counts every occurrence per site and is compared with a known table of
   counts, so a new site, or a new occurrence at a known site, fails with
   instructions: references to the write APIs (a call, a functools.partial or
@@ -50,7 +51,7 @@ import shared.pact_context as pact_context  # noqa: E402
 from shared.pact_context import _build_session_path, project_slug  # noqa: E402
 
 _PLUGIN = Path(__file__).resolve().parent.parent
-_ROOTS = ("hooks", "skills", "scripts", "bin", "telegram")
+_ROOTS = ("hooks", "skills", "scripts", "bin", "telegram", "visualizer")
 FILENAME = "pact-session-context.json"
 _WRITE_APIS = frozenset({"persist_context", "write_context"})
 _PATH_BUILDER = "build_context_cache"
@@ -148,6 +149,10 @@ KNOWN_NAME_SITES = Counter({
     ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 1,       # read
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
     ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
+    # The visualizer reads the session context for project/team labels only;
+    # it is read-only over PACT state (its sole write is its own state file).
+    ("visualizer/roster.py", "read_session_context"): 1,  # read
+    ("visualizer/model.py", "session_activity_ns"): 1,  # read (activity clock mtime)
 })
 
 # (file, function, call): count of relocations in a function that derives a

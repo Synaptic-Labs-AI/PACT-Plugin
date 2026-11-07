@@ -1,0 +1,2661 @@
+{
+ "ok": true,
+ "version": "demo",
+ "etag": "demo-v1",
+ "source": {
+  "kind": "demo",
+  "root": "demo",
+  "slug": "training-simulation",
+  "session_id": "demo",
+  "journal": "",
+  "mtime": 0,
+  "size": 0
+ },
+ "meta": {
+  "project": "PACT-Demo",
+  "project_dir": "/Users/demo/Sites/pact-demo",
+  "team": "session-demo01",
+  "started_at": "2026-11-02T23:00:00Z",
+  "ended_at": "2026-11-02T23:46:00Z",
+  "status": "ended",
+  "ended_by": "session_end",
+  "activity_at": "2026-11-02T23:00:00Z",
+  "duration_s": 2760,
+  "run_kind": "orchestrate",
+  "cloud": false,
+  "lead_address": "",
+  "event_count": 62,
+  "warnings": []
+ },
+ "phases": {
+  "order": [
+   "PREPARE",
+   "ARCHITECT",
+   "CODE",
+   "TEST"
+  ],
+  "current": "TEST",
+  "completed": [
+   "PREPARE",
+   "ARCHITECT",
+   "CODE",
+   "TEST"
+  ],
+  "pending": [],
+  "items": [
+   {
+    "name": "PREPARE",
+    "family": "PREPARE",
+    "status": "completed",
+    "started_seq": 1,
+    "ended_seq": 12,
+    "started_at": "2026-11-02T23:00:00Z",
+    "ended_at": "2026-11-02T23:07:00Z",
+    "run": 1,
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 1,
+      "ended_seq": 12,
+      "started_at": "2026-11-02T23:00:00Z",
+      "ended_at": "2026-11-02T23:07:00Z",
+      "status": "completed"
+     }
+    ]
+   },
+   {
+    "name": "ARCHITECT",
+    "family": "ARCHITECT",
+    "status": "completed",
+    "started_seq": 13,
+    "ended_seq": 20,
+    "started_at": "2026-11-02T23:08:00Z",
+    "ended_at": "2026-11-02T23:14:00Z",
+    "run": 1,
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 13,
+      "ended_seq": 20,
+      "started_at": "2026-11-02T23:08:00Z",
+      "ended_at": "2026-11-02T23:14:00Z",
+      "status": "completed"
+     }
+    ]
+   },
+   {
+    "name": "CODE",
+    "family": "CODE",
+    "status": "completed",
+    "started_seq": 21,
+    "ended_seq": 36,
+    "started_at": "2026-11-02T23:15:00Z",
+    "ended_at": "2026-11-02T23:26:00Z",
+    "run": 1,
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 21,
+      "ended_seq": 36,
+      "started_at": "2026-11-02T23:15:00Z",
+      "ended_at": "2026-11-02T23:26:00Z",
+      "status": "completed"
+     }
+    ]
+   },
+   {
+    "name": "TEST",
+    "family": "TEST",
+    "status": "completed",
+    "started_seq": 37,
+    "ended_seq": 54,
+    "started_at": "2026-11-02T23:27:00Z",
+    "ended_at": "2026-11-02T23:40:00Z",
+    "run": 1,
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 37,
+      "ended_seq": 54,
+      "started_at": "2026-11-02T23:27:00Z",
+      "ended_at": "2026-11-02T23:40:00Z",
+      "status": "completed"
+     }
+    ]
+   }
+  ]
+ },
+ "agents": [
+  {
+   "name": "team-lead",
+   "role": "lead",
+   "agent_type": "team-lead",
+   "color": "yellow",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "lead",
+   "state": "done",
+   "phase": "TEST",
+   "task_id": null,
+   "first_seen": "2026-11-02T23:00:00Z",
+   "last_seen": "2026-11-02T23:46:00Z",
+   "stats": {
+    "events": 30,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": {
+    "seq": 61,
+    "ts": "2026-11-02T23:46:00Z",
+    "type": "session_end",
+    "summary": "SHIPPED \u00b7 wrap-up recorded PR 42"
+   }
+  },
+  {
+   "name": "preparer",
+   "role": "preparer",
+   "agent_type": "pact-preparer",
+   "color": "green",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "PREPARE",
+   "task_id": "2",
+   "first_seen": "2026-11-02T23:01:00Z",
+   "last_seen": "2026-11-02T23:05:30Z",
+   "stats": {
+    "events": 5,
+    "dispatches": 1,
+    "handoffs": 1,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": {
+    "seq": 10,
+    "ts": "2026-11-02T23:05:30Z",
+    "type": "agent_handoff",
+    "summary": "preparer handed off task 2"
+   }
+  },
+  {
+   "name": "secretary",
+   "role": "secretary",
+   "agent_type": "pact-secretary",
+   "color": "red",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "PREPARE",
+   "task_id": "3",
+   "first_seen": "2026-11-02T23:02:00Z",
+   "last_seen": "2026-11-02T23:02:00Z",
+   "stats": {
+    "events": 1,
+    "dispatches": 1,
+    "handoffs": 0,
+    "commits": 1,
+    "findings": 0
+   },
+   "latest": {
+    "seq": 5,
+    "ts": "2026-11-02T23:02:00Z",
+    "type": "agent_dispatch",
+    "summary": "secretary dispatched to PREPARE"
+   }
+  },
+  {
+   "name": "architect",
+   "role": "architect",
+   "agent_type": "pact-architect",
+   "color": "blue",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "ARCHITECT",
+   "task_id": "4",
+   "first_seen": "2026-11-02T23:09:00Z",
+   "last_seen": "2026-11-02T23:12:00Z",
+   "stats": {
+    "events": 3,
+    "dispatches": 1,
+    "handoffs": 1,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": {
+    "seq": 18,
+    "ts": "2026-11-02T23:12:00Z",
+    "type": "agent_handoff",
+    "summary": "architect handed off task 4"
+   }
+  },
+  {
+   "name": "auditor",
+   "role": "auditor",
+   "agent_type": "pact-auditor",
+   "color": "purple",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "ARCHITECT",
+   "task_id": "5",
+   "first_seen": "2026-11-02T23:09:00Z",
+   "last_seen": "2026-11-02T23:21:00Z",
+   "stats": {
+    "events": 2,
+    "dispatches": 1,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 1
+   },
+   "latest": {
+    "seq": 31,
+    "ts": "2026-11-02T23:21:00Z",
+    "type": "review_finding",
+    "summary": "Suggestion \u00b7 Duplicated cookie options in login and refresh handlers."
+   }
+  },
+  {
+   "name": "backend-coder",
+   "role": "backend-coder",
+   "agent_type": "pact-backend-coder",
+   "color": "purple",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "CODE",
+   "task_id": "10",
+   "first_seen": "2026-11-02T23:16:00Z",
+   "last_seen": "2026-11-02T23:32:00Z",
+   "stats": {
+    "events": 5,
+    "dispatches": 1,
+    "handoffs": 1,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": {
+    "seq": 46,
+    "ts": "2026-11-02T23:32:00Z",
+    "type": "remediation",
+    "summary": "Remediation: refresh reuse detection"
+   }
+  },
+  {
+   "name": "frontend-coder",
+   "role": "frontend-coder",
+   "agent_type": "pact-frontend-coder",
+   "color": "pink",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "CODE",
+   "task_id": "7",
+   "first_seen": "2026-11-02T23:16:00Z",
+   "last_seen": "2026-11-02T23:24:00Z",
+   "stats": {
+    "events": 3,
+    "dispatches": 1,
+    "handoffs": 1,
+    "commits": 3,
+    "findings": 0
+   },
+   "latest": {
+    "seq": 34,
+    "ts": "2026-11-02T23:24:00Z",
+    "type": "agent_handoff",
+    "summary": "frontend-coder handed off task 7"
+   }
+  },
+  {
+   "name": "test-engineer",
+   "role": "test-engineer",
+   "agent_type": "pact-test-engineer",
+   "color": "orange",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "TEST",
+   "task_id": "8",
+   "first_seen": "2026-11-02T23:28:00Z",
+   "last_seen": "2026-11-02T23:34:00Z",
+   "stats": {
+    "events": 3,
+    "dispatches": 1,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 1
+   },
+   "latest": {
+    "seq": 48,
+    "ts": "2026-11-02T23:34:00Z",
+    "type": "review_finding",
+    "summary": "Suggestion \u00b7 Add a 30s clock-skew test case."
+   }
+  },
+  {
+   "name": "security-engineer",
+   "role": "security-engineer",
+   "agent_type": "pact-security-engineer",
+   "color": "red",
+   "model": "claude-opus-4-8",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "done",
+   "phase": "TEST",
+   "task_id": "9",
+   "first_seen": "2026-11-02T23:28:00Z",
+   "last_seen": "2026-11-02T23:31:00Z",
+   "stats": {
+    "events": 4,
+    "dispatches": 1,
+    "handoffs": 0,
+    "commits": 2,
+    "findings": 1
+   },
+   "latest": {
+    "seq": 45,
+    "ts": "2026-11-02T23:31:00Z",
+    "type": "blocker_raised",
+    "summary": "Blocker raised for TEST"
+   }
+  },
+  {
+   "name": "architect-reviewer",
+   "role": "architect-reviewer",
+   "agent_type": "",
+   "color": "slate",
+   "model": "",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "standby",
+   "phase": "",
+   "task_id": null,
+   "first_seen": null,
+   "last_seen": null,
+   "stats": {
+    "events": 0,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": null
+  },
+  {
+   "name": "test-engineer-reviewer",
+   "role": "test-engineer-reviewer",
+   "agent_type": "",
+   "color": "slate",
+   "model": "",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "standby",
+   "phase": "",
+   "task_id": null,
+   "first_seen": null,
+   "last_seen": null,
+   "stats": {
+    "events": 0,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": null
+  },
+  {
+   "name": "security-engineer-reviewer",
+   "role": "security-engineer-reviewer",
+   "agent_type": "",
+   "color": "slate",
+   "model": "",
+   "cloud": false,
+   "kind": "specialist",
+   "state": "standby",
+   "phase": "",
+   "task_id": null,
+   "first_seen": null,
+   "last_seen": null,
+   "stats": {
+    "events": 0,
+    "dispatches": 0,
+    "handoffs": 0,
+    "commits": 0,
+    "findings": 0
+   },
+   "latest": null
+  }
+ ],
+ "tasks": [
+  {
+   "id": "1",
+   "key": "1:",
+   "occupant": "",
+   "subject": "Build JWT authentication",
+   "owner": "team-lead",
+   "phase": "TEST",
+   "status": "completed",
+   "kind": "feature",
+   "variety": {
+    "novelty": 3,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 10
+   },
+   "teachback": false,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:00:30Z",
+   "source": "derived"
+  },
+  {
+   "id": "2",
+   "key": "2:",
+   "occupant": "",
+   "subject": "preparer: research JWT auth",
+   "owner": "preparer",
+   "phase": "PREPARE",
+   "status": "completed",
+   "kind": "gate",
+   "variety": {
+    "novelty": 2,
+    "scope": 2,
+    "uncertainty": 3,
+    "risk": 1,
+    "total": 8
+   },
+   "teachback": true,
+   "handoff": true,
+   "updated_at": "2026-11-02T23:05:30Z",
+   "source": "derived"
+  },
+  {
+   "id": "3",
+   "key": "3:",
+   "occupant": "",
+   "subject": "task #3",
+   "owner": "secretary",
+   "phase": "PREPARE",
+   "status": "active",
+   "kind": "task",
+   "variety": null,
+   "teachback": false,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:02:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "4",
+   "key": "4:",
+   "occupant": "",
+   "subject": "architect: design the auth flow",
+   "owner": "architect",
+   "phase": "ARCHITECT",
+   "status": "completed",
+   "kind": "gate",
+   "variety": {
+    "novelty": 2,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 9
+   },
+   "teachback": true,
+   "handoff": true,
+   "updated_at": "2026-11-02T23:12:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "5",
+   "key": "5:",
+   "occupant": "",
+   "subject": "task #5",
+   "owner": "auditor",
+   "phase": "ARCHITECT",
+   "status": "active",
+   "kind": "task",
+   "variety": null,
+   "teachback": false,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:09:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "6",
+   "key": "6:",
+   "occupant": "",
+   "subject": "backend-coder: implement auth service",
+   "owner": "backend-coder",
+   "phase": "CODE",
+   "status": "completed",
+   "kind": "gate",
+   "variety": {
+    "novelty": 1,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 3,
+    "total": 9
+   },
+   "teachback": true,
+   "handoff": true,
+   "updated_at": "2026-11-02T23:23:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "7",
+   "key": "7:",
+   "occupant": "",
+   "subject": "frontend-coder: build auth UI",
+   "owner": "frontend-coder",
+   "phase": "CODE",
+   "status": "completed",
+   "kind": "gate",
+   "variety": {
+    "novelty": 1,
+    "scope": 2,
+    "uncertainty": 2,
+    "risk": 1,
+    "total": 6
+   },
+   "teachback": true,
+   "handoff": true,
+   "updated_at": "2026-11-02T23:24:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "8",
+   "key": "8:",
+   "occupant": "",
+   "subject": "test-engineer: verify auth flows",
+   "owner": "test-engineer",
+   "phase": "TEST",
+   "status": "completed",
+   "kind": "gate",
+   "variety": {
+    "novelty": 1,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 8
+   },
+   "teachback": true,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:29:00Z",
+   "source": "derived"
+  },
+  {
+   "id": "9",
+   "key": "9:",
+   "occupant": "",
+   "subject": "security-engineer: adversarial auth review",
+   "owner": "security-engineer",
+   "phase": "TEST",
+   "status": "active",
+   "kind": "task",
+   "variety": {
+    "novelty": 2,
+    "scope": 2,
+    "uncertainty": 2,
+    "risk": 4,
+    "total": 10
+   },
+   "teachback": true,
+   "handoff": true,
+   "updated_at": "2026-11-02T23:28:30Z",
+   "source": "derived"
+  },
+  {
+   "id": "10",
+   "key": "10:",
+   "occupant": "",
+   "subject": "backend-coder: fix refresh rotation",
+   "owner": "backend-coder",
+   "phase": "TEST",
+   "status": "completed",
+   "kind": "task",
+   "variety": {
+    "novelty": 1,
+    "scope": 1,
+    "uncertainty": 1,
+    "risk": 3,
+    "total": 6
+   },
+   "teachback": false,
+   "handoff": false,
+   "updated_at": "2026-11-02T23:32:00Z",
+   "source": "derived"
+  }
+ ],
+ "events": [
+  {
+   "seq": 0,
+   "ts": "2026-11-02T23:00:00Z",
+   "type": "session_start",
+   "category": "session",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Run started \u00b7 PACT-Demo",
+   "detail": "team session-demo01 \u00b7 local run",
+   "severity": "success",
+   "icon": "session",
+   "raw": {
+    "v": 1,
+    "type": "session_start",
+    "ts": "2026-11-02T23:00:00Z",
+    "session_id": "demo",
+    "project_dir": "/Users/demo/Sites/pact-demo",
+    "team": "session-demo01",
+    "source": "startup"
+   },
+   "phase_family": "OTHER"
+  },
+  {
+   "seq": 1,
+   "ts": "2026-11-02T23:00:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "PREPARE",
+   "agent": null,
+   "task_id": null,
+   "title": "PREPARE started",
+   "detail": "",
+   "severity": "info",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:00:00Z",
+    "phase": "PREPARE",
+    "status": "started"
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 2,
+   "ts": "2026-11-02T23:00:30Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "1",
+   "title": "Variety assessed \u00b7 10/16",
+   "detail": "novelty 3 \u00b7 scope 3 \u00b7 uncertainty 2 \u00b7 risk 2",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:00:30Z",
+    "task_id": "1",
+    "variety": {
+     "novelty": 3,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 10
+    }
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 3,
+   "ts": "2026-11-02T23:01:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "PREPARE",
+   "agent": "preparer",
+   "task_id": "2",
+   "title": "preparer dispatched to PREPARE",
+   "detail": "task #2 \u00b7 research JWT auth",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:01:00Z",
+    "agent": "preparer",
+    "task_id": "2",
+    "phase": "PREPARE",
+    "scope": [
+     "research JWT auth"
+    ]
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 4,
+   "ts": "2026-11-02T23:01:00Z",
+   "type": "dispatch_decision",
+   "category": "dispatch",
+   "phase": null,
+   "agent": "preparer",
+   "task_id": null,
+   "title": "Dispatch gate: ALLOW preparer",
+   "detail": "dispatch_gate \u00b7 resolved team session-demo01",
+   "severity": "success",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "dispatch_decision",
+    "ts": "2026-11-02T23:01:00Z",
+    "decision": "ALLOW",
+    "rule": "dispatch_gate",
+    "name": "preparer",
+    "team_name": "session-demo01",
+    "resolved_team": "session-demo01"
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 5,
+   "ts": "2026-11-02T23:02:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "PREPARE",
+   "agent": "secretary",
+   "task_id": "3",
+   "title": "secretary dispatched to PREPARE",
+   "detail": "task #3 \u00b7 record the plan",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:02:00Z",
+    "agent": "secretary",
+    "task_id": "3",
+    "phase": "PREPARE",
+    "scope": [
+     "record the plan"
+    ]
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 6,
+   "ts": "2026-11-02T23:02:30Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "2",
+   "title": "Dispatch variety \u00b7 task 2",
+   "detail": "novelty 2 \u00b7 scope 2 \u00b7 uncertainty 3 \u00b7 risk 1",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:02:30Z",
+    "task_id": "2",
+    "scope": "dispatch",
+    "variety": {
+     "novelty": 2,
+     "scope": 2,
+     "uncertainty": 3,
+     "risk": 1,
+     "total": 8
+    }
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 7,
+   "ts": "2026-11-02T23:03:00Z",
+   "type": "teachback_ack",
+   "category": "teachback",
+   "phase": null,
+   "agent": "preparer",
+   "task_id": "2",
+   "title": "preparer passed teachback",
+   "detail": "task #2",
+   "severity": "success",
+   "icon": "teachback",
+   "raw": {
+    "v": 1,
+    "type": "teachback_ack",
+    "ts": "2026-11-02T23:03:00Z",
+    "agent": "preparer",
+    "task_id": "2",
+    "rationale_articulates_this_dispatch": "yes"
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 8,
+   "ts": "2026-11-02T23:04:00Z",
+   "type": "task_metadata_snapshot",
+   "category": "task",
+   "phase": null,
+   "agent": "preparer",
+   "task_id": "2",
+   "title": "Task 2 metadata snapshot",
+   "detail": "preparer \u00b7 preparer: research JWT auth",
+   "severity": "info",
+   "icon": "task",
+   "raw": {
+    "v": 1,
+    "type": "task_metadata_snapshot",
+    "ts": "2026-11-02T23:04:00Z",
+    "task_id": "2",
+    "subject": "preparer: research JWT auth",
+    "owner": "preparer",
+    "metadata": {
+     "variety": {
+      "novelty": 2,
+      "scope": 2,
+      "uncertainty": 3,
+      "risk": 1,
+      "total": 8
+     },
+     "teachback_submit": {
+      "understanding": "rotate refresh tokens"
+     }
+    }
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 9,
+   "ts": "2026-11-02T23:05:00Z",
+   "type": "checkpoint",
+   "category": "checkpoint",
+   "phase": "PREPARE",
+   "agent": null,
+   "task_id": null,
+   "title": "Save point \u00b7 PREPARE complete",
+   "detail": "2 active agents",
+   "severity": "success",
+   "icon": "save",
+   "raw": {
+    "v": 1,
+    "type": "checkpoint",
+    "ts": "2026-11-02T23:05:00Z",
+    "phase": "PREPARE",
+    "completed_phases": [
+     "PREPARE"
+    ],
+    "active_agents": [
+     {
+      "name": "preparer",
+      "task_id": "2",
+      "status": "completed"
+     },
+     {
+      "name": "secretary",
+      "task_id": "3",
+      "status": "completed"
+     }
+    ],
+    "variety": {
+     "novelty": 3,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 10
+    }
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 10,
+   "ts": "2026-11-02T23:05:30Z",
+   "type": "agent_handoff",
+   "category": "handoff",
+   "phase": null,
+   "agent": "preparer",
+   "task_id": "2",
+   "title": "preparer handed off task 2",
+   "detail": "docs/preparation/jwt-research.md",
+   "severity": "success",
+   "icon": "handoff",
+   "raw": {
+    "v": 1,
+    "type": "agent_handoff",
+    "ts": "2026-11-02T23:05:30Z",
+    "agent": "preparer",
+    "task_id": "2",
+    "task_subject": "preparer: research JWT auth",
+    "handoff": {
+     "produced": "docs/preparation/jwt-research.md",
+     "decisions": "Short-lived access tokens with rotating refresh tokens.",
+     "reasoning_chain": "Stateless auth keeps the API horizontally scalable, so a refresh path is required.",
+     "uncertainty": "[MEDIUM] Clock skew on refresh expiry; [LOW] library choice is reversible.",
+     "integration": "AuthService, token middleware, and the users table.",
+     "open_questions": "Should refresh tokens be rotated on every use?"
+    }
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 11,
+   "ts": "2026-11-02T23:06:00Z",
+   "type": "commit",
+   "category": "commit",
+   "phase": "PREPARE",
+   "agent": null,
+   "task_id": null,
+   "title": "Commit 94c2da8 \u00b7 Add PREPARE research",
+   "detail": "",
+   "severity": "success",
+   "icon": "commit",
+   "raw": {
+    "v": 1,
+    "type": "commit",
+    "ts": "2026-11-02T23:06:00Z",
+    "sha": "94c2da8",
+    "message": "Add PREPARE research",
+    "phase": "PREPARE",
+    "detail": "docs/preparation/jwt-research.md"
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 12,
+   "ts": "2026-11-02T23:07:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "PREPARE",
+   "agent": null,
+   "task_id": null,
+   "title": "PREPARE completed",
+   "detail": "",
+   "severity": "success",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:07:00Z",
+    "phase": "PREPARE",
+    "status": "completed"
+   },
+   "phase_family": "PREPARE"
+  },
+  {
+   "seq": 13,
+   "ts": "2026-11-02T23:08:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "ARCHITECT",
+   "agent": null,
+   "task_id": null,
+   "title": "ARCHITECT started",
+   "detail": "",
+   "severity": "info",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:08:00Z",
+    "phase": "ARCHITECT",
+    "status": "started"
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 14,
+   "ts": "2026-11-02T23:09:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "ARCHITECT",
+   "agent": "architect",
+   "task_id": "4",
+   "title": "architect dispatched to ARCHITECT",
+   "detail": "task #4 \u00b7 design the auth flow",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:09:00Z",
+    "agent": "architect",
+    "task_id": "4",
+    "phase": "ARCHITECT",
+    "scope": [
+     "design the auth flow"
+    ]
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 15,
+   "ts": "2026-11-02T23:09:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "ARCHITECT",
+   "agent": "auditor",
+   "task_id": "5",
+   "title": "auditor dispatched to ARCHITECT",
+   "detail": "task #5 \u00b7 observe quality",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:09:00Z",
+    "agent": "auditor",
+    "task_id": "5",
+    "phase": "ARCHITECT",
+    "scope": [
+     "observe quality"
+    ]
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 16,
+   "ts": "2026-11-02T23:09:30Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "4",
+   "title": "Dispatch variety \u00b7 task 4",
+   "detail": "novelty 2 \u00b7 scope 3 \u00b7 uncertainty 2 \u00b7 risk 2",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:09:30Z",
+    "task_id": "4",
+    "scope": "dispatch",
+    "variety": {
+     "novelty": 2,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 9
+    }
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 17,
+   "ts": "2026-11-02T23:10:00Z",
+   "type": "teachback_ack",
+   "category": "teachback",
+   "phase": null,
+   "agent": "architect",
+   "task_id": "4",
+   "title": "architect passed teachback",
+   "detail": "task #4",
+   "severity": "success",
+   "icon": "teachback",
+   "raw": {
+    "v": 1,
+    "type": "teachback_ack",
+    "ts": "2026-11-02T23:10:00Z",
+    "agent": "architect",
+    "task_id": "4",
+    "rationale_articulates_this_dispatch": "yes"
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 18,
+   "ts": "2026-11-02T23:12:00Z",
+   "type": "agent_handoff",
+   "category": "handoff",
+   "phase": null,
+   "agent": "architect",
+   "task_id": "4",
+   "title": "architect handed off task 4",
+   "detail": "docs/architecture/auth-flow.md",
+   "severity": "success",
+   "icon": "handoff",
+   "raw": {
+    "v": 1,
+    "type": "agent_handoff",
+    "ts": "2026-11-02T23:12:00Z",
+    "agent": "architect",
+    "task_id": "4",
+    "task_subject": "architect: design the auth flow",
+    "handoff": {
+     "produced": "docs/architecture/auth-flow.md",
+     "decisions": "Three service boundaries: AuthService, TokenStore, Middleware.",
+     "reasoning_chain": "TokenStore isolates rotation so AuthService stays pure.",
+     "uncertainty": "[LOW] middleware ordering assumes JSON body parsing first.",
+     "integration": "Router and error middleware.",
+     "open_questions": "Whether to cache public keys."
+    }
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 19,
+   "ts": "2026-11-02T23:13:00Z",
+   "type": "checkpoint",
+   "category": "checkpoint",
+   "phase": "ARCHITECT",
+   "agent": null,
+   "task_id": null,
+   "title": "Save point \u00b7 ARCHITECT complete",
+   "detail": "2 active agents",
+   "severity": "success",
+   "icon": "save",
+   "raw": {
+    "v": 1,
+    "type": "checkpoint",
+    "ts": "2026-11-02T23:13:00Z",
+    "phase": "ARCHITECT",
+    "completed_phases": [
+     "PREPARE",
+     "ARCHITECT"
+    ],
+    "active_agents": [
+     {
+      "name": "architect",
+      "task_id": "4",
+      "status": "completed"
+     },
+     {
+      "name": "auditor",
+      "task_id": "5",
+      "status": "active"
+     }
+    ],
+    "variety": {
+     "novelty": 3,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 10
+    }
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 20,
+   "ts": "2026-11-02T23:14:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "ARCHITECT",
+   "agent": null,
+   "task_id": null,
+   "title": "ARCHITECT completed",
+   "detail": "",
+   "severity": "success",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:14:00Z",
+    "phase": "ARCHITECT",
+    "status": "completed"
+   },
+   "phase_family": "ARCHITECT"
+  },
+  {
+   "seq": 21,
+   "ts": "2026-11-02T23:15:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "CODE",
+   "agent": null,
+   "task_id": null,
+   "title": "CODE started",
+   "detail": "",
+   "severity": "info",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:15:00Z",
+    "phase": "CODE",
+    "status": "started"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 22,
+   "ts": "2026-11-02T23:16:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "CODE",
+   "agent": "backend-coder",
+   "task_id": "6",
+   "title": "backend-coder dispatched to CODE",
+   "detail": "task #6 \u00b7 implement auth service",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:16:00Z",
+    "agent": "backend-coder",
+    "task_id": "6",
+    "phase": "CODE",
+    "scope": [
+     "implement auth service"
+    ]
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 23,
+   "ts": "2026-11-02T23:16:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "CODE",
+   "agent": "frontend-coder",
+   "task_id": "7",
+   "title": "frontend-coder dispatched to CODE",
+   "detail": "task #7 \u00b7 build auth UI",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:16:00Z",
+    "agent": "frontend-coder",
+    "task_id": "7",
+    "phase": "CODE",
+    "scope": [
+     "build auth UI"
+    ]
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 24,
+   "ts": "2026-11-02T23:16:30Z",
+   "type": "dispatch_decision",
+   "category": "dispatch",
+   "phase": null,
+   "agent": "backend-coder",
+   "task_id": null,
+   "title": "Dispatch gate: ALLOW backend-coder",
+   "detail": "dispatch_gate \u00b7 resolved team session-demo01",
+   "severity": "success",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "dispatch_decision",
+    "ts": "2026-11-02T23:16:30Z",
+    "decision": "ALLOW",
+    "rule": "dispatch_gate",
+    "name": "backend-coder",
+    "team_name": "session-demo01",
+    "resolved_team": "session-demo01"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 25,
+   "ts": "2026-11-02T23:17:00Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "6",
+   "title": "Dispatch variety \u00b7 task 6",
+   "detail": "novelty 1 \u00b7 scope 3 \u00b7 uncertainty 2 \u00b7 risk 3",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:17:00Z",
+    "task_id": "6",
+    "scope": "dispatch",
+    "variety": {
+     "novelty": 1,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 3,
+     "total": 9
+    }
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 26,
+   "ts": "2026-11-02T23:17:00Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "7",
+   "title": "Dispatch variety \u00b7 task 7",
+   "detail": "novelty 1 \u00b7 scope 2 \u00b7 uncertainty 2 \u00b7 risk 1",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:17:00Z",
+    "task_id": "7",
+    "scope": "dispatch",
+    "variety": {
+     "novelty": 1,
+     "scope": 2,
+     "uncertainty": 2,
+     "risk": 1,
+     "total": 6
+    }
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 27,
+   "ts": "2026-11-02T23:17:30Z",
+   "type": "teachback_ack",
+   "category": "teachback",
+   "phase": null,
+   "agent": "backend-coder",
+   "task_id": "6",
+   "title": "backend-coder passed teachback",
+   "detail": "task #6",
+   "severity": "success",
+   "icon": "teachback",
+   "raw": {
+    "v": 1,
+    "type": "teachback_ack",
+    "ts": "2026-11-02T23:17:30Z",
+    "agent": "backend-coder",
+    "task_id": "6",
+    "rationale_articulates_this_dispatch": "yes"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 28,
+   "ts": "2026-11-02T23:18:00Z",
+   "type": "teachback_ack",
+   "category": "teachback",
+   "phase": null,
+   "agent": "frontend-coder",
+   "task_id": "7",
+   "title": "frontend-coder passed teachback",
+   "detail": "refresh race may need a test",
+   "severity": "success",
+   "icon": "teachback",
+   "raw": {
+    "v": 1,
+    "type": "teachback_ack",
+    "ts": "2026-11-02T23:18:00Z",
+    "agent": "frontend-coder",
+    "task_id": "7",
+    "rationale_articulates_this_dispatch": "concern",
+    "concern": "refresh race may need a test"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 29,
+   "ts": "2026-11-02T23:19:00Z",
+   "type": "commit",
+   "category": "commit",
+   "phase": "CODE",
+   "agent": null,
+   "task_id": null,
+   "title": "Commit 1a2b3c4 \u00b7 Add AuthService and token store",
+   "detail": "",
+   "severity": "success",
+   "icon": "commit",
+   "raw": {
+    "v": 1,
+    "type": "commit",
+    "ts": "2026-11-02T23:19:00Z",
+    "sha": "1a2b3c4",
+    "message": "Add AuthService and token store",
+    "phase": "CODE"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 30,
+   "ts": "2026-11-02T23:20:00Z",
+   "type": "commit",
+   "category": "commit",
+   "phase": "CODE",
+   "agent": null,
+   "task_id": null,
+   "title": "Commit 5d6e7f8 \u00b7 Add login and refresh endpoints",
+   "detail": "",
+   "severity": "success",
+   "icon": "commit",
+   "raw": {
+    "v": 1,
+    "type": "commit",
+    "ts": "2026-11-02T23:20:00Z",
+    "sha": "5d6e7f8",
+    "message": "Add login and refresh endpoints",
+    "phase": "CODE"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 31,
+   "ts": "2026-11-02T23:21:00Z",
+   "type": "review_finding",
+   "category": "finding",
+   "phase": null,
+   "agent": "auditor",
+   "task_id": null,
+   "title": "Suggestion \u00b7 Duplicated cookie options in login and refresh handlers.",
+   "detail": "Duplicated cookie options in login and refresh handlers.",
+   "severity": "warning",
+   "icon": "bug",
+   "raw": {
+    "v": 1,
+    "type": "review_finding",
+    "ts": "2026-11-02T23:21:00Z",
+    "severity": "suggestion",
+    "finding": "Duplicated cookie options in login and refresh handlers.",
+    "reviewer": "auditor",
+    "task_id": ""
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 32,
+   "ts": "2026-11-02T23:22:00Z",
+   "type": "commit",
+   "category": "commit",
+   "phase": "CODE",
+   "agent": null,
+   "task_id": null,
+   "title": "Commit 9a0b1c2 \u00b7 Add auth client and session guard",
+   "detail": "",
+   "severity": "success",
+   "icon": "commit",
+   "raw": {
+    "v": 1,
+    "type": "commit",
+    "ts": "2026-11-02T23:22:00Z",
+    "sha": "9a0b1c2",
+    "message": "Add auth client and session guard",
+    "phase": "CODE"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 33,
+   "ts": "2026-11-02T23:23:00Z",
+   "type": "agent_handoff",
+   "category": "handoff",
+   "phase": null,
+   "agent": "backend-coder",
+   "task_id": "6",
+   "title": "backend-coder handed off task 6",
+   "detail": "src/auth/service.ts, token-store.ts, middleware.ts",
+   "severity": "success",
+   "icon": "handoff",
+   "raw": {
+    "v": 1,
+    "type": "agent_handoff",
+    "ts": "2026-11-02T23:23:00Z",
+    "agent": "backend-coder",
+    "task_id": "6",
+    "task_subject": "backend-coder: implement auth service",
+    "handoff": {
+     "produced": "src/auth/service.ts, token-store.ts, middleware.ts",
+     "decisions": "Refresh tokens rotate on use; reuse is treated as theft.",
+     "reasoning_chain": "Rotation gives revocation without server-side session lookup.",
+     "uncertainty": "[HIGH] concurrent refresh requests may race; cover with a test.",
+     "integration": "users table, router, error middleware.",
+     "open_questions": "Should logout revoke all device tokens?"
+    }
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 34,
+   "ts": "2026-11-02T23:24:00Z",
+   "type": "agent_handoff",
+   "category": "handoff",
+   "phase": null,
+   "agent": "frontend-coder",
+   "task_id": "7",
+   "title": "frontend-coder handed off task 7",
+   "detail": "src/ui/auth/*.tsx",
+   "severity": "success",
+   "icon": "handoff",
+   "raw": {
+    "v": 1,
+    "type": "agent_handoff",
+    "ts": "2026-11-02T23:24:00Z",
+    "agent": "frontend-coder",
+    "task_id": "7",
+    "task_subject": "frontend-coder: build auth UI",
+    "handoff": {
+     "produced": "src/ui/auth/*.tsx",
+     "decisions": "Optimistic session guard with a silent refresh attempt.",
+     "reasoning_chain": "Avoids a flash of unauthenticated UI on reload.",
+     "uncertainty": "[MEDIUM] offline behavior is untested.",
+     "integration": "App shell and route guard.",
+     "open_questions": "None"
+    }
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 35,
+   "ts": "2026-11-02T23:25:00Z",
+   "type": "checkpoint",
+   "category": "checkpoint",
+   "phase": "CODE",
+   "agent": null,
+   "task_id": null,
+   "title": "Save point \u00b7 CODE complete",
+   "detail": "2 active agents",
+   "severity": "success",
+   "icon": "save",
+   "raw": {
+    "v": 1,
+    "type": "checkpoint",
+    "ts": "2026-11-02T23:25:00Z",
+    "phase": "CODE",
+    "completed_phases": [
+     "PREPARE",
+     "ARCHITECT",
+     "CODE"
+    ],
+    "active_agents": [
+     {
+      "name": "backend-coder",
+      "task_id": "6",
+      "status": "completed"
+     },
+     {
+      "name": "frontend-coder",
+      "task_id": "7",
+      "status": "completed"
+     }
+    ],
+    "variety": {
+     "novelty": 3,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 10
+    }
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 36,
+   "ts": "2026-11-02T23:26:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "CODE",
+   "agent": null,
+   "task_id": null,
+   "title": "CODE completed",
+   "detail": "",
+   "severity": "success",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:26:00Z",
+    "phase": "CODE",
+    "status": "completed"
+   },
+   "phase_family": "CODE"
+  },
+  {
+   "seq": 37,
+   "ts": "2026-11-02T23:27:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "TEST",
+   "agent": null,
+   "task_id": null,
+   "title": "TEST started",
+   "detail": "",
+   "severity": "info",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:27:00Z",
+    "phase": "TEST",
+    "status": "started"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 38,
+   "ts": "2026-11-02T23:28:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "TEST",
+   "agent": "test-engineer",
+   "task_id": "8",
+   "title": "test-engineer dispatched to TEST",
+   "detail": "task #8 \u00b7 verify auth flows",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:28:00Z",
+    "agent": "test-engineer",
+    "task_id": "8",
+    "phase": "TEST",
+    "scope": [
+     "verify auth flows"
+    ]
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 39,
+   "ts": "2026-11-02T23:28:00Z",
+   "type": "agent_dispatch",
+   "category": "dispatch",
+   "phase": "TEST",
+   "agent": "security-engineer",
+   "task_id": "9",
+   "title": "security-engineer dispatched to TEST",
+   "detail": "task #9 \u00b7 adversarial auth review",
+   "severity": "info",
+   "icon": "dispatch",
+   "raw": {
+    "v": 1,
+    "type": "agent_dispatch",
+    "ts": "2026-11-02T23:28:00Z",
+    "agent": "security-engineer",
+    "task_id": "9",
+    "phase": "TEST",
+    "scope": [
+     "adversarial auth review"
+    ]
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 40,
+   "ts": "2026-11-02T23:28:30Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "8",
+   "title": "Dispatch variety \u00b7 task 8",
+   "detail": "novelty 1 \u00b7 scope 3 \u00b7 uncertainty 2 \u00b7 risk 2",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:28:30Z",
+    "task_id": "8",
+    "scope": "dispatch",
+    "variety": {
+     "novelty": 1,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 8
+    }
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 41,
+   "ts": "2026-11-02T23:28:30Z",
+   "type": "variety_assessed",
+   "category": "variety",
+   "phase": null,
+   "agent": null,
+   "task_id": "9",
+   "title": "Dispatch variety \u00b7 task 9",
+   "detail": "novelty 2 \u00b7 scope 2 \u00b7 uncertainty 2 \u00b7 risk 4",
+   "severity": "info",
+   "icon": "variety",
+   "raw": {
+    "v": 1,
+    "type": "variety_assessed",
+    "ts": "2026-11-02T23:28:30Z",
+    "task_id": "9",
+    "scope": "dispatch",
+    "variety": {
+     "novelty": 2,
+     "scope": 2,
+     "uncertainty": 2,
+     "risk": 4,
+     "total": 10
+    }
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 42,
+   "ts": "2026-11-02T23:29:00Z",
+   "type": "teachback_ack",
+   "category": "teachback",
+   "phase": null,
+   "agent": "test-engineer",
+   "task_id": "8",
+   "title": "test-engineer passed teachback",
+   "detail": "task #8",
+   "severity": "success",
+   "icon": "teachback",
+   "raw": {
+    "v": 1,
+    "type": "teachback_ack",
+    "ts": "2026-11-02T23:29:00Z",
+    "agent": "test-engineer",
+    "task_id": "8",
+    "rationale_articulates_this_dispatch": "yes"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 43,
+   "ts": "2026-11-02T23:30:00Z",
+   "type": "review_finding",
+   "category": "finding",
+   "phase": null,
+   "agent": "security-engineer",
+   "task_id": null,
+   "title": "Blocking \u00b7 A replayed refresh token is accepted by the token store.",
+   "detail": "A replayed refresh token is accepted by the token store.",
+   "severity": "danger",
+   "icon": "bug",
+   "raw": {
+    "v": 1,
+    "type": "review_finding",
+    "ts": "2026-11-02T23:30:00Z",
+    "severity": "blocking",
+    "finding": "A replayed refresh token is accepted by the token store.",
+    "reviewer": "security-engineer",
+    "task_id": ""
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 44,
+   "ts": "2026-11-02T23:31:00Z",
+   "type": "algedonic_signal",
+   "category": "alert",
+   "phase": null,
+   "agent": "security-engineer",
+   "task_id": null,
+   "title": "ALGEDONIC ALERT \u00b7 SECURITY",
+   "detail": "Refresh-token replay accepted; fix before merge.",
+   "severity": "danger",
+   "icon": "alert",
+   "raw": {
+    "v": 1,
+    "type": "algedonic_signal",
+    "ts": "2026-11-02T23:31:00Z",
+    "level": "alert",
+    "category": "SECURITY",
+    "summary": "Refresh-token replay accepted; fix before merge.",
+    "agent": "security-engineer"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 45,
+   "ts": "2026-11-02T23:31:00Z",
+   "type": "blocker_raised",
+   "category": "alert",
+   "phase": "TEST",
+   "agent": "security-engineer",
+   "task_id": null,
+   "title": "Blocker raised for TEST",
+   "detail": "Rotation reuse detection missing.",
+   "severity": "danger",
+   "icon": "alert",
+   "raw": {
+    "v": 1,
+    "type": "blocker_raised",
+    "ts": "2026-11-02T23:31:00Z",
+    "phase": "TEST",
+    "detail": "Rotation reuse detection missing.",
+    "agent": "security-engineer"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 46,
+   "ts": "2026-11-02T23:32:00Z",
+   "type": "remediation",
+   "category": "remediation",
+   "phase": null,
+   "agent": "backend-coder",
+   "task_id": "10",
+   "title": "Remediation: refresh reuse detection",
+   "detail": "fixer backend-coder",
+   "severity": "warning",
+   "icon": "bug",
+   "raw": {
+    "v": 1,
+    "type": "remediation",
+    "ts": "2026-11-02T23:32:00Z",
+    "cycle": 1,
+    "items": [
+     "refresh reuse detection"
+    ],
+    "fixer": "backend-coder",
+    "task_id": "10"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 47,
+   "ts": "2026-11-02T23:33:00Z",
+   "type": "commit",
+   "category": "commit",
+   "phase": "TEST",
+   "agent": null,
+   "task_id": null,
+   "title": "Commit 2b3c4d5 \u00b7 Fix refresh reuse detection",
+   "detail": "",
+   "severity": "success",
+   "icon": "commit",
+   "raw": {
+    "v": 1,
+    "type": "commit",
+    "ts": "2026-11-02T23:33:00Z",
+    "sha": "2b3c4d5",
+    "message": "Fix refresh reuse detection",
+    "phase": "TEST"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 48,
+   "ts": "2026-11-02T23:34:00Z",
+   "type": "review_finding",
+   "category": "finding",
+   "phase": null,
+   "agent": "test-engineer",
+   "task_id": null,
+   "title": "Suggestion \u00b7 Add a 30s clock-skew test case.",
+   "detail": "Add a 30s clock-skew test case.",
+   "severity": "warning",
+   "icon": "bug",
+   "raw": {
+    "v": 1,
+    "type": "review_finding",
+    "ts": "2026-11-02T23:34:00Z",
+    "severity": "suggestion",
+    "finding": "Add a 30s clock-skew test case.",
+    "reviewer": "test-engineer",
+    "task_id": ""
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 49,
+   "ts": "2026-11-02T23:35:00Z",
+   "type": "commit",
+   "category": "commit",
+   "phase": "TEST",
+   "agent": null,
+   "task_id": null,
+   "title": "Commit 3c4d5e6 \u00b7 Add auth integration tests",
+   "detail": "",
+   "severity": "success",
+   "icon": "commit",
+   "raw": {
+    "v": 1,
+    "type": "commit",
+    "ts": "2026-11-02T23:35:00Z",
+    "sha": "3c4d5e6",
+    "message": "Add auth integration tests",
+    "phase": "TEST"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 50,
+   "ts": "2026-11-02T23:36:00Z",
+   "type": "review_dispatch",
+   "category": "review",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "3 reviewers dispatched to PR",
+   "detail": "architect-reviewer, test-engineer-reviewer, security-engineer-reviewer \u00b7 PR 42",
+   "severity": "info",
+   "icon": "review",
+   "raw": {
+    "v": 1,
+    "type": "review_dispatch",
+    "ts": "2026-11-02T23:36:00Z",
+    "pr_number": 42,
+    "pr_url": "https://example.invalid/pull/42",
+    "reviewers": [
+     "architect-reviewer",
+     "test-engineer-reviewer",
+     "security-engineer-reviewer"
+    ]
+   },
+   "agents": [
+    "architect-reviewer",
+    "test-engineer-reviewer",
+    "security-engineer-reviewer"
+   ],
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 51,
+   "ts": "2026-11-02T23:37:00Z",
+   "type": "pr_ready",
+   "category": "pr",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "PR ready \u00b7 6 commits",
+   "detail": "PR 42",
+   "severity": "success",
+   "icon": "pr",
+   "raw": {
+    "v": 1,
+    "type": "pr_ready",
+    "ts": "2026-11-02T23:37:00Z",
+    "pr_number": 42,
+    "pr_url": "https://example.invalid/pull/42",
+    "commits": 6
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 52,
+   "ts": "2026-11-02T23:38:00Z",
+   "type": "compaction_attributed",
+   "category": "compact",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Context compacted",
+   "detail": "verdict lead \u00b7 basis content",
+   "severity": "muted",
+   "icon": "compact",
+   "raw": {
+    "v": 1,
+    "type": "compaction_attributed",
+    "ts": "2026-11-02T23:38:00Z",
+    "verdict": "lead",
+    "basis": "content"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 53,
+   "ts": "2026-11-02T23:39:00Z",
+   "type": "checkpoint",
+   "category": "checkpoint",
+   "phase": "TEST",
+   "agent": null,
+   "task_id": null,
+   "title": "Save point \u00b7 TEST complete",
+   "detail": "0 active agents",
+   "severity": "success",
+   "icon": "save",
+   "raw": {
+    "v": 1,
+    "type": "checkpoint",
+    "ts": "2026-11-02T23:39:00Z",
+    "phase": "TEST",
+    "completed_phases": [
+     "PREPARE",
+     "ARCHITECT",
+     "CODE",
+     "TEST"
+    ],
+    "active_agents": [],
+    "variety": {
+     "novelty": 3,
+     "scope": 3,
+     "uncertainty": 2,
+     "risk": 2,
+     "total": 10
+    }
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 54,
+   "ts": "2026-11-02T23:40:00Z",
+   "type": "phase_transition",
+   "category": "phase",
+   "phase": "TEST",
+   "agent": null,
+   "task_id": null,
+   "title": "TEST completed",
+   "detail": "",
+   "severity": "success",
+   "icon": "phase",
+   "raw": {
+    "v": 1,
+    "type": "phase_transition",
+    "ts": "2026-11-02T23:40:00Z",
+    "phase": "TEST",
+    "status": "completed"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 55,
+   "ts": "2026-11-02T23:41:00Z",
+   "type": "team_realigned",
+   "category": "session",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Team dir realigned",
+   "detail": "session-demo01 \u2192 session-demo01-renamed",
+   "severity": "warning",
+   "icon": "session",
+   "raw": {
+    "v": 1,
+    "type": "team_realigned",
+    "ts": "2026-11-02T23:41:00Z",
+    "from": "session-demo01",
+    "to": "session-demo01-renamed"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 56,
+   "ts": "2026-11-02T23:42:00Z",
+   "type": "lifecycle_decision",
+   "category": "gate",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Gate advisory \u00b7 1 rule flagged",
+   "detail": "reasoning_reconstruction_band_unresolvable",
+   "severity": "warning",
+   "icon": "gate",
+   "raw": {
+    "v": 1,
+    "type": "lifecycle_decision",
+    "ts": "2026-11-02T23:42:00Z",
+    "tool_name": "TaskUpdate",
+    "advisories_count": 1,
+    "rules": [
+     "reasoning_reconstruction_band_unresolvable"
+    ],
+    "advisories": [
+     "Reasoning reconstruction band could not be resolved."
+    ],
+    "verdict": "advisory"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 57,
+   "ts": "2026-11-02T23:42:00Z",
+   "type": "lifecycle_decision",
+   "category": "gate",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Gate allow \u00b7 TaskCreate",
+   "detail": "",
+   "severity": "muted",
+   "icon": "gate",
+   "raw": {
+    "v": 1,
+    "type": "lifecycle_decision",
+    "ts": "2026-11-02T23:42:00Z",
+    "tool_name": "TaskCreate",
+    "advisories_count": 0,
+    "rules": [],
+    "advisories": [],
+    "verdict": "allow"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 58,
+   "ts": "2026-11-02T23:43:00Z",
+   "type": "lifecycle_decision",
+   "category": "gate",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Gate advisory \u00b7 1 rule flagged",
+   "detail": "variety_missing_on_dispatch_task",
+   "severity": "warning",
+   "icon": "gate",
+   "raw": {
+    "v": 1,
+    "type": "lifecycle_decision",
+    "ts": "2026-11-02T23:43:00Z",
+    "tool_name": "TaskUpdate",
+    "advisories_count": 1,
+    "rules": [
+     "variety_missing_on_dispatch_task"
+    ],
+    "advisories": [
+     "A dispatch task is missing its variety stamp."
+    ],
+    "verdict": "advisory"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 59,
+   "ts": "2026-11-02T23:44:00Z",
+   "type": "gate_health",
+   "category": "gate",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Gate health failure \u00b7 task_lifecycle_gate",
+   "detail": "runtime \u00b7 AttributeError: 'str' object has no attribute 'get'",
+   "severity": "danger",
+   "icon": "gate",
+   "raw": {
+    "v": 1,
+    "type": "gate_health",
+    "ts": "2026-11-02T23:44:00Z",
+    "hook": "task_lifecycle_gate",
+    "status": "failed",
+    "stage": "runtime",
+    "error": "AttributeError: 'str' object has no attribute 'get'"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 60,
+   "ts": "2026-11-02T23:45:00Z",
+   "type": "journal_emit_skipped",
+   "category": "gate",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "Journal emit skipped",
+   "detail": "dispatch_site \u00b7 schema",
+   "severity": "warning",
+   "icon": "gate",
+   "raw": {
+    "v": 1,
+    "type": "journal_emit_skipped",
+    "ts": "2026-11-02T23:45:00Z",
+    "skipped_type": "dispatch_site",
+    "cause": "schema"
+   },
+   "phase_family": "TEST"
+  },
+  {
+   "seq": 61,
+   "ts": "2026-11-02T23:46:00Z",
+   "type": "session_end",
+   "category": "pr",
+   "phase": null,
+   "agent": null,
+   "task_id": null,
+   "title": "SHIPPED \u00b7 wrap-up recorded PR 42",
+   "detail": "PR 42 MERGED",
+   "severity": "success",
+   "icon": "pr",
+   "raw": {
+    "v": 1,
+    "type": "session_end",
+    "ts": "2026-11-02T23:46:00Z",
+    "source": "wrap-up",
+    "pr_state": "MERGED",
+    "pr_number": 42
+   },
+   "wrapup": true,
+   "phase_family": "TEST"
+  }
+ ],
+ "handoffs": [
+  {
+   "seq": 10,
+   "ts": "2026-11-02T23:05:30Z",
+   "agent": "preparer",
+   "task_id": "2",
+   "task_key": "2:",
+   "task_subject": "preparer: research JWT auth",
+   "fields": {
+    "produced": "docs/preparation/jwt-research.md",
+    "decisions": "Short-lived access tokens with rotating refresh tokens.",
+    "reasoning_chain": "Stateless auth keeps the API horizontally scalable, so a refresh path is required.",
+    "uncertainty": "[MEDIUM] Clock skew on refresh expiry; [LOW] library choice is reversible.",
+    "integration": "AuthService, token middleware, and the users table.",
+    "open_questions": "Should refresh tokens be rotated on every use?"
+   },
+   "schema_complete": true
+  },
+  {
+   "seq": 18,
+   "ts": "2026-11-02T23:12:00Z",
+   "agent": "architect",
+   "task_id": "4",
+   "task_key": "4:",
+   "task_subject": "architect: design the auth flow",
+   "fields": {
+    "produced": "docs/architecture/auth-flow.md",
+    "decisions": "Three service boundaries: AuthService, TokenStore, Middleware.",
+    "reasoning_chain": "TokenStore isolates rotation so AuthService stays pure.",
+    "uncertainty": "[LOW] middleware ordering assumes JSON body parsing first.",
+    "integration": "Router and error middleware.",
+    "open_questions": "Whether to cache public keys."
+   },
+   "schema_complete": true
+  },
+  {
+   "seq": 33,
+   "ts": "2026-11-02T23:23:00Z",
+   "agent": "backend-coder",
+   "task_id": "6",
+   "task_key": "6:",
+   "task_subject": "backend-coder: implement auth service",
+   "fields": {
+    "produced": "src/auth/service.ts, token-store.ts, middleware.ts",
+    "decisions": "Refresh tokens rotate on use; reuse is treated as theft.",
+    "reasoning_chain": "Rotation gives revocation without server-side session lookup.",
+    "uncertainty": "[HIGH] concurrent refresh requests may race; cover with a test.",
+    "integration": "users table, router, error middleware.",
+    "open_questions": "Should logout revoke all device tokens?"
+   },
+   "schema_complete": true
+  },
+  {
+   "seq": 34,
+   "ts": "2026-11-02T23:24:00Z",
+   "agent": "frontend-coder",
+   "task_id": "7",
+   "task_key": "7:",
+   "task_subject": "frontend-coder: build auth UI",
+   "fields": {
+    "produced": "src/ui/auth/*.tsx",
+    "decisions": "Optimistic session guard with a silent refresh attempt.",
+    "reasoning_chain": "Avoids a flash of unauthenticated UI on reload.",
+    "uncertainty": "[MEDIUM] offline behavior is untested.",
+    "integration": "App shell and route guard.",
+    "open_questions": "None"
+   },
+   "schema_complete": true
+  }
+ ],
+ "commits": [
+  {
+   "seq": 11,
+   "ts": "2026-11-02T23:06:00Z",
+   "sha": "94c2da8",
+   "message": "Add PREPARE research",
+   "phase": "PREPARE"
+  },
+  {
+   "seq": 29,
+   "ts": "2026-11-02T23:19:00Z",
+   "sha": "1a2b3c4",
+   "message": "Add AuthService and token store",
+   "phase": "CODE"
+  },
+  {
+   "seq": 30,
+   "ts": "2026-11-02T23:20:00Z",
+   "sha": "5d6e7f8",
+   "message": "Add login and refresh endpoints",
+   "phase": "CODE"
+  },
+  {
+   "seq": 32,
+   "ts": "2026-11-02T23:22:00Z",
+   "sha": "9a0b1c2",
+   "message": "Add auth client and session guard",
+   "phase": "CODE"
+  },
+  {
+   "seq": 47,
+   "ts": "2026-11-02T23:33:00Z",
+   "sha": "2b3c4d5",
+   "message": "Fix refresh reuse detection",
+   "phase": "TEST"
+  },
+  {
+   "seq": 49,
+   "ts": "2026-11-02T23:35:00Z",
+   "sha": "3c4d5e6",
+   "message": "Add auth integration tests",
+   "phase": "TEST"
+  }
+ ],
+ "reviews": [
+  {
+   "seq": 50,
+   "ts": "2026-11-02T23:36:00Z",
+   "pr_number": 42,
+   "pr_url": "https://example.invalid/pull/42",
+   "reviewers": [
+    "architect-reviewer",
+    "test-engineer-reviewer",
+    "security-engineer-reviewer"
+   ]
+  }
+ ],
+ "findings": [
+  {
+   "seq": 31,
+   "ts": "2026-11-02T23:21:00Z",
+   "severity": "suggestion",
+   "finding": "Duplicated cookie options in login and refresh handlers.",
+   "reviewer": "auditor",
+   "task_id": ""
+  },
+  {
+   "seq": 43,
+   "ts": "2026-11-02T23:30:00Z",
+   "severity": "blocking",
+   "finding": "A replayed refresh token is accepted by the token store.",
+   "reviewer": "security-engineer",
+   "task_id": ""
+  },
+  {
+   "seq": 48,
+   "ts": "2026-11-02T23:34:00Z",
+   "severity": "suggestion",
+   "finding": "Add a 30s clock-skew test case.",
+   "reviewer": "test-engineer",
+   "task_id": ""
+  }
+ ],
+ "alerts": [
+  {
+   "seq": 44,
+   "ts": "2026-11-02T23:31:00Z",
+   "kind": "algedonic",
+   "level": "alert",
+   "category": "SECURITY",
+   "category_key": "security",
+   "summary": "Refresh-token replay accepted; fix before merge.",
+   "task_id": "",
+   "task_key": "",
+   "status": "",
+   "resolved": false,
+   "resolution": null
+  },
+  {
+   "seq": 45,
+   "ts": "2026-11-02T23:31:00Z",
+   "kind": "blocker",
+   "level": "alert",
+   "category": "blocker",
+   "category_key": "blocker",
+   "summary": "Rotation reuse detection missing.",
+   "task_id": "",
+   "task_key": "",
+   "status": "",
+   "resolved": false,
+   "resolution": null
+  }
+ ],
+ "checkpoints": [
+  {
+   "seq": 9,
+   "ts": "2026-11-02T23:05:00Z",
+   "phase": "PREPARE",
+   "completed_phases": [
+    "PREPARE"
+   ],
+   "active_agents": [
+    {
+     "name": "preparer",
+     "task_id": "2",
+     "note": "completed"
+    },
+    {
+     "name": "secretary",
+     "task_id": "3",
+     "note": "completed"
+    }
+   ],
+   "variety": {
+    "novelty": 3,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 10
+   }
+  },
+  {
+   "seq": 19,
+   "ts": "2026-11-02T23:13:00Z",
+   "phase": "ARCHITECT",
+   "completed_phases": [
+    "PREPARE",
+    "ARCHITECT"
+   ],
+   "active_agents": [
+    {
+     "name": "architect",
+     "task_id": "4",
+     "note": "completed"
+    },
+    {
+     "name": "auditor",
+     "task_id": "5",
+     "note": "active"
+    }
+   ],
+   "variety": {
+    "novelty": 3,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 10
+   }
+  },
+  {
+   "seq": 35,
+   "ts": "2026-11-02T23:25:00Z",
+   "phase": "CODE",
+   "completed_phases": [
+    "PREPARE",
+    "ARCHITECT",
+    "CODE"
+   ],
+   "active_agents": [
+    {
+     "name": "backend-coder",
+     "task_id": "6",
+     "note": "completed"
+    },
+    {
+     "name": "frontend-coder",
+     "task_id": "7",
+     "note": "completed"
+    }
+   ],
+   "variety": {
+    "novelty": 3,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 10
+   }
+  },
+  {
+   "seq": 53,
+   "ts": "2026-11-02T23:39:00Z",
+   "phase": "TEST",
+   "completed_phases": [
+    "PREPARE",
+    "ARCHITECT",
+    "CODE",
+    "TEST"
+   ],
+   "active_agents": [],
+   "variety": {
+    "novelty": 3,
+    "scope": 3,
+    "uncertainty": 2,
+    "risk": 2,
+    "total": 10
+   }
+  }
+ ],
+ "gates": {
+  "allowed": 1,
+  "advisory": 2,
+  "by_tool": {
+   "TaskUpdate": {
+    "allow": 0,
+    "advisory": 2
+   },
+   "TaskCreate": {
+    "allow": 1,
+    "advisory": 0
+   }
+  },
+  "by_tool_total": 2,
+  "top_rules": [
+   {
+    "rule": "reasoning_reconstruction_band_unresolvable",
+    "count": 1
+   },
+   {
+    "rule": "variety_missing_on_dispatch_task",
+    "count": 1
+   }
+  ],
+  "health_failures": [
+   {
+    "seq": 59,
+    "ts": "2026-11-02T23:44:00Z",
+    "hook": "task_lifecycle_gate",
+    "stage": "runtime",
+    "error": "AttributeError: 'str' object has no attribute 'get'"
+   }
+  ],
+  "telemetry": {
+   "journal_emit_skipped": 1,
+   "handoff_refusal_degraded": 0
+  }
+ },
+ "wrapup": {
+  "source": "wrap-up",
+  "pr_state": "MERGED",
+  "pr_number": 42,
+  "ts": "2026-11-02T23:46:00Z"
+ },
+ "variety": {
+  "feature": {
+   "novelty": 3,
+   "scope": 3,
+   "uncertainty": 2,
+   "risk": 2,
+   "total": 10
+  },
+  "latest": {
+   "novelty": 3,
+   "scope": 3,
+   "uncertainty": 2,
+   "risk": 2,
+   "total": 10
+  },
+  "history": [
+   {
+    "seq": 2,
+    "ts": "2026-11-02T23:00:30Z",
+    "total": 10,
+    "source": "feature"
+   },
+   {
+    "seq": 6,
+    "ts": "2026-11-02T23:02:30Z",
+    "total": 8,
+    "source": "dispatch"
+   },
+   {
+    "seq": 9,
+    "ts": "2026-11-02T23:05:00Z",
+    "total": 10,
+    "source": "checkpoint"
+   },
+   {
+    "seq": 16,
+    "ts": "2026-11-02T23:09:30Z",
+    "total": 9,
+    "source": "dispatch"
+   },
+   {
+    "seq": 19,
+    "ts": "2026-11-02T23:13:00Z",
+    "total": 10,
+    "source": "checkpoint"
+   },
+   {
+    "seq": 25,
+    "ts": "2026-11-02T23:17:00Z",
+    "total": 9,
+    "source": "dispatch"
+   },
+   {
+    "seq": 26,
+    "ts": "2026-11-02T23:17:00Z",
+    "total": 6,
+    "source": "dispatch"
+   },
+   {
+    "seq": 35,
+    "ts": "2026-11-02T23:25:00Z",
+    "total": 10,
+    "source": "checkpoint"
+   },
+   {
+    "seq": 40,
+    "ts": "2026-11-02T23:28:30Z",
+    "total": 8,
+    "source": "dispatch"
+   },
+   {
+    "seq": 41,
+    "ts": "2026-11-02T23:28:30Z",
+    "total": 10,
+    "source": "dispatch"
+   },
+   {
+    "seq": 53,
+    "ts": "2026-11-02T23:39:00Z",
+    "total": 10,
+    "source": "checkpoint"
+   }
+  ]
+ },
+ "metrics": {
+  "events_total": 62,
+  "events_visible": 62,
+  "agents": 12,
+  "tasks": 10,
+  "handoffs": 4,
+  "commits": 6,
+  "reviews": 1,
+  "findings": {
+   "total": 3,
+   "blocking": 1,
+   "suggestion": 2
+  },
+  "gates_allowed": 1,
+  "gates_advisory": 2,
+  "gate_health_failures": 1,
+  "alerts": 2,
+  "teachbacks": 5,
+  "checkpoints": 4,
+  "compactions": 1,
+  "phases_completed": 4,
+  "phases_skipped": 0,
+  "prs_ready": 1,
+  "variety_total": 10
+ },
+ "truncated": false,
+ "truncated_by": [],
+ "warnings": []
+}

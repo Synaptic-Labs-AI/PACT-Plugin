@@ -14,12 +14,14 @@ Used by: pytest suite. This is the dev-repo enforcement tier of the
          tiers. THIS file is where the suite tier's strictness is declared.
 
 Scope boundary — what is swept and why:
-    hooks/, scripts/, telegram/, and skills/*/scripts/ all execute in (or
-    ship to) consumer sessions, so dead imports there are product defects.
-    tests/ never ships, but is swept too: the backlog that justified its
-    day-one exclusion has been cleared, and the CI ruff leg lints all of
-    pact-plugin/ — this gate sweeps tests/ as well, so the two enforcement
-    layers cannot disagree on tests/ scope.
+    hooks/, scripts/, telegram/, visualizer/, and skills/*/scripts/ all
+    execute in (or ship to) consumer sessions, so dead imports there are
+    product defects. visualizer/ is the Mission Control backend: it ships
+    with the plugin, runs on the consumer's machine, and must stay
+    stdlib-only. tests/ never ships, but is swept too: the backlog that
+    justified its day-one exclusion has been cleared, and the CI ruff leg
+    lints all of pact-plugin/ — this gate sweeps tests/ as well, so the two
+    enforcement layers cannot disagree on tests/ scope.
 
 Suppression contract:
     An intentional unused import (re-export facade, monkeypatch seam,
@@ -100,12 +102,12 @@ def _gate_check(paths):
 
 
 # ─── swept Python surfaces ───────────────────────────────────────────────────
-# hooks/, scripts/, telegram/, skills-scripts ship to consumers; tests/ is
-# the dev-repo-only surface, swept so this gate and the CI ruff leg (which
-# lints all of pact-plugin/) cannot disagree on tests/ scope. CI's tree is
-# a strict superset of these globs (e.g. skills/*/ top-level test
-# files are CI-linted only) — the safe direction: a divergence there is a
-# loud CI red, never a silent gate pass.
+# hooks/, scripts/, telegram/, visualizer/ and skills-scripts ship to
+# consumers; tests/ is the dev-repo-only surface, swept so this gate and the
+# CI ruff leg (which lints all of pact-plugin/) cannot disagree on tests/
+# scope. CI's tree is a strict superset of these globs (e.g. skills/*/ top-
+# level test files are CI-linted only) — the safe direction: a divergence
+# there is a loud CI red, never a silent gate pass.
 
 def _skills_script_files():
     return sorted(PLUGIN_ROOT.glob("skills/*/scripts/**/*.py"))
@@ -166,6 +168,7 @@ TARGET_DIR_SETS = {
     "hooks": lambda: sorted((PLUGIN_ROOT / "hooks").rglob("*.py")),
     "scripts": lambda: sorted((PLUGIN_ROOT / "scripts").rglob("*.py")),
     "telegram": lambda: sorted((PLUGIN_ROOT / "telegram").rglob("*.py")),
+    "visualizer": lambda: sorted((PLUGIN_ROOT / "visualizer").rglob("*.py")),
     "skills-scripts": _skills_script_files,
     # SOLE FILTER — do not add another without reading this.
     # No arm plants a dead-owner probe on disk: such a file is unfiltered BY
@@ -206,6 +209,40 @@ class TestSweptTreeIsClean:
             "'# noqa: F401  # <category>: <reason>' on the statement's first "
             "line, or on the kept name's own line in a multi-line import:\n"
             + "\n".join(findings)
+        )
+
+
+class TestVisualizerIsStdlibOnly:
+    """The scope claim at the top of this file says the visualizer stays
+    stdlib-only (it ships to consumers and runs on their machine). This arm
+    makes that claim enforceable: a third-party top-level import reddens.
+    Relative imports (the package's own modules) are exempt by construction."""
+
+    def test_every_visualizer_absolute_import_is_stdlib(self):
+        offenders = []
+        for path in TARGET_DIR_SETS["visualizer"]():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    roots = {alias.name.split(".")[0] for alias in node.names}
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level:  # `from . import x` — the package itself
+                        continue
+                    if node.module is None:  # unreachable for level==0, guarded
+                        continue
+                    roots = {node.module.split(".")[0]}
+                else:
+                    continue
+                offenders.extend(
+                    f"{path.relative_to(PLUGIN_ROOT)}: {root}"
+                    for root in roots
+                    if root not in sys.stdlib_module_names
+                )
+        assert not offenders, (
+            "visualizer/ must import stdlib only (it ships with the plugin "
+            "and runs on the consumer's machine with no dependency install); "
+            "non-stdlib top-level imports found:\n"
+            + "\n".join(f"  - {line}" for line in offenders)
         )
 
 

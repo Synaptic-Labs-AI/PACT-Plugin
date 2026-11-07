@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# Location: pact-plugin/bin/pact-viz
+# Summary: Direct launcher for PACT Mission Control. Resolves the plugin root
+#          (following an installed-cache symlink), enforces the Python >= 3.12
+#          floor, then execs `python3 -P -m visualizer "$@"`. -P keeps the
+#          working directory off sys.path and the launcher drops empty
+#          PYTHONPATH entries, so only a directory the caller's own PYTHONPATH
+#          names can shadow the plugin's code.
+# Used by: /PACT:visualize, README/command docs, humans and scripts that want
+#          the token-free direct launch path.
+#
+# The wrapper is read-only: it creates nothing, writes no state, and makes no
+# network calls. All state (the detached server's state file and log) lives
+# under <config>/pact-viz, written by the Python CLI only.
+
+set -euo pipefail
+
+# Resolve this script's real path so a symlink from an installed plugin cache
+# (e.g. ~/.claude/plugins/cache/.../bin/pact-viz) still finds its plugin root.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    case "$SOURCE" in
+        /*) ;;
+        *) SOURCE="$SOURCE_DIR/$SOURCE" ;;
+    esac
+done
+PLUGIN_ROOT="$(cd -P "$(dirname "$SOURCE")/.." >/dev/null 2>&1 && pwd)"
+# The resolved launcher path: the CLI prints it in its Stop: line, so the line
+# runs in any shell, including one where ${CLAUDE_PLUGIN_ROOT} is unset.
+PACT_VIZ_LAUNCHER="${PLUGIN_ROOT}/bin/$(basename "$SOURCE")"
+export PACT_VIZ_LAUNCHER
+
+PYTHON_BIN="${PACT_VIZ_PYTHON:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "pact-viz: ${PYTHON_BIN} not found on PATH (install Python 3.12+)" >&2
+    exit 1
+fi
+
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
+    FOUND="$("$PYTHON_BIN" -c 'import sys; print(".".join(str(part) for part in sys.version_info[:3]))' 2>/dev/null || echo unknown)"
+    echo "pact-viz: Python 3.12+ is required (found ${FOUND})" >&2
+    exit 1
+fi
+
+# An EMPTY PYTHONPATH entry (":/x", "/x:", or "::") means the current
+# directory, and -P does not remove it, so drop empty entries before
+# prepending the plugin root.
+CALLER_PYTHONPATH=""
+if [ -n "${PYTHONPATH:-}" ]; then
+    IFS=':' read -r -a PYTHONPATH_PARTS <<< "${PYTHONPATH}"
+    for PART in "${PYTHONPATH_PARTS[@]}"; do
+        if [ -n "$PART" ]; then
+            CALLER_PYTHONPATH="${CALLER_PYTHONPATH:+${CALLER_PYTHONPATH}:}${PART}"
+        fi
+    done
+fi
+
+if [ -n "$CALLER_PYTHONPATH" ]; then
+    exec env PYTHONPATH="${PLUGIN_ROOT}:${CALLER_PYTHONPATH}" "$PYTHON_BIN" -P -m visualizer "$@"
+fi
+exec env PYTHONPATH="${PLUGIN_ROOT}" "$PYTHON_BIN" -P -m visualizer "$@"

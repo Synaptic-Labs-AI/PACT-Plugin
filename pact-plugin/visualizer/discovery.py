@@ -1,0 +1,301 @@
+"""Location: pact-plugin/visualizer/discovery.py
+Summary: Read-only discovery of PACT session journals. Owns the exact-depth
+         layout rule (<root>/pact-sessions/<slug>/<session_id>/
+         session-journal.jsonl), the root listing helpers the API exposes, and
+         the traversal-guarded lookup behind /api/session.
+Used by: visualizer.model (sessions + model), visualizer.server (routes),
+         visualizer.cli (--list), tests.
+
+Discovery NEVER recurses: a journal at any other depth (a nested scratch
+journal, a backup directory) is not a session. Unknown files are ignored, not
+errors, so a half-created session directory does not take the server down.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
+
+from .settings import (
+    JOURNAL_FILENAME,
+    PACT_SESSIONS_DIRNAME,
+    RootSpec,
+)
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_MAX_COMPONENT = 255
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """One discovered session journal.
+
+    Location: discovery.SessionRef.
+    Summary: Identifies a journal by root + slug + session_id and carries the
+             absolute paths needed to read it. ``relative_journal`` is the
+             root-relative path echoed in the model's source block.
+    Used by: model, server, cli, tests.
+    """
+
+    root: RootSpec
+    slug: str
+    session_id: str
+    journal: Path
+
+    @property
+    def root_id(self) -> str:
+        """The root id used in query parameters and the sessions payload."""
+        return self.root.id
+
+    @property
+    def session_dir(self) -> Path:
+        """The directory holding the journal and its sibling session files."""
+        return self.journal.parent
+
+    @property
+    def relative_journal(self) -> str:
+        """``pact-sessions/<slug>/<session_id>/session-journal.jsonl``."""
+        return (
+            f"{PACT_SESSIONS_DIRNAME}/{self.slug}/{self.session_id}/{JOURNAL_FILENAME}"
+        )
+
+    @property
+    def key(self) -> str:
+        """Stable per-root session key (root id :: slug :: session id)."""
+        return f"{self.root_id}::{self.slug}::{self.session_id}"
+
+
+def valid_component(value: object) -> bool:
+    """True when a slug/session id is a safe single path component.
+
+    Location: discovery.valid_component.
+    Summary: Rejects empty values, path separators, NUL/control characters,
+             exact "." / ".." and leading dots. Deliberately permissive about
+             the rest: real slugs are project-directory basenames and real
+             session ids are harness ids, and the only thing that matters here
+             is that the value cannot escape its parent directory.
+    Used by: discover_root, find_session, roster.
+    """
+    if not isinstance(value, str) or not value or len(value) > _MAX_COMPONENT:
+        return False
+    if value in {".", ".."} or value.startswith("."):
+        return False
+    if "/" in value or "\\" in value:
+        return False
+    return not _CONTROL_RE.search(value)
+
+
+def contained(base_dir: Path, path: Path) -> bool:
+    """True when ``path`` lies under ``base_dir`` with no symlink below it.
+
+    Location: discovery.contained.
+    Summary: ``base_dir`` itself may be a symlink (its resolved path is the
+             base). Every component from ``base_dir`` down to ``path`` is
+             lstat'd and any symlink refuses the path; the resolved path must
+             then stay under the resolved base. Listing, fetch and the roster
+             loaders share this one predicate, so a path is either visible and
+             readable everywhere or nowhere. Never raises.
+    Used by: discover_root, find_session, roster loaders, model activity clock.
+    """
+    try:
+        base = Path(base_dir).resolve()
+        relative = Path(path).relative_to(base_dir)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    current = Path(base_dir)
+    try:
+        for part in relative.parts:
+            if part in ("", ".", ".."):
+                return False
+            current = current / part
+            if current.is_symlink():
+                return False
+        Path(path).resolve().relative_to(base)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return True
+
+
+def _safe_dirs(parent: Path) -> list[Path]:
+    """Sorted non-hidden, non-symlink directories under ``parent``."""
+    try:
+        entries = sorted(parent.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return []
+    out: list[Path] = []
+    for entry in entries:
+        try:
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        if not valid_component(entry.name):
+            continue
+        out.append(entry)
+    return out
+
+
+def discover_root(root: RootSpec) -> list[SessionRef]:
+    """Discover the sessions under one config root.
+
+    Location: discovery.discover_root.
+    Summary: Enumerates ``<root>/pact-sessions/<slug>/<session_id>/
+             session-journal.jsonl`` with exactly two levels of directory
+             nesting. Nested or differently named journals are ignored. A
+             missing root or pact-sessions directory reads as no sessions.
+    Used by: discover_sessions, model, server, cli, tests.
+    """
+    sessions: list[SessionRef] = []
+    sessions_root = root.path / PACT_SESSIONS_DIRNAME
+    for slug_dir in _safe_dirs(sessions_root):
+        slug = slug_dir.name
+        for session_dir in _safe_dirs(slug_dir):
+            journal = session_dir / JOURNAL_FILENAME
+            if not contained(sessions_root, journal):
+                continue
+            try:
+                if not journal.is_file():
+                    continue
+            except OSError:
+                continue
+            sessions.append(
+                SessionRef(
+                    root=root,
+                    slug=slug,
+                    session_id=session_dir.name,
+                    journal=journal,
+                )
+            )
+    return sessions
+
+
+def discover_sessions(roots: Sequence[RootSpec]) -> list[SessionRef]:
+    """Discover sessions across every configured root, in root order.
+
+    Location: discovery.discover_sessions.
+    Summary: Concatenates discover_root for each root; duplicate roots are the
+             caller's problem (resolve_roots already de-duplicates).
+    Used by: model, server, cli.
+    """
+    sessions: list[SessionRef] = []
+    for root in roots:
+        sessions.extend(discover_root(root))
+    return sessions
+
+
+def count_root_journals(root: RootSpec) -> int:
+    """Count journals under one root for the health/sessions roots entries."""
+    return len(discover_root(root))
+
+
+def root_payload(
+    roots: Sequence[RootSpec],
+    *,
+    with_counts: bool = True,
+    sessions: Sequence[SessionRef] | None = None,
+) -> list[dict]:
+    """The ``roots`` array used by /api/health and /api/sessions.
+
+    Location: discovery.root_payload.
+    Summary: One dict per root with id/label/path/journals/default. Counts are
+             computed on demand so a stale cache can never hide a new journal;
+             a caller that has just discovered ``sessions`` passes them and
+             no second walk happens.
+    Used by: model.build_health, model.build_sessions_list, server.
+    """
+    counts: dict[str, int] | None = None
+    if sessions is not None:
+        counts = {}
+        for ref in sessions:
+            counts[ref.root_id] = counts.get(ref.root_id, 0) + 1
+    payload: list[dict] = []
+    for root in roots:
+        entry = root.as_dict()
+        if with_counts:
+            entry["journals"] = (
+                counts.get(root.id, 0) if counts is not None else count_root_journals(root)
+            )
+        payload.append(entry)
+    return payload
+
+
+def find_root(roots: Sequence[RootSpec], root_id: str | None) -> RootSpec | None:
+    """Resolve a requested root id (or None for the default root).
+
+    Location: discovery.find_root.
+    Summary: Matches on the compact id first, then on the lexical absolute
+             path, so a caller can pass either the id returned by the API or
+             an explicit path. Unknown ids return None (the handler answers
+             400).
+    Used by: find_session, server.
+    """
+    if not roots:
+        return None
+    if root_id is None or root_id == "":
+        for root in roots:
+            if root.default:
+                return root
+        return roots[0]
+    for root in roots:
+        if root.id == root_id:
+            return root
+    wanted = os.path.abspath(os.path.expanduser(root_id))
+    for root in roots:
+        if os.path.abspath(str(root.path)) == wanted:
+            return root
+    return None
+
+
+def find_session(
+    roots: Sequence[RootSpec],
+    slug: object,
+    session_id: object,
+    root_id: str | None = None,
+) -> SessionRef | None:
+    """Traversal-guarded lookup of one session journal.
+
+    Location: discovery.find_session.
+    Summary: Validates both path components as single safe components, resolves
+             the requested root (default root when omitted), and checks that
+             the resulting journal exists. Returns None for any invalid or
+             missing session; the HTTP layer turns that into 400 (bad params)
+             or 404 (not found).
+    Used by: server (/api/session), model, tests.
+    """
+    if not valid_component(slug) or not valid_component(session_id):
+        return None
+    root = find_root(roots, root_id)
+    if root is None:
+        return None
+    # The listing's predicate, not a second rule: a session is fetchable
+    # exactly when discover_root lists it.
+    sessions_root = root.path / PACT_SESSIONS_DIRNAME
+    expected = sessions_root / str(slug) / str(session_id) / JOURNAL_FILENAME
+    if not contained(sessions_root, expected):
+        return None
+    try:
+        if not expected.is_file():
+            return None
+    except OSError:
+        return None
+    return SessionRef(
+        root=root,
+        slug=str(slug),
+        session_id=str(session_id),
+        journal=expected,
+    )
+
+
+def iter_unique_roots(roots: Iterable[RootSpec]) -> list[RootSpec]:
+    """De-duplicate roots by lexical path while preserving order."""
+    seen: set[Path] = set()
+    out: list[RootSpec] = []
+    for root in roots:
+        if root.path in seen:
+            continue
+        seen.add(root.path)
+        out.append(root)
+    return out

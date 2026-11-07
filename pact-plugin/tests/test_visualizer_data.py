@@ -1,0 +1,2296 @@
+"""Location: pact-plugin/tests/test_visualizer_data.py
+Summary: Data-layer tests for PACT Mission Control: root discovery, tolerant
+         JSONL parsing, event classification, roster/team/task joining, model
+         derivation (phases, agents, tasks, handoffs, gates, variety, wrapup,
+         metrics), response caps, the cheap session list, health, and the
+         deterministic demo. Every root used here is a temporary directory;
+         no test reads the operator's real ~/.claude content.
+Used by: pytest (data half of the visualizer backend acceptance suite).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import types
+from collections import UserDict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+import visualizer_census as census
+
+from visualizer import classify, demo, discovery, journal, model, roster, settings
+
+UTC = timezone.utc
+
+
+# ---------------------------------------------------------------------------
+# Helpers / fixtures
+# ---------------------------------------------------------------------------
+
+
+def make_root(tmp_path: Path, name: str = ".claude") -> Path:
+    """Create a temporary config root directory."""
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def write_journal(
+    root: Path,
+    slug: str,
+    session_id: str,
+    events: list[dict] | bytes,
+    *,
+    suffix_bytes: bytes = b"",
+) -> Path:
+    """Write a session journal at the canonical depth and return its path."""
+    session_dir = root / "pact-sessions" / slug / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / "session-journal.jsonl"
+    if isinstance(events, bytes):
+        data = events + suffix_bytes
+    else:
+        lines = [json.dumps(event, separators=(",", ":")) for event in events]
+        data = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
+        data += suffix_bytes
+    path.write_bytes(data)
+    return path
+
+
+def roots_for(root: Path, tmp_path: Path):
+    """RootSpec list for one explicit root (never the real home config)."""
+    return settings.resolve_roots([root], env={"CLAUDE_CONFIG_DIR": str(root)}, home=tmp_path)
+
+
+def first_ref(root: Path, tmp_path: Path) -> discovery.SessionRef:
+    """The single discovered session under a root."""
+    refs = discovery.discover_sessions(roots_for(root, tmp_path))
+    assert len(refs) == 1, refs
+    return refs[0]
+
+
+def stamp(minute: int = 0, second: int = 0) -> str:
+    """A fixed UTC timestamp for deterministic fixtures."""
+    base = datetime(2026, 11, 1, 10, 0, 0, tzinfo=UTC)
+    return (base + timedelta(minutes=minute, seconds=second)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def basic_events() -> list[dict]:
+    """A small complete run: two phases, one agent, one handoff, wrap-up."""
+    return [
+        {
+            "v": 1,
+            "type": "session_start",
+            "ts": stamp(0),
+            "session_id": "sess-1",
+            "project_dir": "/Users/dev/PACT-prompt",
+            "team": "session-abc",
+        },
+        {
+            "v": 1,
+            "type": "phase_transition",
+            "ts": stamp(1),
+            "phase": "PREPARE",
+            "status": "started",
+        },
+        {
+            "v": 1,
+            "type": "agent_dispatch",
+            "ts": stamp(2),
+            "agent": "preparer",
+            "task_id": "2",
+            "phase": "PREPARE",
+        },
+        {
+            "v": 1,
+            "type": "teachback_ack",
+            "ts": stamp(3),
+            "agent": "preparer",
+            "task_id": "2",
+        },
+        {
+            "v": 1,
+            "type": "agent_handoff",
+            "ts": stamp(4),
+            "agent": "preparer",
+            "task_id": "2",
+            "task_subject": "preparer: research the spec",
+            "handoff": {
+                "produced": "docs/preparation/spec.md",
+                "decisions": "narrow scope",
+                "reasoning_chain": "because",
+                "uncertainty": "[LOW] none",
+                "integration": "architect consumes the doc",
+                "open_questions": "None",
+            },
+        },
+        {
+            "v": 1,
+            "type": "commit",
+            "ts": stamp(5),
+            "sha": "94c2da8",
+            "message": "Add PREPARE research",
+            "phase": "PREPARE",
+        },
+        {
+            "v": 1,
+            "type": "checkpoint",
+            "ts": stamp(6),
+            "phase": "PREPARE",
+            "completed_phases": ["PREPARE"],
+            "active_agents": [{"name": "preparer", "task_id": "2", "status": "completed"}],
+            "variety": {"novelty": 2, "scope": 2, "uncertainty": 3, "risk": 1, "total": 8},
+        },
+        {
+            "v": 1,
+            "type": "phase_transition",
+            "ts": stamp(7),
+            "phase": "PREPARE",
+            "status": "completed",
+        },
+        {
+            "v": 1,
+            "type": "lifecycle_decision",
+            "ts": stamp(8),
+            "tool_name": "TaskUpdate",
+            "advisories_count": 1,
+            "rules": ["reasoning_reconstruction_band_unresolvable"],
+            "advisories": ["band unresolved"],
+            "verdict": "advisory",
+        },
+        {
+            "v": 1,
+            "type": "lifecycle_decision",
+            "ts": stamp(8),
+            "tool_name": "TaskUpdate",
+            "advisories_count": 0,
+            "rules": [],
+            "advisories": [],
+            "verdict": "allow",
+        },
+        {"v": 1, "type": "gate_health", "ts": stamp(9), "hook": "task_lifecycle_gate",
+         "status": "failed", "stage": "runtime", "error": "AttributeError: boom"},
+        {"v": 1, "type": "journal_emit_skipped", "ts": stamp(9), "skipped_type": "dispatch_site",
+         "cause": "schema"},
+        {"v": 1, "type": "handoff_refusal_degraded", "ts": stamp(9), "agent_type": "pact-body",
+         "detail": "would refuse", "classes": ["missing_handoff"]},
+        {"v": 1, "type": "review_finding", "ts": stamp(10), "severity": "blocking",
+         "finding": "missing auth check", "reviewer": "security-engineer", "task_id": "30"},
+        {"v": 1, "type": "remediation", "ts": stamp(11), "cycle": 1,
+         "items": ["missing auth check"], "fixer": "backend-coder", "task_id": "31"},
+        {"v": 1, "type": "session_end", "ts": stamp(12), "source": "wrap-up",
+         "pr_state": "MERGED", "pr_number": 1151},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Root resolution and discovery
+# ---------------------------------------------------------------------------
+
+
+class TestRoots:
+    def test_root_flag_beats_env(self, tmp_path):
+        explicit = make_root(tmp_path, "explicit")
+        env_root = tmp_path / "from-env"
+        roots = settings.resolve_roots([explicit], env={"CLAUDE_CONFIG_DIR": str(env_root)}, home=tmp_path)
+        assert len(roots) == 1
+        assert roots[0].path == explicit
+        assert roots[0].default is True
+        assert roots[0].label == "explicit"
+
+    def test_env_root_used_without_flag(self, tmp_path):
+        env_root = make_root(tmp_path, "env-root")
+        roots = settings.resolve_roots((), env={"CLAUDE_CONFIG_DIR": str(env_root)}, home=tmp_path)
+        assert [root.path for root in roots] == [env_root]
+        assert roots[0].default is True
+
+    def test_home_fallback_is_dot_claude(self, tmp_path):
+        roots = settings.resolve_roots((), env={}, home=tmp_path)
+        assert len(roots) == 1
+        assert roots[0].path == tmp_path / ".claude"
+        assert roots[0].id == "~/.claude"
+        assert roots[0].label == ".claude"
+
+    def test_tilde_roots_expand_against_the_injected_home(self, tmp_path):
+        """`~` and `~/x` must use the injected home, never the process HOME.
+
+        os.path.expanduser reads the real HOME, so a test passing
+        home=tmp_path would silently touch the operator's home and the
+        resolver would disagree with the hooks whenever the two homes differ.
+        """
+        for raw in ("~", "~/nested/root"):
+            resolved = settings.resolve_roots([raw], env={}, home=tmp_path)[0].path
+            assert resolved.is_relative_to(tmp_path), raw
+        assert settings.resolve_roots(["~"], env={}, home=tmp_path)[0].path == tmp_path
+        assert (
+            settings.resolve_roots(["~/nested/root"], env={}, home=tmp_path)[0].path
+            == tmp_path / "nested" / "root"
+        )
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t", "\n ", " \t \n"])
+    def test_blank_env_root_is_unset(self, tmp_path, blank):
+        """$CLAUDE_CONFIG_DIR that is set but blank means UNSET, not cwd.
+
+        hooks/shared/paths.get_claude_config_dir strips before its truthiness
+        test; a whitespace-only value that slipped through here would resolve
+        to the process working directory and the dashboard would read a
+        different root than the hooks that write the journals.
+        """
+        roots = settings.resolve_roots((), env={"CLAUDE_CONFIG_DIR": blank}, home=tmp_path)
+        assert [root.path for root in roots] == [tmp_path / ".claude"]
+
+    def test_env_root_precedence_matches_the_hooks_resolver(self, tmp_path):
+        """Parity with the hooks' config-root resolver, not just with literals.
+
+        The visualizer duplicates this resolver rather than importing hooks,
+        so the two are only kept honest by a test that loads both.
+        """
+        from shared.paths import get_claude_config_dir
+
+        for value in (
+            "",
+            "   ",
+            "\t\n",
+            str(tmp_path / "abs"),
+            "relative-dir",
+            "~",
+            "~/sub",
+            "~root",
+            "~root/x",
+            "~no-such-user-here",
+        ):
+            environment = {"CLAUDE_CONFIG_DIR": value}
+            ours = settings.resolve_roots((), env=environment, home=tmp_path)[0].path
+            theirs = get_claude_config_dir(env=environment, home=tmp_path)
+            assert Path(ours).resolve() == Path(theirs).resolve(), value
+
+    def test_repeatable_roots_keep_order_and_first_default(self, tmp_path):
+        one = make_root(tmp_path, "one")
+        two = make_root(tmp_path, "two")
+        roots = settings.resolve_roots([one, two], env={}, home=tmp_path)
+        assert [root.path for root in roots] == [one, two]
+        assert [root.default for root in roots] == [True, False]
+
+    def test_all_roots_adds_siblings_with_pact_sessions(self, tmp_path):
+        primary = tmp_path / ".claude"
+        (primary / "pact-sessions").mkdir(parents=True)
+        sibling = tmp_path / ".claude-work"
+        (sibling / "pact-sessions").mkdir(parents=True)
+        no_sessions = tmp_path / ".claude-empty"
+        no_sessions.mkdir()
+        unrelated = tmp_path / "not-claude"
+        (unrelated / "pact-sessions").mkdir(parents=True)
+        roots = settings.resolve_roots((), all_roots=True, env={}, home=tmp_path)
+        ids = [root.id for root in roots]
+        assert ids[0] == "~/.claude"
+        assert "~/.claude-work" in ids
+        assert "~/.claude-empty" not in ids
+        assert all(not root.id.startswith(str(tmp_path)) for root in roots)
+        assert len({root.path for root in roots}) == len(roots)
+
+    def test_duplicate_roots_are_deduplicated(self, tmp_path):
+        one = make_root(tmp_path, "dup")
+        roots = settings.resolve_roots([one, one], env={}, home=tmp_path)
+        assert len(roots) == 1
+
+
+class TestDefaultStateDir:
+    """The bare `pact-viz --stop` path resolves its state dir through
+    default_state_dir (no --state-dir flag), so detach and stop must agree
+    on `<config>/pact-viz`. Injected env/home only; never the real config."""
+
+    def test_env_config_dir_defines_the_state_root(self, tmp_path):
+        env_root = tmp_path / "zed"
+        state = settings.default_state_dir(
+            env={"CLAUDE_CONFIG_DIR": str(env_root)}, home=tmp_path
+        )
+        assert state == env_root / "pact-viz"
+
+    def test_home_fallback_without_env(self, tmp_path):
+        state = settings.default_state_dir(env={}, home=tmp_path)
+        assert state == tmp_path / ".claude" / "pact-viz"
+
+    def test_empty_env_var_falls_back_to_home(self, tmp_path):
+        state = settings.default_state_dir(
+            env={"CLAUDE_CONFIG_DIR": ""}, home=tmp_path
+        )
+        assert state == tmp_path / ".claude" / "pact-viz"
+
+    @pytest.mark.parametrize("blank", ["   ", "\t", "\n "])
+    def test_blank_env_var_falls_back_to_home(self, tmp_path, blank):
+        """The state dir uses the same resolver as the roots: blank is UNSET."""
+        state = settings.default_state_dir(
+            env={"CLAUDE_CONFIG_DIR": blank}, home=tmp_path
+        )
+        assert state == tmp_path / ".claude" / "pact-viz"
+
+
+class TestDiscovery:
+    def test_exact_depth_only(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "PACT-prompt", "sess-1", basic_events())
+        # A nested scratch journal must never be discovered.
+        scratch = root / "pact-sessions" / "PACT-prompt" / "sess-1" / "scratch"
+        scratch.mkdir(parents=True)
+        (scratch / "session-journal.jsonl").write_text("{}\n", encoding="utf-8")
+        # A journal one level too shallow must never be discovered.
+        (root / "pact-sessions" / "PACT-prompt" / "session-journal.jsonl").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        # A journal outside pact-sessions must never be discovered.
+        other = root / "elsewhere" / "session-journal.jsonl"
+        other.parent.mkdir(parents=True)
+        other.write_text("{}\n", encoding="utf-8")
+
+        refs = discovery.discover_sessions(roots_for(root, tmp_path))
+        assert [(ref.slug, ref.session_id) for ref in refs] == [("PACT-prompt", "sess-1")]
+        assert refs[0].relative_journal == "pact-sessions/PACT-prompt/sess-1/session-journal.jsonl"
+        assert isinstance(refs[0].root_id, str) and refs[0].root_id.endswith(".claude")
+        assert refs[0].key == f"{refs[0].root_id}::PACT-prompt::sess-1"
+
+    def test_missing_root_and_unreadable_dirs_are_empty(self, tmp_path):
+        root = make_root(tmp_path)
+        assert discovery.discover_sessions(roots_for(root, tmp_path)) == []
+        (root / "pact-sessions" / "project" / "not-a-session").mkdir(parents=True)
+        assert discovery.discover_sessions(roots_for(root, tmp_path)) == []
+
+    def test_hidden_and_malformed_components_are_skipped(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "PACT-prompt", ".sess-dot", basic_events())
+        write_journal(root, ".hidden", "sess", basic_events())
+        write_journal(root, "PACT-prompt", "sess-1", basic_events())
+        refs = discovery.discover_sessions(roots_for(root, tmp_path))
+        assert [(ref.slug, ref.session_id) for ref in refs] == [("PACT-prompt", "sess-1")]
+
+    def test_find_session_is_traversal_guarded(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "PACT-prompt", "sess-1", basic_events())
+        roots = roots_for(root, tmp_path)
+        assert discovery.find_session(roots, "PACT-prompt", "sess-1") is not None
+        for slug, session_id in (
+            ("..", "sess-1"),
+            ("PACT-prompt", ".."),
+            ("PACT-prompt/../..", "sess-1"),
+            ("PACT-prompt", "sess-1/../../etc"),
+            ("", "sess-1"),
+        ):
+            assert discovery.find_session(roots, slug, session_id) is None
+        assert discovery.find_session(roots, "PACT-prompt", "missing") is None
+
+    def test_find_root_accepts_id_and_path(self, tmp_path):
+        root = make_root(tmp_path)
+        roots = roots_for(root, tmp_path)
+        assert discovery.find_root(roots, roots[0].id) is not None
+        assert discovery.find_root(roots, str(root)) is not None
+        assert discovery.find_root(roots, "nope") is None
+        assert discovery.find_root(roots, None) is roots[0]
+
+
+# ---------------------------------------------------------------------------
+# Tolerant journal reading
+# ---------------------------------------------------------------------------
+
+
+class TestJournalRead:
+    def test_malformed_partial_non_utf8_lines_are_skipped_with_warnings(self, tmp_path):
+        root = make_root(tmp_path)
+        good = [
+            {"v": 1, "type": "session_start", "ts": stamp(0), "session_id": "s", "project_dir": "/x"},
+            {"v": 1, "type": "phase_transition", "ts": stamp(1), "phase": "PREPARE", "status": "started"},
+        ]
+        payload = b""
+        payload += json.dumps(good[0], separators=(",", ":")).encode() + b"\n"
+        payload += b"\n"  # blank line, skipped silently
+        payload += b'{"v": 1, "type": \n'  # malformed JSON
+        payload += b"[1, 2, 3]\n"  # valid JSON, not an object
+        payload += b'{"v": 1, "ts": "x"}\n'  # object without type
+        payload += b"\xff\xfe\x00garbage\n"  # invalid UTF-8
+        payload += json.dumps(good[1], separators=(",", ":")).encode() + b"\n"
+        payload += b'{"v": 1, "type": "session_end"'  # partial final line
+        path = write_journal(root, "proj", "sess", payload)
+
+        read = journal.read_journal(path)
+        assert [event.seq for event in read.events] == [0, 6]
+        assert [event.data["type"] for event in read.events] == ["session_start", "phase_transition"]
+        assert read.lines_total == 8
+        assert read.valid_events == 2
+        assert read.skipped_lines == 5
+        assert read.warnings
+        assert len(read.warnings) <= settings.MAX_WARNINGS
+        assert read.etag == journal.make_etag(read.mtime, read.size)
+
+    def test_final_line_without_newline_still_parses(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(
+            root,
+            "proj",
+            "sess",
+            [{"v": 1, "type": "session_start", "ts": stamp(0)}],
+        )
+        raw = path.read_bytes().rstrip(b"\n")
+        path.write_bytes(raw)
+        read = journal.read_journal(path)
+        assert len(read.events) == 1
+        assert read.skipped_lines == 0
+
+    def test_empty_file_reads_as_no_events_without_warnings(self, tmp_path):
+        """A zero-byte journal is a run with no events, not a malformed file."""
+        path = tmp_path / "session-journal.jsonl"
+        path.write_bytes(b"")
+        read = journal.read_journal(path)
+        assert read.events == []
+        assert read.warnings == []
+
+    def test_boundary_truncated_final_line_is_skipped_with_a_warning(self, tmp_path):
+        """A reader that catches a writer mid-append must not fail on the
+        partial last line, and must say so rather than dropping it silently."""
+        path = tmp_path / "session-journal.jsonl"
+        path.write_bytes(b'{"v": 1, "type": "session_start", "ts": "2026-11')
+        read = journal.read_journal(path)
+        assert read.events == []
+        assert read.skipped_lines == 1
+        assert read.warnings
+
+    def test_missing_file_reads_empty(self, tmp_path):
+        read = journal.read_journal(tmp_path / "missing.jsonl")
+        assert read.events == []
+        assert read.mtime == 0.0
+        assert read.size == 0
+
+    def test_etag_changes_after_append(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", [{"v": 1, "type": "session_start", "ts": stamp(0)}])
+        first = journal.read_journal(path)
+        with path.open("ab") as handle:
+            handle.write(b'{"v":1,"type":"session_end","ts":"2026-11-01T10:01:00Z"}\n')
+        second = journal.read_journal(path)
+        assert first.etag != second.etag
+        assert second.etag == journal.make_etag(second.mtime, second.size)
+
+    def test_summarize_reads_ended_session(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", basic_events()[:4] + [
+            {"v": 1, "type": "session_end", "ts": stamp(20)},
+        ])
+        summary = journal.summarize_journal(path)
+        assert summary.started_at == stamp(0)
+        assert summary.updated_at == stamp(20)
+        assert summary.last_event_type == "session_end"
+        assert summary.last_phase == "PREPARE"
+        assert summary.team == "session-abc"
+        assert summary.project_dir == "/Users/dev/PACT-prompt"
+        assert summary.run_kind == "orchestrate"
+        assert summary.status == "ended"
+        assert summary.is_live is False
+
+    def test_summarize_fresh_unended_is_live(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", basic_events()[:4])
+        summary = journal.summarize_journal(path)
+        assert summary.status == "live"
+        assert summary.is_live is True
+
+    def test_summarize_old_unended_is_ended(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", basic_events()[:4])
+        future = datetime(2027, 1, 1, tzinfo=UTC)
+        summary = journal.summarize_journal(path, now=future)
+        assert summary.status == "ended"
+
+    def test_summarize_finds_last_phase_beyond_the_tail_window(self, tmp_path):
+        """A phase_transition earlier than the tail window still reports.
+
+        The summary's last_phase used to read only the final tail window, so
+        a long tail of non-phase events erased the phase. The bounded
+        backward scan must recover it without parsing the whole file.
+        """
+        root = make_root(tmp_path)
+        events = [
+            {"v": 1, "type": "phase_transition", "ts": "2026-01-01T00:00:00Z",
+             "phase": "ARCHITECT", "status": "started"},
+        ]
+        filler = [
+            {"v": 1, "type": "commit", "ts": "2026-01-01T00:30:00Z",
+             "sha": f"{index:08x}", "message": "m" * 400, "phase": "CODE"}
+            for index in range(400)
+        ]
+        path = write_journal(root, "proj", "sess", events + filler)
+        assert path.stat().st_size > settings.SUMMARY_TAIL_BYTES
+        summary = journal.summarize_journal(path)
+        assert summary.last_phase == "ARCHITECT"
+
+    def test_summarize_phase_scan_boundary_is_four_windows(self, tmp_path):
+        """The backward scan's bound, at its edge: a phase_transition just
+        inside 4 x SUMMARY_TAIL_BYTES (512KB) is recovered; one just beyond
+        it is out of budget and leaves last_phase empty.
+
+        The budget is pinned as an absolute byte count, not derived from
+        the window size or the window count: a fixture derived from either
+        constant adapts to a change of it and stays green.
+        """
+        scan_budget = 512 * 1024
+        assert (
+            journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES == scan_budget
+        ), "the documented 512KB scan budget changed; update CONTRACT.md with it"
+        phase = (
+            json.dumps(
+                {"v": 1, "type": "phase_transition", "ts": "2026-01-01T00:00:00Z",
+                 "phase": "ARCHITECT", "status": "started"},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        shell_prefix = '{"v":1,"type":"note","pad":"'
+        shell_suffix = '"}\n'
+        line_size = 128
+
+        def filler_line(total_bytes: int) -> bytes:
+            """One valid note line of exactly total_bytes, newline included."""
+            pad_chars = total_bytes - len(shell_prefix) - len(shell_suffix)
+            assert pad_chars >= 0
+            line = (shell_prefix + "x" * pad_chars + shell_suffix).encode("utf-8")
+            assert len(line) == total_bytes
+            return line
+
+        def filler_bytes(total_bytes: int) -> bytes:
+            """Exactly total_bytes of parseable note lines.
+
+            Many normal-sized lines, not one giant line: the tail reader's
+            window must contain whole parseable lines or summarize_journal
+            skips the last_phase scan entirely (empty tail branch).
+            """
+            remainder = total_bytes % line_size
+            first_len = remainder if remainder >= 64 else remainder + line_size
+            first = filler_line(first_len)
+            count = (total_bytes - len(first)) // line_size
+            data = first + filler_line(line_size) * count
+            assert len(data) == total_bytes
+            return data
+
+        front = filler_line(64)
+        for distance, expected in (
+            (scan_budget - 2048, "ARCHITECT"),  # ~2KB inside the last window
+            (scan_budget + 2048, ""),            # ~2KB beyond the scan budget
+        ):
+            session_dir = tmp_path / f".claude-{distance}"
+            path = session_dir / "session-journal.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = front + phase + filler_bytes(distance)
+            path.write_bytes(data)
+            assert path.stat().st_size == len(front) + len(phase) + distance
+            summary = journal.summarize_journal(path)
+            assert summary.last_phase == expected, distance
+
+    def test_an_oversize_journal_parses_its_tail_with_true_seqs(self, tmp_path, monkeypatch):
+        """Over the cap, the LAST bytes are parsed (a run is never shown empty),
+        the cut first line is dropped, and every seq is the real line index."""
+        root = make_root(tmp_path)
+        events = basic_events()[:6]
+        path = write_journal(root, "proj", "sess", events)
+        lines = path.read_bytes().splitlines(keepends=True)
+        keep = len(lines[-1]) + len(lines[-2]) + 5  # two whole lines and a fragment
+        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", keep)
+        read = journal.read_journal(path)
+        assert read.tail_only is True
+        assert [event.seq for event in read.events] == [len(lines) - 2, len(lines) - 1]
+        assert [event.data["type"] for event in read.events] == [
+            events[-2]["type"], events[-1]["type"]
+        ]
+        assert read.warnings
+
+    def test_summarize_run_kind_uses_the_shared_marker_set(self, tmp_path):
+        """session_end must not mark orchestration in the cheap summary.
+
+        A bare ended run (session_start + session_end) is a session, matching
+        the full model's marker set; a commit journal IS an orchestration by
+        the same set — the summary and the model must never disagree.
+        """
+        root = make_root(tmp_path)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        bare = [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T00:02:00Z"},
+        ]
+        summary = journal.summarize_journal(
+            write_journal(root, "proj", "bare", bare), now=now
+        )
+        assert summary.run_kind == "session"
+        assert summary.status == "ended"
+        with_commit = bare[:1] + [
+            {"v": 1, "type": "commit", "ts": "2026-01-01T00:01:00Z",
+             "sha": "aaa", "message": "m", "phase": "CODE"},
+        ]
+        summary = journal.summarize_journal(
+            write_journal(root, "proj", "commit", with_commit), now=now
+        )
+        assert summary.run_kind == "orchestrate"
+
+    def test_summarize_finds_early_markers_despite_markerless_wrapup_tail(
+        self, tmp_path
+    ):
+        """An ended orchestration with a long markerless tail lists orchestrate.
+
+        The run's only markers sit near the journal's start; a wrap-up tail of
+        non-marker events pushes them out of the tail window, so the head
+        window (already loaded) must carry the verdict.
+        """
+        root = make_root(tmp_path)
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        events = [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "started", "ts": "2026-01-01T00:01:00Z"},
+        ]
+        filler = {"v": 1, "type": "lifecycle_decision", "ts": "2026-01-01T00:02:00Z",
+                  "tool_name": "X", "advisories_count": 0, "rules": [],
+                  "advisories": [], "verdict": "allow", "pad": "x" * 400}
+        filler_len = len(json.dumps(filler, separators=(",", ":"))) + 1
+        # Push the markers past every backward-scan window, but keep them in
+        # the head window, so only the head read can see them.
+        budget = journal._PHASE_SCAN_MAX_WINDOWS * settings.SUMMARY_TAIL_BYTES
+        events += [filler] * (budget // filler_len + 50)
+        events.append({"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"})
+        path = write_journal(root, "proj", "wrapup", events)
+        assert path.stat().st_size > budget
+        assert journal._scan_back(
+            path, path.stat().st_size, frozenset({"phase_transition"})
+        ) == {}
+        summary = journal.summarize_journal(path, now=now)
+        assert summary.run_kind == "orchestrate"
+        assert summary.status == "ended"
+
+
+# ---------------------------------------------------------------------------
+# Classification
+# ---------------------------------------------------------------------------
+
+
+class TestClassify:
+    def test_known_event_classified_with_bounded_strings(self):
+        raw = journal.RawEvent(
+            seq=7,
+            data={
+                "v": 1,
+                "type": "agent_handoff",
+                "ts": stamp(1),
+                "agent": "preparer",
+                "task_id": 8,
+                "handoff": {"produced": "x" * 8000},
+            },
+        )
+        event = classify.classify_event(
+            raw, {"project": "P", "team": "t", "cloud": False}
+        )
+        assert event is not None
+        assert event["seq"] == 7
+        assert event["category"] == "handoff"
+        assert event["icon"] == "handoff"
+        assert event["severity"] == "success"
+        assert event["agent"] == "preparer"
+        assert event["task_id"] == "8"
+        assert len(event["title"]) <= settings.MAX_TITLE_CHARS
+        assert len(event["detail"]) <= settings.MAX_DETAIL_CHARS
+        # raw payload is trimmed to the 4000-char field cap
+        assert len(event["raw"]["handoff"]["produced"]) == settings.MAX_FIELD_CHARS
+
+    def test_unknown_type_is_omitted(self):
+        raw = journal.RawEvent(seq=0, data={"v": 1, "type": "totally_new_event"})
+        assert classify.classify_event(raw) is None
+        assert classify.is_visual_type("totally_new_event") is False
+        assert classify.is_visual_type("commit") is True
+
+    def test_handoff_canonical_fields_and_legacy_aliases(self):
+        payload = {
+            "produced": "p",
+            "key_decisions": "legacy decisions",
+            "areas_of_uncertainty": "legacy uncertainty",
+            "integration_points": "legacy integration",
+            "open_questions": "",
+        }
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["produced"] == "p"
+        assert fields["decisions"] == "legacy decisions"
+        assert fields["uncertainty"] == "legacy uncertainty"
+        assert fields["integration"] == "legacy integration"
+        assert fields["reasoning_chain"] is None
+        assert fields["open_questions"] is None
+        assert classify.handoff_schema_complete_raw(payload) is False
+
+    def test_handoff_schema_complete_for_full_payload(self):
+        payload = {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
+        fields = classify.extract_handoff_fields(payload)
+        assert fields == {name: name.upper() for name in classify.HANDOFF_CANONICAL_FIELDS}
+        assert classify.handoff_schema_complete_raw(payload) is True
+
+    def test_handoff_list_valued_fields_are_joined_not_dropped(self):
+        """The handoff schema is presence-only, so a field may carry a list.
+
+        open_questions is commonly list-shaped in real handoffs; coercing it
+        to None would badge a schema-valid handoff incomplete (the same
+        failure class the reasoning_chain carve-out exists to prevent).
+        """
+        payload = {name: name.upper() for name in classify.HANDOFF_REQUIRED_FIELDS}
+        payload["open_questions"] = ["one question", "another question"]
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["open_questions"] == "one question · another question"
+        assert classify.handoff_schema_complete_raw(payload) is True
+
+    def test_handoff_empty_list_field_counts_as_present(self):
+        """An explicit empty list is PRESENT under the presence-only schema.
+
+        A common real shape: all five required keys carry
+        values and open_questions is an empty list. Dropping it to None would
+        badge a valid handoff incomplete; it renders "(none)" instead.
+        """
+        payload = {name: name.upper() for name in classify.HANDOFF_REQUIRED_FIELDS}
+        payload["open_questions"] = []
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["open_questions"] == "(none)"
+        assert classify.handoff_schema_complete_raw(payload) is True
+
+    def test_handoff_schema_complete_allows_missing_recommended_reasoning_chain(self):
+        """The SSOT marks reasoning_chain recommended, not required.
+
+        A five-key handoff is well-formed and must not be labelled incomplete
+        in the debrief just because the optional field is absent.
+        """
+        payload = {
+            name: name.upper() for name in classify.HANDOFF_REQUIRED_FIELDS
+        }
+        fields = classify.extract_handoff_fields(payload)
+        assert fields["reasoning_chain"] is None
+        assert classify.handoff_schema_complete_raw(payload) is True
+
+    def test_handoff_schema_required_set_excludes_the_recommended_field(self):
+        assert "reasoning_chain" not in classify.HANDOFF_REQUIRED_FIELDS
+        assert classify.HANDOFF_REQUIRED_FIELDS == tuple(
+            field
+            for field in classify.HANDOFF_CANONICAL_FIELDS
+            if field not in classify.HANDOFF_RECOMMENDED_FIELDS
+        )
+
+    def test_handoff_schema_mirrors_the_hooks_ssot(self):
+        """The mirror is hand-copied, so this test is all that keeps it in sync.
+
+        visualizer/ must not import hooks at runtime (it is launched with only
+        the plugin root on sys.path), so the three tuples are duplicated by
+        hand. Without this test a field moving between required and recommended
+        in hooks/shared/handoff_schema leaves the debrief badge reporting the
+        old partition while every visualizer test stays green.
+        """
+        from shared import handoff_schema as ssot
+
+        assert classify.HANDOFF_CANONICAL_FIELDS == ssot.HANDOFF_CANONICAL_FIELDS
+        assert classify.HANDOFF_RECOMMENDED_FIELDS == ssot.HANDOFF_RECOMMENDED_FIELDS
+        assert classify.HANDOFF_LEGACY_ALIASES == ssot.HANDOFF_LEGACY_ALIASES
+
+    def test_each_handoff_field_reads_the_same_source_as_the_hooks(self):
+        """Canonical value or legacy alias: the viewer picks the value the
+        hooks' resolver picks, by membership in the empty set and never by
+        truthiness, so 0 and False are content and an empty list falls
+        through to a non-empty alias."""
+        from shared.handoff_schema import resolve_handoff_field
+
+        canonical_values = [None, "", [], {}, 0, False, "text", ["a", "b"], {"k": "v"}]
+        alias_values = [None, "", [], "legacy", ["x"]]
+        checked = 0
+        for field, alias in (("decisions", "key_decisions"),
+                             ("uncertainty", "areas_of_uncertainty"),
+                             ("integration", "integration_points")):
+            for canonical in canonical_values:
+                for legacy in alias_values:
+                    payload = {field: canonical, alias: legacy}
+                    expected = classify._handoff_field_text(
+                        resolve_handoff_field(payload, field)
+                    )
+                    got = classify.extract_handoff_fields(payload)[field]
+                    assert got == expected, (field, canonical, legacy, got, expected)
+                    checked += 1
+                absent = {alias: "legacy"}
+                assert classify.extract_handoff_fields(absent)[field] == (
+                    classify._handoff_field_text(resolve_handoff_field(absent, field))
+                )
+        assert checked == 3 * len(canonical_values) * len(alias_values)
+
+    def test_handoff_predicate_agrees_with_the_hooks_validator_on_json_shapes(self):
+        """Every shape a journal can produce must get the same verdict.
+
+        json.loads always yields a dict, so these are the reachable inputs.
+        handoff_schema_complete_raw documents itself as mirroring the SSOT
+        validator exactly; this is the arm that catches a semantic split.
+        """
+        from shared.handoff_schema import validate_handoff_schema
+
+        required = classify.HANDOFF_REQUIRED_FIELDS
+        full = {field: "x" for field in required}
+        cases = {
+            "all-present": full,
+            "all-empty-strings": {field: "" for field in required},
+            "empty-list-valued": {**full, "open_questions": []},
+            "empty-object-valued": {**full, "integration": {}},
+            "explicit-null-valued": {**full, "uncertainty": None},
+            "missing-first-required": {f: "x" for f in required if f != "produced"},
+            "missing-last-required": {f: "x" for f in required if f != "open_questions"},
+            "legacy-aliases-only": {
+                "produced": "p",
+                "key_decisions": "d",
+                "areas_of_uncertainty": "u",
+                "integration_points": "i",
+                "open_questions": "o",
+            },
+            "extra-unknown-keys": {**full, "junk": 1},
+            "empty-object": {},
+            "non-mapping-list": ["produced"],
+            "non-mapping-none": None,
+        }
+        for name, handoff in cases.items():
+            ours = classify.handoff_schema_complete_raw(handoff)
+            theirs = validate_handoff_schema(handoff) is None
+            assert ours is theirs, name
+
+    def test_handoff_predicate_type_gate_differs_from_the_hooks_validator(self):
+        """KNOWN DIVERGENCE, pinned rather than hidden.
+
+        The visualizer gates on Mapping, the SSOT on dict, so a non-dict
+        Mapping is `complete` here and `malformed` there. Unreachable from the
+        server path (journal JSON always parses to dict), so this records the
+        current relationship instead of changing either implementation. The
+        dict arm below is the control: the difference is the TYPE gate, not
+        the field logic.
+        """
+        from shared.handoff_schema import validate_handoff_schema
+
+        full = {field: "x" for field in classify.HANDOFF_REQUIRED_FIELDS}
+        for shape in (UserDict(full), types.MappingProxyType(full)):
+            assert classify.handoff_schema_complete_raw(shape) is True
+            assert validate_handoff_schema(shape) is not None
+        assert classify.handoff_schema_complete_raw(dict(full)) is True
+        assert validate_handoff_schema(dict(full)) is None
+
+    def test_normalize_variety(self):
+        assert classify.normalize_variety({"novelty": 2, "scope": 3}) == {
+            "novelty": 2,
+            "scope": 3,
+            "uncertainty": 0,
+            "risk": 0,
+            "total": 5,
+        }
+        assert classify.normalize_variety({"total": 9}) == {
+            "novelty": 0,
+            "scope": 0,
+            "uncertainty": 0,
+            "risk": 0,
+            "total": 9,
+        }
+        assert classify.normalize_variety(None) is None
+        assert classify.normalize_variety("nope") is None
+
+    def test_severity_and_icon_tables_are_consistent(self):
+        for event_type, (category, icon, severity) in classify.EVENT_TYPE_INFO.items():
+            assert isinstance(category, str) and category
+            assert isinstance(icon, str) and icon
+            assert severity in classify.SEVERITIES
+
+    def test_every_emitted_icon_token_is_handled_by_the_stage(self):
+        """The server's icon vocabulary and the canvas's must agree.
+
+        The table check above is self-consistency only: a typo'd token (say
+        "hadnoff") is still a non-empty string, and the feed row still renders,
+        so nothing reddens while the stage silently animates nothing.
+        """
+        stage_js = (
+            Path(__file__).resolve().parent.parent
+            / "visualizer" / "static" / "js" / "stage.js"
+        ).read_text(encoding="utf-8")
+        handled = set(re.findall(r'icon === "([a-z_]+)"', stage_js))
+        emitted = {icon for _category, icon, _severity in classify.EVENT_TYPE_INFO.values()}
+        # Feed-row only: panels.js renders these by category, so they carry no
+        # stage effect by design.
+        inert = {"raw", "variety", "wake"}
+        unhandled = emitted - handled - inert
+        assert not unhandled, (
+            f"event icons with no stage.js branch: {sorted(unhandled)}. "
+            f"Either branch on the token in stage.js or add it to `inert` here."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Team config, cloud roster and task store
+# ---------------------------------------------------------------------------
+
+
+class TestRedaction:
+    """Credential-shaped text never survives a payload string helper."""
+
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "ghp_" + "a1" * 12,
+            "gho_" + "B" * 22,
+            "ghu_" + "c" * 22,
+            "ghs_" + "D" * 22,
+            "ghr_" + "e" * 22,
+            "github_pat_" + "F_1" * 8,
+            "sk-ant-api03-" + "G" * 24,
+            "sk-proj-" + "h" * 24,
+            "AKIA" + "ABCDEFGH12345678",
+            "ASIA" + "ABCDEFGH12345678",
+            "xoxa-" + "1" * 12,
+            "xoxb-" + "2" * 12,
+            "xoxp-" + "3" * 12,
+            "xoxr-" + "4" * 12,
+            "xoxs-" + "5" * 12,
+            "Bearer " + "abc.def_ghi",
+            "bearer " + "Z" * 12,
+            "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH " + "PRIVATE KEY-----",
+        ],
+        ids=lambda secret: secret.split("\n")[0][:16],
+    )
+    def test_a_credential_value_is_replaced(self, secret):
+        text = classify.redact(f"before {secret} after")
+        assert text == f"before {classify.REDACTED} after"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("password=hunter2", "password=[redacted]"),
+            ("PASSWD: hunter2 next", "PASSWD: [redacted] next"),
+            ('secret = "two words"', "secret = [redacted]"),
+            ("token: 'abc def'", "token: [redacted]"),
+            ("api_key=k1", "api_key=[redacted]"),
+            ("api-key=k1", "api-key=[redacted]"),
+            ("apikey=k1", "apikey=[redacted]"),
+            ("Authorization: Basic", "Authorization: [redacted]"),
+            ("access_token=t1", "access_token=[redacted]"),
+            ("client-secret=c1", "client-secret=[redacted]"),
+        ],
+    )
+    def test_an_assignment_keeps_its_name_and_loses_its_value(self, raw, expected):
+        assert classify.redact(raw) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the token count rose",
+            "ghp_short",
+            "sk-tooshort",
+            "AKIA lowercase akiaabcdefgh12345678",
+            "a bearer of news",
+            "passwords are discussed here",
+        ],
+    )
+    def test_ordinary_prose_is_left_alone(self, text):
+        assert classify.redact(text) == text
+
+    def test_redaction_runs_before_the_length_cap(self):
+        """A secret straddling the cap must not leave a matchable-no-longer
+        prefix behind: the text is redacted first, then bounded."""
+        secret = "ghp_" + "A" * 30
+        lead = "x" * (settings.MAX_TITLE_CHARS - 10) + " "
+        text = classify.as_text(lead + secret)
+        assert len(text) <= settings.MAX_TITLE_CHARS
+        assert "ghp_" not in text
+
+    def test_a_credential_named_key_withholds_its_whole_value(self):
+        trimmed = classify.trim_raw(
+            {
+                "cookie": "session=abc",
+                "Credential": {"user": "u", "pass": "p"},
+                "x_api_key": ["k1", "k2"],
+                "authorization": 12345,
+                "note": "plain",
+            }
+        )
+        for key in ("cookie", "Credential", "x_api_key", "authorization"):
+            assert trimmed[key] == classify.REDACTED, key
+        assert trimmed["note"] == "plain"
+
+    def test_a_nested_string_leaf_is_redacted(self):
+        secret = "sk-ant-" + "Q" * 24
+        trimmed = classify.trim_raw({"a": {"b": [{"c": f"see {secret}"}]}})
+        assert secret not in json.dumps(trimmed)
+        assert classify.REDACTED in json.dumps(trimmed)
+
+    @pytest.mark.parametrize("depth", [4, 5, 6, 9])
+    def test_a_string_at_and_past_the_depth_cap_is_redacted(self, depth):
+        secret = "ghp_" + "N" * 24
+        nested: object = f"leaf {secret}"
+        for _ in range(depth):
+            nested = {"a": nested}
+        dumped = json.dumps(classify.trim_raw({"root": nested}))
+        assert secret not in dumped
+
+    def test_a_list_item_at_the_depth_cap_is_redacted(self):
+        secret = "ghp_" + "L" * 24
+        nested: object = [f"leaf {secret}"]
+        for _ in range(4):
+            nested = {"a": nested}
+        assert secret not in json.dumps(classify.trim_raw({"root": nested}))
+
+    def test_a_list_valued_handoff_field_is_redacted(self):
+        secret = "xoxb-" + "9" * 14
+        fields = classify.extract_handoff_fields({"produced": [f"used {secret}", "ok"]})
+        assert secret not in fields["produced"]
+        assert classify.REDACTED in fields["produced"]
+
+
+class TestRoster:
+    def test_team_config_members(self, tmp_path):
+        root = make_root(tmp_path)
+        team_dir = root / "teams" / "session-abc"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "leadSessionId": "abc",
+                    "members": [
+                        {"name": "preparer", "agentId": "preparer@session-abc",
+                         "agentType": "PACT:pact-preparer", "backendType": "in-process"},
+                        {"name": "backend-coder", "agentType": "pact-backend-coder"},
+                        {"not-a-member": True},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        info = roster.load_team(root, "session-abc")
+        assert info.name == "session-abc"
+        assert info.config_present is True
+        assert info.cloud is False
+        assert [member.name for member in info.members] == ["preparer", "backend-coder"]
+        assert info.members[0].role == "preparer"
+        assert info.members[1].role == "backend-coder"
+        assert info.members[0].cloud is False
+        assert roster.color_for_role("preparer") == "green"
+
+    def test_cloud_roster_intents_used_when_no_config(self, tmp_path):
+        root = make_root(tmp_path)
+        team_dir = root / "teams" / "session-cloud"
+        team_dir.mkdir(parents=True)
+        ts = "2026-11-01T10:00:00Z"
+        lines = [
+            census.roster_intent("toolu_1", "preparer", "PACT:pact-preparer", ts),
+            census.roster_intent("toolu_1", "ignored-duplicate", "PACT:pact-preparer", ts),
+            census.roster_intent("toolu_2", "architect", "pact-architect", ts),
+            census.roster_bind("toolu_1", "a123", "PACT:pact-preparer", ts),
+            census.roster_confirm("toolu_1", "a123", ts),
+            "not json at all",
+            {"v": 2, "k": "intent", "tu": "toolu_4", "name": "future-shape", "type": "x"},
+            {"v": 1, "k": "intent", "tu": "toolu_3", "name": "", "type": "x"},
+        ]
+        (team_dir / "pact-roster.jsonl").write_text(
+            "\n".join(item if isinstance(item, str) else json.dumps(item) for item in lines) + "\n",
+            encoding="utf-8",
+        )
+        info = roster.load_team(root, "session-cloud")
+        assert info.cloud is True
+        assert info.config_present is False
+        assert [intent.name for intent in info.intents] == ["preparer", "architect"]
+        assert all(intent.cloud for intent in info.intents)
+        assert info.intents[0].role == "preparer"
+        assert info.intents[0].agent_id == "a123"
+
+    def test_task_store_loaded_and_normalized(self, tmp_path):
+        root = make_root(tmp_path)
+        tasks_dir = root / "tasks" / "session-abc"
+        tasks_dir.mkdir(parents=True)
+        (tasks_dir / "1.json").write_text(
+            json.dumps(
+                {
+                    "id": "1",
+                    "subject": "feature: build auth",
+                    "owner": "team-lead",
+                    "status": "in_progress",
+                    "metadata": {
+                        "type": "feature",
+                        "variety": {"novelty": 3, "scope": 2, "uncertainty": 2,
+                                    "risk": 1, "total": 8},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tasks_dir / "2.json").write_text(
+            json.dumps(
+                {
+                    "id": "2",
+                    "subject": "preparer: research",
+                    "owner": "preparer",
+                    "status": "completed",
+                    "metadata": {
+                        "variety": {"novelty": 1, "scope": 1, "uncertainty": 1,
+                                    "risk": 1, "total": 4},
+                        "teachback_submit": {"understanding": "x"},
+                        "handoff": {"produced": "y"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tasks_dir / "junk.json").write_text("not json", encoding="utf-8")
+        info = roster.load_team(root, "session-abc")
+        assert [task.id for task in info.tasks] == ["1", "2"]
+        assert info.tasks[1].status == "completed"
+        assert info.tasks[1].teachback is True
+        assert info.tasks[1].handoff is True
+        assert info.tasks[1].variety == {
+            "novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4,
+        }
+        # The store keeps the platform status; the model maps it.
+        assert info.tasks[0].status == "in_progress"
+
+    def test_invalid_team_name_is_empty(self, tmp_path):
+        root = make_root(tmp_path)
+        assert roster.load_team(root, "..").name == ""
+        assert roster.load_team(root, "").known is False
+        assert roster.load_team(root, "missing").known is False
+
+    def test_session_context_file_read(self, tmp_path):
+        session_dir = tmp_path / "sessdir"
+        session_dir.mkdir()
+        (session_dir / "pact-session-context.json").write_text(
+            json.dumps({"session_id": "s", "project_dir": "/x/P", "team_name": "session-abc"}),
+            encoding="utf-8",
+        )
+        context = roster.read_session_context(session_dir)
+        assert context["team_name"] == "session-abc"
+        assert roster.read_session_context(tmp_path / "nope") == {}
+
+
+class TestCloudAndRoster:
+    """Cloud follows the real writers: a `main` lead address or a roster
+    file. A team directory without a config is an ordinary local run."""
+
+    def _run(self, root: Path, starts: list[dict]) -> Path:
+        events = starts + [census.phase_transition("2026-11-01T10:05:00Z", "CODE", "started")]
+        return write_journal(root, "proj", "sess-1", events)
+
+    def _meta(self, root: Path, tmp_path: Path) -> dict:
+        return build_basic_model(root, tmp_path)["meta"]
+
+    def test_a_local_run_with_a_team_lead_is_not_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z")])
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        assert self._meta(root, tmp_path)["cloud"] is False
+
+    def test_a_config_less_team_dir_is_not_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z")])
+        (root / "teams" / "session-abc12345" / "inboxes").mkdir(parents=True)
+        info = roster.load_team(root, "session-abc12345")
+        assert info.cloud is False
+        assert self._meta(root, tmp_path)["cloud"] is False
+
+    def test_an_older_start_without_a_lead_address_is_not_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z", lead_address=None)])
+        assert self._meta(root, tmp_path)["cloud"] is False
+
+    def test_a_later_start_naming_main_makes_the_run_cloud(self, tmp_path):
+        """The first start may predate lead addresses; a compact or resume
+        start appended later carries it."""
+        root = make_root(tmp_path)
+        self._run(root, [
+            census.session_start("2026-11-01T10:00:00Z", lead_address=None),
+            census.bare_session_end("2026-11-01T10:01:00Z"),
+            census.session_start("2026-11-01T10:02:00Z", source="compact",
+                                 lead_address=census.CLOUD_LEAD),
+        ])
+        assert self._meta(root, tmp_path)["cloud"] is True
+
+    def test_a_session_context_naming_main_makes_the_run_cloud(self, tmp_path):
+        root = make_root(tmp_path)
+        path = self._run(root, [census.session_start("2026-11-01T10:00:00Z", lead_address=None)])
+        (path.parent / "pact-session-context.json").write_text(
+            json.dumps({"team_name": "session-abc12345", "session_id": "sess-1",
+                        "project_dir": "/work/PACT-prompt", "plugin_root": "/p",
+                        "started_at": "2026-11-01T10:00:00Z", "lead_address": "main"}),
+            encoding="utf-8",
+        )
+        assert self._meta(root, tmp_path)["cloud"] is True
+
+    def test_a_roster_file_makes_the_run_cloud_and_supplies_the_crew(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z", lead_address=None)])
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [census.roster_intent("toolu_9", "architect", "PACT:pact-architect",
+                                  "2026-11-01T10:00:30Z")],
+        )
+        payload = build_basic_model(root, tmp_path)
+        assert payload["meta"]["cloud"] is True
+        assert "architect" in {agent["name"] for agent in payload["agents"]}
+
+    def test_a_config_beside_the_roster_keeps_the_config_crew(self, tmp_path):
+        """The hooks read the roster as the crew only when no config exists."""
+        root = make_root(tmp_path)
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [census.roster_intent("toolu_9", "architect", "PACT:pact-architect",
+                                  "2026-11-01T10:00:30Z")],
+        )
+        info = roster.load_team(root, "session-abc12345")
+        assert [member.name for member in info.members] == ["team-lead", "preparer"]
+        assert info.intents == []
+
+    def test_a_symlinked_roster_is_ignored(self, tmp_path):
+        root = make_root(tmp_path)
+        real = census.write_lines(
+            tmp_path / "elsewhere.jsonl",
+            [census.roster_intent("toolu_9", "architect", "pact-architect", "2026-11-01T10:00:30Z")],
+        )
+        team_dir = root / "teams" / "session-abc12345"
+        team_dir.mkdir(parents=True)
+        (team_dir / "pact-roster.jsonl").symlink_to(real)
+        info = roster.load_team(root, "session-abc12345")
+        assert info.cloud is False
+        assert info.intents == []
+
+    def test_a_legacy_kind_key_is_read_only_when_k_is_absent(self, tmp_path):
+        root = make_root(tmp_path)
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [
+                {"v": 1, "kind": "intent", "tu": "t1", "name": "legacy", "type": "x"},
+                {"v": 1, "k": "bind", "kind": "intent", "tu": "t2", "name": "not-an-intent",
+                 "type": "x", "aid": "a"},
+            ],
+        )
+        info = roster.load_team(root, "session-abc12345")
+        assert [intent.name for intent in info.intents] == ["legacy"]
+
+    def _leads(self, payload: dict) -> list[str]:
+        return [agent["name"] for agent in payload["agents"] if agent["kind"] == "lead"]
+
+    def test_a_local_lead_is_the_team_lead_member_once(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z")])
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        assert self._leads(build_basic_model(root, tmp_path)) == ["team-lead"]
+
+    def test_a_team_lead_member_and_a_main_address_are_one_lead(self, tmp_path):
+        """A config that lists the platform's `team-lead` member, on a run whose
+        latest start names lead address `main`, still has ONE lead: both
+        names are the same lead."""
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z",
+                                              lead_address=census.CLOUD_LEAD)])
+        census.write_team_config(root, "session-abc12345", [("preparer", "pact-preparer")])
+        payload = build_basic_model(root, tmp_path)
+        assert len(self._leads(payload)) == 1, self._leads(payload)
+        names = [agent["name"] for agent in payload["agents"]]
+        assert names.count("team-lead") + names.count("main") == 1, names
+
+    def test_a_cloud_lead_is_main_once(self, tmp_path):
+        root = make_root(tmp_path)
+        self._run(root, [census.session_start("2026-11-01T10:00:00Z",
+                                              lead_address=census.CLOUD_LEAD)])
+        census.write_lines(
+            root / "teams" / "session-abc12345" / "pact-roster.jsonl",
+            [census.roster_intent("toolu_9", "architect", "PACT:pact-architect",
+                                  "2026-11-01T10:00:30Z")],
+        )
+        payload = build_basic_model(root, tmp_path)
+        assert self._leads(payload) == ["main"]
+        assert payload["meta"]["cloud"] is True
+
+
+# ---------------------------------------------------------------------------
+# Model derivation
+# ---------------------------------------------------------------------------
+
+
+def build_basic_model(root: Path, tmp_path: Path) -> dict:
+    ref = first_ref(root, tmp_path)
+    return model.build_model(ref, now=datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC))
+
+
+class TestModelBasics:
+    def test_agent_commit_stats_attributed_to_latest_same_phase_dispatch(
+        self, tmp_path
+    ):
+        """Crew commit counts must be non-zero and correctly attributed.
+
+        Commit events carry no agent; each attributes to the most recent
+        dispatch in the same phase. Before this pass every crew member's
+        stats.commits was permanently 0.
+        """
+        root = make_root(tmp_path)
+        events = [
+            {"v": 1, "type": "session_start", "ts": stamp(0),
+             "project_dir": "/x/proj", "team": "t"},
+            {"v": 1, "type": "agent_dispatch", "ts": stamp(1),
+             "agent": "backend-coder", "task_id": "1", "phase": "CODE",
+             "scope": ["implement"]},
+            {"v": 1, "type": "commit", "ts": stamp(2),
+             "sha": "aaa11111", "message": "one", "phase": "CODE"},
+            {"v": 1, "type": "agent_dispatch", "ts": stamp(3),
+             "agent": "preparer", "task_id": "2", "phase": "PREPARE",
+             "scope": ["research"]},
+            {"v": 1, "type": "commit", "ts": stamp(4),
+             "sha": "bbb22222", "message": "two", "phase": "PREPARE"},
+            {"v": 1, "type": "commit", "ts": stamp(5),
+             "sha": "ccc33333", "message": "three", "phase": "CODE"},
+        ]
+        write_journal(root, "PACT-prompt", "sess-1", events)
+        payload = build_basic_model(root, tmp_path)
+        stats = {agent["name"]: agent["stats"]["commits"] for agent in payload["agents"]}
+        assert stats["backend-coder"] == 2  # both CODE commits
+        assert stats["preparer"] == 1  # the PREPARE commit
+        assert sum(stats.values()) == 3
+
+    def test_full_model_shape(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "PACT-prompt", "sess-1", basic_events())
+        payload = build_basic_model(root, tmp_path)
+
+        assert payload["ok"] is True
+        ref = discovery.find_session(roots_for(root, tmp_path), "PACT-prompt", "sess-1")
+        assert payload["etag"] == model.session_token(ref)[0]
+        assert re.fullmatch(
+            rf"\d+-\d+-\d+-(live|ended|paused|refreshed)-(session_end|idle|-)-"
+            rf"{re.escape(settings.VERSION)}",
+            payload["etag"],
+        ), payload["etag"]
+        assert payload["source"]["kind"] == "real"
+        assert isinstance(payload["source"]["root"], str) and payload["source"]["root"]
+        assert payload["source"]["journal"] == (
+            "pact-sessions/PACT-prompt/sess-1/session-journal.jsonl"
+        )
+        meta = payload["meta"]
+        assert meta["project"] == "PACT-prompt"
+        assert meta["project_dir"] == "/Users/dev/PACT-prompt"
+        assert meta["team"] == "session-abc"
+        assert meta["status"] == "ended"
+        assert meta["event_count"] == len(basic_events())
+        assert meta["run_kind"] == "orchestrate"
+        assert meta["cloud"] is False
+        assert isinstance(payload["warnings"], list)
+        assert payload["truncated"] is False
+
+    def test_phases(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        phases = build_basic_model(root, tmp_path)["phases"]
+        assert phases["order"] == ["PREPARE", "ARCHITECT", "CODE", "TEST"]
+        assert phases["current"] == "PREPARE"
+        assert phases["completed"] == ["PREPARE"]
+        assert phases["pending"] == ["ARCHITECT", "CODE", "TEST"]
+        prepare = phases["items"][0]
+        assert prepare["status"] == "completed"
+        assert prepare["run"] == 1
+        assert prepare["started_seq"] == 1
+        assert prepare["ended_seq"] == 7
+
+    def test_agents_from_team_config_and_events(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        team_dir = root / "teams" / "session-abc"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"members": [
+                {"name": "preparer", "agentType": "pact-preparer"},
+                {"name": "architect", "agentType": "pact-architect"},
+            ]}),
+            encoding="utf-8",
+        )
+        agents = build_basic_model(root, tmp_path)["agents"]
+        by_name = {agent["name"]: agent for agent in agents}
+        assert agents[0]["kind"] == "lead"
+        assert "preparer" in by_name and "architect" in by_name
+        preparer = by_name["preparer"]
+        assert preparer["role"] == "preparer"
+        assert preparer["color"] == "green"
+        assert preparer["stats"]["dispatches"] == 1
+        assert preparer["stats"]["handoffs"] == 1
+        assert preparer["task_id"] == "2"
+        assert preparer["state"] == "done"
+        assert preparer["latest"]["type"] == "agent_handoff"
+        assert by_name["architect"]["state"] == "standby"
+        assert by_name["architect"]["latest"] is None
+
+    def test_tasks_derived_from_events_and_store(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        tasks_dir = root / "tasks" / "session-abc"
+        tasks_dir.mkdir(parents=True)
+        (tasks_dir / "30.json").write_text(
+            json.dumps({"id": "30", "subject": "security: check auth",
+                        "owner": "security-engineer", "status": "in_progress",
+                        "metadata": {"type": "signal"}}),
+            encoding="utf-8",
+        )
+        tasks = build_basic_model(root, tmp_path)["tasks"]
+        by_id = {task["id"]: task for task in tasks}
+        assert by_id["2"]["owner"] == "preparer"
+        assert by_id["2"]["handoff"] is True
+        assert by_id["2"]["teachback"] is True
+        assert by_id["2"]["subject"] == "preparer: research the spec"
+        assert by_id["30"]["source"] == "store"
+        assert by_id["30"]["status"] == "active"
+        assert by_id["31"]["owner"] == "backend-coder"
+
+    def test_handoffs_and_commits(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        payload = build_basic_model(root, tmp_path)
+        assert len(payload["handoffs"]) == 1
+        handoff = payload["handoffs"][0]
+        assert handoff["agent"] == "preparer"
+        assert handoff["task_id"] == "2"
+        assert handoff["task_subject"] == "preparer: research the spec"
+        assert set(handoff["fields"]) == set(classify.HANDOFF_CANONICAL_FIELDS)
+        assert handoff["schema_complete"] is True
+        assert [commit["sha"] for commit in payload["commits"]] == ["94c2da8"]
+        assert payload["commits"][0]["phase"] == "PREPARE"
+
+    def test_findings_alerts_checkpoints_wrapup(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        payload = build_basic_model(root, tmp_path)
+        assert payload["findings"] == [
+            {
+                "seq": 13,
+                "ts": stamp(10),
+                "severity": "blocking",
+                "finding": "missing auth check",
+                "reviewer": "security-engineer",
+                "task_id": "30",
+            }
+        ]
+        assert payload["alerts"] == []
+        assert len(payload["checkpoints"]) == 1
+        assert payload["checkpoints"][0]["completed_phases"] == ["PREPARE"]
+        assert payload["wrapup"] == {
+            "source": "wrap-up",
+            "pr_state": "MERGED",
+            "pr_number": 1151,
+            "ts": stamp(12),
+        }
+        events = {event["type"] for event in payload["events"]}
+        assert "lifecycle_decision" in events
+        assert "journal_emit_skipped" in events
+        assert "handoff_refusal_degraded" in events
+        assert "remediation" in events
+
+    def test_gates_and_telemetry(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        gates = build_basic_model(root, tmp_path)["gates"]
+        assert gates["allowed"] == 1
+        assert gates["advisory"] == 1
+        assert gates["by_tool"]["TaskUpdate"] == {"allow": 1, "advisory": 1}
+        assert gates["top_rules"] == [
+            {"rule": "reasoning_reconstruction_band_unresolvable", "count": 1}
+        ]
+        assert gates["health_failures"][0]["hook"] == "task_lifecycle_gate"
+        assert gates["health_failures"][0]["error"] == "AttributeError: boom"
+        assert gates["telemetry"] == {
+            "journal_emit_skipped": 1,
+            "handoff_refusal_degraded": 1,
+        }
+
+    def test_variety_and_metrics(self, tmp_path):
+        root = make_root(tmp_path)
+        write_journal(root, "P", "s", basic_events())
+        payload = build_basic_model(root, tmp_path)
+        variety = payload["variety"]
+        assert variety["feature"] is None
+        assert variety["latest"] == {
+            "novelty": 2, "scope": 2, "uncertainty": 3, "risk": 1, "total": 8,
+        }
+        assert variety["history"] == [
+            {"seq": 6, "ts": stamp(6), "total": 8, "source": "checkpoint"}
+        ]
+        metrics = payload["metrics"]
+        assert metrics["events_total"] == len(basic_events())
+        assert metrics["events_visible"] == len(payload["events"])
+        assert metrics["agents"] == len(payload["agents"])
+        assert metrics["handoffs"] == 1
+        assert metrics["commits"] == 1
+        assert metrics["findings"] == {"total": 1, "blocking": 1, "suggestion": 0}
+        assert metrics["alerts"] == 0
+        assert metrics["teachbacks"] == 1
+        assert metrics["checkpoints"] == 1
+        assert metrics["compactions"] == 0
+        assert metrics["phases_completed"] == 1
+        assert metrics["phases_skipped"] == 0
+        assert metrics["prs_ready"] == 0
+        assert metrics["variety_total"] == 8
+        assert metrics["gates_allowed"] == 1
+        assert metrics["gates_advisory"] == 1
+        assert metrics["gate_health_failures"] == 1
+
+    def test_wrapup_null_without_wrapup_session_end(self, tmp_path):
+        root = make_root(tmp_path)
+        events = [event for event in basic_events() if event["type"] != "session_end"]
+        events.append({"v": 1, "type": "session_end", "ts": stamp(30)})
+        write_journal(root, "P", "s", events)
+        assert build_basic_model(root, tmp_path)["wrapup"] is None
+
+    def test_unknown_event_types_counted_and_omitted(self, tmp_path):
+        root = make_root(tmp_path)
+        events = basic_events() + [
+            {"v": 1, "type": "brand_new_thing", "ts": stamp(40)},
+            {"v": 1, "type": "another_new_thing", "ts": stamp(41)},
+        ]
+        write_journal(root, "P", "s", events)
+        payload = build_basic_model(root, tmp_path)
+        assert payload["meta"]["event_count"] == len(events)
+        assert all(event["type"] not in {"brand_new_thing", "another_new_thing"}
+                   for event in payload["events"])
+        assert any("unrecognized" in warning for warning in payload["warnings"])
+
+
+class TestPhasesRerunSkip:
+    def test_rerun_increments_run_and_skip_reason_recorded(self, tmp_path):
+        root = make_root(tmp_path)
+        events = [
+            {"v": 1, "type": "phase_transition", "ts": stamp(0), "phase": "PREPARE", "status": "started"},
+            {"v": 1, "type": "phase_transition", "ts": stamp(1), "phase": "PREPARE", "status": "completed"},
+            {"v": 1, "type": "phase_transition", "ts": stamp(2), "phase": "PREPARE", "status": "started"},
+            {"v": 1, "type": "phase_transition", "ts": stamp(3), "phase": "PREPARE", "status": "completed"},
+            {"v": 1, "type": "phase_transition", "ts": stamp(4), "phase": "ARCHITECT",
+             "status": "skipped", "skip_reason": "design already approved"},
+            {"v": 1, "type": "phase_transition", "ts": stamp(5), "phase": "CODE", "status": "started"},
+        ]
+        write_journal(root, "P", "s", events)
+        payload = build_basic_model(root, tmp_path)
+        phases = payload["phases"]
+        assert phases["current"] == "CODE"
+        prepare = phases["items"][0]
+        assert prepare["run"] == 2
+        assert prepare["status"] == "completed"
+        architect = phases["items"][1]
+        assert architect["status"] == "skipped"
+        assert architect["skip_reason"] == "design already approved"
+        assert phases["completed"] == ["PREPARE"]
+        assert phases["pending"] == ["TEST"]
+        assert payload["metrics"]["phases_skipped"] == 1
+        assert payload["metrics"]["phases_completed"] == 1
+
+
+class TestCaps:
+    def test_gates_by_tool_keeps_the_busiest_tools_with_an_honest_total(self):
+        """by_tool is capped, and the cap keeps the tools with the MOST
+        decisions: tool<i> has i+1 decisions, so the busiest are the highest
+        indexes and the kept order is strictly descending."""
+        total = settings.MAX_GATE_TOOLS + 20
+        events = [
+            {
+                "type": "lifecycle_decision",
+                "seq": index * 100 + repeat,
+                "raw": {"tool_name": f"tool{index:03d}", "verdict": "allow"},
+            }
+            for index in range(total)
+            for repeat in range(index + 1)
+        ]
+        gates = model.derive_gates(events)
+        assert gates["by_tool_total"] == total
+        expected = [f"tool{index:03d}" for index in reversed(range(20, total))]
+        assert list(gates["by_tool"]) == expected
+        assert gates["by_tool"][expected[0]]["allow"] == total
+
+    def test_top_rules_are_ranked_by_count(self):
+        events = [
+            {"type": "lifecycle_decision", "seq": seq,
+             "raw": {"tool_name": "T", "verdict": "advisory", "rules": [rule]}}
+            for seq, rule in enumerate(["alpha"] + ["zulu"] * 3 + ["mike"] * 2)
+        ]
+        ranked = [entry["rule"] for entry in model.derive_gates(events)["top_rules"]]
+        # Count order differs from name order, so either sort key is visible.
+        assert ranked == ["zulu", "mike", "alpha"]
+
+    def test_event_cap_keeps_most_recent_and_marks_truncated(self, tmp_path):
+        root = make_root(tmp_path)
+        total = settings.MAX_EVENTS + 250
+        events = [
+            {"v": 1, "type": "phase_transition", "ts": stamp(i // 60, i % 60),
+             "phase": "PREPARE", "status": "started"}
+            for i in range(total)
+        ]
+        write_journal(root, "P", "s", events)
+        payload = build_basic_model(root, tmp_path)
+        assert len(payload["events"]) == settings.MAX_EVENTS
+        assert payload["metrics"]["events_total"] == total
+        assert payload["metrics"]["events_visible"] == settings.MAX_EVENTS
+        assert payload["truncated"] is True
+        assert any("truncated" in warning for warning in payload["warnings"])
+        # seq remains the physical file index and the kept window is the tail
+        assert payload["events"][0]["seq"] == total - settings.MAX_EVENTS
+        assert payload["events"][-1]["seq"] == total - 1
+
+    def test_handoff_and_task_caps(self, tmp_path):
+        root = make_root(tmp_path)
+        events = []
+        for index in range(settings.MAX_HANDOFFS + 25):
+            events.append(
+                {
+                    "v": 1,
+                    "type": "agent_handoff",
+                    "ts": stamp(index // 60, index % 60),
+                    "agent": "preparer",
+                    "task_id": f"h{index}",
+                    "task_subject": f"task {index}",
+                    "handoff": {"produced": f"artifact-{index}"},
+                }
+            )
+        events.extend(
+            {
+                "v": 1,
+                "type": "task_metadata_snapshot",
+                "ts": stamp(1, index % 60),
+                "task_id": f"t{index}",
+                "subject": f"task {index}",
+            }
+            for index in range(settings.MAX_TASKS + 20)
+        )
+        write_journal(root, "P", "s", events)
+        payload = build_basic_model(root, tmp_path)
+        assert len(payload["handoffs"]) == settings.MAX_HANDOFFS
+        assert payload["metrics"]["handoffs"] == settings.MAX_HANDOFFS + 25
+        assert len(payload["tasks"]) == settings.MAX_TASKS
+        # Union of the handoff task ids (h0..) and snapshot task ids (t0..):
+        # both streams create tasks, so the full count is their sum.
+        assert payload["metrics"]["tasks"] == (
+            settings.MAX_HANDOFFS + 25 + settings.MAX_TASKS + 20
+        )
+        assert payload["truncated"] is True
+
+    def test_handoff_field_cap(self, tmp_path):
+        root = make_root(tmp_path)
+        huge = "x" * (settings.MAX_FIELD_CHARS * 3)
+        events = [
+            {
+                "v": 1,
+                "type": "agent_handoff",
+                "ts": stamp(0),
+                "agent": "preparer",
+                "task_id": "2",
+                "handoff": {
+                    "produced": huge,
+                    "decisions": "d",
+                    "reasoning_chain": "r",
+                    "uncertainty": "u",
+                    "integration": "i",
+                    "open_questions": "o",
+                },
+            }
+        ]
+        write_journal(root, "P", "s", events)
+        handoff = build_basic_model(root, tmp_path)["handoffs"][0]
+        assert len(handoff["fields"]["produced"]) == settings.MAX_FIELD_CHARS
+        assert len(handoff["fields"]["decisions"]) <= settings.MAX_FIELD_CHARS
+
+
+class TestReviewsPayload:
+    """derive_reviews feeds payload["reviews"] and metrics reviews_total;
+    until these tests nothing pinned its field mapping or its cap."""
+
+    def test_field_mapping_and_only_review_dispatch_is_collected(self):
+        events = [
+            {"type": "phase_transition", "seq": 0, "raw": {"phase": "TEST"}},
+            {
+                "type": "review_dispatch",
+                "seq": 1,
+                "ts": "2026-11-01T10:00:00Z",
+                "raw": {
+                    "pr_number": 1697,
+                    "pr_url": "https://example.invalid/pull/1697",
+                    "reviewers": ["security-engineer", "test-engineer"],
+                },
+            },
+            {
+                "type": "review_dispatch",
+                "seq": 2,
+                "ts": "2026-11-01T11:30:00Z",
+                "raw": {},
+            },
+        ]
+        reviews, total = model.derive_reviews(events)
+        assert total == 2
+        assert reviews == [
+            {
+                "seq": 1,
+                "ts": "2026-11-01T10:00:00Z",
+                "pr_number": 1697,
+                "pr_url": "https://example.invalid/pull/1697",
+                "reviewers": ["security-engineer", "test-engineer"],
+            },
+            {"seq": 2, "ts": "2026-11-01T11:30:00Z",
+             "pr_number": None, "pr_url": "", "reviewers": []},
+        ]
+
+    def test_cap_keeps_the_tail_with_an_honest_total(self):
+        count = settings.MAX_REVIEWS + 20
+        events = [
+            {
+                "type": "review_dispatch",
+                "seq": index,
+                "ts": stamp(index // 60, index % 60),
+                "raw": {
+                    "pr_number": 1700 + index,
+                    "pr_url": f"https://example.invalid/pull/{1700 + index}",
+                    "reviewers": [f"reviewer-{index}"],
+                },
+            }
+            for index in range(count)
+        ]
+        reviews, total = model.derive_reviews(events)
+        assert total == count
+        assert len(reviews) == settings.MAX_REVIEWS
+        assert reviews[0]["seq"] == 20
+        assert reviews[-1]["seq"] == count - 1
+        kept = reviews[-1]
+        assert kept["pr_number"] == 1700 + count - 1
+        assert kept["pr_url"] == f"https://example.invalid/pull/{1700 + count - 1}"
+        assert kept["reviewers"] == [f"reviewer-{count - 1}"]
+
+
+class TestSessionsListAndHealth:
+    def _two_sessions(self, tmp_path: Path) -> tuple[Path, list[dict]]:
+        root = make_root(tmp_path)
+        write_journal(
+            root, "Older", "sess-old", [
+                {"v": 1, "type": "session_start", "ts": "2026-10-01T10:00:00Z",
+                 "project_dir": "/Users/dev/Older"},
+                {"v": 1, "type": "phase_transition", "ts": "2026-10-01T10:01:00Z",
+                 "phase": "PREPARE", "status": "started"},
+                {"v": 1, "type": "session_end", "ts": "2026-10-01T10:02:00Z"},
+            ],
+        )
+        write_journal(
+            root, "Newer", "sess-new", [
+                {"v": 1, "type": "session_start", "ts": "2026-10-02T10:00:00Z",
+                 "project_dir": "/Users/dev/Newer"},
+                {"v": 1, "type": "phase_transition", "ts": "2026-10-02T10:01:00Z",
+                 "phase": "CODE", "status": "started"},
+                {"v": 1, "type": "session_end", "ts": "2026-10-02T10:02:00Z"},
+            ],
+        )
+        roots = roots_for(root, tmp_path)
+        return root, roots
+
+    def test_sessions_sorted_newest_first_with_cheap_fields(self, tmp_path):
+        _root, roots = self._two_sessions(tmp_path)
+        payload = model.build_sessions_list(roots, now=datetime(2026, 11, 1, tzinfo=UTC))
+        assert payload["ok"] is True
+        assert payload["default_root"] == roots[0].id
+        assert payload["generated_at"].endswith("Z")
+        assert payload["roots"][0]["journals"] == 2
+        assert payload["roots"][0]["default"] is True
+        sessions = payload["sessions"]
+        assert [session["session_id"] for session in sessions] == ["sess-new", "sess-old"]
+        newest = sessions[0]
+        assert newest["project"] == "Newer"
+        assert newest["project_dir"] == "/Users/dev/Newer"
+        assert newest["updated_at"] == "2026-10-02T10:02:00Z"
+        assert newest["started_at"] == "2026-10-02T10:00:00Z"
+        assert newest["last_event_type"] == "session_end"
+        assert newest["last_phase"] == "CODE"
+        assert newest["status"] == "ended"
+        assert newest["is_live"] is False
+        assert newest["run_kind"] == "orchestrate"
+        assert newest["size_bytes"] > 0
+        assert newest["key"].endswith("::Newer::sess-new")
+
+    def test_limit_and_filters(self, tmp_path):
+        _root, roots = self._two_sessions(tmp_path)
+        limited = model.build_sessions_list(roots, limit=1)
+        assert len(limited["sessions"]) == 1
+        filtered = model.build_sessions_list(roots, project_filter="older")
+        assert [session["session_id"] for session in filtered["sessions"]] == ["sess-old"]
+        by_session = model.build_sessions_list(roots, session_filter="sess-new")
+        assert [session["session_id"] for session in by_session["sessions"]] == ["sess-new"]
+        none = model.build_sessions_list(roots, project_filter="does-not-exist")
+        assert none["sessions"] == []
+
+    def test_multiple_roots_are_listed_with_first_as_default(self, tmp_path):
+        first = make_root(tmp_path, ".claude")
+        second = make_root(tmp_path, ".claude-work")
+        write_journal(first, "Alpha", "sess-a", [
+            {"v": 1, "type": "session_start", "ts": "2026-10-01T10:00:00Z",
+             "project_dir": "/Users/dev/Alpha"},
+            {"v": 1, "type": "session_end", "ts": "2026-10-01T10:01:00Z"},
+        ])
+        write_journal(second, "Beta", "sess-b", [
+            {"v": 1, "type": "session_start", "ts": "2026-10-02T10:00:00Z",
+             "project_dir": "/Users/dev/Beta"},
+            {"v": 1, "type": "session_end", "ts": "2026-10-02T10:01:00Z"},
+        ])
+        roots = settings.resolve_roots([first, second], env={}, home=tmp_path)
+        payload = model.build_sessions_list(roots, show_all=True)
+        assert payload["default_root"] == roots[0].id
+        assert [root["journals"] for root in payload["roots"]] == [1, 1]
+        assert [session["session_id"] for session in payload["sessions"]] == [
+            "sess-b", "sess-a",
+        ]
+        assert {session["root"] for session in payload["sessions"]} == {
+            roots[0].id, roots[1].id,
+        }
+
+    def test_health_payload(self, tmp_path):
+        _root, roots = self._two_sessions(tmp_path)
+        payload = model.build_health(
+            roots, pid=1234, instance_id="deadbeef", uptime_s=12.34,
+            now=datetime(2026, 11, 1, tzinfo=UTC),
+        )
+        assert payload["ok"] is True
+        assert payload["name"] == "pact-mission-control"
+        # The identity is the plugin's own release: read plugin.json here
+        # rather than compare against settings.VERSION, which would pass on
+        # any value at all.
+        plugin_root = Path(__file__).resolve().parent.parent
+        manifest = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
+        assert payload["version"] == manifest["version"]
+        assert payload["plugin_root"] == str(plugin_root)
+        assert payload["pid"] == 1234
+        assert payload["instance_id"] == "deadbeef"
+        assert payload["uptime_s"] == 12.3
+        assert "demo" not in payload
+        assert payload["demo_available"] is True
+        assert payload["roots"][0]["journals"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def model_payload() -> dict:
+    """One deterministic demo build shared by the demo tests."""
+    return demo.build_demo_model()
+
+
+class TestDemo:
+    def test_identity(self, model_payload):
+        assert model_payload["ok"] is True
+        assert model_payload["etag"] == settings.DEMO_ETAG == "demo-v1"
+        source = model_payload["source"]
+        assert source["kind"] == "demo"
+        assert source["root"] == "demo"
+        assert source["slug"] == "training-simulation"
+        assert source["journal"] == ""
+
+    def test_four_phases(self, model_payload):
+        phases = model_payload["phases"]
+        assert phases["order"] == ["PREPARE", "ARCHITECT", "CODE", "TEST"]
+        assert phases["completed"] == ["PREPARE", "ARCHITECT", "CODE", "TEST"]
+        assert phases["current"] == "TEST"
+        assert phases["pending"] == []
+        for item in phases["items"]:
+            assert item["status"] == "completed"
+            assert item["run"] == 1
+
+    def test_nine_agents_and_lead(self, model_payload):
+        agents = model_payload["agents"]
+        assert len(agents) >= 8
+        assert agents[0]["name"] == "team-lead"
+        assert agents[0]["kind"] == "lead"
+        assert agents[0]["state"] == "done"
+        names = {agent["name"] for agent in agents}
+        assert {
+            "preparer", "secretary", "architect", "auditor", "backend-coder",
+            "frontend-coder", "test-engineer", "security-engineer",
+        } <= names
+        for agent in agents:
+            assert set(agent["stats"]) == {
+                "events", "dispatches", "handoffs", "commits", "findings",
+            }
+
+    def test_handoffs_are_six_field(self, model_payload):
+        handoffs = model_payload["handoffs"]
+        assert len(handoffs) == 4
+        for handoff in handoffs:
+            assert list(handoff["fields"]) == list(classify.HANDOFF_CANONICAL_FIELDS)
+            assert all(handoff["fields"][name] for name in classify.HANDOFF_CANONICAL_FIELDS)
+            assert handoff["schema_complete"] is True
+            assert handoff["task_subject"]
+
+    def test_wrapup_merged(self, model_payload):
+        assert model_payload["wrapup"] == {
+            "source": "wrap-up",
+            "pr_state": "MERGED",
+            "pr_number": 42,
+            "ts": model_payload["events"][-1]["ts"],
+        }
+        assert model_payload["events"][-1]["type"] == "session_end"
+        assert model_payload["metrics"]["prs_ready"] == 1
+
+    def test_gates_health_and_telemetry(self, model_payload):
+        gates = model_payload["gates"]
+        assert gates["advisory"] >= 1
+        assert gates["allowed"] >= 1
+        assert gates["health_failures"]
+        assert gates["health_failures"][0]["hook"] == "task_lifecycle_gate"
+        assert gates["top_rules"]
+        assert gates["telemetry"]["journal_emit_skipped"] >= 1
+        assert model_payload["metrics"]["gate_health_failures"] == 1
+
+    def test_required_event_variety(self, model_payload):
+        types = {event["type"] for event in model_payload["events"]}
+        required = {
+            "session_start",
+            "phase_transition",
+            "agent_dispatch",
+            "dispatch_decision",
+            "agent_handoff",
+            "teachback_ack",
+            "task_metadata_snapshot",
+            "checkpoint",
+            "commit",
+            "review_finding",
+            "remediation",
+            "review_dispatch",
+            "pr_ready",
+            "algedonic_signal",
+            "blocker_raised",
+            "compaction_attributed",
+            "team_realigned",
+            "lifecycle_decision",
+            "gate_health",
+            "journal_emit_skipped",
+            "variety_assessed",
+            "session_end",
+        }
+        assert required <= types
+        metrics = model_payload["metrics"]
+        assert metrics["compactions"] == 1
+        assert metrics["checkpoints"] == 4
+        assert metrics["alerts"] == 2
+        assert metrics["teachbacks"] == 5
+        assert metrics["findings"]["blocking"] == 1
+        assert metrics["findings"]["suggestion"] == 2
+        assert metrics["phases_completed"] == 4
+        assert metrics["phases_skipped"] == 0
+
+    def test_variety_block_present(self, model_payload):
+        variety = model_payload["variety"]
+        assert variety["feature"] is not None
+        assert variety["feature"]["total"] == 10
+        assert variety["latest"] is not None
+        assert len(variety["history"]) >= 3
+        sources = {entry["source"] for entry in variety["history"]}
+        assert {"feature", "dispatch", "checkpoint"} <= sources
+        assert model_payload["metrics"]["variety_total"] == 10
+
+    def test_deterministic_and_base_time_injectable(self):
+        first = demo.build_demo_model()
+        second = demo.build_demo_model()
+        assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+        shifted_base = datetime(2027, 1, 1, 0, 0, 0, tzinfo=UTC)
+        shifted = demo.build_demo_model(base_time=shifted_base)
+        assert shifted["meta"]["started_at"] == "2027-01-01T00:00:00Z"
+        assert shifted["metrics"]["events_total"] == first["metrics"]["events_total"]
+        assert len(shifted["events"]) == len(first["events"])
+        assert shifted["events"][-1]["type"] == "session_end"
+
+    def test_demo_does_not_expose_real_paths(self, model_payload):
+        blob = json.dumps(model_payload)
+        assert "/Users/demo/Sites/pact-demo" in blob  # obviously synthetic
+        home = str(Path.home())
+        assert home not in blob
+
+
+# ---------------------------------------------------------------------------
+# Bounds and validators on untrusted input
+# ---------------------------------------------------------------------------
+
+
+class TestComponentValidation:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "a/b",
+            "a\\b",
+            "a\x00b",
+            "a\x01b",
+            "a\nb",
+            "a\x7fb",
+            "x" * (discovery._MAX_COMPONENT + 1),
+            42,
+            None,
+        ],
+        ids=lambda value: repr(value)[:24],
+    )
+    def test_unsafe_component_is_refused(self, value):
+        assert discovery.valid_component(value) is False
+
+    @pytest.mark.parametrize(
+        "value", ["PACT-prompt", "sess-1", "My_App.v2", "x" * discovery._MAX_COMPONENT]
+    )
+    def test_ordinary_component_is_accepted(self, value):
+        assert discovery.valid_component(value) is True
+
+
+class TestJournalReadBounds:
+    def test_blank_type_string_is_a_skipped_line(self, tmp_path):
+        root = make_root(tmp_path)
+        path = write_journal(
+            root,
+            "proj",
+            "sess",
+            [
+                {"v": 1, "type": "session_start", "ts": stamp(0)},
+                {"v": 1, "type": "   ", "ts": stamp(1)},
+            ],
+        )
+        read = journal.read_journal(path)
+        assert [event.data["type"] for event in read.events] == ["session_start"]
+        assert read.skipped_lines == 1
+
+    def test_warnings_are_capped_while_every_skip_is_counted(self, tmp_path):
+        root = make_root(tmp_path)
+        bad = settings.MAX_WARNINGS + 5
+        path = write_journal(root, "proj", "sess", b"{not json\n" * bad)
+        read = journal.read_journal(path)
+        assert read.skipped_lines == bad
+        assert len(read.warnings) == settings.MAX_WARNINGS
+
+    def test_summary_reports_the_newest_event_of_a_long_tail(self, tmp_path):
+        """More events than the tail keeps: the summary still names the last."""
+        root = make_root(tmp_path)
+        events = [{"v": 1, "type": "session_start", "ts": stamp(0)}]
+        events += [
+            {"v": 1, "type": "lifecycle_decision", "ts": stamp(1, second % 60),
+             "tool_name": "X", "advisories_count": 0, "rules": [],
+             "advisories": [], "verdict": "allow"}
+            for second in range(200)
+        ]
+        events.append({"v": 1, "type": "commit", "ts": stamp(30), "sha": "abc1234",
+                       "message": "m", "phase": "CODE"})
+        path = write_journal(root, "proj", "sess", events)
+        summary = journal.summarize_journal(path, now=datetime(2026, 11, 2, tzinfo=UTC))
+        assert summary.last_event_type == "commit"
+        assert summary.updated_at == stamp(30)
+
+
+class TestBoundedText:
+    def test_line_breaks_collapse_to_spaces(self):
+        assert classify.as_text("a\nb\r\nc\rd") == "a b c d"
+
+    def test_raw_nesting_is_cut_at_the_depth_cap(self):
+        nested: dict = {"leaf": "deep-value"}
+        for _ in range(10):
+            nested = {"a": nested}
+        trimmed = json.dumps(classify.trim_raw(nested))
+        assert "[truncated]" in trimmed
+        assert "deep-value" not in trimmed
+
+    def test_raw_mapping_keys_are_capped_and_marked(self):
+        trimmed = classify.trim_raw({f"k{index}": index for index in range(60)})
+        assert trimmed["_truncated_keys"] is True
+        assert len(trimmed) == 41
+
+
+class TestVarietyNormalisation:
+    def test_a_boolean_dimension_is_not_a_score(self):
+        assert settings.normalize_variety({"novelty": True}) is None
+
+    def test_dimensions_are_clamped(self):
+        variety = settings.normalize_variety({"scope": 500, "risk": -3})
+        assert variety["scope"] == 99
+        assert variety["risk"] == 0
+
+
+class TestPythonFloor:
+    @pytest.mark.parametrize(
+        ("version", "ok"),
+        [((3, 12, 0), True), ((3, 13, 1), True), ((4, 0), True),
+         ((3, 11, 99), False), ((2, 7), False), ((), False)],
+    )
+    def test_floor_is_inclusive_at_the_minimum(self, version, ok):
+        assert settings.python_version_ok(version) is ok
+
+
+# ---------------------------------------------------------------------------
+# Caps keep the newest and say so
+# ---------------------------------------------------------------------------
+
+
+class TestCapsSurface:
+    _NOW = datetime(2026, 11, 2, tzinfo=UTC)
+
+    def _session(self, root: Path, slug: str, session_id: str, events: list[dict]) -> Path:
+        path = write_journal(root, slug, session_id, events)
+        written = datetime(2026, 11, 1, 10, tzinfo=UTC).timestamp()
+        os.utime(path, (written, written))
+        return path
+
+    def _start_end(self, ts: str = "2026-11-01T10:00:00Z") -> list[dict]:
+        return [census.session_start(ts), census.bare_session_end(ts)]
+
+    def test_small_headless_runs_are_hidden_and_counted(self, tmp_path):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "trivial-1", self._start_end())
+        self._session(root, "proj", "orchestrated", self._start_end()[:1] + [
+            census.phase_transition("2026-11-01T10:01:00Z", "CODE", "started"),
+            census.bare_session_end("2026-11-01T10:02:00Z"),
+        ])
+        big = self._start_end()[:1] + [
+            census.event("lifecycle_decision", "2026-11-01T10:01:00Z", tool_name="X",
+                         advisories_count=0, rules=[], advisories=[], verdict="allow",
+                         pad="x" * (model.TRIVIAL_SESSION_BYTES + 10)),
+            census.bare_session_end("2026-11-01T10:02:00Z"),
+        ]
+        self._session(root, "proj", "large", big)
+        roots = roots_for(root, tmp_path)
+        default = model.build_sessions_list(roots, now=self._NOW)
+        assert sorted(row["session_id"] for row in default["sessions"]) == ["large", "orchestrated"]
+        assert default["hidden_trivial"] == 1
+        assert all(row["trivial"] is False for row in default["sessions"])
+        everything = model.build_sessions_list(roots, now=self._NOW, show_all=True)
+        trivial = {row["session_id"]: row["trivial"] for row in everything["sessions"]}
+        assert trivial == {"trivial-1": True, "orchestrated": False, "large": False}
+
+    def test_a_live_small_run_is_never_hidden(self, tmp_path):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "live-small", [census.session_start("2026-11-01T10:00:00Z")])
+        listed = model.build_sessions_list(
+            roots_for(root, tmp_path), now=datetime(2026, 11, 1, 10, 1, tzinfo=UTC)
+        )
+        assert [row["session_id"] for row in listed["sessions"]] == ["live-small"]
+        assert listed["hidden_trivial"] == 0
+
+    def test_the_limit_keeps_the_newest_and_reports_the_total(self, tmp_path):
+        root = make_root(tmp_path)
+        for day in (1, 2, 3):
+            self._session(root, "proj", f"sess-{day}", [
+                census.session_start(f"2026-11-0{day}T10:00:00Z"),
+                census.phase_transition(f"2026-11-0{day}T10:01:00Z", "CODE", "started"),
+                census.bare_session_end(f"2026-11-0{day}T10:02:00Z"),
+            ])
+        listed = model.build_sessions_list(roots_for(root, tmp_path), limit=2, now=self._NOW)
+        assert [row["session_id"] for row in listed["sessions"]] == ["sess-3", "sess-2"]
+        assert listed["total"] == 3
+        assert listed["limit"] == 2
+
+    def test_two_names_folding_to_one_label_are_marked(self, tmp_path):
+        root = make_root(tmp_path)
+        for slug, project_dir in (("a", "/w/My App"), ("b", "/w/My_App"), ("c", "/w/Other")):
+            self._session(root, slug, "sess-x" + slug, [
+                census.session_start("2026-11-01T10:00:00Z", project_dir=project_dir),
+                census.phase_transition("2026-11-01T10:01:00Z", "CODE", "started"),
+            ])
+        rows = {row["slug"]: row for row in model.build_sessions_list(
+            roots_for(root, tmp_path), now=self._NOW, show_all=True)["sessions"]}
+        assert rows["a"]["project"] == rows["b"]["project"] == "My_App"
+        assert rows["a"]["project_display"] == "My App"
+        assert rows["b"]["project_display"] == "My_App"
+        assert rows["a"]["project_collision"] is True
+        assert rows["b"]["project_collision"] is True
+        assert rows["c"]["project_collision"] is False
+
+    def test_an_event_cap_is_named_and_keeps_the_newest(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        events = [census.session_start("2026-11-01T10:00:00Z")] + [
+            census.phase_transition(f"2026-11-01T10:{minute:02d}:00Z", "CODE", "started")
+            for minute in range(1, 11)
+        ]
+        self._session(root, "proj", "sess-1", events)
+        monkeypatch.setattr(model, "MAX_EVENTS", 4)
+        payload = build_basic_model(root, tmp_path)
+        assert "events" in payload["truncated_by"]
+        assert payload["truncated"] is True
+        assert [event["seq"] for event in payload["events"]] == [7, 8, 9, 10]
+
+    def test_an_oversize_journal_is_named_in_truncated_by(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "sess-1", basic_events())
+        monkeypatch.setattr(journal, "MAX_JOURNAL_BYTES", 600)
+        payload = build_basic_model(root, tmp_path)
+        assert "journal_bytes" in payload["truncated_by"]
+        assert payload["events"]
+        assert payload["events"][0]["seq"] > 0
+
+    def test_an_uncapped_run_reports_no_truncation(self, tmp_path):
+        root = make_root(tmp_path)
+        self._session(root, "proj", "sess-1", basic_events())
+        payload = build_basic_model(root, tmp_path)
+        assert payload["truncated_by"] == []
+        assert payload["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# Incremental journal parsing
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalRead:
+    """A repeat read parses only new complete lines, and always equals a
+    full parse of the file as it is now."""
+
+    @staticmethod
+    def _shape(read: journal.JournalRead) -> tuple:
+        return ([(event.seq, event.data) for event in read.events],
+                read.lines_total, read.valid_events, read.skipped_lines)
+
+    def _fresh(self, path: Path, monkeypatch) -> tuple:
+        with monkeypatch.context() as patch:
+            patch.setattr(journal, "_PARSE_CACHE", type(journal._PARSE_CACHE)())
+            return self._shape(journal.read_journal(path))
+
+    @staticmethod
+    def _line(index: int) -> str:
+        return json.dumps({"v": 1, "type": "phase_transition", "ts": stamp(index),
+                           "phase": "CODE", "status": "started", "n": index}) + "\n"
+
+    def test_growth_fragments_shrink_and_rotation_all_match_a_full_parse(
+        self, tmp_path, monkeypatch
+    ):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", b"")
+        steps = []
+
+        def check(label: str) -> None:
+            got = self._shape(journal.read_journal(path))
+            assert got == self._fresh(path, monkeypatch), label
+            steps.append((label, len(got[0])))
+
+        path.write_text("".join(self._line(i) for i in range(3)), encoding="utf-8")
+        check("initial")
+        whole = self._line(3)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(whole[:20])
+        check("fragment")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(whole[20:] + self._line(4))
+        check("completed")
+        path.write_text("".join(self._line(i) for i in range(2)), encoding="utf-8")
+        check("shrunk")
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_text("".join(self._line(i + 10) for i in range(6)), encoding="utf-8")
+        os.replace(replacement, path)
+        check("rotated")
+        assert steps == [("initial", 3), ("fragment", 3), ("completed", 5),
+                         ("shrunk", 2), ("rotated", 6)]
+
+    def test_a_repeat_read_does_not_reparse_old_lines(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", b"")
+        path.write_text("".join(self._line(i) for i in range(50)), encoding="utf-8")
+        journal.read_journal(path)
+        folded: list[int] = []
+        real = journal._fold_line
+
+        def counted(read, index, raw):
+            folded.append(index)
+            return real(read, index, raw)
+
+        monkeypatch.setattr(journal, "_fold_line", counted)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(self._line(50))
+        read = journal.read_journal(path)
+        assert folded == [50]
+        assert [event.seq for event in read.events][-1] == 50
