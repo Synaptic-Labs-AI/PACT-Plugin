@@ -504,6 +504,45 @@ def test_widget_roles_match_their_children():
     )
 
 
+def _css_text() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(STATIC_DIR.rglob("*.css")))
+
+
+def test_no_text_below_the_11px_floor():
+    """Stylesheet text and the debrief chart labels stay at 11px or larger."""
+    small = [
+        size for size in re.findall(r"font-size:\s*([0-9.]+)px", _css_text()) if float(size) < 11
+    ]
+    assert not small, f"font sizes below the 11px floor: {sorted(set(small))}"
+    charts = (STATIC_JS_DIR / "charts.js").read_text(encoding="utf-8")
+    sizes = [int(size) for size in re.findall(r"setFont\(ctx,\s*(\d+)\)", charts)]
+    assert sizes and min(sizes) >= 11, f"chart label sizes below 11px: {sizes}"
+
+
+def _luminance(hex_color: str) -> float:
+    channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(foreground: str, background: str) -> float:
+    high, low = sorted((_luminance(foreground), _luminance(background)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_text_tokens_meet_contrast_on_the_panel_backgrounds():
+    """Each text colour token clears 4.5:1 on each background text sits on."""
+    tokens = dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9a-fA-F]{6})\b", _css_text()))
+    assert {"text", "muted", "dim", "bg", "panel", "panel-2"} <= tokens.keys()
+    for foreground in ("text", "muted", "dim"):
+        for background in ("bg", "panel", "panel-2"):
+            ratio = _contrast(tokens[foreground], tokens[background])
+            assert ratio >= 4.5, f"--{foreground} on --{background} is {ratio:.2f}:1"
+    assert not re.search(r"(?<![-\w])color:\s*rgba\([^)]*,\s*0?\.\d+\s*\)", _css_text()), (
+        "a text colour uses partial alpha, which lowers its contrast below the token's"
+    )
+
+
 def test_reduced_motion_is_respected():
     css = "\n".join(
         path.read_text(encoding="utf-8")

@@ -154,7 +154,7 @@ export function drawRadar(canvas, dims, options = {}) {
   }
 
   /* Axis labels: label above value, placed just outside each vertex. */
-  setFont(ctx, 9);
+  setFont(ctx, 11);
   ctx.textBaseline = "middle";
   entries.forEach((entry, index) => {
     const angle = angleFor(index);
@@ -178,7 +178,7 @@ export function drawRadar(canvas, dims, options = {}) {
     ctx.fillText(String(options.centerText), cx, cy);
   }
   if (options.centerSub) {
-    setFont(ctx, 8);
+    setFont(ctx, 11);
     ctx.textAlign = "center";
     ctx.fillStyle = token("--dim");
     ctx.fillText(String(options.centerSub), cx, cy + 13);
@@ -227,7 +227,7 @@ export function drawSparkline(canvas, values, options = {}) {
   ctx.restore();
 
   if (!numbers.length) {
-    setFont(ctx, 9);
+    setFont(ctx, 11);
     ctx.fillStyle = token("--dim");
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -281,7 +281,7 @@ export function drawSparkline(canvas, values, options = {}) {
   }
 
   if (options.showLabels !== false) {
-    setFont(ctx, 8);
+    setFont(ctx, 11);
     ctx.fillStyle = token("--dim");
     ctx.textBaseline = "bottom";
     ctx.textAlign = "left";
