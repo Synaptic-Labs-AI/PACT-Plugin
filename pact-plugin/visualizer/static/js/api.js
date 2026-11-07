@@ -76,7 +76,7 @@ async function getJSON(url) {
   try {
     body = await res.json();
   } catch (err) {
-    throw new Error(`bad JSON from ${url}`);
+    throw new Error(`bad JSON from ${url} (HTTP ${res.status})`);
   }
   if (!res.ok) {
     throw new Error((body && body.error) || `request failed (${res.status})`);

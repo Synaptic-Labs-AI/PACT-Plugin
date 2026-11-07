@@ -1212,6 +1212,21 @@ def test_toasts_hold_for_the_reader_and_keep_focus():
     )
 
 
+API_SCRIPT = r"""
+globalThis.window = { location: { search: "", hash: "" } };
+globalThis.fetch = async () => ({
+  ok: false,
+  status: 502,
+  json: async () => { throw new SyntaxError("Unexpected token <"); },
+});
+const api = await import("./api.js");
+let message = "";
+try { await api.sessions(); } catch (err) { message = String(err.message); }
+if (!message.includes("HTTP 502")) { console.error("FAILED PINS: a non-JSON error names its HTTP status: " + message); process.exit(1); }
+console.log("PINS OK");
+"""
+
+
 KEY_SCRIPT = r"""
 const failed = [];
 const check = (name, ok) => { if (!ok) failed.push(name); };
@@ -1260,6 +1275,18 @@ def test_api_carries_the_launch_key():
     )
     assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
         f"key pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
+def test_a_non_json_error_names_its_http_status():
+    """A proxy's HTML error page must not hide the status behind 'bad JSON'."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", API_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"api pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
 
 
