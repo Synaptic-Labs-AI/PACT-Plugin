@@ -484,6 +484,13 @@ export class Stage {
 
 `stage.js` imports `sprites.js`. It may read `model.events` up to the cursor to
 derive room/agent state; `setModel` + `setCursor` are the only state inputs.
+Lifecycle and wrap-up are evaluated AT THE CURSOR: the crew goes to the lounge
+only while the newest lifecycle event at or before the cursor is a
+`session_end` and only end trailers (`session_end`, `cleanup_summary`) follow
+it up to the cursor, the same rule as the server's run status (a later
+`session_start` or any other event brings it back); the SHIPPED stamp
+fires only for a wrap-up `session_end` (`source` is `wrap-up`), the PR stamp
+uses the wrap-up at or before the cursor, and confetti only a MERGED one.
 Canvas is internally laid out at 960×440 logical pixels and scaled by CSS; use
 devicePixelRatio for sharpness. It owns `#stage-caption` text.
 
@@ -552,8 +559,13 @@ Achievements from real metrics only: first handoff, 5+ gate advisories,
 
 Wires everything. It owns:
 - root/project/session selects and header buttons;
-- `state = {sessions, roots, model, cursor, live, playing, speed, filter, selectedAgent, sound}`;
-- polling (`live` every ~1200ms; paused/ended only on demand), ETag/since;
+- `state = {roots, sessions, current, model, mode, cursor, playing, speed, filter, selectedAgent, sound, followLive, etag, …}`,
+  where `mode` ∈ `idle|live|replay|demo` and `followLive` is true only while
+  the cursor rides the newest event of a live run;
+- polling with ETag/`since`: an open real run is always polled, about every
+  1.2 s while `meta.status` is `live` and every 10 s otherwise, so a resumed or
+  idle run comes back on its own. A poll keeps the cursor on the same event
+  `seq` even when the capped window slides; the demo is never polled;
 - replay clock (event-paced at 1× = 2 events/s, 2× = 5, 4× = 12, 8× = 30);
 - URL state (`?demo=1`, `?root=…&slug=…&session=…&mock=1`);
 - error/loading states;

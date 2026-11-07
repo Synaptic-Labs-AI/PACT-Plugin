@@ -304,6 +304,47 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("in ARCHITECT, current is ARCHITECT", staged.phaseState.current === "ARCHITECT");
   check("PREPARE is complete past its end seq", staged.phaseState.completed.has("PREPARE"));
 
+  /* A reader off the live head stays on the same event across a poll, by
+   * seq, even when the capped window slides. */
+  const { cursorAfterRefresh } = await import("./dom.js");
+  const win = (from, n) => Array.from({ length: n }, (_, i) => ({ seq: from + i }));
+  check("a slid window keeps the reader on the same event",
+    cursorAfterRefresh(win(100, 10), 4, win(103, 10)) === 1);
+  check("an unslid window keeps the same index", cursorAfterRefresh(win(100, 10), 4, win(100, 12)) === 4);
+  check("an event that slid out lands at the window start", cursorAfterRefresh(win(100, 10), 2, win(105, 10)) === 0);
+
+  /* Lifecycle at the cursor: a session_start after a session_end reopens the
+   * run, and only a wrap-up session_end at or before the cursor is the wrap-up. */
+  const life = (evs, cursor) => Stage.prototype._lifecycleAtCursor.call({ events: evs, cursor });
+  const bare = { type: "session_end", raw: {} };
+  const wrap = { type: "session_end", wrapup: true, raw: { source: "wrap-up", pr_state: "merged", pr_number: 9 } };
+  const start = { type: "session_start", raw: {} };
+  check("a bare session_end ends the run at the cursor", life([start, bare], 2).endIdx === 1);
+  check("a later session_start reopens the run", life([start, bare, start], 3).endIdx === -1);
+  check("any event other than an end trailer reopens the run",
+    life([start, bare, { type: "session_consolidated" }], 3).endIdx === -1);
+  check("end trailers keep the run ended",
+    life([start, bare, { type: "cleanup_summary" }, bare], 4).endIdx === 3);
+  check("a bare session_end is not a wrap-up", life([start, bare], 2).wrapup === null);
+  check("a wrap-up after the cursor is not shown yet", life([start, bare, wrap], 2).wrapup === null);
+  const shown = life([start, wrap], 2).wrapup;
+  check("a wrap-up at the cursor carries its own PR", shown && shown.pr_state === "MERGED" && shown.pr_number === 9);
+
+  /* Only a wrap-up session_end fires the SHIPPED stamp. */
+  const spawned = [];
+  const spawnThis = {
+    model: { meta: {} }, phaseState: { current: "" }, agents: new Map(), reducedMotion: false,
+    _phaseRoomForEvent: Stage.prototype._phaseRoomForEvent,
+    _agentPoint: () => null, _roomPoint: () => ({ x: 0, y: 0 }),
+    _pushEffect: (effect) => spawned.push(effect.kind),
+    _makeConfetti: () => ({ kind: "confetti" }), _addShake: () => {},
+  };
+  Stage.prototype._spawnForEvent.call(spawnThis, bare);
+  check("a bare session_end fires no stamp", !spawned.includes("stamp"));
+  Stage.prototype._spawnForEvent.call(spawnThis, wrap);
+  check("a wrap-up session_end fires the stamp and, when merged, confetti",
+    spawned.includes("stamp") && spawned.includes("confetti"));
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);
@@ -450,10 +491,28 @@ Object.defineProperty(globalThis.window, "localStorage", storageGetter);
 /* The shell's overlays start hidden, as their markup declares. */
 for (const id of ["modal-root", "loading", "error-banner"]) document.getElementById(id).hidden = true;
 globalThis.requestAnimationFrame = () => 0;
-const intervals = [];
-globalThis.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
-globalThis.clearInterval = (id) => { if (intervals[id - 1]) intervals[id - 1].cleared = true; };
-const activeInterval = () => [...intervals].reverse().find((entry) => !entry.cleared) || null;
+/* Poll timers (a second or longer) are captured for the scenario to fire by
+ * hand; short timers, which tick() uses, run normally. */
+const realSetTimeout = setTimeout;
+const realClearTimeout = clearTimeout;
+const timers = [];
+globalThis.setTimeout = (fn, ms) => {
+  if (Number(ms) < 1000) return realSetTimeout(fn, ms);
+  timers.push({ fn, ms });
+  return `poll-${timers.length}`;
+};
+globalThis.clearTimeout = (id) => {
+  if (typeof id === "string" && id.startsWith("poll-")) timers[Number(id.slice(5)) - 1].cleared = true;
+  else realClearTimeout(id);
+};
+const pendingTimers = () => timers.filter((entry) => !entry.cleared && !entry.fired);
+const firePoll = () => {
+  const entry = pendingTimers().at(-1);
+  if (!entry) return false;
+  entry.fired = true;
+  entry.fn();
+  return true;
+};
 
 const model = (kind, sid, etag, status = "ended") => ({
   source: { kind, session_id: sid },
@@ -663,6 +722,38 @@ check("the next run starts with no selection", log.selected.at(-1) === null);
 """, tmp_path)
 
 
+def test_an_open_run_is_always_polled_at_its_status_cadence(tmp_path):
+    """Live runs poll about every 1.2 s, others every 10 s, and a scrub keeps polling."""
+    _run_app_scenario(r"""
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [live], default_root: "r" };
+await import("./app.js");
+await tick();
+const events = (n) => Array.from({ length: n }, (_, i) => ({ seq: i, ts: "2026-11-01T00:00:01Z" }));
+pending.session.shift().resolve(Object.assign(model("real", "L1", "e1", "live"), { events: events(3) }));
+await tick();
+check("a live run is polled about every 1.2 s", pendingTimers().at(-1).ms === 1200);
+fireWindow("keydown", { key: "ArrowLeft", target: { tagName: "DIV" } });
+check("scrubbing off the live head keeps polling", pendingTimers().length === 1);
+
+/* The run ends: the page drops to replay and polls every 10 s. */
+firePoll();
+await tick();
+pending.session.shift().resolve(Object.assign(model("real", "L1", "e2", "ended"), { events: events(4) }));
+await tick();
+check("an ended run says so", log.toasts.includes("Run ended"));
+check("an ended run is still polled, every 10 s", pendingTimers().at(-1).ms === 10000);
+
+/* The run resumes: the page says so and polls fast again. */
+firePoll();
+await tick();
+pending.session.shift().resolve(Object.assign(model("real", "L1", "e3", "live"), { events: events(5) }));
+await tick();
+check("a resumed run says so", log.toasts.includes("Run resumed"));
+check("a resumed run is polled fast again", pendingTimers().at(-1).ms === 1200);
+check("only one poll is ever scheduled", pendingTimers().length === 1);
+""", tmp_path)
+
+
 def test_a_stale_poll_never_overwrites_a_reopened_run(tmp_path):
     """A poll in flight when the same run is reopened is dropped."""
     _run_app_scenario(r"""
@@ -671,9 +762,7 @@ await import("./app.js");
 await tick();
 pending.session.shift().resolve(model("real", "L1", "e1", "live"));
 await tick();
-const poll = activeInterval();
-check("an open live run polls", Boolean(poll));
-poll.fn();
+check("an open live run polls", firePoll());
 await tick();
 check("the poll is in flight", pending.session.length === 1);
 const stalePoll = pending.session.shift();

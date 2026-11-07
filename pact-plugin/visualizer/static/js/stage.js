@@ -139,6 +139,26 @@ const WORK_EVENT_TYPES = new Set([
 
 /* ---- small helpers ----------------------------------------------------- */
 
+/* A session_end recorded by wrap-up (the server flags it; the raw source is
+ * the fallback), as opposed to a bare process exit. */
+function isWrapup(event) {
+  if (!event || event.type !== "session_end") return false;
+  if (event.wrapup === true) return true;
+  return Boolean(event.raw && event.raw.source === "wrap-up");
+}
+
+/* The wrap-up fields carried by one wrap-up session_end event. */
+function wrapupOf(event) {
+  const raw = (event && event.raw) || {};
+  const number = Number(raw.pr_number);
+  return {
+    pr_state: String(raw.pr_state || "").toUpperCase(),
+    pr_number: raw.pr_number === undefined || raw.pr_number === null || !Number.isFinite(number) ? null : number,
+    ts: event && event.ts,
+  };
+}
+
+
 function clamp(value, lo, hi) {
   const n = Number(value);
   if (!Number.isFinite(n)) return lo;
@@ -253,6 +273,7 @@ export class Stage {
 
     this.phaseState = { current: "", completed: new Set() };
     this.endEventIdx = -1;
+    this.cursorWrapup = null;
     this.lastBug = null;
     this.shake = { t: 0, dur: 0, mag: 0 };
 
@@ -626,18 +647,34 @@ export class Stage {
     return { lastByName, lastIdxByName };
   }
 
-  _findEndEvent() {
-    let found = -1;
+  /* The run's lifecycle as of the cursor, walked over the events shown so
+   * far, with the server's rule: the run reads ended only while its latest
+   * session_end is followed by nothing but end trailers (session_end,
+   * cleanup_summary). Any other event after it, a session_start included,
+   * reopens the run. The wrap-up is the latest wrap-up session_end at or
+   * before the cursor, never the final one from the whole journal. */
+  _lifecycleAtCursor() {
+    let endIdx = -1;
+    let wrapup = null;
     for (let i = 0; i < this.cursor && i < this.events.length; i += 1) {
       const event = this.events[i];
-      if (event && event.type === "session_end") found = i;
+      if (!event) continue;
+      if (event.type === "session_end") {
+        endIdx = i;
+        if (isWrapup(event)) wrapup = wrapupOf(event);
+      } else if (event.type !== "cleanup_summary") {
+        endIdx = -1;
+      }
     }
-    return found;
+    return { endIdx, wrapup };
   }
 
   _computeViews() {
     const { lastByName, lastIdxByName } = this._lastEventsByAgent();
-    this.endEventIdx = this._findEndEvent();
+    const lifecycle = this._lifecycleAtCursor();
+    this.endEventIdx = lifecycle.endIdx;
+    this.cursorWrapup = lifecycle.wrapup;
+
     const ended = this.endEventIdx >= 0;
     const completed = this.phaseState.completed;
     const current = this.phaseState.current;
@@ -2278,8 +2315,7 @@ export class Stage {
   /* ---- event effects --------------------------------------------------- */
 
   _wrapup() {
-    const wrapup = this.model && this.model.wrapup;
-    return wrapup && typeof wrapup === "object" ? wrapup : null;
+    return this.cursorWrapup || null;
   }
 
   _wrapupVisible() {
@@ -2317,7 +2353,7 @@ export class Stage {
     const review = { x: REVIEW_DECK.x + REVIEW_DECK.w / 2, y: REVIEW_DECK.top + 20 };
 
     const stamp = () => {
-      const wrapup = this._wrapup() || {};
+      const wrapup = wrapupOf(event);
       const state = String(wrapup.pr_state || "").toUpperCase() || "SHIPPED";
       const number = wrapup.pr_number !== undefined && wrapup.pr_number !== null ? ` #${wrapup.pr_number}` : "";
       const wrapColor = state === "MERGED" ? C.success : state === "OPEN" ? C.warning : C.muted;
@@ -2337,7 +2373,8 @@ export class Stage {
 
     switch (type) {
       case "session_end":
-        stamp();
+        /* Only a wrap-up ships; a bare session_end is a process exit. */
+        if (isWrapup(event)) stamp();
         return;
       case "session_start":
         this._pushEffect({

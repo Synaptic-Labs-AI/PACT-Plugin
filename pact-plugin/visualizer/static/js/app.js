@@ -15,6 +15,7 @@ import {
   pollMayShowError,
   PROJECT_ALTERED_NOTE,
   runKey,
+  cursorAfterRefresh,
 } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
@@ -221,7 +222,6 @@ function setCursor(index, opts = {}) {
 
   if (opts.fromUser && following()) {
     state.followLive = false;
-    stopPolling();
     setModeLabel();
     if (panels) panels.setLive(false);
     if (timeline) timeline.setMode({ live: false, playing: state.playing, speed: state.speed });
@@ -259,7 +259,6 @@ function togglePlay() {
   if (state.mode === "live") {
     state.mode = "replay";
     state.followLive = false;
-    stopPolling();
     setModeLabel();
     if (panels) panels.setLive(false);
   }
@@ -280,24 +279,40 @@ function setSpeed(speed) {
   updateTimeline();
 }
 
+/* An open real run is always polled: about every 1.2 s while it is live and
+ * every 10 s otherwise, so a run that resumes or goes idle updates on its own.
+ * The server answers an unchanged journal cheaply. */
+const POLL_LIVE_MS = 1200;
+const POLL_IDLE_MS = 10000;
+
 function stopPolling() {
   pollGeneration += 1;
   if (state.pollTimer) {
-    clearInterval(state.pollTimer);
+    clearTimeout(state.pollTimer);
     state.pollTimer = 0;
   }
 }
 
 function startPolling() {
   stopPolling();
-  if (state.mode !== "live" || !state.current || state.current.kind === "demo") return;
-  if (!state.model || state.model.meta.status !== "live") return;
-  state.pollTimer = setInterval(pollLive, 1200);
+  schedulePoll();
+}
+
+function schedulePoll() {
+  if (!state.current || state.current.kind !== "real" || !state.model) return;
+  const generation = pollGeneration;
+  const live = Boolean(state.model.meta && state.model.meta.status === "live");
+  state.pollTimer = setTimeout(async () => {
+    state.pollTimer = 0;
+    await pollLive();
+    /* A stop or a new run since this timer was set owns the schedule now. */
+    if (generation === pollGeneration) schedulePoll();
+  }, live ? POLL_LIVE_MS : POLL_IDLE_MS);
 }
 
 async function pollLive() {
   if (pollBusy) return;
-  if (state.mode !== "live" || !state.current || state.current.kind === "demo") return;
+  if (!state.current || state.current.kind !== "real") return;
   const ref = state.current;
   const generation = pollGeneration;
   /* A stale poll belongs to a view that is gone (another run, or the same run
@@ -317,10 +332,12 @@ async function pollLive() {
      * banner must survive a successful poll. */
     if (state.lastError && pollClearsError(state.errorSource)) hideError();
     if (!data || data.unchanged) return;
-    const follow = state.followLive;
+    const follow = following();
     const priorCursor = state.cursor;
     const priorEvents = state.model && Array.isArray(state.model.events) ? state.model.events : [];
     const priorLastSeq = priorEvents.length ? Number(priorEvents[priorEvents.length - 1].seq) : -1;
+    const wasLive = Boolean(state.model && state.model.meta && state.model.meta.status === "live");
+    const atHead = priorCursor >= priorEvents.length;
     state.etag = data.etag || null;
     state.model = data;
     if (stage) stage.setModel(data);
@@ -328,7 +345,7 @@ async function pollLive() {
     if (timeline) timeline.setModel(data);
     const total = data.events.length;
     if (follow) setCursor(total, { animate: true });
-    else setCursor(clamp(priorCursor, 0, total), { animate: false });
+    else setCursor(cursorAfterRefresh(priorEvents, priorCursor, data.events), { animate: false });
     updateHeader(data);
     if (achievements) achievements.evaluate(data, { live: true });
     /* Count by seq, not length: above MAX_EVENTS the window length is
@@ -341,16 +358,20 @@ async function pollLive() {
       const phase = data.phases && data.phases.current ? ` in ${data.phases.current}` : "";
       announce(`${added} new event${added === 1 ? "" : "s"}${phase}`);
     }
-    if (data.meta.status !== "live") {
-      state.mode = "replay";
-      state.followLive = false;
-      stopPolling();
+    const nowLive = Boolean(data.meta && data.meta.status === "live");
+    state.current.is_live = nowLive;
+    if (nowLive !== wasLive) {
+      /* A run that resumes is followed again only if the reader was at its
+       * head; one that ends drops to replay. The toast root is a polite live
+       * region, so each toast is also the announcement. */
+      state.mode = nowLive ? "live" : "replay";
+      state.followLive = nowLive && atHead && !state.playing;
+      if (state.followLive) setCursor(total, { animate: false });
       setModeLabel();
-      if (panels) panels.setLive(false);
+      if (panels) panels.setLive(following());
       updateTimeline();
-      /* The toast root is a polite live region, so the toast is the
-       * announcement; a second announce() would speak it twice. */
-      toast("Run ended", "The journal recorded the end of this run.", "success");
+      if (nowLive) toast("Run resumed", "The journal shows new activity on this run.", "info");
+      else toast("Run ended", "The journal shows this run has ended.", "success");
     }
   } catch (err) {
     /* Mirror the success arm: surface a failure only while this poll still
@@ -402,7 +423,7 @@ function applyModel(model, opts = {}) {
   if (state.mode === "demo") cursor = 0;
   if (state.followLive) cursor = total;
   state.cursor = cursor;
-  if (stage) stage.setCursor(cursor, { animate: false, live: state.followLive });
+  if (stage) stage.setCursor(cursor, { animate: false, live: following() });
   if (panels) panels.setCursor(cursor);
   if (timeline) timeline.setCursor(cursor);
   updateClock();
@@ -745,14 +766,12 @@ async function openSession(ref, opts = {}) {
     applyModel(model, { mode: state.mode, cursor: "end" });
     syncSelectors(state.current);
     updateUrl("session", ref);
-    if (live) startPolling();
-    else stopPolling();
+    startPolling();
   } catch (err) {
     if (token === sessionRequest) {
       showError(`Could not open run: ${err.message}`, () => openSession(ref), "navigation");
       /* The previous run is still on screen, and this load stopped its
-       * polling. If that run is live, resume it so the LIVE badge stays true;
-       * startPolling() is a no-op for a demo, replay or ended run. */
+       * polling: resume it. startPolling() is a no-op for the demo. */
       startPolling();
       /* Resync only when a run is still displayed; with no run open there is
        * nothing to point the selectors at (syncSelectors no-ops on null). */

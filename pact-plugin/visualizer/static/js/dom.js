@@ -240,6 +240,21 @@ export function createSeqIndex(model) {
   };
 }
 
+/* Where a reader who is NOT following the live head stays when a poll
+ * replaces the events: on the same event, found by seq, because above
+ * MAX_EVENTS the window slides and the same index names a different event.
+ * An event that slid out of the window puts the cursor at the window start. */
+export function cursorAfterRefresh(priorEvents, priorCursor, events) {
+  const prior = Array.isArray(priorEvents) ? priorEvents : [];
+  const next = Array.isArray(events) ? events : [];
+  if (priorCursor <= 0 || !prior.length) return clamp(priorCursor, 0, next.length);
+  const last = prior[Math.min(priorCursor, prior.length) - 1];
+  const index = createSeqIndex({ events: next })(last && last.seq);
+  if (index === null) return clamp(priorCursor, 0, next.length);
+  const same = next[index] && Number(next[index].seq) === Number(last.seq);
+  return clamp(same ? index + 1 : index, 0, next.length);
+}
+
 /* Canvas modules read design tokens off the document root. One fallback map
  * keeps timeline.js and charts.js painting the same colours in tests,
  * headless runs, and before the stylesheet has applied. */
