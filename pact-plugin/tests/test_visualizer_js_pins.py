@@ -1713,6 +1713,30 @@ def test_variety_charts_redraw_on_resize():
     )
 
 
+ROLE_SCRIPT = r"""
+const { normalizeRole } = await import("./sprites.js");
+const cases = [
+  ["latest-bot", "unknown"], ["contest", "unknown"],
+  ["pact-test-engineer", "test-engineer"], ["test-engineer", "test-engineer"], ["unrestricted-pytest", "test-engineer"],
+];
+const wrong = cases.filter(([name, role]) => normalizeRole(name) !== role);
+if (wrong.length) { console.error("FAILED PINS: role matching: " + JSON.stringify(wrong)); process.exit(1); }
+console.log("PINS OK");
+"""
+
+
+def test_role_matching_is_word_anchored():
+    """'test' inside another word does not make an agent a test engineer."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", ROLE_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"role pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))

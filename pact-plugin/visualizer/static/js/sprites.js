@@ -168,7 +168,8 @@ const ROLE_PATTERNS = [
   ["devops-engineer", /devops|sre\b|infra(?:structure)?|platform[-_ ]?engineer/],
   ["auditor", /audit/],
   ["qa-engineer", /\bqa\b|quality[-_ ]?(?:engineer|assurance)/],
-  ["test-engineer", /test/],
+  /* Word-anchored, so "latest-bot" is not a tester; pytest still is. */
+  ["test-engineer", /\btest|pytest/],
   ["security-engineer", /security|secops|appsec/],
   ["secretary", /secretar|scribe|chro?nicler/],
   ["n8n", /n8n|automation|workflow[-_ ]?bot/],
