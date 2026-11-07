@@ -367,6 +367,7 @@ Otherwise return the full model:
       "started_at": "2026-10-29T10:01:00Z",
       "ended_at": "2026-10-29T10:30:00Z",
       "run": 1,
+      "runs": [{"started_seq": 1, "ended_seq": 40, "started_at": "2026-10-29T10:01:00Z", "ended_at": "2026-10-29T10:30:00Z", "status": "completed"}],
       "skip_reason": ""
     }]
   },
@@ -492,6 +493,19 @@ Field rules:
   neither the feed nor the raw-log view.
 - `title` / `detail` are plain text, no HTML, redacted, then truncated to
   240/500 chars.
+- `phases.items[].runs` lists every pass of the phase, oldest first, one
+  `{started_seq, ended_seq, started_at, ended_at, status}` entry per pass. A
+  `phase_transition` start opens a pass (`status: "active"`, `ended_seq` and
+  `ended_at` null). A completed or skipped transition closes the open pass and
+  sets its `status` (`completed` or `skipped`). With none open, it adds a
+  start-less pass (`started_seq`/`started_at` null) only if the phase has no
+  passes yet; otherwise it is a repeated end marker and is ignored, so it adds
+  no pass and moves no `ended_seq`. A start while a pass is still open is
+  likewise a repeated start marker and is ignored, so at most one pass is open,
+  and it is the last. `run` counts every pass, including any the cap dropped,
+  and the item's own `started_seq`/`ended_seq`/`started_at`/`ended_at`/`status`
+  are the last pass's values. At most the newest 50 passes are kept; a cut adds
+  `phase_runs` to `truncated_by`.
 - `phase_family` ∈ `PREPARE|ARCHITECT|CODE|TEST|REVIEW|OTHER`, from the
   event's own `phase`, else the run's current phase at that seq (the newest
   `phase_transition` before it). Mapping, upper-cased with `_` read as `-`:
@@ -524,7 +538,8 @@ Field rules:
   `journal_bytes` (a journal over 64 MiB is parsed from its last 64 MiB only,
   dropping the partial first line, with a warning), `events` (6000),
   `tasks` (400), `handoffs` (400), `commits` (2000), `reviews` (300),
-  `findings` (500), `alerts` (200), `checkpoints` (500), `agents` (200).
+  `findings` (500), `alerts` (200), `checkpoints` (500), `agents` (200),
+  `phase_runs` (50 passes per phase).
   `truncated` is true exactly when `truncated_by` is non-empty.
 - `severity` ∈ `info|success|warning|danger|muted`. `icon` is a short token
   (`phase`, `dispatch`, `handoff`, `commit`, `review`, `bug`, `pr`, `gate`,

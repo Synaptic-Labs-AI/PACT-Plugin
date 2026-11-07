@@ -2171,3 +2171,99 @@ class TestStructuredHandoffValuesAreRedactedBeforeEncoding:
         value = [{"pem": pem}, {"quote": 'token was "' + token + '" yes'}]
         rendered = classify.extract_handoff_fields({"decisions": value})["decisions"]
         assert "MIIBOGUSBODY" not in rendered and token not in rendered
+
+
+class TestPhaseRunsKeepEveryPass:
+    """phases.items[].runs records each pass of a phase, oldest first."""
+
+    @staticmethod
+    def _runs(transitions):
+        from visualizer import journal, model
+
+        events = [journal.RawEvent(seq=index, data={"type": "phase_transition", "phase": phase,
+                                                     "status": status, "ts": f"t{index}"})
+                  for index, (phase, status) in enumerate(transitions)]
+        item = next(item for item in model.derive_phases(events)["items"]
+                    if item["name"] == transitions[0][0])
+        return item, [(run["started_seq"], run["ended_seq"], run["status"]) for run in item["runs"]]
+
+    def test_a_single_run(self):
+        item, runs = self._runs([("CODE", "started"), ("CODE", "completed")])
+        assert runs == [(0, 1, "completed")]
+        assert item["run"] == 1
+
+    def test_complete_restart_complete_keeps_both_runs(self):
+        item, runs = self._runs([("PREPARE", "started"), ("PREPARE", "completed"),
+                                 ("PREPARE", "started"), ("PREPARE", "completed")])
+        assert runs == [(0, 1, "completed"), (2, 3, "completed")]
+        assert (item["run"], item["started_seq"], item["ended_seq"]) == (2, 2, 3)
+
+    def test_complete_then_restart_leaves_the_last_run_open(self):
+        item, runs = self._runs([("TEST", "started"), ("TEST", "completed"),
+                                 ("TEST", "started")])
+        assert runs == [(0, 1, "completed"), (2, None, "active")]
+        assert item["status"] == "active"
+
+    def test_skip_then_restart(self):
+        item, runs = self._runs([("ARCHITECT", "skipped"), ("ARCHITECT", "started"),
+                                 ("ARCHITECT", "completed")])
+        assert runs == [(None, 0, "skipped"), (1, 2, "completed")]
+        assert item["run"] == 2
+
+    def test_a_repeated_end_after_a_closed_run_is_not_a_pass(self):
+        item, runs = self._runs([("PREPARE", "started"), ("PREPARE", "completed"),
+                                 ("PREPARE", "completed"), ("PREPARE", "started"),
+                                 ("PREPARE", "completed")])
+        assert runs == [(0, 1, "completed"), (3, 4, "completed")]
+        assert item["run"] == 2
+
+    def test_a_rerun_with_a_stray_repeated_end_keeps_two_passes(self):
+        """The real shape: PREPARE 18-43, a repeated completion at 196, then 820-846."""
+        from visualizer import journal, model
+
+        def transition(seq, status):
+            return journal.RawEvent(seq=seq, data={"type": "phase_transition", "phase": "PREPARE",
+                                                    "status": status, "ts": f"t{seq}"})
+
+        events = [transition(18, "started"), transition(43, "completed"),
+                  transition(196, "completed"), transition(820, "started"),
+                  transition(846, "completed")]
+        item = model.derive_phases(events)["items"][0]
+        assert [(run["started_seq"], run["ended_seq"], run["status"]) for run in item["runs"]] == [
+            (18, 43, "completed"), (820, 846, "completed")]
+        assert item["run"] == 2
+        last = item["runs"][-1]
+        for name in ("started_seq", "ended_seq", "started_at", "ended_at", "status"):
+            assert item[name] == last[name], name
+
+    def test_a_repeated_end_never_moves_the_item_fields(self):
+        item, runs = self._runs([("CODE", "started"), ("CODE", "completed"),
+                                 ("CODE", "skipped")])
+        assert runs == [(0, 1, "completed")]
+        assert (item["ended_seq"], item["status"], item["skip_reason"]) == (1, "completed", "")
+
+    def test_a_repeated_start_while_open_is_not_a_second_pass(self):
+        item, runs = self._runs([("CODE", "started"), ("CODE", "started"),
+                                 ("CODE", "completed"), ("CODE", "started")])
+        assert runs == [(0, 2, "completed"), (3, None, "active")]
+        assert item["run"] == 2 and item["started_seq"] == 3
+        assert sum(1 for run in item["runs"] if run["ended_seq"] is None) == 1
+
+    def test_a_bare_complete_is_one_start_less_pass(self):
+        item, runs = self._runs([("CODE", "completed"), ("CODE", "completed")])
+        assert runs == [(None, 0, "completed")]
+        assert item["run"] == 1
+
+    def test_the_run_list_keeps_the_newest_and_names_the_cut(self, tmp_path, monkeypatch):
+        from visualizer import model
+
+        monkeypatch.setattr(model, "MAX_PHASE_RUNS", 3)
+        events = [_START]
+        for _ in range(5):
+            events += [{"type": "phase_transition", "phase": "CODE", "status": "started"},
+                       {"type": "phase_transition", "phase": "CODE", "status": "completed"}]
+        payload = _build(tmp_path, events)
+        code = next(item for item in payload["phases"]["items"] if item["name"] == "CODE")
+        assert len(code["runs"]) == 3 and code["run"] == 5
+        assert code["runs"][-1]["ended_seq"] == code["ended_seq"]
+        assert "phase_runs" in payload["truncated_by"]

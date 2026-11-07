@@ -45,6 +45,8 @@ from .settings import (
 )
 
 PHASE_ORDER: tuple[str, ...] = ("PREPARE", "ARCHITECT", "CODE", "TEST")
+# Newest runs kept per phase; a cut is named in truncated_by as phase_runs.
+MAX_PHASE_RUNS = 50
 
 # Event types that make a run an orchestration rather than a bare session.
 # The set itself lives in settings (ORCHESTRATION_MARKER_TYPES) so the cheap
@@ -193,11 +195,17 @@ def _phase_items(events: Sequence[journal.RawEvent]) -> dict:
 
     Location: model._phase_items.
     Summary: Builds the canonical four-phase track plus any extra phase seen.
-             A repeat ``started`` after a terminal status increments ``run``
-             (the rerun marker); a ``skipped`` transition carries its reason.
-             ``current`` is the phase of the most recent transition, which is
-             how the dev-demo exemplar reports TEST after the final phase
-             completed.
+             Each item's ``runs`` lists every run oldest first: a start appends
+             an open run (a start while the newest run is still open is a
+             repeated marker and changes nothing); a completed or skipped
+             transition closes the open run. An end with no open run is a start-less pass only when
+             the phase has no runs yet; after a closed run it is a repeated
+             marker and changes nothing at all. ``run`` == len(runs) (before
+             the MAX_PHASE_RUNS cap, which keeps the newest). The item's own
+             started_/ended_ fields and status always equal runs[-1]'s; a
+             ``skipped`` transition carries its reason. ``current`` is the phase of the most recent
+             transition, which is how the dev-demo exemplar reports TEST after
+             the final phase completed.
     Used by: derive_phases, build_model.
     """
     items: dict[str, dict] = {}
@@ -224,32 +232,45 @@ def _phase_items(events: Sequence[journal.RawEvent]) -> dict:
                 "ended_at": None,
                 "run": 0,
                 "skip_reason": "",
+                "runs": [],
             }
             items[phase] = item
         status = _text(data.get("status"), 20).lower()
         ts = _text(data.get("ts"), 64) or None
         last_phase = phase
+        runs: list[dict] = item["runs"]
         if status in {"started", "active"}:
-            item["run"] = int(item["run"]) + 1
+            if runs and runs[-1]["ended_seq"] is None:
+                # A start while the newest pass is open is a repeated marker:
+                # no second open pass, and the open pass keeps its start.
+                continue
+            runs.append({"started_seq": raw.seq, "ended_seq": None, "started_at": ts,
+                         "ended_at": None, "status": "active"})
             item["started_seq"] = raw.seq
             item["started_at"] = ts
             item["status"] = "active"
-        elif status == "completed":
-            if int(item["run"]) == 0:
-                item["run"] = 1
+        elif status in {"completed", "skipped"}:
+            open_run = next((run for run in reversed(runs) if run["ended_seq"] is None), None)
+            if open_run is None and runs:
+                # An end after a CLOSED run is a repeated marker: it adds no
+                # pass and changes nothing, so the item still mirrors runs[-1].
+                continue
+            if open_run is None:
+                # A phase recorded done without a start is one start-less pass.
+                open_run = {"started_seq": None, "ended_seq": None, "started_at": None,
+                            "ended_at": None, "status": status}
+                runs.append(open_run)
+            open_run.update({"ended_seq": raw.seq, "ended_at": ts, "status": status})
             item["ended_seq"] = raw.seq
             item["ended_at"] = ts
-            item["status"] = "completed"
-        elif status == "skipped":
-            if int(item["run"]) == 0:
-                item["run"] = 1
-            item["ended_seq"] = raw.seq
-            item["ended_at"] = ts
-            item["status"] = "skipped"
-            item["skip_reason"] = _text(
-                data.get("skip_reason") or data.get("reason"), MAX_FIELD_CHARS
-            )
+            item["status"] = status
+            if status == "skipped":
+                item["skip_reason"] = _text(
+                    data.get("skip_reason") or data.get("reason"), MAX_FIELD_CHARS
+                )
+        item["run"] = len(runs)
     phase_items: list[dict] = []
+    runs_cut = False
     for name in order:
         item = items.get(name)
         if item is None:
@@ -263,7 +284,11 @@ def _phase_items(events: Sequence[journal.RawEvent]) -> dict:
                 "ended_at": None,
                 "run": 0,
                 "skip_reason": "",
+                "runs": [],
             }
+        if len(item["runs"]) > MAX_PHASE_RUNS:
+            item["runs"] = item["runs"][-MAX_PHASE_RUNS:]
+            runs_cut = True
         phase_items.append(item)
     completed = [item["name"] for item in phase_items if item["status"] == "completed"]
     pending = [item["name"] for item in phase_items if item["status"] == "pending"]
@@ -273,6 +298,7 @@ def _phase_items(events: Sequence[journal.RawEvent]) -> dict:
         "completed": completed,
         "pending": pending,
         "items": phase_items,
+        "_runs_cut": runs_cut,
     }
 
 
@@ -339,7 +365,9 @@ def fill_task_agents(events: Sequence[dict], tasks: Sequence[Mapping[str, Any]])
 
 def derive_phases(events: Sequence[journal.RawEvent]) -> dict:
     """Public alias for the phases derivation (used by tests/demo)."""
-    return _phase_items(events)
+    phases = _phase_items(events)
+    phases.pop("_runs_cut", None)
+    return phases
 
 
 class _AgentAccumulator:
@@ -1674,6 +1702,9 @@ def derive_model(
         )
 
     phases = _phase_items(events)
+    if phases.pop("_runs_cut", False):
+        truncated_by.append("phase_runs")
+        collected_warnings.append(f"phase runs capped at the most recent {MAX_PHASE_RUNS}")
     assign_phase_families(classified)
     tasks, tasks_total, all_tasks = derive_tasks(
         events=classified, team_info=info, task_seeds=task_seeds

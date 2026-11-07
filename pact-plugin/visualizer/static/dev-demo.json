@@ -52,7 +52,16 @@
     "started_at": "2026-11-02T23:00:00Z",
     "ended_at": "2026-11-02T23:07:00Z",
     "run": 1,
-    "skip_reason": ""
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 1,
+      "ended_seq": 12,
+      "started_at": "2026-11-02T23:00:00Z",
+      "ended_at": "2026-11-02T23:07:00Z",
+      "status": "completed"
+     }
+    ]
    },
    {
     "name": "ARCHITECT",
@@ -63,7 +72,16 @@
     "started_at": "2026-11-02T23:08:00Z",
     "ended_at": "2026-11-02T23:14:00Z",
     "run": 1,
-    "skip_reason": ""
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 13,
+      "ended_seq": 20,
+      "started_at": "2026-11-02T23:08:00Z",
+      "ended_at": "2026-11-02T23:14:00Z",
+      "status": "completed"
+     }
+    ]
    },
    {
     "name": "CODE",
@@ -74,7 +92,16 @@
     "started_at": "2026-11-02T23:15:00Z",
     "ended_at": "2026-11-02T23:26:00Z",
     "run": 1,
-    "skip_reason": ""
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 21,
+      "ended_seq": 36,
+      "started_at": "2026-11-02T23:15:00Z",
+      "ended_at": "2026-11-02T23:26:00Z",
+      "status": "completed"
+     }
+    ]
    },
    {
     "name": "TEST",
@@ -85,7 +112,16 @@
     "started_at": "2026-11-02T23:27:00Z",
     "ended_at": "2026-11-02T23:40:00Z",
     "run": 1,
-    "skip_reason": ""
+    "skip_reason": "",
+    "runs": [
+     {
+      "started_seq": 37,
+      "ended_seq": 54,
+      "started_at": "2026-11-02T23:27:00Z",
+      "ended_at": "2026-11-02T23:40:00Z",
+      "status": "completed"
+     }
+    ]
    }
   ]
  },
