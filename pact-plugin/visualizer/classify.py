@@ -303,17 +303,33 @@ _HANDOFF_EMPTY_VALUES: tuple[Any, ...] = (None, "", [], {})
 
 
 def _without_secret_keys(value: Any, depth: int = 0) -> Any:
-    """A JSON-like value with every credential-named key's value withheld."""
+    """A JSON-like value with secrets withheld BEFORE it is serialized.
+
+    A credential-named key's value is withheld whole, and every string leaf
+    and every key is redacted here, as trim_raw does: JSON escaping turns
+    whitespace inside a secret (``Bearer`` + tab or newline) into ``\\t`` /
+    ``\\n``, which the patterns no longer match once the text is encoded.
+    """
     if depth >= 5:
-        return "[truncated]" if isinstance(value, (Mapping, list)) else value
+        if isinstance(value, (Mapping, list)):
+            return "[truncated]"
+        return redact(value) if isinstance(value, str) else value
     if isinstance(value, Mapping):
-        return {
-            str(key): REDACTED if is_secret_key(key) else _without_secret_keys(item, depth + 1)
-            for key, item in list(value.items())[:40]
-        }
+        out: dict[str, Any] = {}
+        for key, item in list(value.items())[:40]:
+            name = redact(str(key))
+            if name in out:
+                # Two keys that redact (or stringify) to the same text must not
+                # overwrite each other: number the later ones.
+                number = 2
+                while f"{name} {number}" in out:
+                    number += 1
+                name = f"{name} {number}"
+            out[name] = REDACTED if is_secret_key(key) else _without_secret_keys(item, depth + 1)
+        return out
     if isinstance(value, list):
         return [_without_secret_keys(item, depth + 1) for item in value[:40]]
-    return value
+    return redact(value) if isinstance(value, str) else value
 
 
 def _compact_json(value: Any) -> str:

@@ -23,7 +23,11 @@ truth for the HTTP payloads, DOM shell, and JS module boundaries.
   `name=value` assignments for password/secret/token/api key/authorization
   names keep the name and lose the value, and a raw mapping key naming a
   credential (token, secret, password, authorization, api key, credential,
-  cookie) has its whole value replaced. Redaction is unconditional.
+  cookie) has its whole value replaced. A structured value rendered as
+  compact JSON (a dict, or dicts inside a list, in a handoff field) has every
+  string leaf and every key redacted before it is encoded, and the encoded text
+  is redacted again, so a secret holding whitespace that JSON would escape
+  (`Bearer` plus a tab or newline) is still caught. Redaction is unconditional.
 - Terminal-safe. `--list` and `--status` strip C0/C1 control characters from
   every field they print.
 - Python 3.12+, stdlib only. Front-end is plain ES modules, no build step.

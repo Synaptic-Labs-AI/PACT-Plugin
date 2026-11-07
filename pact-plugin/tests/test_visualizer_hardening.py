@@ -2126,3 +2126,48 @@ class TestPlantedFifosNeverHang:
         os.mkfifo(record, 0o600)
         assert self._run_bounded(cli.main, [command, "--state-dir", str(state_dir)]) == code
         assert record.exists() and not record.is_file()
+
+
+class TestStructuredHandoffValuesAreRedactedBeforeEncoding:
+    """Secrets inside dict/list handoff values are redacted before JSON escaping."""
+
+    _TOKEN = "eyJhbGciOi" + "JIUzI1NiJ9"
+
+    @pytest.mark.parametrize("separator", ["\t", "\n"])
+    @pytest.mark.parametrize("shape", ["dict_leaf", "nested", "list_of_dicts", "key"])
+    def test_bearer_with_escaped_whitespace(self, separator, shape):
+        from visualizer import classify
+
+        secret = "Bear" + "er" + separator + self._TOKEN
+        value = {
+            "dict_leaf": {"note": secret},
+            "nested": {"steps": [{"detail": {"deep": secret}}]},
+            "list_of_dicts": [{"item": secret}, {"other": "fine"}],
+            "key": {secret: "value"},
+        }[shape]
+        rendered = classify.extract_handoff_fields({"decisions": value})["decisions"]
+        assert self._TOKEN not in rendered
+        assert "[redacted]" in rendered
+
+    def test_two_secret_keys_in_one_dict_both_survive(self):
+        from visualizer import classify
+
+        first = "gh" + "p_" + "A" * 24
+        second = "gh" + "p_" + "B" * 24
+        rendered = classify.extract_handoff_fields(
+            {"decisions": {first: "one", second: "two", "[redacted] 2": "three"}}
+        )["decisions"]
+        assert first not in rendered and second not in rendered
+        entries = json.loads(rendered)
+        assert sorted(entries.values()) == ["one", "three", "two"]
+        assert all(key.startswith("[redacted]") for key in entries)
+
+    def test_pem_block_and_quoted_token_stay_redacted(self):
+        from visualizer import classify
+
+        kind = "PRIVATE " + "KEY"
+        pem = "-----BEGIN " + kind + "-----\nMIIBOGUSBODY\nMORE\n-----END " + kind + "-----"
+        token = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2"
+        value = [{"pem": pem}, {"quote": 'token was "' + token + '" yes'}]
+        rendered = classify.extract_handoff_fields({"decisions": value})["decisions"]
+        assert "MIIBOGUSBODY" not in rendered and token not in rendered
