@@ -6,13 +6,17 @@ Waiting).
 Pins the amendment surfaces:
 
   §5 Wait in Silence:
-    - the narration-versus-milestone rule (a milestone is a dispatch's
-      result, a measured number, or a state change the user would act on
-      and cannot otherwise see; relayed to the user in one line, only when it
-      is new since your last report to the user, carrying a number where
-      there is one, and not a running tally of the same work; a long
-      dispatch reports at its milestones unprompted, and "no actionable
-      content" means nothing the team needs AND nothing the user is owed);
+    - the narration-versus-milestone rule (the idle-turn list names a
+      milestone the user is owed; silence does not suppress a milestone; a
+      milestone is something the user would act on and cannot otherwise
+      see, of three kinds; relayed to the user in one line, only when it is
+      new since your last report to the user, carrying a number where there
+      is one rather than a description of the activity, and not a running
+      tally of the same work; the fan-out tally test; "no actionable
+      content" means nothing the team needs AND nothing the user is owed;
+      the lead relays each milestone as it reaches it and never polls or
+      nudges for one, and asks for progress signals in a long dispatch's
+      brief);
     - the filler-call compulsion block (names the reflex, states the
       turn-manufacture mechanics, states the terminal action);
     - the termination test — the discriminator stated ONCE at its §5 home:
@@ -53,12 +57,12 @@ does not fail the pin while a re-WORD still does. Section slices are
 fence-aware: the §5 watcher template is a fenced bash block whose `#`
 comment lines must not terminate the §5 slice early.
 
-Counter-test-by-construction (measured at authoring time): this module was
-run against the PRE-AMENDMENT persona before the amendment text landed —
-19 of 21 cases RED (every phrase pin; no pinned phrase pre-existed on its
-section slice) and the 2 heading-anchor cases GREEN (the headings
-pre-existed — they are slice anchors, not amendment text), then the full
-module GREEN after the amendment. The two heading pins guard the slice
+Counter-test-by-construction: each block of phrase pins is run against the
+persona text from before its rule landed, where every phrase pin of that
+block is RED and the heading-anchor cases are GREEN (the headings are slice
+anchors, not amendment text), then against the amended text, where the
+full module is GREEN. Case counts are deliberately not recorded here: they
+change with every added pin. The two heading pins guard the slice
 anchors so a heading rename fails with a clear message rather than an
 empty-slice failure per phrase pin.
 """
@@ -148,26 +152,44 @@ SECTION_PHRASE_PINS = [
     # exception: narration stays suppressed and lies outside what silence
     # governs, so this rule adds no second exception beside the one
     # protocol-defined exception above) ---
+    # The idle-turn list must name the milestone itself, so the sentence is
+    # complete without the redefinition below it.
+    (WAIT_IN_SILENCE, "no user input, no milestone the user is owed — emit no reply"),
     (WAIT_IN_SILENCE, "Narration is not a milestone"),
-    (WAIT_IN_SILENCE, "A milestone is a dispatch's result, a measured number, or a state change the user would act on and cannot otherwise see"),
-    # The relay sentence's four load-bearing clauses, each pinned to the span
-    # that is UNIQUE to it: "to the user" alone occurs three times in this
-    # slice (the watcher rule also reports "to the user"), so the bare
-    # phrase would stay green if the relay clause were deleted. The rule
-    # this block records is general: a pin must name a span unique to the
-    # sentence it guards, or it is not guarding that sentence.
-    (WAIT_IN_SILENCE, "to the user in one line"),
+    # The paragraph's central claim, as the whole sentence to its period:
+    # a qualifier added after it fails, and so does listing a tool call as
+    # narration (filler calls are the next paragraph's separate failure).
+    (WAIT_IN_SILENCE, 'Silence suppresses narration — "waiting on X", "still running" — and it does not suppress a milestone.'),
+    # The whole definition sentence, to its period: the qualifier leads so
+    # that it governs all three kinds, and an appended kind fails the pin.
+    (WAIT_IN_SILENCE, "A milestone is something the user would act on and cannot otherwise see: a dispatch's result, a measured number, or a state change."),
+    # The relay sentence's load-bearing clauses, each pinned to a span that
+    # is UNIQUE to it and that carries its own polarity word ("Relay",
+    # "only when"): "to the user" alone occurs three times in this slice,
+    # so the bare phrase would stay green if the relay clause were deleted,
+    # and a span without its polarity word stays green when the clause is
+    # inverted around it.
+    (WAIT_IN_SILENCE, "Relay it to the user in one line"),
     # Without "to the user" here a milestone already sent to a teammate
     # reads as suppressed for the user, which is the ambiguity this clause
     # closes.
-    (WAIT_IN_SILENCE, "new since your last report to the user"),
+    (WAIT_IN_SILENCE, "only when it is new since your last report to the user"),
     (WAIT_IN_SILENCE, "a number where there is one"),
     (WAIT_IN_SILENCE, "not a running tally of the same work"),
+    (WAIT_IN_SILENCE, "rather than a description of the activity"),
+    # The tally test separates the two fan-out readings the rule treats
+    # oppositely.
+    (WAIT_IN_SILENCE, "In a fan-out, a count of members finished is a tally; a member's result the user would act on is a milestone."),
     # The redefinition is pinned separately: it is the clause that reverses the
     # old safe reading, so a presence pin on the definition alone would stay
     # green if a later edit softened this back to a contrast.
     (WAIT_IN_SILENCE, '"No actionable content" means nothing the team needs AND nothing the user is owed.'),
-    (WAIT_IN_SILENCE, "A long dispatch reports at its milestones, unprompted"),
+    # The lead is the subject that relays, it relays what reaches it, and it
+    # never polls or nudges to obtain a milestone; the mid-run source is a
+    # request in the dispatch brief.
+    (WAIT_IN_SILENCE, "Relay each milestone as it reaches you, unprompted"),
+    (WAIT_IN_SILENCE, "never poll or nudge a teammate to obtain one."),
+    (WAIT_IN_SILENCE, "When you want a long dispatch reported mid-run, ask for progress signals in its brief."),
     # --- §5: the termination test (discriminator canonical phrase, §5 home) ---
     (WAIT_IN_SILENCE, "Legitimate wait-time activity terminates on the awaited event"),
     # --- §5: the watcher rule ---
@@ -237,12 +259,3 @@ def test_rule_phrase_present(heading: str, phrase: str):
         f"otherwise the wait-discipline rule this phrase carries is missing "
         f"from a runtime-loaded surface."
     )
-
-
-# ---------------------------------------------------------------------------
-# Counter-test record (measured at authoring time): with the module run
-# against the pre-amendment persona, the 2 heading cases were GREEN (the
-# headings pre-existed — they are the slice anchors, not amendment text)
-# and all 19 phrase cases were RED (no pinned phrase pre-existed on its
-# slice). Post-amendment: the full module GREEN.
-# ---------------------------------------------------------------------------

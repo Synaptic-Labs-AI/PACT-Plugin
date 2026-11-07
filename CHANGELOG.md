@@ -22,12 +22,18 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-The orchestrator's wait-in-silence rule now separates narration from a milestone. It stays silent on "waiting on X", "still running" and the filler poll, and it reports a dispatch's result, a measured number, or a state change the user would act on and cannot otherwise see, in one line that carries the concrete fact rather than a description of the activity. A dispatch's result is a milestone in its own right, and a long dispatch also reports at its intermediate milestones unprompted, so the user sees milestones as they land rather than asking for status.
+The orchestrator's wait-in-silence rule now separates narration from a milestone. It stays silent on "waiting on X" and "still running". It reports a milestone, meaning something the user would act on and cannot otherwise see: a dispatch's result, a measured number, or a state change. The report is one line that carries the concrete fact rather than a description of the activity. The orchestrator relays each milestone as it reaches it, without being asked, and never polls or nudges a teammate to get one. When it wants a long dispatch reported mid-run, it asks for progress signals in that dispatch's brief, so the user sees milestones as they land rather than asking for status.
 
 ### What landed
 
-- `agents/pact-orchestrator.md` §Wait in Silence gains one paragraph, placed immediately after the rule that emits no reply on a turn with no actionable content. It defines a milestone as a dispatch's result, a measured number, or a state change the user would act on and cannot otherwise see, requires the relay to be one line addressed to the user, carrying the concrete fact only when it is new since the last report to the user and not a running tally of the same work, and states that "No actionable content" means nothing the team needs AND nothing the user is owed.
-- The paragraph separates narration from a milestone rather than carving an exception out of the silence rule, so the surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
+- `agents/pact-orchestrator.md` §Wait in Silence: the list that defines a turn with no actionable content now includes "no milestone the user is owed", so that sentence is complete on its own.
+- The same section gains one paragraph, placed immediately after that rule. It does the following:
+  - It defines a milestone as something the user would act on and cannot otherwise see. That qualifier governs all three kinds: a dispatch's result, a measured number, and a state change.
+  - It requires the relay to be one line addressed to the user. The line carries the concrete fact, and is sent only when the fact is new since the last report to the user and is not a running tally of the same work.
+  - It states the tally test for a fan-out: a count of members finished is a tally, and a member's result the user would act on is a milestone.
+  - It states that "No actionable content" means nothing the team needs AND nothing the user is owed.
+  - It makes the orchestrator relay each milestone as it reaches it, never poll or nudge a teammate to obtain one, and ask for progress signals in the brief of a dispatch it wants reported mid-run.
+- The paragraph separates narration from a milestone rather than carving an exception out of the silence rule. Filler calls stay with the filler-call rule, not the narration list. The surrounding anti-narration, filler-call and watcher rules keep their full force: none of their pinned phrases changed, and the section was not restructured.
 
 ### Why
 
