@@ -548,16 +548,20 @@ def extract_final_dispatch_coverage(
       of each event, and it is identical to the `total` term of
       `extract_dispatch_coverage`.
     - `malformed` (list[dict]) — the `dispatch_site` events that resolve no
-      total on either stream AND carry a PRESENT `variety` key.
+      total on ANY of the three inputs — the latest
+      `task_metadata_snapshot`, the event's own `variety`, and the
+      dispatch-marked `variety_assessed` event — AND carry a PRESENT
+      `variety` key.
     - `fallback_used` (int) — members of which the final value did NOT come
       from a snapshot. State that definition adjacent to the number wherever
       it is reported. IT COUNTS ARMS 2 AND 3 TOGETHER, so an arm-3 member is
       inside this number and has no final value at all.
     - `superseded` (int) — members of which the final TOTAL DIFFERS from the
-      as-dispatched one, counted only where the two totals each resolve.
+      total resolved from the `dispatch_site` event's own `variety`, counted
+      only where both resolve.
     - `late_stamped` (int) — members that took a snapshot value and carry NO
-      `variety` key on their `dispatch_site` event. THE DISPATCH WAS NOT
-      STAMPED AT DISPATCH TIME and a later write supplied the value.
+      `variety` key on their `dispatch_site` event. THE `dispatch_site` EMIT
+      CARRIED NO STAMP, and the final value came from the snapshot.
     - `dispatch_malformed` (int) — members that took a snapshot value and
       carry a PRESENT but unresolvable `variety` on their `dispatch_site`
       event. A producer defect that the snapshot value would otherwise hide.
@@ -569,8 +573,8 @@ def extract_final_dispatch_coverage(
       resolve and are EQUAL, and at least one dimension vector is not
       complete. The vector comparison could not run, so these members are
       REPORTED rather than absorbed into the agreeing population.
-    - `total_unresolved` (int) — members that resolved NO total on EITHER
-      stream. Arm 3 alone. `fallback_used` counts arms 2 and 3 together and
+    - `total_unresolved` (int) — members that resolved NO total on ANY of
+      the three inputs. Arm 3 alone. `fallback_used` counts arms 2 and 3 together and
       keeps that union on purpose, so this term is the arm-3 half named
       separately and NOT a split of it. See the nesting statement below,
       because this count is CONTAINED IN `fallback_used` and CONTAINS
@@ -598,7 +602,7 @@ def extract_final_dispatch_coverage(
     A member reaches arm 1 or it does not, and `fallback_used` counts exactly
     the members that do not, so `fallback_used` shares no member with the
     five arm-1 counters. Arm 1 then partitions SIX ways with no overlap,
-    keyed first on the as-dispatched value:
+    keyed first on the value on the `dispatch_site` event:
 
       1. it does not resolve and no `variety` key is present → `late_stamped`
       2. it does not resolve and a `variety` key is present → `dispatch_malformed`
@@ -607,8 +611,8 @@ def extract_final_dispatch_coverage(
       5. it resolves, the totals agree, vectors differ      → `superseded_dimensions_only`
       6. it resolves, the totals agree, vectors agree       → counted nowhere
 
-    Cells 1 and 2 need the as-dispatched value to be None and cells 3 to 6
-    need it to resolve, so no member reaches both groups. Cells 1 and 2 split
+    Cells 1 and 2 need the `dispatch_site` value to be unresolved and
+    cells 3 to 6 need it to resolve, so no member reaches both groups. Cells 1 and 2 split
     on `"variety" in event`, which is one predicate with two outcomes. Cell 3
     needs the totals DIFFERENT and cells 4 to 6 need them EQUAL. Cells 4 and 5
     split on whether the two vectors are each complete. So a reader can add
@@ -884,11 +888,11 @@ def resolve_arc_start(
     Returns the LATEST `ts` among `variety_assessed` events whose `task_id`
     matches `feature_task_id`. The platform REUSES low task_ids across arcs,
     so the current feature's id can also match a PRIOR arc's
-    `variety_assessed`; the latest-ts match is the current arc (this is why
-    a plain most-recent `read-last` of ANY feature is wrong). Returns None
-    when no matching `variety_assessed` exists (legacy/trivial session) →
-    the caller omits `--since` → whole-journal read (fail-open; single-arc
-    behavior unchanged).
+    `variety_assessed`; the latest-ts match is a candidate boundary, not
+    current-arc provenance by itself. Returns None when no matching
+    `variety_assessed` exists or when `feature_task_id` is None. None means
+    the boundary is unavailable to the caller: current-arc metric readers
+    must stop rather than omit `--since` and relabel the whole journal.
 
     Scope boundary (comPACT/rePACT-led arcs): feature-level
     `variety_assessed` events are written by three commands — the
@@ -920,7 +924,9 @@ def resolve_arc_start(
 
     task_id matching is str-normalized (`str(event task_id) == str(feature
     task_id)`) so a future bare-int `variety_assessed` emit still matches a
-    str feature_task_id.
+    str feature_task_id. A None feature id returns before iteration, and an
+    event whose task_id is None is skipped before normalization, so neither
+    can alias the other. The string id "None" remains an ordinary id.
 
     arc_start relies on `variety_assessed` being emitted exactly once per
     arc per feature (writers: the orchestrate feature assessment, the
@@ -942,10 +948,15 @@ def resolve_arc_start(
     """
     latest_ts: str | None = None
     latest_dt: datetime | None = None
+    if feature_task_id is None:
+        return None
     for event in variety_assessed_events:
         if event.get("scope") == VARIETY_ASSESSED_DISPATCH_SCOPE:
             continue
-        if str(event.get("task_id")) != str(feature_task_id):
+        task_id = event.get("task_id")
+        if task_id is None:
+            continue
+        if str(task_id) != str(feature_task_id):
             continue
         ts = event.get("ts")
         if not ts:

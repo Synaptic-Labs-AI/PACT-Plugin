@@ -23,8 +23,9 @@ THE SKIP IDENTITY, AND WHY IT IS NOT `executed == collected`
   which also equals "every collected node ID reached a terminal outcome".
   Both are checked: the arithmetic, and the size of the terminal node-ID set.
   Skips are admitted site by site from a committed allowlist
-  (scripts/full_suite_skip_allowlist.json), and a run that passed nothing
-  fails whatever else it reports.
+  (scripts/full_suite_skip_allowlist.json), and an entry that admits no
+  skip of the certifying run is stale and fails it. A run that passed
+  nothing, or that exited non-zero, fails whatever else it reports.
 
 FAIL CLOSED, ALWAYS. Every condition below is a named failure with exit 1.
 There is no skip path and no "warn" path.
@@ -145,8 +146,8 @@ def load_skip_allowlist(path: Path) -> list[dict]:
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise invalid("expected a JSON object with schema_version 1")
     entries = data.get("entries")
-    if not isinstance(entries, list) or not entries:
-        raise invalid("entries must be a non-empty list")
+    if not isinstance(entries, list):
+        raise invalid("entries must be a list")
     seen = set()
     for index, entry in enumerate(entries):
         where = f"entries[{index}]"
@@ -207,6 +208,20 @@ def skip_site_problems(sites: list[dict], entries: list[dict]
                 f"{entry['file']}: {entry['reason']!r} skipped {count} "
                 f"time(s); the allowlist admits {allowed}"))
     return problems
+
+
+def unused_allowlist_entries(sites: list[dict], entries: list[dict]
+                             ) -> list[dict]:
+    """The entries that admit none of the recorded skip sites.
+
+    The certifying run is the only environment this verifier judges, so an
+    entry no skip uses there admits nothing and is stale. Only the full-run
+    check calls this: the fast lane runs a subset, where unused entries are
+    expected.
+    """
+    used = {id(entry) for site in sites
+            if (entry := _entry_for(site, entries)) is not None}
+    return [entry for entry in entries if id(entry) not in used]
 
 
 def _require_skip_sites(record: dict) -> list[dict]:
@@ -287,6 +302,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"passed is {counts['passed']}; a run that passed nothing "
                 f"executed nothing worth certifying",
             )
+        exitstatus = _require_int(record, "exitstatus")
+        if exitstatus != 0:
+            raise RunFailure(
+                "EXITSTATUS",
+                f"exitstatus is {exitstatus}; the certifying run must exit 0. "
+                f"A session that exited non-zero failed, whatever its counts "
+                f"say.",
+            )
         sites = _require_skip_sites(record)
         if sum(site["count"] for site in sites) != counts["skipped"]:
             raise RunFailure(
@@ -294,12 +317,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"skip_sites account for "
                 f"{sum(site['count'] for site in sites)} skips but the run "
                 f"reports {counts['skipped']}")
-        problems = skip_site_problems(
-            sites, load_skip_allowlist(Path(args.skip_allowlist)))
+        entries = load_skip_allowlist(Path(args.skip_allowlist))
+        problems = skip_site_problems(sites, entries)
         if problems:
             condition = problems[0][0]
             raise RunFailure(
                 condition, "; ".join(detail for _, detail in problems))
+        unused = unused_allowlist_entries(sites, entries)
+        if unused:
+            raise RunFailure(
+                "SKIP-ALLOWLIST-UNUSED",
+                "; ".join(f"{entry['file']}: {entry['reason']!r} admits no "
+                          f"skip this run reported" for entry in unused)
+                + ". Remove each entry in the commit that stops its skip.")
 
         before = _require_int(record, "items_before_modifyitems")
         after = _require_int(record, "items_after_modifyitems")

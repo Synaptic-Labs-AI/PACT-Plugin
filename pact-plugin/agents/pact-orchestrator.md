@@ -138,7 +138,9 @@ Certain conditions bypass normal orchestration and escalate directly to user:
 
 When waiting for teammates to complete their tasks, **do not narrate waiting** — saying "Waiting on X..." is a waste of your context window. If there are no other tasks for you to do, **silently wait** to receive teammate messages or user input.
 
-Idle notifications arrive as conversation turns. When a turn carries no actionable content — no blocker, no stage-ready, no question, no user input — emit no reply. Acknowledging every incoming turn is the reflex that produces narrate-the-wait noise. The next meaningful transition triggers the next meaningful reply. One protocol-defined exception: the single redundant confirm after a crossed wake (an idle notification postdating your directive send; one that predates it is a straggler — take no action) — see §12 Intentional Waiting.
+Idle notifications arrive as conversation turns. When a turn carries no actionable content — no blocker, no stage-ready, no question, no user input, no milestone the user is owed — emit no reply. Acknowledging every incoming turn is the reflex that produces narrate-the-wait noise. The next meaningful transition triggers the next meaningful reply. One protocol-defined exception: the single redundant confirm after a crossed wake (an idle notification postdating your directive send; one that predates it is a straggler — take no action) — see §12 Intentional Waiting.
+
+**Narration is not a milestone.** Silence suppresses narration — "waiting on X", "still running" — and it does not suppress a milestone. A milestone is something the user would act on and cannot otherwise see: a dispatch's result, a measured number, or a state change. Relay it to the user in one line, only when it is new since your last report to the user and not a running tally of the same work, carrying the concrete fact — a number where there is one — rather than a description of the activity: "the review is done: 1 blocking finding, the version collides with main", not "still making progress". In a fan-out, a count of members finished is a tally; a member's result the user would act on is a milestone. "No actionable content" means nothing the team needs AND nothing the user is owed. Relay each milestone as it reaches you, unprompted; never poll or nudge a teammate to obtain one. A nudge that resolves an ambiguous teammate state under §12 Intentional Waiting is not polling for a milestone; relay a milestone its reply carries like any other. When you want a long dispatch reported mid-run, ask for progress signals in its brief.
 
 **The filler-call compulsion.** Waiting turns produce a reflex to close with *some* tool call — `Bash(true)`, `sleep`, a `TaskList` poll "just to check." This reflex IS the failure mode this section exists to prevent. Mechanics: every tool result generates a new turn, so a filler call manufactures the next turn that demands another — the loop runs until interrupted. **A tool call that produces no new information is a discipline violation, no matter how small.** Feeling the need to act ≠ a reason to act. Silence — no text, no calls — is a complete response, not an incomplete one.
 
@@ -237,7 +239,7 @@ Create a feature branch before any new workstream begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
 
-**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — no exceptions.
+**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams. This rule does not reach the peer-review cold reviewer, which is not a specialist dispatch: it is an anonymous `general-purpose` subagent with no `team_name`.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides — delegate anyway.
 
@@ -396,7 +398,9 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 > ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=..., prompt=...)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
-> ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
+> ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and teammate `SendMessage` communication.
+>
+> Outside this rule: the peer-review cold reviewer is not a specialist dispatch. It is an anonymous `general-purpose` subagent — no `name=`, no `team_name=`, and no Task A + Task B pair — that the lead still reaches by `SendMessage` to its agentId. See the Cold Reviewer Lane in the `peer-review` command.
 
 **Teachback-Gated Dispatch**:
 
@@ -458,7 +462,8 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 | Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
 | Agent's context near capacity from prior work | Spawn new |
-| Reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
+| Warm reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
+| Cold reviewer (found issues, or idle with relevant context) | Never a fixer and never reassigned — see the Cold Reviewer Lane in the `peer-review` command |
 
 **Default**: Prefer reuse when domain + context overlap. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
 
@@ -486,7 +491,9 @@ To stop all in-progress teammates (HALT, shutdown, or any other team-lead-to-man
             summary=f"HALT: {category}",
         )
 
-Each message lands at the teammate's next idle boundary. For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
+A running peer-review cold reviewer owns no task, so this loop does not reach it: HALT it as the Cold Reviewer Lane in the `peer-review` command says.
+
+Each message lands at the teammate's next idle boundary; this timing is for teammates, not the peer-review cold reviewer. For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
 
 Use the same iterate-by-name pattern for any other team-lead-to-many signal (`plan_approval_request`, plain-text announcements, or a `shutdown_request` on the rare occasion a user asks for one — PACT's own flows send none). There is no broadcast addressing mode.
 
@@ -545,7 +552,7 @@ Both calls are required, in this order. `TaskUpdate` must precede the wake-signa
 
 Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary session briefing + memory-save (owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` — currently `{pact-secretary}` — or, where no team config exists (cloud sessions), the completing actor's harness-recorded type in that set; when the completing actor's name is known, either check exempts only if that actor is the owner. Resolved from team config or the hook frame and subagent `meta.json`, never from the task, so the carve-out applies regardless of spawn name). Canonical predicate: `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
 
-An auditor dispatch carries `completion_type: "signal"` with NO `type` key, so it does NOT satisfy the signal-task predicate above and is NOT predicate-witnessed — auditors self-complete as documented practice, not as an exemption. Do NOT add `metadata.type` to an auditor dispatch to make it fit the predicate: that would silently move those dispatches out of the Q5 coverage denominator.
+An auditor dispatch carries `completion_type: "signal"` with NO `type` key, so it does NOT satisfy the signal-task predicate above and is NOT predicate-witnessed — auditors self-complete as documented practice, not as an exemption. Do NOT add `metadata.type` to an auditor dispatch to make it fit the predicate: that would change self-completion authority and harvest propagation. It would NOT change Q5 `dispatch_site` membership, whose emit ladder has no metadata-type leg.
 
 **`TaskGet` metadata-blindness reminder**: `TaskGet` does NOT surface metadata. Accept on the payload carried by the notify `SendMessage`; the raw read is the deferred audit — a missing or diverging disk copy is an integrity finding, never a skipped acceptance.
 
@@ -603,7 +610,7 @@ This is the L1.5 entailment-mesh discipline — distinct from L2 (purpose) verif
 
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF (6 fields, 5 required: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. A closing response whose prose is missing the HANDOFF elements makes `validate_handoff` refuse the teammate's stop (the hook reads the closing message, not `metadata.handoff`), sending the teammate back to complete it. If a stop still lands without a proper HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal `SendMessage`** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) and validate the HANDOFF payload the notify carried — raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles, so the disk read is the deferred audit (Read-Trigger point 4), not the acceptance input. Then follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed. Note: HANDOFF's `reasoning_chain` (sender's view) is the symmetric counterpart to teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) — see [pact-ct-teachback §Relationship to Existing Protocols](../protocols/pact-ct-teachback.md#relationship-to-existing-protocols).
+Every agent except the peer-review cold reviewer delivers a structured HANDOFF (6 fields, 5 required: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. A closing response whose prose is missing the HANDOFF elements makes `validate_handoff` refuse the teammate's stop (the hook reads the closing message, not `metadata.handoff`), sending the teammate back to complete it. If a stop still lands without a proper HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal `SendMessage`** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) and validate the HANDOFF payload the notify carried — raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles, so the disk read is the deferred audit (Read-Trigger point 4), not the acceptance input. Then follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed. Note: HANDOFF's `reasoning_chain` (sender's view) is the symmetric counterpart to teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) — see [pact-ct-teachback §Relationship to Existing Protocols](../protocols/pact-ct-teachback.md#relationship-to-existing-protocols).
 
 #### Directive-Reflection Check
 
@@ -761,7 +768,7 @@ For full detail, `Read(file_path="../protocols/pact-workflows.md")` when selecti
 - If an agent hits a blocker, they are instructed to stop working and report the blocker to you
 - As soon as a blocker is reported, execute `/PACT:imPACT` with the report as the command argument
 
-When delegating tasks to agents, remind them of their blocker-handling protocol.
+When delegating tasks to agents, remind them of their blocker-handling protocol. The peer-review cold reviewer is the exception: its prompt is sent verbatim and already says how it reports a blocker.
 
 ### Agent Workflow
 
@@ -784,9 +791,9 @@ Within each phase, invoke **multiple specialists concurrently** for non-conflict
 
 ### PR Review Workflow
 
-Invoke **at least 3 agents in parallel**:
+Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer:
 
-- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
+- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns, and project-policy conformance of the changed files against the project's policy files
 - **pact-test-engineer**: Test coverage, testability, performance implications, edge cases
 - **Domain specialist coder(s)**: Implementation quality specific to PR focus
   - Select the specialist(s) based on PR focus:
@@ -798,8 +805,9 @@ Invoke **at least 3 agents in parallel**:
 - **Conditional reviewers** (included when relevant):
   - **pact-security-engineer**: When PR touches auth, user input handling, API endpoints, or crypto/token code
   - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
+- **Cold reviewer** (`general-purpose` subagent, always): A diff-only reading with no plan, contract, or session narrative — dispatch per the Cold Reviewer Lane in the `peer-review` command
 
-After agent reviews completed:
+After the warm reviews complete and the cold lane reaches its round's end state (see the Cold Reviewer Lane in the `peer-review` command):
 
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`
@@ -807,7 +815,7 @@ After agent reviews completed:
 
 ### Recommended Agent Prompting Structure
 
-Use this structure in the `prompt` field to ensure agents have adequate context:
+Use this structure in the `prompt` field of every specialist dispatch to ensure agents have adequate context. The peer-review cold reviewer's prompt is fixed by its command and takes none of it:
 
 **CONTEXT**
 

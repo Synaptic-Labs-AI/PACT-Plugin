@@ -54,6 +54,7 @@ from shared.pact_context import (
     LEAD_ADDRESS_LOCAL,
     LEAD_ADDRESSES,
     _build_session_path,
+    _is_unknown_or_missing_session,
     get_session_dir,
     project_slug,
 )
@@ -846,10 +847,12 @@ def format_session_substitutions(
     session_dir: str,
     plugin_root: str,
     lead_address: str,
+    session_id: str,
 ) -> str:
     """The sentence telling the orchestrator which values replace the
     {team_name}, {session_dir}, {plugin_root} and {lead_address} placeholders
-    in commands, spawn prompts and task text.
+    in commands, spawn prompts and task text, plus the trusted running session
+    id used to validate a Current Session block.
 
     Every value is checked before it reaches this LLM-facing sentence:
 
@@ -868,6 +871,9 @@ def format_session_substitutions(
       resolve to safe values. The sentence carries no quote characters, so
       it passes the same marker checks as a substituted value. An unavailable team name or session dir has no
       safe fallback, so commands that depend on it wait for a clean start.
+    - ``session_id`` is the required trust anchor for Current Session
+      validation. A missing or unsafe value renders an unavailable notice,
+      never the rejected raw value.
     - ``lead_address`` is required (no default: a silent ``team-lead``
       default would misroute a cloud session, #1666 item 1) and allowlisted.
       Any value outside LEAD_ADDRESSES (a non-str one included, checked first
@@ -900,6 +906,18 @@ def format_session_substitutions(
             'Session dir unavailable (not set: no session id or project dir) — '
             'do not run commands that depend on {session_dir} until next clean start. '
         )
+    if (
+        not isinstance(session_id, str)
+        or _is_unknown_or_missing_session(session_id)
+        or not _safe_for_line(session_id)
+        or not is_safe_path_component(session_id)
+    ):
+        session_sentence += (
+            "Running session id unavailable (missing or unsafe) — do not use "
+            "the Current Session block for session-id validation. "
+        )
+    else:
+        session_sentence += f"Running session id: `{session_id}`. "
     if plugin_root:
         plugin_sentence = (
             f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'

@@ -166,6 +166,8 @@ _CASES = [
     ("failed", _set(failed=1, passed=3), None, "FAILED"),
     ("errors", _set(errors=1, passed=3), None, "ERRORS"),
     ("nothing-passed", _set(passed=0, skipped=5), None, "NOTHING-PASSED"),
+    ("exitstatus-nonzero", _set(exitstatus=1), None, "EXITSTATUS"),
+    ("exitstatus-bool", _set(exitstatus=False), None, "BAD-FIELD-EXITSTATUS"),
     ("skip-sites-bad", _set(skip_sites=[{"file": "f", "reason": "r",
                                          "count": 0}]), None,
      "SKIP-SITES-BAD"),
@@ -275,12 +277,42 @@ def test_an_exact_entry_does_not_admit_a_longer_reason(tmp_path):
     ("zero-allowed", {"schema_version": 1, "entries": [_entry(allowed=0)]}),
     ("bad-match", {"schema_version": 1, "entries": [_entry(match="regex")]}),
     ("duplicate", {"schema_version": 1, "entries": [_entry(), _entry()]}),
-    ("empty", {"schema_version": 1, "entries": []}),
     ("schema", {"schema_version": 2, "entries": [_entry()]}),
 ])
 def test_an_invalid_allowlist_fails(tmp_path, case_id, allowlist):
     _failure(_verify(tmp_path, _good_record(), allowlist=allowlist),
              "ALLOWLIST-INVALID")
+
+
+def test_an_entry_no_skip_uses_fails_and_is_named(tmp_path):
+    """An allowance that outlived its skip is stale, and the gate says which."""
+    allowlist = _allowlist(_entry(), _entry(file="tests/test_gone.py"))
+    proc = _verify(tmp_path, _good_record(), allowlist=allowlist)
+    _failure(proc, "SKIP-ALLOWLIST-UNUSED")
+    assert "tests/test_gone.py" in proc.stderr, proc.stderr
+    assert _SITE["file"] + ":" not in proc.stderr, proc.stderr
+
+
+def test_an_entry_used_below_its_allowance_is_not_unused(tmp_path):
+    """One skip at a site allowing two still uses the entry."""
+    proc = _verify(tmp_path, _good_record(),
+                   allowlist=_allowlist(_entry(allowed=2)))
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_an_empty_allowlist_certifies_a_run_with_no_skips(tmp_path):
+    """Once the last skip is gone, the allowlist can be emptied, not padded.
+
+    The control is the same empty allowlist against a run that did skip,
+    which must name the skip as unlisted.
+    """
+    empty = {"schema_version": 1, "about": "no skips", "entries": []}
+    record = _good_record()
+    record.update(passed=5, skipped=0, skip_sites=[],
+                  summary_line="5 passed in 0.10s")
+    assert _verify(tmp_path, record, allowlist=empty).returncode == 0
+    _failure(_verify(tmp_path, _good_record(), allowlist=empty),
+             "SKIP-UNLISTED")
 
 
 def test_the_committed_allowlist_is_valid_and_every_entry_is_counted():

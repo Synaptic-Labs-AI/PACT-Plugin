@@ -513,7 +513,7 @@ class TestAllowlist:
                                        if isinstance(v, (str, int, float))
                                        or v is None])
     def test_substitution_sentence_rejects(self, value):
-        text = format_session_substitutions("t", "/s", "/p", value)
+        text = format_session_substitutions("t", "/s", "/p", value, SESSION_ID)
         assert f"Use `team-lead` {SENTENCE}" in text
         assert "rm" not in text
         assert "Ignore" not in text
@@ -599,7 +599,7 @@ class TestFormatSessionSubstitutionsNonStr:
 
     @pytest.mark.parametrize("value", [["main"], {"main": 1}])
     def test_unhashable_falls_back_to_team_lead(self, value):
-        text = format_session_substitutions("t", "/s", "/p", value)
+        text = format_session_substitutions("t", "/s", "/p", value, SESSION_ID)
         assert f"Use `team-lead` {SENTENCE}" in text
 
     # A plain set does NOT raise: CPython retries a set's membership test in
@@ -607,7 +607,7 @@ class TestFormatSessionSubstitutionsNonStr:
     @pytest.mark.parametrize("value", [None, 0, 1, True, 1.5, b"main",
                                        ("main",), {"main"}])
     def test_hashable_non_str_falls_back(self, value):
-        text = format_session_substitutions("t", "/s", "/p", value)
+        text = format_session_substitutions("t", "/s", "/p", value, SESSION_ID)
         assert f"Use `team-lead` {SENTENCE}" in text
 
     def test_production_callers_only_pass_allowlisted_strings(

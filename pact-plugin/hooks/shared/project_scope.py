@@ -808,10 +808,29 @@ def _listed_worktrees(
 
 
 def _record_names_declaration(identity: Optional[dict], declared: Path) -> bool:
-    """Whether the record was written for exactly this declaration."""
-    return isinstance(identity, dict) and identity.get(
-        "declared"
-    ) == os.path.realpath(declared)
+    """Whether the record was written for exactly this declaration.
+
+    TOTAL: a declaration the OS will not canonicalise (an embedded NUL, or a
+    path otherwise refused) answers False instead of raising. False is the
+    honest answer — the record's `declared` value cannot equal a path whose
+    own canonical form does not exist — and every consumer reads it as "this
+    record does not apply", which is the fail-closed direction. The
+    isinstance short-circuit stays first, so a non-dict identity is decided
+    without touching the filesystem at all.
+
+    ValueError is the MEASURED failure: `os.path.realpath` raises it on an
+    embedded NUL. OSError is retained defensively for a filesystem-level
+    refusal; no input shape tested by the review lane raised it through
+    `realpath` (which handles unreadable components internally), so it is
+    listed to keep a refusal from escaping, not because a specific input is
+    known to raise it.
+    """
+    if not isinstance(identity, dict):
+        return False
+    try:
+        return identity.get("declared") == os.path.realpath(declared)
+    except (OSError, ValueError):
+        return False
 
 
 def _recorded_common_dir(identity: Optional[dict], declared: Path) -> Optional[str]:
@@ -979,7 +998,12 @@ def stays_in_declared_project(
         resolved = Path(resolved_root).resolve()
         if declared.resolve() == resolved:
             return True
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError: an embedded NUL in the declaration. A path that cannot
+        # be resolved cannot be shown to stay in the declared project, and
+        # this function's fail-safe is False — refuse. Before this, a corrupt
+        # session record crashed the working-memory sync guard here, one call
+        # before the record predicate could answer.
         # RuntimeError: a symlink loop, on Pythons before 3.13.
         return False
     anchor = _nearest_existing_directory(declared)
@@ -1071,7 +1095,11 @@ def get_worktree_identity_from_session_record() -> dict:
     CLAUDE_CODE_SESSION_ID. Nothing is cached.
 
     Returns {} unless the record's `session_id` equals CLAUDE_CODE_SESSION_ID
-    and `declared`, `worktree` and `common_dir` are all absolute path strings.
+    and `declared`, `worktree` and `common_dir` are all absolute path strings
+    that the OS can canonicalise. Refusing the whole record on an unusable
+    field is deliberate: `record_resolution` resolves those paths and its
+    guards do not include the ValueError a malformed value raises, so a
+    record admitted here would crash consumers that trust this reader.
     Never raises.
     """
     # Same guard pair as pact_session._discover_session_id -- keep in sync.
@@ -1086,6 +1114,28 @@ def get_worktree_identity_from_session_record() -> dict:
     for key in _WORKTREE_IDENTITY_PATHS:
         value = record.get(key)
         if not isinstance(value, str) or not os.path.isabs(value):
+            return {}
+        # CANONICALISABILITY, CHECKED AT THE ONE SEAM EVERY CONSUMER USES.
+        # A field the OS will not canonicalise (an embedded NUL, or another
+        # refused value) would raise ValueError deeper in `record_resolution`,
+        # at `common_dir.resolve()` / `common_dir.parent.resolve()` /
+        # `os.path.realpath` — all inside guards that name OSError and
+        # RuntimeError but not ValueError. Refusing the WHOLE record here
+        # closes the field family (declared, worktree, common_dir) rather
+        # than the two fields someone remembered, and it matches the write
+        # side's own rule: a record whose paths cannot be canonicalised
+        # proves nothing.
+        #
+        # VALIDATE, DO NOT REWRITE. The record is returned with its original
+        # spellings, because consumers compare `common_dir` and `worktree`
+        # against git's own output; substituting a canonical form here could
+        # turn a passing comparison into a failing one on a symlinked
+        # checkout. `resolve()` is the same operation the consumers perform,
+        # and it does NOT raise for a merely deleted path (non-strict), so
+        # the removed-worktree case this record exists for still reads back.
+        try:
+            Path(value).resolve()
+        except (OSError, RuntimeError, ValueError):
             return {}
     return record
 
