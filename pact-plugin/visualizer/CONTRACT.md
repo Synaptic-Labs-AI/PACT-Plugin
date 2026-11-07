@@ -830,6 +830,7 @@ export function createAudio();
 // { setEnabled(bool), play(kind), enabled }
 // kind: "dispatch" | "handoff" | "commit" | "bug" | "pr" | "alert" | "achievement"
 // WebAudio only; must be silent and allocation-free until enabled.
+// A context created suspended (a saved "on" at load) resumes on the first pointerdown or keydown.
 ```
 
 ### achievements.js

@@ -61,6 +61,18 @@ export function createAudio() {
       masterGain = audioContext.createGain();
       masterGain.gain.value = 0.5;
       masterGain.connect(audioContext.destination);
+      /* A saved "sound on" preference creates the context at load, before any
+       * user gesture, so the browser starts it suspended and every blip is
+       * silent. Resume it on the first gesture so the button tells the truth. */
+      if (audioContext.state === "suspended" && typeof window.addEventListener === "function") {
+        const unlock = () => {
+          window.removeEventListener("pointerdown", unlock, true);
+          window.removeEventListener("keydown", unlock, true);
+          resumeContext();
+        };
+        window.addEventListener("pointerdown", unlock, true);
+        window.addEventListener("keydown", unlock, true);
+      }
     } catch (_) {
       audioContext = null;
       masterGain = null;

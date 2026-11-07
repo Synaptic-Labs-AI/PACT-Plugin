@@ -1374,6 +1374,46 @@ def test_each_phase_pass_gets_its_own_timeline_band():
     )
 
 
+AUDIO_SCRIPT = r"""
+const listeners = {};
+let created = null;
+class FakeContext {
+  constructor() { this.state = "suspended"; this.destination = {}; this.currentTime = 0; created = this; }
+  createGain() { return { gain: { value: 0 }, connect() {} }; }
+  resume() { this.state = "running"; return Promise.resolve(); }
+}
+globalThis.window = {
+  AudioContext: FakeContext,
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+  removeEventListener(type, fn) { listeners[type] = (listeners[type] || []).filter((f) => f !== fn); },
+};
+const { createAudio } = await import("./audio.js");
+const audio = createAudio();
+created = null;
+audio.setEnabled(true);
+/* setEnabled itself calls resume(); a browser refuses that before a gesture. */
+created.state = "suspended";
+for (const fn of [...(listeners.pointerdown || [])]) fn({});
+if (created.state !== "running") { console.error("FAILED PINS: the first gesture resumes a suspended context"); process.exit(1); }
+if ((listeners.pointerdown || []).length || (listeners.keydown || []).length) {
+  console.error("FAILED PINS: the gesture listeners remove themselves"); process.exit(1);
+}
+console.log("PINS OK");
+"""
+
+
+def test_saved_sound_preference_plays_after_the_first_gesture():
+    """A context created before any gesture is resumed by the first one."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", AUDIO_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"audio pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))
