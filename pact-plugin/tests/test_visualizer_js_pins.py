@@ -1679,6 +1679,40 @@ def test_achievement_toasts_use_the_achievement_style():
     )
 
 
+RESIZE_SCRIPT = r"""
+const listeners = {};
+globalThis.window = { addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); } };
+globalThis.document = { createElement: () => ({}), createTextNode: () => ({}) };
+globalThis.Node = Object;
+const { Panels } = await import("./panels.js");
+const panels = new Panels({});
+let drawn = 0;
+panels._drawCharts = () => { drawn += 1; };
+panels.modalTab = "variety";
+panels.modalView = "tab";
+for (const fn of listeners.resize || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (drawn !== 1) { console.error("FAILED PINS: the variety charts redraw once after a resize: " + drawn); process.exit(1); }
+panels.modalTab = "tasks";
+for (const fn of listeners.resize || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (drawn !== 1) { console.error("FAILED PINS: other tabs do not redraw charts"); process.exit(1); }
+console.log("PINS OK");
+"""
+
+
+def test_variety_charts_redraw_on_resize():
+    """A window resize redraws the charts while the variety tab shows."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", RESIZE_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"resize pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))

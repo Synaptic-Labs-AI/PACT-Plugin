@@ -16,6 +16,7 @@ import {
   runKey,
   feedKey,
   wrapupAtCursor,
+  debounce,
   PROJECT_ALTERED_NOTE,
 } from "./dom.js";
 import { drawRadar, drawSparkline } from "./charts.js";
@@ -376,6 +377,14 @@ export class Panels {
       this.modal.addEventListener("click", (event) => {
         if (event.target === this.modal) this.closeModal();
       });
+    }
+
+    /* The variety charts are sized from their layout box; redraw them when
+     * the window changes size while they are showing. */
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("resize", debounce(() => {
+        if (this.modalTab === "variety" && this.modalView === "tab") this._drawCharts();
+      }, 150));
     }
 
     this.renderLeft();
