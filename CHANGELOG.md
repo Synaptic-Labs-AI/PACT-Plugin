@@ -32,7 +32,7 @@ PACT Mission Control turns the session journal into a live control room: a loopb
 - A deterministic training simulation at `/api/demo` covering all four phases, nine agents, review findings and remediation, gate advisories, an algedonic alert, and a merged wrap-up.
 - The `/PACT:visualize` command with demo, live, project, and stop modes.
 - Unconditional server-side redaction: credential-shaped values and credential-named fields in journals, handoffs, task records and raw payloads reach the page as `[redacted]`, and `--list`/`--status` strip terminal control characters from what they print.
-- The launcher runs Python with `-P`, so a `visualizer/` package or a top-level `json.py` in the directory it is started from cannot replace the plugin's code or the standard library.
+- The launcher runs Python with `-P` and drops empty `PYTHONPATH` entries, so a `visualizer/` package or a top-level `json.py` in the directory it is started from cannot replace the plugin's code or the standard library, unless the caller's own `PYTHONPATH` names that directory.
 
 ### Why
 

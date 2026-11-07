@@ -733,6 +733,32 @@ class TestBinWrapper:
         assert result.returncode == 0, combined
         assert "pact-viz" in result.stdout
 
+    @pytest.mark.parametrize("caller_path", [":", "/x:", ":/x", "/x::/y"])
+    def test_an_empty_pythonpath_entry_does_not_bring_the_cwd_back(
+        self, tmp_path, caller_path
+    ):
+        """An empty PYTHONPATH entry means the current directory, ahead of the
+        stdlib, and -P does not remove it; the launcher must drop it."""
+        decoy = tmp_path / "project"
+        decoy.mkdir()
+        (decoy / "json.py").write_text(
+            "raise SystemExit('SHADOWED-STDLIB-JSON')\n", encoding="utf-8"
+        )
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = caller_path
+        result = subprocess.run(
+            [str(BIN_WRAPPER), "--version"],
+            cwd=str(decoy),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        assert "SHADOWED" not in combined, combined
+        assert result.returncode == 0, combined
+        assert "pact-viz" in result.stdout
+
     def test_wrapper_version_runs(self):
         result = subprocess.run(
             [str(BIN_WRAPPER), "--version"],

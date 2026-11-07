@@ -217,8 +217,8 @@ python3 -m pytest \
 # Lint the backend for unused imports / undefined names.
 ruff check --select F401,F821 --target-version py312 visualizer/
 
-# Run the server directly from the checkout. -P keeps the current directory
-# off the import path, so only the plugin's own package can load.
+# Run the server directly from the checkout, from pact-plugin/. PYTHONPATH=.
+# names this plugin root; -P stops Python adding the current directory itself.
 PYTHONPATH=. python3 -P -m visualizer --demo --open
 ```
 
