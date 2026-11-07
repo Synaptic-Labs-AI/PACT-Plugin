@@ -15,6 +15,7 @@ import http.client
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -145,11 +146,34 @@ class HttpResponse:
         return self.body.decode("utf-8", errors="replace")
 
 
-def http_request(port: int, path: str, method: str = "GET", timeout: float = 5.0) -> HttpResponse:
+# Launch key of each test server, by port, so every /api request carries the
+# key the way the page does. A test passes key=None (no header) or a wrong
+# key to exercise the refusal.
+_SERVER_KEYS: dict[int, str] = {}
+_KEY_OF_SERVER = object()
+
+
+def new_server(roots, **kwargs):
+    """create_server, with the server's key recorded for http_request."""
+    srv = server_module.create_server(roots, **kwargs)
+    _SERVER_KEYS[srv.server_port] = srv.key
+    return srv
+
+
+def http_request(
+    port: int,
+    path: str,
+    method: str = "GET",
+    timeout: float = 5.0,
+    key: object = _KEY_OF_SERVER,
+) -> HttpResponse:
     """One raw HTTP request (no redirect/proxy/normalization layer)."""
+    if key is _KEY_OF_SERVER:
+        key = _SERVER_KEYS.get(port)
+    headers = {"X-PACT-Key": key} if isinstance(key, str) else {}
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request(method, path)
+        connection.request(method, path, headers=headers)
         response = connection.getresponse()
         body = response.read()
         headers = {name.lower(): value for name, value in response.getheaders()}
@@ -163,7 +187,7 @@ def live_server(tmp_path):
     """A real server on an ephemeral loopback port, torn down with the test."""
     root = make_root(tmp_path)
     roots = roots_for(root, tmp_path)
-    srv = server_module.create_server(roots)
+    srv = new_server(roots)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
@@ -193,7 +217,8 @@ class TestHealth:
         assert len(payload["instance_id"]) == 32
         int(payload["instance_id"], 16)  # hex
         assert payload["uptime_s"] >= 0
-        assert payload["demo"] is False
+        assert "demo" not in payload
+        assert payload["plugin_root"] == str(PLUGIN_ROOT)
         assert payload["demo_available"] is True
         assert payload["roots"][0]["default"] is True
         assert payload["roots"][0]["journals"] == 1
@@ -216,6 +241,73 @@ class TestHealth:
         assert response.headers["content-security-policy"] == settings.CSP
         assert response.headers["x-content-type-options"] == "nosniff"
         assert response.json() == {"ok": False, "error": "not found"}
+
+
+class TestLaunchKey:
+    """Every /api route needs the per-launch key; static routes do not."""
+
+    _API_PATHS = (
+        "/api/health",
+        "/api/sessions",
+        "/api/session?slug=PACT-prompt&session_id=sess-1",
+        "/api/session?slug=PACT-prompt&session_id=missing",
+        "/api/demo",
+        "/api/no-such-route",
+    )
+
+    @pytest.mark.parametrize("path", _API_PATHS)
+    def test_an_unkeyed_api_request_is_401_before_any_route_work(self, live_server, path):
+        srv, _thread = live_server
+        response = http_request(srv.server_port, path, key=None)
+        assert response.status == 401, path
+        assert response.json() == {"ok": False, "error": "key required"}
+        assert response.headers["content-security-policy"] == settings.CSP
+
+    @pytest.mark.parametrize(
+        "wrong", ["", "x", "PREFIX", "SUFFIX", "\u00e9t\u00e9"], ids=["empty", "short", "prefix", "suffix", "latin1"]
+    )
+    def test_a_wrong_key_is_401_never_500(self, live_server, wrong):
+        srv, _thread = live_server
+        candidate = {"PREFIX": srv.key[:-1], "SUFFIX": srv.key + "x"}.get(wrong, wrong)
+        response = http_request(srv.server_port, "/api/health", key=candidate)
+        assert response.status == 401
+        assert response.json() == {"ok": False, "error": "key required"}
+
+    def test_the_right_key_is_accepted_on_every_route(self, live_server):
+        srv, _thread = live_server
+        for path in ("/api/health", "/api/sessions", "/api/demo",
+                     "/api/session?slug=PACT-prompt&session_id=sess-1"):
+            assert http_request(srv.server_port, path).status == 200, path
+
+    @pytest.mark.parametrize("path", ["/", "/favicon.svg", "/static/favicon.svg", "/js/api.js"])
+    def test_static_routes_need_no_key(self, live_server, path):
+        srv, _thread = live_server
+        assert http_request(srv.server_port, path, key=None).status == 200, path
+
+    def test_each_server_mints_its_own_key(self, tmp_path):
+        roots = roots_for(make_root(tmp_path), tmp_path)
+        first = server_module.create_server(roots)
+        second = server_module.create_server(roots)
+        try:
+            assert first.key and second.key and first.key != second.key
+            assert len(first.key) >= 32
+        finally:
+            first.server_close()
+            second.server_close()
+
+    def test_a_supplied_key_is_the_one_enforced(self, tmp_path):
+        roots = roots_for(make_root(tmp_path), tmp_path)
+        srv = new_server(roots, key="k" * 43)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            assert srv.key == "k" * 43
+            assert http_request(srv.server_port, "/api/health").status == 200
+            assert http_request(srv.server_port, "/api/health", key="j" * 43).status == 401
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +590,7 @@ class TestDemoWithNoSessions:
         empty = tmp_path / ".claude"
         empty.mkdir()
         roots = roots_for(empty, tmp_path)
-        srv = server_module.create_server(roots)
+        srv = new_server(roots)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         try:
@@ -637,7 +729,7 @@ class TestLoopbackOnly:
     def test_close_leaves_no_listening_socket(self, tmp_path):
         root = make_root(tmp_path)
         roots = roots_for(root, tmp_path)
-        srv = server_module.create_server(roots)
+        srv = new_server(roots)
         port = srv.server_port
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
@@ -708,9 +800,9 @@ class TestDirectCli:
         assert "Python 3.12+" in captured.err
 
     def test_health_check_refuses_non_loopback_port_args(self):
-        assert cli.health_check(0) is None
-        assert cli.health_check(70000) is None
-        assert cli.health_check("nope") is None  # type: ignore[arg-type]
+        assert cli.health_check(0, "k") is None
+        assert cli.health_check(70000, "k") is None
+        assert cli.health_check("nope", "k") is None  # type: ignore[arg-type]
 
     def test_state_file_round_trip_and_permissions(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -719,6 +811,7 @@ class TestDirectCli:
             "port": 51234,
             "url": "http://127.0.0.1:51234/",
             "instance_id": "a" * 32,
+            "key": "k" * 43,
         }
         cli.write_state(state_dir, payload)
         state_path = settings.state_file(state_dir)
@@ -726,6 +819,9 @@ class TestDirectCli:
         assert oct(state_path.stat().st_mode & 0o777) == oct(0o600)
         assert oct(state_dir.stat().st_mode & 0o777) == oct(0o700)
         assert cli.read_state(state_dir) == payload
+        # A record without its launch key is not a server the CLI can reach.
+        cli.write_state(state_dir, {key: value for key, value in payload.items() if key != "key"})
+        assert cli.read_state(state_dir) is None
         # A malformed state file reads as no state.
         state_path.write_text("{not json", encoding="utf-8")
         assert cli.read_state(state_dir) is None
@@ -866,12 +962,15 @@ def _run_cli(args: list[str], tmp_path: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _https_ok(port: int, timeout: float = 5.0) -> bool:
+def _https_ok(port: int, key: str, timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/health", headers={"X-PACT-Key": key}
+    )
     while time.monotonic() < deadline:
         try:
-            with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
+            with opener.open(request, timeout=1) as response:
                 if response.status == 200:
                     return True
         except (OSError, urllib.error.URLError):
@@ -884,6 +983,19 @@ def _parse_url(stdout: str) -> str:
     match = re.search(r"^URL: (http://127\.0\.0\.1:\d+/)", stdout, re.MULTILINE)
     assert match, f"no URL: line in output:\n{stdout}"
     return match.group(1)
+
+
+def _parse_key(stdout: str) -> str:
+    """The launch key, which the URL line carries only in its fragment."""
+    match = re.search(r"^URL: http://127\.0\.0\.1:\d+/[^#\s]*#k=(\S+)$", stdout, re.MULTILINE)
+    assert match, f"no keyed URL: line in output:\n{stdout}"
+    return match.group(1)
+
+
+def _stop_tokens(stdout: str) -> list[str]:
+    match = re.search(r"^Stop: (.+)$", stdout, re.MULTILINE)
+    assert match, f"no Stop: line in output:\n{stdout}"
+    return shlex.split(match.group(1))
 
 
 class TestDetachedLifecycle:
@@ -904,13 +1016,17 @@ class TestDetachedLifecycle:
             started = _run_cli(args, tmp_path)
             assert started.returncode == 0, started.stderr
             assert started.stdout.count("URL: ") == 1
-            assert "Stop: pact-viz --stop" in started.stdout
+            assert _stop_tokens(started.stdout)[-3:] == [
+                "--stop", "--state-dir", str(state_dir.resolve())
+            ]
             url = _parse_url(started.stdout)
+            key = _parse_key(started.stdout)
             port = int(url.split(":")[-1].rstrip("/"))
-            assert _https_ok(port)
+            assert _https_ok(port, key)
 
             state = cli.read_state(state_dir)
             assert state is not None
+            assert state["key"] == key
             assert state["port"] == port
             assert state["pid"] > 0
             assert len(state["instance_id"]) == 32
@@ -922,13 +1038,16 @@ class TestDetachedLifecycle:
             status = _run_cli(["--status", "--state-dir", str(state_dir)], tmp_path)
             assert status.returncode == 0
             assert "PACT Mission Control: running" in status.stdout
-            assert url in status.stdout
+            assert _parse_key(status.stdout) == key
+            assert f"PID: {state['pid']}" in status.stdout
 
             # A second --detach reuses the healthy instance (same URL) and
             # does not spawn another listener.
             again = _run_cli(args, tmp_path)
             assert again.returncode == 0, again.stderr
             assert _parse_url(again.stdout) == url
+            # Reuse prints the running instance's key; it never mints one.
+            assert _parse_key(again.stdout) == key
             assert "reusing" in again.stdout
             assert cli.read_state(state_dir)["pid"] == state["pid"]
 
@@ -981,25 +1100,28 @@ class TestDetachedLifecycle:
             started = _run_cli(args, tmp_path)
             assert started.returncode == 0, started.stderr
             match = re.search(
-                r"^URL: (http://127\.0\.0\.1:\d+/\?demo=1)$", started.stdout, re.MULTILINE
+                r"^URL: (http://127\.0\.0\.1:\d+/\?demo=1)#k=\S+$", started.stdout, re.MULTILINE
             )
             assert match, f"demo URL not printed with ?demo=1:\n{started.stdout}"
             base = match.group(1).split("?")[0]
             port = int(base.split(":")[-1].rstrip("/"))
-            assert _https_ok(port)
-            page = http_request(port, "/?demo=1")
+            key = _parse_key(started.stdout)
+            assert _https_ok(port, key)
+            page = http_request(port, "/?demo=1", key=None)
             assert page.status == 200
-            demo_payload = http_request(port, "/api/demo").json()
+            demo_payload = http_request(port, "/api/demo", key=key).json()
             assert demo_payload["source"]["kind"] == "demo"
         finally:
             stopped = _run_cli(["--stop", "--state-dir", str(state_dir)], tmp_path)
             assert stopped.returncode == 0, stopped.stderr
 
-    def test_stop_never_kills_a_foreign_instance(self, tmp_path):
-        """A state file whose token does not match the live server is stale."""
+    @pytest.mark.parametrize("mismatch", ["instance_id", "key"])
+    def test_stop_never_kills_a_foreign_instance(self, tmp_path, mismatch):
+        """A state file naming a live server it cannot authenticate as its own
+        (another instance token, or another launch key) is stale."""
         root = make_root(tmp_path)
         roots = roots_for(root, tmp_path)
-        srv = server_module.create_server(roots)
+        srv = new_server(roots)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         state_dir = tmp_path / "state"
@@ -1010,7 +1132,8 @@ class TestDetachedLifecycle:
                     "pid": 999999,
                     "port": srv.server_port,
                     "url": srv.url,
-                    "instance_id": "b" * 32,  # NOT the live server's token
+                    "instance_id": "b" * 32 if mismatch == "instance_id" else srv.instance_id,
+                    "key": "z" * 43 if mismatch == "key" else srv.key,
                 },
             )
             code = cli.main(["--stop", "--state-dir", str(state_dir)])
@@ -1055,7 +1178,7 @@ class TestBrowserOpen:
         result: dict[str, int] = {}
 
         def run() -> None:
-            result["code"] = cli.serve_foreground(args, roots, state_dir, "a" * 32)
+            result["code"] = cli.serve_foreground(args, roots, state_dir, "a" * 32, "k" * 43)
 
         worker = threading.Thread(target=run)
         worker.start()
@@ -1063,7 +1186,7 @@ class TestBrowserOpen:
         while time.monotonic() < deadline and not state_dir.exists():
             time.sleep(0.02)
         assert state_dir.exists(), "foreground server never wrote its state file"
-        assert _https_ok(servers[0].server_port)
+        assert _https_ok(servers[0].server_port, "k" * 43)
         servers[0].shutdown()
         worker.join(timeout=10)
         assert not worker.is_alive()
@@ -1103,6 +1226,8 @@ def _host_request(port: int, path: str, host: str, timeout: float = 5.0) -> Http
     try:
         connection.putrequest("GET", path, skip_host=True)
         connection.putheader("Host", host)
+        if port in _SERVER_KEYS:
+            connection.putheader("X-PACT-Key", _SERVER_KEYS[port])
         connection.endheaders()
         response = connection.getresponse()
         body = response.read()
@@ -1147,13 +1272,13 @@ class TestLateCrashWindow:
         monkeypatch.setattr(
             server_module.MissionControlHandler, "_send_json", counting_send_json
         )
-        srv = server_module.create_server(roots)
+        srv = new_server(roots)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         try:
             connection = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=5)
             try:
-                connection.request("GET", "/api/health")
+                connection.request("GET", "/api/health", headers={"X-PACT-Key": srv.key})
                 response = connection.getresponse()
                 assert response.status == 200
                 with pytest.raises(http.client.IncompleteRead):
@@ -1199,7 +1324,7 @@ class TestHostHeaderAndErrorContract:
         plain HTML body and no security headers; the server routes that path
         through its JSON error shape instead.
         """
-        srv = server_module.create_server([])
+        srv = new_server([])
         try:
             thread = threading.Thread(target=srv.serve_forever, daemon=True)
             thread.start()
@@ -1229,14 +1354,14 @@ class TestHostHeaderAndErrorContract:
 
 
 class TestReuseAndStopGuards:
-    """cmd_stop must not clear a replacement instance's state (M2) and reuse
-    must refuse when the running instance serves a different request (M5)."""
+    """cmd_stop must not clear a replacement instance's state, and reuse
+    must refuse when the running instance serves a different request."""
 
     def test_clear_state_if_instance_leaves_a_replacement_alone(self, tmp_path):
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A"})
-        cli.write_state(state_dir, {"pid": 2, "port": 2, "url": "u", "instance_id": "B"})
+        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A", "key": "k"})
+        cli.write_state(state_dir, {"pid": 2, "port": 2, "url": "u", "instance_id": "B", "key": "k"})
         # The stale-A clear must not delete instance B's state file, and must
         # report that it declined so the caller keeps B's log too.
         assert cli._clear_state_if_instance(state_dir, "A") is False
@@ -1245,16 +1370,19 @@ class TestReuseAndStopGuards:
         assert cli._clear_state_if_instance(state_dir, "B") is True
         assert cli.read_state(state_dir) is None
 
-    def test_stop_removes_the_server_log_residue(self, tmp_path):
-        """--stop leaves no 0-byte server.log behind when the state is ours."""
+    def test_stop_removes_the_log_and_launch_page_residue(self, tmp_path):
+        """--stop leaves no server.log or launch page behind when the state is ours."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         log = state_dir / "server.log"
         log.write_text("")
-        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A"})
+        page = state_dir / "launch.html"
+        page.write_text("<meta>")
+        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "A", "key": "k"})
         assert cli._clear_state_if_instance(state_dir, "A") is True
-        cli._remove_server_log(state_dir)
+        cli._remove_residue(state_dir)
         assert not log.exists()
+        assert not page.exists()
 
     def test_foreign_state_keeps_the_log(self, tmp_path):
         """When the guard declines (foreign state), the log must survive."""
@@ -1262,7 +1390,7 @@ class TestReuseAndStopGuards:
         state_dir.mkdir()
         log = state_dir / "server.log"
         log.write_text("still running\n")
-        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "B"})
+        cli.write_state(state_dir, {"pid": 1, "port": 1, "url": "u", "instance_id": "B", "key": "k"})
         assert cli._clear_state_if_instance(state_dir, "A") is False
         assert log.exists()
 
@@ -1277,7 +1405,7 @@ class TestReuseAndStopGuards:
             assert started.returncode == 0, started.stderr
             url = _parse_url(started.stdout)
             port = int(url.split(":")[-1].rstrip("/"))
-            assert _https_ok(port)
+            assert _https_ok(port, _parse_key(started.stdout))
 
             # Same request reuses (control arm).
             again = _run_cli(args_a, tmp_path)
@@ -1296,3 +1424,113 @@ class TestReuseAndStopGuards:
         finally:
             if settings.state_file(state_dir).exists():
                 _run_cli(["--stop", "--state-dir", str(state_dir)], tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# CLI state record, keyed health and reuse
+# ---------------------------------------------------------------------------
+
+
+def _live_state(srv) -> dict:
+    """A state record that names a live in-process test server as ours."""
+    return {
+        "version": settings.VERSION,
+        "plugin_root": str(settings.PLUGIN_ROOT),
+        "pid": os.getpid(),
+        "pid_start": cli.pid_start_time(os.getpid()),
+        "host": "127.0.0.1",
+        "port": srv.server_port,
+        "url": srv.url,
+        "instance_id": srv.instance_id,
+        "key": srv.key,
+        "roots": [root.id for root in srv.roots],
+    }
+
+
+class TestStateRecord:
+    def _write_raw(self, state_dir: Path, payload: dict) -> None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        settings.state_file(state_dir).write_text(json.dumps(payload), encoding="utf-8")
+
+    def _valid(self) -> dict:
+        return {"pid": 4242, "port": 51234, "url": "http://127.0.0.1:51234/",
+                "instance_id": "a" * 32, "key": "k" * 43}
+
+    @pytest.mark.parametrize(
+        "change",
+        [{"port": 0}, {"port": 70000}, {"pid": 0}, {"pid": "4242"}, {"key": ""},
+         {"instance_id": ""}, {"url": 5}],
+        ids=["port0", "port-high", "pid0", "pid-text", "key-empty", "id-empty", "url-type"],
+    )
+    def test_an_invalid_record_reads_as_no_server(self, tmp_path, change):
+        state_dir = tmp_path / "state"
+        self._write_raw(state_dir, {**self._valid(), **change})
+        assert cli.read_state(state_dir) is None
+
+    def test_a_valid_record_reads_back(self, tmp_path):
+        state_dir = tmp_path / "state"
+        self._write_raw(state_dir, self._valid())
+        assert cli.read_state(state_dir) == self._valid()
+
+    def test_a_symlinked_record_is_refused(self, tmp_path):
+        real = tmp_path / "elsewhere.json"
+        real.write_text(json.dumps(self._valid()), encoding="utf-8")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        settings.state_file(state_dir).symlink_to(real)
+        assert cli.read_state(state_dir) is None
+
+
+class TestKeyedHealthCheck:
+    def test_health_check_needs_the_key(self, live_server):
+        srv, _thread = live_server
+        assert cli.health_check(srv.server_port, srv.key)["instance_id"] == srv.instance_id
+        assert cli.health_check(srv.server_port, "z" * 43) is None
+
+    def test_health_check_never_goes_through_a_proxy(self, live_server, monkeypatch):
+        """A machine-wide proxy must not carry the loopback check off-box:
+        with a dead proxy configured, the check still reaches the server."""
+        srv, _thread = live_server
+        for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, "http://127.0.0.1:9")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        payload = cli.health_check(srv.server_port, srv.key)
+        assert payload is not None and payload["instance_id"] == srv.instance_id
+
+
+class TestReuse:
+    def test_reuse_prints_the_stored_key_and_this_selection(self, live_server, tmp_path, capsys):
+        srv, _thread = live_server
+        state_dir = tmp_path / "state"
+        cli.write_state(state_dir, _live_state(srv))
+        args = cli.build_parser().parse_args(["--detach", "--demo", "--state-dir", str(state_dir)])
+        assert cli._reuse_if_running(state_dir, args, srv.roots) is True
+        out = capsys.readouterr().out
+        assert "reusing" in out
+        assert re.search(
+            rf"^URL: {re.escape(srv.url.rstrip('/'))}/\?demo=1#k={re.escape(srv.key)}$",
+            out, re.MULTILINE,
+        ), out
+
+    def test_reuse_refuses_an_explicit_other_port(self, live_server, tmp_path):
+        srv, _thread = live_server
+        state_dir = tmp_path / "state"
+        cli.write_state(state_dir, _live_state(srv))
+        other = srv.server_port + 1 if srv.server_port < 65535 else srv.server_port - 1
+        args = cli.build_parser().parse_args(
+            ["--detach", "--port", str(other), "--state-dir", str(state_dir)]
+        )
+        with pytest.raises(cli.CliError, match=f"is on port {srv.server_port}"):
+            cli._reuse_if_running(state_dir, args, srv.roots)
+        same = cli.build_parser().parse_args(
+            ["--detach", "--port", str(srv.server_port), "--state-dir", str(state_dir)]
+        )
+        assert cli._reuse_if_running(state_dir, same, srv.roots) is True
+
+    def test_an_unauthenticated_instance_is_not_reused(self, live_server, tmp_path):
+        srv, _thread = live_server
+        state_dir = tmp_path / "state"
+        cli.write_state(state_dir, {**_live_state(srv), "key": "z" * 43})
+        args = cli.build_parser().parse_args(["--detach", "--state-dir", str(state_dir)])
+        assert cli._reuse_if_running(state_dir, args, srv.roots) is False

@@ -152,6 +152,7 @@ KNOWN_NAME_SITES = Counter({
     # The visualizer reads the session context for project/team labels only;
     # it is read-only over PACT state (its sole write is its own state file).
     ("visualizer/roster.py", "read_session_context"): 1,  # read
+    ("visualizer/model.py", "session_activity_ns"): 1,  # read (activity clock mtime)
 })
 
 # (file, function, call): count of relocations in a function that derives a

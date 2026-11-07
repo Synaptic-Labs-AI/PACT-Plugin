@@ -27,6 +27,14 @@ start it — neither is a fallback for the other.
 The command is a thin wrapper around the same binary. When in doubt, the direct
 launcher is the simplest thing that can work.
 
+One server per config root serves every session. Which run a page opens is
+chosen by its URL (`?demo=1`, `?project=…`, `?session=…`), so a demo launch,
+a launch for another project and a launch from another session all reuse the
+same running server. The printed URL ends in `#k=…`: that fragment is the
+page's access key for this server start. Open the URL as printed; a bookmark
+without the fragment shows "This page needs its launch link" and
+`pact-viz --status` prints the full URL again.
+
 ## Quick launch
 
 From a development clone of this repo:
@@ -41,8 +49,9 @@ pact-plugin/bin/pact-viz --demo --detach --open
 # Real journals, newest run in the default config root.
 pact-plugin/bin/pact-viz --open
 
-# A specific project's newest run.
-pact-plugin/bin/pact-viz --project PACT-prompt --open
+# A specific project's newest run (live first), by label or by directory.
+pact-plugin/bin/pact-viz --project my-app --open
+pact-plugin/bin/pact-viz --project-dir ~/code/my-app --open
 ```
 
 From inside a Claude Code session, the command form does the same thing and
@@ -139,16 +148,17 @@ the same journal events. Roughly:
 
 | Flag | What it does |
 | --- | --- |
-| `--demo` | Serve the built-in deterministic training run (`?demo=1`); no journals needed |
-| `--project <slug>` | Filter the session list to this project; its newest run opens |
-| `--session <id>` | Filter the session list to sessions whose id contains this text |
+| `--demo` | Open the built-in deterministic training run (`?demo=1`); no journals needed |
+| `--project <label>` | Open this project's newest run, live first (`[A-Za-z0-9._-]`; with `--list`, filter the table) |
+| `--project-dir <path>` | Open the newest run of the project at this directory, using the same slug the hooks write |
+| `--session <id>` | Open this session: its full id or a prefix of 8 or more characters (with `--list`, filter the table) |
 | `--root <path>` | Read a config root (repeatable; default order above) |
 | `--all-roots` | Also read sibling `~/.claude*` roots with `pact-sessions/` |
 | `--port <n>` | Listen on a chosen loopback port instead of the tool's default |
-| `--open` | Best-effort: open the viewer in the default browser after the server is up (the `URL:` line is still printed) |
+| `--open` | Best-effort: open the viewer in the default browser after the server is up, through a private `launch.html` redirect so the key never appears in a process list (the `URL:` line is still printed) |
 | `--detach` | Start in the background, print the URL, and return only after a health check confirms it is reachable |
 | `--stop` | Stop the detached instance recorded in the state file; idempotent |
-| `--status` | Report whether a detached instance is running, with its URL, PID, and instance id |
+| `--status` | Report whether a detached instance is running, with its full URL (key included), PID, and instance id |
 | `--list` | List the sessions discovered in the selected roots as a plain-text table and exit |
 | `--state-dir <path>` | Keep the detached-instance state file elsewhere |
 | `--verbose` | More logging on stderr |
@@ -157,8 +167,9 @@ the same journal events. Roughly:
 Every successful launch prints exactly one `URL: ...` line on stdout, whether or
 not `--open` was passed, so a headless session can report it without opening a
 browser. `--detach` exits only once that URL passes a local health check, so the
-URL it prints is immediately reachable, and it adds a `Stop: ...` hint naming the
-command that closes the same instance. `--stop` prints one `Stop: ...` line:
+URL it prints is immediately reachable, and it adds a `Stop: ...` line: the
+launcher's absolute path with `--stop --state-dir <absolute dir>`, runnable as
+pasted in any shell. `--stop` prints one `Stop: ...` line:
 
 - `Stop: stopped pid <pid>` — the health check confirmed the instance is gone;
   exit 0.
@@ -166,25 +177,36 @@ command that closes the same instance. `--stop` prints one `Stop: ...` line:
   was removed; exit 0.
 - `Stop: unconfirmed pid <pid>` — the process was signalled but did not confirm
   exit; the next line is `PACT Mission Control: stop was signalled but the process did not confirm exit`; exit 1.
-- `Stop: refused` — the state file's pid does not match the pid in the running
-  server's `/api/health` payload (a missing pid is refused too). Nothing is
-  signalled, the next line names both pids, and the state file is deliberately
-  kept: deleting the record would turn a recoverable mismatch into a server
-  nothing can stop. Exit 1.
+- `Stop: refused` — the server answers with this instance's key and id but
+  under another pid or start time. Nothing is signalled, the next line names
+  both pids and the state file, and the state file is deliberately kept:
+  deleting the record would turn a recoverable mismatch into a server nothing
+  can stop. Exit 1.
 
 ## Privacy
 
 - **Local reads only.** The viewer reads local files under the roots you select.
   Nothing is uploaded, and nothing leaves the machine.
 - **Read-only.** Mission Control never writes into `pact-sessions/`, `teams/`,
-  `tasks/`, or `pact-memory/`. Its only write is its own small state file at
-  `<config>/pact-viz/server.json` (directory `0700`, file `0600`), used to find
-  and health-check a detached instance. `--stop` removes the instance; you may
-  delete a stale state file by hand.
-- **Single-user by design.** Loopback is reachable by any process or user on
-  the machine, so anyone who can reach the port can read the journals the viewer
-  serves and the `/api/health` instance token; there is no authentication. Run it
-  on a single-user machine, and over SSH only through a tunnel you control.
+  `tasks/`, or `pact-memory/`. It writes only inside its own state directory
+  `<config>/pact-viz/` (`0700`): the state file `server.json` (`0600`), used to
+  find and health-check a detached instance; `server.log`, the detached
+  server's stderr; and `launch.html` (`0600`), the browser redirect `--open`
+  uses. `--stop` removes the instance and its files; you may delete a stale
+  state file by hand.
+- **A per-launch key guards the API.** Each server start mints a random key.
+  Every API request must carry it, so another web page in your browser cannot
+  read the API, and neither can another user on the machine who cannot read
+  your state file. The key travels only in the URL fragment, which browsers
+  never send to the server. Static page files need no key; they hold no run
+  data. A web page can still tell that a viewer is listening on a port.
+- **Where the key is visible to you.** As your own user, you can find it in:
+  the state file (`0600`); the `launch.html` redirect (`0600`); the browser
+  history entry from before the page strips the fragment; the tab's
+  `sessionStorage`; the detached server's `/proc/<pid>/environ` on Linux
+  (owner-only, and it holds the same key as the state file); and, when you
+  launch through `/PACT:visualize`, the Claude transcript, which carries the
+  reported URL. Treat the printed URL like the journals it opens.
 - **Credentials are masked.** Before any text reaches the page, the server
   replaces credential-shaped values (GitHub, API-key and AWS-style tokens,
   bearer tokens, private keys, and `password=`/`token=`-style assignments)
@@ -249,19 +271,20 @@ Run the viewer **on the machine that holds the journals** and forward its
 loopback port. The server has no remote mode and no authentication; do not bind
 it to a public interface or open the port in a cloud security group.
 
-On the remote host (for example an EC2 instance running Claude Code):
+On the remote host (for example an EC2 instance running Claude Code), from the
+plugin root (the installed plugin's version directory, or `pact-plugin/` in a
+clone):
 
 ```bash
-cd ~/pact-mission-control
-pact-plugin/bin/pact-viz --detach --port 8787
-# URL: http://127.0.0.1:8787/
+bin/pact-viz --detach --port 8787
+# URL: http://127.0.0.1:8787/#k=...
 ```
 
 On the local machine:
 
 ```bash
 ssh -N -L 8787:127.0.0.1:8787 <user>@<host>
-# then open http://127.0.0.1:8787/ locally
+# then open the printed URL, #k=... included, locally
 ```
 
 If the remote Claude Code journals live under another user or
@@ -289,10 +312,15 @@ line and forward the port, for example
 
 **Address already in use.** Choose another loopback port with `--port`, or stop
 the old instance with `--stop` first. The tool reuses a healthy detached instance
-rather than starting a second one, so a stale `--stop` is rarely needed. It
-refuses to reuse one recorded by a different build version, root set, port,
-launch mode, or filter — stop that instance first; a record with no readable
-version is reported as `(unknown)` and refused too.
+rather than starting a second one, whatever run you ask it to open, so a stale
+`--stop` is rarely needed. An instance from another plugin build is stopped and
+replaced automatically. It refuses to reuse one that serves different roots, or
+that listens on another port than an explicit `--port`; stop that instance
+first with the printed command.
+
+**"This page needs its launch link."** The page was opened without its `#k=…`
+fragment (a bookmark, a typed URL) or the server restarted with a new key. Run
+`pact-viz --status` and open the URL it prints.
 
 **`--stop` reports no running instance.** `Stop: not running` is success, not an
 error: no healthy detached instance was found, and any stale state file was

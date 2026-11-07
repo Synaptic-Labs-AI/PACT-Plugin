@@ -9,9 +9,13 @@ truth for the HTTP payloads, DOM shell, and JS module boundaries.
   `~/.claude/teams`, or `~/.claude/pact-memory`.
 - Local-only. The server binds `127.0.0.1` only. No `--host`, no
   `--allow-remote`, no external network calls from the server or the page.
-- Single-user. Loopback is reachable by any local UID: the API serves the
-  journals and the `/api/health` instance token without authentication, so the
-  documented posture is one trusted user per machine.
+- Keyed. Each server start mints a random launch key. Every `/api/*` request
+  must carry it in the `X-PACT-Key` header; without it the server answers 401
+  before any route work. The key reaches the page only in the URL fragment
+  (`#k=`), so it never reaches a server log or a Referer. Static files and `/`
+  need no key; they carry no run data. A custom header cannot be sent
+  cross-origin (`OPTIONS` is 405), so another web page cannot read the API.
+  Local users who cannot read the 0600 state file cannot either.
 - Redacted. Every string derived from journals, task records and team files
   (titles, details, subjects, handoff fields, raw payloads, the session list's
   `team` and `project_dir`) passes `classify.redact` before it is bounded: credential-shaped values (GitHub, Anthropic/OpenAI-style,
@@ -40,42 +44,70 @@ visualizer/
 
 ## CLI lifecycle
 
-`--stop` acts only on the detached instance recorded in
-`<config>/pact-viz/server.json`, and only after `/api/health` answers with that
-file's `instance_id` AND its pid. It prints exactly one `Stop: ...` line:
+One server per state directory (default `<config>/pact-viz/`) serves every
+session of its roots. `--demo`, `--project LABEL`, `--project-dir PATH` and
+`--session ID` never change what the server serves; they only choose what the
+printed URL opens (§ URL selection). `--project` must fully match
+`[A-Za-z0-9._-]{1,128}` and `--session` `[A-Za-z0-9-]{8,64}`; otherwise the
+CLI prints `pact-viz: --project must match [A-Za-z0-9._-]` (or the `--session`
+equivalent) and exits 2. `--project-dir` uses the hooks' on-disk slug of the
+resolved directory name. With `--list`, `--project` and `--session` filter the
+printed table instead.
 
-- `Stop: stopped pid <pid>` — the health check confirmed the instance is gone;
-  exit 0.
-- `Stop: not running` — nothing healthy was running and a stale state file was
+The state file `<state-dir>/server.json` (0600, in a 0700 directory) records
+the port, URL, pid, the process start time where the OS exposes it, the random
+`instance_id`, the launch `key`, the roots, the plugin root and the version.
+Every CLI health check sends the key, and an instance counts as ours only when
+the keyed `/api/health` reports the recorded `instance_id` and pid (and start
+time, when recorded).
+
+A successful launch prints, on stdout: a banner line, `URL: <url>` and
+`Stop: <command>`. The URL carries the selection query and the key fragment:
+`http://127.0.0.1:<port>/?project=<label>#k=<key>`. The Stop command is
+runnable in any shell: the launcher's absolute path, or the interpreter form
+when the module was run directly, plus `--stop --state-dir <absolute dir>`,
+every part shell-quoted. `--open` writes `<state-dir>/launch.html` (0600), a
+redirect to the keyed URL, and opens that file, so the key never appears in a
+process argument list.
+
+Reuse, when a confirmed instance is already recorded:
+
+1. Another plugin build (different plugin root or version): the CLI stops it
+   with a verified stop, prints
+   `PACT Mission Control: replaced an instance from another plugin build`,
+   and starts a fresh server.
+2. Different roots: refused, exit 1, with
+   `pact-viz: a running instance serves different roots (<running>) than
+   requested (<wanted>); stop it first with <Stop command>`.
+3. An explicit `--port` that differs: refused, exit 1, with
+   `pact-viz: a running instance is on port <p> but port <q> was requested;
+   stop it first with <Stop command>`.
+4. Otherwise: `PACT Mission Control: reusing the running instance`, then the
+   URL (stored key, this invocation's selection) and the Stop line. Reuse never
+   mints a new key.
+
+An unconfirmed record (no answer, a 401, or a different instance) is not
+reused; a fresh server replaces the record.
+
+`--status` prints `PACT Mission Control: running`, the keyed `URL:`, `PID:`
+(from the server's own health answer) and `Instance:`, or
+`PACT Mission Control: not running`.
+
+`--stop` acts only on the recorded instance and prints exactly one `Stop:` line:
+
+- `Stop: stopped pid <pid>`, then `PACT Mission Control: stopped`. The
+  instance stopped answering; exit 0.
+- `Stop: not running`. Nothing confirmed was running, and a stale record was
   removed; exit 0.
-- `Stop: unconfirmed pid <pid>` — the process was signalled but did not confirm
-  exit; the next line is `PACT Mission Control: stop was signalled but the process did not confirm exit`; exit 1.
-- `Stop: refused` — the state file's pid does not match the pid the running
-  server reports, or the payload carries no pid. Nothing is signalled; the next
-  line is `PACT Mission Control: state file pid <state-pid> does not match the
+- `Stop: unconfirmed pid <pid>`. The process was signalled but did not confirm
+  exit; the next line is `PACT Mission Control: stop was signalled but the
+  process did not confirm exit`; exit 1.
+- `Stop: refused`. The server answers with this instance's key and id but
+  under another pid or start time. Nothing is signalled; the next line is
+  `PACT Mission Control: state file pid <state-pid> does not match the
   server's pid <server-pid>; refusing to signal — delete <state-file> to clear
-  the record` (a missing pid prints `None`; the path is shell-quoted so it can
-  be pasted safely), and the state file is deliberately kept by `--stop`:
-  deleting the record would turn a recoverable mismatch into a server nothing
-  can stop. Exit 1.
+  the record` (the path is shell-quoted). The state file is kept; exit 1.
 
-Two consequences follow from the state file being the only record. A refusal
-leaves `<state-dir>/server.json` (default `<config>/pact-viz/server.json`) in
-place and the refusal line names it, so `--stop` keeps refusing until you delete
-that file by hand and then stop the unrecorded server by pid or port. An
-unconfirmed stop removes the state file and log while the server may still be
-answering, so exit 1 means the process must be checked directly, by pid or
-port, rather than trusting the missing record.
-
-Reuse is refused, with exit 1, when the recorded instance differs from the
-request in build version, roots, explicit port, launch mode (`--demo`), or the
-`--project`/`--session` filters. The version check runs first: a mismatch prints
-`pact-viz: a running instance is version <recorded> but this is <current>; stop
-it first with <stop command>` instead of reusing an old build, and a missing,
-empty, or non-string recorded version renders `(unknown)` — the corrupt-record
-case. The other checks name their own difference, for example `a running
-instance was started with --demo; stop it first with pact-viz --stop` (or
-`without --demo`).
 One recorded instance per state directory is deliberate; a second would
 overwrite the record and orphan the first.
 
@@ -83,8 +115,10 @@ overwrite the record and orphan the first.
 
 All responses are JSON, `Content-Type: application/json; charset=utf-8`.
 Errors are `{"ok": false, "error": "<short reason>"}` with 400 (bad
-parameters), 403 (a `Host` header other than loopback), 404, 405, or 500 (an
-unhandled handler error).
+parameters), 401 (`key required`: the `X-PACT-Key` header is missing or wrong;
+checked right after the Host check, before any route work, on every `/api/*`
+route including health), 403 (a `Host` header other than loopback), 404, 405,
+or 500 (an unhandled handler error).
 
 ### GET /api/health
 
@@ -92,20 +126,24 @@ unhandled handler error).
 {
   "ok": true,
   "name": "pact-mission-control",
-  "version": "0.1.0",
+  "version": "4.9.0",
+  "plugin_root": "/home/x/.claude/plugins/cache/pact-plugin/PACT/4.9.0",
   "pid": 12345,
   "instance_id": "random-hex",
   "uptime_s": 12.3,
-  "roots": [{"id": "~/.claude", "label": ".claude", "path": "/Users/x/.claude", "journals": 291, "default": true}],
-  "demo": false,
-  "demo_available": true
+  "roots": [{"id": "~/.claude", "label": ".claude", "path": "/home/x/.claude", "journals": 291, "default": true}],
+  "demo_available": true,
+  "generated_at": "2026-11-03T00:00:00Z"
 }
 ```
 
-`demo` reports the launch mode; `demo_available` reports that the scripted
-demo can be opened in either mode.
+Served only with the key; without it, 401 like every other `/api/*` route.
+`version` is the plugin version from `.claude-plugin/plugin.json` and, with
+`plugin_root`, is the build identity the CLI compares on reuse.
+`demo_available` reports that the scripted demo can be opened; there is no
+demo launch mode.
 
-### GET /api/sessions?limit=500
+### GET /api/sessions?limit=500&project=…&session=…
 
 ```json
 {
@@ -135,10 +173,14 @@ demo can be opened in either mode.
 }
 ```
 
-`filters` echoes the server's launch filters: only the `--project` / `--session`
-flags that were passed appear as keys, and it is `{}` when the server is
-unfiltered. The page uses it to tell an empty root from a filter that excluded
-everything.
+`project` and `session` are request filters: `project` must fully match
+`[A-Za-z0-9._-]{1,128}` and `session` `[A-Za-z0-9-]{8,64}`, else 400.
+`project` matches tier by tier, exact first: the slug, then the constrained
+label, then the raw directory basename; only when all three miss does a
+case-insensitive pass over the same names run, never a substring. `session`
+matches an exact id or an id prefix. `filters` echoes the applied filters
+(`{}` when none), so the page can tell an empty root from a selection that
+matched nothing.
 
 List entries are deliberately cheap: no full journal parse. `started_at` may be
 null when unavailable. `last_phase` reflects the last `phase_transition` within
@@ -379,7 +421,8 @@ Field rules:
 
 ### GET /api/demo?since=…
 
-Same model shape, `source.kind="demo"`, `source.root="demo"`,
+Same model shape, `source.kind="demo"`, `source.root="demo"`, `version="demo"`
+(a fixed script reports no build, so a version bump does not change it),
 `etag="demo-v1"`; `since=demo-v1` returns `{ok:true,unchanged:true,etag:"demo-v1"}`.
 Available even when no real sessions exist. Deterministic except base time.
 
@@ -462,8 +505,12 @@ nodes, or arrays; strings become text nodes.
 
 ```js
 export const USE_MOCK; // true when location.search has mock=1
+export const KEY_STORAGE;           // sessionStorage key holding the launch key
+export const KEY_REQUIRED_MESSAGE;  // the launch-link banner text
+export function takeLaunchKey();    // fragment #k= -> sessionStorage, strip the fragment; "" when absent
+export function setKeyRejectedHandler(fn); // called on any 401
 export async function health();
-export async function sessions();
+export async function sessions(filters = {}); // {project, session} -> /api/sessions query
 export async function session({root, slug, session_id, since}); // 304-equivalent -> {unchanged,etag}
 export async function demo({since});
 ```
@@ -567,7 +614,15 @@ Wires everything. It owns:
   idle run comes back on its own. A poll keeps the cursor on the same event
   `seq` even when the capped window slides; the demo is never polled;
 - replay clock (event-paced at 1× = 2 events/s, 2× = 5, 4× = 12, 8× = 30);
-- URL state (`?demo=1`, `?root=…&slug=…&session=…&mock=1`);
+- URL selection, read once at boot (`dom.launchSelection`): `?demo=1` opens the
+  demo; `?root=…&slug=…&session_id=…` opens that run; `?session=ID` fetches the
+  list narrowed to it and opens the single match (zero or several matches show
+  an error); `?project=X` fetches the list narrowed to X and opens its newest
+  live run, else its newest run (none → the named-empty notice); no selection
+  opens the default root's newest live run, else its newest run. `?mock=1` is
+  the offline preview;
+- the launch key: without one (`takeLaunchKey()` returns "") the page shows
+  the launch-link banner and makes no `/api` call; a 401 shows the same banner;
 - error/loading states;
 - calling `stage.setModel/setCursor`, `panels.setModel/setCursor`,
   `timeline.setModel/setCursor/setMode`, `audio.play`, `achievements.evaluate`;

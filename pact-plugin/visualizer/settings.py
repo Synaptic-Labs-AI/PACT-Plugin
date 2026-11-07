@@ -13,7 +13,9 @@ directory instead of touching the operator's real ~/.claude.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,8 +25,50 @@ from typing import Mapping, Sequence
 
 APP_NAME = "pact-mission-control"
 APP_LABEL = "PACT Mission Control"
-VERSION = "0.1.0"
 DEMO_ETAG = "demo-v1"
+# The scripted demo is a fixed script, not a build: it reports this constant
+# instead of the plugin version, so a version bump does not change it.
+DEMO_VERSION = "demo"
+
+# The plugin directory this package runs from (``<plugin>/visualizer/..``).
+PLUGIN_ROOT: Path = Path(__file__).resolve().parents[1]
+
+
+def _plugin_version(plugin_root: Path) -> str:
+    """The ``version`` from ``<plugin_root>/.claude-plugin/plugin.json``.
+
+    Falls back to ``0+unknown`` when the manifest is missing or unreadable,
+    so the CLI still runs from a bare checkout.
+    """
+    try:
+        manifest = json.loads(
+            (plugin_root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return "0+unknown"
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    return version if isinstance(version, str) and version.strip() else "0+unknown"
+
+
+# Build identity: a running server from another plugin build is replaced,
+# because it serves a different viewer than the one asked for.
+VERSION = _plugin_version(PLUGIN_ROOT)
+
+# --- Launch key and URL selection -------------------------------------------
+
+# The per-launch key travels to the detached child in this environment
+# variable (never argv) and to the server in this request header.
+KEY_ENV = "PACT_VIZ_KEY"
+KEY_HEADER = "X-PACT-Key"
+# bin/pact-viz exports its resolved path here so the Stop: line is runnable.
+LAUNCHER_ENV = "PACT_VIZ_LAUNCHER"
+
+PROJECT_LABEL_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+# The hooks' on-disk slug rule (hooks/shared/pact_context._UNSAFE_SLUG_CHARS_RE).
+SLUG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
+# A --session prefix must be at least this long to select a session.
+SESSION_PREFIX_MIN = 8
 
 # The server is loopback-only by construction. There is no --host flag and no
 # --allow-remote escape hatch; this is the single bind address the server

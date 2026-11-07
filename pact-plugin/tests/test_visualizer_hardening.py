@@ -58,16 +58,23 @@ def _read_until_close(port: int, raw_request: bytes, read_timeout: float = 0.5) 
     return b"".join(chunks)
 
 
-def _state(port: int, *, pid: int, instance_id: str) -> dict:
+def _state(port: int, *, pid: int, instance_id: str, key: str = "test-key") -> dict:
     return {
         "version": settings.VERSION,
+        "plugin_root": str(settings.PLUGIN_ROOT),
         "pid": pid,
+        "pid_start": None,
         "host": settings.LOOPBACK_HOST,
         "port": port,
         "url": f"http://{settings.LOOPBACK_HOST}:{port}/",
         "instance_id": instance_id,
+        "key": key,
         "roots": [],
     }
+
+
+def _fake_health(instance_id: str, pid: int):
+    return lambda port, key, timeout=1.0: {"ok": True, "instance_id": instance_id, "pid": pid}
 
 
 class TestStopPidCrossCheck:
@@ -77,10 +84,10 @@ class TestStopPidCrossCheck:
         """A tampered state file must not make --stop signal a bystander."""
         srv = live_server
         state_dir = tmp_path / "state"
-        # State names the real instance and port but an unrelated pid.
+        # State names the real instance, port and key but an unrelated pid.
         cli.write_state(
             state_dir,
-            _state(srv.server_port, pid=999_999, instance_id=srv.instance_id),
+            _state(srv.server_port, pid=999_999, instance_id=srv.instance_id, key=srv.key),
         )
         signalled: list[tuple[int, int]] = []
         monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
@@ -89,12 +96,10 @@ class TestStopPidCrossCheck:
         assert cli.cmd_stop(args) == 1
 
         assert signalled == []
-        # The live instance's state survives: it still names the server to stop.
         assert cli.read_state(state_dir) is not None
         out = capsys.readouterr().out
         assert "refusing to signal" in out
         assert "does not match" in out
-        # The message names the escape hatch for a stuck user.
         assert str(settings.state_file(state_dir)) in out
 
     def test_refusal_quotes_the_delete_operand(
@@ -105,13 +110,11 @@ class TestStopPidCrossCheck:
         state_dir = tmp_path / "state dir;touch PWNED"
         cli.write_state(
             state_dir,
-            _state(srv.server_port, pid=999_999, instance_id=srv.instance_id),
+            _state(srv.server_port, pid=999_999, instance_id=srv.instance_id, key=srv.key),
         )
         monkeypatch.setattr(os, "kill", lambda pid, sig: None)
 
-        args = cli.build_parser().parse_args(
-            ["--stop", "--state-dir", str(state_dir)]
-        )
+        args = cli.build_parser().parse_args(["--stop", "--state-dir", str(state_dir)])
         assert cli.cmd_stop(args) == 1
 
         out = capsys.readouterr().out
@@ -121,14 +124,8 @@ class TestStopPidCrossCheck:
     def test_stop_signals_when_the_pid_matches(self, tmp_path, monkeypatch, capsys):
         """Control arm: the guard must not block an honest stop."""
         state_dir = tmp_path / "state"
-        cli.write_state(
-            state_dir, _state(12345, pid=4242, instance_id="instance-ok")
-        )
-        monkeypatch.setattr(
-            cli,
-            "_health_for_instance",
-            lambda port, instance_id, timeout=1.0: {"ok": True, "pid": 4242},
-        )
+        cli.write_state(state_dir, _state(12345, pid=4242, instance_id="instance-ok"))
+        monkeypatch.setattr(cli, "health_check", _fake_health("instance-ok", 4242))
         signalled: list[tuple[int, int]] = []
         monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
         monkeypatch.setattr(cli, "_wait_until_stopped", lambda *a, **k: True)
@@ -139,22 +136,31 @@ class TestStopPidCrossCheck:
         assert [pid for pid, _sig in signalled] == [4242]
         assert cli.read_state(state_dir) is None
 
+    def test_stop_refuses_a_reused_pid_by_start_time(self, tmp_path, monkeypatch, capsys):
+        """Same instance token and pid, different start time: never signal."""
+        state_dir = tmp_path / "state"
+        state = _state(12345, pid=4242, instance_id="instance-ok")
+        state["pid_start"] = "111"
+        cli.write_state(state_dir, state)
+        monkeypatch.setattr(cli, "health_check", _fake_health("instance-ok", 4242))
+        monkeypatch.setattr(cli, "pid_start_time", lambda pid: "222")
+        signalled: list[int] = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
+
+        args = cli.build_parser().parse_args(["--stop", "--state-dir", str(state_dir)])
+        assert cli.cmd_stop(args) == 1
+        assert signalled == []
+        assert "Stop: refused" in capsys.readouterr().out
+
 
 class TestStopUnconfirmed:
-    def test_unconfirmed_stop_does_not_claim_success(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_unconfirmed_stop_does_not_claim_success(self, tmp_path, monkeypatch, capsys):
         """A signalled-but-still-answering instance must not print success."""
         state_dir = tmp_path / "state"
         cli.write_state(state_dir, _state(12345, pid=4242, instance_id="instance-ok"))
-        monkeypatch.setattr(
-            cli,
-            "_health_for_instance",
-            lambda port, instance_id, timeout=1.0: {"ok": True, "pid": 4242},
-        )
+        monkeypatch.setattr(cli, "health_check", _fake_health("instance-ok", 4242))
         monkeypatch.setattr(cli, "_terminate", lambda pid: None)
         monkeypatch.setattr(cli, "_wait_until_stopped", lambda *a, **k: False)
-        # Signal escalation is skipped when the pid is already gone.
         monkeypatch.setattr(cli, "_pid_gone", lambda pid: True)
 
         args = cli.build_parser().parse_args(["--stop", "--state-dir", str(state_dir)])
@@ -165,21 +171,31 @@ class TestStopUnconfirmed:
         assert "Stop: stopped pid" not in out
 
 
-class TestStopHintQuoting:
-    def test_state_dir_metacharacters_round_trip_as_one_token(self, tmp_path):
-        """The printed Stop: line must be paste-safe for any state-dir path."""
-        weird = tmp_path / "state dir;touch PWNED"
-        args = cli.build_parser().parse_args(
-            ["--stop", "--state-dir", str(weird)]
-        )
-        hint = cli._stop_hint(args)
+class TestStopLine:
+    """The printed Stop: line is runnable as pasted, for any state-dir path."""
 
-        assert shlex.split(hint) == [
-            "pact-viz",
-            "--stop",
-            "--state-dir",
-            str(weird),
+    def test_launcher_form_round_trips_as_tokens(self, tmp_path, monkeypatch):
+        weird = tmp_path / "state dir;touch PWNED"
+        launcher = str(tmp_path / "bin dir" / "pact-viz")
+        monkeypatch.setenv(settings.LAUNCHER_ENV, launcher)
+        assert shlex.split(cli._stop_command(weird)) == [
+            launcher, "--stop", "--state-dir", str(weird),
         ]
+
+    def test_interpreter_form_without_the_launcher(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.delenv(settings.LAUNCHER_ENV, raising=False)
+        weird = tmp_path / "state dir"
+        assert shlex.split(cli._stop_command(weird)) == [
+            f"PYTHONPATH={settings.PLUGIN_ROOT}", sys.executable, "-P", "-m", "visualizer",
+            "--stop", "--state-dir", str(weird),
+        ]
+
+    def test_relative_state_dir_is_printed_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(settings.LAUNCHER_ENV, "/x/pact-viz")
+        assert shlex.split(cli._stop_command(cli.Path("rel")))[-1] == str(tmp_path / "rel")
 
 
 def _one_root(tmp_path):
@@ -187,104 +203,89 @@ def _one_root(tmp_path):
 
 
 def _reuse_args(tmp_path, *extra):
-    return cli.build_parser().parse_args(
+    args = cli.build_parser().parse_args(
         ["--detach", "--state-dir", str(tmp_path / "state"), *extra]
     )
+    assert cli._check_args(cli.build_parser(), args) == 0
+    return args
 
 
-class TestReuseDemoMode:
-    def test_reuse_refuses_across_demo_modes(self, tmp_path):
-        state = {
-            "version": settings.VERSION,
-            "roots": ["r"],
-            "port": 5,
-            "filters": {},
-            "demo": False,
-        }
+class TestReuseRules:
+    """One server per state dir: selection never refuses; build, roots and port do."""
+
+    @staticmethod
+    def _running(tmp_path, monkeypatch, **overrides):
+        state_dir = tmp_path / "state"
+        state = {**_state(5555, pid=4242, instance_id="i1", key="stored-key"), "roots": ["r"]}
+        state.update(overrides)
+        cli.write_state(state_dir, state)
+        monkeypatch.setattr(cli, "_our_instance", lambda state, timeout=1.0: {"pid": 4242})
+        return state_dir
+
+    @pytest.mark.parametrize(
+        "extra, query",
+        [((), ""), (("--demo",), "?demo=1"), (("--project", "p.x"), "?project=p.x"),
+         (("--session", "abcdef12"), "?session=abcdef12")],
+    )
+    def test_any_selection_reuses_with_the_stored_key(
+        self, tmp_path, monkeypatch, capsys, extra, query
+    ):
+        state_dir = self._running(tmp_path, monkeypatch)
+        assert cli._reuse_if_running(state_dir, _reuse_args(tmp_path, *extra), _one_root(tmp_path))
+        out = capsys.readouterr().out
+        assert f"URL: http://127.0.0.1:5555/{query}#k=stored-key" in out
+
+    def test_another_build_is_replaced_after_a_verified_stop(self, tmp_path, monkeypatch, capsys):
+        state_dir = self._running(tmp_path, monkeypatch, version="0.0.1")
+        stopped: list[str] = []
+        monkeypatch.setattr(cli, "_stop_verified", lambda state: stopped.append(state["pid"]) or True)
+        assert cli._reuse_if_running(state_dir, _reuse_args(tmp_path), _one_root(tmp_path)) is False
+        assert stopped == [4242]
+        assert cli.read_state(state_dir) is None
+        assert "replaced an instance from another plugin build" in capsys.readouterr().out
+
+    def test_another_plugin_root_is_replaced(self, tmp_path, monkeypatch):
+        state_dir = self._running(tmp_path, monkeypatch, plugin_root="/elsewhere")
+        monkeypatch.setattr(cli, "_stop_verified", lambda state: True)
+        assert cli._reuse_if_running(state_dir, _reuse_args(tmp_path), _one_root(tmp_path)) is False
+
+    def test_another_build_that_will_not_stop_refuses(self, tmp_path, monkeypatch):
+        state_dir = self._running(tmp_path, monkeypatch, version="0.0.1")
+        monkeypatch.setattr(cli, "_stop_verified", lambda state: False)
         with pytest.raises(cli.CliError) as excinfo:
-            cli._refuse_on_reuse_mismatch(
-                state, _reuse_args(tmp_path, "--demo"), _one_root(tmp_path)
-            )
-        # Branch-specific: the wording must say which mode the server runs.
-        assert "started without --demo" in str(excinfo.value)
+            cli._reuse_if_running(state_dir, _reuse_args(tmp_path), _one_root(tmp_path))
+        assert "stop it first with" in str(excinfo.value)
 
-    def test_reuse_refuses_demo_request_against_a_real_instance(self, tmp_path):
-        state = {
-            "version": settings.VERSION,
-            "roots": ["r"],
-            "port": 5,
-            "filters": {},
-            "demo": True,
-        }
+    def test_different_roots_refuse(self, tmp_path, monkeypatch):
+        state_dir = self._running(tmp_path, monkeypatch, roots=["other"])
         with pytest.raises(cli.CliError) as excinfo:
-            cli._refuse_on_reuse_mismatch(
-                state, _reuse_args(tmp_path), _one_root(tmp_path)
+            cli._reuse_if_running(state_dir, _reuse_args(tmp_path), _one_root(tmp_path))
+        assert str(excinfo.value).startswith("a running instance serves different roots")
+
+    def test_a_different_explicit_port_refuses(self, tmp_path, monkeypatch):
+        state_dir = self._running(tmp_path, monkeypatch)
+        with pytest.raises(cli.CliError):
+            cli._reuse_if_running(
+                state_dir, _reuse_args(tmp_path, "--port", "6000"), _one_root(tmp_path)
             )
-        assert "started with --demo" in str(excinfo.value)
 
-    def test_reuse_allows_the_same_demo_mode(self, tmp_path):
-        state = {
-            "version": settings.VERSION,
-            "roots": ["r"],
-            "port": 5,
-            "filters": {},
-            "demo": True,
-        }
-        cli._refuse_on_reuse_mismatch(
-            state, _reuse_args(tmp_path, "--demo"), _one_root(tmp_path)
-        )
-
-
-class TestReuseVersion:
-    def test_reuse_refuses_a_different_version(self, tmp_path):
-        state = {
-            "version": "0.0.1",
-            "roots": ["r"],
-            "port": 5,
-            "filters": {},
-            "demo": False,
-        }
-        with pytest.raises(cli.CliError) as excinfo:
-            cli._refuse_on_reuse_mismatch(
-                state, _reuse_args(tmp_path), _one_root(tmp_path)
-            )
-        message = str(excinfo.value)
-        assert "version 0.0.1" in message
-        assert f"this is {settings.VERSION}" in message
-
-    def test_reuse_refuses_an_unknown_version(self, tmp_path):
-        state = {"roots": ["r"], "port": 5, "filters": {}, "demo": False}
-        with pytest.raises(cli.CliError) as excinfo:
-            cli._refuse_on_reuse_mismatch(
-                state, _reuse_args(tmp_path), _one_root(tmp_path)
-            )
-        assert "version (unknown)" in str(excinfo.value)
-
-    def test_reuse_allows_the_same_version(self, tmp_path):
-        state = {
-            "version": settings.VERSION,
-            "roots": ["r"],
-            "port": 5,
-            "filters": {},
-            "demo": False,
-        }
-        cli._refuse_on_reuse_mismatch(
-            state, _reuse_args(tmp_path), _one_root(tmp_path)
-        )
+    def test_an_unconfirmed_instance_starts_fresh(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        cli.write_state(state_dir, {**_state(5555, pid=4242, instance_id="i1"), "roots": ["r"]})
+        monkeypatch.setattr(cli, "health_check", lambda *a, **k: None)
+        assert cli._reuse_if_running(state_dir, _reuse_args(tmp_path), _one_root(tmp_path)) is False
 
 
 class TestWaitUntilStopped:
     def test_a_disappeared_pid_is_not_success(self, monkeypatch):
         """The instance still answering wins over the pid having vanished."""
-        monkeypatch.setattr(
-            cli, "_health_for_instance", lambda *a, **k: {"ok": True}
-        )
+        monkeypatch.setattr(cli, "_our_instance", lambda *a, **k: {"ok": True})
         monkeypatch.setattr(cli, "_pid_gone", lambda pid: True)
-        assert cli._wait_until_stopped(1, "token", timeout=0.15) is False
+        assert cli._wait_until_stopped(_state(1, pid=1, instance_id="t"), timeout=0.15) is False
 
     def test_a_silent_instance_is_success(self, monkeypatch):
-        monkeypatch.setattr(cli, "_health_for_instance", lambda *a, **k: None)
-        assert cli._wait_until_stopped(1, "token", timeout=0.15) is True
+        monkeypatch.setattr(cli, "_our_instance", lambda *a, **k: None)
+        assert cli._wait_until_stopped(_state(1, pid=1, instance_id="t"), timeout=0.15) is True
 
 
 class TestHeadResponse:
@@ -305,89 +306,235 @@ class TestHeadResponse:
         srv = live_server
         raw = _read_until_close(
             srv.server_port,
-            b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+            + f"{settings.KEY_HEADER}: {srv.key}\r\n\r\n".encode(),
         )
         _head, separator, body = raw.partition(b"\r\n\r\n")
         assert separator == b"\r\n\r\n"
         assert body.startswith(b'{"ok":true')
 
 
-def _get_json(port: int, path: str) -> dict:
-    url = f"http://127.0.0.1:{port}{path}"
-    with urllib.request.urlopen(url, timeout=5) as response:
-        return json.loads(response.read().decode("utf-8"))
+def _get(port: int, path: str, key: str | None) -> tuple[int, dict]:
+    headers = {settings.KEY_HEADER: key} if key is not None else {}
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read().decode("utf-8"))
 
 
-def _health(port: int) -> dict:
-    return _get_json(port, "/api/health")
+def _get_json(port: int, path: str, key: str) -> dict:
+    return _get(port, path, key)[1]
 
 
-class TestHealthLaunchMode:
-    def test_health_reports_the_actual_launch_mode(self, live_server):
-        """/api/health reports the launch mode, not a hard-coded demo flag."""
-        real = _health(live_server.server_port)
-        assert real["demo"] is False
-        assert real["demo_available"] is True
+class TestLaunchKeyRequired:
+    """Every /api/* route answers 401 without the launch key; static routes do not."""
 
-        demo_srv = server_module.create_server(live_server.roots, demo_mode=True)
-        thread = threading.Thread(target=demo_srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            demo = _health(demo_srv.server_port)
-        finally:
-            demo_srv.shutdown()
-            demo_srv.server_close()
-            thread.join(timeout=5)
+    @pytest.mark.parametrize(
+        "path",
+        ["/api/health", "/api/sessions", "/api/session?slug=a&session_id=b", "/api/demo",
+         "/api/nope"],
+    )
+    @pytest.mark.parametrize("presented", [None, "", "wrong", "café"])
+    def test_api_without_the_right_key_is_401(self, live_server, path, presented):
+        if presented == "café":
+            raw = _read_until_close(
+                live_server.server_port,
+                f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n".encode()
+                + settings.KEY_HEADER.encode() + b": caf\xe9\xff\r\n\r\n",
+            )
+            assert raw.startswith(b"HTTP/1.1 401")
+            return
+        status, body = _get(live_server.server_port, path, presented)
+        assert status == 401
+        assert body == {"ok": False, "error": "key required"}
 
-        assert demo["demo"] is True
-        assert demo["demo_available"] is True
+    def test_the_right_key_is_accepted(self, live_server):
+        status, body = _get(live_server.server_port, "/api/health", live_server.key)
+        assert status == 200 and body["ok"] is True
+
+    def test_static_page_needs_no_key(self, live_server):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{live_server.server_port}/", timeout=5) as response:
+            assert response.status == 200
 
 
-class TestSessionsFilterEcho:
+class TestHealthIdentity:
+    def test_keyed_health_names_the_build_and_no_launch_mode(self, live_server):
+        health = _get_json(live_server.server_port, "/api/health", live_server.key)
+        assert health["version"] == settings.VERSION
+        assert health["plugin_root"] == str(settings.PLUGIN_ROOT)
+        assert health["demo_available"] is True
+        assert "demo" not in health
+
+
+class TestSessionsSelection:
     def test_unfiltered_sessions_echo_empty_filters(self, live_server):
-        payload = _get_json(live_server.server_port, "/api/sessions")
+        payload = _get_json(live_server.server_port, "/api/sessions", live_server.key)
         assert payload["filters"] == {}
 
-    def test_launch_project_filter_is_echoed(self, live_server):
-        """A filtered launch's /api/sessions names the filter that emptied it."""
-        srv = server_module.create_server(
-            live_server.roots, filters={"project": "my project"}
+    def test_request_filters_are_applied_and_echoed(self, live_server):
+        payload = _get_json(
+            live_server.server_port, "/api/sessions?project=p.x&session=abcdef12",
+            live_server.key,
         )
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            payload = _get_json(srv.server_port, "/api/sessions")
-        finally:
-            srv.shutdown()
-            srv.server_close()
-            thread.join(timeout=5)
-
-        assert payload["filters"]["project"] == "my project"
+        assert payload["filters"] == {"project": "p.x", "session": "abcdef12"}
         assert payload["sessions"] == []
 
-    def test_invalid_byte_filter_is_escaped_not_a_500(self, live_server):
-        """A lone surrogate must escape as JSON, not kill the whole response."""
-        bad = "evil-\udcff-proj"  # what an undecodable argv byte becomes
-        srv = server_module.create_server(
-            live_server.roots, filters={"project": bad}
-        )
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            url = f"http://127.0.0.1:{srv.server_port}/api/sessions"
-            try:
-                with urllib.request.urlopen(url, timeout=5) as response:
-                    status, raw = response.status, response.read()
-            except urllib.error.HTTPError as error:
-                status, raw = error.code, error.read()
-        finally:
-            srv.shutdown()
-            srv.server_close()
-            thread.join(timeout=5)
+    @pytest.mark.parametrize(
+        "query", ["project=my%20project", "project=%C3%A9", "session=short", "session=a%2Fb12345"]
+    )
+    def test_malformed_selection_is_400_not_500(self, live_server, query):
+        status, body = _get(live_server.server_port, f"/api/sessions?{query}", live_server.key)
+        assert status == 400
+        assert body["ok"] is False
 
-        assert status == 200
-        assert b"\\udcff" in raw
-        assert json.loads(raw.decode("utf-8"))["filters"]["project"] == bad
+
+class TestProjectMatcher:
+    """Exact on slug, label, raw basename in that order; case-folded only after all miss."""
+
+    @staticmethod
+    def _sessions():
+        return [
+            {"key": "k1", "slug": "My_App", "project": "My_App", "session_id": "s1"},
+            {"key": "k2", "slug": "my_app", "project": "my_app", "session_id": "s2"},
+            {"key": "k3", "slug": "PACT-prompt", "project": "PACT-prompt", "session_id": "s3"},
+        ]
+
+    def test_exact_slug_wins_over_case_folding(self):
+        from visualizer import model
+
+        hits = model.match_project("my_app", self._sessions(), {})
+        assert [hit["key"] for hit in hits] == ["k2"]
+
+    def test_raw_basename_tier(self):
+        from visualizer import model
+
+        hits = model.match_project("My App", self._sessions(), {"k1": "My App"})
+        assert [hit["key"] for hit in hits] == ["k1"]
+
+    def test_case_insensitive_only_after_every_exact_tier_misses(self):
+        from visualizer import model
+
+        hits = model.match_project("pact-PROMPT", self._sessions(), {})
+        assert [hit["key"] for hit in hits] == ["k3"]
+
+    def test_never_a_substring(self):
+        from visualizer import model
+
+        assert model.match_project("PACT", self._sessions(), {}) == []
+
+    def test_session_exact_then_unique_prefix(self):
+        from visualizer import model
+
+        sessions = [{"session_id": "abcdef12-0001"}, {"session_id": "abcdef12-0002"}]
+        assert len(model.match_session("abcdef12", sessions)) == 2
+        assert model.match_session("abcdef12-0001", sessions) == [sessions[0]]
+        assert model.match_session("abcdef1", sessions) == []
+
+
+class TestSelectionFlags:
+    @pytest.mark.parametrize(
+        "argv, message",
+        [(["--project", "a b"], "pact-viz: --project must match [A-Za-z0-9._-]"),
+         (["--project", "x" * 129], "pact-viz: --project must match [A-Za-z0-9._-]"),
+         (["--session", "short"], "pact-viz: --session must match [A-Za-z0-9-]{8,64}")],
+    )
+    def test_bad_selection_value_exits_2(self, tmp_path, capsys, argv, message):
+        assert cli.main([*argv, "--state-dir", str(tmp_path / "s")]) == 2
+        assert capsys.readouterr().err.strip() == message
+
+    @pytest.mark.parametrize(
+        "argv",
+        [["--stop", "--demo"], ["--status", "--project", "x"], ["--stop", "--port", "5"],
+         ["--status", "--open"], ["--list", "--demo"], ["--list", "--open"],
+         ["--list", "--port", "5"], ["--list", "--detach"], ["--project", "a", "--project-dir", "b"],
+         ["--demo", "--session", "abcdef12"]],
+    )
+    def test_meaningless_combinations_are_usage_errors(self, argv):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        assert excinfo.value.code == 2
+
+    def test_project_dir_uses_the_hooks_slug_rule(self, tmp_path):
+        target = tmp_path / "My  App.v2"
+        target.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        assert cli.project_slug(str(link)) == "My_App_v2"
+
+
+class TestLaunchPage:
+    def test_launch_page_is_private_and_carries_the_escaped_url(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        url = 'http://127.0.0.1:5/?project=a"b#k=K<x>'
+        page = cli._write_launch_page(state_dir, url)
+        assert (page.stat().st_mode & 0o777) == 0o600
+        text = page.read_text()
+        assert "K&lt;x&gt;" in text and 'a&quot;b' in text
+        assert "<x>" not in text
+
+    def test_browser_is_opened_on_the_file_not_the_keyed_url(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        opened: list[str] = []
+        monkeypatch.setattr(cli.webbrowser, "open", lambda target: opened.append(target) or True)
+        assert cli._open_keyed(state_dir, "http://127.0.0.1:5/#k=SECRETKEY")
+        assert opened == [(state_dir / "launch.html").as_uri()]
+        assert "SECRETKEY" not in opened[0]
+
+    def test_a_planted_symlink_is_replaced_not_followed(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("keep me")
+        (state_dir / "launch.html").symlink_to(victim)
+        cli._write_launch_page(state_dir, "http://127.0.0.1:5/#k=K")
+        assert victim.read_text() == "keep me"
+        assert not (state_dir / "launch.html").is_symlink()
+
+
+class TestKeyStaysOutOfArgv:
+    def test_child_argv_carries_no_key_and_no_selection(self, tmp_path):
+        args = cli.build_parser().parse_args(
+            ["--detach", "--demo", "--state-dir", str(tmp_path / "s")]
+        )
+        command = cli._child_command(args, [], tmp_path / "s")
+        assert "--demo" not in command and "--project" not in command
+        assert not any(part.startswith("--key") or part.startswith("#k=") for part in command)
+
+    def test_main_pops_the_inherited_key_and_instance(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(settings.KEY_ENV, "inherited-key")
+        monkeypatch.setenv("PACT_VIZ_INSTANCE_ID", "inherited-instance")
+        seen: dict = {}
+
+        def fake_serve(args, roots, state_dir, instance_id, key):
+            seen.update(instance_id=instance_id, key=key,
+                        env_key=os.environ.get(settings.KEY_ENV),
+                        env_instance=os.environ.get("PACT_VIZ_INSTANCE_ID"))
+            return 0
+
+        monkeypatch.setattr(cli, "serve_foreground", fake_serve)
+        assert cli.main(["--state-dir", str(tmp_path / "s")]) == 0
+        assert seen == {"instance_id": "inherited-instance", "key": "inherited-key",
+                        "env_key": None, "env_instance": None}
+
+
+class TestPidStartTime:
+    def test_own_start_time_is_read_on_linux(self):
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            pytest.skip("pid start time comes from /proc")
+        first = cli.pid_start_time(os.getpid())
+        assert first and first.isdigit()
+        assert cli.pid_start_time(os.getpid()) == first
+
+    def test_a_missing_pid_has_no_start_time(self):
+        assert cli.pid_start_time(2**31 - 1) is None
 
 
 class TestHalfOpenTimeout:
@@ -424,7 +571,7 @@ class TestDetachFailureGuard:
     def test_failed_detach_keeps_another_instances_state(self, tmp_path, monkeypatch):
         """A concurrent detach's published state must survive our failure path."""
         state_dir = tmp_path / "state"
-        foreign = {"pid": 2, "port": 1, "url": "u", "instance_id": "B"}
+        foreign = {"pid": 2, "port": 1, "url": "u", "instance_id": "B", "key": "kb"}
         cli.write_state(state_dir, foreign)
 
         class DeadProcess:
@@ -665,8 +812,9 @@ class TestTerminalOutputStripsControls:
         assert "\x1b" not in out
         state_dir = tmp_path / "state"
         cli.write_state(state_dir, {"pid": os.getpid(), "port": 1, "url": "http://x/\x1b]0;t\x07",
-                                    "instance_id": "i\x9b1", "roots": ["r\x1bx"]})
-        monkeypatch.setattr(cli, "_health_for_instance", lambda *a, **k: {"pid": os.getpid()})
+                                    "instance_id": "i\x9b1", "key": "k\x1b[2J",
+                                    "roots": ["r\x1bx"]})
+        monkeypatch.setattr(cli, "_our_instance", lambda *a, **k: {"pid": os.getpid()})
         rc = cli.main(["--status", "--state-dir", str(state_dir)])
         out = capsys.readouterr().out
         assert rc == 0
@@ -753,10 +901,14 @@ class TestRunStatusOneRule:
 class TestEtagCoversEveryInput:
     """A since-poll must see status crossing the live window and task-store writes."""
 
-    @staticmethod
-    def _get(port, query):
+    key = ""
+
+    def _get(self, port, query):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(f"http://127.0.0.1:{port}/api/session?{query}", timeout=5) as response:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/session?{query}", headers={settings.KEY_HEADER: self.key}
+        )
+        with opener.open(request, timeout=5) as response:
             return json.loads(response.read()), response.headers.get("ETag")
 
     def test_since_poll_sees_status_change_and_task_write(self, tmp_path, monkeypatch):
@@ -766,6 +918,7 @@ class TestEtagCoversEveryInput:
         _write_session(root_dir, [_START], age_s=10)
         roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
         srv = server_module.create_server(roots)
+        self.key = srv.key
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         try:
@@ -793,3 +946,17 @@ class TestEtagCoversEveryInput:
             srv.shutdown()
             srv.server_close()
             thread.join(timeout=5)
+
+
+class TestSessionContextIsAnTokenInput:
+    def test_a_context_file_write_changes_the_token(self, tmp_path):
+        from visualizer import discovery, model
+
+        root_dir = tmp_path / "root"
+        journal_path = _write_session(root_dir, [_START], age_s=3600)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        ref = discovery.find_session(roots, "proj", "s1")
+        before, _ = model.session_token(ref)
+        (journal_path.parent / "pact-session-context.json").write_text('{"team_name": "t"}')
+        after, _ = model.session_token(ref)
+        assert after != before

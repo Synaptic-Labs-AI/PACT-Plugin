@@ -255,6 +255,32 @@ export function cursorAfterRefresh(priorEvents, priorCursor, events) {
   return clamp(same ? index + 1 : index, 0, next.length);
 }
 
+/* What the launch URL selects (newest first wins where several match):
+ *   ?demo=1                        the training simulation
+ *   ?root=&slug=&session_id=       that exact run (the page's own deep link)
+ *   ?session=ID (with ?project=)   the one run whose id matches; zero or
+ *                                  several matches are an error naming ID
+ *   ?project=X                     that project's newest live run, else its
+ *                                  newest run, else the named-empty notice
+ *   nothing                        the newest live run on the default root,
+ *                                  else its newest run
+ * The server applies project and session to the list and echoes them in
+ * `filters`, which is the only source for the named-empty label. */
+export function launchSelection(search) {
+  const params = new URLSearchParams(search || "");
+  if (params.has("demo")) return { kind: "demo" };
+  const root = params.get("root") || "";
+  const slug = params.get("slug") || "";
+  const sessionId = params.get("session_id") || "";
+  if (root && slug && sessionId) return { kind: "deep", root, slug, session_id: sessionId };
+  const query = {};
+  if (params.get("project")) query.project = params.get("project");
+  if (params.get("session")) query.session = params.get("session");
+  if (query.session) return { kind: "session", root, query };
+  if (query.project) return { kind: "project", root, query };
+  return { kind: "default", root, query };
+}
+
 /* Canvas modules read design tokens off the document root. One fallback map
  * keeps timeline.js and charts.js painting the same colours in tests,
  * headless runs, and before the stylesheet has applied. */

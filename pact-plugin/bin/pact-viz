@@ -28,6 +28,10 @@ while [ -L "$SOURCE" ]; do
     esac
 done
 PLUGIN_ROOT="$(cd -P "$(dirname "$SOURCE")/.." >/dev/null 2>&1 && pwd)"
+# The resolved launcher path: the CLI prints it in its Stop: line, so the line
+# runs in any shell, including one where ${CLAUDE_PLUGIN_ROOT} is unset.
+PACT_VIZ_LAUNCHER="${PLUGIN_ROOT}/bin/$(basename "$SOURCE")"
+export PACT_VIZ_LAUNCHER
 
 PYTHON_BIN="${PACT_VIZ_PYTHON:-python3}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then

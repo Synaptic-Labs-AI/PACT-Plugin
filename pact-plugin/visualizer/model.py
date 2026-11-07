@@ -37,6 +37,8 @@ from .settings import (
     MAX_TASKS,
     MAX_VARIETY_HISTORY,
     MAX_WARNINGS,
+    PLUGIN_ROOT,
+    SESSION_PREFIX_MIN,
     VERSION,
     normalize_variety,
     ORCHESTRATION_MARKER_TYPES,
@@ -1243,6 +1245,7 @@ def derive_model(
     now: datetime | None = None,
     mtime: float = 0.0,
     activity_ts: float = 0.0,
+    version: str = VERSION,
 ) -> dict:
     """Derive the full contract model from an already-parsed journal.
 
@@ -1386,7 +1389,7 @@ def derive_model(
 
     return {
         "ok": True,
-        "version": VERSION,
+        "version": version,
         "etag": etag,
         "source": dict(source),
         "meta": meta,
@@ -1458,6 +1461,26 @@ def session_team(ref: discovery.SessionRef) -> str:
     return resolve_team_name(head, roster.read_session_context(ref.session_dir), ref.session_id)
 
 
+def session_activity_ns(ref: discovery.SessionRef, team_name: str) -> int:
+    """Newest mtime (ns) of a session's non-journal inputs, or 0.
+
+    Location: model.session_activity_ns.
+    Summary: The team's task and team files (roster.activity_mtime_ns) plus
+             the session's pact-session-context.json, which build_model reads
+             for the team-name fallback. The journal mtime is folded in by the
+             caller.
+    Used by: session_token, build_sessions_list.
+    """
+    newest = roster.activity_mtime_ns(ref.root.path, team_name) if team_name else 0
+    context = ref.session_dir / "pact-session-context.json"
+    if discovery.contained(ref.root.path / "pact-sessions", context):
+        try:
+            newest = max(newest, int(context.stat().st_mtime_ns))
+        except OSError:
+            pass
+    return newest
+
+
 def session_token(
     ref: discovery.SessionRef, now: datetime | None = None, team_name: str | None = None
 ) -> tuple[str, float]:
@@ -1474,7 +1497,7 @@ def session_token(
     """
     lifecycle, stat = journal.lifecycle_scan(ref.journal)
     team = session_team(ref) if team_name is None else team_name
-    activity_ns = roster.activity_mtime_ns(ref.root.path, team) if team else 0
+    activity_ns = session_activity_ns(ref, team)
     journal_ns = int(stat.st_mtime_ns) if stat is not None else 0
     size = int(stat.st_size) if stat is not None else 0
     activity_ns = max(activity_ns, journal_ns)
@@ -1527,35 +1550,21 @@ def build_sessions_list(
 
     Location: model.build_sessions_list.
     Summary: One bounded head/tail read per journal (never a full parse), then
-             filter (--project is an exact, case-insensitive match on the
-             emitted project or the slug; --session stays a substring), sort
-             newest updated_at first, and cap at ``limit``. ``started_at`` is
-             None when the head window has no timestamp.
-    Used by: server (/api/sessions), tests.
+             filter with match_project / match_session, sort newest
+             updated_at first, and cap at ``limit``. ``started_at`` is None
+             when the head window has no timestamp.
+    Used by: server (/api/sessions), cli (--list), tests.
     """
     reference = utcnow(now)
     sessions: list[dict] = []
+    raw_names: dict[str, str] = {}
     for ref in discovery.discover_sessions(roots):
         team_name = session_team(ref)
-        activity_ns = roster.activity_mtime_ns(ref.root.path, team_name) if team_name else 0
+        activity_ns = session_activity_ns(ref, team_name)
         summary = journal.summarize_journal(ref.journal, reference, activity_ns / 1e9)
         raw_project = _basename(summary.project_dir) or ref.slug
         project, project_conformed = project_label(raw_project)
-        if project_filter:
-            # EXACT, case-insensitive, against every name this session can be
-            # addressed by: the raw directory basename, its constrained label
-            # and the slug. The QUERY is run through the same sanitiser too,
-            # because commands/visualize.md passes the raw basename: a
-            # directory named "My App" is labelled "My_App" and the raw query
-            # must still find it. Never a substring — "PACT" must not match
-            # "PACT-prompt".
-            wanted = project_filter.lower()
-            wanted_label = project_label(project_filter)[0].lower()
-            candidates = {raw_project.lower(), project.lower(), ref.slug.lower()}
-            if wanted not in candidates and wanted_label not in candidates:
-                continue
-        if session_filter and session_filter.lower() not in ref.session_id.lower():
-            continue
+        raw_names[ref.key] = raw_project
         entry = {
             "key": ref.key,
             "root": ref.root_id,
@@ -1580,6 +1589,10 @@ def build_sessions_list(
             # list and the payload says the label lost characters.
             entry["project_altered"] = True
         sessions.append(entry)
+    if project_filter:
+        sessions = match_project(project_filter, sessions, raw_names)
+    if session_filter:
+        sessions = match_session(session_filter, sessions)
     sessions.sort(
         key=lambda entry: (
             entry.get("updated_at") or "",
@@ -1603,6 +1616,54 @@ def build_sessions_list(
     }
 
 
+def match_project(
+    wanted: str, sessions: Sequence[dict], raw_names: Mapping[str, str]
+) -> list[dict]:
+    """The sessions a ``project`` selection names.
+
+    Location: model.match_project.
+    Summary: Tiered and exact first: the slug, then the constrained label,
+             then the raw directory basename (``raw_names`` by session key).
+             Only when all three tiers miss does a case-insensitive pass over
+             the same three names run. Never a substring match.
+    Used by: build_sessions_list (/api/sessions and --list).
+    """
+    def names(session: Mapping[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(session.get("slug") or ""),
+            str(session.get("project") or ""),
+            raw_names.get(str(session.get("key") or ""), ""),
+        )
+
+    for tier in range(3):
+        hits = [session for session in sessions if names(session)[tier] == wanted]
+        if hits:
+            return hits
+    folded = wanted.lower()
+    return [
+        session for session in sessions
+        if folded in {name.lower() for name in names(session)}
+    ]
+
+
+def match_session(wanted: str, sessions: Sequence[dict]) -> list[dict]:
+    """The sessions a ``session`` selection names: exact id, else a prefix.
+
+    Location: model.match_session.
+    Summary: An exact session id wins. Otherwise a prefix of at least
+             settings.SESSION_PREFIX_MIN characters selects every session it
+             starts; the page treats zero or several matches as an error.
+    Used by: build_sessions_list (/api/sessions and --list).
+    """
+    exact = [session for session in sessions if session.get("session_id") == wanted]
+    if exact or len(wanted) < SESSION_PREFIX_MIN:
+        return exact
+    return [
+        session for session in sessions
+        if str(session.get("session_id") or "").startswith(wanted)
+    ]
+
+
 def build_health(
     roots: Sequence[Any],
     *,
@@ -1610,16 +1671,14 @@ def build_health(
     instance_id: str,
     uptime_s: float,
     now: datetime | None = None,
-    demo_mode: bool = False,
 ) -> dict:
-    """Build the /api/health payload.
+    """Build the /api/health payload (served only with the launch key).
 
     Location: model.build_health.
-    Summary: Identity, pid, random instance token, uptime and the roots array
-             (with live journal counts). ``demo`` reports the ACTUAL launch
-             mode — the caller passes what the server was started as, so a
-             real-journal launch never claims to be the demo. ``demo_available``
-             is the capability: the scripted demo exists in every mode.
+    Summary: Identity (version and plugin_root, the build the CLI compares on
+             reuse), pid, random instance token, uptime and the roots array
+             (with live journal counts). ``demo_available`` is the capability:
+             the scripted demo is selectable by URL on every server.
     Used by: server (/api/health), tests.
     """
     reference = utcnow(now)
@@ -1627,11 +1686,11 @@ def build_health(
         "ok": True,
         "name": APP_NAME,
         "version": VERSION,
+        "plugin_root": str(PLUGIN_ROOT),
         "pid": int(pid),
         "instance_id": str(instance_id),
         "uptime_s": round(max(0.0, float(uptime_s)), 1),
         "roots": discovery.root_payload(roots),
-        "demo": bool(demo_mode),
         "demo_available": True,
         "generated_at": iso_utc(reference),
     }

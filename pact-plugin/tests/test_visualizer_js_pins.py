@@ -345,6 +345,17 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("a wrap-up session_end fires the stamp and, when merged, confetti",
     spawned.includes("stamp") && spawned.includes("confetti"));
 
+  /* The launch URL's selection. */
+  const { launchSelection } = await import("./dom.js");
+  check("?demo=1 is the demo", launchSelection("?demo=1").kind === "demo");
+  check("root, slug and session_id are the deep link",
+    JSON.stringify(launchSelection("?root=r&slug=s&session_id=x")) === JSON.stringify({ kind: "deep", root: "r", slug: "s", session_id: "x" }));
+  check("?session= selects by id and keeps the project",
+    JSON.stringify(launchSelection("?session=abcd1234&project=p").query) === JSON.stringify({ project: "p", session: "abcd1234" })
+    && launchSelection("?session=abcd1234").kind === "session");
+  check("?project= selects the project", launchSelection("?project=p").kind === "project");
+  check("no query is the default", launchSelection("").kind === "default");
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);
@@ -372,17 +383,27 @@ function deferred(kind, args) {
   return promise;
 }
 export const api = {
+  key: "k-test",
+  keyRejected: null,
   sessionsData: null,
   sessionsDeferred: false,
-  sessions: (args) => (api.sessionsDeferred ? deferred("sessions", args) : Promise.resolve(api.sessionsData)),
+  sessionsCalls: [],
+  healthCalls: 0,
+  sessions: (args) => {
+    api.sessionsCalls.push(Object.assign({}, args));
+    return api.sessionsDeferred ? deferred("sessions", args) : Promise.resolve(api.sessionsData);
+  },
   session: (args) => deferred("session", args),
   demo: (args) => deferred("demo", args || {}),
-  health: async () => ({ demo_available: true }),
+  health: async () => { api.healthCalls += 1; return { demo_available: true }; },
 };
 """,
     "api.js": r"""
 import { api } from "./stubs.js";
 export const USE_MOCK = false;
+export const KEY_REQUIRED_MESSAGE = "This page needs its launch link. Run pact-viz --status to print it.";
+export const takeLaunchKey = () => api.key;
+export const setKeyRejectedHandler = (fn) => { api.keyRejected = fn; };
 export const sessions = (...a) => api.sessions(...a);
 export const session = (...a) => api.session(...a);
 export const demo = (...a) => api.demo(...a);
@@ -533,15 +554,19 @@ console.log("PINS OK");
 """
 
 
-def _run_app_scenario(scenario: str, tmp_path: Path) -> None:
-    """Run one app.js scenario under the harness and assert it passed."""
+def _run_app_scenario(scenario: str, tmp_path: Path, search: str = "") -> None:
+    """Run one app.js scenario under the harness and assert it passed.
+
+    `search` is the page's location.search (the launch URL's query).
+    """
     node = _require_node()
     for name in ("app.js", "dom.js"):
         shutil.copy(STATIC_JS_DIR / name, tmp_path / name)
     for name, body in APP_STUBS.items():
         (tmp_path / name).write_text(body, encoding="utf-8")
     (tmp_path / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
-    (tmp_path / "harness.js").write_text(APP_PRELUDE + scenario + APP_EPILOGUE, encoding="utf-8")
+    prelude = f"globalThis.__SEARCH__ = {json.dumps(search)};\n" + APP_PRELUDE
+    (tmp_path / "harness.js").write_text(prelude + scenario + APP_EPILOGUE, encoding="utf-8")
     proc = subprocess.run([node, "harness.js"], cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
         f"app.js scenario failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
@@ -754,6 +779,70 @@ check("only one poll is ever scheduled", pendingTimers().length === 1);
 """, tmp_path)
 
 
+def test_without_its_launch_key_the_page_calls_no_api(tmp_path):
+    """No key: the launch-link banner, no retry, and not a single /api call."""
+    _run_app_scenario(r"""
+api.key = "";
+api.sessionsData = { roots: [], sessions: [] };
+await import("./app.js");
+await tick();
+const banner = document.getElementById("error-banner");
+check("the launch-link banner shows", banner.hidden === false
+  && document.getElementById("error-text").textContent.includes("needs its launch link"));
+check("the banner offers no retry", document.getElementById("error-retry").hidden === true);
+check("no /api call is made", api.sessionsCalls.length === 0 && api.healthCalls === 0
+  && pending.session.length === 0 && pending.demo.length === 0);
+""", tmp_path)
+
+
+def test_a_401_shows_the_launch_link_banner_and_it_stays(tmp_path):
+    """A rejected key replaces any banner, and later errors do not displace it."""
+    _run_app_scenario(r"""
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended], default_root: "r" };
+await import("./app.js");
+await tick();
+const rejected = new Error("This page needs its launch link. Run pact-viz --status to print it.");
+rejected.status = 401;
+api.keyRejected();
+pending.session.shift().reject(rejected);
+await tick();
+const text = document.getElementById("error-text").textContent;
+check("the 401 banner names the launch link", text.includes("needs its launch link"));
+document.getElementById("btn-refresh").fire("click");
+await tick();
+check("a later navigation does not displace it",
+  document.getElementById("error-text").textContent.includes("needs its launch link")
+  && document.getElementById("error-banner").hidden === false);
+""", tmp_path)
+
+
+def test_the_launch_url_selects_the_run(tmp_path):
+    """?project= narrows the list on the server and opens its newest live run."""
+    _run_app_scenario(r"""
+const older = { root: "r", slug: "p", session_id: "P1", is_live: false, status: "ended", updated_at: "2026-11-03" };
+const liveRun = { root: "r", slug: "p", session_id: "P2", is_live: true, status: "live", updated_at: "2026-11-01" };
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [older, liveRun], default_root: "r", filters: { project: "p" } };
+await import("./app.js");
+await tick();
+check("the project goes to the server", api.sessionsCalls[0] && api.sessionsCalls[0].project === "p");
+check("the newest live run of the project opens", pending.session[0] && pending.session[0].args.session_id === "P2");
+""", tmp_path, search="?project=p")
+
+
+def test_an_ambiguous_or_unknown_session_names_the_id(tmp_path):
+    """?session= opens only a single match; otherwise the error names the id."""
+    _run_app_scenario(r"""
+const a = { root: "r", slug: "p", session_id: "abcd1234-1", is_live: false, updated_at: "2026-11-02" };
+const b = { root: "r", slug: "p", session_id: "abcd1234-2", is_live: false, updated_at: "2026-11-01" };
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [a, b], default_root: "r", filters: { session: "abcd1234" } };
+await import("./app.js");
+await tick();
+check("the session goes to the server", api.sessionsCalls[0] && api.sessionsCalls[0].session === "abcd1234");
+check("two matches open nothing", pending.session.length === 0);
+check("the error names the id", document.getElementById("error-text").textContent.includes("abcd1234"));
+""", tmp_path, search="?session=abcd1234")
+
+
 def test_a_stale_poll_never_overwrites_a_reopened_run(tmp_path):
     """A poll in flight when the same run is reopened is dropped."""
     _run_app_scenario(r"""
@@ -875,6 +964,57 @@ def test_toasts_hold_for_the_reader_and_keep_focus():
     )
 
 
+KEY_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+const stored = new Map();
+const replaced = [];
+globalThis.history = { replaceState: (_s, _t, url) => replaced.push(url) };
+globalThis.window = {
+  location: { search: "?project=p", hash: "#k=secret-key-1", pathname: "/" },
+  sessionStorage: { getItem: (k) => stored.get(k) || null, setItem: (k, v) => stored.set(k, v) },
+};
+const requests = [];
+let status = 200;
+globalThis.fetch = async (url, init) => {
+  requests.push({ url, headers: init.headers });
+  return { ok: status === 200, status, json: async () => ({ ok: status === 200, sessions: [] }) };
+};
+const api = await import("./api.js");
+check("the fragment key is taken", api.takeLaunchKey() === "secret-key-1");
+check("the key moves to this tab's storage", stored.get("pact-viz-key") === "secret-key-1");
+check("the fragment is stripped and the query kept", replaced.at(-1) === "/?project=p");
+await api.sessions({ project: "p", session: "abcd1234", all: true, limit: 50 });
+check("every /api call sends the key", requests.at(-1).headers["X-PACT-Key"] === "secret-key-1");
+check("list filters go to the server",
+  requests.at(-1).url === "/api/sessions?project=p&session=abcd1234&all=1&limit=50");
+let rejected = 0;
+api.setKeyRejectedHandler(() => { rejected += 1; });
+status = 401;
+let error = null;
+try { await api.session({ root: "r", slug: "s", session_id: "x" }); } catch (err) { error = err; }
+check("a 401 reaches the page's handler", rejected === 1);
+check("a 401 throws with its status", error && error.status === 401);
+/* Without a fragment, the key comes back from this tab's storage. */
+globalThis.window.location.hash = "";
+check("a reload without the fragment reuses the stored key", api.takeLaunchKey() === "secret-key-1");
+if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+console.log("PINS OK");
+"""
+
+
+def test_api_carries_the_launch_key():
+    """The fragment key is stored, stripped, and sent on every /api call."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", KEY_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"key pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
 def test_dev_demo_fixture_matches_build_demo_model():
     """The mock fixture must be the Python demo, not an older hand copy."""
     fixture = json.loads(DEV_DEMO.read_text(encoding="utf-8"))
@@ -907,18 +1047,16 @@ def test_js_behaviour_pins():
     )
 
 
-def test_no_query_param_project_fallback():
-    """The named-empty state comes only from the server's echoed filters.
-
-    A `?project=` query param never narrowed the response, so trusting it
-    could name a filter that was not applied — and the pick path would open
-    an unrelated run instead of the empty state. The server echoes
-    `filters` (server.py, since b7ecf6fb), which is the only source.
+def test_the_named_empty_label_comes_only_from_the_server_echo():
+    """The URL's project or session goes to the server, which echoes the
+    filters it applied; only that echo may name an empty selection, so the
+    page never names a filter the response was not narrowed by.
     """
     source = (STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
-    assert 'params.get("project")' not in source, (
-        "app.js reads a project query param; only the server's launch filters "
-        "narrow the session list, and only data.filters may name them"
+    code = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    assignments = re.findall(r"state\.requestedFilter\s*=(?!=)\s*([^;]+);", code)
+    assert assignments == ["requestedFilterLabel(data && data.filters)"], (
+        f"state.requestedFilter is set from something other than the server's echo: {assignments}"
     )
 
 

@@ -495,10 +495,10 @@ class TestRunKindAgreement:
 # --- 6. commit attribution counts agent-carrying commits too ----------------
 
 
-class TestHealthDemoShape:
-    """`demo` is the launch MODE; `demo_available` is the capability."""
+class TestHealthIdentity:
+    """Health names the build: the plugin's release and its root."""
 
-    def _health(self, tmp_path: Path, **kwargs) -> dict:
+    def _health(self, tmp_path: Path) -> dict:
         root = make_root(tmp_path)
         return model.build_health(
             roots_for(root),
@@ -506,23 +506,54 @@ class TestHealthDemoShape:
             instance_id="deadbeef",
             uptime_s=1.5,
             now=datetime(2026, 1, 1, tzinfo=UTC),
-            **kwargs,
         )
 
-    def test_real_launch_does_not_claim_the_demo_mode(self, tmp_path):
+    def test_health_carries_the_build_identity_and_no_launch_mode(self, tmp_path):
         payload = self._health(tmp_path)
-        assert payload["demo"] is False
+        plugin_root = Path(__file__).resolve().parent.parent
+        manifest = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
+        assert payload["version"] == manifest["version"]
+        assert payload["plugin_root"] == str(plugin_root)
         assert payload["demo_available"] is True
+        assert not {"demo", "demo_mode", "is_demo", "mode"} & set(payload)
 
-    def test_demo_launch_reports_the_demo_mode(self, tmp_path):
-        payload = self._health(tmp_path, demo_mode=True)
-        assert payload["demo"] is True
-        assert payload["demo_available"] is True
 
-    def test_the_capability_field_is_the_only_addition(self, tmp_path):
-        payload = self._health(tmp_path)
-        assert {"demo", "demo_available"} <= set(payload)
-        assert not {"demo_mode", "is_demo", "mode"} & set(payload)
+class TestSelectionMatcher:
+    """One matcher serves the URL selection and --list: exact names first,
+    case-insensitive only when every exact tier misses."""
+
+    def _rows(self, tmp_path: Path, specs: list[tuple[str, str, str]]) -> Path:
+        root = make_root(tmp_path)
+        for slug, session_id, project_dir in specs:
+            write_journal(root, slug, session_id, [
+                census.session_start(STAMP, session_id=session_id, project_dir=project_dir),
+            ])
+        return root
+
+    def _ids(self, root: Path, **filters) -> list[str]:
+        return sorted(row["session_id"] for row in list_payload(root, **filters)["sessions"])
+
+    def test_an_exact_name_beats_a_case_folded_one(self, tmp_path):
+        root = self._rows(tmp_path, [("app", "sess-lower", "/w/app"),
+                                     ("App", "sess-upper", "/w/App")])
+        assert self._ids(root, project_filter="app") == ["sess-lower"]
+        assert self._ids(root, project_filter="App") == ["sess-upper"]
+        assert self._ids(root, project_filter="APP") == ["sess-lower", "sess-upper"]
+
+    def test_the_slug_tier_wins_over_the_label_tier(self, tmp_path):
+        root = self._rows(tmp_path, [("alpha", "sess-label", "/w/beta"),
+                                     ("beta", "sess-slug", "/w/other")])
+        assert self._ids(root, project_filter="beta") == ["sess-slug"]
+
+    def test_a_session_id_matches_exactly_or_by_a_long_prefix(self, tmp_path):
+        root = self._rows(tmp_path, [("p", "0123456789abcdef", "/w/p"),
+                                     ("p", "0123456700000000", "/w/p")])
+        assert self._ids(root, session_filter="0123456789abcdef") == ["0123456789abcdef"]
+        assert self._ids(root, session_filter="01234567") == [
+            "0123456700000000", "0123456789abcdef"
+        ]
+        assert self._ids(root, session_filter="012345678") == ["0123456789abcdef"]
+        assert self._ids(root, session_filter="0123456") == []
 
 
 class TestCommitAttribution:

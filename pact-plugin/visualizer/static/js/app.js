@@ -1,7 +1,16 @@
 /* PACT Mission Control — app shell and orchestration.
  * Reads local journals via same-origin API only. No external requests. */
 
-import { sessions, session, demo, health, USE_MOCK } from "./api.js";
+import {
+  sessions,
+  session,
+  demo,
+  health,
+  USE_MOCK,
+  takeLaunchKey,
+  setKeyRejectedHandler,
+  KEY_REQUIRED_MESSAGE,
+} from "./api.js";
 import {
   el,
   clear,
@@ -16,6 +25,7 @@ import {
   PROJECT_ALTERED_NOTE,
   runKey,
   cursorAfterRefresh,
+  launchSelection,
 } from "./dom.js";
 import { Stage } from "./stage.js";
 import { Panels } from "./panels.js";
@@ -113,6 +123,9 @@ const state = {
   errorSource: "",
   demoAvailable: true,
   requestedFilter: "",
+  /* The selection the URL asked for ({project, session}); every list refresh
+   * sends it so the server narrows the list the same way each time. */
+  listQuery: {},
   suppress: false,
   pollTimer: 0,
   raf: 0,
@@ -146,10 +159,15 @@ function setLoading(on, sub) {
 /* `source` records which operation raised the banner: only a poll may clear a
  * poll banner, so a failed navigation or refresh survives the next poll. */
 function showError(message, retry, source = "") {
+  /* The launch-link banner outranks every other: until the page has its key,
+   * nothing else can succeed. */
+  if (state.errorSource === "key" && source !== "key") return;
   state.lastError = message || "Something went wrong";
   state.errorSource = source;
   els.errorText.textContent = state.lastError;
   els.error.hidden = false;
+  els.errorRetry.hidden = source === "key";
+  els.errorDemo.hidden = source === "key" || !state.demoAvailable;
   els.errorRetry.onclick = () => {
     hideError();
     if (typeof retry === "function") retry();
@@ -158,6 +176,7 @@ function showError(message, retry, source = "") {
 }
 
 function hideError() {
+  if (state.errorSource === "key") return;
   els.error.hidden = true;
   state.lastError = "";
   state.errorSource = "";
@@ -539,7 +558,7 @@ function fmtDateShort(iso) {
 }
 
 async function refreshList(preferredRoot) {
-  const data = await sessions();
+  const data = await sessions(state.listQuery);
   state.roots = Array.isArray(data.roots) ? data.roots : [];
   state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
   if (!state.roots.length && state.sessions.length) {
@@ -632,9 +651,9 @@ function showEmptyFilter(label) {
 async function loadInitial() {
   setLoading(true, "reading local journals");
   try {
-    const params = new URLSearchParams(window.location.search);
-    /* `demo_available` is the capability; `demo` is the server's actual launch
-     * mode. Only the capability decides whether the demo affordance exists. */
+    const pick = launchSelection(window.location.search);
+    /* `demo_available` is the capability: only it decides whether the demo
+     * affordance exists. */
     try {
       const info = await health();
       state.demoAvailable = Boolean(info && info.demo_available !== false);
@@ -642,31 +661,35 @@ async function loadInitial() {
       /* Keep the default: the demo is also the degraded-path fallback. */
     }
     els.demo.hidden = !state.demoAvailable;
-    const data = await refreshList(params.get("root") || undefined);
-    /* Only the server's launch filters narrowed the list, and the payload
-     * echoes them; a query param here would name a filter that was never
-     * applied to the response. */
+    state.listQuery = pick.query || {};
+    const data = await refreshList(pick.root || undefined);
     state.requestedFilter = requestedFilterLabel(data && data.filters);
     const rootId = els.root.value;
-    if (params.has("demo") || (USE_MOCK && !params.has("session"))) {
+    if (pick.kind === "demo" || (USE_MOCK && pick.kind === "default")) {
       await openDemo();
-    } else if (params.has("session")) {
-      const ref = {
-        kind: "real",
-        root: params.get("root") || rootId || data.default_root || (state.roots[0] && state.roots[0].id),
-        slug: params.get("slug") || "",
-        session_id: params.get("session"),
-        is_live: false,
-      };
-      await openSession(ref, { fromUrl: true });
+    } else if (pick.kind === "deep") {
+      await openSession({ kind: "real", root: pick.root, slug: pick.slug, session_id: pick.session_id, is_live: false });
+    } else if (pick.kind === "session") {
+      const matches = state.sessions.filter((s) => s.session_id === pick.query.session || s.session_id.startsWith(pick.query.session));
+      if (matches.length === 1) {
+        await openSession(matches[0]);
+      } else {
+        selectRoot(rootId, { open: false });
+        showError(
+          matches.length
+            ? `Session ${pick.query.session} matches ${matches.length} runs; use a longer id.`
+            : `No run matches session ${pick.query.session}.`,
+          null,
+          "navigation",
+        );
+      }
     } else {
-      const live = state.sessions.find((s) => s.is_live && s.root === rootId);
-      const pick = live || sessionsFor(rootId, null)[0];
-      if (pick) {
-        populateProjects(rootId);
-        els.project.value = pick.slug;
-        populateSessions(rootId, pick.slug);
-        await openSession(pick, { fromUrl: true });
+      /* project or default: the list is already narrowed by the server */
+      const scope = pick.kind === "project" ? state.sessions : state.sessions.filter((s) => s.root === rootId);
+      const newest = (list) => list.slice().sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))[0];
+      const choice = newest(scope.filter((s) => s.is_live)) || newest(scope);
+      if (choice) {
+        await openSession(choice);
       } else {
         selectRoot(rootId, { open: false });
         if (state.requestedFilter) showEmptyFilter(state.requestedFilter);
@@ -675,6 +698,7 @@ async function loadInitial() {
     }
   } catch (err) {
     setLoading(false);
+    if (err && err.status === 401) return; /* the launch-link banner is up */
     showError(`Could not read PACT runs: ${err.message}`, loadInitial, "load");
     /* The demo needs the same server. Only try it when health answers;
      * otherwise openDemo's failure would replace this error and its retry
@@ -789,7 +813,7 @@ function updateUrl(kind, ref) {
   else if (ref) {
     p.set("root", ref.root);
     p.set("slug", ref.slug);
-    p.set("session", ref.session_id);
+    p.set("session_id", ref.session_id);
   }
   const next = p.toString();
   try {
@@ -1183,6 +1207,14 @@ function initModules() {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize).catch(() => {});
 }
 
+/* The page without its launch key makes no /api call: it says how to get
+ * the link instead. A 401 later (a restarted server) shows the same banner. */
+function showKeyBanner() {
+  setLoading(false);
+  stopPolling();
+  showError(KEY_REQUIRED_MESSAGE, null, "key");
+}
+
 async function boot() {
   trackHeaderHeight();
   initModules();
@@ -1191,6 +1223,13 @@ async function boot() {
   setModeLabel(); /* the static HTML badge starts as LIVE; the app starts idle */
   updateTimeline();
   state.raf = requestAnimationFrame(frame);
+  if (!USE_MOCK) {
+    setKeyRejectedHandler(showKeyBanner);
+    if (!takeLaunchKey()) {
+      showKeyBanner();
+      return;
+    }
+  }
   try {
     await loadInitial();
   } catch (err) {

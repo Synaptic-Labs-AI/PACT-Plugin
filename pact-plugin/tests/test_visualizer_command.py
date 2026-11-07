@@ -154,8 +154,8 @@ class TestLaunchInstructions:
 
     @pytest.mark.parametrize(
         "flag",
-        ["--demo", "--project", "--stop", "--open"],
-        ids=["demo", "project", "stop", "open"],
+        ["--demo", "--project", "--project-dir", "--session", "--stop", "--open"],
+        ids=["demo", "project", "project-dir", "session", "stop", "open"],
     )
     def test_body_covers_each_argument_variant(self, flag):
         assert flag in _body(), (
@@ -163,36 +163,91 @@ class TestLaunchInstructions:
             f"body never tells the model to pass: missing {flag!r}."
         )
 
-    def test_live_row_binds_project_to_the_project_root(self):
-        """The live-launch fix (Bugbot "Live launch skips current session"):
-        the empty/live row must pass --project and derive it from the PROJECT
-        ROOT, not from the shell's current working directory.
-
-        A worktree session's cwd basename is the worktree name, while the
-        journal slug is the basename of $CLAUDE_PROJECT_DIR. Taking the slug
-        from $PWD filters every session out, and the page then silently falls
-        back to the training demo: the user asks for their live run and gets
-        fictional data with no error. The row-level asserts are deliberately
-        narrower than the body-wide flag check above, which a revert leaves
-        green."""
+    def _row(self, label):
         rows = [
             line for line in _body().splitlines()
-            if line.strip().startswith("| empty / `live`")
+            if line.strip().startswith(f"| {label}")
         ]
         assert len(rows) == 1, (
-            "visualize.md must carry exactly one empty/live launch row; "
+            f"visualize.md must carry exactly one {label!r} launch row; "
             f"found {len(rows)}"
         )
-        row = rows[0]
-        assert "--project" in row, (
-            "the empty/live launch row must pass --project so the viewer "
-            "opens this session's project rather than any live run in the root"
+        return rows[0]
+
+    def test_live_row_passes_the_project_root_not_a_basename(self):
+        """The empty/live row hands the PROJECT ROOT to the launcher, which
+        derives the journal slug with the hooks' own rule. A shell basename
+        of $PWD is the worktree or subdirectory name, which matches no
+        journal slug, and a basename of an unresolved symlink differs from
+        the hooks' resolved slug."""
+        row = self._row("empty / `live`")
+        assert '--project-dir "$CLAUDE_PROJECT_DIR"' in row, (
+            "the empty/live row must pass --project-dir \"$CLAUDE_PROJECT_DIR\""
         )
-        assert "${CLAUDE_PROJECT_DIR:-$PWD}" in row, (
-            "the empty/live launch row must derive the project from "
-            "$CLAUDE_PROJECT_DIR (the project root), falling back to $PWD. A "
-            "bare $PWD basename is the worktree name in a worktree session, "
-            "which matches no journal slug and silently opens the demo."
+        assert "$PWD" not in row and "basename" not in row, (
+            "the empty/live row must not derive the project from $PWD or a "
+            "shell basename"
+        )
+
+    def test_live_row_handles_an_unset_project_dir(self):
+        body = _body()
+        assert "`$CLAUDE_PROJECT_DIR` is empty" in body, (
+            "visualize.md must say what to do when $CLAUDE_PROJECT_DIR is empty"
+        )
+
+    def test_live_row_offers_the_session_id(self):
+        assert "--session '<session id>'" in _body(), (
+            "visualize.md must tell the model to pass this session's id when "
+            "it is known, so a peer session in the same project is not opened"
+        )
+
+    def test_project_argument_is_validated_before_use(self):
+        """$ARGUMENTS is free text substituted into a shell command, so the
+        label must be checked against the allowlist before anything runs."""
+        body = _body()
+        assert "`^[A-Za-z0-9._-]+$`" in body, (
+            "visualize.md must tell the model to accept a <project> argument "
+            "only when it fully matches ^[A-Za-z0-9._-]+$"
+        )
+        assert "do not launch anything" in body.lower(), (
+            "visualize.md must tell the model to launch nothing for an invalid label"
+        )
+
+    def test_project_row_single_quotes_the_label(self):
+        row = self._row("`<project>`")
+        assert "--project '<label>'" in row, (
+            "the <project> row must single-quote the label: inside double "
+            "quotes $( ) and backticks still expand"
+        )
+        assert '"<label>"' not in row
+
+    def test_stop_scope_is_the_config_root(self):
+        body = _body()
+        assert "recorded for this config root" in body, (
+            "the stop bullet must say it stops the server recorded for this "
+            "config root, which another session or a shell may have started"
+        )
+        assert "this session launched" not in body
+
+    def test_refusal_is_reported_not_acted_on(self):
+        lines = [
+            line for line in _body().splitlines()
+            if "do not stop the server yourself" in line.lower()
+        ]
+        assert len(lines) == 1, (
+            "visualize.md must tell the model to report a stop-it-first "
+            "refusal and leave the running server alone"
+        )
+        assert "`Stop:`" in lines[0] and "`pact-viz:`" in lines[0], (
+            "the refusal instruction must say to report the pact-viz: line "
+            "together with the Stop: command"
+        )
+
+    def test_url_is_reported_with_its_key(self):
+        body = _body()
+        assert "including everything after `#`" in body, (
+            "visualize.md must tell the model to report the URL with its "
+            "fragment: the fragment carries the page's access key"
         )
 
     def test_body_reports_url_and_stop_lines(self):
@@ -209,27 +264,42 @@ class TestLaunchInstructions:
 
     def test_direct_launch_is_presented_as_an_equal_option(self):
         body = _body()
-        assert f"{LAUNCH_LITERAL} --open" in body, (
-            "visualize.md must name the direct launch "
-            f"`{LAUNCH_LITERAL} --open`; it is the token-free path and must "
-            "not be omitted."
-        )
-        assert "equal" in body.lower(), (
+        lowered = body.lower()
+        assert "equal path, not a fallback" in lowered, (
             "visualize.md must present the direct launch as an EQUAL path, not "
-            "a fallback — the two launch paths drive the same server and the "
+            "a fallback; the two launch paths drive the same server and the "
             "direct one costs no tokens."
         )
 
-    def test_body_does_not_open_a_browser_unconditionally(self):
-        """--open is conditional on a local GUI session; the body must not
-        instruct an unconditional browser open on headless machines."""
+    def test_direct_launch_gives_the_user_an_absolute_path(self):
+        """${CLAUDE_PLUGIN_ROOT} is set for the command's own Bash call, not
+        in the user's shell, so the direct-launch advice must hand over the
+        absolute launcher path from the Stop: line."""
         body = _body()
-        lowered = body.lower()
-        assert "headless" in lowered or "ssh" in lowered, (
-            "visualize.md must mention the headless/SSH condition under which "
-            "--open is omitted; otherwise a headless session runs a browser "
-            "open that cannot succeed and drops the URL report."
+        assert "absolute path" in body and "`Stop:` line" in body, (
+            "visualize.md must tell the model to give the user the launcher's "
+            "absolute path from the Stop: line"
         )
+        assert "`${CLAUDE_PLUGIN_ROOT}` is not set in their shell" in body
+
+    def test_open_is_conditional_on_a_local_gui(self):
+        """--open is appended only at a local GUI session. A body-wide word
+        check passes on any mention of headless; this pins the condition in
+        the same sentence as the flag, and keeps --open out of every row."""
+        body = _body()
+        sentences = [
+            line for line in body.splitlines()
+            if "--open" in line and "local GUI" in line
+        ]
+        assert sentences, (
+            "visualize.md must say, in the line that names --open, that it is "
+            "appended only at a local GUI session"
+        )
+        assert "SSH" in body and "headless" in body
+        for label in ("empty / `live`", "`demo`", "`<project>`", "`stop`"):
+            assert "--open" not in self._row(label), (
+                f"the {label} row must not hard-code --open"
+            )
 
 
 class TestSurfaceHygiene:

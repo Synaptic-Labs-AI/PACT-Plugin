@@ -15,6 +15,7 @@ ephemeral port and shut it down without leaving a listener behind.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import secrets
@@ -31,6 +32,7 @@ from .settings import (
     APP_NAME,
     DEFAULT_SESSIONS_LIMIT,
     JSON_CONTENT_TYPE,
+    KEY_HEADER,
     LOOPBACK_HOST,
     MAX_SESSIONS_LIMIT,
     SECURITY_HEADERS,
@@ -68,8 +70,9 @@ class MissionControlServer(ThreadingHTTPServer):
 
     Location: server.MissionControlServer.
     Summary: Carries the resolved roots, the random instance token, the
-             server's start time, the CLI's list filters and the launch mode
-             (``demo_mode``) that /api/health reports. Threading
+             per-launch key every /api/* request must present, and the
+             server's start time. The server serves every session of its
+             roots; which run a page shows is chosen by its URL. Threading
              (daemon threads) keeps a slow static read from blocking the API
              and lets shutdown return promptly.
     Used by: create_server, cli, tests.
@@ -87,15 +90,13 @@ class MissionControlServer(ThreadingHTTPServer):
         *,
         roots: Sequence[RootSpec],
         instance_id: str,
+        key: str,
         verbose: bool = False,
-        filters: Mapping[str, str] | None = None,
-        demo_mode: bool = False,
     ) -> None:
         self.roots: list[RootSpec] = list(roots)
         self.instance_id = instance_id
+        self.key = key
         self.verbose = bool(verbose)
-        self.filters = dict(filters or {})
-        self.demo_mode = bool(demo_mode)
         self.started_at = _now()
         self.started_monotonic = time.monotonic()
         super().__init__(address, handler_class)
@@ -189,6 +190,22 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
+    def _key_ok(self) -> bool:
+        """True when the request carries this server's launch key.
+
+        Constant-time compare; any decoding problem reads as a wrong key.
+        """
+        presented = self.headers.get(KEY_HEADER)
+        if not presented:
+            return False
+        try:
+            return hmac.compare_digest(
+                presented.encode("utf-8", "surrogateescape"),
+                str(self.mission_server.key).encode("utf-8"),
+            )
+        except (TypeError, ValueError, UnicodeError):
+            return False
+
     def _method_not_allowed(self) -> None:
         """Answer any non-GET method with the contract's 405 JSON body."""
         self._send_json(
@@ -212,6 +229,11 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         # checks) sees the same effective path; nothing decodes again later,
         # which keeps %2e%2e from being re-expanded after a check.
         path = unquote(split.path)
+        # The key check runs before any route work, so an unkeyed request
+        # costs O(1): no discovery, summary or parse.
+        if path.startswith("/api/") and not self._key_ok():
+            self._send_error(401, "key required")
+            return
         if path == "/":
             self._serve_index()
         elif path == "/api/health":
@@ -309,13 +331,30 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             instance_id=server.instance_id,
             uptime_s=server.uptime_s,
             now=_now(),
-            demo_mode=server.demo_mode,
         )
         self._send_json(200, payload)
 
     def _serve_sessions(self, query: str) -> None:
-        """GET /api/sessions?limit=N -> the cheap session list."""
+        """GET /api/sessions?limit=&project=&session= -> the cheap session list.
+
+        ``project`` must be a label (settings.PROJECT_LABEL_RE) and
+        ``session`` an id or id prefix (settings.SESSION_ID_RE); either
+        otherwise answers 400. The applied filters are echoed in ``filters``.
+        """
         params = parse_qs(query, keep_blank_values=True)
+        filters: dict[str, str] = {}
+        project = _first_param(params, "project")
+        if project is not None:
+            if not settings.PROJECT_LABEL_RE.fullmatch(project):
+                self._send_error(400, "project must match [A-Za-z0-9._-]")
+                return
+            filters["project"] = project
+        session = _first_param(params, "session")
+        if session is not None:
+            if not settings.SESSION_ID_RE.fullmatch(session):
+                self._send_error(400, "session must match [A-Za-z0-9-]{8,64}")
+                return
+            filters["session"] = session
         limit = DEFAULT_SESSIONS_LIMIT
         raw_limit = _first_param(params, "limit")
         if raw_limit is not None:
@@ -326,7 +365,6 @@ class MissionControlHandler(BaseHTTPRequestHandler):
                 return
             limit = parsed
         server = self.mission_server
-        filters = server.filters
         payload = model.build_sessions_list(
             server.roots,
             limit=limit,
@@ -335,8 +373,8 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             now=_now(),
         )
         # Always present (empty when unfiltered) so the page can tell "no runs"
-        # from "the launch filter excluded everything" without a second branch.
-        payload["filters"] = dict(filters)
+        # from "the selection matched nothing" without a second branch.
+        payload["filters"] = filters
         self._send_json(200, payload)
 
     def _serve_session(self, query: str) -> None:
@@ -513,18 +551,17 @@ def create_server(
     host: str = LOOPBACK_HOST,
     port: int = 0,
     instance_id: str | None = None,
+    key: str | None = None,
     verbose: bool = False,
-    filters: Mapping[str, str] | None = None,
-    demo_mode: bool = False,
 ) -> MissionControlServer:
     """Bind and return a Mission Control server without serving it.
 
     Location: server.create_server.
     Summary: The test seam. Refuses any host other than the hard-coded
              127.0.0.1 loopback literal, binds, generates a random instance
-             token when one is not supplied (the CLI supplies one so it can
-             health-check its own detached child), and verifies the bound
-             socket address really is loopback.
+             token and a random launch key when they are not supplied (the CLI
+             supplies both so it can health-check its own detached child),
+             and verifies the bound socket address really is loopback.
     Used by: cli (foreground/detached), tests.
     """
     if host != LOOPBACK_HOST:
@@ -544,9 +581,8 @@ def create_server(
         MissionControlHandler,
         roots=roots,
         instance_id=token,
+        key=key if key else secrets.token_urlsafe(32),
         verbose=verbose,
-        filters=filters,
-        demo_mode=demo_mode,
     )
     bound_host = str(server.server_address[0])
     if bound_host != LOOPBACK_HOST:
@@ -557,7 +593,6 @@ def create_server(
     return server
 
 
-def server_url(server: MissionControlServer, *, demo_mode: bool = False) -> str:
-    """The user-facing URL for a bound server, with ?demo=1 when requested."""
-    base = server.url
-    return f"{base}?demo=1" if demo_mode else base
+def server_url(server: MissionControlServer) -> str:
+    """The canonical base URL for a bound server (no selection, no key)."""
+    return server.url

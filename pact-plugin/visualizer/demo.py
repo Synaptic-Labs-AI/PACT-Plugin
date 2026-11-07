@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import journal, model, roster
-from .settings import DEMO_ETAG
+from .settings import DEMO_ETAG, DEMO_VERSION
 
 _DEMO_LEAD_ADDRESS = ""
 _BASE_TIME = datetime(2026, 11, 2, 23, 0, 0, tzinfo=timezone.utc)
@@ -764,5 +764,6 @@ def build_demo_model(base_time: datetime | None = None) -> dict:
         event_count=len(events),
         now=ended_dt,
         mtime=base.timestamp(),
+        version=DEMO_VERSION,
     )
     return demo_model

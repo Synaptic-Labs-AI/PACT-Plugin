@@ -1492,7 +1492,7 @@ class TestSessionsListAndHealth:
         assert len(limited["sessions"]) == 1
         filtered = model.build_sessions_list(roots, project_filter="older")
         assert [session["session_id"] for session in filtered["sessions"]] == ["sess-old"]
-        by_session = model.build_sessions_list(roots, session_filter="new")
+        by_session = model.build_sessions_list(roots, session_filter="sess-new")
         assert [session["session_id"] for session in by_session["sessions"]] == ["sess-new"]
         none = model.build_sessions_list(roots, project_filter="does-not-exist")
         assert none["sessions"] == []
@@ -1529,14 +1529,17 @@ class TestSessionsListAndHealth:
         )
         assert payload["ok"] is True
         assert payload["name"] == "pact-mission-control"
-        # CONTRACT.md is the source of truth for the payload shape, so pin its
-        # literal: `== settings.VERSION` would pass on any value at all.
-        assert payload["version"] == "0.1.0"
-        assert payload["version"] == settings.VERSION
+        # The identity is the plugin's own release: read plugin.json here
+        # rather than compare against settings.VERSION, which would pass on
+        # any value at all.
+        plugin_root = Path(__file__).resolve().parent.parent
+        manifest = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
+        assert payload["version"] == manifest["version"]
+        assert payload["plugin_root"] == str(plugin_root)
         assert payload["pid"] == 1234
         assert payload["instance_id"] == "deadbeef"
         assert payload["uptime_s"] == 12.3
-        assert payload["demo"] is False
+        assert "demo" not in payload
         assert payload["demo_available"] is True
         assert payload["roots"][0]["journals"] == 2
 

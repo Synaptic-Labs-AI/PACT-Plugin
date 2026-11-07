@@ -1,20 +1,22 @@
 """Location: pact-plugin/visualizer/cli.py
 Summary: The ``pact-viz`` command line: argument parsing, root resolution,
          foreground and detached serving, the on-disk server state file
-         (atomic, 0600 in a 0700 directory), health-checked --stop/--status,
-         the plain-text --list, and the Python >= 3.12 floor.
+         (atomic, 0600 in a 0700 directory), the per-launch key and the URL
+         that carries it, key-authenticated --stop/--status and reuse, the
+         plain-text --list, and the Python >= 3.12 floor.
 Used by: visualizer.__main__ (python -m visualizer), pact-plugin/bin/pact-viz
          (exec'd wrapper), tests.
 
-Only two blocking operations live here: starting/stopping the detached child
-and the wait-for-ready health poll. Everything else is a pure function of the
-state file and the environment, so the direct CLI is testable without a real
-server.
+One server runs per state directory and serves every session of its roots;
+which run a page opens is chosen by the URL (?demo=1, ?project=, ?session=),
+so every launch can reuse a running server. Only two blocking operations live
+here: starting/stopping the detached child and the wait-for-ready health poll.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -27,6 +29,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
@@ -37,8 +40,12 @@ from . import model, settings
 from . import server as server_module
 from .settings import (
     APP_LABEL,
+    KEY_ENV,
+    KEY_HEADER,
+    LAUNCHER_ENV,
     LOOPBACK_HOST,
     MIN_PYTHON,
+    PLUGIN_ROOT,
     VERSION,
     RootSpec,
 )
@@ -49,6 +56,7 @@ from .settings import (
 _INSTANCE_ENV = "PACT_VIZ_INSTANCE_ID"
 
 _LOG_FILENAME = "server.log"
+_LAUNCH_FILENAME = "launch.html"
 _READY_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 5.0
 _POLL_INTERVAL_S = 0.05
@@ -69,7 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     Location: cli.build_parser.
     Summary: Defines every flag in the contract. There is deliberately no
              --host/--allow-remote: the bind address is the hard loopback
-             literal in settings/server.
+             literal in settings/server. --demo, --project, --project-dir and
+             --session select what the printed URL opens; they never change
+             what the server serves.
     Used by: main, tests.
     """
     parser = argparse.ArgumentParser(
@@ -104,14 +114,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also read sibling ~/.claude* config roots that contain pact-sessions/",
     )
-    parser.add_argument("--project", metavar="SLUG", help="only list sessions in this project")
     parser.add_argument(
-        "--session", metavar="ID", help="only list sessions whose id contains this text"
+        "--project",
+        metavar="LABEL",
+        help="open this project's newest run ([A-Za-z0-9._-]; with --list: filter)",
+    )
+    parser.add_argument(
+        "--project-dir",
+        metavar="PATH",
+        help="open the newest run of the project at PATH (its on-disk slug)",
+    )
+    parser.add_argument(
+        "--session",
+        metavar="ID",
+        help="open this session (id or a prefix of 8+ characters; with --list: filter)",
     )
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="open the training simulation (?demo=1) instead of a real session",
+        help="open the training simulation (?demo=1)",
     )
     parser.add_argument(
         "--open",
@@ -145,6 +166,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def project_slug(project_dir: str) -> str:
+    """The hooks' on-disk slug for a project directory ("" when none).
+
+    Location: cli.project_slug.
+    Summary: The resolved directory's basename with every run of characters
+             outside ``[A-Za-z0-9_-]`` collapsed to ``_`` — the rule the hooks
+             use when they name ``pact-sessions/<slug>/``.
+    Used by: main (--project-dir).
+    """
+    try:
+        name = Path(project_dir).resolve().name
+    except (OSError, RuntimeError):
+        name = Path(project_dir).name
+    return settings.SLUG_UNSAFE_RE.sub("_", name) if name else ""
+
+
 def _state_dir(args: argparse.Namespace) -> Path:
     """Resolve the state directory: --state-dir or <config>/pact-viz."""
     override = getattr(args, "state_dir", None)
@@ -158,8 +195,9 @@ def read_state(state_dir: Path) -> dict | None:
 
     Location: cli.read_state.
     Summary: Returns the parsed object only when it has the required types
-             (pid/port ints, url/instance_id strings); a truncated or hostile
-             file reads as "no state", never as a partial running server.
+             (pid/port ints, url/instance_id/key strings); a truncated, hostile
+             or older-format file reads as "no state", never as a partial
+             running server.
     Used by: cmd_status, cmd_stop, detach, serve_foreground, tests.
     """
     path = settings.state_file(state_dir)
@@ -177,10 +215,9 @@ def read_state(state_dir: Path) -> dict | None:
         return None
     if not (0 < port <= 65535) or pid <= 0:
         return None
-    if not isinstance(payload.get("instance_id"), str):
-        return None
-    if not isinstance(payload.get("url"), str):
-        return None
+    for name in ("instance_id", "url", "key"):
+        if not isinstance(payload.get(name), str) or not payload.get(name):
+            return None
     return payload
 
 
@@ -243,13 +280,12 @@ def _clear_state_if_instance(state_dir: Path, instance_id: str) -> bool:
     """Clear the state file only when it still names ``instance_id``.
 
     Location: cli._clear_state_if_instance.
-    Summary: The guard serve_foreground's shutdown path has always had: a
-             concurrent ``--detach`` that overwrote the state file between the
-             read and the clear must not lose ITS state file, or its server
-             runs on with no record to stop it. Returns True when the state
-             dir was cleared (ours or already empty) — the caller then also
-             removes the detached server's log residue.
-    Used by: cmd_stop (both clear sites).
+    Summary: A concurrent ``--detach`` that overwrote the state file between
+             the read and the clear must not lose ITS state file, or its
+             server runs on with no record to stop it. Returns True when the
+             state dir was cleared (ours or already empty) — the caller then
+             also removes the detached server's log and launch residue.
+    Used by: cmd_stop, detach, serve_foreground.
     """
     current = read_state(state_dir)
     if current is None or current.get("instance_id") == instance_id:
@@ -258,38 +294,56 @@ def _clear_state_if_instance(state_dir: Path, instance_id: str) -> bool:
     return False
 
 
-def _remove_server_log(state_dir: Path) -> None:
-    """Remove the detached server's log; never raises.
+def _remove_residue(state_dir: Path) -> None:
+    """Remove the detached server's log and the launch page; never raises.
 
-    Location: cli._remove_server_log.
-    Summary: detach creates ``server.log`` for its child's stderr; after a
-             stop the file is residue (usually 0 bytes). Unlinking after the
-             bounded stop wait is safe: the writer has exited, and even in the
-             unconfirmed-exit case an unlink only orphans the child's open fd
-             rather than corrupting anything. A later detach recreates it.
-    Used by: cmd_stop (after a guarded clear).
+    After a stop both are residue: the writer has exited, and even in the
+    unconfirmed-exit case an unlink only orphans the child's open fd. A later
+    launch recreates them.
+    """
+    for name in (_LOG_FILENAME, _LAUNCH_FILENAME):
+        try:
+            (state_dir / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def pid_start_time(pid: int) -> str | None:
+    """The kernel start time of ``pid`` (Linux /proc stat field 22), or None.
+
+    Location: cli.pid_start_time.
+    Summary: Together with the pid it names one process for its whole life,
+             so a pid the OS reused after the server exited never matches.
+             None when /proc is unavailable (not Linux) or the pid is gone.
+    Used by: serve_foreground (recorded), _our_instance (compared).
     """
     try:
-        (state_dir / _LOG_FILENAME).unlink(missing_ok=True)
-    except OSError:
-        pass
+        text = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    # The command name (field 2) may contain spaces and parentheses; every
+    # field after it follows the LAST ')'. Field 22 is index 19 from there.
+    tail = text.rsplit(")", 1)[-1].split()
+    return tail[19] if len(tail) > 19 else None
 
 
-def health_check(port: int, timeout: float = 1.0) -> dict | None:
-    """GET /api/health on loopback; the parsed payload or None.
+def health_check(port: int, key: str, timeout: float = 1.0) -> dict | None:
+    """GET /api/health on loopback with the launch key; the payload or None.
 
     Location: cli.health_check.
     Summary: Uses an opener with proxies disabled so a machine-wide HTTP proxy
              can never route a loopback check off-box. Short timeout; any
-             failure reads as "not healthy".
-    Used by: cmd_status, cmd_stop, detach, serve_foreground, tests.
+             failure (including the 401 an unkeyed or wrong-key request gets)
+             reads as "not healthy".
+    Used by: _our_instance, tests.
     """
     if not isinstance(port, int) or not (0 < port <= 65535):
         return None
     url = f"http://{LOOPBACK_HOST}:{port}/api/health"
+    request = urllib.request.Request(url, headers={KEY_HEADER: str(key)})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(url, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
         return None
@@ -298,12 +352,91 @@ def health_check(port: int, timeout: float = 1.0) -> dict | None:
     return None
 
 
-def _health_for_instance(port: int, instance_id: str, timeout: float = 1.0) -> dict | None:
-    """Health-check and require the expected random instance token."""
-    payload = health_check(port, timeout=timeout)
-    if payload is None:
+def _our_instance(state: dict, timeout: float = 1.0) -> dict | None:
+    """The health payload when the state file's server answers as itself.
+
+    Location: cli._our_instance.
+    Summary: Key-authenticated health must report the recorded instance_id
+             AND pid, and, when a start time was recorded, the live process
+             must still have that start time. Anything else — a 401, another
+             instance, a reused pid — reads as "not our instance".
+    Used by: cmd_status, cmd_stop, _reuse_if_running, detach.
+    """
+    health = health_check(int(state["port"]), str(state["key"]), timeout=timeout)
+    if health is None:
         return None
-    return payload if payload.get("instance_id") == instance_id else None
+    if health.get("instance_id") != state.get("instance_id"):
+        return None
+    if not isinstance(health.get("pid"), int) or health.get("pid") != state.get("pid"):
+        return None
+    recorded_start = state.get("pid_start")
+    if isinstance(recorded_start, str) and recorded_start:
+        if pid_start_time(int(state["pid"])) != recorded_start:
+            return None
+    # With no recorded start time (not Linux) the instance_id + pid match
+    # above is the whole identity check.
+    return health
+
+
+def _instance_gone(state: dict) -> bool:
+    """True once the recorded instance no longer answers as itself."""
+    return _our_instance(state, timeout=0.25) is None
+
+
+def _wait_until_stopped(state: dict, timeout: float) -> bool:
+    """Poll until the instance stops answering; True when it did.
+
+    A disappeared pid is not enough: the recorded pid can name an unrelated
+    process, so success means THIS instance's health no longer answers.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _instance_gone(state):
+            return True
+        time.sleep(_POLL_INTERVAL_S)
+    return False
+
+
+def _pid_gone(pid: int) -> bool:
+    """True when a pid no longer exists."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _terminate(pid: int) -> None:
+    """SIGTERM one process, ignoring an already-gone pid."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError as error:
+        raise CliError(f"cannot signal pid {pid}: {error}") from error
+
+
+def _stop_verified(state: dict) -> bool:
+    """Signal a CONFIRMED instance and wait; True once it stopped answering.
+
+    The caller has already confirmed identity with _our_instance. SIGTERM is
+    followed by a bounded wait and a SIGKILL only if the process is still
+    alive.
+    """
+    pid = int(state["pid"])
+    _terminate(pid)
+    stopped = _wait_until_stopped(state, _STOP_TIMEOUT_S)
+    if not stopped and not _pid_gone(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        stopped = _wait_until_stopped(state, 2.0)
+    return stopped
 
 
 def open_browser(url: str) -> bool:
@@ -314,37 +447,95 @@ def open_browser(url: str) -> bool:
         return False
 
 
+def _write_launch_page(state_dir: Path, url: str) -> Path:
+    """Write ``<state-dir>/launch.html``, a redirect to the keyed URL (0600).
+
+    Location: cli._write_launch_page.
+    Summary: The browser is opened on this file instead of the keyed URL, so
+             the key never appears in a process argument list, which other
+             local users can read. Opened O_NOFOLLOW so a planted symlink is
+             refused rather than followed; rewritten on every launch.
+    Used by: _open_keyed.
+    """
+    path = state_dir / _LAUNCH_FILENAME
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    body = (
+        "<!doctype html>\n<meta charset=\"utf-8\">\n"
+        f"<meta http-equiv=\"refresh\" content=\"0;url={html.escape(url, quote=True)}\">\n"
+        "<title>PACT Mission Control</title>\n"
+    ).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.write(descriptor, body)
+    finally:
+        os.close(descriptor)
+    return path
+
+
+def _open_keyed(state_dir: Path, url: str) -> bool:
+    """Open the keyed URL through the launch page; never raises."""
+    try:
+        page = _write_launch_page(state_dir, url)
+    except OSError:
+        return False
+    return open_browser(page.as_uri())
+
+
 def _print_url(url: str) -> None:
     """Print the contract's single URL line (stdout, flushed)."""
     print(f"URL: {url}", flush=True)
 
 
-def _stop_hint(args: argparse.Namespace | None = None) -> str:
-    """The Stop: command matching how this server was launched.
+def _stop_command(state_dir: Path) -> str:
+    """The runnable Stop: command for this state directory.
 
-    Location: cli._stop_hint.
-    Summary: The state directory is shell-quoted because this line is meant to
-             be pasted into a shell; an unquoted path with a metacharacter
-             would execute it.
-    Used by: _print_stop_line, _refuse_on_reuse_mismatch.
+    Location: cli._stop_command.
+    Summary: Uses the launcher path bin/pact-viz exported, else the direct
+             interpreter form, and always the absolute state directory, so
+             the line works pasted into any shell. Every part is
+             shell-quoted.
+    Used by: _print_stop_line, refusal messages.
     """
-    hint = "pact-viz --stop"
-    override = getattr(args, "state_dir", None) if args is not None else None
-    if override:
-        hint += f" --state-dir {shlex.quote(str(override))}"
-    return hint
+    directory = shlex.quote(str(Path(os.path.abspath(str(state_dir)))))
+    launcher = os.environ.get(LAUNCHER_ENV, "").strip()
+    if launcher:
+        return f"{shlex.quote(launcher)} --stop --state-dir {directory}"
+    return (
+        f"PYTHONPATH={shlex.quote(str(PLUGIN_ROOT))} {shlex.quote(sys.executable)} "
+        f"-P -m visualizer --stop --state-dir {directory}"
+    )
 
 
-def _print_stop_line(args: argparse.Namespace | None = None) -> None:
+def _print_stop_line(state_dir: Path) -> None:
     """Print the Stop: line documenting how to end the server."""
-    print(f"Stop: {_stop_hint(args)}", flush=True)
+    print(f"Stop: {_stop_command(state_dir)}", flush=True)
 
 
-def _demo_url(base_url: str) -> str:
-    """The same URL with the client-side demo flag, exactly once."""
-    if "?demo=1" in base_url:
-        return base_url
-    return base_url.rstrip("/") + "/?demo=1"
+def _selection_query(args: argparse.Namespace) -> str:
+    """The URL query this invocation selects ("" for the default view)."""
+    if getattr(args, "demo", False):
+        return "?demo=1"
+    params: list[tuple[str, str]] = []
+    session = getattr(args, "session", None)
+    if session:
+        params.append(("session", str(session)))
+    project = getattr(args, "selected_project", None)
+    if project:
+        params.append(("project", str(project)))
+    return "?" + urllib.parse.urlencode(params) if params else ""
+
+
+def keyed_url(base_url: str, query: str, key: str) -> str:
+    """``<base>/<query>#k=<key>``: the key rides only in the fragment.
+
+    A fragment is never sent to the server, so the key stays out of request
+    lines, logs and Referer headers.
+    """
+    return base_url.rstrip("/") + "/" + query + "#k=" + key
 
 
 def _state_roots_label(roots: Sequence[RootSpec]) -> str:
@@ -358,18 +549,6 @@ def _resolve_roots(args: argparse.Namespace) -> list[RootSpec]:
         root_args=args.root or (),
         all_roots=bool(getattr(args, "all_roots", False)),
     )
-
-
-def _filters(args: argparse.Namespace) -> dict[str, str]:
-    """The /api/sessions filters from --project/--session."""
-    filters: dict[str, str] = {}
-    project = getattr(args, "project", None)
-    session = getattr(args, "session", None)
-    if project:
-        filters["project"] = str(project)
-    if session:
-        filters["session"] = str(session)
-    return filters
 
 
 _TERMINAL_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -397,17 +576,17 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     Location: cli.cmd_list.
     Summary: A compact plain-text table: root, project, session id, updated,
-             status and size. Reads only the bounded head/tail summaries, so
-             it is fast on large journals and never starts a listener.
+             status and size. --project/--project-dir/--session filter with
+             the same matcher /api/sessions uses. Reads only the bounded
+             head/tail summaries and never starts a listener.
     Used by: main, tests.
     """
     roots = _resolve_roots(args)
-    filters = _filters(args)
     payload = model.build_sessions_list(
         roots,
         limit=settings.DEFAULT_SESSIONS_LIMIT,
-        project_filter=filters.get("project", ""),
-        session_filter=filters.get("session", ""),
+        project_filter=str(getattr(args, "selected_project", None) or ""),
+        session_filter=str(getattr(args, "session", None) or ""),
     )
     print(f"{APP_LABEL} · sessions")
     if not roots:
@@ -436,10 +615,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     """--status: report whether the detached server is running.
 
     Location: cli.cmd_status.
-    Summary: Reads the state file, then health-checks the recorded port and
-             requires the recorded instance token. A stale or foreign server
-             reads as "not running"; the command is informational and exits 0
-             in both cases.
+    Summary: Reads the state file, then confirms the instance with
+             key-authenticated health. A stale or foreign server reads as
+             "not running"; the command is informational and exits 0 in both
+             cases. The URL line carries the launch key; PID comes from
+             health.
     Used by: main, tests.
     """
     state_dir = _state_dir(args)
@@ -447,79 +627,30 @@ def cmd_status(args: argparse.Namespace) -> int:
     if state is None:
         print("PACT Mission Control: not running")
         return 0
-    if _health_for_instance(int(state["port"]), str(state["instance_id"])) is None:
+    health = _our_instance(state)
+    if health is None:
         print("PACT Mission Control: not running (stale state file)")
         return 0
-    status_url = str(state["url"])
-    if state.get("demo"):
-        status_url = _demo_url(status_url)
     print("PACT Mission Control: running")
-    print(f"URL: {_terminal(status_url)}")
-    print(f"PID: {state['pid']}")
+    print(f"URL: {_terminal(keyed_url(str(state['url']), '', str(state['key'])))}")
+    print(f"PID: {health['pid']}")
     print(f"Instance: {_terminal(state['instance_id'])}")
     if state.get("roots"):
         print("Roots: " + ", ".join(_terminal(root) for root in state["roots"]))
     return 0
 
 
-def _terminate(pid: int) -> None:
-    """SIGTERM one process, ignoring an already-gone pid."""
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except PermissionError as error:
-        raise CliError(f"cannot signal pid {pid}: {error}") from error
-
-
-def _wait_until_stopped(port: int, instance_id: str, timeout: float) -> bool:
-    """Poll until the instance stops answering.
-
-    Location: cli._wait_until_stopped.
-    Summary: Success means THIS instance's /api/health no longer answers. A
-             disappeared pid is not enough: the recorded pid can name an
-             unrelated process, and treating its exit as success reported a
-             stop while the real server kept serving.
-    Used by: cmd_stop.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _health_for_instance(port, instance_id, timeout=0.25) is None:
-            return True
-        time.sleep(_POLL_INTERVAL_S)
-    return False
-
-
-def _pid_gone(pid: int) -> bool:
-    """True when a pid no longer exists."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    except OSError:
-        return True
-    return False
-
-
 def cmd_stop(args: argparse.Namespace) -> int:
-    """--stop: health-check and stop the detached server; idempotent.
+    """--stop: confirm and stop the detached server; idempotent.
 
     Location: cli.cmd_stop.
-    Summary: The process is only signalled when /api/health answers with the
-             SAME random instance token recorded in the state file AND reports
-             the same pid — a stale or tampered pid that the OS reused, or that
-             names a bystander, is never killed. Stop success means the
-             instance stopped answering, not merely that a pid disappeared.
-             SIGTERM is followed by a bounded wait and a SIGKILL only if the
-             process is still alive; the state file and the detached server's
-             log are removed either way, unless a concurrent detach already
-             replaced the state with a different instance's. ``Stop: stopped
-             pid N`` prints only once health confirms the instance is gone
-             (exit 0); ``Stop: not running`` also exits 0; a delivered signal
-             whose exit is unconfirmed prints ``Stop: unconfirmed pid N`` and
-             exits 1.
+    Summary: The process is only signalled when key-authenticated health
+             reports the recorded instance_id and pid (and the recorded start
+             time, where one exists) — a stale or tampered pid the OS reused,
+             or one naming a bystander, is never signalled. Stop success means
+             the instance stopped answering. ``Stop: stopped pid N`` (exit 0),
+             ``Stop: not running`` (exit 0), ``Stop: refused`` (exit 1) and
+             ``Stop: unconfirmed pid N`` (exit 1).
     Used by: main, tests.
     """
     state_dir = _state_dir(args)
@@ -528,38 +659,29 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print("PACT Mission Control: not running")
         print("Stop: not running")
         return 0
-    port = int(state["port"])
     instance_id = str(state["instance_id"])
     pid = int(state["pid"])
-    health = _health_for_instance(port, instance_id)
-    if health is None:
+    health = health_check(int(state["port"]), str(state["key"]))
+    if health is None or health.get("instance_id") != instance_id:
         if _clear_state_if_instance(state_dir, instance_id):
-            _remove_server_log(state_dir)
+            _remove_residue(state_dir)
         print("Stop: not running")
         print("PACT Mission Control: not running (stale state file cleaned)")
         return 0
-    reported_pid = health.get("pid")
-    if not isinstance(reported_pid, int) or reported_pid != pid:
-        # The state file names a different process than the one answering with
-        # this instance token; signalling it would kill an unrelated process.
+    if _our_instance(state) is None:
+        # The instance answers with our token but under another pid or start
+        # time; signalling the recorded pid would hit an unrelated process.
         print("Stop: refused")
         print(
             f"PACT Mission Control: state file pid {pid} does not match the "
-            f"server's pid {reported_pid!r}; refusing to signal — delete "
+            f"server's pid {health.get('pid')!r}; refusing to signal — delete "
             f"{shlex.quote(str(settings.state_file(state_dir)))} to clear "
             "the record"
         )
         return 1
-    _terminate(pid)
-    stopped = _wait_until_stopped(port, instance_id, _STOP_TIMEOUT_S)
-    if not stopped and not _pid_gone(pid):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        stopped = _wait_until_stopped(port, instance_id, 2.0)
+    stopped = _stop_verified(state)
     if _clear_state_if_instance(state_dir, instance_id):
-        _remove_server_log(state_dir)
+        _remove_residue(state_dir)
     if not stopped:
         print(f"Stop: unconfirmed pid {pid}")
         print(
@@ -572,90 +694,56 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refuse(difference: str, state_dir: Path) -> None:
+    """Raise the contract's reuse refusal for one difference."""
+    raise CliError(
+        f"a running instance {difference}; stop it first with {_stop_command(state_dir)}"
+    )
+
+
 def _reuse_if_running(
     state_dir: Path, args: argparse.Namespace, roots: Sequence[RootSpec]
 ) -> bool:
-    """Print the existing healthy instance's URL and reuse it; True on reuse.
+    """Reuse a healthy instance of this build; True when it was reused.
 
     Location: cli._reuse_if_running.
-    Summary: Reuses only when the running instance serves EXACTLY what this
-             invocation asked for — the same build version, the same root ids
-             in the same order, a compatible port (an explicit --port must
-             match; 0 accepts any), the same launch mode (--demo), and the
-             same --project/--session filters. A mismatched request
-             refuses with a CliError pointing at --stop, because silently
-             printing the old instance's URL would show the user the wrong
-             data. The state file records the filters so the comparison is
-             honest across restarts.
+    Summary: Only a confirmed instance (_our_instance) counts; anything else
+             starts fresh. In order: (1) another plugin build (plugin_root or
+             version differs) is stopped with a verified stop and replaced —
+             its viewer is not the one asked for; (2) different roots refuse;
+             (3) an explicit --port that differs refuses. A reused instance
+             prints its URL with the stored key and THIS invocation's
+             selection query; reuse never mints a key.
     Used by: serve_foreground, detach, tests.
     """
     state = read_state(state_dir)
-    if state is None:
+    if state is None or _our_instance(state) is None:
         return False
-    if _health_for_instance(int(state["port"]), str(state["instance_id"])) is None:
+    if state.get("plugin_root") != str(PLUGIN_ROOT) or state.get("version") != VERSION:
+        if not _stop_verified(state):
+            _refuse("from another plugin build did not stop", state_dir)
+        if _clear_state_if_instance(state_dir, str(state["instance_id"])):
+            _remove_residue(state_dir)
+        print(f"{APP_LABEL}: replaced an instance from another plugin build")
         return False
-    _refuse_on_reuse_mismatch(state, args, roots)
-    url = str(state["url"])
-    if getattr(args, "demo", False):
-        url = _demo_url(url)
-    print(f"{APP_LABEL}: reusing the running instance")
-    _print_url(url)
-    _print_stop_line(args)
-    if getattr(args, "open_browser", False):
-        open_browser(url)
-    return True
-
-
-def _refuse_on_reuse_mismatch(
-    state: dict, args: argparse.Namespace, roots: Sequence[RootSpec]
-) -> None:
-    """Raise CliError when the running instance does not serve this request."""
-    running_version = state.get("version")
-    if not isinstance(running_version, str) or running_version != VERSION:
-        # Every writer of this file has recorded its version, so a missing or
-        # non-text value is a hand-edited/corrupt record, not an old build.
-        shown = (
-            running_version
-            if isinstance(running_version, str) and running_version
-            else "(unknown)"
-        )
-        raise CliError(
-            f"a running instance is version {shown} but this is {VERSION}; "
-            f"stop it first with {_stop_hint(args)}"
-        )
     wanted_roots = [root.id for root in roots]
     running_roots = [str(item) for item in state.get("roots", [])]
     if wanted_roots != running_roots:
-        raise CliError(
-            "a running instance serves different roots "
-            f"({', '.join(running_roots) or 'unknown'}) than requested "
-            f"({', '.join(wanted_roots) or 'unknown'}); stop it first with "
-            f"{_stop_hint(args)}"
+        _refuse(
+            f"serves different roots ({', '.join(running_roots) or 'unknown'}) than "
+            f"requested ({', '.join(wanted_roots) or 'unknown'})",
+            state_dir,
         )
     wanted_port = int(getattr(args, "port", 0) or 0)
     if wanted_port and wanted_port != int(state["port"]):
-        raise CliError(
-            f"a running instance is on port {state['port']} but port "
-            f"{wanted_port} was requested; stop it first with {_stop_hint(args)}"
-        )
-    running_demo = bool(state.get("demo", False))
-    wanted_demo = bool(getattr(args, "demo", False))
-    if wanted_demo != running_demo:
-        raise CliError(
-            "a running instance was started "
-            f"{'with --demo' if running_demo else 'without --demo'}; "
-            f"stop it first with {_stop_hint(args)}"
-        )
-    running_filters = state.get("filters") or {}
-    for key in ("project", "session"):
-        wanted = str(getattr(args, key, None) or "")
-        running = str(running_filters.get(key, "") or "")
-        if wanted != running:
-            raise CliError(
-                f"a running instance was started with --{key} "
-                f"{running or '(none)'} but --{key} {wanted or '(none)'} was "
-                f"requested; stop it first with {_stop_hint(args)}"
-            )
+        _refuse(f"is on port {state['port']} but port {wanted_port} was requested", state_dir)
+    url = keyed_url(str(state["url"]), _selection_query(args), str(state["key"]))
+    print(f"{APP_LABEL}: reusing the running instance")
+    _print_url(url)
+    _print_stop_line(state_dir)
+    if getattr(args, "open_browser", False):
+        _open_keyed(state_dir, url)
+    return True
 
 
 def serve_foreground(
@@ -663,50 +751,46 @@ def serve_foreground(
     roots: Sequence[RootSpec],
     state_dir: Path,
     instance_id: str,
+    key: str,
 ) -> int:
     """Run the server in the foreground until interrupted.
 
     Location: cli.serve_foreground.
     Summary: Reuses a healthy running instance first; otherwise binds, writes
-             the state file, prints the URL/Stop lines, optionally opens the
-             browser, and serves until SIGINT/SIGTERM (both trigger a clean
-             shutdown that removes only this instance's state file).
+             the state file (with the key, plugin root and own start time),
+             prints the URL/Stop lines, optionally opens the browser, and
+             serves until SIGINT/SIGTERM (both trigger a clean shutdown that
+             removes only this instance's state file).
     Used by: main, tests.
     """
     if _reuse_if_running(state_dir, args, roots):
         return 0
     port = int(getattr(args, "port", 0) or 0)
-    filters = _filters(args)
-    demo_mode = bool(getattr(args, "demo", False))
     try:
         server = server_module.create_server(
             roots,
             port=port,
             instance_id=instance_id,
+            key=key,
             verbose=bool(getattr(args, "verbose", False)),
-            filters=filters,
-            demo_mode=demo_mode,
         )
     except OSError as error:
         # A port already in use is a user-facing condition, not a traceback.
         raise CliError(f"cannot bind {LOOPBACK_HOST}:{port}: {error}") from error
-    actual_port = int(server.server_port)
-    # The state file always stores the canonical BASE url; ?demo=1 is a
-    # client-side display mode, so appending it at print/open time (and
-    # exactly once) keeps --status/--stop/reuse from doubling the query.
     base_url = server_module.server_url(server)
-    url = _demo_url(base_url) if demo_mode else base_url
+    url = keyed_url(base_url, _selection_query(args), key)
     state_payload = {
         "version": VERSION,
+        "plugin_root": str(PLUGIN_ROOT),
         "pid": os.getpid(),
+        "pid_start": pid_start_time(os.getpid()),
         "host": LOOPBACK_HOST,
-        "port": actual_port,
+        "port": int(server.server_port),
         "url": base_url,
         "instance_id": instance_id,
+        "key": key,
         "started_at": _utc_now_iso(),
-        "demo": demo_mode,
         "roots": [root.id for root in roots],
-        "filters": dict(filters),
     }
     try:
         write_state(state_dir, state_payload)
@@ -715,9 +799,9 @@ def serve_foreground(
         raise
     print(f"{APP_LABEL} {VERSION} · {_state_roots_label(roots)}")
     _print_url(url)
-    _print_stop_line(args)
+    _print_stop_line(state_dir)
     if getattr(args, "open_browser", False):
-        if not open_browser(url):
+        if not _open_keyed(state_dir, url):
             print("pact-viz: could not open a browser; use the URL above", file=sys.stderr)
 
     def _request_shutdown(_signum: int, _frame: Any) -> None:
@@ -756,7 +840,7 @@ def _child_command(
     roots: Sequence[RootSpec],
     state_dir: Path,
 ) -> list[str]:
-    """The detached child's argv: the same flags minus --detach/--open.
+    """The detached child's argv: serving flags only, never selection or key.
 
     Location: cli._child_command.
     Summary: Root paths and the state directory are passed ABSOLUTE because
@@ -764,7 +848,9 @@ def _child_command(
              forwarding a relative --root/--state-dir verbatim would make the
              child resolve them against a different directory than the parent.
              ``-P`` keeps the working directory off sys.path, so the child
-             imports the visualizer only through PYTHONPATH.
+             imports the visualizer only through PYTHONPATH. The key travels
+             in the environment, not here, because argv is readable by other
+             local users.
     Used by: detach.
     """
     command = [
@@ -779,12 +865,6 @@ def _child_command(
         command.extend(["--root", str(root.path)])
     if getattr(args, "all_roots", False):
         command.append("--all-roots")
-    if getattr(args, "project", None):
-        command.extend(["--project", str(args.project)])
-    if getattr(args, "session", None):
-        command.extend(["--session", str(args.session)])
-    if getattr(args, "demo", False):
-        command.append("--demo")
     command.extend(["--state-dir", str(state_dir)])
     if getattr(args, "verbose", False):
         command.append("--verbose")
@@ -799,15 +879,15 @@ def detach(
     """--detach: spawn the server in the background and wait until healthy.
 
     Location: cli.detach.
-    Summary: Reuses a healthy instance first. Otherwise generates a random
-             instance token, passes it to the child through an internal env
-             var, spawns ``python -m visualizer`` in its own session with
-             stderr appended to ``<state-dir>/server.log``, and polls the
-             state file + /api/health until the child answers with that exact
-             token (or the timeout expires, in which case the child is killed
-             and a nonzero exit is returned). The child's stdout/stderr are not
-             inherited, so the parent's own stdout carries exactly the URL and
-             Stop lines.
+    Summary: Reuses a healthy instance first. Otherwise mints a random
+             instance token and launch key, passes both to the child through
+             internal env vars (the child pops them), spawns ``python -P -m
+             visualizer`` in its own session with stderr appended to
+             ``<state-dir>/server.log``, and polls the state file + keyed
+             health until the child answers as that instance (or the timeout
+             expires, in which case the child is killed and a nonzero exit is
+             returned). The parent's stdout carries exactly the banner, URL
+             and Stop lines.
     Used by: main, tests.
     """
     if _reuse_if_running(state_dir, args, roots):
@@ -818,14 +898,15 @@ def detach(
     except OSError as error:
         raise CliError(f"cannot create state directory {state_dir}: {error}") from error
     instance_id = secrets.token_hex(16)
-    package_root = Path(__file__).resolve().parent.parent
+    key = secrets.token_urlsafe(32)
     environment = dict(os.environ)
     environment[_INSTANCE_ENV] = instance_id
+    environment[KEY_ENV] = key
     existing_pythonpath = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = (
-        f"{package_root}{os.pathsep}{existing_pythonpath}"
+        f"{PLUGIN_ROOT}{os.pathsep}{existing_pythonpath}"
         if existing_pythonpath
-        else str(package_root)
+        else str(PLUGIN_ROOT)
     )
     log_path = state_dir / _LOG_FILENAME
     command = _child_command(args, roots, state_dir)
@@ -837,7 +918,7 @@ def detach(
                 pass
             process = subprocess.Popen(
                 command,
-                cwd=str(package_root),
+                cwd=str(PLUGIN_ROOT),
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -849,17 +930,17 @@ def detach(
         raise CliError(f"cannot start the server process: {error}") from error
 
     deadline = time.monotonic() + _READY_TIMEOUT_S
-    reused_url = ""
+    ready: dict | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
             break
         state = read_state(state_dir)
         if state is not None and state.get("instance_id") == instance_id:
-            if _health_for_instance(int(state["port"]), instance_id) is not None:
-                reused_url = str(state["url"])
+            if _our_instance(state) is not None:
+                ready = state
                 break
         time.sleep(_POLL_INTERVAL_S)
-    if not reused_url:
+    if ready is None:
         if process.poll() is None:
             try:
                 process.terminate()
@@ -877,17 +958,16 @@ def detach(
         if tail:
             message += f"; last log lines from {log_path}:\n{tail}"
         raise CliError(message)
-    url = _demo_url(reused_url) if bool(getattr(args, "demo", False)) else reused_url
+    url = keyed_url(str(ready["url"]), _selection_query(args), key)
     # Reap the child without blocking: this process returns immediately, but a
     # long-lived caller (a test harness, an embedding script) would otherwise
-    # carry a zombie when the detached server eventually exits. A blocking
-    # wait() here would hang the CLI until the server stops.
+    # carry a zombie when the detached server eventually exits.
     threading.Thread(target=process.wait, daemon=True).start()
     print(f"{APP_LABEL} {VERSION} · detached")
     _print_url(url)
-    _print_stop_line(args)
+    _print_stop_line(state_dir)
     if getattr(args, "open_browser", False):
-        if not open_browser(url):
+        if not _open_keyed(state_dir, url):
             print("pact-viz: could not open a browser; use the URL above", file=sys.stderr)
     return 0
 
@@ -902,17 +982,84 @@ def _log_tail(path: Path, max_chars: int = 1200) -> str:
     return text[-max_chars:]
 
 
+def _check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Validate selection values and flag combinations; nonzero exit on error.
+
+    Sets ``args.selected_project`` (the --project label or the --project-dir
+    slug). Meaningless combinations are argparse usage errors (exit 2).
+    """
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    modes = [
+        name
+        for name, enabled in (("--stop", args.stop), ("--status", args.status), ("--list", args.list))
+        if enabled
+    ]
+    if len(modes) > 1:
+        parser.error("choose at most one of --stop, --status, --list")
+    if args.detach and modes:
+        parser.error("--detach cannot be combined with --stop, --status or --list")
+    selection = [
+        flag
+        for flag, value in (
+            ("--demo", args.demo),
+            ("--project", args.project),
+            ("--project-dir", args.project_dir),
+            ("--session", args.session),
+        )
+        if value
+    ]
+    if args.stop or args.status:
+        extra = selection + [
+            flag
+            for flag, value in (("--port", args.port), ("--open", args.open_browser))
+            if value
+        ]
+        if extra:
+            parser.error(f"{modes[0]} cannot be combined with {', '.join(extra)}")
+    if args.list:
+        extra = [
+            flag
+            for flag, value in (
+                ("--demo", args.demo),
+                ("--open", args.open_browser),
+                ("--port", args.port),
+            )
+            if value
+        ]
+        if extra:
+            parser.error(f"--list cannot be combined with {', '.join(extra)}")
+    if args.project and args.project_dir:
+        parser.error("choose one of --project and --project-dir")
+    if args.demo and len(selection) > 1:
+        parser.error("--demo cannot be combined with --project, --project-dir or --session")
+    if args.project is not None and not settings.PROJECT_LABEL_RE.fullmatch(args.project):
+        print("pact-viz: --project must match [A-Za-z0-9._-]", file=sys.stderr)
+        return 2
+    if args.session is not None and not settings.SESSION_ID_RE.fullmatch(args.session):
+        print("pact-viz: --session must match [A-Za-z0-9-]{8,64}", file=sys.stderr)
+        return 2
+    args.selected_project = args.project or (
+        project_slug(args.project_dir) if args.project_dir else ""
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """The pact-viz entry point.
 
     Location: cli.main.
-    Summary: Enforces the Python floor first (so an old interpreter gets a
-             clear error before argparse), parses flags, rejects conflicting
-             modes, and dispatches to --stop/--status/--list, detached or
-             foreground serving. CLI failures print one ``pact-viz:`` line to
-             stderr and return 1; usage errors exit 2 through argparse.
+    Summary: Takes the internal instance token and launch key out of the
+             environment first (so nothing this process spawns inherits
+             them), enforces the Python floor (so an old interpreter gets a
+             clear error before argparse), validates flags, and dispatches to
+             --stop/--status/--list, detached or foreground serving. CLI
+             failures print one ``pact-viz:`` line to stderr and return 1;
+             usage errors exit 2.
     Used by: visualizer.__main__, tests.
     """
+    inherited_instance = os.environ.pop(_INSTANCE_ENV, None)
+    inherited_key = os.environ.pop(KEY_ENV, None)
     if not settings.python_version_ok():
         required = ".".join(str(part) for part in MIN_PYTHON)
         print(
@@ -922,21 +1069,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    if not 0 <= args.port <= 65535:
-        parser.error("--port must be between 0 and 65535")
-    modes = [
-        name
-        for name, enabled in (
-            ("--stop", args.stop),
-            ("--status", args.status),
-            ("--list", args.list),
-        )
-        if enabled
-    ]
-    if len(modes) > 1:
-        parser.error("choose at most one of --stop, --status, --list")
-    if args.detach and modes:
-        parser.error("--detach cannot be combined with --stop, --status or --list")
+    status = _check_args(parser, args)
+    if status:
+        return status
     try:
         if args.stop:
             return cmd_stop(args)
@@ -948,8 +1083,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         state_dir = _state_dir(args)
         if args.detach:
             return detach(args, roots, state_dir)
-        instance_id = os.environ.get(_INSTANCE_ENV) or secrets.token_hex(16)
-        return serve_foreground(args, roots, state_dir, instance_id)
+        instance_id = inherited_instance or secrets.token_hex(16)
+        key = inherited_key or secrets.token_urlsafe(32)
+        return serve_foreground(args, roots, state_dir, instance_id, key)
     except CliError as error:
         print(f"pact-viz: {error}", file=sys.stderr)
         return 1
