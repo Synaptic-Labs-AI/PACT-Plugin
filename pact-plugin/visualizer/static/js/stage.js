@@ -3659,7 +3659,10 @@ export class Stage {
     const phase = this.phaseState.current || (wrapVisible ? "WRAP-UP" : "");
     const project = String(meta.project || (model && model.source && model.source.slug) || "run");
 
-    if (this.captionEl) {
+    if (this.captionEl && !model) {
+      /* No run is open: say so instead of captioning an empty floor. */
+      this.captionEl.textContent = "NO RUN OPEN · PICK A RUN OR THE TRAINING SIMULATION";
+    } else if (this.captionEl) {
       const parts = [project.toUpperCase()];
       if (phase) parts.push(`PHASE ${phase}`);
       parts.push(`${crew} CREW`);

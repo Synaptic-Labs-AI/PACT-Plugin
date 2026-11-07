@@ -75,7 +75,6 @@ const els = {
   left: $("left-rail"),
   right: $("right-rail"),
   stageCanvas: $("stage"),
-  stageCaption: $("stage-caption"),
   recorder: $("recorder"),
   modal: $("modal-root"),
   toast: $("toast-root"),
@@ -415,9 +414,8 @@ function updateHeader(model) {
   const meta = model.meta || {};
   const run = meta.project || meta.team || "PACT run";
   document.title = `${run} · PACT Mission Control`;
-  if (model.phases && model.phases.current) {
-    els.stageCaption.textContent = `${model.phases.current} · ${meta.run_kind || "run"} · ${meta.status || ""}`;
-  }
+  /* The stage owns #stage-caption: it rewrites it on every model and cursor
+   * change, so a second writer would make the caption change format. */
   setModeLabel();
 }
 
@@ -686,7 +684,6 @@ function showEmptyFilter(label) {
       `No sessions for ${name}. Choose another project or session, or open the training simulation.`
     );
   }
-  els.stageCaption.textContent = `NO SESSIONS FOR ${name.toUpperCase()}`;
   setModeLabel(); /* no run is open; the badge must not keep saying LIVE */
 }
 

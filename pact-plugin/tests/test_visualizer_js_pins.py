@@ -419,6 +419,17 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("the canvas label says where the crew stands",
     String(labelled.attrs["aria-label"]).includes("2 on the review deck, 1 in the standby lounge."));
 
+  /* The stage is the caption's only writer, and with no run open it says so
+   * instead of captioning an empty floor. */
+  const chrome = {
+    model: null, events: [], views: [], cursor: 0, live: false, canvas: null, aria: "",
+    phaseState: { current: "", completed: new Set() },
+    captionEl: { textContent: "PREVIOUS RUN · PHASE CODE" },
+    _wrapup: () => null, _wrapupVisible: () => false,
+  };
+  Stage.prototype._updateChrome.call(chrome);
+  check("with no run the caption says no run is open", chrome.captionEl.textContent.startsWith("NO RUN OPEN"));
+
   if (failed.length) {
     console.error("FAILED PINS: " + failed.join("; "));
     process.exit(1);
@@ -1251,6 +1262,15 @@ def test_the_named_empty_label_comes_only_from_the_server_echo():
     assignments = re.findall(r"state\.requestedFilter\s*=(?!=)\s*([^;]+);", code)
     assert assignments == ["requestedFilterLabel(data && data.filters)"], (
         f"state.requestedFilter is set from something other than the server's echo: {assignments}"
+    )
+
+
+def test_only_the_stage_writes_the_caption():
+    """app.js must not write #stage-caption, or the caption flips format."""
+    source = (STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+    code = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    assert "stage-caption" not in code and "stageCaption" not in code, (
+        "app.js writes the stage caption; the stage is its only writer"
     )
 
 

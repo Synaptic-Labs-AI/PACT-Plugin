@@ -645,7 +645,7 @@ IDs and their owners:
   #left-rail             panels.js renders
   #stage-shell
     #stage-frame > canvas#stage    stage.js draws
-    #stage-caption       stage.js or app.js sets text
+    #stage-caption       stage.js sets text (its only writer)
     #stage-legend        static legend
   #right-rail            panels.js renders
 #recorder                timeline.js renders
@@ -744,7 +744,9 @@ Placement at the cursor, per agent:
   rewind. Effects therefore keep firing after the capped window starts
   sliding.
 Canvas is internally laid out at 960×440 logical pixels and scaled by CSS; use
-devicePixelRatio for sharpness. It owns `#stage-caption` text.
+devicePixelRatio for sharpness. It is the only writer of `#stage-caption`. At boot, before
+the first model, it reads `WAITING FOR RUN DATA · PICK A RUN`; after a run is
+cleared it reads `NO RUN OPEN · PICK A RUN OR THE TRAINING SIMULATION`.
 
 Canvas text is decorative. Every piece of information the stage draws is also
 in the DOM: the run card, the crew rail, the comms feed, `#stage-caption`, a
