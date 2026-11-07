@@ -544,6 +544,55 @@ check("the newer selection is shown", log.stage.at(-1) === "real:S2:s2");
 """, tmp_path)
 
 
+def test_a_failed_refresh_does_not_banner_over_a_newer_selection(tmp_path):
+    """The refresh and root-change catch arms are gated like their success arms."""
+    _run_app_scenario(r"""
+const other = { root: "r", slug: "p", session_id: "S2", is_live: false, status: "ended", updated_at: "2026-10-01" };
+api.sessionsData = { roots: [{ id: "r", label: "r" }], sessions: [ended, other], default_root: "r" };
+await import("./app.js");
+await tick();
+pending.session.shift().resolve(model("real", "S1", "e0"));
+await tick();
+const banner = document.getElementById("error-banner");
+const select = document.getElementById("session-select");
+banner.hidden = true;
+api.sessionsDeferred = true;
+
+/* Refresh, then a newer selection, then the refresh's list call fails. */
+document.getElementById("btn-refresh").fire("click");
+await tick();
+select.value = "r::p::S2";
+select.fire("change");
+await tick();
+pending.sessions.shift().reject(new Error("boom"));
+await tick();
+check("a superseded refresh failure shows no banner", banner.hidden === true);
+pending.session.shift().resolve(model("real", "S2", "s2"));
+await tick();
+
+/* The same for a root change. */
+const root = document.getElementById("root-select");
+root.value = "r";
+root.fire("change");
+await tick();
+select.value = "r::p::S1";
+select.fire("change");
+await tick();
+pending.sessions.shift().reject(new Error("boom"));
+await tick();
+check("a superseded root-change failure shows no banner", banner.hidden === true);
+
+/* Control: with no newer selection, a failed refresh still banners. */
+pending.session.shift().resolve(model("real", "S1", "e1"));
+await tick();
+document.getElementById("btn-refresh").fire("click");
+await tick();
+pending.sessions.shift().reject(new Error("boom"));
+await tick();
+check("an unsuperseded refresh failure still banners", banner.hidden === false);
+""", tmp_path)
+
+
 def test_a_stale_poll_never_overwrites_a_reopened_run(tmp_path):
     """A poll in flight when the same run is reopened is dropped."""
     _run_app_scenario(r"""

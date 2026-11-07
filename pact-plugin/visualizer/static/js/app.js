@@ -798,7 +798,7 @@ async function refreshAll() {
       selectRoot(els.root.value);
     }
   } catch (err) {
-    showError(`Refresh failed: ${err.message}`, refreshAll, "refresh");
+    if (!superseded(token)) showError(`Refresh failed: ${err.message}`, refreshAll, "refresh");
   }
 }
 
@@ -837,7 +837,7 @@ function bindHeader() {
       if (superseded(token)) return;
       selectRoot(rootId);
     } catch (err) {
-      showError(`Could not switch root: ${err.message}`, () => refreshAll(), "refresh");
+      if (!superseded(token)) showError(`Could not switch root: ${err.message}`, () => refreshAll(), "refresh");
     }
   });
   els.project.addEventListener("change", async () => {

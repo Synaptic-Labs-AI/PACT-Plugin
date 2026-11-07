@@ -5,8 +5,8 @@ Summary: The node gate shared by the visualizer's node-run JS checks
          the checks skip on a developer machine and fail under CI, because a
          CI runner image that lost node would otherwise retire them silently:
          a skip reads as green.
-Used by: test_visualizer_js_pins.py, test_visualizer_assets.py,
-         test_visualizer_node_gate.py.
+Used by: test_visualizer_js_pins.py (which also pins this gate),
+         test_visualizer_assets.py.
 """
 from __future__ import annotations
 
