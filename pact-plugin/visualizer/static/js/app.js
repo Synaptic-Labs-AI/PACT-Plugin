@@ -744,11 +744,9 @@ async function loadInitial() {
      * with a dead end. */
     try {
       await health();
-      try {
-        await openDemo();
-      } catch (_) {
-        showError(`Could not read PACT runs: ${err.message}`, loadInitial, "load");
-      }
+      /* The demo stands in, but the list error and its retry stay up: they
+       * are the only way back to the real runs. openDemo never throws. */
+      await openDemo({ keepError: true });
     } catch (_) {
       /* API unreachable: keep the list error and its retry. */
     }
@@ -757,9 +755,9 @@ async function loadInitial() {
   }
 }
 
-async function openDemo() {
+async function openDemo({ keepError = false } = {}) {
   closeDrawers();
-  hideError();
+  if (!keepError) hideError();
   const token = ++sessionRequest; /* supersede any in-flight load */
   setLoading(true, "loading training simulation");
   try {
@@ -787,7 +785,15 @@ async function openDemo() {
     updateTimeline();
     updateUrl("demo");
   } catch (err) {
-    if (token === sessionRequest) showError(`Demo failed to load: ${err.message}`, openDemo, "navigation");
+    if (token !== sessionRequest) {
+      /* a later view owns the screen */
+    } else if (keepError && state.lastError) {
+      /* The fallback demo failed too: keep the list banner and its retry,
+       * which is still the way back, and say what else failed. */
+      els.errorText.textContent = `${state.lastError} The training simulation also failed: ${err.message}`;
+    } else {
+      showError(`Demo failed to load: ${err.message}`, openDemo, "navigation");
+    }
   } finally {
     if (token === sessionRequest) setLoading(false);
   }

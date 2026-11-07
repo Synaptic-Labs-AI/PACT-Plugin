@@ -967,6 +967,42 @@ check("its run past the cap becomes selectable",
 """, tmp_path)
 
 
+def test_the_fallback_demo_keeps_the_list_error(tmp_path):
+    """When the run list fails, the demo stands in under the error banner."""
+    _run_app_scenario(r"""
+api.sessions = () => Promise.reject(new Error("list unavailable"));
+await import("./app.js");
+await tick();
+const banner = document.getElementById("error-banner");
+check("the list failure raises the banner", banner.hidden === false);
+pending.demo.shift().resolve(model("demo", "demo", "demo-v1"));
+await tick();
+check("the fallback demo renders", log.stage.at(-1) === "demo:demo:demo-v1");
+check("the banner and its retry survive the fallback demo", banner.hidden === false
+  && document.getElementById("error-text").textContent.includes("Could not read PACT runs"));
+""", tmp_path)
+
+
+def test_a_failed_fallback_demo_keeps_the_list_retry(tmp_path):
+    """When the list and then the fallback demo both fail, the list banner and
+    its reload retry stay; the demo failure is added to its text."""
+    _run_app_scenario(r"""
+let listCalls = 0;
+api.sessions = () => { listCalls += 1; return Promise.reject(new Error("list unavailable")); };
+await import("./app.js");
+await tick();
+pending.demo.shift().reject(new Error("demo unavailable"));
+await tick();
+const text = document.getElementById("error-text").textContent;
+check("the list banner stays", text.includes("Could not read PACT runs"));
+check("the demo failure is added to it", text.includes("also failed: demo unavailable"));
+const before = listCalls;
+document.getElementById("error-retry").onclick();
+await tick();
+check("its retry reloads the run list", listCalls === before + 1);
+""", tmp_path)
+
+
 def test_a_stale_poll_never_overwrites_a_reopened_run(tmp_path):
     """A poll in flight when the same run is reopened is dropped."""
     _run_app_scenario(r"""
