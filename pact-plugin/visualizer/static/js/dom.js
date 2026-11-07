@@ -292,6 +292,19 @@ export function launchSelection(search) {
   return { kind: "default", root, query };
 }
 
+/* The passes of one phase item, oldest first, each {start, end} as journal
+ * seqs or null. phases.items[].runs lists every pass; an item without it is
+ * one pass made of its own boundaries. A pass with no start is a phase
+ * recorded as done without a start; an open pass has no end. */
+export function phasePasses(item) {
+  const seq = (value) => (value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value));
+  const runs = item && Array.isArray(item.runs) && item.runs.length ? item.runs : [item || {}];
+  return runs
+    .filter((run) => run && typeof run === "object")
+    .map((run) => ({ start: seq(run.started_seq), end: seq(run.ended_seq) }))
+    .filter((pass) => pass.start !== null || pass.end !== null);
+}
+
 /* Canvas modules read design tokens off the document root. One fallback map
  * keeps timeline.js and charts.js painting the same colours in tests,
  * headless runs, and before the stylesheet has applied. */

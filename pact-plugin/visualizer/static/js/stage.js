@@ -23,7 +23,7 @@
  * this module touches.
  */
 
-import { runKey } from "./dom.js";
+import { runKey, phasePasses } from "./dom.js";
 import {
   SPRITE_W,
   SPRITE_H,
@@ -617,34 +617,20 @@ export class Stage {
       if (!item || typeof item !== "object") continue;
       const family = familyOf(item.family || item.name);
       if (!family) continue;
-      /* A pending phase carries null for both boundaries. Number(null) is 0,
-       * which used to make it look like the phase had started at the top of
-       * the journal, so the last pending phase overwrote `current`. Absent
-       * boundaries are absent, not zero. */
-      const start = item.started_seq === null || item.started_seq === undefined ? null : Number(item.started_seq);
-      const endRaw = item.ended_seq === null || item.ended_seq === undefined ? null : Number(item.ended_seq);
-      if (start !== null && Number.isFinite(start) && cursorSeq >= start && (endRaw === null || cursorSeq < endRaw)) {
-        current = family;
-      }
-      if (endRaw !== null && Number.isFinite(endRaw) && cursorSeq >= endRaw) {
-        completed.add(family);
-      }
-    }
-
-    if (!items.length) {
-      for (let i = 0; i < this.cursor && i < this.events.length; i += 1) {
-        const event = this.events[i];
-        if (!event || event.type !== "phase_transition") continue;
-        const family = familyOf(event.phase);
-        if (!family) continue;
-        const title = String(event.title || "").toLowerCase();
-        if (title.indexOf("complete") >= 0 || title.indexOf("done") >= 0 || title.indexOf("end") >= 0) {
-          completed.add(family);
-          if (current === family) current = "";
-        } else {
-          current = family;
+      /* The pass containing the cursor decides: inside a pass (from its
+       * start to its end, or open) the phase is current; after a closed pass
+       * and before the next one starts it is complete. A pass with no start
+       * reads as complete from its end. A pending phase has no pass. */
+      let reading = "";
+      for (const pass of phasePasses(item)) {
+        if (pass.start !== null && cursorSeq >= pass.start) {
+          reading = pass.end === null || cursorSeq < pass.end ? "current" : "complete";
+        } else if (pass.start === null && pass.end !== null && cursorSeq >= pass.end) {
+          reading = "complete";
         }
       }
+      if (reading === "current") current = family;
+      else if (reading === "complete") completed.add(family);
     }
 
     this.phaseState = { current, completed };

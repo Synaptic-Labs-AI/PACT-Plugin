@@ -506,6 +506,15 @@ Field rules:
   and the item's own `started_seq`/`ended_seq`/`started_at`/`ended_at`/`status`
   are the last pass's values. At most the newest 50 passes are kept; a cut adds
   `phase_runs` to `truncated_by`.
+- The stage and the timeline read the pass that contains the cursor
+  (`dom.phasePasses(item)`; an item without `runs` reads as one pass from its
+  own boundaries). A phase is current from a pass's `started_seq` up to, not
+  including, its `ended_seq`, or for as long as the pass is open. It is
+  complete from a closed pass's `ended_seq` until the next pass starts. A
+  start-less pass (only ever the first) is complete from its end. The timeline
+  draws one band per pass, labelled `run N`: an open pass runs to the window's end, a start-less pass is
+  a one-event point at its end, and a pass that began before the window is
+  clipped to the window's start.
 - `phase_family` ∈ `PREPARE|ARCHITECT|CODE|TEST|REVIEW|OTHER`, from the
   event's own `phase`, else the run's current phase at that seq (the newest
   `phase_transition` before it). Mapping, upper-cased with `_` read as `-`:
@@ -691,6 +700,7 @@ export function fmtDuration(seconds);
 export function fmtTime(iso);        // local HH:MM:SS
 export function fmtDate(iso);        // short local date
 export function missionSecondsAt(model, cursor); // mission clock; when truncated_by has "events" or "journal_bytes", cursor 0 is events[0].ts
+export function phasePasses(item); // phases.items[].runs as [{start, end}] seqs, oldest first; one pass from the item's own boundaries when runs is absent
 export function shortSha(sha);
 export function rootChangeAction({ hasSession, requestedFilter, hasRun });
 export function requestedFilterLabel(filters);  // named-empty label from the server's echoed filters

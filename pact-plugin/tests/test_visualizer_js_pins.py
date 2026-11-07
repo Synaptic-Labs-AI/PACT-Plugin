@@ -310,6 +310,49 @@ const check = (name, ok) => { if (!ok) failed.push(name); };
   check("in ARCHITECT, current is ARCHITECT", staged.phaseState.current === "ARCHITECT");
   check("PREPARE is complete past its end seq", staged.phaseState.completed.has("PREPARE"));
 
+  /* Boundaries: the event AT ended_seq closes the phase; the event AT
+   * started_seq opens it. events[i].seq === i, so cursor = seq + 1. */
+  staged.cursor = 6; /* cursor seq 5 === PREPARE.ended_seq */
+  Stage.prototype._computePhaseState.call(staged);
+  check("at its end seq a phase is complete and not current",
+    staged.phaseState.completed.has("PREPARE") && staged.phaseState.current !== "PREPARE");
+  staged.cursor = 7; /* cursor seq 6 === ARCHITECT.started_seq */
+  Stage.prototype._computePhaseState.call(staged);
+  check("at its start seq a phase is current", staged.phaseState.current === "ARCHITECT");
+
+  /* phases.items[].runs: the pass containing the cursor decides. Passes of
+   * CODE here: [2, 5], then [8, 10]; events[i].seq === i, cursor = seq + 1. */
+  const passes = (cursorSeq, runs) => {
+    const host = {
+      model: { phases: { items: [{ name: "CODE", family: "CODE", started_seq: 8, ended_seq: 10, runs }] } },
+      events: Array.from({ length: 14 }, (_, seq) => ({ seq })),
+      cursor: cursorSeq + 1,
+      phaseState: { current: "", completed: new Set() },
+    };
+    Stage.prototype._computePhaseState.call(host);
+    return host.phaseState;
+  };
+  const twoRuns = [{ started_seq: 2, ended_seq: 5 }, { started_seq: 8, ended_seq: 10 }];
+  check("inside the first pass the phase is current", passes(3, twoRuns).current === "CODE");
+  check("between passes the phase reads complete",
+    passes(6, twoRuns).completed.has("CODE") && passes(6, twoRuns).current === "");
+  check("inside a later pass it is current again",
+    passes(9, twoRuns).current === "CODE" && !passes(9, twoRuns).completed.has("CODE"));
+  check("after the last pass closes it is complete", passes(11, twoRuns).completed.has("CODE"));
+  check("an open pass stays current to the window end",
+    passes(12, [{ started_seq: 2, ended_seq: 5 }, { started_seq: 8, ended_seq: null }]).current === "CODE");
+  check("a pass with no start reads complete from its end",
+    passes(4, [{ started_seq: null, ended_seq: 4 }]).completed.has("CODE")
+    && !passes(3, [{ started_seq: null, ended_seq: 4 }]).completed.has("CODE"));
+
+  /* Paused and refreshed runs are real statuses and keep their own badge. */
+  check("a paused run says PAUSED", modeBadge({
+    hasModel: true, mode: "replay", followLive: false, status: "paused",
+  }).label === "◼ PAUSED");
+  check("a refreshed run says REFRESHED", modeBadge({
+    hasModel: true, mode: "replay", followLive: false, status: "refreshed",
+  }).label === "◼ REFRESHED");
+
   /* A reader off the live head stays on the same event across a poll, by
    * seq, even when the capped window slides. */
   const { cursorAfterRefresh } = await import("./dom.js");
@@ -1266,6 +1309,68 @@ def test_task_board_and_alerts_follow_the_payload_shape():
     )
     assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
         f"task and alert pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
+TIMELINE_SCRIPT = r"""
+const failed = [];
+const check = (name, ok) => { if (!ok) failed.push(name); };
+function node(tag) {
+  return {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, style: {}, dataset: {}, className: "",
+    textContent: "", hidden: false, classList: { toggle() {} },
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); return child; },
+    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); return child; },
+    get firstChild() { return this.children[0] || null; },
+    getBoundingClientRect() { return { width: 0, height: 0, left: 0 }; },
+    getContext() { return null; },
+  };
+}
+globalThis.document = { createElement: node, createTextNode: (t) => ({ textContent: t }) };
+globalThis.Node = Object;
+globalThis.window = {};
+(async () => {
+  const { createTimeline } = await import("./timeline.js");
+  const root = node("footer");
+  const timeline = createTimeline(root, {});
+  const events = Array.from({ length: 10 }, (_, i) => ({ seq: i, ts: "2026-11-01T00:00:00Z" }));
+  const bandsFor = (items, evs = events) => {
+    timeline.setModel({ meta: {}, events: evs, phases: { items } });
+    const track = root.children[0].children.find((c) => c.className === "rec-track");
+    const layer = track.children.find((c) => c.className === "rec-bands");
+    return layer.children.filter((c) => String(c.className).includes("band-code")).map((c) => [c.style.left, c.style.width]);
+  };
+  const runs = [{ started_seq: 1, ended_seq: 3 }, { started_seq: 6, ended_seq: 8 }];
+  check("each pass of a phase gets its own band",
+    JSON.stringify(bandsFor([{ name: "CODE", family: "CODE", started_seq: 6, ended_seq: 8, run: 2, runs }]))
+      === JSON.stringify([["10%", "30%"], ["60%", "30%"]]));
+  check("an open pass runs to the window end",
+    JSON.stringify(bandsFor([{ name: "CODE", family: "CODE", runs: [{ started_seq: 6, ended_seq: null }] }]))
+      === JSON.stringify([["60%", "40%"]]));
+  check("a pass with no start is a point at its end",
+    JSON.stringify(bandsFor([{ name: "CODE", family: "CODE", runs: [{ started_seq: null, ended_seq: 4 }] }]))
+      === JSON.stringify([["40%", "10%"]]));
+  const late = Array.from({ length: 10 }, (_, i) => ({ seq: 100 + i, ts: "2026-11-01T00:00:00Z" }));
+  check("a pass that began before the window is clipped to its start",
+    JSON.stringify(bandsFor([{ name: "CODE", family: "CODE", runs: [{ started_seq: 50, ended_seq: 102 }] }], late))
+      === JSON.stringify([["0%", "30%"]]));
+  if (failed.length) { console.error("FAILED PINS: " + failed.join("; ")); process.exit(1); }
+  console.log("PINS OK");
+})().catch((err) => { console.error("PIN SCRIPT ERROR: " + (err && err.stack ? err.stack : err)); process.exit(1); });
+"""
+
+
+def test_each_phase_pass_gets_its_own_timeline_band():
+    """One band per pass, open passes to the window end, clipped to the window."""
+    node = _require_node()
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", TIMELINE_SCRIPT],
+        check=False, cwd=STATIC_JS_DIR, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0 and "PINS OK" in proc.stdout, (
+        f"timeline pins failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
 
 

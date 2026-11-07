@@ -11,6 +11,7 @@ import {
   clamp,
   toggleClass,
   createSeqIndex,
+  phasePasses,
   cssToken,
   missionSecondsAt,
 } from "./dom.js";
@@ -271,19 +272,21 @@ export function createTimeline(root, options = {}) {
     const indexForSeq = createSeqIndex(model);
     const bands = [];
     for (const item of items) {
-      const start = indexForSeq(item.started_seq);
-      if (start === null || start >= total) continue;
-      const rawEnd = item.ended_seq === null || item.ended_seq === undefined
-        ? null
-        : indexForSeq(Number(item.ended_seq) + 1);
-      if (rawEnd !== null && rawEnd <= start) continue;
-      const end = rawEnd === null ? total : clamp(rawEnd, start + 1, total);
-      bands.push({
-        name: String(item.name || item.family || "PHASE"),
-        family: String(item.family || item.name || "").toLowerCase(),
-        start,
-        end,
-        run: Number(item.run) || 1,
+      /* One band per pass of the phase, clipped to the window. A pass with no
+       * start is a point at its end; a pass that closed before the window
+       * opens has no visible band. */
+      phasePasses(item).forEach((pass, passIndex) => {
+        const start = indexForSeq(pass.start === null ? pass.end : pass.start);
+        if (start === null || start >= total) return;
+        const rawEnd = pass.start === null ? start + 1 : pass.end === null ? total : indexForSeq(pass.end + 1);
+        if (rawEnd <= start) return;
+        bands.push({
+          name: String(item.name || item.family || "PHASE"),
+          family: String(item.family || item.name || "").toLowerCase(),
+          start,
+          end: clamp(rawEnd, start + 1, total),
+          run: passIndex + 1,
+        });
       });
     }
     bands.sort((left, right) => left.start - right.start || left.end - right.end);
