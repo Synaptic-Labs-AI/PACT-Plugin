@@ -192,20 +192,32 @@ def count_root_journals(root: RootSpec) -> int:
 
 
 def root_payload(
-    roots: Sequence[RootSpec], *, with_counts: bool = True
+    roots: Sequence[RootSpec],
+    *,
+    with_counts: bool = True,
+    sessions: Sequence[SessionRef] | None = None,
 ) -> list[dict]:
     """The ``roots`` array used by /api/health and /api/sessions.
 
     Location: discovery.root_payload.
     Summary: One dict per root with id/label/path/journals/default. Counts are
-             computed on demand so a stale cache can never hide a new journal.
+             computed on demand so a stale cache can never hide a new journal;
+             a caller that has just discovered ``sessions`` passes them and
+             no second walk happens.
     Used by: model.build_health, model.build_sessions_list, server.
     """
+    counts: dict[str, int] | None = None
+    if sessions is not None:
+        counts = {}
+        for ref in sessions:
+            counts[ref.root_id] = counts.get(ref.root_id, 0) + 1
     payload: list[dict] = []
     for root in roots:
         entry = root.as_dict()
         if with_counts:
-            entry["journals"] = count_root_journals(root)
+            entry["journals"] = (
+                counts.get(root.id, 0) if counts is not None else count_root_journals(root)
+            )
         payload.append(entry)
     return payload
 

@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
+import re
 import secrets
 import sys
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,8 +35,11 @@ from . import demo, discovery, model, settings
 from .settings import (
     APP_NAME,
     DEFAULT_SESSIONS_LIMIT,
+    BODY_CACHE_ENTRIES,
     JSON_CONTENT_TYPE,
     KEY_HEADER,
+    MAX_CONCURRENT_BUILDS,
+    MAX_CONNECTIONS,
     LOOPBACK_HOST,
     MAX_SESSIONS_LIMIT,
     SECURITY_HEADERS,
@@ -97,9 +104,58 @@ class MissionControlServer(ThreadingHTTPServer):
         self.instance_id = instance_id
         self.key = key
         self.verbose = bool(verbose)
+        # At most MAX_CONCURRENT_BUILDS full model builds run at once; the
+        # newest encoded bodies are kept by (journal path, etag).
+        self.build_slots = threading.BoundedSemaphore(MAX_CONCURRENT_BUILDS)
+        self.body_cache: OrderedDict[tuple[str, str], bytes] = OrderedDict()
+        self.body_lock = threading.Lock()
+        self.connections = 0
+        self.connections_lock = threading.Lock()
         self.started_at = _now()
         self.started_monotonic = time.monotonic()
         super().__init__(address, handler_class)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Serve a connection on its own thread, or close it past the cap."""
+        with self.connections_lock:
+            if self.connections >= MAX_CONNECTIONS:
+                admitted = False
+            else:
+                self.connections += 1
+                admitted = True
+        if not admitted:
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            with self.connections_lock:
+                self.connections -= 1
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        """ThreadingMixIn's worker, releasing the connection slot at the end."""
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self.connections_lock:
+                self.connections -= 1
+
+    def cached_body(self, key: tuple[str, str]) -> bytes | None:
+        """An encoded body for (journal path, etag), or None."""
+        with self.body_lock:
+            body = self.body_cache.get(key)
+            if body is not None:
+                self.body_cache.move_to_end(key)
+            return body
+
+    def remember_body(self, key: tuple[str, str], body: bytes) -> None:
+        """Keep an encoded body, evicting the least recently used past the bound."""
+        with self.body_lock:
+            self.body_cache[key] = body
+            self.body_cache.move_to_end(key)
+            while len(self.body_cache) > BODY_CACHE_ENTRIES:
+                self.body_cache.popitem(last=False)
 
     @property
     def uptime_s(self) -> float:
@@ -136,6 +192,19 @@ class MissionControlHandler(BaseHTTPRequestHandler):
     _headers_sent: bool = False
 
     # -- lifecycle -------------------------------------------------------
+
+    def version_string(self) -> str:
+        """The Server header: product and version, nothing else."""
+        return self.server_version
+
+    def parse_request(self) -> bool:
+        """Refuse HTTP/0.9: it has no status line or headers to carry the contract."""
+        if not super().parse_request():
+            return False
+        if self.request_version == "HTTP/0.9":
+            self.close_connection = True
+            return False
+        return True
 
     @property
     def mission_server(self) -> MissionControlServer:
@@ -214,8 +283,33 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             extra_headers=(("Allow", _ALLOWED_METHODS),),
         )
 
-    for _method in ("do_HEAD", "do_POST", "do_PUT", "do_DELETE", "do_PATCH", "do_OPTIONS"):
-        locals()[_method] = _method_not_allowed
+    do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed
+
+    def do_HEAD(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        """HEAD: the static page and assets answer 200 with headers only.
+
+        /api/* stays GET-only (405), so HEAD never builds a model.
+        """
+        self._headers_sent = False
+        try:
+            if not _host_allowed(self.headers.get("Host", "")):
+                self._send_error(403, "forbidden host")
+                return
+            path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/"):
+                self._method_not_allowed()
+            elif path == "/":
+                self._serve_index()
+            elif path.startswith("/static/"):
+                self._serve_static_relative(path[len("/static/"):])
+            else:
+                alias = _alias_relative_path(path)
+                if alias is not None:
+                    self._serve_static_relative(alias)
+                else:
+                    self._send_json(404, {"ok": False, "error": "not found"})
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     # -- routing ---------------------------------------------------------
 
@@ -282,17 +376,16 @@ class MissionControlHandler(BaseHTTPRequestHandler):
         extra_headers: Sequence[tuple[str, str]] = (),
     ) -> None:
         """Send one JSON response (UTF-8, no-store, security headers)."""
-        try:
-            # ensure_ascii=True keeps every payload encodable: a lone
-            # surrogate (e.g. an undecodable byte in a directory name or a
-            # --project filter) becomes a JSON \uXXXX escape instead of
-            # raising on encode and turning the whole response into a 500.
-            body = json.dumps(
-                payload, ensure_ascii=True, separators=(",", ":")
-            ).encode("utf-8")
-        except (TypeError, ValueError):
-            body = b'{"ok":false,"error":"serialization error"}'
-            status = 500
+        body, status = _encode_json(payload, status)
+        self._send_body(status, body, extra_headers)
+
+    def _send_body(
+        self,
+        status: int,
+        body: bytes,
+        extra_headers: Sequence[tuple[str, str]] = (),
+    ) -> None:
+        """Send an already-encoded JSON body (no body for HEAD)."""
         self._send_headers(status, JSON_CONTENT_TYPE, len(body), extra_headers)
         # HEAD reaches this helper through the 405 answer (see
         # _method_not_allowed); the header block above already carries
@@ -318,7 +411,8 @@ class MissionControlHandler(BaseHTTPRequestHandler):
             self._send_error(404, "not found")
             return
         self._send_headers(200, content_type, len(body), extra_headers)
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     # -- API routes -------------------------------------------------------
 
@@ -413,10 +507,18 @@ class MissionControlHandler(BaseHTTPRequestHandler):
                     extra_headers=(("ETag", _quoted(current_etag)),),
                 )
                 return
-        payload = model.build_model(ref, now=_now())
-        self._send_json(
-            200, payload, extra_headers=(("ETag", _quoted(str(payload.get("etag", "")))),)
-        )
+        server = self.mission_server
+        current_etag, _activity = model.session_token(ref, now=_now())
+        cache_key = (str(ref.journal), current_etag)
+        body = server.cached_body(cache_key)
+        if body is None:
+            with server.build_slots:
+                payload = model.build_model(ref, now=_now())
+            body, status = _encode_json(payload, 200)
+            current_etag = str(payload.get("etag", current_etag))
+            if status == 200:
+                server.remember_body((str(ref.journal), current_etag), body)
+        self._send_body(200, body, extra_headers=(("ETag", _quoted(current_etag)),))
 
     def _serve_demo(self, query: str) -> None:
         """GET /api/demo?since=demo-v1 -> the deterministic scripted model."""
@@ -504,6 +606,33 @@ def _alias_relative_path(path: str) -> str | None:
     return None
 
 
+def _finite(value: Any) -> Any:
+    """``value`` with every NaN/Infinity float replaced by None (JSON null)."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(item) for item in value]
+    return value
+
+
+def _encode_json(payload: Mapping[str, Any], status: int) -> tuple[bytes, int]:
+    """(UTF-8 JSON body, status); a payload that cannot encode becomes a 500.
+
+    ensure_ascii keeps every payload encodable (a lone surrogate from an
+    undecodable directory name becomes a backslash-u escape), and non-finite
+    floats become null so the body is valid JSON for every client.
+    """
+    try:
+        body = json.dumps(
+            _finite(payload), ensure_ascii=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return b'{"ok":false,"error":"serialization error"}', 500
+    return body, status
+
+
 def _quoted(token: str) -> str:
     """An HTTP entity tag: the token in double quotes (RFC 9110 strong ETag)."""
     return '"' + token.replace('"', "") + '"'
@@ -520,6 +649,10 @@ def _first_param(params: Mapping[str, list[str]], key: str) -> str | None:
     return None
 
 
+_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost)(:[0-9]{1,5})?", re.IGNORECASE)
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+
+
 def _host_allowed(host: str) -> bool:
     """True when the Host header names this loopback server.
 
@@ -530,15 +663,14 @@ def _host_allowed(host: str) -> bool:
              router with a 403 before any route runs.
     Used by: MissionControlHandler._route_get.
     """
-    host = host.strip()
-    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-    return name.lower() in {"127.0.0.1", "localhost"}
+    return bool(_HOST_RE.fullmatch(host.strip()))
 
 
 def _parse_limit(value: str) -> int | None:
     """Parse the /api/sessions limit parameter (1..MAX_SESSIONS_LIMIT)."""
-    text = value.strip()
-    if not text.lstrip("-").isdigit():
+    # No strip: "+5" in a query decodes to " 5", which is not a number.
+    text = value
+    if not _ASCII_DIGITS.fullmatch(text):
         return None
     try:
         limit = int(text)

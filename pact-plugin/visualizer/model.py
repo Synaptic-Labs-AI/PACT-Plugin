@@ -1830,7 +1830,7 @@ def session_team(ref: discovery.SessionRef) -> str:
              full model all name the same team without a full parse.
     Used by: session_token, build_model, build_sessions_list.
     """
-    head = journal.read_head_events(ref.journal)
+    head = journal.head_events(ref.journal)
     return resolve_team_name(head, roster.read_session_context(ref.session_dir), ref.session_id)
 
 
@@ -1939,7 +1939,8 @@ def build_sessions_list(
     reference = utcnow(now)
     sessions: list[dict] = []
     raw_names: dict[str, str] = {}
-    for ref in discovery.discover_sessions(roots):
+    discovered = discovery.discover_sessions(roots)
+    for ref in discovered:
         team_name = session_team(ref)
         activity_ns = session_activity_ns(ref, team_name)
         summary = journal.summarize_journal(ref.journal, reference, activity_ns / 1e9)
@@ -2009,7 +2010,7 @@ def build_sessions_list(
         "ok": True,
         "generated_at": iso_utc(reference),
         "default_root": default_root,
-        "roots": discovery.root_payload(roots),
+        "roots": discovery.root_payload(roots, sessions=discovered),
         "total": len(sessions),
         "limit": int(limit),
         "hidden_trivial": hidden_trivial,

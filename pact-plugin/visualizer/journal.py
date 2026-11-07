@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -205,9 +206,19 @@ def read_journal(path: Path) -> JournalRead:
     Used by: model.build_model, server, tests.
     """
     read = JournalRead()
-    stat = journal_stat(path)
+    try:
+        status = os.stat(path)
+    except OSError:
+        status = None
+    stat = None if status is None else (float(status.st_mtime), int(status.st_size))
     if stat is not None:
         read.mtime, read.size = stat
+    if status is not None and stat[1] <= MAX_JOURNAL_BYTES:
+        try:
+            return _read_incremental(path, status, read)
+        except OSError:
+            _add_warning(read.warnings, "journal could not be read")
+            return read
     first_index = 0
     try:
         if stat is not None and stat[1] > MAX_JOURNAL_BYTES:
@@ -225,23 +236,109 @@ def read_journal(path: Path) -> JournalRead:
         return read
 
     for offset, raw_line in _iter_lines(data):
-        index = first_index + offset
-        read.lines_total += 1
-        if not raw_line.strip():
-            continue
-        text = decode_line(raw_line)
-        if text is None:
-            read.skipped_lines += 1
-            _add_warning(read.warnings, f"line {index}: skipped non-UTF-8 content")
-            continue
-        value = _parse_object(text)
-        if value is None:
-            read.skipped_lines += 1
-            _add_warning(read.warnings, f"line {index}: skipped malformed event")
-            continue
-        read.events.append(RawEvent(seq=index, data=value))
-        read.valid_events += 1
+        _fold_line(read, first_index + offset, raw_line)
     return read
+
+
+def _fold_line(read: JournalRead, index: int, raw_line: bytes) -> None:
+    """Parse one physical line into ``read`` (event, or a counted skip)."""
+    read.lines_total += 1
+    if not raw_line.strip():
+        return
+    text = decode_line(raw_line)
+    if text is None:
+        read.skipped_lines += 1
+        _add_warning(read.warnings, f"line {index}: skipped non-UTF-8 content")
+        return
+    value = _parse_object(text)
+    if value is None:
+        read.skipped_lines += 1
+        _add_warning(read.warnings, f"line {index}: skipped malformed event")
+        return
+    read.events.append(RawEvent(seq=index, data=value))
+    read.valid_events += 1
+
+
+@dataclass
+class _ParseState:
+    """The cached parse of a journal's complete lines (incremental reads)."""
+
+    device: int
+    inode: int
+    offset: int
+    next_index: int
+    read: JournalRead
+
+
+# Per-journal parse of every COMPLETE line read so far, so a poll of a growing
+# journal parses only its new lines. Bounded: whole-journal event lists are
+# large, and only the runs a page has open are read repeatedly.
+_PARSE_CACHE: "OrderedDict[str, _ParseState]" = OrderedDict()
+_PARSE_CACHE_MAX = 4
+_PARSE_LOCK = threading.Lock()
+
+
+def _copy_read(source: JournalRead) -> JournalRead:
+    """A JournalRead whose lists can be extended without touching ``source``."""
+    return JournalRead(
+        events=list(source.events),
+        warnings=list(source.warnings),
+        lines_total=source.lines_total,
+        valid_events=source.valid_events,
+        skipped_lines=source.skipped_lines,
+        mtime=source.mtime,
+        size=source.size,
+        tail_only=source.tail_only,
+    )
+
+
+def _read_incremental(path: Path, status: os.stat_result, result: JournalRead) -> JournalRead:
+    """read_journal for a journal under the cap, parsing only new lines.
+
+    Location: journal._read_incremental.
+    Summary: The cached state holds the parse of every complete line up to a
+             byte offset. A journal with the same device and inode that has
+             not shrunk resumes from that offset; anything else (a new file,
+             a rotation, a truncation) is parsed in full. A trailing fragment
+             without its newline is parsed for this read only, never cached,
+             because the writer may still be completing it.
+    Used by: read_journal.
+    """
+    key = str(path)
+    with _PARSE_LOCK:
+        state = _PARSE_CACHE.get(key)
+        if state is not None:
+            _PARSE_CACHE.move_to_end(key)
+    same_file = (
+        state is not None
+        and state.device == int(status.st_dev)
+        and state.inode == int(status.st_ino)
+        and int(status.st_size) >= state.offset
+    )
+    if same_file:
+        base = _copy_read(state.read)
+        offset, next_index = state.offset, state.next_index
+    else:
+        base, offset, next_index = JournalRead(), 0, 0
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read()
+    cut = data.rfind(b"\n") + 1
+    complete, fragment = data[:cut], data[cut:]
+    for line_offset, raw_line in _iter_lines(complete):
+        _fold_line(base, next_index + line_offset, raw_line)
+    next_index += complete.count(b"\n")
+    with _PARSE_LOCK:
+        _PARSE_CACHE[key] = _ParseState(
+            int(status.st_dev), int(status.st_ino), offset + cut, next_index, _copy_read(base)
+        )
+        _PARSE_CACHE.move_to_end(key)
+        while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+            _PARSE_CACHE.popitem(last=False)
+    if fragment:
+        _fold_line(base, next_index, fragment)
+    base.mtime, base.size = result.mtime, result.size
+    return base
 
 
 def _read_tail_lines(path: Path, start: int) -> tuple[bytes, int]:
@@ -293,6 +390,54 @@ def _read_window(path: Path, start: int | None, end: int | None) -> bytes:
             return handle.read(int(end))
     except OSError:
         return b""
+
+
+_HEAD_CACHE: "OrderedDict[str, tuple[tuple[int, int, int], list[RawEvent]]]" = OrderedDict()
+_SUMMARY_CACHE: "OrderedDict[str, tuple[tuple[int, int, int], JournalSummary]]" = OrderedDict()
+_SUMMARY_CACHE_MAX = 4096
+_SUMMARY_LOCK = threading.Lock()
+
+
+def _identity(path: Path) -> tuple[tuple[int, int, int], os.stat_result] | None:
+    """(inode, mtime_ns, size) and the stat of a journal, or None."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return None
+    return (int(status.st_ino), int(status.st_mtime_ns), int(status.st_size)), status
+
+
+def _cached(cache: OrderedDict, key: str, identity: tuple[int, int, int]):
+    """A cache value whose identity still matches, else None (thread-safe)."""
+    with _SUMMARY_LOCK:
+        hit = cache.get(key)
+        if hit is not None and hit[0] == identity:
+            cache.move_to_end(key)
+            return hit[1]
+    return None
+
+
+def _remember(cache: OrderedDict, key: str, identity: tuple[int, int, int], value) -> None:
+    """Store a cache value, evicting the least recently used past the bound."""
+    with _SUMMARY_LOCK:
+        cache[key] = (identity, value)
+        cache.move_to_end(key)
+        while len(cache) > _SUMMARY_CACHE_MAX:
+            cache.popitem(last=False)
+
+
+def head_events(path: Path) -> list[RawEvent]:
+    """read_head_events, cached by (inode, mtime_ns, size)."""
+    found = _identity(path)
+    if found is None:
+        return []
+    identity, _status = found
+    cached = _cached(_HEAD_CACHE, str(path), identity)
+    if cached is not None:
+        return cached
+    events = read_head_events(path)
+    _remember(_HEAD_CACHE, str(path), identity, events)
+    return events
 
 
 def read_head_events(path: Path, limit: int = 40) -> list[RawEvent]:
@@ -579,15 +724,30 @@ def summarize_journal(
              fields.
     Used by: model.build_sessions_list, cli (--list), tests.
     """
+    found = _identity(path)
+    if found is None:
+        return JournalSummary()
+    identity, stat = found
+    current = now if now is not None else datetime.now(timezone.utc)
+    core = _cached(_SUMMARY_CACHE, str(path), identity)
+    if core is None:
+        core = _summary_core(path, stat)
+        _remember(_SUMMARY_CACHE, str(path), identity, core)
+    summary = JournalSummary(**{**core.__dict__, "warnings": list(core.warnings)})
+    clock = max(summary.mtime, float(activity_ts or 0.0))
+    summary.status, summary.ended_by = run_status(
+        summary.lifecycle or Lifecycle(), clock, current.timestamp()
+    )
+    summary.is_live = summary.status == "live"
+    return summary
+
+
+def _summary_core(path: Path, stat: os.stat_result) -> JournalSummary:
+    """Every summary field that depends only on the file's bytes (cacheable)."""
     summary = JournalSummary()
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return summary
     summary.mtime, summary.mtime_ns, summary.size = (
         float(stat.st_mtime), int(stat.st_mtime_ns), int(stat.st_size)
     )
-    current = now if now is not None else datetime.now(timezone.utc)
 
     head = read_head_events(path)
     if head:
@@ -631,9 +791,6 @@ def summarize_journal(
     if _ORCHESTRATION_TYPES.intersection(found):
         summary.run_kind = "orchestrate"
 
-    clock = max(summary.mtime, float(activity_ts or 0.0))
-    summary.status, summary.ended_by = run_status(lifecycle, clock, current.timestamp())
-
     if summary.run_kind != "orchestrate" and head:
         # A run's opening markers sit in the first 64KB even when every marker
         # older than the 512KB tail budget has scrolled out of the backward
@@ -646,7 +803,6 @@ def summarize_journal(
 
     if summary.updated_at is None:
         summary.updated_at = _iso_from_mtime(summary.mtime)
-    summary.is_live = summary.status == "live"
     return summary
 
 

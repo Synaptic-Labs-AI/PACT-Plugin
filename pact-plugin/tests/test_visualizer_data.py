@@ -2176,3 +2176,77 @@ class TestCapsSurface:
         payload = build_basic_model(root, tmp_path)
         assert payload["truncated_by"] == []
         assert payload["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# Incremental journal parsing
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalRead:
+    """A repeat read parses only new complete lines, and always equals a
+    full parse of the file as it is now."""
+
+    @staticmethod
+    def _shape(read: journal.JournalRead) -> tuple:
+        return ([(event.seq, event.data) for event in read.events],
+                read.lines_total, read.valid_events, read.skipped_lines)
+
+    def _fresh(self, path: Path, monkeypatch) -> tuple:
+        with monkeypatch.context() as patch:
+            patch.setattr(journal, "_PARSE_CACHE", type(journal._PARSE_CACHE)())
+            return self._shape(journal.read_journal(path))
+
+    @staticmethod
+    def _line(index: int) -> str:
+        return json.dumps({"v": 1, "type": "phase_transition", "ts": stamp(index),
+                           "phase": "CODE", "status": "started", "n": index}) + "\n"
+
+    def test_growth_fragments_shrink_and_rotation_all_match_a_full_parse(
+        self, tmp_path, monkeypatch
+    ):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", b"")
+        steps = []
+
+        def check(label: str) -> None:
+            got = self._shape(journal.read_journal(path))
+            assert got == self._fresh(path, monkeypatch), label
+            steps.append((label, len(got[0])))
+
+        path.write_text("".join(self._line(i) for i in range(3)), encoding="utf-8")
+        check("initial")
+        whole = self._line(3)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(whole[:20])
+        check("fragment")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(whole[20:] + self._line(4))
+        check("completed")
+        path.write_text("".join(self._line(i) for i in range(2)), encoding="utf-8")
+        check("shrunk")
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_text("".join(self._line(i + 10) for i in range(6)), encoding="utf-8")
+        os.replace(replacement, path)
+        check("rotated")
+        assert steps == [("initial", 3), ("fragment", 3), ("completed", 5),
+                         ("shrunk", 2), ("rotated", 6)]
+
+    def test_a_repeat_read_does_not_reparse_old_lines(self, tmp_path, monkeypatch):
+        root = make_root(tmp_path)
+        path = write_journal(root, "proj", "sess", b"")
+        path.write_text("".join(self._line(i) for i in range(50)), encoding="utf-8")
+        journal.read_journal(path)
+        folded: list[int] = []
+        real = journal._fold_line
+
+        def counted(read, index, raw):
+            folded.append(index)
+            return real(read, index, raw)
+
+        monkeypatch.setattr(journal, "_fold_line", counted)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(self._line(50))
+        read = journal.read_journal(path)
+        assert folded == [50]
+        assert [event.seq for event in read.events][-1] == 50

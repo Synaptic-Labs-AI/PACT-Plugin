@@ -1465,3 +1465,156 @@ class TestCapsKeepTheNewestAndSayWhich:
         payload = _get_json(live_server.server_port, "/api/sessions?all=1", live_server.key)
         assert payload["filters"] == {"all": "1"}
         assert payload["hidden_trivial"] == 0
+
+
+class TestServerAnswersOnlyWellFormedRequests:
+    def test_http_0_9_gets_no_body(self, live_server):
+        raw = _read_until_close(live_server.server_port, b"GET /api/health\r\n")
+        assert b'"ok"' not in raw and b"instance_id" not in raw
+
+    @pytest.mark.parametrize("path", ["/api/health", "/", "/static/favicon.svg"])
+    def test_every_response_is_no_store_and_same_origin_only(self, live_server, path):
+        raw = _read_until_close(
+            live_server.server_port,
+            f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n".encode()
+            + f"{settings.KEY_HEADER}: {live_server.key}\r\n\r\n".encode(),
+        ).lower()
+        for header in (b"cache-control: no-store", b"cross-origin-resource-policy: same-origin",
+                       b"cross-origin-opener-policy: same-origin"):
+            assert header in raw
+
+    def test_server_header_has_no_trailing_space(self, live_server):
+        raw = _read_until_close(
+            live_server.server_port, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        line = next(l for l in raw.split(b"\r\n") if l.lower().startswith(b"server:"))
+        assert line == f"Server: {settings.APP_NAME}/{settings.VERSION}".encode()
+
+    @pytest.mark.parametrize("host", ["127.0.0.1:1 evil", "localhost:47811@evil", "127.0.0.1:abc",
+                                      "evil.example", ""])
+    def test_strict_host(self, live_server, host):
+        raw = _read_until_close(
+            live_server.server_port,
+            f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode(),
+        )
+        assert raw.startswith(b"HTTP/1.1 403")
+
+    def test_limit_takes_ascii_digits_only(self, live_server):
+        status, _body = _get(live_server.server_port, "/api/sessions?limit=%EF%BC%91",
+                             live_server.key)
+        assert status == 400
+
+    def test_head_is_200_for_static_and_405_for_api(self, live_server):
+        page = _read_until_close(
+            live_server.server_port, b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        head, _sep, body = page.partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.1 200") and body == b""
+        assert b"content-length:" in head.lower()
+        api = _read_until_close(
+            live_server.server_port,
+            b"HEAD /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        assert api.startswith(b"HTTP/1.1 405")
+
+    def test_no_stray_loop_variable_on_the_handler(self):
+        assert not hasattr(server_module.MissionControlHandler, "_method")
+
+    def test_non_finite_floats_encode_as_null(self):
+        body, status = server_module._encode_json(
+            {"a": float("nan"), "b": [float("inf")], "c": 1.5}, 200)
+        assert (body, status) == (b'{"a":null,"b":[null],"c":1.5}', 200)
+
+
+class TestServerBoundsItsWork:
+    def test_connections_past_the_cap_are_closed(self, live_server, monkeypatch):
+        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2)
+        idle = [socket.create_connection(("127.0.0.1", live_server.server_port)) for _ in range(2)]
+        try:
+            import time
+
+            time.sleep(0.2)
+            with socket.create_connection(("127.0.0.1", live_server.server_port), timeout=5) as extra:
+                extra.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                extra.settimeout(2)
+                assert extra.recv(100) == b""
+        finally:
+            for sock in idle:
+                sock.close()
+        import time
+
+        deadline = time.time() + 5
+        while live_server.connections and time.time() < deadline:
+            time.sleep(0.05)
+        status, _ = _get(live_server.server_port, "/api/health", live_server.key)
+        assert status == 200
+
+    def test_an_unchanged_session_is_built_once(self, tmp_path, monkeypatch):
+        from visualizer import model
+
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START], age_s=3600)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        srv = server_module.create_server(roots)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        calls: list[int] = []
+        real = model.build_model
+        monkeypatch.setattr(model, "build_model", lambda *a, **k: calls.append(1) or real(*a, **k))
+        try:
+            first = _get(srv.server_port, "/api/session?slug=proj&session_id=s1", srv.key)
+            second = _get(srv.server_port, "/api/session?slug=proj&session_id=s1", srv.key)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
+        assert first == second and first[0] == 200
+        assert calls == [1]
+
+    def test_the_session_list_walks_the_roots_once(self, tmp_path, monkeypatch):
+        from visualizer import discovery, model
+
+        root_dir = tmp_path / "root"
+        _write_session(root_dir, [_START])
+
+        def no_second_walk(root):
+            raise AssertionError("root_payload walked the roots again")
+
+        monkeypatch.setattr(discovery, "count_root_journals", no_second_walk)
+        roots = settings.resolve_roots([root_dir], env={}, home=tmp_path)
+        payload = model.build_sessions_list(roots, show_all=True)
+        assert payload["roots"][0]["journals"] == 1
+
+
+class TestIncrementalParse:
+    def test_appends_parse_only_new_lines_with_true_seq(self, tmp_path):
+        from visualizer import journal
+
+        path = tmp_path / "session-journal.jsonl"
+        path.write_text('{"type":"a"}\n{"type":"b"}\n{"type":"c"')
+        first = journal.read_journal(path)
+        # The unfinished last line is skipped for this read and not cached.
+        assert [(event.seq, event.data["type"]) for event in first.events] == [
+            (0, "a"), (1, "b")]
+        assert first.skipped_lines == 1
+        with path.open("a") as handle:
+            handle.write('}\nnot json\n{"type":"d"}\n')
+        second = journal.read_journal(path)
+        assert [(event.seq, event.data["type"]) for event in second.events] == [
+            (0, "a"), (1, "b"), (2, "c"), (4, "d")]
+        assert second.skipped_lines == 1
+        assert [event.seq for event in first.events] == [0, 1]
+
+    def test_a_truncated_or_replaced_journal_is_parsed_in_full(self, tmp_path):
+        from visualizer import journal
+
+        path = tmp_path / "session-journal.jsonl"
+        path.write_text('{"type":"a"}\n{"type":"b"}\n')
+        journal.read_journal(path)
+        path.write_text('{"type":"z"}\n')
+        assert [event.data["type"] for event in journal.read_journal(path).events] == ["z"]
+        replacement = tmp_path / "other.jsonl"
+        replacement.write_text('{"type":"y"}\n{"type":"x"}\n{"type":"w"}\n')
+        os.replace(replacement, path)
+        assert [event.data["type"] for event in journal.read_journal(path).events] == [
+            "y", "x", "w"]

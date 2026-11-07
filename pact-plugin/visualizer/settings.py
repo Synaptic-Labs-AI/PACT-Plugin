@@ -148,8 +148,17 @@ SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
     ("Content-Security-Policy", CSP),
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
-    ("Cache-Control", "no-cache"),
+    ("Cache-Control", "no-store"),
+    # No other origin may embed or read these responses, even with no-cors.
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
 )
+
+# Server bounds: concurrent model builds, cached encoded bodies, and open
+# connections (a connection past the cap is closed at accept).
+MAX_CONCURRENT_BUILDS = 2
+BODY_CACHE_ENTRIES = 4
+MAX_CONNECTIONS = 32
 
 STATIC_MIME_TYPES: dict[str, str] = {
     ".html": "text/html; charset=utf-8",

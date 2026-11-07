@@ -120,8 +120,18 @@ All responses are JSON, `Content-Type: application/json; charset=utf-8`.
 Errors are `{"ok": false, "error": "<short reason>"}` with 400 (bad
 parameters), 401 (`key required`: the `X-PACT-Key` header is missing or wrong;
 checked right after the Host check, before any route work, on every `/api/*`
-route including health), 403 (a `Host` header other than loopback), 404, 405,
-or 500 (an unhandled handler error).
+route including health), 403 (a `Host` header other than exactly
+`127.0.0.1` or `localhost` with an optional `:port`), 404, 405 (any method but
+GET, and HEAD on `/api/*`), or 500 (an unhandled handler error). `limit` must be
+ASCII digits. An HTTP/0.9 request line is closed with no response. JSON never
+carries NaN or Infinity; they become `null`.
+
+Server bounds: at most 2 model builds run at once; the 4 most recent encoded
+session bodies are cached by (journal, etag); at most 32 connections are open,
+and a connection past the cap is closed at accept. A journal is parsed
+incrementally: a poll reads only the bytes appended since the last parse of
+the same file (same device and inode), and reparses in full when the file
+shrinks or is replaced. The `Server` header is `pact-mission-control/<version>`.
 
 ### GET /api/health
 
@@ -553,7 +563,8 @@ Available even when no real sessions exist. Deterministic except base time.
   containment and MIME rules. These are aliases only; no other root path is
   served.
 - Anything else → 404.
-- Headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-cache`.
+- Headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, `Cross-Origin-Resource-Policy: same-origin`, `Cross-Origin-Opener-Policy: same-origin`, on every response including errors.
+- `HEAD` on `/` and on the static routes answers 200 with the GET headers and no body.
 
 ## DOM shell (index.html)
 

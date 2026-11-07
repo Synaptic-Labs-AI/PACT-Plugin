@@ -232,7 +232,7 @@ class TestHealth:
         assert response.headers["content-security-policy"] == settings.CSP
         assert response.headers["x-content-type-options"] == "nosniff"
         assert response.headers["referrer-policy"] == "no-referrer"
-        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["cache-control"] == "no-store"
 
     def test_security_headers_on_errors(self, live_server):
         srv, _thread = live_server
@@ -1671,3 +1671,154 @@ class TestReuse:
         cli.write_state(state_dir, {**_live_state(srv), "key": "z" * 43})
         args = cli.build_parser().parse_args(["--detach", "--state-dir", str(state_dir)])
         assert cli._reuse_if_running(state_dir, args, srv.roots) is False
+
+
+# ---------------------------------------------------------------------------
+# Bounded work and well-formed requests only
+# ---------------------------------------------------------------------------
+
+
+def _raw_exchange(port: int, payload: bytes, timeout: float = 3.0) -> bytes:
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock.sendall(payload)
+        chunks: list[bytes] = []
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except TimeoutError:
+            pass
+    return b"".join(chunks)
+
+
+_EVERY_RESPONSE_HEADERS = {
+    "cache-control": "no-store",
+    "cross-origin-resource-policy": "same-origin",
+    "cross-origin-opener-policy": "same-origin",
+    "x-content-type-options": "nosniff",
+}
+
+
+class TestResponseContract:
+    @pytest.mark.parametrize(
+        ("path", "keyed", "status"),
+        [("/api/health", True, 200), ("/api/health", False, 401), ("/", False, 200),
+         ("/static/favicon.svg", False, 200), ("/api/nope", True, 404),
+         ("/static/missing.css", False, 404)],
+    )
+    def test_every_response_carries_the_header_set(self, live_server, path, keyed, status):
+        srv, _thread = live_server
+        response = http_request(srv.server_port, path, key=srv.key if keyed else None)
+        assert response.status == status
+        for name, value in _EVERY_RESPONSE_HEADERS.items():
+            assert response.headers[name] == value, (path, name)
+        assert response.headers["content-security-policy"] == settings.CSP
+        assert response.headers["server"] == f"{settings.APP_NAME}/{settings.VERSION}"
+
+    def test_an_http_0_9_request_gets_no_answer(self, live_server):
+        srv, _thread = live_server
+        assert _raw_exchange(srv.server_port, b"GET /\r\n", timeout=1.0) == b""
+
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1:", "127.0.0.1:123456", "127.0.0.1:8a", "localhost.:80",
+         "127.0.0.1.evil", "evil.127.0.0.1", "[::1]:80", "127.0.0.1:80:80"],
+    )
+    def test_a_host_that_is_not_exactly_loopback_is_403(self, live_server, host):
+        srv, _thread = live_server
+        assert _host_request(srv.server_port, "/api/health", host).status == 403, host
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "LOCALHOST", "localhost:65535"])
+    def test_exact_loopback_hosts_pass(self, live_server, host):
+        srv, _thread = live_server
+        assert _host_request(srv.server_port, "/api/health", host).status == 200, host
+
+    @pytest.mark.parametrize("value", ["%D9%A3", "%EF%BC%95", "%2B5", "5.0", "0x5"])
+    def test_a_limit_that_is_not_ascii_digits_is_400(self, live_server, value):
+        srv, _thread = live_server
+        assert http_request(srv.server_port, f"/api/sessions?limit={value}").status == 400
+
+    def test_head_answers_static_with_headers_only_and_refuses_the_api(self, live_server):
+        srv, _thread = live_server
+        raw = _raw_exchange(
+            srv.server_port, b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        head, _, body = raw.partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.1 200")
+        assert b"content-length:" in head.lower()
+        assert body == b""
+        assert http_request(srv.server_port, "/api/health", method="HEAD").status == 405
+
+    def test_a_non_finite_number_in_a_journal_reaches_the_page_as_null(self, live_server):
+        srv, _thread = live_server
+        path = srv.roots[0].path / "pact-sessions" / "PACT-prompt" / "sess-1" / "session-journal.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write('{"v":1,"type":"commit","ts":"2026-11-01T10:06:00Z","sha":"abc1234",'
+                         '"message":"m","phase":"CODE","weird":NaN,"big":Infinity}\n')
+        response = http_request(srv.server_port, "/api/session?slug=PACT-prompt&session_id=sess-1")
+        assert response.status == 200
+
+        def refuse(name: str) -> None:
+            raise AssertionError(f"non-JSON constant {name} in the response")
+
+        payload = json.loads(response.body, parse_constant=refuse)
+        raw = [event["raw"] for event in payload["events"] if event["raw"].get("weird", 0) is None]
+        assert raw and raw[0]["big"] is None
+
+
+class TestServerBounds:
+    def test_connections_past_the_cap_are_closed_at_accept(self, live_server, monkeypatch):
+        srv, _thread = live_server
+        monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2)
+        held = [socket.create_connection(("127.0.0.1", srv.server_port), timeout=5)
+                for _ in range(2)]
+        try:
+            for sock in held:
+                sock.sendall(b"GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            time.sleep(0.2)
+            refused = _raw_exchange(
+                srv.server_port,
+                b"GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            assert refused == b""
+        finally:
+            for sock in held:
+                sock.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and srv.connections:
+            time.sleep(0.05)
+        assert http_request(srv.server_port, "/favicon.svg").status == 200
+
+    def test_an_unchanged_session_is_built_once(self, live_server, monkeypatch):
+        srv, _thread = live_server
+        calls: list[int] = []
+        real = server_module.model.build_model
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(server_module.model, "build_model", counted)
+        path = "/api/session?slug=PACT-prompt&session_id=sess-1"
+        first = http_request(srv.server_port, path)
+        second = http_request(srv.server_port, path)
+        assert first.body == second.body
+        assert len(calls) == 1
+        journal_path = (srv.roots[0].path / "pact-sessions" / "PACT-prompt" / "sess-1"
+                        / "session-journal.jsonl")
+        with journal_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"v":1,"type":"phase_transition","ts":"2026-11-01T10:07:00Z",'
+                         '"phase":"CODE","status":"started"}\n')
+        third = http_request(srv.server_port, path)
+        assert len(calls) == 2
+        assert third.json()["etag"] != first.json()["etag"]
+
+    def test_the_body_cache_is_bounded(self, live_server):
+        srv, _thread = live_server
+        root = srv.roots[0].path
+        for index in range(settings.BODY_CACHE_ENTRIES + 3):
+            write_journal(root, "Many", f"sess-many-{index}", sample_events())
+            http_request(srv.server_port, f"/api/session?slug=Many&session_id=sess-many-{index}")
+        assert len(srv.body_cache) == settings.BODY_CACHE_ENTRIES
