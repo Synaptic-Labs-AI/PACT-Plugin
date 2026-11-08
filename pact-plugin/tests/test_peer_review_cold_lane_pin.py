@@ -74,8 +74,11 @@ cold reviewer actually refrains from reading the avoid-list paths, reports
 the required shape, or arrives without contaminated context is runtime
 behavior no fixture observes — the first live peer-review dispatch under
 this prose is the probe. A warm brief rewritten in words that avoid every
-enumerated token passes the guard. The ceiling on these pins is prose
-reworded into uselessness while every pinned phrase survives.
+enumerated token passes the guard. The evasion ceiling is prose reworded into
+uselessness while every pinned phrase survives. A second, distinct cost is
+maintenance: the rows are exact substrings, so a punctuation-only edit inside a
+pinned span (a semicolon replaced by a period, say) reds a row even though the
+meaning is unchanged, and the row must be updated with the prose.
 """
 import re
 from pathlib import Path
@@ -400,9 +403,9 @@ RETIRED_LANE_STEMS = (
     "skip the cold lane",
     "that no valid cold report has marked resolved",
     "alone holds merge readiness",
-    # The old append-at-return timing. The retained 'as soon as
+    # The old append-at-return timing, in full. The retained 'as soon as
     # `/PACT:imPACT` returns' is a different string and must not be matched.
-    "as soon as it returns",
+    "as soon as it returns, before synthesizing",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -961,36 +964,52 @@ class TestLeadFacingRules:
         ("Return", "writes no HANDOFF and messages no one; its final report is its return", (
          "the return path")),
         ("Return", "Append every report verbatim to the record under its agentId", "the verbatim record"),
-        ("Return", "while a warm reviewer dispatched in that round has not yet delivered its HANDOFF", (
-         "the hold's trigger — a live warm reviewer in the same round")),
+        ("Return", "while a warm reviewer dispatched in that round still holds the release", (
+         "the hold's trigger — a live warm reviewer still holds the release")),
+        ("Return", "neither delivered a HANDOFF you have accepted", (
+         "the trigger's acceptance bar — delivery alone does not release")),
         ("Return", "hold the report in your own context and write it to no file", (
          "the hold and its write bar")),
         ("Return", "the review doc, a sibling file and a scratch file are the same leak", (
          "why no file is safe — a sibling or scratch file leaks like the review doc")),
+        ("Return", "The hold delays writes only; it does not delay triage.", (
+         "the write/decide boundary — triage is not delayed")),
         ("Return", "every other file of your own that would carry a finding or a disposition", (
          "the hold's file-set extension")),
+        ("Return", "the synthesis included", (
+         "the synthesis named in the hold's file set")),
         ("Return", "every review_finding journal write", (
          "the hold's journal-write extension")),
-        ("Return", "Count only a HANDOFF you have received; a reviewer's task status is not a delivery", (
-         "delivery accounting — receipt, not task status")),
-        ("Return", "when you have received that round's last warm HANDOFF", (
-         "the release condition")),
+        ("Return", "The hold does not cover two writes: the spawn-time agentId and placeholder record, which **Spawn result** requires at once, and the placeholder-correction lead line below, which follows the report it corrects", (
+         "the hold's two write exemptions — the spawn record and the correction line")),
+        ("Return", "Count only a HANDOFF for that round that you have received and accepted; a reviewer's task status is not a delivery", (
+         "delivery accounting — a round-scoped HANDOFF received and accepted")),
+        ("Return", "treat it as no report for this round and follow **No report or an invalid one**", (
+         "the unreproducible-report fallback into the no-report rule")),
+        ("Return", "Append the held report and write the held files", (
+         "the release action — append the held report and write the held files")),
+        ("Return", "when no warm reviewer dispatched in that round still holds the release", (
+         "the release condition — no warm reviewer still holds the release")),
         ("Return", "in every case before synthesizing", (
          "the append-before-synthesis ordering")),
         ("Return", "A warm reviewer that stops without delivering its HANDOFF is a blocker", (
          "the stopped-reviewer blocker path")),
+        ("Return", "is a blocker: run /PACT:imPACT, and once it has handled that reviewer", (
+         "the stopped-reviewer action — run imPACT on the stop")),
         ("Return", "the reviewer no longer holds the release", (
          "the imPACT release valve — a handled stop releases the hold")),
-        ("Return", "That hold covers what you write, not what you decide", (
-         "the write/decide boundary — triage is not held")),
+        ("Return", "holds the release again", (
+         "the re-hold when a reviewer becomes live again")),
         ("Return", "A report not cut short by a HALT is a blocker report when its coverage boundary names a changed path whose diff hunk it did not read for any reason, or none, other than that the path is not review-relevant", (
          "the blocker trigger with its HALT carve-out, matching REPORT's reasons")),
         ("Return", "or a path it judged not review-relevant that you judge clearly review-relevant", (
          "the lead's reclassification and its bound ('clearly')")),
         ("Return", "a skipped path that is not review-relevant (a version bump, a lockfile, a generated file) and a path read but whose tests did not run are coverage notes", (
          "the trigger's boundary — untested or irrelevant is not a blocker")),
-        ("Return", "Record any placeholder values /PACT:imPACT corrects as a labelled lead line in the record as soon as /PACT:imPACT returns", (
-         "the record of imPACT's corrections the resume test reads")),
+        ("Return", "Record any placeholder values /PACT:imPACT corrects as a labelled lead line in the record, appended immediately after the report it corrects", (
+         "the record of imPACT's corrections and its append timing")),
+        ("Return", "or immediately after the report when that report is still held", (
+         "the correction line's held-report branch — write it with the report")),
         ("Return", "Run /PACT:imPACT on a blocker report, and do not synthesize the lane as clean", (
          "the blocker route and the bar on reading a blocked lane as clean")),
         ("Validity", "A report cut short by a HALT, or a blocker report, is never valid", (
@@ -1021,6 +1040,8 @@ class TestLeadFacingRules:
          "the completion-is-not-review rule")),
         ("Synthesis", 'Wait for the round\'s end state — a valid cold report or the "Cold lane did not run" line — before synthesizing', (
          "the wait rule, naming both end states and requiring a valid report")),
+        ("Synthesis", "While a warm reviewer dispatched in this round still holds the release", (
+         "the synthesis hold's trigger — a warm reviewer still holds the release")),
         ("Synthesis", "hold the synthesis in your own context", (
          "the synthesis hold while warm reviewers are live")),
         ("Synthesis", "write no file that carries a finding", (

@@ -18,21 +18,21 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.30: hold the cold report until the round's last warm HANDOFF
+## v4.8.30: hold the cold report until the round's last warm HANDOFF is accepted
 
 ### Summary
 
-The peer-review cold lane's report is now held in the lead's context until the round's last warm reviewer has delivered its HANDOFF, instead of being appended to the record the moment it returns. The hold also covers the lead's other files that carry a finding or a disposition, so a mid-round file write cannot carry the cold report into a live warm reviewer's context.
+The peer-review cold lane's report is now held in the lead's context until the round's last warm reviewer has delivered a HANDOFF the lead accepted, instead of being appended to the record the moment it returns. The hold also covers the lead's other files that carry a finding or a disposition, so a mid-round file write cannot carry the cold report into a live warm reviewer's context. The trade-off is durability: a held report exists only in the lead's context, so a context compaction can lose it; **Return** names the degraded path instead of promising a recovery.
 
 ### What landed
 
-- `commands/peer-review.md` **Return**: the report is appended only after that round's last warm HANDOFF, held in the lead's context until then. The review doc, a sibling file and a scratch file are named as the same leak. The hold covers the synthesis, every other file of the lead's that would carry a finding or a disposition, and every `review_finding` journal write, while leaving the lead's decisions unconstrained. A reviewer's task status is not a delivery; a warm reviewer that stops without a HANDOFF is a blocker handled through `/PACT:imPACT`, and once handled it no longer holds the release.
-- `commands/peer-review.md` **Synthesis**: while a warm reviewer in the round has not delivered its HANDOFF, the synthesis is held in the lead's context too, and no file carrying a finding is written until the release **Return** gives.
-- The lead line recording placeholder values corrected by `/PACT:imPACT` may now be written with the held report it corrects.
+- `commands/peer-review.md` **Return**: the report is appended only after that round's last warm reviewer has delivered a HANDOFF the lead accepted, held in the lead's context until then. The review doc, a sibling file and a scratch file are named as the same leak. The hold covers the synthesis, every other file of the lead's that would carry a finding or a disposition, and every `review_finding` journal write, while leaving the lead's decisions unconstrained and exempting the spawn-time record and the placeholder-correction line. A reviewer's task status is not a delivery; a warm reviewer that stops without a HANDOFF is a blocker handled through `/PACT:imPACT`, and once handled it no longer holds the release. A reviewer that becomes live again in the round — a rejected HANDOFF under revision, or a re-dispatch by `/PACT:imPACT` — re-holds it. A held report that can no longer be reproduced verbatim is treated as no report under the existing one-fresh-dispatch bound, ending with the "Cold lane did not run" row and line when that bound is spent.
+- `commands/peer-review.md` **Synthesis**: while a warm reviewer in the round still holds the release, the synthesis is held in the lead's context too, and no file carrying a finding is written until the release **Return** gives.
+- The lead line recording placeholder values corrected by `/PACT:imPACT` is appended immediately after the report it corrects, including when that report is still held.
 
 ### Why
 
-The cold lane is dispatched in the same parallel block as the warm lanes, but its report reached live warm reviewers when the lead wrote it to the record: a file this session writes reaches a live teammate's context when it changes, whatever its location. Holding the report until the warm lanes have delivered restores the independence the parallel dispatch is meant to provide.
+The cold lane is dispatched in the same parallel block as the warm lanes, but its report reached live warm reviewers when the lead wrote it to the record: a file this session writes reaches a live teammate's context when it changes, whatever its location. Holding the report until the warm lanes have delivered restores the cold lane's own independence — its no-exposure reading of the diff. It does not make the warm lanes independent of each other. The durability trade-off is real: the hold exists only in the lead's context, and the degraded path names what to do when that context no longer carries the text.
 
 ## v4.8.29: run the full CI suite with pytest-xdist
 
