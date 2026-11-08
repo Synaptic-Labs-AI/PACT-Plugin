@@ -984,16 +984,20 @@ class TestLeadFacingRules:
          "the hold's two write exemptions — the spawn record and the correction line")),
         ("Return", "Count only a HANDOFF for that round that you have received and accepted; a reviewer's task status is not a delivery", (
          "delivery accounting — a round-scoped HANDOFF received and accepted")),
-        ("Return", "treat it as no report for this round and follow **No report or an invalid one**", (
-         "the unreproducible-report fallback into the no-report rule")),
+        ("Return", "If you can no longer reproduce a held report verbatim", (
+         "the unreproducible-report fallback trigger")),
+        ("Return", "follow **No report or an invalid one** for a report other than a same-round re-check, treating it as no report", (
+         "the non-re-check fallback route")),
+        ("Return", "follow **Re-check** for a lost same-round re-check report, whose fallback makes the valid first-round report the round's end state, with no fresh dispatch", (
+         "the lost same-round re-check fallback and its no-fresh-dispatch outcome")),
         ("Return", "Append the held report and write the held files", (
          "the release action — append the held report and write the held files")),
         ("Return", "when no warm reviewer dispatched in that round still holds the release", (
          "the release condition — no warm reviewer still holds the release")),
         ("Return", "in every case before synthesizing", (
          "the append-before-synthesis ordering")),
-        ("Return", "A warm reviewer that stops without delivering its HANDOFF is a blocker", (
-         "the stopped-reviewer blocker path")),
+        ("Return", "A warm reviewer that stops without having delivered a HANDOFF you accepted is a blocker", (
+         "the stopped-reviewer blocker path — an accepted HANDOFF")),
         ("Return", "is a blocker: run /PACT:imPACT, and once it has handled that reviewer", (
          "the stopped-reviewer action — run imPACT on the stop")),
         ("Return", "the reviewer no longer holds the release", (
