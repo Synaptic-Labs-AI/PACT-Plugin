@@ -996,11 +996,13 @@ class TestLeadFacingRules:
          "the release condition — no warm reviewer still holds the release")),
         ("Return", "in every case before synthesizing", (
          "the append-before-synthesis ordering")),
-        ("Return", "stops before delivering any HANDOFF", (
-         "the first stop — a stop before any HANDOFF")),
-        ("Return", "stops after you rejected its HANDOFF and no revision followed", (
-         "the second stop — a rejected HANDOFF with no revision")),
-        ("Return", "is a blocker: run /PACT:imPACT, and once it has handled that reviewer", (
+        ("Return", "is making no progress counts as a stop", (
+         "the progress state — a reviewer still working is not a stop")),
+        ("Return", "has delivered no HANDOFF", (
+         "the first clause — no HANDOFF delivered")),
+        ("Return", "you rejected its HANDOFF and it has drawn no revised HANDOFF", (
+         "the second clause's delivery half — no revised HANDOFF after a rejection")),
+        ("Return", "run /PACT:imPACT, and once it has handled that reviewer", (
          "the stopped-reviewer action — run imPACT on the stop")),
         ("Return", "is not a stop, and it holds the release", (
          "the exclusion — a delivered HANDOFF awaiting decision is not a stop")),
