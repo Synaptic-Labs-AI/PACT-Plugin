@@ -290,6 +290,7 @@ ONCE_RULES = (
     ("HALT` by its recorded agentId", "the HALT route"),
     ("the HALT lands at its next tool call", "the HALT timing"),
     ("Append every report verbatim to the record", "the verbatim record"),
+    ("every other file of your own that would carry a finding or a disposition", "the hold's file-set extension"),
     ("is a blocker report when", "the blocker-report trigger"),
     ("is never valid", "the HALT and blocker invalidity rule"),
     ("A first-round cold report is valid only with", "the first-round validity list"),
@@ -399,6 +400,9 @@ RETIRED_LANE_STEMS = (
     "skip the cold lane",
     "that no valid cold report has marked resolved",
     "alone holds merge readiness",
+    # The old append-at-return timing. The retained 'as soon as
+    # `/PACT:imPACT` returns' is a different string and must not be matched.
+    "as soon as it returns",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -889,8 +893,9 @@ class TestLifecycleOrder:
         assert term not in _cold_section().lower(), (
             f"the cold lane again uses {term!r} — machinery the lane dropped "
             f"(restart, supersession, a moving re-check base, round "
-            f"bookkeeping, the re-check skip); every round now reviews the whole "
-            f"PR with one retry"
+            f"bookkeeping, the re-check skip, and the old append-at-return "
+            f"timing); every round now reviews the whole PR with one retry, "
+            f"and a cold report is held until the round's last warm HANDOFF"
         )
 
     def test_no_third_failure_term(self):
@@ -956,7 +961,28 @@ class TestLeadFacingRules:
         ("Return", "writes no HANDOFF and messages no one; its final report is its return", (
          "the return path")),
         ("Return", "Append every report verbatim to the record under its agentId", "the verbatim record"),
-        ("Return", "as soon as it returns, before synthesizing", "the record's timing"),
+        ("Return", "while a warm reviewer dispatched in that round has not yet delivered its HANDOFF", (
+         "the hold's trigger — a live warm reviewer in the same round")),
+        ("Return", "hold the report in your own context and write it to no file", (
+         "the hold and its write bar")),
+        ("Return", "the review doc, a sibling file and a scratch file are the same leak", (
+         "why no file is safe — a sibling or scratch file leaks like the review doc")),
+        ("Return", "every other file of your own that would carry a finding or a disposition", (
+         "the hold's file-set extension")),
+        ("Return", "every review_finding journal write", (
+         "the hold's journal-write extension")),
+        ("Return", "Count only a HANDOFF you have received; a reviewer's task status is not a delivery", (
+         "delivery accounting — receipt, not task status")),
+        ("Return", "when you have received that round's last warm HANDOFF", (
+         "the release condition")),
+        ("Return", "in every case before synthesizing", (
+         "the append-before-synthesis ordering")),
+        ("Return", "A warm reviewer that stops without delivering its HANDOFF is a blocker", (
+         "the stopped-reviewer blocker path")),
+        ("Return", "the reviewer no longer holds the release", (
+         "the imPACT release valve — a handled stop releases the hold")),
+        ("Return", "That hold covers what you write, not what you decide", (
+         "the write/decide boundary — triage is not held")),
         ("Return", "A report not cut short by a HALT is a blocker report when its coverage boundary names a changed path whose diff hunk it did not read for any reason, or none, other than that the path is not review-relevant", (
          "the blocker trigger with its HALT carve-out, matching REPORT's reasons")),
         ("Return", "or a path it judged not review-relevant that you judge clearly review-relevant", (
@@ -995,6 +1021,10 @@ class TestLeadFacingRules:
          "the completion-is-not-review rule")),
         ("Synthesis", 'Wait for the round\'s end state — a valid cold report or the "Cold lane did not run" line — before synthesizing', (
          "the wait rule, naming both end states and requiring a valid report")),
+        ("Synthesis", "hold the synthesis in your own context", (
+         "the synthesis hold while warm reviewers are live")),
+        ("Synthesis", "write no file that carries a finding", (
+         "the synthesis hold's write bar")),
         ("Synthesis", "Every cold finding in the record ends in exactly one disposition", (
          "the disposition rule — every finding closes, exactly once")),
         ("Synthesis", "resolved, when a valid cold report marks it so", "the resolved disposition"),
