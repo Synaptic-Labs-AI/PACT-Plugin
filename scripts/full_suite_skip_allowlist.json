@@ -3,12 +3,6 @@
   "about": "Every skip the certifying full-suite run may report, keyed on the file and the verbatim reason the -ra summary prints (never on a line number). scripts/verify_full_run.py fails on a skip site missing from this list, on more skips at a site than 'allowed', or on an entry that admits no skip of the certifying run; scripts/verify_fast_summary.py reports the same comparison for the fast lane as a warning. To admit a new legitimate skip, add its entry in the SAME commit that adds the skip, and remove an entry in the SAME commit that stops its skip. 'match' is 'exact', or 'prefix' when the reason embeds variable text (key on the stable leading part and say so in the entry). 'allowed' is the most skips at the site, an integer of at least 1.",
   "entries": [
     {
-      "file": "tests/test_ci_full_run_record.py",
-      "reason": "could not import 'xdist': No module named 'xdist'",
-      "match": "exact",
-      "allowed": 3
-    },
-    {
       "file": "tests/test_conftest_config_root_isolation.py",
       "reason": "no ambient CLAUDE_CODE_SESSION_ID was present at collection, so this cell cannot discriminate a working scrub from an absent input — it is meaningful only when the suite runs under a session that exports one",
       "match": "exact",

@@ -32,37 +32,34 @@ Witness
 multi-anchor retry cost. Each ``x`` is a non-verb token, so the scan runs every
 prefix pattern to completion (no early dangerous-match short-circuit).
 
-Assertion strategy (CI-robust — NOT exact-ms; design §7.2)
-----------------------------------------------------------
-Two mutually reinforcing assertions per case:
+Assertion strategy (scaling plus normalized absolute cost)
+-------------------------------------------------------------
+The four multi-anchor cases measure three sizes and require both doubling
+ratios to stay below 3.0. Linear work is ~2.0x per doubling; quadratic work
+is ~4.0x. Those ratios cannot detect a constant-factor slowdown, so the
+largest measurement is also divided by a same-process known-linear reference:
+``str.split`` on the same witness. The normalized absolute budget catches a
+linear 4x regression without restoring a machine-specific millisecond bound.
+Every timing, ratio, reference, normalized value, and threshold is printed
+before the assertions.
 
-* **Absolute CPU-time ceiling** (PRIMARY discriminator). The unbounded/quadratic
-  form is ~1.8 s (gh detect) to ~7.3 s (gh read) at N=4000. The ceiling sits
-  clear of linear and below quadratic, so it cannot flap on a slow machine yet
-  still trips on a regression.
+TIMED ON CPU TIME (``time.process_time``), NOT WALL CLOCK. Wall clock also
+counts time waiting for a core, which concurrent suites needlessly include.
+``best-of-K`` minimum timing suppresses upward scheduler/GC noise because a
+slow sample never lowers the minimum.
 
-  TIMED ON CPU TIME (``time.process_time``), NOT WALL CLOCK. The work is pure
-  CPU, so the two clocks agree on a quiet machine, and backtracking burns CPU
-  either way. Wall clock also counts the time the process waits for a core,
-  so concurrent suites failed these ceilings on honest code; CPU time does not
-  count that wait.
-
-  BOUNDED COSTS ARE QUOTED AT ``N_LARGE`` BELOW, NOT AT N=4000. Every figure
-  in this module once described N=4000 while the arms ran at 8000, which
-  understated one of them ~30x and makes a ceiling look safer than it is. Each
-  per-case comment now carries its measured ``t_large`` and the margin that
-  follows from it.
-* **Scaling ratio** ``t(2N)/t(N) < 3.0`` across one doubling. Linear ≈ 2.0,
-  quadratic ≈ 4.0; 3.0 is the midpoint. ``best-of-K`` minimum timing suppresses
-  upward scheduler/GC noise (a slow sample never lowers the min).
+The push-flag-walk cases retain their bounded absolute CPU-time ceiling.
+They are single-anchor linear witnesses, so restoring the global-prefix bound
+does not produce a quadratic counterfactual for them.
 
 Counter-test-by-revert (non-vacuity)
 ------------------------------------
-Restore the unbounded ``*`` form (the shared prefix constants) and re-run: the
-ratio returns to ~4x AND the N=4000 CPU time blows past the ceiling => the
-targeted case goes RED. Expected cardinality: reverting the shared constants
-(``_GIT_GLOBAL_FLAGS`` / ``_GH_GLOBAL_FLAGS``) reds the corresponding git / gh
-cases.
+Restore the unbounded ``*`` form in either shared prefix constant: both
+corresponding git or gh cases go red on the doubling ratios and normalized
+absolute budget, while the normal bounded controls stay green. A 4x linear
+workload preserves the raw doubling ratios but reds the normalized budget.
+These are manual counter-tests run against a modified copy; no arm in this
+module runs them. The measured values are beside ``NORMALIZED_ABSOLUTE_CEILING``.
 """
 
 import time
@@ -73,39 +70,36 @@ import pytest
 from merge_guard_pre import is_dangerous_command  # noqa: E402
 from shared.merge_guard_common import detect_command_operation_type  # noqa: E402
 
-# N_LARGE = 2 * N_SMALL — the scaling-ratio doubling. N is large enough that the
-# unbounded quadratic is unmistakable (~6 s for the git bank) yet the bounded
-# form stays well under ~0.2 s, so the test runs in a few seconds.
-#
-# FLOORED (measured): a RATIO removes machine-SPEED dependence but NOT NOISE
-# dependence, and a small denominator amplifies what is left. At N_SMALL=2000 the
-# smallest arm measured ~33 ms, so a single scheduler slice is a large fraction
-# of it; under a loaded suite this ratio was observed at 3.85 against a 3.0
-# ceiling while the honest value is ~2.0. That is a false red, and it is also
-# uncomfortably close to the 4.0 quadratic signature the ceiling exists to
-# separate — so the noise threatened BOTH directions, not just flakiness.
-# Doubling N puts every arm in the hundreds of milliseconds, where a scheduler
-# slice is a few percent rather than tens of percent.
+# The multi-anchor cases measure all three sizes; the push-flag-walk cases
+# measure N_LARGE only; the privileged-flag scanner linearity cases measure the
+# N_SMALL/N_LARGE pair.
 N_SMALL = 4000
 N_LARGE = 8000
 
-# best-of-K minimum: the dominant timing noise is upward (scheduler preemption,
-# GC), and a minimum is a clean lower bound on the true cost that a slow sample
-# cannot inflate. K=5 gives five chances at a clean large-N measurement, which
-# is what keeps the small-absolute-time ratios (gh detect, push-flag walk) from
-# flaking.
+# A ratio's noise grows as its denominator shrinks: an arm of ~33 ms once read
+# 3.85 against the 3.0 ceiling under load. At 2000 tokens every multi-anchor arm
+# measures ~130-180 ms of CPU time, and quiet or under three concurrent
+# four-worker runs the 2000->4000 ratio stayed within 1.96-2.06 (aarch64).
+# If a faster runner brings this arm down towards tens of milliseconds, raise
+# the sizes, not the ratio ceiling.
+N_MULTI_SMALL = 2000
+
+# best-of-K minimum: scheduler preemption and GC add upward noise, and a slow
+# sample cannot inflate the minimum.
 _K = 5
 
 # Linear ~2.0x per doubling; quadratic ~4.0x. 3.0 is the midpoint.
 RATIO_CEILING = 3.0
 
-# Per-case absolute ceilings. The git/detect bank's quadratic is ~6 s at N=4000
-# and 60.7 s at N_LARGE (measured under the counter-factual revert), so 2.0 s
-# trips hard on regression.
-# MEASURED t_large at N_LARGE=8000, across quiet / 10 / 24 busy procs / two
-# concurrent full-suite runs: is_dangerous 286-435 ms (4.6x of room),
-# detect 375-619 ms (3.2x). Both hold.
-_CEIL_GIT = 2.0
+# Normalized target/reference cost at N_LARGE, one ceiling for all four
+# multi-anchor cases. Measured on aarch64, quiet and under three concurrent
+# four-worker runs: git cases 2020-2160, gh cases 1520-1730. On x86_64 runners
+# these values are bounded only by green CI runs, which show they stay below
+# the ceiling but not by how much. The ceiling therefore detects a linear
+# constant-factor slowdown of about 1.9x on the git cases and 2.3x-2.6x on the
+# gh cases. Measured counter-tests: a 4x slowdown of is_dangerous_command gave
+# 8610-8720 (git) and 6500-6640 (gh); an unbounded gh prefix gave over 200000.
+NORMALIZED_ABSOLUTE_CEILING = 4000.0
 
 
 def _best_time(fn, arg, k=_K):
@@ -120,57 +114,17 @@ def _best_time(fn, arg, k=_K):
     return best
 
 
-# gh multi-anchor witness (review m-3 — the `_GH_GLOBAL_FLAGS` bound had no direct
-# perf witness). Measured quadratic counter-factual (revert `_GH_GLOBAL_FLAGS`
-# `{0,K}`->`*`): is_dangerous ~7.3 s at N=4000 (2.0 s ceiling fine), but
-# detect_command_operation_type only ~1.8 s (two gh-prefix classifier patterns,
-# not the ~21-pattern read bank) — so detect/gh gets a TIGHTER 1.0 s ceiling
-# (per-surface ceiling calibration).
-# MEASURED t_large at N_LARGE=8000, same four load levels: is_dangerous
-# 214-363 ms against 2.0 s (5.5x of room), detect 221-373 ms against 1.0 s
-# (2.7x — the tightest margin in this module, and it holds). The `~0.08 s /
-# ~0.02 s` this replaced was an N=4000 figure; the detect half understated
-# N_LARGE by ~15x.
-_CEIL_GH_READ = 2.0
-_CEIL_GH_DETECT = 1.0
-
-# Push-flag-walk witness (`git push ` + `-x ` * N). The push-dash-flag walk is a
-# SINGLE-anchor walk (one `git`/`push`), so even unbounded it is O(N) LINEAR, not
-# quadratic — it was already linear at HEAD (the F1 outer `_GIT_PREFIX` bound caps
-# the multi-anchor interaction; design §12.2). This case PINS structural linearity
-# (ratio < 3.0): a future nested-quantifier regression in the push patterns would
-# trip it. It is GREEN-stays-GREEN — reverting the `{0,32}` push bound keeps it
-# linear, so there is NO perf counter-test-RED for it; the bound's non-vacuity is
-# the >K-RESIDUAL FLIP in TestFlagTokenBoundary, not a perf revert.
-#
-# THE RATIO ASSERTION IS DISABLED FOR THIS CASE (ratio ceiling None below), and
-# the reason is that it is the ONE arm here that can produce a false red and
-# cannot produce a true one. VERIFIED, not inferred: reverting both global-flag
-# bounds `{0,32}`->`*` reds `detect_command_operation_type/git` at 60.7 s against
-# its 2.0 s ceiling and leaves BOTH push cases green — so the counter-factual
-# that exists for git/gh does not reach these, exactly as the paragraph above
-# says. What remains is a guard against a hypothetical future nested-quantifier
-# regression, and the absolute ceiling below guards the same hypothetical with
-# far more room:
-#
-#   MEASURED at N_LARGE=8000, 38 reps per case across four load levels (quiet;
-#   10 and 24 busy procs on 10 cores; two concurrent full-suite pytest runs;
-#   and a 2M-object live heap): ratio med 1.99, MAX 2.79 against a 3.0 ceiling
-#   — 1.07x of room. t_large med 175-310 ms against the 1.0 s ceiling below —
-#   3.3x of room. Neither is counter-testable today; keeping the one that will
-#   not false-fire and dropping the one that will is the whole trade.
-#
-# The `~6 ms` this comment used to claim was stale by the N doubling above and
-# understated the real figure by ~30x, which makes the absolute ceiling look far
-# safer than it is. Measured numbers, with their N, replace it.
+# Push-flag-walk is a single-anchor linear witness. Keep its absolute CPU-time
+# ceiling; restoring an unbounded global prefix does not make this case
+# quadratic, so its non-vacuity lives in TestFlagTokenBoundary instead.
 _CEIL_PUSHWALK = 1.0
 
 # `_VALUE_TOKEN` HAS NO ARM IN THIS LADDER, AND THE ATTEMPT IS RECORDED SO IT IS
 # NOT REPEATED. A ratio arm on the `$''` witness was built, sized into the
-# hundreds-of-milliseconds band this N floor exists to reach (254 ms / 783 ms),
+# hundreds-of-milliseconds band the sizes above are chosen to reach (254 ms / 783 ms),
 # and it STILL FLAKED: measured 1.98 in isolation and 3.08 under a loaded
 # full-suite run, against the 3.0 ceiling. Being in the band is NECESSARY BUT
-# NOT SUFFICIENT — the floor fixes a small-denominator problem, and this is a
+# NOT SUFFICIENT — larger sizes fix a small-denominator problem, and this is a
 # different one. Contention inflated the two arms UNEQUALLY (1.5x on the small,
 # 2.4x on the large), and a ratio cannot subtract that: the asymmetry lands
 # entirely in the quotient.
@@ -186,26 +140,28 @@ _CEIL_PUSHWALK = 1.0
 # because the larger arm never returns.
 
 
-def _measure_scaling(fn, build):
-    """Return (t_small, t_large) best-of-K times on the witness ``build(N)``."""
+def _measure_scaling(fn, build, sizes=(N_SMALL, N_LARGE)):
+    """Return best-of-K CPU times for ``fn(build(N))`` at each requested size."""
     # Warm up once (regex objects are compiled at import; this primes caches).
     fn(build(100))
-    t_small = _best_time(fn, build(N_SMALL))
-    t_large = _best_time(fn, build(N_LARGE))
-    return t_small, t_large
+    return tuple(_best_time(fn, build(n)) for n in sizes)
 
 
-# (id, function, witness builder build(N)->str, absolute-ceiling-seconds,
-#  ratio-ceiling or None to skip the ratio assertion — None ONLY where the case
-#  has no quadratic counter-factual, so the ratio can false-red but never true-red)
+# (id, function, witness builder build(N)->str, normalized absolute budget or
+# raw seconds for absolute-only cases, ratio-ceiling or None for absolute-only)
 _CASES = [
-    ("is_dangerous_command/git", is_dangerous_command, lambda n: "git x " * n, _CEIL_GIT, RATIO_CEILING),
-    ("detect_command_operation_type/git", detect_command_operation_type, lambda n: "git x " * n, _CEIL_GIT, RATIO_CEILING),
-    # --- remediation additions (PR #1003) ---
-    ("is_dangerous_command/gh", is_dangerous_command, lambda n: "gh x " * n, _CEIL_GH_READ, RATIO_CEILING),
-    ("detect_command_operation_type/gh", detect_command_operation_type, lambda n: "gh x " * n, _CEIL_GH_DETECT, RATIO_CEILING),
-    ("is_dangerous_command/push-flag-walk", is_dangerous_command, lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK, None),
-    ("detect_command_operation_type/push-flag-walk", detect_command_operation_type, lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK, None),
+    ("is_dangerous_command/git", is_dangerous_command,
+     lambda n: "git x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
+    ("detect_command_operation_type/git", detect_command_operation_type,
+     lambda n: "git x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
+    ("is_dangerous_command/gh", is_dangerous_command,
+     lambda n: "gh x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
+    ("detect_command_operation_type/gh", detect_command_operation_type,
+     lambda n: "gh x " * n, NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING),
+    ("is_dangerous_command/push-flag-walk", is_dangerous_command,
+     lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK, None),
+    ("detect_command_operation_type/push-flag-walk", detect_command_operation_type,
+     lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK, None),
 ]
 
 
@@ -215,32 +171,53 @@ _CASES = [
     ids=[c[0] for c in _CASES],
 )
 def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, ratio_ceiling):
-    """The bounded global-flag prefixes / push-flag walk must scale
-    sub-quadratically on the worst-case witness through both detection paths,
-    the gh prefix (review m-3), and the push-flag walk
-    (structural-linearity pin, §12.2). Restoring an unbounded `*` form on a
-    MULTI-anchor witness (git/gh) makes the ratio ~4x and the N=4000
-    CPU time exceed the ceiling => RED. The push-flag-walk witness is
-    single-anchor (already linear, defense-in-depth) so it stays GREEN under
-    revert — its non-vacuity lives in TestFlagTokenBoundary's >K-residual flip."""
-    t_small, t_large = _measure_scaling(fn, build)
-    ratio = (t_large / t_small) if t_small > 0 else float("inf")
+    """Multi-anchor prefixes scale linearly across two doublings.
+
+    The single-anchor push-flag-walk cases retain their bounded absolute check;
+    their structural non-vacuity lives in TestFlagTokenBoundary.
+    """
     witness = build(1)
-
-    # PRIMARY: generous absolute CPU-time ceiling (flake-resistant).
-    assert t_large < abs_ceiling, (
-        f"{fn.__name__} on {witness!r}*{N_LARGE}: {t_large * 1000:.1f} ms exceeds "
-        f"{abs_ceiling * 1000:.0f} ms ceiling — unbounded O(n^2) backtracking regression?"
-    )
-
-    # REINFORCING: scaling ratio across one doubling (linear ~2.0, quadratic ~4.0).
-    # Skipped where ratio_ceiling is None — see the `_CEIL_PUSHWALK` note.
-    if ratio_ceiling is not None:
-        assert ratio < ratio_ceiling, (
-            f"{fn.__name__} on {witness!r}: t({N_LARGE})/t({N_SMALL}) = {ratio:.2f} "
-            f">= {ratio_ceiling} — quadratic scaling regression "
-            f"(t_small={t_small * 1000:.1f} ms, t_large={t_large * 1000:.1f} ms)?"
+    if ratio_ceiling is None:
+        (t_large,) = _measure_scaling(fn, build, sizes=(N_LARGE,))
+        assert t_large < abs_ceiling, (
+            f"{fn.__name__} on {witness!r}*{N_LARGE}: {t_large * 1000:.1f} ms exceeds "
+            f"{abs_ceiling * 1000:.0f} ms ceiling — unbounded O(n^2) backtracking regression?"
         )
+        return
+
+    sizes = (N_MULTI_SMALL, N_SMALL, N_LARGE)
+    t_small, t_intermediate, t_large = _measure_scaling(fn, build, sizes=sizes)
+    reference_times = tuple(_best_time(str.split, build(n)) for n in sizes)
+    normalized = tuple(t / r for t, r in zip(
+        (t_small, t_intermediate, t_large), reference_times))
+    first_ratio = (t_intermediate / t_small) if t_small > 0 else float("inf")
+    second_ratio = (t_large / t_intermediate) if t_intermediate > 0 else float("inf")
+    print(
+        f"{fn.__name__} on {witness!r}: "
+        f"t_small={t_small * 1000:.1f} ms, "
+        f"t_intermediate={t_intermediate * 1000:.1f} ms, "
+        f"t_large={t_large * 1000:.1f} ms, "
+        f"ratio_small_to_intermediate={first_ratio:.2f}, "
+        f"ratio_intermediate_to_large={second_ratio:.2f}, "
+        f"reference_times_ms={tuple(round(v * 1000, 3) for v in reference_times)}, "
+        f"normalized={tuple(round(v, 1) for v in normalized)}, "
+        f"normalized_ceiling={abs_ceiling:.1f}"
+    )
+    for label, ratio in (("small-to-intermediate", first_ratio),
+                         ("intermediate-to-large", second_ratio)):
+        assert ratio < ratio_ceiling, (
+            f"{fn.__name__} on {witness!r}: {label} ratio {ratio:.2f} "
+            f">= {ratio_ceiling} — quadratic scaling regression "
+            f"(t_small={t_small * 1000:.1f} ms, "
+            f"t_intermediate={t_intermediate * 1000:.1f} ms, "
+            f"t_large={t_large * 1000:.1f} ms)?"
+        )
+    assert normalized[-1] < abs_ceiling, (
+        f"{fn.__name__} on {witness!r}: normalized absolute cost "
+        f"{normalized[-1]:.1f} >= {abs_ceiling:.1f} — constant-factor or "
+        f"quadratic regression (target={t_large:.6f}s, "
+        f"reference={reference_times[-1]:.6f}s)?"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +297,8 @@ class TestPrivilegedFlagScannerLinearity:
         t_small, t_large = _measure_scaling(fn, build)
         ratio = (t_large / t_small) if t_small > 0 else float("inf")
 
-        # PRIMARY: generous absolute ceiling (linear is sub-ms here even at N=4000).
+        # PRIMARY: generous absolute ceiling (linear measures ~25-28 ms of CPU
+        # time at N_LARGE on aarch64, so 1.0 s leaves ~35x of room).
         assert t_large < 1.0, (
             f"extract_privileged_flags({op}) on {build(1)!r}*{N_LARGE}: "
             f"{t_large * 1000:.1f} ms exceeds 1000 ms ceiling — backtracking regression?"

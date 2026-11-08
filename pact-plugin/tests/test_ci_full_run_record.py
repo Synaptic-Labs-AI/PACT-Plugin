@@ -137,6 +137,8 @@ def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
     env = os.environ.copy()
     env.pop("GITHUB_ACTIONS", None)
     env.pop("GITHUB_WORKSPACE", None)
+    for name in [name for name in env if name.startswith("PYTEST_XDIST_")]:
+        env.pop(name)
     # The certifying session that runs THIS module has claimed ownership;
     # the rig session is a fresh outermost session and must claim its own.
     env.pop(OWNER_ENV, None)
@@ -701,16 +703,20 @@ def test_the_recorder_counts_deselected_items_from_the_hook(monkeypatch):
     assert record._deselected == 4
 
 
-def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
-    """PROBE-ONLY COVERAGE: skips until pytest-xdist is in the CI pins.
+WORKER_ITEM_ID_MISMATCH_CONFTEST = '''
 
-    The agreement rule itself is covered in CI by the pure-function tests
-    above. This test exercises the real workeroutput/testnodedown seam, and
-    it deliberately skips rather than mocking that seam: a skip is not a
-    pass. Until the pin lands, the plugin's side of the seam is pinned in CI
-    by the worker-publish and controller-record tests above, which drive the
-    recorder's own hooks with only the attributes it reads.
-    """
+def pytest_collection_modifyitems(session, config, items):
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    if worker is None:
+        return
+    for item in items:
+        if item.name == "test_pass":
+            item._id = item.nodeid.replace("test_pass", f"test_pass_{worker}")
+'''
+
+
+def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
+    """Identical worker collections produce a verifiable schema-v3 record."""
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
     proc = _run(plugin_root, workspace,
@@ -725,14 +731,28 @@ def test_xdist_workers_agree_and_the_record_verifies(tmp_path):
     assert "FULL-RUN-OK" in verdict.stdout, verdict.stdout
 
 
-def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
-    """PROBE-ONLY COVERAGE (see the test above): the negative arm.
+def test_xdist_same_count_different_item_ids_are_refused(tmp_path):
+    """A same-count collection ID mismatch fails pytest and the verifier."""
+    pytest.importorskip("xdist")
+    root, plugin_root, workspace = _rig(
+        tmp_path, PASSING_SUITE,
+        extra_conftest=WORKER_ITEM_ID_MISMATCH_CONFTEST)
+    proc = _run(plugin_root, workspace,
+                args=("-n", "2", "--dist", "loadfile"))
+    output = proc.stdout + proc.stderr
+    assert proc.returncode != 0, output
+    assert "Different tests were collected" in output, output
+    record = _record(workspace)
+    assert record["collected"] == 4, record
+    assert record["errors"] == 1, record
+    assert record["exitstatus"] != 0, record
+    verdict = _verify(root, workspace / RECORD_NAME)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "RUN-VERIFY-FAILURE ERRORS:" in verdict.stderr, verdict.stderr
 
-    An xdist run whose collection hook silently drops an item must fail on
-    COLLECTION-HOOK-NARROWING, not on an earlier condition. The assertion on
-    the reason token is the point: an arm that reds for the wrong reason
-    proves nothing about this check.
-    """
+
+def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
+    """A silent per-worker item removal fails the narrowing verifier check."""
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(
         tmp_path, PASSING_SUITE, extra_conftest=SILENT_REMOVAL_CONFTEST)
@@ -749,6 +769,36 @@ def test_xdist_narrowing_reaches_the_narrowing_check(tmp_path):
         verdict.stderr)
 
 
+NESTED_XDIST_ENV_CONFTEST = '''
+
+import json
+import os
+
+
+def pytest_sessionstart(session):
+    if getattr(session.config, "workerinput", None) is not None:
+        return
+    marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".controller-xdist-env"
+    marker.write_text(json.dumps(sorted(
+        name for name in os.environ if name.startswith("PYTEST_XDIST_"))),
+        encoding="utf-8")
+'''
+
+
+def test_nested_session_does_not_inherit_outer_xdist_environment(
+        tmp_path, monkeypatch):
+    """The nested controller starts without any of the parent's xdist variables."""
+    _, plugin_root, workspace = _rig(
+        tmp_path, PASSING_SUITE, extra_conftest=NESTED_XDIST_ENV_CONFTEST)
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "4")
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "outer-run")
+    proc = _run(plugin_root, workspace)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = workspace / ".controller-xdist-env"
+    assert json.loads(marker.read_text(encoding="utf-8")) == []
+
+
 EIGHT_PASSING_SUITE = "".join(
     f"def test_{name}():\n    assert True\n\n" for name in "abcdefgh")
 
@@ -760,33 +810,48 @@ import time
 import pytest
 
 
+def pytest_testnodedown(node, error):
+    if node.gateway.id != "gw0":
+        return
+    marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".gw0-down"
+    marker.write_text("down\\n", encoding="utf-8")
+
+
+def _wait_for_gw0_down():
+    marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".gw0-down"
+    deadline = time.monotonic() + 10
+    while not marker.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "LATE-WORKER-SYNCHRONIZATION-FAILURE: "
+                "gw0 down marker not observed")
+        time.sleep(0.01)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtestloop(session):
+    worker = getattr(session.config, "workerinput", {}).get("workerid")
     yield
-    if os.environ.get("PYTEST_XDIST_WORKER") == "gw1":
-        # The pause lets gw0 report first, so gw1 is the node left unreported.
-        time.sleep(2)
+    if worker == "gw1":
+        _wait_for_gw0_down()
         raise RuntimeError("internal error on gw1 after its tests")
 '''
 
 
 def test_xdist_exit_zero_internal_error_is_refused_by_the_ready_set(
         tmp_path):
-    """PROBE-ONLY COVERAGE (see the tests above): a run that exits 0 short.
-
-    gw1 runs its share of the tests, then raises an internal error. xdist
-    logs it, gw1 never reports down, and the session still exits 0 with every
-    test passed. Nothing but the ready-node comparison stands between that
-    run and a certificate measured by gw0 alone: the record must carry null
-    collection fields, and the verifier must fail on the first of them it
-    reads rather than certify.
-    """
+    """A worker lost after passing its tests fails closed on the ready set."""
     pytest.importorskip("xdist")
     root, plugin_root, workspace = _rig(
         tmp_path, EIGHT_PASSING_SUITE,
         extra_conftest=LATE_WORKER_INTERNAL_ERROR_CONFTEST)
     proc = _run(plugin_root, workspace, args=("-n", "2"))
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    # gw1 must fail with its own error after gw0 went down; a timed-out wait
+    # also raises late and exits 0, so only its absence proves the ordering.
+    assert "internal error on gw1 after its tests" in output, output
+    assert "LATE-WORKER-SYNCHRONIZATION-FAILURE" not in output, output
     record = _record(workspace)
     assert (record["exitstatus"], record["passed"]) == (0, 8), record
     assert record["items_before_modifyitems"] is None, record
@@ -860,6 +925,36 @@ def test_a_module_level_skip_is_recorded_as_a_site(tmp_path):
     assert record["skipped_at_collection"] == 1, record
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 0, verdict.stderr
+
+
+def test_xdist_module_skip_accounting_matches_serial(tmp_path):
+    """Serial and xdist runs record the same module-skip accounting."""
+    pytest.importorskip("xdist")
+    records = []
+    for label, args in (
+            ("serial", ("-ra",)),
+            ("xdist", ("-ra", "-n", "2", "--dist", "loadfile"))):
+        root, plugin_root, workspace = _rig(tmp_path / label, PASSING_SUITE)
+        (plugin_root / "tests" / "test_module_skip.py").write_text(
+            MODULE_SKIP_SUITE, encoding="utf-8")
+        proc = _run(plugin_root, workspace, args)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        record = _record(workspace)
+        verdict = _verify(root, workspace / RECORD_NAME)
+        assert verdict.returncode == 0, verdict.stdout + verdict.stderr
+        assert "FULL-RUN-OK" in verdict.stdout, verdict.stdout
+        records.append(record)
+
+    serial, distributed = records
+    for key in ("collected", "passed", "skipped", "skipped_at_collection",
+                "deselected", "exitstatus", "skip_sites"):
+        assert distributed[key] == serial[key], (key, serial, distributed)
+    assert len(distributed["terminal_node_ids"]) == len(
+        serial["terminal_node_ids"])
+    for record in records:
+        terminal_ids = record["terminal_node_ids"]
+        assert len(terminal_ids) == record["collected"], record
+        assert len(set(terminal_ids)) == len(terminal_ids), record
 
 
 def test_the_verifier_and_the_recorder_name_the_same_record_file():
