@@ -410,6 +410,8 @@ RETIRED_LANE_STEMS = (
     "as soon as it returns, before synthesizing",
     # The old stop valve that released on any imPACT outcome.
     "once it has handled that reviewer",
+    # The release end that left a replaced reviewer holding forever.
+    "calls for no replacement",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -904,7 +906,7 @@ class TestLifecycleOrder:
             f"timing, and the stop valve that released on any imPACT outcome); "
             f"every round now reviews the whole PR with one retry, and a cold "
             f"report is held until every warm reviewer of its round is accepted "
-            f"or stopped with no replacement"
+            f"or stopped with TaskStop"
         )
 
     def test_no_third_failure_term(self):
@@ -982,10 +984,14 @@ class TestLeadFacingRules:
          "the holder set — dispatched in the round or reused in it by SendMessage")),
         ("Return", "until you accept a HANDOFF it delivered for that round", (
          "release end 1 — an accepted HANDOFF for that round")),
-        ("Return", "or until /PACT:imPACT has stopped it with TaskStop and calls for no replacement", (
-         "release end 2 — imPACT stopped it and called for no replacement")),
-        ("Return", "a replacement that /PACT:imPACT calls for holds the release from that moment, before you spawn it", (
-         "the replacement holds from the moment it is called for, before its spawn")),
+        # Closed by its semicolon: a condition appended after TaskStop (a
+        # replacement's acceptance, say) would bring back the never-release.
+        ("Return", "or until it is stopped with TaskStop;", (
+         "release end 2 — any TaskStop, with nothing appended")),
+        ("Return", "a replacement that /PACT:imPACT calls for holds the release from that moment", (
+         "the replacement holds from the moment it is called for")),
+        ("Return", "before you stop its predecessor or spawn it", (
+         "the handover — the replacement holds before its predecessor's stop")),
         ("Return", "a TaskStop that reports the agent not found counts as stopped", (
          "a not-found TaskStop counts as stopped")),
         ("Return", "You accept a HANDOFF when you validate it, mark its task completed and send the acceptance SendMessage", (
@@ -1000,6 +1006,8 @@ class TestLeadFacingRules:
          "the enumerated imPACT outcomes that keep the hold")),
         ("Return", "and so does stall recovery that marks its task completed and spawns a new teammate without TaskStop", (
          "stall recovery without TaskStop keeps the hold")),
+        ("Return", "until you stop the old teammate with TaskStop, which you do once the new teammate is spawned", (
+         "the stall-recovery old teammate holds until stopped, once its successor is spawned")),
         ("Return", "that new teammate holds the release too", (
          "the stall-recovery teammate holds the release too")),
         ("Return", "The hold delays writes and messages only", (
@@ -1060,10 +1068,13 @@ class TestLeadFacingRules:
          "the re-hold trigger — a rejected HANDOFF under revision")),
         ("Return", "re-dispatched by /PACT:imPACT", (
          "the re-hold trigger — an imPACT re-dispatch")),
-        ("Return", "or sent new work by SendMessage", (
+        ("Return", "sent new work by SendMessage", (
          "the re-hold trigger — new work by SendMessage")),
-        ("Return", "holds the release again until you accept its new HANDOFF or /PACT:imPACT stops it with TaskStop and calls for no replacement", (
-         "the re-hold and its two ends")),
+        ("Return", "or resumed after a TaskStop by any SendMessage to its name", (
+         "the re-hold trigger — any message resumes a stopped reviewer")),
+        # Closed by its period, for the same reason as release end 2.
+        ("Return", "holds the release again until you accept its new HANDOFF or it is stopped with TaskStop.", (
+         "the re-hold and its two ends, with nothing appended")),
         ("Return", "A report not cut short by a HALT is a blocker report when its coverage boundary names a changed path whose diff hunk it did not read for any reason, or none, other than that the path is not review-relevant", (
          "the blocker trigger with its HALT carve-out, matching REPORT's reasons")),
         ("Return", "or a path it judged not review-relevant that you judge clearly review-relevant", (
