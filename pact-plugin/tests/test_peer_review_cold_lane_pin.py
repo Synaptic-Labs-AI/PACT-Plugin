@@ -1018,10 +1018,12 @@ class TestLeadFacingRules:
          "the message bar — no held finding to a holder or the secretary")),
         ("Return", "in the subject, description or metadata of a task assigned to that reviewer or named in its task", (
          "the task-content bar — a holder's task and tasks named in it")),
-        ("Return", "or in the subject of any task you create", (
-         "the task-subject bar — any task you create")),
-        ("Return", "because every teammate can read every task's subject", (
-         "why every task subject is barred")),
+        ("Return", "or in the subject, description or metadata of any task you create", (
+         "the created-task bar — subject, description and metadata of any task you create")),
+        # Closed by its period: the bare phrase is a prefix of the old
+        # "every task's subject" reason and would survive its return.
+        ("Return", "because every teammate can read every task.", (
+         "why every task you create is barred — every teammate can read every task")),
         ("Return", "The hold does not cover the spawn-time agentId and placeholder record, which **Spawn result** requires at once.", (
          "the hold's one write exemption — the spawn record, and nothing else")),
         ("Return", "If you can no longer reproduce a held report verbatim", (
