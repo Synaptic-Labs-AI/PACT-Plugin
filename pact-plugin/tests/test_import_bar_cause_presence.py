@@ -664,7 +664,11 @@ class TestTheFloorEarnsItsPlace:
     @staticmethod
     def _copy(tmp_path: Path) -> Path:
         target = tmp_path / "memory_repair"
-        shutil.copytree(PACKAGE_DIR, target)
+        target.mkdir()
+        for source in _tracked_package_python_files():
+            destination = target / source.relative_to(PACKAGE_DIR)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         return target
 
     @staticmethod
@@ -693,6 +697,19 @@ class TestTheFloorEarnsItsPlace:
         )
         assert renamed != text, "the mutation changed nothing, so the arm proves nothing"
         path.write_text(renamed, encoding="utf-8")
+
+    def test_the_copy_excludes_untracked_source_files(self, tmp_path):
+        expected = {path.relative_to(PACKAGE_DIR)
+                    for path in _tracked_package_python_files()}
+        stray = PACKAGE_DIR / "000_backend_import_bar_copy_issue1714_probe.py"
+        stray.write_text("", encoding="utf-8")
+        try:
+            package = self._copy(tmp_path)
+            copied = {path.relative_to(package) for path in _python_files(package)}
+            assert copied == expected
+            assert self._arms_pass(package, MINIMUM_CARRIERS, EXEMPT_MODULES)
+        finally:
+            stray.unlink()
 
     def test_a_plain_rename_is_caught_without_the_floor(self, tmp_path):
         """The condition the OLD stated cause named, and it is not unique."""
