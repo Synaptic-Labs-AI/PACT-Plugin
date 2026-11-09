@@ -48,6 +48,7 @@ from scripts.database import (
     list_memories,
     search_memories_by_text,
 )
+from scripts.database import PrefixTooShortError
 from scripts.graph import add_file_relation, get_file_id
 from scripts.working_memory import (
     AmbientSyncRefused,
@@ -1541,6 +1542,29 @@ class TestUpdatePayloadProjectIdGuard:
         )
         with pytest.raises(ProjectScopeDisagreementError):
             memory.update(memory_id, {"project_id": None})
+
+    def test_a_payload_refusal_precedes_the_prefix_check(
+        self, tmp_path
+    ):
+        """F3, the other seam: payload validation precedes id resolution.
+
+        The control half proves a short prefix alone takes the
+        PrefixTooShortError path, so the payload half — same short prefix,
+        bad payload — discriminating ValueError is the guard firing FIRST,
+        not the prefix check being unreachable.
+        """
+        db_path = tmp_path / "prefix-ordering.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory.save({"context": "PREFIX-ORDERING"}, sync_to_claude=False)
+
+        with pytest.raises(PrefixTooShortError):
+            memory.update("ab", {"context": "control half"})
+
+        with pytest.raises(ValueError) as excinfo:
+            memory.update("ab", {"project_id": None})
+        assert str(excinfo.value).startswith(
+            "project_id, when supplied to update, must be a non-empty string "
+        )
 
 
 class TestUnresolvedIdentityScopesReads:
