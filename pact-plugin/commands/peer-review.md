@@ -204,7 +204,7 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 
 ### Cold Reviewer Lane
 
-Run the cold lane once in each review round — the initial review and each verify-only re-review — in the order below; each rule applies where it is written.
+Run the cold lane once in each review round — the initial review, any later full review round, and each verify-only re-review — in the order below; each rule applies where it is written.
 
 **Dispatch.** The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description="Cold diff-only review", prompt=<the cold prompt below, placeholders filled>)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it. This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array as the string `"cold-reviewer"`.
 
