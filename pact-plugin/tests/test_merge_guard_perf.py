@@ -45,8 +45,9 @@ before the assertions.
 
 TIMED ON CPU TIME (``time.process_time``), NOT WALL CLOCK. Wall clock also
 counts time waiting for a core, which concurrent suites needlessly include.
-``best-of-K`` minimum timing suppresses upward scheduler/GC noise because a
-slow sample never lowers the minimum.
+Normalized cost uses the best-of-K per-pair minimum to suppress upward
+scheduler/GC noise. Raw scaling ratios use the median target at each size, so
+one anomalously fast size cannot invert a linear doubling into a false quadratic.
 
 The push-flag-walk cases retain their bounded absolute CPU-time ceiling.
 They are single-anchor linear witnesses, so restoring the global-prefix bound
@@ -64,6 +65,7 @@ module runs them. The measured values are beside ``NORMALIZED_ABSOLUTE_CEILING``
 
 import time
 from pathlib import Path
+from statistics import median
 
 import pytest
 
@@ -114,9 +116,10 @@ def _best_time(fn, arg, k=_K):
     return best
 
 
-def _best_paired_times(fn, arg, k=_K, reference_fn=str.split):
-    """Best target, reference, and per-pair normalized cost over k iterations."""
-    best_target = best_reference = best_normalized = float("inf")
+def _best_paired_times(fn, arg, k=_K, reference_fn=str.split, target_aggregate=min):
+    """Aggregate target, best reference, and best per-pair normalized cost."""
+    targets = []
+    best_reference = best_normalized = float("inf")
     for _ in range(k):
         t0 = time.process_time()
         fn(arg)
@@ -124,16 +127,16 @@ def _best_paired_times(fn, arg, k=_K, reference_fn=str.split):
         t0 = time.process_time()
         reference_fn(arg)
         reference = time.process_time() - t0
-        best_target = min(best_target, target)
+        targets.append(target)
         best_reference = min(best_reference, reference)
         best_normalized = min(best_normalized, target / reference)
-    return best_target, best_reference, best_normalized
+    return target_aggregate(targets), best_reference, best_normalized
 
 
 def _measure_paired_scaling(fn, build, sizes):
     """Measure target/reference adjacently at each size, avoiding block bias."""
     fn(build(100))
-    return tuple(_best_paired_times(fn, build(n)) for n in sizes)
+    return tuple(_best_paired_times(fn, build(n), target_aggregate=median) for n in sizes)
 
 
 # Push-flag-walk is a single-anchor linear witness. Keep its absolute CPU-time
@@ -285,6 +288,47 @@ def test_paired_samples_remove_cross_block_normalized_bias(monkeypatch):
     assert new_reference == pytest.approx(0.0000005)
     assert new_normalized == pytest.approx(2000.0)
     assert new_normalized < NORMALIZED_ABSOLUTE_CEILING < old_normalized
+
+
+def test_median_raw_scaling_rejects_size_outlier_but_not_quadratic(monkeypatch):
+    """One fast size cannot create a false quadratic; true quadratic stays red."""
+    now = 0.0
+    costs = {"small": [1, 2, 2, 2, 2], "intermediate": [4, 4, 4, 4, 4]}
+    calls = {"small": 0, "intermediate": 0}
+
+    def process_time():
+        return now
+
+    def target(size):
+        nonlocal now
+        index = calls[size]
+        calls[size] += 1
+        now += costs[size][index] * 0.001
+
+    def reference(_):
+        nonlocal now
+        now += 0.0000005
+
+    monkeypatch.setattr(time, "process_time", process_time)
+    old_small = _best_time(target, "small")
+    old_intermediate = _best_time(target, "intermediate")
+    assert old_intermediate / old_small > RATIO_CEILING
+
+    calls = {"small": 0, "intermediate": 0}
+    new_small, _, _ = _best_paired_times(
+        target, "small", reference_fn=reference, target_aggregate=median)
+    new_intermediate, _, _ = _best_paired_times(
+        target, "intermediate", reference_fn=reference, target_aggregate=median)
+    assert new_intermediate / new_small == pytest.approx(2.0)
+    assert new_intermediate / new_small < RATIO_CEILING
+
+    costs = {"small": [2, 2, 2, 2, 2], "intermediate": [8, 8, 8, 8, 8]}
+    calls = {"small": 0, "intermediate": 0}
+    quadratic_small, _, _ = _best_paired_times(
+        target, "small", reference_fn=reference, target_aggregate=median)
+    quadratic_intermediate, _, _ = _best_paired_times(
+        target, "intermediate", reference_fn=reference, target_aggregate=median)
+    assert quadratic_intermediate / quadratic_small > RATIO_CEILING
 
 
 # ---------------------------------------------------------------------------
