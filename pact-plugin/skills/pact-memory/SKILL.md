@@ -296,7 +296,7 @@ identity before interpreting them.
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
 
-On `update`, an omitted `project_id` leaves the row's project unchanged; an explicit `null`, empty string, or non-string `project_id` or `session_id` is refused with exit 2 — the opposite of `save`, where `null` means auto-detect — and a valid non-empty string re-keys the row, with its file and search rows following.
+On `update`, an omitted `project_id` leaves the row's project unchanged; an explicit `null`, empty string, or non-string `project_id` or `session_id` is refused with exit 2 — the opposite of `save`, where `null` means auto-detect — and a valid non-empty string re-keys the row, with its file and search rows following. A supplied `project_id` or `session_id` on either verb must be a non-empty string without control characters or lone surrogates; on `save`, `null` or omission auto-detects, while on `update` `null` is refused.
 
 ### Exit Codes
 
