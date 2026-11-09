@@ -66,6 +66,31 @@ AMBIGUOUS_MATCH_CAP = 50
 _PREFIX_UPPER_BOUND_CHAR = "g"
 
 
+# Characters that must not reach a rendered envelope raw: C0/DEL/C1 controls
+# (`Cc`), Unicode format characters (`Cf`, which include every bidi override
+# that can reorder or hide the text around it), lone surrogates (`Cs`), and
+# the line/paragraph separators (`Zl`/`Zp`) that break line-oriented logs.
+# JSON encoding alone does not cover this — a consumer that PARSES the
+# envelope and prints the message re-materialises the character.
+def _char_is_unsafe_for_display(char: str) -> bool:
+    return unicodedata.category(char) in ("Cc", "Cf", "Cs", "Zl", "Zp")
+
+
+def escape_for_envelope(text: str) -> str:
+    """Render a caller-supplied value inert in a rendered JSON envelope.
+
+    Control and format characters become visible ``<U+XXXX>`` markers, so a
+    value the caller typed (a memory id or prefix, echoed back on an error
+    path) cannot steer a terminal or reorder the visible text around it.
+    The value is ESCAPED, not refused: the caller needs to see what it sent
+    in order to correct it.
+    """
+    return "".join(
+        f"<U+{ord(char):04X}>" if _char_is_unsafe_for_display(char) else char
+        for char in text
+    )
+
+
 class PrefixTooShortError(ValueError):
     """Raised when a memory-ID prefix is shorter than MIN_PREFIX_LENGTH."""
 
@@ -73,7 +98,8 @@ class PrefixTooShortError(ValueError):
         self.prefix = prefix
         self.minimum = minimum
         super().__init__(
-            f"Prefix '{prefix}' is too short — provide at least {minimum} characters."
+            f"Prefix '{escape_for_envelope(prefix)}' is too short — "
+            f"provide at least {minimum} characters."
         )
 
 

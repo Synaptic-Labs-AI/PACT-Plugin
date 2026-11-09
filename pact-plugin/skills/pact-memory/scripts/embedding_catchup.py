@@ -202,10 +202,19 @@ def get_unembedded_memories(
                 )
 
             # Find memories without embeddings
+            # THE JOIN MATCHES THE PARTITION, NOT JUST THE ID. A vector stored
+            # under a DIFFERENT project is not this row's embedding: a re-key
+            # that could not move it (embedding fault, or a process that
+            # cannot open the vector table) leaves the old partition
+            # populated, and an id-only join then reports the memory as
+            # embedded forever. `IS` is null-safe on purpose so a legacy
+            # NULL-project memory still joins its own NULL partition instead
+            # of being reported unembedded on every sweep.
             query = """
                 SELECT m.id
                 FROM memories m
-                LEFT JOIN vec_memories v ON m.id = v.memory_id
+                LEFT JOIN vec_memories v
+                    ON m.id = v.memory_id AND v.project_id IS m.project_id
                 WHERE v.memory_id IS NULL
             """
             params: List[Any] = []
@@ -272,6 +281,17 @@ def embed_single_memory(memory_id: str) -> bool:
                 sqlite_vec.load(conn)
 
                 embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
+                # DROP A ROW IN ANOTHER PARTITION FIRST. A vec0 primary key is
+                # GLOBAL across partitions: a plain INSERT and an OR REPLACE
+                # both RAISE `UNIQUE constraint failed` when a row for this
+                # memory id exists under a different project (measured), so a
+                # replace alone cannot repair a stranded vector — it fails and
+                # the sweep reports the memory unembedded forever. DELETE spans
+                # partitions, so this is the move.
+                conn.execute(
+                    "DELETE FROM vec_memories WHERE memory_id = ?",
+                    (memory_id,),
+                )
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO vec_memories (memory_id, project_id, embedding)

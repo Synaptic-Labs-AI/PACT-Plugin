@@ -334,9 +334,22 @@ atexit.register(_remove_process_marker)
 
 
 def _get_embedding_attempted_path() -> Path:
-    """Get path to session-scoped embedding attempt marker file."""
+    """Get path to session-scoped embedding attempt marker file.
+
+    The session id is SANITISED, exactly as `_build_session_path` sanitises
+    the directory it composes from the same value: it is read from a session
+    context file, so it is not this module's own text, and it is about to be
+    a path component under /tmp. Path traversal (`../`), a separator, a NUL
+    or a control character must not survive into the filename; the shared
+    substitution keeps the two surfaces on one rule.
+    """
+    from shared.pact_context import _UNSAFE_SLUG_CHARS_RE
+
     session_id = get_session_id_from_context_file() or _PROCESS_MARKER_TOKEN
-    return Path("/tmp") / f"pact_embedding_attempted_{session_id}"
+    return (
+        Path("/tmp")
+        / f"pact_embedding_attempted_{_UNSAFE_SLUG_CHARS_RE.sub('_', str(session_id))}"
+    )
 
 
 def maybe_embed_pending() -> dict:

@@ -337,6 +337,19 @@ class PACTMemory:
                         directory basename (home scope warns).
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
+
+        Raises:
+            ValueError: If a SUPPLIED `project_id` or `session_id` is not a
+                non-empty string free of control characters and lone
+                surrogates, or if the session id DETECTED from the session
+                context file is unusable. A falsy supplied value still means
+                "auto-detect" — the guard sits INSIDE the truthy branch, so
+                `project_id=""` keeps its documented detection meaning
+                instead of becoming a refusal. The value is refused here
+                rather than at its first use because both identifiers reach
+                a utf-8 TEXT binding and the session id reaches a /tmp path
+                component, where the same value fails as an unhandled
+                UnicodeEncodeError or a path outside the intended file.
         """
         if project_id:
             # A caller-supplied project_id short-circuits detection entirely —
@@ -344,13 +357,55 @@ class PACTMemory:
             # env/record scope guard, which takes no arguments and never sees
             # a payload, so "supplied" is the least-checked source of the six
             # and is exactly the one worth naming in the disclosure.
+            #
+            # THE GUARD SITS INSIDE THIS BRANCH, NOT IN FRONT OF IT. In front,
+            # a falsy-but-present id would be refused, and `PACTMemory("")`
+            # flips from "auto-detect" (documented, and the route the save
+            # guard's remedy text names) to an error. The rule here is about
+            # values a caller actually supplied; omission and falsy stay the
+            # detection signal they have always been.
+            if _unusable_identifier(project_id):
+                raise ValueError(
+                    "project_id, when supplied, must be a non-empty string "
+                    "without control characters (U+0000-U+001F, "
+                    "U+007F-U+009F) or lone surrogates (U+D800-U+DFFF); "
+                    "pass nothing to auto-detect the project."
+                )
             self._project_id: Optional[str] = project_id
             self._project_id_source = "supplied"
         else:
             self._project_id, self._project_id_source = (
                 self._detect_project_id_with_source()
             )
-        self._session_id = session_id or self._detect_session_id()
+        if session_id:
+            # Same branch placement and the same reason as project_id above.
+            if _unusable_identifier(session_id):
+                raise ValueError(
+                    "session_id, when supplied, must be a non-empty string "
+                    "without control characters (U+0000-U+001F, "
+                    "U+007F-U+009F) or lone surrogates (U+D800-U+DFFF); "
+                    "pass nothing to auto-detect the session."
+                )
+            self._session_id: Optional[str] = session_id
+        else:
+            # THE DETECTED ID IS VALIDATED TOO. It is read from the session
+            # context file — a value this process did not type — and it is
+            # written to a row's TEXT column and interpolated into a /tmp
+            # marker filename. An unusable one fails later, far from here,
+            # as an unhandled UnicodeEncodeError or a path that is not the
+            # marker this module meant to touch.
+            detected_session = self._detect_session_id()
+            if detected_session is not None and _unusable_identifier(
+                detected_session
+            ):
+                raise ValueError(
+                    "session_id detected from the session context is not a "
+                    "non-empty string free of control characters and lone "
+                    "surrogates; refusing it before it reaches the store or "
+                    "a path. Pass session_id explicitly, or fix the session "
+                    "context file."
+                )
+            self._session_id = detected_session
         self._db_path = db_path
 
         # Cache for the cwd's main repo root, resolved lazily by
@@ -1691,15 +1746,17 @@ class PACTMemory:
             the storage form.
 
         Raises:
-            ValueError: If updates contains unknown field names, if any
-                dict-list item contains unknown sub-object keys, or if a
-                supplied `project_id` or `session_id` is not a non-empty
-                string without control characters or lone surrogates
-                (explicit null included — it would scalar-replace the
-                row's key to NULL; omit the field to leave it
-                unchanged). Payload validation precedes id resolution:
-                such a payload is refused before the memory id is
-                resolved, so it reports the payload, never the prefix.
+            ValueError: If `updates` is not a dict (a non-mapping
+                payload cannot be indexed by field name), if updates
+                contains unknown field names, if any dict-list item
+                contains unknown sub-object keys, or if a supplied
+                `project_id` or `session_id` is not a non-empty string
+                without control characters or lone surrogates (explicit
+                null included — it would scalar-replace the row's key to
+                NULL; omit the field to leave it unchanged). Payload
+                validation precedes id resolution: such a payload is
+                refused before the memory id is resolved, so it reports
+                the payload, never the prefix.
             PrefixTooShortError: prefix is shorter than the minimum.
             AmbiguousPrefixError: prefix matches more than one memory.
             ProjectScopeDisagreementError: CLAUDE_PROJECT_DIR and the session
@@ -1744,6 +1801,18 @@ class PACTMemory:
         # ValueError for the same reason as save()'s payload block: it is this
         # module's bad-input channel and the CLI envelopes it as exit 2, so it
         # cannot read as an env/record disagreement.
+        #
+        # FIRST, THE PAYLOAD MUST BE A MAPPING AT ALL. `update_memory` writes
+        # from `updates.items()` and the loop below indexes by field name, so
+        # a list, a string or a scalar reached one of two bare
+        # TypeErrors/AttributeErrors instead of this channel. `cmd_update`
+        # rejects a non-object JSON payload before calling here, but the
+        # method is public and the library route had no gate.
+        if not isinstance(updates, dict):
+            raise ValueError(
+                "update payload must be an object mapping field names to "
+                f"values, not {type(updates).__name__}; nothing was written."
+            )
         for _identity_field in ("project_id", "session_id"):
             if _identity_field in updates and _unusable_identifier(
                 updates[_identity_field]
@@ -1803,20 +1872,90 @@ class PACTMemory:
                     vector_current = self._last_embedding_status is None
 
             if success and "project_id" in updates:
-                # A WARRANTED RE-KEY CASCADES. update_memory moved the
-                # memories row; three project-keyed surfaces still carry the
-                # old key and would make the row unaddressable from its new
-                # project: the linked files rows, the memory_files links
-                # pointing at them, and the vec_memories partition row.
-                # The comparison reads the PRE-update snapshot: by the time
-                # this runs, the row itself already carries the new key.
-                if before_snapshot.get("project_id") != updates["project_id"]:
+                # A RE-KEY CASCADES ON A CHANGE THIS CALL MADE, OR ON AN
+                # INVARIANT THE STORE STILL BREAKS. update_memory moved the
+                # memories row; two project-keyed surfaces still carry the old
+                # key: the linked files rows (and the memory_files links
+                # pointing at them) and the vec_memories partition row.
+                #
+                # The OBSERVED-INVARIANT half is what lets a RE-ISSUED update
+                # finish a cascade an earlier fault interrupted: by then the
+                # memories row already carries the target, so the snapshot
+                # comparison alone calls the update a no-op and leaves the
+                # links and the vector on the old project forever. Both
+                # observations are indexed lookups, so the satisfied case —
+                # the normal one — writes nothing.
+                target_project = updates["project_id"]
+                # The CHANGE half is kept as it was: a call that re-keyed the
+                # row cascades even when the content store faulted, which is
+                # what the faulted-re-embed arm pins.
+                project_changed = (
+                    before_snapshot.get("project_id") != target_project
+                )
+                files_stale = self._linked_file_partition_is_stale(
+                    conn, memory_id, target_project
+                )
+                vector_stale = self._vector_partition_is_stale(
+                    conn, memory_id, target_project
+                )
+                if project_changed or files_stale or vector_stale:
+                    # `and not vector_stale` is the failure direction: when the
+                    # partition is observed wrong the re-store must happen even
+                    # if the content path reported a successful store, because
+                    # an extra embed is cheaper than a wrong skip.
                     self._cascade_rekey(
-                        conn, memory_id, updates["project_id"],
-                        vector_current=vector_current,
+                        conn, memory_id, target_project,
+                        vector_current=vector_current and not vector_stale,
                     )
 
             return memory_id if success else None
+
+    @staticmethod
+    def _linked_file_partition_is_stale(
+        conn: sqlite3.Connection, memory_id: str, target_project: str,
+    ) -> bool:
+        """Report whether a linked file row sits outside the target project.
+
+        The cascade's invariant, OBSERVED rather than inferred from what this
+        call changed. `IS NOT` is null-safe, so a link to an unprojected file
+        row counts as stale for a projected target — correct, because that row
+        is keyed NULL and no project-scoped read of the target reaches it.
+        """
+        return conn.execute(
+            "SELECT 1 FROM files f JOIN memory_files mf ON mf.file_id = f.id "
+            "WHERE mf.memory_id = ? AND f.project_id IS NOT ? LIMIT 1",
+            (memory_id, target_project),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _vector_partition_is_stale(
+        conn: sqlite3.Connection, memory_id: str, target_project: str,
+    ) -> bool:
+        """Report whether this memory's vector row sits in another partition.
+
+        TWO STATES ARE NOT STALE, both deliberate:
+
+        - A MISSING row belongs to the embedding catch-up, not to the
+          cascade. Treating absence as stale would make every update on a
+          process that cannot embed re-attempt a store forever.
+        - An UNOBSERVABLE table (no extension support, or sqlite-vec absent)
+          is not evidence of a wrong partition. The trigger does not fire
+          there; the read-side confirmation in search.vector_search is what
+          keeps a stranded row from being served to another project.
+
+        Only an observed row under a different project makes this true.
+        """
+        try:
+            conn.enable_load_extension(True)
+            import sqlite_vec
+            sqlite_vec.load(conn)
+            row = conn.execute(
+                "SELECT project_id FROM vec_memories WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        return row is not None and row["project_id"] != target_project
 
     def _cascade_rekey(
         self,
@@ -1826,24 +1965,38 @@ class PACTMemory:
         *,
         vector_current: bool,
     ) -> None:
-        """Move every project-keyed row a warranted re-key leaves behind.
+        """Move what a re-key leaves behind: file LINKS and the vector row.
 
         Files: each linked row is keyed (path, project_id) and
         search_by_file filters by project, so the link is re-pointed to the
         (path, new_project) row — created on demand by track_file, which
-        get-or-creates — and the old link removed. The old file ROW is left
-        in place: deleting it could dangle file_relations references, and a
-        row no memory links is inert, not a leak.
+        get-or-creates — and the old link removed. The OLD file ROW stays,
+        and what that costs is named here rather than waved away as inert:
+        `file_relations` recorded against the old row STAY THERE and become
+        invisible from the new project (`get_file_relations` and
+        `get_file_context` resolve relations from the (path, project) row),
+        so graph relations do not follow a re-key; and the old row still
+        counts in the OLD project's `get_status` graph_stats["files"], which
+        counts rows rather than links. Deleting the old row instead could
+        dangle `file_relations` references, so the residue is left, not
+        hidden.
 
         Vector: vec0 partitions by project_id, so a vector left in the old
-        partition is invisible to the new project's semantic search.
-        Re-stored through _store_embedding, which drops the old partition
-        row and inserts under the new one. When sqlite-vec is absent it
-        returns a degraded reason instead of raising, and the stale
-        partition row then survives by the same contract as every other
-        degraded write: unchanged until a process that can embed rewrites
-        it. `vector_current` skips the re-store when the content-change
-        path already stored the vector under the new key.
+        partition is invisible to the new project's semantic search — and,
+        because the partition is what a project-scoped query filters on,
+        still visible to the OLD one. Re-stored through _store_embedding,
+        which drops the old partition row and inserts under the new one.
+        `vector_current` skips the re-store when the content-change path
+        already stored the vector under the new key. If the re-store FAULTS,
+        the reachable old row is dropped rather than stranded: the
+        partition-aware catch-up then reports the memory unembedded and
+        repairs it, and `search.vector_search` confirms the stored project on
+        every hit in the meantime.
+
+        RETRY: the caller invokes this when the update moved the key, or when
+        the OBSERVED invariant is still broken. The second half means
+        re-issuing the same update after an interrupted cascade finishes it
+        rather than reading as a no-op.
         """
         linked = conn.execute(
             "SELECT f.id AS file_id, f.path AS path, f.project_id AS project_id, "
@@ -1879,6 +2032,16 @@ class PACTMemory:
                 self._last_embedding_status = self._store_embedding(
                     conn, memory_id, memory_dict
                 )
+                if self._last_embedding_status is not None:
+                    # A FAULT RESTORED THE OLD PARTITION'S ROW BY ROLLING THE
+                    # REPLACE BACK. Drop it where the table is reachable, so a
+                    # stranded row becomes a MISSING one — the state the
+                    # partition-aware catch-up repairs. The no-vector-store
+                    # exit cannot reach the table, so this is a no-op there
+                    # and the read-side confirmation in search.vector_search
+                    # carries the guarantee; the no-model exit already dropped
+                    # the row before returning its reason.
+                    self._drop_existing_vector(conn, memory_id)
 
     @_with_store_scope
     def delete(self, memory_id: str) -> Optional[str]:

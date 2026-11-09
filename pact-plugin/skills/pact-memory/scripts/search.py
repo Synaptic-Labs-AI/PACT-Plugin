@@ -125,7 +125,37 @@ def vector_search(
             """
             cursor = conn.execute(sql, (embedding_blob, limit))
 
-        return [(row[0], row[1]) for row in cursor.fetchall()]
+        rows = [(row[0], row[1]) for row in cursor.fetchall()]
+
+        # THE PARTITION IS A HINT; THE ROW'S STORED SCOPE IS THE FACT.
+        # A partition row is written by whichever process stored the vector,
+        # and a re-key that could not move it — an embedding fault, or a
+        # process that cannot open the vector table — leaves the OLD project's
+        # partition populated. Returning such a hit hands another project's
+        # memory to this project's caller, and nothing downstream re-checks it.
+        # Confirm every hit against memories before returning it here, so both
+        # callers inherit the guarantee.
+        #
+        # `project_id is None` KEEPS ITS WHOLE-STORE MEANING: an unscoped
+        # search asks for every partition, and filtering there would silently
+        # narrow a documented scope.
+        if project_id is None or not rows:
+            return rows
+        ids = [memory_id for memory_id, _ in rows]
+        placeholders = ",".join("?" * len(ids))
+        scoped = {
+            row[0]
+            for row in conn.execute(
+                f"SELECT id FROM memories WHERE id IN ({placeholders}) "
+                "AND project_id = ?",
+                (*ids, project_id),
+            )
+        }
+        return [
+            (memory_id, distance)
+            for memory_id, distance in rows
+            if memory_id in scoped
+        ]
 
     except Exception as e:
         error_str = str(e).lower()
@@ -339,6 +369,17 @@ def graph_enhanced_search(
         for memory_id, score in ranked_results:
             memory_dict = get_memory(conn, memory_id)
             if memory_dict:
+                # BELT, BESIDE THE CHOKE POINT. vector_search already confirms
+                # every hit and the keyword leg filters in SQL, but the
+                # graph-boosted leg adds ids from file links WITHOUT a project
+                # check, and this loop is the last place an id becomes a
+                # returned memory. Confirming here means no id source can leak
+                # a row from another project. `project_id is None` unscoped.
+                if (
+                    project_id is not None
+                    and memory_dict.get("project_id") != project_id
+                ):
+                    continue
                 # Get associated files
                 from .graph import get_files_for_memory
                 files_data = get_files_for_memory(conn, memory_id)
@@ -423,6 +464,18 @@ def search_by_file(
         for memory_id in list(memory_ids)[:limit]:
             memory_dict = get_memory(conn, memory_id)
             if memory_dict:
+                # THE GRAPH LOOKUP SCOPES THE FILE, NOT THE MEMORY. A stale
+                # link left on the old project's file row still yields this
+                # memory id (get_memories_for_file is file-id-addressed and
+                # checks no project), so a re-keyed row would be served to its
+                # old project. Confirm the row's own stored project here,
+                # exactly as vector_search confirms a vector hit; an unscoped
+                # call (project_id None) keeps its whole-store meaning.
+                if (
+                    project_id is not None
+                    and memory_dict.get("project_id") != project_id
+                ):
+                    continue
                 from .graph import get_files_for_memory
                 files_data = get_files_for_memory(conn, memory_id)
                 file_paths = [f["path"] for f in files_data]

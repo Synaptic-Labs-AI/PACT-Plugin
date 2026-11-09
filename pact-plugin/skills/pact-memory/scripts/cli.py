@@ -53,6 +53,7 @@ from scripts.database import (
     CALLER_FACING_UPDATE_FIELDS,
     AmbiguousPrefixError,
     PrefixTooShortError,
+    escape_for_envelope,
 )
 from scripts.memory_api import (
     PACTMemory,
@@ -720,7 +721,10 @@ def cmd_get(args, db_path=None):
             total_matches=exc.total_matches,
         )
     if result is None:
-        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+        # The id is CALLER INPUT and this is the one place it is echoed back.
+        # Escape it before it reaches a rendered envelope: a control or bidi
+        # character would otherwise reach the reader's terminal verbatim.
+        _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
     _success(result.to_dict())
 
 
@@ -814,7 +818,10 @@ def cmd_update(args, db_path=None):
             allowed_fields=getattr(exc, "allowed_fields", sorted(CALLER_FACING_UPDATE_FIELDS)),
         )
     if resolved_id is None:
-        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+        # The id is CALLER INPUT and this is the one place it is echoed back.
+        # Escape it before it reaches a rendered envelope: a control or bidi
+        # character would otherwise reach the reader's terminal verbatim.
+        _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
     # Mirror of the save envelope. An update that failed to re-embed is the
     # costlier case: a save that stored no vector leaves a record merely
     # invisible to semantic search, while an update leaves a vector describing
@@ -923,7 +930,10 @@ def cmd_delete(args, db_path=None):
             total_matches=exc.total_matches,
         )
     if resolved_id is None:
-        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+        # The id is CALLER INPUT and this is the one place it is echoed back.
+        # Escape it before it reaches a rendered envelope: a control or bidi
+        # character would otherwise reach the reader's terminal verbatim.
+        _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
     _success({"deleted": True, "memory_id": resolved_id})
 
 
