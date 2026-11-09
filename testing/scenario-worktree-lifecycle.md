@@ -38,6 +38,7 @@ Or trigger it via `/PACT:orchestrate` or `/PACT:comPACT`, which invoke worktree 
 ```
 Worktree ready at {REPO_ROOT}/.worktrees/feature/test-worktree
 Branch: feature/test-worktree
+Venv link: .venv -> {REPO_ROOT}/.venv (read-only, shared with the main checkout — do not install through it)
 ```
 
 ### Step 2: Verify Worktree State
@@ -209,7 +210,7 @@ git worktree list  # Stale entry removed
 | Worktree create fails | "fatal: '{branch}' is already checked out" | Branch exists in another worktree; the setup skill should detect this via `git worktree list` |
 | Plan files lost on cleanup | `docs/plans/` content created in worktree was not committed | Key lesson: always commit plan files before removing worktrees. Plan-mode creates files that are not auto-committed. |
 | Unignored `.venv` symlink | `git worktree remove` refuses with "contains modified or untracked files" (exit 128); `git status --porcelain` shows `?? .venv` | The slash-free `.venv` rule is missing from `info/exclude`, or the link is tracked. Re-run worktree setup to write the rule; do not use `--force` to work around it |
-| No `.venv` in the main checkout | Step 4 prints `Venv link: skipped (no .venv in the main checkout)` | Expected for non-Python repos; setup continues |
+| No `.venv` in the main checkout | Step 4 prints `Venv link: skipped (no .venv at $REPO_ROOT/.venv)` | Expected for non-Python repos; setup continues |
 
 ## Recorded Probe
 

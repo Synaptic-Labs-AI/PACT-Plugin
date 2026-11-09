@@ -70,8 +70,14 @@ Before removal, the shell's working directory must NOT be inside the worktree be
 
 ```bash
 # Compute repo root, cd there, then remove the worktree — must be ONE bash call
+LOCAL_GIT_DIR=$(git rev-parse --git-dir)
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
-REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
 cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/{branch}"
 ```
 

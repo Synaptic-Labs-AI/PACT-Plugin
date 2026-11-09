@@ -1,5 +1,6 @@
 {
   "venvPath": "..",
   "venv": ".venv",
+  "pythonVersion": "3.12",
   "extraPaths": ["hooks/", "hooks/shared/", "skills/pact-memory/", "skills/pact-memory/scripts/", "scripts/", "tests/fixtures/"]
 }

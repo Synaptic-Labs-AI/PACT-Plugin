@@ -124,6 +124,15 @@ def fence_for_step_3(skill_text, branch=BRANCH):
     return _fence_in(skill_text, "### Step 3:", "### Step 4:", branch)
 
 
+def shipped_delimiter(skill_text):
+    """The ONE quoted heredoc delimiter the fence reads the branch with."""
+    delimiters = re.findall(r"<<\s*'([^']+)'", fence_for(skill_text))
+    assert len(delimiters) == 1, (
+        f"expected exactly one quoted heredoc delimiter; found {delimiters}"
+    )
+    return delimiters[0]
+
+
 def _source_repo_root():
     """Repo root by a POSITIVE marker, or None when this is not a checkout.
 
@@ -227,6 +236,58 @@ def make_empty_repo(tmp_path):
     return repo
 
 
+def make_submodule_checkout(tmp_path):
+    """A superproject with a submodule that has its own `.venv` at its root."""
+    superproject = tmp_path / "super"
+    superproject.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(superproject)], check=True)
+    (superproject / "README.md").write_text("superproject\n", encoding="utf-8")
+    git(superproject, "add", "-A")
+    git(superproject, *GIT_ID, "commit", "-qm", "init")
+
+    upstream = tmp_path / "sub-upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(upstream)], check=True)
+    (upstream / "README.md").write_text("submodule\n", encoding="utf-8")
+    git(upstream, "add", "-A")
+    git(upstream, *GIT_ID, "commit", "-qm", "init")
+
+    subprocess.run(
+        [
+            "git", "-C", str(superproject), "-c", "protocol.file.allow=always",
+            "submodule", "add", "--quiet", str(upstream), "sub",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    git(superproject, *GIT_ID, "commit", "-qm", "add submodule")
+
+    submodule = superproject / "sub"
+    (submodule / ".venv").mkdir()
+    (submodule / ".venv" / "marker").write_text("venv\n", encoding="utf-8")
+    return superproject, submodule
+
+
+def make_separate_git_dir_checkout(tmp_path):
+    """A checkout whose git dir lives OUTSIDE its working tree."""
+    checkout = tmp_path / "checkout"
+    git_dir = tmp_path / "elsewhere" / "gitdir"
+    git_dir.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "--quiet", "--separate-git-dir", str(git_dir), str(checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (checkout / "README.md").write_text("checkout\n", encoding="utf-8")
+    git(checkout, "add", "-A")
+    git(checkout, *GIT_ID, "commit", "-qm", "init")
+    (checkout / ".venv").mkdir()
+    (checkout / ".venv" / "marker").write_text("venv\n", encoding="utf-8")
+    return checkout, git_dir
+
+
 def run_fence(fence, repo, pwd=None):
     """Run the fence with `repo` as cwd.
 
@@ -308,15 +369,10 @@ class TestFenceContract:
     def test_the_branch_arrives_as_data_through_one_quoted_heredoc(self):
         """The branch is DATA. Exactly one QUOTED heredoc carries it, and it
         reaches no expansion — the point is not that `$BRANCH` appears."""
-        fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
+        text = SKILL_FILE.read_text(encoding="utf-8")
+        fence = fence_for(text)
         assert "{branch}" not in fence
-        delimiters = re.findall(r"<<\s*'([^']+)'", fence)
-        assert len(delimiters) == 1, (
-            f"expected exactly one QUOTED heredoc in Step 4; found {delimiters}. "
-            "An unquoted heredoc, or an inline assignment, makes the branch "
-            "shell code again."
-        )
-        delimiter = delimiters[0]
+        delimiter = shipped_delimiter(text)
         assert (
             f"IFS= read -r BRANCH <<'{delimiter}'\n{BRANCH}\n{delimiter}" in fence
         ), "the branch is not read through the quoted heredoc"
@@ -470,24 +526,43 @@ class TestStep3BranchIsInertText:
 
 
 class TestDelimiterCannotBeForged:
-    """A branch legally named `PACT_BRANCH` must survive the heredoc.
+    """The delimiter must be a string NO legal branch may equal.
 
-    Under the old underscore delimiter, that value IS the terminator: the body
-    ends empty, the branch reads as empty, and the fence reports an invalid
-    name. The space-bearing delimiter makes the same value ordinary body text,
-    so a valid ref named like the delimiter links normally.
+    Pinning a hardcoded spelling (`PACT_BRANCH`) would stay green if a
+    maintainer "tidied" the odd space delimiter to a hyphen form — and then a
+    legitimate branch named `PACT-BRANCH` would terminate the heredoc and be
+    falsely rejected. The property below reds on any such tidy, and the
+    behavioural arm pins the identifier-shaped cousin end to end.
     """
 
-    def test_a_branch_named_like_the_old_delimiter_links_normally(
+    def test_the_shipped_delimiter_is_not_a_legal_branch_name(self, tmp_path):
+        delimiter = shipped_delimiter(SKILL_FILE.read_text(encoding="utf-8"))
+        done = subprocess.run(
+            ["git", "check-ref-format", "--branch", delimiter],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+        )
+        assert done.returncode != 0, (
+            f"the heredoc delimiter {delimiter!r} is a LEGAL branch name — a "
+            "ref with that exact value would terminate the heredoc and be "
+            "falsely rejected. The delimiter must be unforgeable by any valid "
+            "ref."
+        )
+        assert "not a valid branch name" in done.stderr, (
+            f"the delimiter was rejected for the wrong reason: {done.stderr!r}"
+        )
+
+    def test_a_ref_shaped_like_an_identifier_cousin_links_normally(
         self, isolated_git_config, tmp_path
     ):
-        repo, worktree = make_repo(tmp_path, branch="PACT_BRANCH")
+        repo, worktree = make_repo(tmp_path, branch="PACT-BRANCH")
         done = run_fence(
-            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="PACT_BRANCH"),
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="PACT-BRANCH"),
             repo,
         )
         assert "invalid branch name" not in done.stdout, (
-            f"a valid ref named PACT_BRANCH was rejected: {done.stdout.strip()!r}"
+            f"a valid ref named PACT-BRANCH was rejected: {done.stdout.strip()!r}"
         )
         assert "Venv link: .venv -> " in done.stdout
         assert (worktree / ".venv").is_symlink()
@@ -716,11 +791,11 @@ class TestSymlinkedRootIsAValidWorktree:
     """A worktree reached through a symlinked root is still a valid worktree.
 
     `git rev-parse --show-toplevel` reports the PHYSICAL path, so a predicate
-    that compares toplevel to the computed path rejects this state. The fence
-    computes its root from `pwd`, and `PWD` carries the LOGICAL spelling in a
-    shell that reached the directory through a symlink — passing it mirrors
-    that, and without it bash resolves to the physical path and this arm would
-    not exercise the symlink at all.
+    that compares toplevel to the computed path rejects this state. Under the
+    hybrid the fence resolves its root to the PHYSICAL path; `PWD` is still
+    passed so the invocation carries the logical spelling a real shell would
+    have, proving the physical resolution accepts it. The assertions below are
+    unchanged and must keep passing.
     """
 
     def test_link_is_created_through_the_symlinked_root(
@@ -781,6 +856,77 @@ class TestContainment:
         )
         assert not os.path.lexists(other_wt / ".venv"), (
             "a link was created in another repository's worktree"
+        )
+
+
+class TestRootResolutionOutsideASimpleCheckout:
+    """The root is the CHECKOUT, not the git dir's parent.
+
+    In a submodule `--git-common-dir` is `<super>/.git/modules/<name>`; with
+    `--separate-git-dir` it is an unrelated directory. Taking the git dir's
+    parent therefore writes `.worktrees/` INSIDE `<super>/.git/modules` or
+    beside the separate git dir, and the real checkout gets nothing.
+    """
+
+    @staticmethod
+    def _assert_locus(skill_text, root, old_path):
+        step3 = run_fence(fence_for_step_3(skill_text), root)
+        assert step3.returncode == 0, f"Step 3 failed: {step3.stderr.strip()}"
+        assert (root / ".worktrees" / BRANCH / ".git").is_file(), (
+            "the worktree was not created under the checkout root"
+        )
+        assert not os.path.lexists(old_path), (
+            f"the pre-fix locus {old_path} was written to"
+        )
+
+        step4 = run_fence(fence_for(skill_text), root)
+        assert step4.returncode == 0, f"Step 4 failed: {step4.stderr.strip()}"
+        assert "Venv link: .venv -> " in step4.stdout, (
+            f"the link was not created; stdout={step4.stdout.strip()!r}"
+        )
+        assert (root / ".worktrees" / BRANCH / ".venv").is_symlink()
+
+    def test_submodule_root_is_the_submodule(self, isolated_git_config, tmp_path):
+        superproject, submodule = make_submodule_checkout(tmp_path)
+        self._assert_locus(
+            SKILL_FILE.read_text(encoding="utf-8"),
+            submodule,
+            superproject / ".git" / "modules" / ".worktrees",
+        )
+
+    def test_separate_git_dir_root_is_the_checkout(
+        self, isolated_git_config, tmp_path
+    ):
+        checkout, git_dir = make_separate_git_dir_checkout(tmp_path)
+        self._assert_locus(
+            SKILL_FILE.read_text(encoding="utf-8"),
+            checkout,
+            git_dir.parent / ".worktrees",
+        )
+
+
+class TestInvocationLocus:
+    """A linked worktree invocation still targets the MAIN checkout.
+
+    The hybrid must not replace the common-dir locus with `--show-toplevel`
+    everywhere: run from inside a linked worktree, `--show-toplevel` is the
+    WORKTREE, and treating it as the root would nest `.worktrees/` inside the
+    worktree and link the wrong `.venv`.
+    """
+
+    def test_running_from_inside_a_linked_worktree_targets_the_main_root(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), worktree)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "Venv link: .venv -> " in done.stdout, (
+            f"the link was not created; stdout={done.stdout.strip()!r}"
+        )
+        assert (worktree / ".venv").is_symlink()
+        assert not (worktree / ".worktrees").exists(), (
+            "the fence treated the linked worktree as the root and nested "
+            ".worktrees/ inside it"
         )
 
 

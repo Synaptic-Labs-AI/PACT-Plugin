@@ -39,9 +39,15 @@ git worktree list
 All worktrees live in `.worktrees/` relative to the repo root.
 
 ```bash
-# Get main repo root (from a worktree, returns absolute path; from main repo, returns relative .git — the cd && pwd wrapper normalizes both to absolute)
+# Resolve the main checkout root.
+LOCAL_GIT_DIR=$(git rev-parse --git-dir)
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
-REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
 
 # Create directory and ensure gitignored
 mkdir -p "$REPO_ROOT/.worktrees"
@@ -52,8 +58,14 @@ grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || echo '.worktrees/' 
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
+LOCAL_GIT_DIR=$(git rev-parse --git-dir)
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
-REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
 
 IFS= read -r BRANCH <<'PACT BRANCH'
 {branch}
@@ -62,7 +74,7 @@ git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { ech
 git worktree add "$REPO_ROOT/.worktrees/$BRANCH" -b "$BRANCH"
 ```
 
-Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes). `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
+Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes). `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
 
 **If creation fails**:
 - Branch already exists: Ask user whether to check out the existing branch. If yes, run the Step 3 block unchanged except for dropping `-b` (`git worktree add "$REPO_ROOT/.worktrees/$BRANCH" "$BRANCH"`), keeping the branch read and validation.
@@ -70,12 +82,18 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 
 ### Step 4: Link the Repo venv (if present)
 
-Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
+Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
+LOCAL_GIT_DIR=$(git rev-parse --git-dir)
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
-REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Venv link: skipped (cannot determine the main checkout root)"; exit 0; }
 
 IFS= read -r BRANCH <<'PACT BRANCH'
 {branch}
@@ -116,7 +134,7 @@ else
       echo "Venv link: .venv already exists in the worktree — left untouched"
     elif ln -s "$REPO_ROOT/.venv" "$WORKTREE/.venv"; then
       LINK_CREATED=1
-      echo "Venv link: .venv -> $REPO_ROOT/.venv"
+      echo "Venv link: .venv -> $REPO_ROOT/.venv (read-only, shared with the main checkout — do not install through it)"
     else
       echo "WARNING: could not create the .venv link — tools will not resolve project dependencies in this worktree"
     fi
@@ -140,7 +158,7 @@ fi
 
 Include every line Step 4 printed in the Step 5 report, warnings included.
 
-Treat the link as a read-only, shared view of the main checkout's environment. Do not install into it, and do not delete it through the worktree path: `.venv/` with a trailing slash resolves into the shared environment and removes the main checkout's contents. When a branch needs its own dependency set, remove the link and create a local environment in the worktree.
+Treat the link as a read-only, shared view of the main checkout's environment. Do not install into it, and do not delete it through the worktree path: `.venv/` with a trailing slash resolves into the shared environment and removes the main checkout's contents. When a branch needs its own dependency set, remove the link with `rm -f .venv` (no trailing slash) and create a local environment in the worktree.
 
 A failed link is a warning, not an error: this step is a convenience, and failing the whole setup over it would regress platforms where `ln -s` is unavailable. This is the one deliberate exception to the stop-on-error rule at the top of this skill.
 
