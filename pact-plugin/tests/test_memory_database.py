@@ -2218,69 +2218,132 @@ def _insert_memories(conn, rows):
 
 
 class TestTheDetectedProjectIdIsValidated:
-    """The identity the instance ADOPTS is held to the same rule as a payload.
+    """The ADOPTED project id is validated at the point of BINDING, not at
+    construction (Bugbot finding at ba744f08).
 
-    The detected value comes from CLAUDE_PROJECT_DIR, a session record, the
-    git root or the cwd, and it reaches the same `memories.project_id` TEXT
-    binding every payload id does. Without the guard it fails at the store as
-    an unhandled UnicodeEncodeError, which is not this module's remedy
-    channel. The control arms keep None (unresolved) and a clean value legal.
+    A detected value comes from CLAUDE_PROJECT_DIR, a session record, the git
+    root or the cwd. Refusing it in the constructor gated `get`/`update`/
+    `delete` by FULL 32-character id — the identity-independent by-id
+    capability — on a value those calls never bind. The rule now mirrors the
+    detected session id: by-id commands work, project-scoped reads treat the
+    value as unresolvable (empty/zeroed), and a write that would bind it
+    refuses with ValueError carrying remedy text.
     """
 
-    def test_a_detected_surrogate_project_id_is_refused(self, tmp_path, monkeypatch):
+    _BAD = "proj\udcff"
+
+    def _memory(
+        self,
+        tmp_path,
+        monkeypatch,
+        value=_BAD,
+        source="CLAUDE_PROJECT_DIR",
+        db_path=None,
+    ):
         from scripts.memory_api import PACTMemory
 
         monkeypatch.setattr(
             PACTMemory,
             "_detect_project_id_with_source",
-            staticmethod(lambda: ("proj\udcff", "CLAUDE_PROJECT_DIR")),
+            staticmethod(lambda: (value, source)),
         )
+        return PACTMemory(
+            project_id=None,
+            session_id="s",
+            db_path=db_path or (tmp_path / "d.db"),
+        )
+
+    def test_construction_adopts_the_detected_value(self, tmp_path, monkeypatch):
+        memory = self._memory(tmp_path, monkeypatch)
+        assert memory.project_id == self._BAD, (
+            "the detected value was silently dropped or altered; it is "
+            "adopted AS FOUND and the binding paths guard it themselves"
+        )
+        assert not (tmp_path / "d.db").exists(), (
+            "read-only construction performed store work"
+        )
+
+    def test_an_unresolved_detection_is_not_refused(self, tmp_path, monkeypatch):
+        memory = self._memory(
+            tmp_path, monkeypatch, value=None, source="unresolved"
+        )
+        assert memory.project_id is None
+
+    def test_a_clean_detected_value_is_adopted(self, tmp_path, monkeypatch):
+        memory = self._memory(
+            tmp_path, monkeypatch, value="clean-project", source="cwd"
+        )
+        assert memory.project_id == "clean-project"
+
+    def test_full_id_get_update_delete_work_under_an_unusable_detected_project(
+        self, tmp_path, monkeypatch
+    ):
+        """The by-id capability is identity-independent, full 32-char ids."""
+        from scripts.memory_api import PACTMemory
+
+        db_path = tmp_path / "by-id.db"
+        seed = PACTMemory(project_id="P", session_id="s", db_path=db_path)
+        memory_id = seed.save({"context": "BY-ID"}, sync_to_claude=False)
+
+        memory = self._memory(tmp_path, monkeypatch, db_path=db_path)
+        got = memory.get(memory_id)
+        assert got is not None and got.id == memory_id, (
+            "a full 32-character id was gated by an unusable detected project"
+        )
+        assert memory.update(
+            memory_id, {"context": "BY-ID-UPDATED"}
+        ) == memory_id
+        assert memory.delete(memory_id) == memory_id
+
+    def test_scoped_reads_decline_to_empty_under_an_unusable_detected_project(
+        self, tmp_path, monkeypatch
+    ):
+        """Unresolvable identity, never a binding and never an exception."""
+        from scripts.memory_api import PACTMemory
+
+        db_path = tmp_path / "reads.db"
+        seed = PACTMemory(project_id="P", session_id="s", db_path=db_path)
+        seed.save({"context": "READS"}, sync_to_claude=False)
+
+        memory = self._memory(tmp_path, monkeypatch, db_path=db_path)
+        assert memory.list() == []
+        assert memory.search("READS") == []
+        assert memory.search_by_file("/repo/x.py") == []
+        status = memory.get_status()
+        assert status["project_id"] is None
+        assert status["memory_count"] == 0
+        assert status["graph_stats"]["memories"] == 0
+
+    def test_save_refuses_with_remedy_text_before_any_store_work(
+        self, tmp_path, monkeypatch
+    ):
+        memory = self._memory(tmp_path, monkeypatch)
         with pytest.raises(ValueError) as excinfo:
-            PACTMemory(project_id=None, session_id="s", db_path=tmp_path / "d.db")
+            memory.save({"context": "X"}, sync_to_claude=False)
         message = str(excinfo.value)
+        assert "CLAUDE_PROJECT_DIR" in message, message
         assert "Supply project_id explicitly" in message, message
         assert "\\udcff" in message, (
             "the unusable value was not rendered inert in the message that "
             f"reports it: {message!r}"
         )
         assert "\udcff" not in message, message
-
-    def test_a_detected_control_character_is_refused(self, tmp_path, monkeypatch):
-        from scripts.memory_api import PACTMemory
-
-        monkeypatch.setattr(
-            PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: ("proj\nname", "git root")),
+        assert not (tmp_path / "d.db").exists(), (
+            "the adopted-project refusal performed store work"
         )
-        with pytest.raises(ValueError, match="git root"):
-            PACTMemory(project_id=None, session_id="s", db_path=tmp_path / "d.db")
 
-    def test_an_unresolved_detection_is_not_refused(self, tmp_path, monkeypatch):
-        from scripts.memory_api import PACTMemory
-
-        monkeypatch.setattr(
-            PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+    def test_a_payload_project_bypasses_the_adopted_guard(
+        self, tmp_path, monkeypatch
+    ):
+        """The guard keys on the value that WOULD be bound, not the instance."""
+        memory = self._memory(
+            tmp_path, monkeypatch, db_path=tmp_path / "payload.db"
         )
-        memory = PACTMemory(
-            project_id=None, session_id="s", db_path=tmp_path / "d.db"
+        memory_id = memory.save(
+            {"context": "WARRANTED", "project_id": "explicit"},
+            sync_to_claude=False,
         )
-        assert memory.project_id is None
-
-    def test_a_clean_detected_value_is_adopted(self, tmp_path, monkeypatch):
-        from scripts.memory_api import PACTMemory
-
-        monkeypatch.setattr(
-            PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: ("clean-project", "cwd")),
-        )
-        memory = PACTMemory(
-            project_id=None, session_id="s", db_path=tmp_path / "d.db"
-        )
-        assert memory.project_id == "clean-project"
+        assert memory.get(memory_id).project_id == "explicit"
 
 
 class TestGraphContextConfirmsTheStoredProject:

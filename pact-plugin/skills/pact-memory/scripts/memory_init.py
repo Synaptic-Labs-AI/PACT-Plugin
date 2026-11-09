@@ -384,15 +384,25 @@ def maybe_embed_pending() -> dict:
     result = {"status": "skipped", "message": None}
 
     # Check if we've already attempted this session, then mark it as attempted
-    # (first, to prevent retry on errors). BOTH FILESYSTEM CALLS SIT INSIDE
-    # THE GUARD: `exists()` raises OSError for more than a missing file
-    # (ENAMETOOLONG, EACCES on a parent, ...), and a marker fault is a reason
-    # to skip the sweep, not to fail the caller's memory operation.
+    # (first, to prevent retry on errors). BOTH FILESYSTEM CALLS ARE GUARDED:
+    # `exists()` raises OSError for more than a missing file (ENAMETOOLONG,
+    # EACCES on a parent, ...), and a marker fault is a reason to skip the
+    # sweep, not to fail the caller's memory operation.
+    #
+    # THE TWO FAILURES ARE REPORTED SEPARATELY. When the PROBE fails, the
+    # file may exist and be unreadable; telling the caller creation failed
+    # sends them to the wrong remedy (permissions or the path, not a write
+    # that was never attempted). Both skip the sweep.
     marker_path = _get_embedding_attempted_path()
     try:
-        if marker_path.exists():
-            result["message"] = "Already attempted this session"
-            return result
+        already_attempted = marker_path.exists()
+    except OSError:
+        result["message"] = "Could not check session marker"
+        return result
+    if already_attempted:
+        result["message"] = "Already attempted this session"
+        return result
+    try:
         marker_path.touch()
     except OSError:
         result["message"] = "Could not create session marker"

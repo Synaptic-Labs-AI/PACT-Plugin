@@ -3269,8 +3269,9 @@ class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
     A 300-character alphanumeric id survives the slug regex intact, so the
     composed name exceeds NAME_MAX and the first filesystem call raises
     ENAMETOOLONG. The marker is a best-effort suppression of the catch-up
-    sweep, so a marker fault must degrade to "could not create session
-    marker", never to a failure of the caller's memory operation.
+    sweep, so a marker fault must degrade to a reported skip ("could not
+    check" / "could not create session marker"), never to a failure of the
+    caller's memory operation.
     """
 
     _LONG_ID = "s" * 300
@@ -3308,8 +3309,9 @@ class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
             result = memory_init.ensure_memory_ready()  # must not raise OSError
 
             assert len(marker.name) <= 255, marker.name
-            assert result["embedding"]["message"] != (
-                "Could not create session marker"
+            assert result["embedding"]["message"] not in (
+                "Could not check session marker",
+                "Could not create session marker",
             ), result["embedding"]
         finally:
             if marker is not None:
@@ -3338,10 +3340,15 @@ class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
         second = marker_for("a" * 300 + "2")
         assert first != second, (first.name, second.name)
 
-    def test_a_filesystem_error_on_the_marker_is_reported_not_raised(
+    def test_a_probe_failure_is_reported_as_a_check_failure(
         self, monkeypatch
     ):
-        """`exists()` is a filesystem call too, and it can raise OSError."""
+        """`exists()` is a filesystem call too, and it can raise OSError.
+
+        The failing call is the PROBE, not the creation: the file may exist
+        and be unreadable, so reporting "could not create" names the wrong
+        remedy. The sweep is skipped either way.
+        """
         import memory_init
 
         marker = MagicMock()
@@ -3352,5 +3359,25 @@ class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
 
         result = memory_init.maybe_embed_pending()
 
-        assert result["message"] == "Could not create session marker", result
+        assert result["message"] == "Could not check session marker", result
+        assert result["status"] == "skipped", result
         marker.touch.assert_not_called()
+
+    def test_a_creation_failure_is_reported_as_a_creation_failure(
+        self, monkeypatch
+    ):
+        """The other branch: the probe succeeded and the write failed."""
+        import memory_init
+
+        marker = MagicMock()
+        marker.exists.return_value = False
+        marker.touch.side_effect = OSError(28, "No space left on device")
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path", lambda: marker
+        )
+
+        result = memory_init.maybe_embed_pending()
+
+        assert result["message"] == "Could not create session marker", result
+        assert result["status"] == "skipped", result
+        marker.touch.assert_called_once_with()
