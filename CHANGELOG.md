@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.31: guard update() identity payloads and cascade warranted re-keys
+## v4.8.32: guard update() identity payloads and cascade warranted re-keys
 
 ### Summary
 
@@ -34,6 +34,23 @@ goes only above the newest version. Every PR checks the whole file with
 ### Why
 
 `update_memory` scalar-replaces `project_id`, and the CLI's `update` command hands caller JSON to it verbatim, so any agent or script could send `{"project_id": null}` and silently re-key a memory row to a bucket no reader addresses. The refusal channel is `ValueError` for the same reason as on the create path: the CLI envelopes it as invalid input (exit 2), so it cannot read as an env/record disagreement. The null boundary is the opposite of `save()`'s on purpose — on create, null means auto-detect; on update, null is exactly the write the guard exists to stop. The cascade exists because a warranted re-key that moved only the `memories` row would strand the row's file links and vector in the old project: the row would vanish from `search_by_file` and semantic search under its new key while remaining findable under its old one.
+## v4.8.31: require a fresh reviewer for every warm review lane
+
+### Summary
+
+A warm reviewer for a fresh review dispatch is now stated to be a freshly spawned teammate, never one reused from an earlier phase of the session. The rule defines its own scope — the initial review or any later full review round — and treats continuing a reviewer this round already dispatched as not reuse. It sits where the dispatch decision is made, and the surfaces that pushed a lead toward reuse now name the exception.
+
+### What landed
+
+- The freshness rule as the first paragraph of the warm dispatch section in `/PACT:peer-review`. It scopes itself to a fresh review dispatch — the initial review or any later full review round — and states that continuing a reviewer this round already dispatched, whether a revision after a rejected HANDOFF, an `/PACT:imPACT` re-dispatch, or a resume, is not reuse. It carries the distinct-name mechanism, the dispatch gate's refusal framed as a naming rule, and a pointer to the agent-memory channel a fresh spawn does not close.
+- A review-dispatch row in the orchestrator persona's Reuse vs. Spawn table, ahead of the generic idle-agent row, with the same continuation carve-out; plus a scoped default, the Agent Shutdown Guidance exception, and the PR Review Workflow line.
+- The verify-only re-review table now says the full-review column's reviewers are each freshly spawned under a distinct `name=`, and the cold-lane lead-in runs the cold lane in a later full review round as well as the initial review and each verify-only re-review.
+- The duplicate-name refusal in the dispatch gate now tells a fresh review dispatch to create the new name's Task A (teachback) and Task B (work) before spawning the reviewer under that distinct name rather than re-tasking the existing teammate, and names both permitted reuse paths (verify-only re-review and reviewer-to-fixer work).
+- A structural pin covering the rule, its extraction boundary, and the persona surfaces.
+
+### Why
+
+The command said to spawn warm reviewers but never said they must be fresh, while a reuse default, a shutdown absolute, and the gate's naming refusal all read as permission to re-task an existing teammate. A reviewer carrying the builder's context cannot give the independent read the lane exists to buy.
 
 ## v4.8.30: hold the cold report until its round's warm reviewers are accepted or stopped
 
