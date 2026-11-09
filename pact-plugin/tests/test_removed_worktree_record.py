@@ -1381,6 +1381,64 @@ class TestUnresolvedIdentityRefusesWrites:
             "was not established before _ensure_ready()"
         )
 
+    @pytest.mark.parametrize(
+        "session_id",
+        ["", 123, "bad\x00id", "bad\x7fid", "bad\x9fid", "bad\ud800id"],
+    )
+    def test_f2_a_supplied_payload_session_id_must_be_usable(
+        self, tmp_path, session_id
+    ):
+        """Save-side session_id, cycle 2: same rule, same verb.
+
+        A session_id SOMEONE ACTUALLY SENT must be usable — empty, non-str,
+        control-char and lone-surrogate values are refused before any store
+        work, through the same `_unusable_identifier` rule the project_id
+        guards and the update guard use. Null is NOT in this sweep: on save
+        a null session_id means "default me", exactly as a null project_id
+        means "auto-detect me" (pinned by the NULL-omission arm above).
+        """
+        db_path = tmp_path / "session-id.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+
+        with pytest.raises(ValueError) as excinfo:
+            memory.save(
+                {"context": "SESSION-ID", "session_id": session_id},
+                sync_to_claude=False,
+            )
+
+        assert str(excinfo.value).startswith(
+            "session_id, when supplied, must be a non-empty string without "
+        ), f"refused for a different reason: {str(excinfo.value)!r}"
+        assert not db_path.exists(), (
+            "an invalid payload session_id created the store; the guard must "
+            "precede _ensure_ready()"
+        )
+
+    def test_f2_a_NULL_payload_session_id_is_omission_not_a_refusal(
+        self, tmp_path
+    ):
+        """The save-side null boundary, pinned: null means "default me".
+
+        The update guard rejects an explicit null session_id (there it is
+        the hazard — scalar-replace to NULL); this arm holds save() to the
+        OPPOSITE boundary so the two verbs cannot silently converge.
+        """
+        db_path = tmp_path / "null-session.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+
+        memory_id = memory.save(
+            {"context": "NULL-SESSION", "session_id": None}, sync_to_claude=False
+        )
+
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT session_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "s", (
+            "a None payload session_id was not treated as omission; it "
+            "should default to the instance's session id, not be refused"
+        )
+
 
 class TestUpdatePayloadProjectIdGuard:
     """An update payload cannot de-key or re-key a row (#1688 close-out).

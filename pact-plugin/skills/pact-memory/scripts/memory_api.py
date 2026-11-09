@@ -1053,6 +1053,21 @@ class PACTMemory:
                 "project. Nothing was written."
             )
 
+        # THE SAME RULE FOR session_id, SAME VERB, SAME SHAPE: a supplied
+        # value must be usable; null does NOT apply here — on save, a null
+        # session_id means "default me" exactly as a null project_id means
+        # "auto-detect me", and only a value someone actually sent can be
+        # bad input. Sits beside the project_id guard, before `_ensure_ready`
+        # and before the defaulting, so a refused payload does no store work.
+        payload_session = memory.get("session_id")
+        if payload_session is not None and _unusable_identifier(payload_session):
+            raise ValueError(
+                "session_id, when supplied, must be a non-empty string without "
+                "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+                "surrogates (U+D800-U+DFFF); omit it to default the session. "
+                "Nothing was written."
+            )
+
         # AND FAIL CLOSED WHEN NO IDENTITY RESOLVED AT ALL. A None id is not a
         # neutral default here: `create_memory` would stamp a NULL project_id,
         # which `list_memories`/search then treat as "no filter" or as a
