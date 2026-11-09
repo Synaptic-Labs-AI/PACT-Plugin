@@ -335,15 +335,21 @@ def _carveout_is_positive(text: str, case: str) -> bool:
     bare token check accepts 'does not reuse that reviewer', and a
     sentence-wide negation scan accepts the exception-shaped inversion
     'reviews other than verify-only still reuse that reviewer' because its
-    verb is positive. The qualifier directly before the case noun is what
-    flips the carve-out, so bind that qualifier rather than widening the
-    scan: the shutdown paragraph's 'except for review dispatch' sits in the
-    same sentence as its carve-out and would otherwise read as an inversion.
+    verb is positive. The guard checks an ENUMERATED set of qualifiers that
+    immediately precede the case noun — other than, except (for), apart from,
+    excluding, but, than, and the non- prefix — rather than widening the
+    sentence scan: the shutdown paragraph's 'except for review dispatch'
+    sits in the same sentence as its carve-out, and a sentence-wide
+    exception set would read it as an inversion. A qualifier outside this
+    enumeration can still invert the carve-out with the arms green; that
+    residual belongs to the module's disclosed unbounded class, not to a
+    closed set.
     """
     escaped = re.escape(case)
     inverted = re.compile(
-        rf"\b(?:other\s+than|except(?:\s+for)?|but|than)\s+"
+        rf"\b(?:other\s+than|except(?:\s+for)?|apart\s+from|excluding|but|than)\s+"
         rf"(?:a\s+|an\s+|the\s+)?{escaped}\b"
+        rf"|\bnon-{escaped}\b"
     )
     if inverted.search(text):
         return False
