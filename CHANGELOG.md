@@ -18,6 +18,22 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.31: capture comparable full-suite diagnostic outcomes
+
+### Summary
+
+The full-suite workflow's manual dispatch can now select whole-file or per-test xdist scheduling while keeping whole-file scheduling as the default everywhere else. Manual runs also emit JUnit XML and upload it with the existing collection and run records, so diagnostic comparisons can detect per-test outcome changes without replacing the schema-v3 merge-gate evidence.
+
+### What landed
+
+- `.github/workflows/tests.yml` adds a constrained `dist` dispatch choice: `loadfile` by default, with `load` as the only alternative. The single unrestricted pytest invocation has no path operands and resolves to the existing default command outside explicit diagnostic dispatches. The required `full-suite` job remains scalar, and the existing full-collection, full-run, and before/after environment verifiers keep their ordering.
+- The pytest step writes `.full-suite-results.xml`. A dispatch-only, always-run upload step preserves that JUnit file, `.full-run-record.json`, and `.full-collection-record.json` under a unique run/attempt artifact name. Missing evidence is an error, and `include-hidden-files: true` is mandatory for these dotfiles. The upload action is pinned to `actions/upload-artifact` v7.0.2 by full commit SHA; merge-group and push runs gain no artifact dependency.
+- CI contract tests pin the input, exact dynamic command, artifact shape and placement, action allowlist and pin, and final environment check. One strict `shlex` normalizer accepts only the reviewed dynamic command and resolves it to the static default for local collection parity; expression fragments, extra arguments, missing JUnit output, and selection flags fail instead of reaching local pytest. Mutation arms cover altered commands, hidden-file omission, missing paths, wrong upload conditions or placement, and unpinned actions.
+
+### Why
+
+Repeated diagnostic runs need per-test evidence, not only aggregate counts: equal totals can hide two tests swapping pass and skip. JUnit adds that comparison surface beside the existing certification records, while the constrained dispatch interface exposes per-test scheduling without arbitrary pytest arguments or a new job matrix.
+
 ## v4.8.30: hold the cold report until its round's warm reviewers are accepted or stopped
 
 ### Summary

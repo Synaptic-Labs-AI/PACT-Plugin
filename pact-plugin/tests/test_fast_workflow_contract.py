@@ -63,6 +63,7 @@ ALLOWED_ACTIONS = (
     "actions/setup-python@",
     "actions/cache/restore@",
     "actions/cache/save@",
+    "actions/upload-artifact@",
 )
 FAST_PATH_FILES = (
     Path("scripts/fast_suite_selection.py"),
@@ -401,8 +402,23 @@ def _assert_full_workflow_contract(root):
         f"tests.yml pull_request types are {pull_request.get('types')!r}, "
         f"not ['opened', 'synchronize', 'reopened']"
     )
-    assert "workflow_dispatch" in triggers, (
-        "the documented manual fallback needs workflow_dispatch"
+    dispatch = triggers.get("workflow_dispatch")
+    assert isinstance(dispatch, dict), (
+        "the documented manual fallback needs workflow_dispatch with its "
+        "constrained dist input"
+    )
+    inputs = dispatch.get("inputs")
+    assert isinstance(inputs, dict) and set(inputs) == {"dist"}, (
+        f"workflow_dispatch inputs are {inputs!r}; only the constrained dist "
+        "choice is admitted, never arbitrary pytest arguments"
+    )
+    dist = inputs["dist"]
+    assert dist.get("required") is False
+    assert dist.get("default") == "loadfile"
+    assert dist.get("type") == "choice"
+    assert dist.get("options") == ["loadfile", "load"], (
+        f"dist options are {dist.get('options')!r}; loadfile stays the default "
+        "and load is the only diagnostic alternative"
     )
     assert "merge_group" in triggers, "tests.yml has no merge_group trigger"
     merge = triggers.get("merge_group") or {}
@@ -430,11 +446,11 @@ def _assert_full_workflow_contract(root):
         f"tests.yml must contain exactly one pytest invocation; found "
         f"{len(pytest_runs)}: {pytest_runs!r}"
     )
-    assert pytest_runs[0] == ci_contract.TEST_CMD, (
+    assert pytest_runs[0] == ci_contract.WORKFLOW_TEST_CMD, (
         f"the pytest step is {pytest_runs[0]!r}, not exactly "
-        f"{ci_contract.TEST_CMD!r}"
+        f"{ci_contract.WORKFLOW_TEST_CMD!r}"
     )
-    words = pytest_runs[0].split()
+    words = shlex.split(pytest_runs[0])
     after_pytest = words[words.index("pytest") + 1:]
     for flag in ("-k", "-m", "--deselect", "--ignore", "--maxfail"):
         assert flag not in after_pytest, (
@@ -468,7 +484,7 @@ def _assert_full_workflow_contract(root):
         "test_ci_collection_scope permits exactly one such line"
     )
 
-    position = runs.index(ci_contract.TEST_CMD)
+    position = runs.index(ci_contract.WORKFLOW_TEST_CMD)
     assert runs[position - 1] == ci_contract.VERIFY_CMD, (
         "the full pytest step is not immediately preceded by the env verify"
     )
@@ -510,6 +526,42 @@ def _assert_full_workflow_contract(root):
         "the test step; the continue-on-error pin would check the wrong step")
     _assert_step_cannot_be_silenced(
         steps, evidence_cmd, "tests.yml run-evidence step")
+
+    uploads = [
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Upload full-suite diagnostic evidence"
+    ]
+    assert len(uploads) == 1, (
+        f"expected exactly one diagnostic evidence upload; found {len(uploads)}"
+    )
+    upload_index, upload = uploads[0]
+    assert upload.get("uses") == ci_contract.UPLOAD_ARTIFACT_ACTION, (
+        f"diagnostic upload uses {upload.get('uses')!r}, not the reviewed "
+        f"full-SHA action {ci_contract.UPLOAD_ARTIFACT_ACTION!r}"
+    )
+    assert str(upload.get("if", "")).strip() == (
+        "always() && github.event_name == 'workflow_dispatch'"), (
+        f"diagnostic upload condition is {upload.get('if')!r}; it must run "
+        "after either test outcome but only for workflow_dispatch"
+    )
+    upload_with = upload.get("with") or {}
+    assert upload_with.get("name") == (
+        "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}")
+    assert (upload_with.get("path") or "").splitlines() == [
+        ".full-suite-results.xml",
+        ".full-run-record.json",
+        ".full-collection-record.json",
+    ], f"diagnostic upload paths are {upload_with.get('path')!r}"
+    assert upload_with.get("if-no-files-found") == "error"
+    assert upload_with.get("include-hidden-files") is True, (
+        "all three evidence files are dotfiles; omitting hidden files would "
+        "silently upload no usable diagnostic evidence"
+    )
+    assert upload_index == evidence_index + 1 == len(steps) - 2, (
+        f"diagnostic upload index {upload_index}, run evidence index "
+        f"{evidence_index}, final step index {len(steps) - 1}: upload must sit "
+        "immediately between run verification and the final environment check"
+    )
 
     merge_steps = [step for step in steps
                    if step.get("name") == "Assert the merge-group certification subject"]

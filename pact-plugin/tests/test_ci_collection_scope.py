@@ -203,8 +203,8 @@ def _the_pytest_command(workflow_text):
 
 
 def _pytest_args(command):
-    """Everything after the `pytest` token, or None when it cannot be found."""
-    words = command.split()
+    """Effective default arguments after pytest, never expression fragments."""
+    words = ci_contract.normalized_workflow_test_argv(command)
     if "pytest" not in words:
         return None
     return words[words.index("pytest") + 1:]
@@ -309,7 +309,7 @@ def _path_operands(command, working_dir):
     direction that matters: a path argument that does not exist collects
     nothing, so it is not a silent narrowing — it is a broken CI run.
     """
-    words = command.split()
+    words = ci_contract.normalized_workflow_test_argv(command)
     if "pytest" not in words:
         return None
     after = words[words.index("pytest") + 1:]
@@ -354,6 +354,26 @@ def _collect_node_ids(args, cwd):
 
 class TestCiInvocationCollectsTheWholeCorpus:
     """The CI pytest step must reach every test root, through either door."""
+
+    def test_dynamic_command_normalizes_to_the_static_default(self):
+        normalized = ci_contract.normalized_workflow_test_argv()
+        assert normalized == ci_contract.TEST_CMD.split()
+        assert _pytest_args(ci_contract.WORKFLOW_TEST_CMD) == [
+            "-ra", "-n", "4", "--dist", "loadfile"
+        ]
+
+    def test_dynamic_command_rejects_expression_and_argument_drift(self):
+        junit = '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"'
+        for command in (
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                "${{ inputs.dist || 'loadfile' }}",
+                "${{ inputs.dist || 'load' }}", 1),
+            ci_contract.WORKFLOW_TEST_CMD + " tests",
+            ci_contract.WORKFLOW_TEST_CMD.replace(" " + junit, "", 1),
+            ci_contract.WORKFLOW_TEST_CMD + " --deselect tests/test_smoke.py",
+        ):
+            with pytest.raises(AssertionError, match="PARSE FAILURE"):
+                ci_contract.normalized_workflow_test_argv(command)
 
     def test_ci_invocation_and_full_corpus_collect_the_same_tests(self):
         """COLLECTION PARITY: what CI collects must equal the whole corpus.

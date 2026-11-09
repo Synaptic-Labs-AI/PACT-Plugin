@@ -216,6 +216,15 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      dist:
+        description: xdist distribution for diagnostic evidence
+        required: false
+        default: loadfile
+        type: choice
+        options:
+          - loadfile
+          - load
 
 # Minimal privilege: this workflow only checks out the repo and runs pytest —
 # it needs read access to repo contents and nothing else. Pinning the token
@@ -496,7 +505,7 @@ jobs:
 
       - name: Run test suite
         working-directory: pact-plugin
-        run: python -m pytest -ra -n 4 --dist loadfile
+        run: python -m pytest -ra -n 4 --dist "${{ inputs.dist || 'loadfile' }}" --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
 
       # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
       # inspects a separate --collect-only run; this reads the in-band record
@@ -508,6 +517,23 @@ jobs:
       # holds.
       - name: Verify the certifying run
         run: python scripts/verify_full_run.py --record "$GITHUB_WORKSPACE/.full-run-record.json" --collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"
+
+      # DIAGNOSTIC EVIDENCE ONLY. JUnit supplements, never replaces, the
+      # schema-v3 certification record above. All three files are dotfiles, so
+      # hidden-file inclusion is mandatory. Upload even after a red test step,
+      # but only for an explicit diagnostic dispatch; merge gates do not gain a
+      # new artifact dependency.
+      - name: Upload full-suite diagnostic evidence
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .full-suite-results.xml
+            .full-run-record.json
+            .full-collection-record.json
+          if-no-files-found: error
+          include-hidden-files: true
 
       - name: Verify the CI environment (after tests)
         if: always()

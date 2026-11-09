@@ -456,9 +456,10 @@ class TestDependencyDriftIsDetectable:
     # `--report`), so a drifted environment fails the step. A report-only
     # form would print the verdict and exit 0, and is refused here.
     VERIFY_CMD = "python scripts/verify_ci_environment.py"
-    # The test step's command, exactly: the placement arm pins it so the
-    # tested process is the process the verify steps checked.
+    # The test step's commands: the dynamic full-suite form and the static
+    # default every generic profile retains.
     TEST_CMD = ci_contract.TEST_CMD
+    WORKFLOW_TEST_CMD = ci_contract.WORKFLOW_TEST_CMD
     # A job is GOVERNED when any step's run text names one of these.
     _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
     _PYTEST_RE = re.compile(r"\bpytest\b")
@@ -469,7 +470,7 @@ class TestDependencyDriftIsDetectable:
     # exemption for a narrowed suite.
     _PROFILES = {
         (".github/workflows/tests.yml", "full-suite"): [
-            ("^" + re.escape(TEST_CMD) + "$", 1),
+            ("^" + re.escape(WORKFLOW_TEST_CMD) + "$", 1),
         ],
         (".github/workflows/fast-tests.yml", "fast-suite"): [
             (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
@@ -630,6 +631,44 @@ class TestDependencyDriftIsDetectable:
             f"contract). Pin them in constraints-ci.txt, or remove them here."
         )
 
+    def _diagnostic_upload_problems(self, rel, jid, steps):
+        """Placement and fail-closed shape of the full-suite evidence upload."""
+        if (rel, jid) != (".github/workflows/tests.yml", "full-suite"):
+            return []
+        where = f"{rel} job {jid}"
+        uploads = [
+            (index, step) for index, step in enumerate(steps)
+            if step.get("name") == "Upload full-suite diagnostic evidence"
+        ]
+        if len(uploads) != 1:
+            return [f"{where}: expected one diagnostic evidence upload, "
+                    f"found {len(uploads)}"]
+        index, step = uploads[0]
+        problems = []
+        if (index != len(steps) - 2
+                or steps[index - 1].get("name") != "Verify the certifying run"):
+            problems.append(
+                f"{where}: diagnostic upload must sit between run verification "
+                "and the final environment check")
+        if step.get("uses") != ci_contract.UPLOAD_ARTIFACT_ACTION:
+            problems.append(f"{where}: diagnostic upload action/ref drift")
+        if str(step.get("if", "")).strip() != (
+                "always() && github.event_name == 'workflow_dispatch'"):
+            problems.append(f"{where}: diagnostic upload condition drift")
+        with_block = step.get("with") or {}
+        if with_block.get("name") != (
+                "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}"):
+            problems.append(f"{where}: diagnostic artifact name drift")
+        if (with_block.get("path") or "").splitlines() != [
+                ".full-suite-results.xml", ".full-run-record.json",
+                ".full-collection-record.json"]:
+            problems.append(f"{where}: diagnostic artifact paths drift")
+        if with_block.get("if-no-files-found") != "error":
+            problems.append(f"{where}: missing diagnostic evidence must error")
+        if with_block.get("include-hidden-files") is not True:
+            problems.append(f"{where}: dotfile evidence needs hidden inclusion")
+        return problems
+
     def test_ci_environment_is_verified_around_every_test_run(self):
         """The runtime check runs in the SAME place as the tests.
 
@@ -671,6 +710,7 @@ class TestDependencyDriftIsDetectable:
                     continue
                 governed_jobs += 1
                 where = f"{rel} job {jid}"
+                problems.extend(self._diagnostic_upload_problems(rel, jid, steps))
                 last = steps[-1] if steps else {}
                 if runs[-1].strip() != self.VERIFY_CMD or str(
                         last.get("if", "")).strip() not in (
@@ -955,6 +995,7 @@ class TestDependencyDriftIsDetectable:
         "actions/setup-python",
         "actions/cache/restore",
         "actions/cache/save",
+        "actions/upload-artifact",
     })
 
     def test_every_third_party_action_is_allowlisted(self):
@@ -1001,6 +1042,9 @@ class TestDependencyDriftIsDetectable:
             if uses.startswith("docker://")
             or uses.split("@")[0].rstrip("/").lower()
             not in self._ALLOWED_THIRD_PARTY_ACTIONS
+            or (uses.split("@")[0].rstrip("/").lower()
+                == "actions/upload-artifact"
+                and uses != ci_contract.UPLOAD_ARTIFACT_ACTION)
         ]
         assert not offenders, (
             f"ACTION ALLOWLIST DRIFT: {offenders} are not on the vetted "
@@ -1392,12 +1436,19 @@ class TestDependencyDriftIsDetectable:
             f"after-check, which must END tests.yml: {after_block!r}), so a "
             f"mutation would not land; rebuild the blocks from the new "
             f"spelling in this arm")
-        test_line = f"        run: {self.TEST_CMD}\n"
+        test_line = f"        run: {self.WORKFLOW_TEST_CMD}\n"
         assert real.count(test_line) == 1, (
-            f"tests.yml runs {self.TEST_CMD!r} {real.count(test_line)} times, "
+            f"tests.yml runs {self.WORKFLOW_TEST_CMD!r} "
+            f"{real.count(test_line)} times, "
             f"not once, so the test-step mutations below are ambiguous")
         arm = "test_ci_environment_is_verified_around_every_test_run"
         install = "      - name: Install test dependencies\n"
+        upload_start = real.index(
+            "      - name: Upload full-suite diagnostic evidence\n")
+        upload_end = real.index(after_block, upload_start)
+        upload_block = real[upload_start:upload_end]
+        without_upload = real[:upload_start] + real[upload_end:]
+        assert "          include-hidden-files: true\n" in upload_block
         for name, text in [
             ("before-removed", real.replace(before_block, "", 1)),
             ("before-earlier", real.replace(before_block, "", 1).replace(
@@ -1430,10 +1481,21 @@ class TestDependencyDriftIsDetectable:
                 before_block, before_block.replace(
                     "        run: ", "        if: github.event_name == 'push'\n"
                     "        run: "), 1)),
+            ("upload-condition", real.replace(
+                "        if: always() && github.event_name == 'workflow_dispatch'\n",
+                "        if: github.event_name == 'workflow_dispatch'\n", 1)),
+            ("upload-before-run-verifier", without_upload.replace(
+                "      - name: Verify the certifying run\n",
+                upload_block + "      - name: Verify the certifying run\n", 1)),
+            ("upload-after-final", without_upload + upload_block),
+            ("upload-missing-hidden", real.replace(
+                "          include-hidden-files: true\n", "", 1)),
+            ("upload-missing-path", real.replace(
+                "            .full-run-record.json\n", "", 1)),
             ("second-pytest-step", real.replace(
                 after_block,
                 "      - name: Again\n        working-directory: pact-plugin\n"
-                f"        run: {self.TEST_CMD}\n" + after_block, 1)),
+                f"        run: {self.WORKFLOW_TEST_CMD}\n" + after_block, 1)),
         ]:
             self._shape_reddens(tmp_path, monkeypatch, name, arm,
                                 "VERIFY PLACEMENT DRIFT", workflow_text=text)
@@ -1516,6 +1578,12 @@ class TestDependencyDriftIsDetectable:
                 install, "      - uses: pre-commit/action@v3.0.1\n" + install, 1))),
             ("docker-image", dict(workflow_text=real.replace(
                 install, "      - uses: docker://python:3.12-slim\n" + install, 1))),
+            ("upload-moving-tag", dict(workflow_text=real.replace(
+                ci_contract.UPLOAD_ARTIFACT_ACTION,
+                "actions/upload-artifact@v7", 1))),
+            ("upload-unpinned", dict(workflow_text=real.replace(
+                ci_contract.UPLOAD_ARTIFACT_ACTION,
+                "actions/upload-artifact", 1))),
             ("reusable-workflow", dict(extra_files={
                 ".github/workflows/reuse.yml":
                     "name: reuse\non: [pull_request]\njobs:\n  r:\n"

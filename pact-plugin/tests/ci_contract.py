@@ -14,6 +14,7 @@ selection options.
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,40 @@ FAST_WORKFLOW = Path(".github") / "workflows" / "fast-tests.yml"
 
 VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
+WORKFLOW_TEST_CMD = (
+    "python -m pytest -ra -n 4 --dist \"${{ inputs.dist || 'loadfile' }}\" "
+    "--junitxml=\"$GITHUB_WORKSPACE/.full-suite-results.xml\""
+)
+UPLOAD_ARTIFACT_ACTION = (
+    "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+)
+_DIST_EXPRESSION = "${{ inputs.dist || 'loadfile' }}"
+_JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
+
+
+def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
+    """Resolve the exact diagnostic command to its static default argv.
+
+    The GitHub expression contains spaces, so only shlex can preserve it as one
+    token. Any spelling or argument drift is a parse failure: a normalizer that
+    accepted more than the reviewed command could hide a scope regression.
+    """
+    words = shlex.split(command)
+    assert words == shlex.split(WORKFLOW_TEST_CMD), (
+        f"PARSE FAILURE: {command!r} is not the exact diagnostic workflow "
+        f"command {WORKFLOW_TEST_CMD!r}; refusing to pass expression fragments "
+        "or unreviewed arguments to local pytest."
+    )
+    normalized = [
+        "loadfile" if word == _DIST_EXPRESSION else word
+        for word in words
+        if word != _JUNIT_ARGUMENT
+    ]
+    assert normalized == TEST_CMD.split(), (
+        f"PARSE FAILURE: normalized argv {normalized!r} differs from the "
+        f"static default {TEST_CMD.split()!r}."
+    )
+    return normalized
 
 # The files that together make up the fast lane. Used to distinguish a
 # WHOLLY deleted lane (a loud skip) from a half-deleted one (a failure).
