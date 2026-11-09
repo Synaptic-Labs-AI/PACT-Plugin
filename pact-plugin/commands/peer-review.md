@@ -258,6 +258,9 @@ Division of labour: the warm lanes read the project's policy files, and the arch
 
 **Dispatch reviewers** — for each warm reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
+<!-- ANCHOR-STABLE: REVIEWER-FRESHNESS -->
+**Reviewer freshness.** Every warm reviewer is a freshly spawned teammate — never a teammate reused from an earlier phase of this session, not the one that wrote the code and not one that prepared or designed it. Reuse a warm reviewer only for a verify-only re-review or for reviewer-to-fixer work. Spawn each reviewer under a `name=` distinct from every live member: the dispatch gate refuses a `name=` already live in the team, and that refusal is a naming rule — spawn the reviewer under a distinct `name=`; it is never permission to re-task the existing teammate. Freshness closes the conversational channel only; the REVIEWER-MEMORY-CHANNEL clause below names the agent-memory channel it does not close and the cold lane's decisive read.
+
 1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>, metadata=<see below>)` — Task B.
    - Task B's `description` carries the review mission: "Review this PR. Focus: [domain-specific review criteria]…"

@@ -455,6 +455,13 @@ WARM_SCOPED_INVENTORY = {
         "pr", "**`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead"),
     "- After CODE phase specialists have reported → Standard Harv": (
         "persona", "Every agent except the peer-review cold reviewer delivers a structured HANDOFF"),
+    # The reuse default and the shutdown absolute are scoped to warm review
+    # dispatch by the PR Review Workflow line that names the warm reviewers
+    # and requires each to be freshly spawned.
+    "**Default**: Prefer reuse when domain + context overlap. **R": (
+        "persona", "Invoke **at least 3 warm reviewers in parallel**"),
+    "Do **not** shut down teammates preemptively. Reuse idle team": (
+        "persona", "Invoke **at least 3 warm reviewers in parallel**"),
 }
 
 
