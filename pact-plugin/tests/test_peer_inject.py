@@ -30,6 +30,25 @@ HOOK = Path(__file__).resolve().parents[1] / "hooks" / "peer_inject.py"
 SUPPRESS = {"suppressOutput": True}
 
 
+def _tracked_glob(directory, pattern):
+    """Use the git index for shipped files, while still detecting deletion."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "."],
+        cwd=directory, capture_output=True, text=True, check=True,
+    )
+    files = []
+    for name in result.stdout.split("\0"):
+        if not name:
+            continue
+        path = Path(name)
+        assert not path.is_absolute() and ".." not in path.parts, name
+        candidate = directory / path
+        if path.parent == Path(".") and path.match(pattern) and candidate.is_file():
+            files.append(candidate)
+    assert files, f"no tracked {pattern} files in {directory}"
+    return sorted(files)
+
+
 def _write_team_config(tmp_path, team, members, **extra):
     """Write teams/<team>/config.json under `<tmp_path>/.claude`. An in-process
     caller passes `Path.home()` (the autouse fixture's config root is
@@ -1246,7 +1265,8 @@ class TestCompletionAuthorityNoteParametrizedAgents:
           files and silently pass.
         """
         agents_dir = Path(__file__).parent.parent / "agents"
-        files = set(p.stem for p in agents_dir.glob("pact-*.md"))
+        files = {p.stem for p in _tracked_glob(agents_dir, "pact-*.md")}
+        assert "pact-devops-engineer" in files
         files.discard("pact-orchestrator")
         listed = set(_PACT_AGENT_TYPES)
         missing = files - listed
@@ -1258,6 +1278,26 @@ class TestCompletionAuthorityNoteParametrizedAgents:
             f"unexpected (in list but no agent file): {sorted(unexpected)}. "
             "Update _PACT_AGENT_TYPES to match the SPAWNABLE pact-* agents."
         )
+
+    def test_tracked_glob_excludes_untracked_and_detects_deletion(self, tmp_path):
+        directory = tmp_path / "agents"
+        directory.mkdir()
+        keep = directory / "pact-keep.md"
+        removed = directory / "pact-removed.md"
+        nested = directory / "nested" / "pact-nested.md"
+        nested.parent.mkdir()
+        for path in (keep, removed, nested, directory / "other.md"):
+            path.write_text("fixture", encoding="utf-8")
+        subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+        (directory / "pact-untracked.md").write_text("scratch", encoding="utf-8")
+
+        assert _tracked_glob(directory, "pact-*.md") == [keep, removed]
+        removed.unlink()
+        assert _tracked_glob(directory, "pact-*.md") == [keep]
+        keep.unlink()
+        with pytest.raises(AssertionError, match="no tracked"):
+            _tracked_glob(directory, "pact-*.md")
 
 
 class TestCompletionAuthorityLiteralPhraseRegressionGuard:

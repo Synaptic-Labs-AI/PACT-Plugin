@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -54,6 +55,27 @@ from staleness import check_pinned_staleness, locate_pinned
 from helpers import doc_at  # noqa: E402
 
 _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
+
+
+def _tracked_glob(directory, pattern):
+    """Use the git index for shipped files, while still detecting deletion."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "."],
+        cwd=directory, capture_output=True, text=True, check=True,
+    )
+    files = []
+    for name in result.stdout.split("\0"):
+        if not name:
+            continue
+        path = Path(name)
+        assert not path.is_absolute() and ".." not in path.parts, name
+        candidate = directory / path
+        if path.parent == Path(".") and path.match(pattern) and candidate.is_file():
+            files.append(candidate)
+    assert files, f"no tracked {pattern} files in {directory}"
+    return sorted(files)
+
+
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
 _CASES = sorted(_EXPECTED)
 _UNCERTAIN = {"UNKNOWN", "DUPLICATE", "MALFORMED"}
@@ -109,8 +131,31 @@ def _only_block_and_blank_rows(doc, rows, span):
 
 
 def test_every_corpus_file_is_a_case():
+    files = _tracked_glob(_CORPUS, "*.md")
     assert len(_CASES) >= 100
-    assert {p.stem for p in _CORPUS.glob("*.md")} == set(_CASES)
+    assert _CORPUS / "hidden_pre_closed_at_row_end.md" in files
+    assert {p.stem for p in files} == set(_CASES)
+
+
+def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
+    directory = tmp_path / "corpus"
+    directory.mkdir()
+    keep = directory / "keep.md"
+    removed = directory / "removed.md"
+    nested = directory / "nested" / "nested.md"
+    nested.parent.mkdir()
+    for path in (keep, removed, nested, directory / "other.txt"):
+        path.write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    (directory / "untracked.md").write_text("scratch", encoding="utf-8")
+
+    assert _tracked_glob(directory, "*.md") == [keep, removed]
+    removed.unlink()
+    assert _tracked_glob(directory, "*.md") == [keep]
+    keep.unlink()
+    with pytest.raises(AssertionError, match="no tracked"):
+        _tracked_glob(directory, "*.md")
 
 
 # --- the Current Session block ----------------------------------------------

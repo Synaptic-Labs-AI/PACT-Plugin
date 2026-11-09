@@ -33,6 +33,7 @@ The full-suite workflow's manual dispatch can now select whole-file or per-test 
 - `pact-plugin/tests/test_memory_store_isolation.py` removes the predecessor sentinel that made memory-init reset verification depend on test order and worker placement. Both tests now establish their own initialized state, and the reset test calls the owner reset before its unchanged clean-state assertion; standalone, reversed-order, xdist-load, and reset-removal controls cover the isolation.
 - `pact-plugin/tests/test_merge_guard_perf.py` pairs target and reference timing observations so normalized cost no longer depends on separately timed blocks. Best-of-K, independent-minimum raw scaling ratios, the 4000.0 ceiling, and unbounded-prefix detection remain, with fake-clock and mutation controls proving the new schedule still detects regressions.
 - `scripts/verify-gate-tree.sh` now brackets local pytest with before/after HEAD and complete porcelain comparisons. Stable, moved, and red-child runs are distinguished explicitly, green moved trees become unattributable, and the canary requires the new evidence while decisive certification still uses a detached clean worktree.
+- Instruction-surface tests for corpus writers, markers, lazy-load cross-references, and peer injection now enumerate their intended tracked files rather than stray untracked matches. Local controls check root/pattern filtering, known members, deletion detection, empty-population refusal, and the original raw-glob failure mode.
 
 ### Why
 
