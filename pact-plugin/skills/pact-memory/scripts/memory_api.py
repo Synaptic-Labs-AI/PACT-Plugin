@@ -854,13 +854,11 @@ class PACTMemory:
         """The session id a status ENVELOPE may report; None when unusable.
 
         Folded exactly as `_project_scope()` folds the project id, so both
-        identity fields in one envelope follow one rule: a value no row can
-        carry is not reported as an identifier. An unusable detected value
-        also carries the control or bidi character the envelope would
-        otherwise render. This is a FOLD, not an escape — escaping would
-        leave the two identifiers disagreeing about what counts as
-        reportable, and the raw value stays readable in the session context
-        file. A SUPPLIED value was validated in the constructor.
+        identity fields in one envelope follow one rule. The fold removes
+        what `_unusable_identifier` rejects — a control character or a lone
+        surrogate; a bidi/format character is ACCEPTED by design and is
+        still rendered, the documented display-spoofing residual. This is a
+        FOLD, not an escape.
         """
         if (
             self._session_id is not None
