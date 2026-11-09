@@ -40,7 +40,9 @@ Present the list and ask: "Which worktree should I remove?"
 
 `git worktree remove` deletes the worktree's `docs/` directory **irrecoverably** — that directory is gitignored and worktree-ephemeral, so the phase artifacts it holds (`docs/preparation/`, `docs/architecture/`, `docs/plans/`, `docs/review/`, `docs/decision-logs/`) are gone the instant the worktree is removed. Those artifacts are the **fuller substance** behind each phase's distilled HANDOFF. This step is the single chokepoint that protects them for **all** teardown callers — `peer-review` auto-cleanup, CONSOLIDATE sub-scope early-teardown, and manual `/PACT:worktree-cleanup` alike — so harvest MUST precede remove.
 
-Run this exact command, substituting the target worktree's absolute path from Step 1 — the same path Step 2 will remove:
+Run this exact command, substituting the target worktree's absolute path from Step 1 — the same path Step 2 will remove.
+
+`{abs_worktree}` must be a single line in intent: a value whose second line is non-empty is not the worktree path this step accepts, so report it instead of substituting it. If the path still contains braces after substitution, stop and report it.
 
 ```bash
 WORKTREE=
@@ -75,7 +77,7 @@ This guard is conditional by design: it must NOT unconditionally block, or it wo
 
 Before removal, the shell's working directory must NOT be inside the worktree being removed. Compute the repo root, `cd` to it, and remove the worktree — all in a single bash call. This is critical because if the shell CWD is inside the deleted worktree, all subsequent commands will fail.
 
-`{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
+`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it.
 
 ```bash
 # Compute repo root, cd there, then remove the worktree — must be ONE bash call
@@ -104,7 +106,7 @@ git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { ech
 TARGET=$(cd "$REPO_ROOT/.worktrees/$BRANCH" 2>/dev/null && pwd -P) || { echo "Cannot remove worktree: no worktree at $REPO_ROOT/.worktrees/$BRANCH."; exit 1; }
 BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
 [ -n "$BASE_PHYS" ] && [ "${TARGET#"$BASE_PHYS"/}" != "$TARGET" ] || { echo "Cannot remove worktree: $REPO_ROOT/.worktrees/$BRANCH resolves outside .worktrees/."; exit 1; }
-[ "$(git -C "$TARGET" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BRANCH" ] || { echo "Cannot remove worktree: $TARGET is not the worktree for $BRANCH."; exit 1; }
+[ "$(git -C "$TARGET" symbolic-ref --short -q HEAD 2>/dev/null)" = "$BRANCH" ] || { echo "Cannot remove worktree: $TARGET is not the worktree for $BRANCH."; exit 1; }
 
 cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/$BRANCH"
 ```
@@ -130,7 +132,7 @@ Do NOT force-remove automatically. The user must choose.
 
 After the worktree is removed, delete the local branch.
 
-`{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
+`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it.
 
 ```bash
 BRANCH=
@@ -175,7 +177,8 @@ Cleaned up worktree for {branch}
 | Branch not fully merged | Surface git error, offer merge or force-delete options |
 | Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch |
 | Currently inside the target worktree | Navigate to main repo root before removal |
-| Target is not the worktree for the branch (a symlink, a relocated path, or a detached HEAD) | Step 2 refuses before removing anything: the path must resolve under `.worktrees/` and its checked-out branch must equal `{branch}`. A detached HEAD cannot confirm identity, so it is refused; remove such a worktree manually with `git worktree remove <path>` if that is what you want |
+| The worktree's local branch ref was deleted (for example by a force-delete elsewhere) | The identity check passes: the worktree's symbolic HEAD still names `{branch}` even though the ref is gone. Removal then stops on git's own refusal, because the dangling HEAD makes every tracked file look staged and `git worktree remove` reports modified or untracked files. Confirm there is no real uncommitted work, then remove with `git worktree remove --force`; Step 3 then finds no branch left to delete and reports git's error |
+| Target is not the worktree for the branch (a symlink, a relocated path, or a detached HEAD) | Step 2 refuses before removing anything: the path must resolve under `.worktrees/` and the branch its HEAD symbolically names must equal `{branch}`. A detached HEAD cannot confirm identity, so it is refused; remove such a worktree manually with `git worktree remove <path>` if that is what you want |
 | No worktrees exist | Report "No worktrees found" |
 | Multiple worktrees for related branches | List all, let user choose which to remove |
 

@@ -65,7 +65,7 @@ grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || {
 
 ### Step 3: Create the Worktree
 
-`{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
+`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
@@ -100,7 +100,7 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 
 ### Step 4: Link the Repo venv (if present)
 
-Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
+Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.

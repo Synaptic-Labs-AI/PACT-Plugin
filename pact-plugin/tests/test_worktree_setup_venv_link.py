@@ -58,7 +58,9 @@ than failing on a file the cache never ships. The fence arms need only
 import json
 import os
 import re
+import shutil
 import subprocess
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -145,15 +147,41 @@ def cleanup_delete_fence(skill_text, branch=BRANCH):
     return _fence_in(skill_text, "### Step 3:", "### Step 4:", branch)
 
 
-# The four fences that read a branch value. Each must refuse a multi-line value
-# and an unsubstituted placeholder before a command uses the value. The exit
-# code differs by site: the setup link step warns and continues (0), the rest
-# stop the step (1).
-_BRANCH_SITES = {
-    "setup-step-3": (SKILL_FILE, "### Step 3:", "### Step 4:", 1),
-    "setup-step-4": (SKILL_FILE, "### Step 4:", "### Step 5:", 0),
-    "cleanup-step-2": (CLEANUP_SKILL_FILE, "### Step 2:", "### Step 3:", 1),
-    "cleanup-step-3": (CLEANUP_SKILL_FILE, "### Step 3:", "### Step 4:", 1),
+# Every fence that reads a substituted value through a heredoc. Each must
+# refuse a multi-line value and an unsubstituted placeholder before a command
+# uses it. The exit code differs by site: the setup link step warns and
+# continues (0), the rest stop the step (1). `cleanup-step-1.5` reads the
+# worktree path rather than the branch, so it carries its own placeholder and
+# its own refusal messages.
+_Site = namedtuple(
+    "_Site", "path start end exit_code placeholder multiline unsubstituted"
+)
+_SITES = {
+    "setup-step-3": _Site(
+        SKILL_FILE, "### Step 3:", "### Step 4:", 1, "{branch}",
+        "the branch value must be a single line",
+        "the branch placeholder was not substituted",
+    ),
+    "setup-step-4": _Site(
+        SKILL_FILE, "### Step 4:", "### Step 5:", 0, "{branch}",
+        "the branch value must be a single line",
+        "the branch placeholder was not substituted",
+    ),
+    "cleanup-step-1.5": _Site(
+        CLEANUP_SKILL_FILE, "### Step 1.5:", "### Step 2:", 1, "{abs_worktree}",
+        "the worktree path must be a single line",
+        "the worktree path placeholder was not substituted",
+    ),
+    "cleanup-step-2": _Site(
+        CLEANUP_SKILL_FILE, "### Step 2:", "### Step 3:", 1, "{branch}",
+        "the branch value must be a single line",
+        "the branch placeholder was not substituted",
+    ),
+    "cleanup-step-3": _Site(
+        CLEANUP_SKILL_FILE, "### Step 3:", "### Step 4:", 1, "{branch}",
+        "the branch value must be a single line",
+        "the branch placeholder was not substituted",
+    ),
 }
 
 # The four fences that resolve the main checkout root. The body is duplicated
@@ -167,14 +195,30 @@ _ROOT_GUARD_SITES = {
 }
 
 
-def branch_site_fence(label, branch=BRANCH):
-    path, start, end, _ = _BRANCH_SITES[label]
-    return _fence_in(path.read_text(encoding="utf-8"), start, end, branch)
+def _read_site_fence(skill_text, start, end, placeholder, value):
+    """A fence with its placeholder substituted; fails closed when it is gone."""
+    fence = fence_block(skill_text, start, end)
+    assert placeholder in fence, (
+        f"the fence after {start!r} no longer carries a {placeholder} "
+        "placeholder, so this test cannot address the path the skill uses"
+    )
+    return fence.replace(placeholder, value)
 
 
-def branch_site_fence_unsubstituted(label):
-    path, start, end, _ = _BRANCH_SITES[label]
-    return fence_block(path.read_text(encoding="utf-8"), start, end)
+def read_site_fence(label, value=BRANCH):
+    site = _SITES[label]
+    return _read_site_fence(
+        site.path.read_text(encoding="utf-8"),
+        site.start,
+        site.end,
+        site.placeholder,
+        value,
+    )
+
+
+def read_site_fence_unsubstituted(label):
+    site = _SITES[label]
+    return fence_block(site.path.read_text(encoding="utf-8"), site.start, site.end)
 
 
 def root_guard_parts(fence):
@@ -484,6 +528,39 @@ def run_fence(fence, repo, pwd=None):
     }
     if pwd is not None:
         env["PWD"] = str(pwd)
+    return subprocess.run(
+        [str(BASH), "-c", fence],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def run_fence_without_tool(fence, repo, missing):
+    """Run the fence with `missing` absent from PATH, and nothing else changed.
+
+    A shim directory links every external tool the fence uses except `missing`,
+    so its invocation fails with 127 while the rest of the fence behaves
+    normally. Nothing global is mutated: the caller's PATH is never touched, and
+    the shim is scoped to this one subprocess.
+    """
+    shim = repo.parent / f"bin-without-{missing}"
+    shim.mkdir(exist_ok=True)
+    for name in ("git", "grep", "tail", "mkdir", "rm", "dirname"):
+        if name == missing:
+            continue
+        target = shutil.which(name)
+        assert target, f"{name} is not on PATH, so the shim cannot be built"
+        link = shim / name
+        if not link.exists():
+            link.symlink_to(target)
+    env = {
+        "PATH": str(shim),
+        "HOME": os.environ["HOME"],
+        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
     return subprocess.run(
         [str(BASH), "-c", fence],
         cwd=str(repo),
@@ -1426,17 +1503,25 @@ class TestCleanupMultiLineValueIsTheInstructionsJob:
 
 
 def _site_repo(label, tmp_path):
-    """The repo shape each branch-reading site needs, with its worktree."""
-    if label == "setup-step-3":
+    """The repo shape each reading site needs, with its worktree."""
+    if label in ("setup-step-3", "cleanup-step-1.5"):
         return make_empty_repo(tmp_path), None
     return make_repo(tmp_path)
 
 
-def _assert_site_wrote_nothing(label, repo, worktree):
+def _assert_site_wrote_nothing(label, repo, worktree, done):
     """The site-specific 'nothing happened' assertion for a refused value."""
     if label == "setup-step-3":
         assert not (repo / ".worktrees").exists(), (
             "a refused branch value still created .worktrees/"
+        )
+    elif label == "cleanup-step-1.5":
+        assert not any(
+            marker in done.stdout
+            for marker in ("DIR_PRESENT", "DIR_ABSENT", "CANNOT_OBSERVE")
+        ), f"a refused worktree path still ran the harvest probe: {done.stdout!r}"
+        assert not (repo / "docs").exists(), (
+            "a refused worktree path still created a docs/ directory"
         )
     elif label == "setup-step-4":
         assert not os.path.lexists(worktree / ".venv")
@@ -1454,56 +1539,55 @@ def _assert_site_wrote_nothing(label, repo, worktree):
         ), "a refused branch value still deleted the branch"
 
 
-_BRANCH_SITE_PARAMS = [
-    pytest.param(label, _BRANCH_SITES[label][3], id=label)
-    for label in _BRANCH_SITES
+_SITE_PARAMS = [
+    pytest.param(label, _SITES[label].exit_code, id=label) for label in _SITES
 ]
 
 
-class TestEveryBranchSiteRefusesAMultiLineValue:
+class TestEveryReadSiteRefusesAMultiLineValue:
     """The double read refuses a value that carries a newline.
 
     This is the fence-level defence; it does not cover a value that also
     supplies the heredoc delimiter (pinned as a characterization above).
     """
 
-    @pytest.mark.parametrize("label,expected_rc", _BRANCH_SITE_PARAMS)
+    @pytest.mark.parametrize("label,expected_rc", _SITE_PARAMS)
     def test_a_two_line_value_is_refused_before_it_is_used(
         self, isolated_git_config, tmp_path, label, expected_rc
     ):
         repo, worktree = _site_repo(label, tmp_path)
-        done = run_fence(branch_site_fence(label, branch="evil\nsecond"), repo)
-        assert "the branch value must be a single line" in done.stdout, (
+        done = run_fence(read_site_fence(label, value="evil\nsecond"), repo)
+        assert _SITES[label].multiline in done.stdout, (
             f"{label} did not refuse a two-line value: {done.stdout.strip()!r}"
         )
         assert done.returncode == expected_rc, (
             f"{label} returned {done.returncode}, expected {expected_rc}: "
             f"{done.stderr.strip()}"
         )
-        _assert_site_wrote_nothing(label, repo, worktree)
+        _assert_site_wrote_nothing(label, repo, worktree, done)
 
 
-class TestEveryBranchSiteRefusesTheUnsubstitutedPlaceholder:
+class TestEveryReadSiteRefusesTheUnsubstitutedPlaceholder:
     """A skill whose placeholder was never substituted must stop, not act.
 
-    The check is `[ "$BRANCH" != "$(printf '{%s}' branch)" ]`, so it compares
-    against the placeholder's own spelling rather than pinning today's syntax.
+    The check compares against the placeholder's own spelling rather than
+    pinning today's syntax, so it survives a placeholder rename in lockstep.
     """
 
-    @pytest.mark.parametrize("label,expected_rc", _BRANCH_SITE_PARAMS)
+    @pytest.mark.parametrize("label,expected_rc", _SITE_PARAMS)
     def test_the_placeholder_is_refused_before_it_is_used(
         self, isolated_git_config, tmp_path, label, expected_rc
     ):
         repo, worktree = _site_repo(label, tmp_path)
-        done = run_fence(branch_site_fence_unsubstituted(label), repo)
-        assert "the branch placeholder was not substituted" in done.stdout, (
+        done = run_fence(read_site_fence_unsubstituted(label), repo)
+        assert _SITES[label].unsubstituted in done.stdout, (
             f"{label} acted on the literal placeholder: {done.stdout.strip()!r}"
         )
         assert done.returncode == expected_rc, (
             f"{label} returned {done.returncode}, expected {expected_rc}: "
             f"{done.stderr.strip()}"
         )
-        _assert_site_wrote_nothing(label, repo, worktree)
+        _assert_site_wrote_nothing(label, repo, worktree, done)
 
 
 class TestPreviousBranchShortcutIsRefused:
@@ -1520,7 +1604,7 @@ class TestPreviousBranchShortcutIsRefused:
         worktree, which is what this arm pins.
         """
         repo = make_empty_repo(tmp_path)
-        done = run_fence(branch_site_fence("setup-step-3", branch="@{-1}"), repo)
+        done = run_fence(read_site_fence("setup-step-3", value="@{-1}"), repo)
         assert "Cannot create worktree: invalid branch name." in done.stdout, (
             f"@{{-1}} was not refused: {done.stdout.strip()!r}"
         )
@@ -1659,6 +1743,67 @@ class TestCleanupRefusesMisidentifiedTargets:
         assert (detached / ".git").is_file(), "the detached worktree was removed"
 
 
+class TestDeletedBranchRefIdentity:
+    """A worktree whose branch ref is gone still identifies as that branch.
+
+    `symbolic-ref --short -q HEAD` reads HEAD's symbolic target, which survives
+    `git update-ref -d refs/heads/<branch>` — so the identity guard passes and
+    the failure is git's own dirty-tree refusal, not a misidentification. The
+    sequence below is the one the skill documents for this state: the unforced
+    removal refuses, the documented `--force` retry removes, and Step 3 then
+    finds no branch left to delete.
+    """
+
+    def test_deleted_ref_identity_passes_and_force_is_the_documented_exit(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+
+        deleted = git(repo, "update-ref", "-d", f"refs/heads/{BRANCH}", check=False)
+        assert deleted.returncode == 0, deleted.stderr
+        assert (
+            git(worktree, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
+            == BRANCH
+        ), "the worktree no longer names its branch symbolically"
+
+        refused = run_fence(cleanup_remove_fence(text), repo)
+        assert refused.returncode == 128, (
+            f"the unforced removal should fail as dirty, got rc={refused.returncode}: "
+            f"stdout={refused.stdout!r} stderr={refused.stderr!r}"
+        )
+        assert "is not the worktree for" not in refused.stdout, (
+            "the identity guard refused a worktree whose symbolic HEAD still "
+            f"names the branch: {refused.stdout!r}"
+        )
+        assert "contains modified or untracked files" in refused.stderr, (
+            f"the failure is not git's dirty-tree refusal: {refused.stderr!r}"
+        )
+        assert worktree.exists()
+
+        shipped = cleanup_remove_fence(text)
+        forced_fence = shipped.replace(
+            'git worktree remove "$REPO_ROOT/.worktrees/$BRANCH"',
+            'git worktree remove --force "$REPO_ROOT/.worktrees/$BRANCH"',
+        )
+        assert forced_fence != shipped, (
+            "the shipped removal command changed, so the documented --force "
+            "retry no longer applies"
+        )
+        forced = run_fence(forced_fence, repo)
+        assert forced.returncode == 0, (
+            f"the documented --force retry failed: "
+            f"stdout={forced.stdout!r} stderr={forced.stderr!r}"
+        )
+        assert not worktree.exists()
+
+        delete = run_fence(cleanup_delete_fence(text), repo)
+        assert delete.returncode != 0
+        assert f"branch '{BRANCH}' not found" in delete.stderr, (
+            f"Step 3 did not report the missing branch: {delete.stderr!r}"
+        )
+
+
 class TestTemplateLessRepo:
     """`git init --template=` leaves no `.git/info/`; the fence must create it.
 
@@ -1786,6 +1931,39 @@ class TestUnlinkWhenNotIgnored:
             f"expected the unlink warning; got {done.stdout.strip()!r}"
         )
         assert porcelain(worktree) == ""
+
+
+class TestNoVenvExistsWarning:
+    """The warning branch reached when the link could not be created.
+
+    With `ln` absent the creation fails, and a negated `!.venv` rule makes
+    `check-ignore` fail too. The fence must then say that there is nothing to
+    commit — not claim it removed a link that never existed, and not stay
+    silent. PATH is scoped to the one subprocess; the test process's PATH is
+    never mutated, so later arms are unaffected.
+    """
+
+    def test_ln_failure_with_a_negated_rule_warns_and_leaves_no_link(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path, gitignore=".worktrees/\n!.venv\n")
+        done = run_fence_without_tool(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo, "ln"
+        )
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "WARNING: could not create the .venv link" in done.stdout, (
+            f"the creation failure was not reported: {done.stdout.strip()!r}"
+        )
+        assert (
+            "WARNING: .venv is NOT ignored in this worktree, but no .venv "
+            "exists there — nothing was created to commit"
+        ) in done.stdout, (
+            "the no-venv warning branch did not fire; the fence either claimed "
+            f"a removal or stayed silent: {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(worktree / ".venv"), (
+            "a link exists even though `ln` was absent"
+        )
 
 
 # ---------------------------------------------------------------------------
