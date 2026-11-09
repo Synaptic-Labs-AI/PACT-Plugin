@@ -1791,10 +1791,16 @@ class PACTMemory:
                     self._last_embedding_status = self._store_embedding(
                         conn, memory_id, memory_dict
                     )
-                    # The content re-store reads the re-keyed row, so it
-                    # already lands in the NEW project's vec partition; the
-                    # cascade below must not embed a second time for it.
-                    vector_current = True
+                    # The content re-store reads the re-keyed row, so on
+                    # SUCCESS it already lands in the NEW project's vec
+                    # partition and the cascade below must not embed a second
+                    # time for it. A FAULT is not success: the reason string
+                    # means nothing was written (the fault path rolls its own
+                    # vector-replace back and returns without raising), so
+                    # the vector is NOT current and the cascade still
+                    # re-stores. Only a None status means stored-or-correctly-
+                    # absent.
+                    vector_current = self._last_embedding_status is None
 
             if success and "project_id" in updates:
                 # A WARRANTED RE-KEY CASCADES. update_memory moved the

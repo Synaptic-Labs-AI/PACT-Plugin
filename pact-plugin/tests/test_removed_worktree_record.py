@@ -1638,6 +1638,67 @@ class TestUpdatePayloadProjectIdGuard:
             "the re-pointed links were rolled back with the embedding fault"
         )
 
+    def test_a_faulted_content_reembed_does_not_skip_the_cascade_reembed(
+        self, tmp_path, monkeypatch
+    ):
+        """Cycle 5 (Bugbot B2): vector_current means the vector IS current.
+
+        The content path's re-embed can FAULT — its rollback restores the
+        original vector and nothing is written — and that must not read as
+        'already stored under the new key' to the cascade. A counting
+        fault stub pins the skip condition from both sides: a combined
+        content+rekey update stores TWICE (content path, then cascade,
+        because the fault left the vector not-current) and a content-only
+        update stores ONCE (no re-key, no cascade) — so the cascade
+        re-store fires on fault and only on fault-supplemented skips.
+        """
+        calls: list = []
+
+        def _counting_fault(conn, memory_id, memory):
+            calls.append(memory_id)
+            conn.rollback()
+            return "fault"
+
+        monkeypatch.setattr(
+            PACTMemory, "_store_embedding", staticmethod(_counting_fault)
+        )
+
+        # Combined: content fields AND a warranted re-key in one update.
+        db_path = tmp_path / "skip.db"
+        combined = PACTMemory(
+            project_id="detected-b", session_id="s", db_path=db_path
+        )
+        memory_id = combined.save(
+            {"context": "SKIP-SEED"}, sync_to_claude=False
+        )
+        calls.clear()
+        assert combined.update(
+            memory_id, {"context": "SKIP-CHANGED", "project_id": "warranted-c"}
+        ) == memory_id
+        assert len(calls) == 2, (
+            f"a faulted content re-embed must not skip the cascade "
+            f"re-embed; store calls: {len(calls)}"
+        )
+        assert combined.last_embedding_status == "fault"
+
+        # Content-only: the same fault, but no re-key means no cascade and
+        # exactly the one content-path call.
+        db_path2 = tmp_path / "skip2.db"
+        content_only = PACTMemory(
+            project_id="detected-b", session_id="s", db_path=db_path2
+        )
+        memory_id2 = content_only.save(
+            {"context": "SKIP2-SEED"}, sync_to_claude=False
+        )
+        calls.clear()
+        assert content_only.update(
+            memory_id2, {"context": "SKIP2-CHANGED"}
+        ) == memory_id2
+        assert len(calls) == 1, (
+            f"no re-key means no cascade re-embed; store calls: {len(calls)}"
+        )
+        assert content_only.last_embedding_status == "fault"
+
     def test_a_disagreement_refusal_precedes_the_payload_guard(
         self, tmp_path, monkeypatch
     ):
