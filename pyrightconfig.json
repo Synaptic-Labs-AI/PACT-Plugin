@@ -1,4 +1,6 @@
 {
+  "venvPath": ".",
+  "venv": ".venv",
   "extraPaths": [
     "pact-plugin/hooks",
     "pact-plugin/hooks/shared",

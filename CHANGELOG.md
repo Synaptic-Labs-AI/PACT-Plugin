@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.32: link the repo venv into worktrees so pyright resolves imports
+
+### Summary
+
+`/PACT:worktree-setup` now links the main checkout's `.venv` into each worktree it creates or reuses, and records a slash-free `.venv` rule in the repo's git `info/exclude` before creating the link. Both pyright configs gain `venvPath` and `venv` keys, because pyright does not auto-detect a `.venv` even in the main checkout. A worktree with no repo `.venv` is left alone, and a link failure warns instead of failing the setup.
+
+### What landed
+
+- Step 4 of the `worktree-setup` skill: computes the repo root, skips with a one-line message when the main checkout has no `.venv`, writes `.venv` as an exact line to the common git `info/exclude` before linking, leaves an existing path untouched, creates the symlink, and verifies it with `git check-ignore`. The report gains a `Venv link:` line, and the edge cases cover a missing venv, an existing path, an unignored link, and platforms without symlink support.
+- `venvPath` and `venv` in both `pyrightconfig.json` files, resolving to the repo root from each config's own directory.
+- The worktree lifecycle scenario gains the venv step, verification rows for the link and the symlink-matching ignore rule, a failure-mode row for an unignored link, and a recorded-probe section.
+- The reuse path now reaches the link step, repairing worktrees created before this change and any worktree whose link was removed.
+
+### Why
+
+pyright could not resolve project imports inside a worktree because the worktree had no `.venv`. A symlink alone is not enough on the measured pyright, and the repo's tracked `.venv/` rule matches directories only, so an unignored symlink could be swept into a commit and would make `git worktree remove` refuse without `--force`. Writing the slash-free rule before the link keeps both paths safe.
+
 ## v4.8.31: require a fresh reviewer for every warm review lane
 
 ### Summary

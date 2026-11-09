@@ -60,13 +60,48 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 - Branch already exists: Ask user whether to check out the existing branch (`git worktree add "$REPO_ROOT/.worktrees/{branch}" {branch}` without `-b`)
 - Disk/permissions error: Surface git's error message and offer fallback to working in the main repo directory
 
-### Step 4: Report
+### Step 4: Link the Repo venv (if present)
+
+Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one.
+
+```bash
+# Shell variables do not survive between Bash calls, so recompute the paths here.
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
+REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
+WORKTREE="$REPO_ROOT/.worktrees/{branch}"
+
+if [ ! -d "$REPO_ROOT/.venv" ]; then
+  echo "Venv link: skipped (no .venv in the main checkout)"
+else
+  # Write .venv with no trailing slash so the rule matches the symlink as well as a directory.
+  EXCLUDE=$(git -C "$WORKTREE" rev-parse --git-path info/exclude)
+  if grep -qxF '.venv' "$EXCLUDE" 2>/dev/null || printf '%s\n' '.venv' >> "$EXCLUDE"; then
+    if [ -e "$WORKTREE/.venv" ] || [ -L "$WORKTREE/.venv" ]; then
+      echo "Venv link: .venv already exists in the worktree — left untouched"
+    elif ln -s "$REPO_ROOT/.venv" "$WORKTREE/.venv"; then
+      echo "Venv link: .venv -> $REPO_ROOT/.venv"
+    else
+      echo "WARNING: could not create the .venv link — pyright will not resolve imports in this worktree"
+    fi
+    git -C "$WORKTREE" check-ignore -q .venv || echo "WARNING: .venv is NOT ignored in this worktree — git worktree remove will refuse without --force, and git add -A could commit the link"
+  else
+    echo "WARNING: could not write $EXCLUDE — .venv link skipped so an unignored link cannot be committed"
+  fi
+fi
+```
+
+Include the line Step 4 printed in the Step 5 report, or the warning when the link could not be made.
+
+A failed link is a warning, not an error: this step is a convenience, and failing the whole setup over it would regress platforms where `ln -s` is unavailable. This is the one deliberate exception to the stop-on-error rule at the top of this skill.
+
+### Step 5: Report
 
 Output the result:
 
 ```
 Worktree ready at {REPO_ROOT}/.worktrees/{branch}
 Branch: {branch}
+<the line Step 4 printed>
 ```
 
 **Return the worktree path** so it can be passed to subsequent phases and agents.
@@ -79,3 +114,7 @@ Branch: {branch}
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
 | Branch name already exists | Ask user: check out existing or create new name |
 | Creation fails (disk/permissions) | Surface error, offer fallback to main repo |
+| Main checkout has no `.venv` | Step 4 prints a one-line skip; no link is created and setup continues |
+| `.venv` already exists in the worktree (real directory or a foreign link) | Step 4 reports it and leaves it untouched |
+| `.venv` is not ignored (exclude write failed, or the link is tracked) | Step 4 prints a loud warning: `git worktree remove` will refuse without `--force`, and `git add -A` could commit the link. Re-run setup to retry the write |
+| Platform without symlink support (e.g. Windows) | The link step warns, names the consequence, and setup continues; the worktree is still usable |

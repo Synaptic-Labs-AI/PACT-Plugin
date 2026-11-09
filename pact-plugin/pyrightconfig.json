@@ -1,3 +1,5 @@
 {
+  "venvPath": "..",
+  "venv": ".venv",
   "extraPaths": ["hooks/", "hooks/shared/", "skills/pact-memory/", "skills/pact-memory/scripts/", "scripts/", "tests/fixtures/"]
 }

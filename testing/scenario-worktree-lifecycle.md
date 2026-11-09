@@ -32,6 +32,7 @@ Or trigger it via `/PACT:orchestrate` or `/PACT:comPACT`, which invoke worktree 
 3. Creates `.worktrees/` directory if needed
 4. Ensures `.worktrees/` is in `.gitignore`
 5. Creates the worktree with `git worktree add`
+6. Links the repo's `.venv` into the worktree when the main checkout has one, and records the ignore rule
 
 **Expected outcome**:
 ```
@@ -54,6 +55,11 @@ git -C {REPO_ROOT}/.worktrees/feature/test-worktree branch --show-current
 
 # .worktrees/ is gitignored
 grep '.worktrees' {REPO_ROOT}/.gitignore
+
+# Repo venv linked and ignored as a symlink (when the main checkout has a .venv)
+test -L {REPO_ROOT}/.worktrees/feature/test-worktree/.venv
+git -C {REPO_ROOT}/.worktrees/feature/test-worktree check-ignore -v .venv
+git -C {REPO_ROOT}/.worktrees/feature/test-worktree status --porcelain
 ```
 
 **Expected**:
@@ -61,6 +67,8 @@ grep '.worktrees' {REPO_ROOT}/.gitignore
 - The worktree directory contains the full repository file tree
 - The branch `feature/test-worktree` is checked out inside the worktree
 - `.worktrees/` appears in `.gitignore`
+- `.venv` is a symlink to `{REPO_ROOT}/.venv` (this check is skipped when the main checkout has no `.venv`)
+- `git check-ignore -v .venv` reports the `.git/info/exclude` rule, and `git status --porcelain` lists no `.venv` entry
 
 ### Step 3: Perform Work in Worktree
 
@@ -180,6 +188,8 @@ git worktree list  # Stale entry removed
 | Worktree created | `git worktree list` | New entry at `.worktrees/{branch}` |
 | Branch created | `git branch` | Feature branch exists |
 | .worktrees/ gitignored | `grep '.worktrees' .gitignore` | Entry present |
+| Repo venv linked | `test -L .worktrees/{branch}/.venv` | Symlink points at `{REPO_ROOT}/.venv`; skipped when the main checkout has no `.venv` |
+| Venv link ignored as a symlink | `git -C .worktrees/{branch} check-ignore -v .venv` and `git -C .worktrees/{branch} status --porcelain` | `check-ignore` reports the `info/exclude` `.venv` rule (no trailing slash); `status` lists no `.venv` entry |
 | Filesystem isolation | File created in worktree not visible in main | `ls` in main directory fails for worktree-only files |
 | Worktree reuse | Second setup call for same branch | "Reusing existing worktree" message |
 | Cleanup removes directory | `ls .worktrees/{branch}` after cleanup | Directory does not exist |
@@ -197,3 +207,15 @@ git worktree list  # Stale entry removed
 | Branch not deleted | Branch persists after worktree removal | `git branch -d` failed because branch is not merged; user must choose force delete |
 | Worktree create fails | "fatal: '{branch}' is already checked out" | Branch exists in another worktree; the setup skill should detect this via `git worktree list` |
 | Plan files lost on cleanup | `docs/plans/` content created in worktree was not committed | Key lesson: always commit plan files before removing worktrees. Plan-mode creates files that are not auto-committed. |
+| Unignored `.venv` symlink | `git worktree remove` refuses with "contains modified or untracked files" (exit 128); `git status --porcelain` shows `?? .venv` | The slash-free `.venv` rule is missing from `info/exclude`, or the link is tracked. Re-run worktree setup to write the rule; do not use `--force` to work around it |
+| No `.venv` in the main checkout | Step 4 prints `Venv link: skipped (no .venv in the main checkout)` | Expected for non-Python repos; setup continues |
+
+## Recorded Probe
+
+The lead fills these from the executed run.
+
+- Environment: git `<version>`, pyright `<version>`
+- `pyright pact-plugin/tests/test_peer_review_cold_lane_pin.py` from the worktree root: `<output>`
+- `cd pact-plugin && pyright tests/test_peer_review_cold_lane_pin.py`: `<output>`
+- `git check-ignore -v .venv` in the worktree: `<output>`
+- Control — the same command after removing the `info/exclude` line: `<output and exit code>`
