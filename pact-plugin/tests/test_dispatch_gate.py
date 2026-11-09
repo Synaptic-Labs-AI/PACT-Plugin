@@ -947,8 +947,9 @@ def test_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsys):
     # prohibition red; the four presence-only substrings it replaces stayed
     # green on both.
     hint = (
-        "If this is a fresh review dispatch, spawn the reviewer under "
-        "a distinct new name; do not re-task the existing teammate. "
+        "If this is a fresh review dispatch, create Task A (teachback) and "
+        "Task B (work) under a distinct new name first, then spawn the "
+        "reviewer under that name; do not re-task the existing teammate. "
         "A verify-only re-review or reviewer-to-fixer work reuses the "
         "reviewer by SendMessage."
     )

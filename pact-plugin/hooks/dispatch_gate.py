@@ -501,10 +501,11 @@ def evaluate_dispatch(
                 f"PACT dispatch_gate: name {name!r} is already a live "
                 f"member of team {session_team!r}. Use a unique name "
                 "(append a numeric suffix or role-descriptor variant). "
-                "If this is a fresh review dispatch, spawn the reviewer under "
-                "a distinct new name; do not re-task the existing teammate. "
-                "A verify-only re-review or reviewer-to-fixer work reuses "
-                "the reviewer by SendMessage.",
+                "If this is a fresh review dispatch, create Task A "
+                "(teachback) and Task B (work) under a distinct new name "
+                "first, then spawn the reviewer under that name; do not "
+                "re-task the existing teammate. A verify-only re-review or "
+                "reviewer-to-fixer work reuses the reviewer by SendMessage.",
                 "name_not_unique")
 
     # ⑧ Task assignment — TaskCreate must precede Agent spawn so the
