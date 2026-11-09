@@ -81,6 +81,14 @@ WARM_ON_FRESHNESS = re.compile(
     r"\bwarm\s+reviewers?\b[^.;,]{0,40}\bfresh\w*\b"
     r"|\bfresh\w*\b[^.;,]{0,40}\bwarm\s+reviewers?\b"
 )
+# The absolute governs a FRESH review dispatch. Without the scope phrase the
+# sentence forbids the verify-only reuse the next sentence permits — the
+# contradiction the phrase exists to prevent — so the phrase must sit in the
+# same sentence as the freshness claim, not merely in the paragraph.
+FRESH_DISPATCH_SCOPE = re.compile(
+    r"\bfresh\s+review[-\s]+dispatch\b[^.;]{0,80}"
+    r"\b(?:every|each|all)\s+warm\s+reviewers?\b[^.;]{0,40}\bfresh\w*\s+spawn\w*"
+)
 # The reuse exception is exhaustive: 'Reuse a warm reviewer ONLY for X or Y'.
 # A bare 'only' token is satisfied by 'verify-only', so the exclusivity word
 # must bind to REUSE and the hyphenated compound must not satisfy it.
@@ -240,6 +248,15 @@ def _unnegated_tail(pattern: re.Pattern, text: str) -> bool:
     return False
 
 
+def _governed_phrase_has_one_negation(text: str) -> bool:
+    """The leftmost negation governing a reuse noun phrase is the only one in
+    that phrase. 'never a teammate not reused' carries a second negation
+    INSIDE the governed phrase and reads as requiring the reuse."""
+    match = NEGATION_GOVERNS_REUSE.search(text)
+    return (match is not None
+            and len(NEGATION.findall(match.group(0))) == 1)
+
+
 @pytest.mark.parametrize("pattern, lost", [
     (WARM_ON_FRESHNESS, "the rule's scope — the freshness claim bound to WARM reviewers"),
     (FRESHNESS_ON_SPAWN, "a freshness claim bound to a spawn (either word order)"),
@@ -281,6 +298,11 @@ def test_negation_is_bound_to_reuse():
         "the freshness clause negates something other than the reuse — "
         "'never the builder and any specialist reused is acceptable' keeps "
         "the window green while permitting the reuse the rule forbids"
+    )
+    assert _governed_phrase_has_one_negation(clause), (
+        "the freshness clause carries a second negation INSIDE the reuse "
+        "bar — 'never a teammate not reused' reads as requiring the reuse "
+        "the rule forbids"
     )
 
 
@@ -367,6 +389,20 @@ def test_permitted_reuse_is_scoped_to_warm_reviewers():
         "the freshness clause permits reuse without scoping it to WARM "
         "reviewers — 'Reuse a reviewer only for …' also covers the cold "
         "reviewer the Cold Reviewer Lane forbids from reuse"
+    )
+
+
+def test_fresh_dispatch_scope_is_bound_to_the_freshness_claim():
+    """The freshness absolute governs a FRESH review dispatch only. Without
+    the scope phrase, 'every warm reviewer is a freshly spawned teammate'
+    contradicts the verify-only reuse the same paragraph permits — the
+    contradiction the phrase exists to prevent."""
+    clause = _clause()
+    assert FRESH_DISPATCH_SCOPE.search(clause), (
+        "the freshness clause states its absolute without scoping it to a "
+        "FRESH review dispatch — the phrase must sit with the freshness "
+        "claim, or the sentence forbids the verify-only reuse the next "
+        "sentence permits"
     )
 
 
@@ -505,6 +541,11 @@ def test_persona_has_one_review_dispatch_row():
         f"the review-dispatch row negates something other than the reuse — "
         f"'never the builder and a specialist reused' keeps the window green "
         f"while permitting the reuse the row forbids: {row!r}"
+    )
+    assert _governed_phrase_has_one_negation(action), (
+        f"the review-dispatch row carries a second negation INSIDE its reuse "
+        f"bar — 'never a specialist not reused' reads as requiring the reuse "
+        f"the row forbids: {row!r}"
     )
     assert WARM_ON_FRESHNESS.search(action), (
         f"the review-dispatch row no longer scopes its freshness claim to "
