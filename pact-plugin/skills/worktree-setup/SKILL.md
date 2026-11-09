@@ -97,8 +97,10 @@ else
   # Write /.venv anchored so the rule matches only the root-level entry.
   EXCLUDE=$(git -C "$WORKTREE" rev-parse --git-path info/exclude 2>/dev/null)
   IGNORE_FAILED=0
+  EXCLUDE_RESOLVED=1
   if [ -z "$EXCLUDE" ]; then
     IGNORE_FAILED=1
+    EXCLUDE_RESOLVED=0
   elif ! grep -qxF '/.venv' "$EXCLUDE" 2>/dev/null; then
     # Terminate a final line that lacks a newline, so the new rule cannot merge into it.
     if [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE" 2>/dev/null)" ]; then
@@ -127,7 +129,11 @@ else
       fi
     fi
   else
-    echo "WARNING: could not write $EXCLUDE — .venv link skipped so an unignored link cannot be committed"
+    if [ "$EXCLUDE_RESOLVED" = 0 ]; then
+      echo "WARNING: could not resolve the exclude path — .venv link skipped so an unignored link cannot be committed"
+    else
+      echo "WARNING: could not write $EXCLUDE — .venv link skipped so an unignored link cannot be committed"
+    fi
   fi
 fi
 ```
@@ -168,5 +174,5 @@ Branch: {branch}
 | An untracked `.venv` link is not ignored | A link created by this run is removed before the warning, so `git add -A` cannot commit it. A pre-existing unignored link stays in place; `git worktree remove` refuses without `--force`. Re-run setup to write a missing rule; if a later `!.venv` rule nullifies it, inspect the exclude file |
 | Dependency work in a worktree | The link is read-only and shared. Remove the link and create a local environment in the worktree instead of installing through it |
 | `git clean -xdf` runs in a worktree | The ignored `.venv` link is removed; pyright reports `venv .venv subdirectory not found in venv path`. Re-run setup to restore the link |
-| Main checkout moved or renamed | Every worktree link is dangling while `git status` stays clean. Remove the link with `rm .venv` and re-run setup after the worktree metadata is repaired |
+| Main checkout moved or renamed | Every worktree link is dangling. `git status` stays clean in the moved main checkout, but inside a worktree it reports `fatal: not a git repository: <old path>`. Run `git worktree repair <worktree-path>`, remove the dangling link with `rm .venv`, then re-run setup. Re-running Step 4 before the repair prints the unresolved-exclude-path warning and skips the link |
 | Platforms where symlinks are unavailable or emulated by copy (e.g. Git Bash/MSYS2) | `ln -s` may copy the environment instead of linking it and still exit 0; do not rely on the worktree sharing the main checkout's packages |
