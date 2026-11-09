@@ -4383,22 +4383,40 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
     # the resolver scans [prefix, prefix + 'g'), so a continuation above 'g'
     # falls outside the window and the fixture would match no rows at all.
     _PREFIX = "ab\u202ecdef"  # written as an escape: the literal is invisible
+    # A continuation ABOVE the window. It must NOT match, which is what makes
+    # the fixture a measurement of the scan window rather than of loose
+    # matching.
+    _ABOVE_WINDOW = _PREFIX + "h"
 
     @staticmethod
     def _seed(cli_db, ids):
-        from scripts.database import create_memory
+        """Seed the throwaway store, BOUND AND ASSERTED IN THIS PROCESS.
+
+        A parent-process write that resolves through the default store lands
+        in the operator's live memory file; the security lane measured exactly
+        that with four seed rows. The scope plus the assertion make the
+        destination a measured fact instead of an assumption.
+        """
+        from scripts.config import resolve_db_path, store_scope
         try:
             import pysqlite3 as sqlite3
         except ImportError:
             import sqlite3
 
-        conn = sqlite3.connect(str(cli_db))
-        conn.row_factory = sqlite3.Row
-        with patch("scripts.database.ensure_initialized"):
-            for memory_id in ids:
-                create_memory(conn, {"id": memory_id, "context": "snippet"})
-        conn.commit()
-        conn.close()
+        with store_scope(cli_db):
+            assert Path(resolve_db_path()).resolve() == Path(cli_db).resolve(), (
+                "the parent process is not bound to the throwaway store: "
+                f"resolved {resolve_db_path()!r}, expected {cli_db!r}"
+            )
+            from scripts.database import create_memory
+
+            conn = sqlite3.connect(str(cli_db))
+            conn.row_factory = sqlite3.Row
+            with patch("scripts.database.ensure_initialized"):
+                for memory_id in ids:
+                    create_memory(conn, {"id": memory_id, "context": "snippet"})
+            conn.commit()
+            conn.close()
 
     @staticmethod
     def _get(cli_script_path, cli_db, prefix):
@@ -4411,12 +4429,24 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
     def test_the_message_and_the_prefix_field_carry_markers(
         self, cli_script_path, cli_db
     ):
-        self._seed(cli_db, [self._PREFIX, self._PREFIX + "0"])
+        self._seed(
+            cli_db,
+            [self._PREFIX, self._PREFIX + "0", self._ABOVE_WINDOW],
+        )
 
         result = self._get(cli_script_path, cli_db, self._PREFIX)
         assert result.returncode == 1, (result.returncode, result.stderr)
         envelope = json.loads(result.stderr)
         assert envelope["error"] == "AMBIGUOUS_PREFIX", envelope
+
+        # THE WINDOW CONTROL: exactly the two in-window ids match. A resolver
+        # that matched loosely would bring the above-window id in, and the
+        # escaping assertions below would then be measuring the wrong fixture.
+        assert envelope["total_matches"] == 2, envelope
+        matched = {m["id"] for m in envelope["matches"]}
+        assert matched == {self._PREFIX, self._PREFIX + "0"}, matched
+        assert self._ABOVE_WINDOW not in matched
+
         for surface in ("message", "prefix"):
             text = envelope[surface]
             assert "<U+202E>" in text, (surface, text)
