@@ -7,7 +7,11 @@ are pattern pins bound to that paragraph and to the persona's
 Reuse-vs-Spawn row. The command region ends at its own blank line; the
 persona region is heading-bounded, and the workflow arm scans one line. A
 token living in a neighbouring SENTENCE inside the same region can still
-satisfy an arm, so the structural arms bind the words that matter.
+satisfy an arm, so every load-bearing claim is bound structurally: the scope
+word to the freshness claim, the exception word to the review dispatch, the
+exclusivity word to the reuse it scopes, and the negation to the reuse it
+forbids. Words that merely elaborate a bound claim — the named examples of who
+must not be reused — are not themselves pinned.
 
 WHAT THIS DOES NOT CATCH: behaviour. The pins certify TEXT — that the rule
 is stated, that its load-bearing words survive a rewording, and that a
@@ -60,6 +64,28 @@ NEGATION_NEAR_RETASK = re.compile(
 ROW_NEGATION_NEAR_REUSE = re.compile(
     r"\b(?:never|not)\b[^.;]{0,60}\breus\w*\b"
     r"|\breus\w*\b[^.;]{0,60}\b(?:never|not)\b"
+)
+# The rule's scope: the freshness claim must bind WARM reviewers, not reviewers
+# in general. A bare '\bwarm\b' token is satisfied by the later 'Spawn each
+# warm reviewer' sentence, so the scope word is bound to the freshness claim.
+WARM_ON_FRESHNESS = re.compile(
+    r"\bwarm\b[^.;]{0,40}\bfresh\w*\b"
+    r"|\bfresh\w*\b[^.;]{0,40}\bwarm\b"
+)
+# The reuse exception is exhaustive: 'Reuse a warm reviewer ONLY for X or Y'.
+# A bare 'only' token is satisfied by 'verify-only', so the exclusivity word
+# must bind to REUSE and the hyphenated compound must not satisfy it.
+EXCLUSIVITY_NEAR_REUSE = re.compile(
+    r"(?<!-)\bonly\b[^.;]{0,60}\breuse\w*\b"
+    r"|\breuse\w*\b[^.;]{0,60}(?<!-)\bonly\b"
+)
+# The Default and shutdown paragraphs scope review dispatch OUT of the reuse
+# default. A bare 'not' anywhere is satisfied by 'not the qualification' (or by
+# an inverted 'not different'), so the exception word must bind to REVIEW
+# DISPATCH itself.
+REVIEW_DISPATCH_EXCEPTED = re.compile(
+    r"\breview dispatch\b[^.;]{0,30}\b(?:exception|except\w*|outside|excluded?)\b"
+    r"|\b(?:except|outside|exclud\w*)\b[^.;]{0,30}\breview dispatch\b"
 )
 
 
@@ -140,6 +166,7 @@ def _clause() -> str:
 
 
 @pytest.mark.parametrize("pattern, lost", [
+    (WARM_ON_FRESHNESS, "the rule's scope — the freshness claim bound to WARM reviewers"),
     (FRESHNESS_ON_SPAWN, "a freshness claim bound to a spawn (either word order)"),
     (re.compile(r"\bspawn"), "the action the rule requires"),
     (re.compile(r"\bname\b"), "the uniqueness lever"),
@@ -208,6 +235,20 @@ def test_exclusivity_is_bound_to_the_conversational_channel():
     )
 
 
+def test_exclusivity_is_bound_to_reuse():
+    """The reuse exception is exhaustive: 'Reuse a warm reviewer only for a
+    verify-only re-review or for reviewer-to-fixer work'. A bare `only` arm
+    would pass on the 'only' inside 'verify-only', so the exclusivity word
+    must bind to REUSE and the hyphenated compound must not satisfy it."""
+    clause = _clause()
+    assert EXCLUSIVITY_NEAR_REUSE.search(clause), (
+        "the freshness clause permits reuse without an exclusivity word "
+        "bound to it — dropping 'only' from 'Reuse a warm reviewer only for "
+        "…' turns the permitted-reuse list into two examples rather than the "
+        "exhaustive set"
+    )
+
+
 def test_clause_sits_before_the_spawn_template():
     """The identity and `name=` are chosen before the spawn call, so the rule
     must sit before the Agent template that dispatches it.
@@ -220,10 +261,15 @@ def test_clause_sits_before_the_spawn_template():
     """
     section = _section()
     anchor = section.find(ANCHOR)
-    template = section.find("\nAgent(\n")
+    # Locate the template by its call shape, not by its exact line ending: a
+    # formatting-only edit must not report a lost spawn template.
+    template_match = re.search(r"\n[ \t]*Agent\(", section)
     steps = section.find("\n1. `TaskCreate(")
     assert anchor != -1, f"peer-review.md lost the {ANCHOR!r} anchor"
-    assert template != -1, "the dispatch section lost its Agent( spawn template"
+    assert template_match is not None, (
+        "the dispatch section lost its Agent( spawn template"
+    )
+    template = template_match.start()
     assert steps != -1, (
         "the dispatch section lost its numbered step 1 (`TaskCreate`) — the "
         "position arm can no longer bind the clause to the steps"
@@ -293,11 +339,34 @@ def _review_row(section: str) -> str:
 
 
 def test_persona_has_one_review_dispatch_row():
+    """The row carries four separate claims, each deletable on its own: the
+    freshness claim is scoped to WARM reviewers, it is a SPAWN, the name is
+    DISTINCT, and the reuse exception names its two permitted cases. They are
+    bound here, not merely present: a token that survives its own deletion
+    proves nothing."""
     row = _review_row(_persona_reuse_section())
     action = _cells(row)[1].lower()
     assert "spawn" in action and ROW_NEGATION_NEAR_REUSE.search(action), (
-        f"the review-dispatch row no longer says to spawn fresh and never "
-        f"(or not) reuse: {row!r}"
+        f"the review-dispatch row no longer says to spawn and never (or not) "
+        f"reuse: {row!r}"
+    )
+    assert WARM_ON_FRESHNESS.search(action), (
+        f"the review-dispatch row no longer scopes its freshness claim to "
+        f"WARM reviewers — a bare 'Spawn the reviewer fresh' also covers the "
+        f"cold reviewer, which the Cold Reviewer Lane forbids: {row!r}"
+    )
+    hits = [m.start() for m in re.finditer(r"\bname\b", action)]
+    assert hits and any(
+        UNIQUENESS.search(action[max(0, i - 60):i + 60]) for i in hits
+    ), (
+        f"the review-dispatch row no longer binds a uniqueness word "
+        f"(distinct, unique, different) to 'name' within 60 chars — the "
+        f"distinct-name mechanism is the dispatch gate's lever: {row!r}"
+    )
+    assert "verify-only" in action and "fixer" in action, (
+        f"the review-dispatch row no longer names its permitted reuse cases "
+        f"('verify-only' and 'fixer') — without them the row reads as an "
+        f"absolute ban while peer-review.md still reuses the reviewer: {row!r}"
     )
     assert "sendmessage" not in action, (
         f"the review-dispatch row routes the reviewer through SendMessage "
@@ -342,10 +411,11 @@ def test_persona_default_scopes_reuse_away_from_review_dispatch():
         "the **Default** sentence no longer mentions both reuse and review "
         "dispatch, so its exception cannot be stated"
     )
-    assert any(word in default for word in
-               ("not", "never", "except", "outside", "exclude")), (
-        "the **Default** sentence states reuse without scoping review "
-        "dispatch out of it — the unscoped absolute is back"
+    assert REVIEW_DISPATCH_EXCEPTED.search(default), (
+        "the **Default** sentence states reuse without excepting review "
+        "dispatch — a bare negation anywhere ('not the qualification', or an "
+        "inverted 'not different') does not scope it, so the exception word "
+        "must bind to 'review dispatch'"
     )
 
 
@@ -373,10 +443,19 @@ def test_shutdown_guidance_scopes_reuse_away_from_review_dispatch():
     assert "reuse idle teammates whenever possible" in paragraph, (
         "the shutdown guidance no longer states the reuse default"
     )
-    assert all(token in paragraph for token in
-               ("review dispatch", "fresh", "distinct")), (
-        "the shutdown guidance states reuse without its review-dispatch "
-        "exception — the second reuse surface is back"
+    assert REVIEW_DISPATCH_EXCEPTED.search(paragraph), (
+        "the shutdown guidance states reuse without excepting review "
+        "dispatch — 'review dispatch is not different' carries every token "
+        "this arm used to require and inverts the instruction, so the "
+        "exception word must bind to 'review dispatch'"
+    )
+    assert FRESHNESS_ON_SPAWN.search(paragraph), (
+        "the shutdown guidance no longer binds a freshness claim to the "
+        "spawn — detached 'fresh' and 'distinct' tokens let the exception "
+        "read as permission to reuse a stale reviewer"
+    )
+    assert "distinct" in paragraph, (
+        "the shutdown guidance lost the distinct-name lever"
     )
 
 
@@ -392,10 +471,19 @@ def _warm_review_workflow_line() -> str:
 
 
 def test_persona_review_workflow_line_requires_a_fresh_spawn():
+    """Freshness and the distinct-name lever are both load-bearing: the
+    dispatch gate can only refuse a collision on a `name=`. A bare 'distinct'
+    token is satisfied by 'under a distinct role', which names nothing."""
     line = _warm_review_workflow_line().lower()
-    assert FRESHNESS_ON_SPAWN.search(line) and re.search(r"\bdistinct\b", line), (
+    hits = [m.start() for m in re.finditer(r"\bname\b", line)]
+    assert (
+        FRESHNESS_ON_SPAWN.search(line)
+        and hits
+        and any(UNIQUENESS.search(line[max(0, i - 60):i + 60]) for i in hits)
+    ), (
         f"the persona's PR Review Workflow no longer requires each warm "
-        f"reviewer to be spawned fresh under a distinct name: {line!r}"
+        f"reviewer to be spawned fresh under a distinct `name=` — the "
+        f"naming lever is what the dispatch gate enforces: {line!r}"
     )
 
 
