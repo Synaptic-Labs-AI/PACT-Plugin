@@ -37,6 +37,7 @@ import pytest
 
 from fixtures.project_dir import write_session_context
 from fixtures.role_frames import teammate_frame
+from scripts import database as scripts_database
 from scripts import memory_api, pact_session
 from scripts.memory_api import (
     PACTMemory,
@@ -1581,6 +1582,61 @@ class TestUpdatePayloadProjectIdGuard:
                     assert stale == 0, (
                         "a vector remains in the old project's partition"
                     )
+
+    def test_a_rekeys_links_survive_an_embedding_fault(
+        self, tmp_path, monkeypatch
+    ):
+        """Cycle 4 (Bugbot B1): the links commit BEFORE the embedding call.
+
+        _store_embedding's fault path rolls the connection back. Link
+        writes left in that transaction would be undone with it, leaving
+        the row addressable only under its OLD key — the state the
+        cascade exists to retire. save() commits its links before
+        embedding for the same reason; this pins the same ordering on the
+        re-key path.
+
+        THE MIGRATION COMMIT IS NEUTRALIZED because it defends this
+        ordering only incidentally: `get_memory` -> `ensure_initialized`
+        -> `_migrate_ct_fields` ends in `conn.commit()`, which flushes the
+        pending link writes as a side effect BEFORE the embedding call.
+        Without this isolation the arm passes with OR without the
+        cascade's own commit (measured), proving nothing. The status
+        assert proves the fault stub ran, so the surviving-links assert
+        cannot pass for the wrong reason.
+        """
+        db_path = tmp_path / "fault.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        old = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = old.save(
+            {"context": "FAULT"}, files=[str(linked)], sync_to_claude=False
+        )
+        assert [m.id for m in old.search_by_file(str(linked))] == [memory_id], (
+            "the live fixture did not link the file; the fault arm below "
+            "would prove nothing"
+        )
+
+        monkeypatch.setattr(
+            scripts_database, "_migrate_ct_fields", lambda conn: None
+        )
+
+        def _rollback_fault(conn, memory_id, memory):
+            conn.rollback()
+            return "fault"
+
+        monkeypatch.setattr(
+            type(old), "_store_embedding", staticmethod(_rollback_fault)
+        )
+        assert old.update(memory_id, {"project_id": "warranted-c"}) == memory_id
+        assert old.last_embedding_status == "fault", (
+            "the fault stub never ran; the surviving-links assertion was "
+            "not exercising the seam"
+        )
+
+        new = PACTMemory(project_id="warranted-c", session_id="s", db_path=db_path)
+        assert [m.id for m in new.search_by_file(str(linked))] == [memory_id], (
+            "the re-pointed links were rolled back with the embedding fault"
+        )
 
     def test_a_disagreement_refusal_precedes_the_payload_guard(
         self, tmp_path, monkeypatch

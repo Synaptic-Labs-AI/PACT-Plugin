@@ -1861,6 +1861,12 @@ class PACTMemory:
                 "DELETE FROM memory_files WHERE memory_id = ? AND file_id = ?",
                 (memory_id, row["file_id"]),
             )
+        # COMMIT THE LINKS BEFORE THE EMBEDDING CALL, as save() commits its
+        # links before embedding: _store_embedding's fault path rolls the
+        # connection back, and link writes left in that transaction would be
+        # undone with it — the row would stay addressable only under its OLD
+        # key, the exact state the cascade exists to retire.
+        conn.commit()
         if not vector_current:
             memory_dict = get_memory(conn, memory_id)
             if memory_dict:
