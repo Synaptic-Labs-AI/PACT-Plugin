@@ -109,19 +109,16 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
-    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
-        cwd=repo, capture_output=True, text=True, check=True,
+    """Keep deleted index entries visible to failure assertions."""
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=True
     )
-    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
-    assert paths, f"tracked population is empty: {pattern}"
-    assert repo / known_member in paths, f"known member missing: {known_member}"
-    return paths
 
 
 # THE ADDRESS OF THE GUARDED REGION, and not a copy of it. An HTML comment does
@@ -973,10 +970,10 @@ class TestTrackedPopulation:
         repo.mkdir()
         pattern = f"pact-plugin/{REPAIR_PACKAGE_DIR}/*.py"
         known = f"pact-plugin/{REPAIR_PACKAGE_DIR}/tracked.py"
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(repo, pattern, known)
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        with pytest.raises(AssertionError, match="tracked population is empty"):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(repo, pattern, known)
 
 

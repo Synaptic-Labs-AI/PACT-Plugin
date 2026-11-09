@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 PLUGIN = Path(__file__).parent.parent
 REPO_ROOT = PLUGIN.parent
 COMMANDS_DIR = PLUGIN / "commands"
@@ -18,15 +20,10 @@ PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
 
 
 def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
-    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
-        cwd=repo, capture_output=True, text=True, check=True,
+    """Keep deleted index entries visible to failure assertions."""
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=True
     )
-    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
-    assert paths, f"tracked population is empty: {pattern}"
-    assert repo / known_member in paths, f"known member missing: {known_member}"
-    return paths
 
 
 def _command_files() -> list[Path]:
@@ -101,13 +98,43 @@ class TestTrackedPopulation:
         tracked.unlink()
         assert _tracked_glob(repo, pattern, "pact-plugin/commands/tracked.md") == [tracked]
 
+    def test_nonzero_git_result_never_falls_back(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "commands" / "untracked.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("untracked")
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(AssertionError, match="Refusing to widen"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
+
+    def test_known_member_must_be_present(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "commands" / "tracked.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/commands/tracked.md"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="known member missing"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/missing.md")
+
     def test_empty_and_wrong_roots_refuse(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        with pytest.raises(AssertionError, match="tracked population is empty"):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
 
 

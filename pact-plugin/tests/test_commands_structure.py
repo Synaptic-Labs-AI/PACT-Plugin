@@ -17,10 +17,11 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
 from shared.intentional_wait import KNOWN_RESOLVERS
 
@@ -29,38 +30,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _tracked_files(repo_root, relative_dir, pattern=None):
-    """Enumerate shipped files from the index, falling back only without git."""
-    pathspec = relative_dir if pattern is None else f"{relative_dir}/{pattern}"
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", pathspec],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        result = None
-
-    if result is not None and result.returncode == 0:
-        root = repo_root / relative_dir
-        files = [
-            root / PurePosixPath(entry).relative_to(relative_dir)
-            for entry in result.stdout.split("\0")
-            if entry
-        ]
-        source = "git index"
-    else:
-        root = repo_root / relative_dir
-        candidates = root.rglob("*") if pattern is None else root.glob(pattern)
-        files = [path for path in candidates if path.is_file()]
-        source = "filesystem fallback"
-
-    if not files:
-        raise AssertionError(
-            f"empty command population for {pathspec} from {source}"
-        )
-    return sorted(files)
+    """Keep deleted index entries visible to structural failure assertions."""
+    return _shared_tracked_files(
+        repo_root, relative_dir, pattern, keep_deleted=True
+    )
 
 # The shutdown loop's call AS IT APPEARS INSIDE THE FENCED BLOCK.
 #
@@ -174,7 +147,7 @@ class TestTrackedCommandPopulation:
             tmp_path, "pact-plugin/commands", "*.md"
         )
 
-        with pytest.raises(AssertionError, match="empty command population"):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
 
 

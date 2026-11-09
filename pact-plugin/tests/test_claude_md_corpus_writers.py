@@ -35,6 +35,7 @@ import pytest
 
 import archive_pin
 from fixtures.hf_cache import hf_cache_env
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from pin_caps import section_pins
 from scripts import working_memory
 from shared.claude_md_manager import (
@@ -58,22 +59,8 @@ _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
 
 
 def _tracked_glob(directory, pattern):
-    """Use the git index for shipped files, while still detecting deletion."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z", "--", "."],
-        cwd=directory, capture_output=True, text=True, check=True,
-    )
-    files = []
-    for name in result.stdout.split("\0"):
-        if not name:
-            continue
-        path = Path(name)
-        assert not path.is_absolute() and ".." not in path.parts, name
-        candidate = directory / path
-        if path.parent == Path(".") and path.match(pattern) and candidate.is_file():
-            files.append(candidate)
-    assert files, f"no tracked {pattern} files in {directory}"
-    return sorted(files)
+    """Return current tracked files only, excluding deleted index entries."""
+    return _shared_tracked_files(directory, ".", pattern)
 
 
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
@@ -137,6 +124,26 @@ def test_every_corpus_file_is_a_case():
     assert {p.stem for p in files} == set(_CASES)
 
 
+def test_nonzero_git_result_never_falls_back(tmp_path, monkeypatch):
+    directory = tmp_path / "corpus"
+    directory.mkdir()
+    (directory / "untracked.md").write_text("untracked", encoding="utf-8")
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(
+                args, 128, stdout="", stderr="fatal: synthetic index failure"
+            )
+        if args[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(AssertionError, match="Refusing to widen"):
+        _tracked_glob(directory, "*.md")
+
+
 def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
     directory = tmp_path / "corpus"
     directory.mkdir()
@@ -154,7 +161,7 @@ def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
     removed.unlink()
     assert _tracked_glob(directory, "*.md") == [keep]
     keep.unlink()
-    with pytest.raises(AssertionError, match="no tracked"):
+    with pytest.raises(AssertionError, match="empty tracked population"):
         _tracked_glob(directory, "*.md")
 
 

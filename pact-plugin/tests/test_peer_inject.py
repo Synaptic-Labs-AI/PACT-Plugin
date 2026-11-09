@@ -26,27 +26,15 @@ from unittest.mock import patch
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
+
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "peer_inject.py"
 SUPPRESS = {"suppressOutput": True}
 
 
 def _tracked_glob(directory, pattern):
-    """Use the git index for shipped files, while still detecting deletion."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z", "--", "."],
-        cwd=directory, capture_output=True, text=True, check=True,
-    )
-    files = []
-    for name in result.stdout.split("\0"):
-        if not name:
-            continue
-        path = Path(name)
-        assert not path.is_absolute() and ".." not in path.parts, name
-        candidate = directory / path
-        if path.parent == Path(".") and path.match(pattern) and candidate.is_file():
-            files.append(candidate)
-    assert files, f"no tracked {pattern} files in {directory}"
-    return sorted(files)
+    """Return current tracked files only, excluding deleted index entries."""
+    return _shared_tracked_files(directory, ".", pattern)
 
 
 def _write_team_config(tmp_path, team, members, **extra):
@@ -1296,7 +1284,7 @@ class TestCompletionAuthorityNoteParametrizedAgents:
         removed.unlink()
         assert _tracked_glob(directory, "pact-*.md") == [keep]
         keep.unlink()
-        with pytest.raises(AssertionError, match="no tracked"):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(directory, "pact-*.md")
 
 

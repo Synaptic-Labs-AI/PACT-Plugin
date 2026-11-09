@@ -11,10 +11,11 @@ Tests cover:
 """
 import re
 import subprocess
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import frontmatter_block, parse_frontmatter
 
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
@@ -22,40 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _tracked_files(repo_root, relative_dir, pattern):
-    """Enumerate shipped files from the index, falling back only without git."""
-    pathspec = f"{relative_dir}/{pattern}"
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", pathspec],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        result = None
-
-    if result is not None and result.returncode == 0:
-        root = repo_root / relative_dir
-        files = [
-            root / PurePosixPath(entry).relative_to(relative_dir)
-            for entry in result.stdout.split("\0")
-            if entry
-        ]
-        source = "git index"
-    else:
-        files = [
-            path
-            for path in (repo_root / relative_dir).glob(pattern)
-            if path.is_file()
-        ]
-        source = "filesystem fallback"
-
-    if not files:
-        raise AssertionError(
-            f"empty agent population for {pathspec} from {source}"
-        )
-    return sorted(files)
+    """Keep deleted index entries visible to structural failure assertions."""
+    return _shared_tracked_files(
+        repo_root, relative_dir, pattern, keep_deleted=True
+    )
 
 
 # Expected agent files
@@ -128,6 +99,29 @@ class TestTrackedAgentPopulation:
             tmp_path, "pact-plugin/agents", "*.md"
         )
 
+    def test_nonzero_git_result_never_falls_back(self, tmp_path, monkeypatch):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(AssertionError, match="Refusing to widen"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_pathspec_cannot_escape_the_root(self, tmp_path):
+        with pytest.raises(ValueError, match="escapes the repository"):
+            _tracked_files(tmp_path, "../outside", "*.md")
+
     def test_gitless_fallback_is_nonempty_or_loud(self, tmp_path):
         agents = tmp_path / "pact-plugin" / "agents"
         agents.mkdir(parents=True)
@@ -137,7 +131,7 @@ class TestTrackedAgentPopulation:
             tmp_path, "pact-plugin/agents", "*.md"
         )
 
-        with pytest.raises(AssertionError, match="empty agent population"):
+        with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_files(tmp_path, "pact-plugin/commands", "*.md")
 
 
