@@ -112,7 +112,11 @@ SHELL_MARKER = re.compile(
 FIND = {"find", "rfind", "index", "rindex", "split", "rsplit", "partition", "rpartition",
         "startswith", "endswith", "count", "replace", "removeprefix", "removesuffix"}
 RE_FUN = {"search", "match", "fullmatch", "finditer", "findall", "sub", "subn", "split"}
-NOT_HELPERS = FIND | RE_FUN | {"compile", "get", "write", "write_text", "read_text", "join", "format"}
+# `update` rides with `get`: both are dict methods too ubiquitous for a
+# bare-name callee match to mean the helper — the collision surfaced when
+# PACTMemory.update gained a locator-shaped search and `heading_at.update(...)`
+# in claude_md_manager._plan_migration matched it by attribute name alone.
+NOT_HELPERS = FIND | RE_FUN | {"compile", "get", "update", "write", "write_text", "read_text", "join", "format"}
 LINE_BREAKS = ("\n", "\r\n", "\r")
 # The finder's lookups. Their results carry states and rows, never marker text,
 # and the markers in their arguments are the finder's to locate.
