@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
-_SCRIPT = _REPO_ROOT / "scripts" / "verify-gate-tree.sh"
+_SCRIPT = Path(os.environ.get(
+    "PACT_VERIFY_GATE_TREE_SCRIPT",
+    str(_REPO_ROOT / "scripts" / "verify-gate-tree.sh"),
+))
 
 _REFUSED = 2
 
@@ -70,6 +74,83 @@ def _stamps(capture: Path) -> dict[str, str]:
             key, _, value = line.partition(" ")
             out[key] = value
     return out
+
+
+_BLOCKING_TEST = '''\
+import os
+import time
+from pathlib import Path
+
+import pytest
+
+
+def test_blocking():
+    ready = Path(os.environ["PACT_GATE_READY"])
+    release = Path(os.environ["PACT_GATE_RELEASE"])
+    ready.write_text("ready", encoding="utf-8")
+    deadline = time.monotonic() + 10
+    while not release.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("parent did not release the blocking child")
+        time.sleep(0.01)
+    if os.environ.get("PACT_GATE_CHILD_FAIL") == "1":
+        pytest.exit("intentional red child", returncode=7)
+'''
+
+
+def _make_blocking_repo(path: Path) -> Path:
+    repo = _make_repo(path)
+    (repo / "test_blocking.py").write_text(_BLOCKING_TEST, encoding="utf-8")
+    _git(repo, "add", "test_blocking.py")
+    _git(repo, "commit", "--quiet", "-m", "blocking child")
+    return repo
+
+
+def _run_with_mutation(repo: Path, tmp_path: Path, mutate,
+                       child_fail: bool = False) -> tuple[
+        subprocess.CompletedProcess, Path]:
+    """Apply `mutate(repo)` only after the real pytest child is blocked."""
+    ready = tmp_path / "child-ready"
+    release = tmp_path / "child-release"
+    capture = tmp_path / "capture.txt"
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PACT_GATE_READY"] = str(ready)
+    env["PACT_GATE_RELEASE"] = str(release)
+    if child_fail:
+        env["PACT_GATE_CHILD_FAIL"] = "1"
+    proc = subprocess.Popen(
+        ["bash", str(_SCRIPT), str(repo), str(capture), "-q", "-p", "no:cacheprovider"],
+        cwd=str(repo), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not ready.exists() and proc.poll() is None:
+            if time.monotonic() > deadline:
+                pytest.fail("blocking child never became ready")
+            time.sleep(0.01)
+        if not ready.exists():
+            stdout, stderr = proc.communicate(timeout=5)
+            pytest.fail(
+                f"blocking child exited before ready (rc={proc.returncode})\n"
+                f"stdout:\n{stdout}\nstderr:\n{stderr}\n"
+                f"capture:\n{capture.read_text(encoding='utf-8')}"
+            )
+        before = capture.read_text(encoding="utf-8")
+        assert "GATE-HEAD " in before
+        assert "GATE-HEAD-AFTER" not in before, "child was not blocked mid-run"
+        mutate(repo)
+        release.write_text("release", encoding="utf-8")
+        stdout, stderr = proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+        ready.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode, stdout=stdout, stderr=stderr), capture
 
 
 class TestScriptIsPresent:
@@ -172,6 +253,98 @@ class TestFaithfulInvocationsAreNotRefused:
 
         assert result.returncode != _REFUSED, result.stderr
         assert capture.is_file()
+
+
+class TestAfterRunTreeAttribution:
+    """A green run counts only when its complete subject stayed unchanged."""
+
+    @staticmethod
+    def _tracked(repo):
+        (repo / "marker.txt").write_text("tracked mutation\n", encoding="utf-8")
+
+    @staticmethod
+    def _move_head(repo):
+        TestAfterRunTreeAttribution._tracked(repo)
+        _git(repo, "add", "marker.txt")
+        _git(repo, "commit", "--quiet", "-m", "move HEAD")
+
+    def test_stable_green_run_is_attributable(self, tmp_path):
+        repo = _make_blocking_repo(tmp_path / "repo")
+
+        result, capture = _run_with_mutation(repo, tmp_path, lambda repo: None)
+
+        assert result.returncode == 0, result.stderr
+        stamps = _stamps(capture)
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "stable"
+        assert stamps["GATE-HEAD-AFTER"] == stamps["GATE-HEAD"]
+        assert stamps["GATE-DIRTY-PATHS-AFTER"] == "0"
+        assert capture.read_text(encoding="utf-8").splitlines()[-1] == (
+            "GATE-PYTEST-EXIT 0")
+
+    def test_preexisting_dirt_can_stay_stable(self, tmp_path):
+        repo = _make_blocking_repo(tmp_path / "repo")
+        (repo / "marker.txt").write_text("already dirty\n", encoding="utf-8")
+
+        result, capture = _run_with_mutation(repo, tmp_path, lambda repo: None)
+
+        assert result.returncode == 0
+        stamps = _stamps(capture)
+        assert stamps["GATE-DIRTY-PATHS"] == "1"
+        assert stamps["GATE-DIRTY-PATHS-AFTER"] == "1"
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "stable"
+
+    @pytest.mark.parametrize("kind", ["tracked", "untracked", "head"])
+    def test_green_run_with_movement_is_unattributable(self, tmp_path, kind):
+        repo = _make_blocking_repo(tmp_path / "repo")
+        original_head = _git(repo, "rev-parse", "HEAD")
+
+        def mutate(repo):
+            if kind == "tracked":
+                self._tracked(repo)
+            elif kind == "untracked":
+                (repo / "new-untracked.txt").write_text("new\n", encoding="utf-8")
+            else:
+                self._move_head(repo)
+
+        result, capture = _run_with_mutation(repo, tmp_path, mutate)
+
+        assert result.returncode == 1, result.stderr
+        stamps = _stamps(capture)
+        assert stamps["GATE-PYTEST-EXIT"] == "0"
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
+        assert stamps["GATE-HEAD-AFTER"] == _git(repo, "rev-parse", "HEAD")
+        if kind == "head":
+            assert stamps["GATE-HEAD"] == original_head
+            assert stamps["GATE-HEAD-AFTER"] != original_head
+
+    def test_equal_dirty_counts_do_not_hide_a_changed_population(self, tmp_path):
+        repo = _make_blocking_repo(tmp_path / "repo")
+        (repo / "before.txt").write_text("before\n", encoding="utf-8")
+
+        def swap_paths(repo):
+            (repo / "before.txt").unlink()
+            (repo / "after.txt").write_text("after\n", encoding="utf-8")
+
+        result, capture = _run_with_mutation(repo, tmp_path, swap_paths)
+
+        assert result.returncode == 1
+        stamps = _stamps(capture)
+        assert stamps["GATE-DIRTY-PATHS"] == "1"
+        assert stamps["GATE-DIRTY-PATHS-AFTER"] == "1"
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
+
+    def test_red_child_status_is_preserved_when_the_tree_moves(self, tmp_path):
+        repo = _make_blocking_repo(tmp_path / "repo")
+
+        result, capture = _run_with_mutation(
+            repo, tmp_path, self._tracked, child_fail=True)
+
+        assert result.returncode == 7, result.stderr
+        stamps = _stamps(capture)
+        assert stamps["GATE-PYTEST-EXIT"] == "7"
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
+        assert capture.read_text(encoding="utf-8").splitlines()[-1] == (
+            "GATE-PYTEST-EXIT 7")
 
 
 class TestWrongTreeIsRefused:

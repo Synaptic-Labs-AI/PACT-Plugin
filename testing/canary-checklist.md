@@ -65,7 +65,7 @@ env -u PYTEST_ADDOPTS ../scripts/verify-gate-tree.sh "$(cd -P .. && pwd)" "$CAPT
 echo "wrapper exit: $?"
 ```
 
-The first argument is the worktree the run must measure. The second is the capture file. Each argument after those two goes to pytest. The script writes `GATE-TREE`, `GATE-HEAD`, `GATE-DIRTY-PATHS`, `GATE-CWD` and `GATE-COMMAND` above the pytest output, then appends `GATE-PYTEST-EXIT` at the end.
+The first argument is the worktree the run must measure. The second is the capture file. Each argument after those two goes to pytest. The script writes `GATE-TREE`, `GATE-HEAD`, `GATE-DIRTY-PATHS`, `GATE-CWD` and `GATE-COMMAND` above the pytest output, then appends `GATE-HEAD-AFTER`, `GATE-DIRTY-PATHS-AFTER`, `GATE-TREE-ATTRIBUTION`, and finally `GATE-PYTEST-EXIT` as the last stamp. `GATE-TREE-ATTRIBUTION` is `stable` only when HEAD and the complete before/after `git status --porcelain` text are identical; equal dirty counts alone are insufficient. A nonzero pytest status is preserved. A green pytest run whose tree moved returns 1 and is `unattributable`, not a pass.
 
 Five properties of that command are load-bearing. Keep each one:
 
@@ -84,15 +84,17 @@ Read the capture first. Tick the Tier 1 row second. All eight must hold:
 1. **The wrapper exit is `0`**, read from the terminal at the moment of the run. This one cannot be read from the capture. A refusal exits `2` and writes NOTHING. pytest can also exit 2, so a 2 with a capture present is an interrupted run rather than a refusal. A capture from an earlier run at the same path then survives byte for byte, and it reads clean for a run that did not occur. The `rm -f` line and this exit code are the two guards against that.
 2. **The capture file is present.** If it is absent, the run refused and wrote nothing.
 3. **`GATE-TREE`** names the worktree you review.
-4. **`GATE-HEAD`** is the commit you recorded from the PR page. A literal `HEAD` on this line is not a commit. It means the tree carries no commit.
-5. **`GATE-DIRTY-PATHS`** is `0`. A count above zero means the tree holds changes that `GATE-HEAD` does not carry, so the run did not measure that commit alone.
-6. **`GATE-PYTEST-EXIT`** is `0`.
+4. **`GATE-HEAD`** is the commit you recorded from the PR page, and **`GATE-HEAD-AFTER`** is that same commit. A literal `HEAD` on either line is not a commit. It means the tree carries no commit. The after-HEAD must equal both `GATE-HEAD` and the externally recorded PR SHA, so a commit created during the run cannot pass.
+5. **`GATE-DIRTY-PATHS` and `GATE-DIRTY-PATHS-AFTER`** are both `0`, and **`GATE-TREE-ATTRIBUTION`** is `stable`. A count above zero on either line means the tree holds changes that `GATE-HEAD` does not carry, so the run did not measure that commit alone. `stable` certifies that the complete before/after `git status --porcelain` text is identical, not merely that the two dirty counts match.
+6. **`GATE-PYTEST-EXIT`** is `0` and is the last stamp, after all three after-run stamps. A moved tree makes the wrapper exit 1 even when this stamp is 0, so the wrapper exit and the attribution condition above must both hold.
 7. **`GATE-COMMAND`** is `python3 -m pytest -q` and nothing more. A path, a `-k` filter, a `--co` or a `--lf` narrows what pytest collected. Items 1 to 6 stay correct for a narrowed run, and a narrowed run measured a part of the suite rather than the suite. Measured: `--co` exits 0 and runs no test, and a `-k` that selects a subset exits 0.
 8. **The summary line** in the capture reads `<N> passed`, with no `deselected` and no error count. `<N>` marks the SHAPE of the line. Do not fetch a number to compare it against, because an exported `PYTEST_ADDOPTS` reaches each later run in that shell, so a second count carries the same selection. This item catches a `-k` or `-m` selection and a collect-only run, and the source does not matter. IT DOES NOT CATCH A PATH, which narrows with a clean summary, and the `env -u` prefix is what closes that one. Measured: `PYTEST_ADDOPTS='tests/test_canary_checklist_count.py'` gives a stamp of `python3 -m pytest -q`, an exit of 0, and `9 passed` from a suite of 14662.
 
 Do not merge a PR of which the capture fails one of the eight.
 
 A route stays open. A `collect_ignore` entry in the pytest configuration narrows the run with a clean summary and a clean stamp, and a `testpaths` line or a path line does the same by the same mechanism. Where that line is committed, it is visible in review and it narrows CI in the same way, so it is recorded here rather than checked. Where the file is untracked, `GATE-DIRTY-PATHS` is above zero and item 5 catches it. Where the file is untracked AND an ignore rule matches it, nothing here catches it. A default marker expression is different: it deselects, so item 8 catches it. Measured: an ignored `conftest.py` with `collect_ignore` gives `GATE-DIRTY-PATHS 0`, a clean stamp and `1 passed` of 3 tests.
+
+The after-run bracket is a cheap shared-tree guard, not decisive clean-SHA certification. An in-place edit while already dirty can leave the porcelain text unchanged, and ignored files are outside that text. Decisive local certification still requires a detached clean worktree at the named SHA.
 
 #### A tree the wrapper refuses
 

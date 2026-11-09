@@ -498,3 +498,39 @@ class TestCanaryChecklistFixedCountRows:
             "Read the script for a loop across a directory. That is what "
             "separates (a) from (b), and no arm here can do it for you."
         )
+
+
+class TestCanaryTreeAttributionContract:
+    """The suite row consumes every after-run attribution stamp."""
+
+    @staticmethod
+    def _text():
+        if not _CHECKLIST.exists():
+            pytest.skip("testing/canary-checklist.md not present")
+        return _CHECKLIST.read_text(encoding="utf-8")
+
+    def test_all_after_stamps_are_named(self):
+        text = self._text()
+        for stamp in (
+            "GATE-HEAD-AFTER",
+            "GATE-DIRTY-PATHS-AFTER",
+            "GATE-TREE-ATTRIBUTION",
+        ):
+            assert f"`{stamp}`" in text, f"canary lost {stamp}"
+
+    def test_after_head_must_match_both_external_sha_and_before_head(self):
+        text = self._text()
+        assert "after-HEAD must equal both `GATE-HEAD` and the externally recorded PR SHA" in text
+
+    def test_stable_requires_full_porcelain_equality_not_count_equality(self):
+        text = self._text()
+        assert "`GATE-TREE-ATTRIBUTION`** is `stable`" in text
+        assert "complete before/after `git status --porcelain` text is identical" in text
+        assert "not merely that the two dirty counts match" in text
+
+    def test_exit_stamp_is_last_and_green_movement_is_not_a_pass(self):
+        text = self._text()
+        assert "`GATE-PYTEST-EXIT`** is `0` and is the last stamp" in text
+        assert "after all three after-run stamps" in text
+        assert "A green pytest run whose tree moved returns 1" in text
+        assert "detached clean worktree at the named SHA" in text

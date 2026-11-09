@@ -12,9 +12,17 @@
 #      the declared one.
 #   2. STAMPS the tree identity into the capture file above the pytest output,
 #      so a later reader can tell what was measured without a re-run.
+#   3. READS HEAD and the complete porcelain state again after pytest, and marks
+#      the run stable only when both are unchanged. A green run whose tree moved
+#      is unattributable and returns 1; a red pytest status is preserved.
 #
 #   The STAMP is the load-bearing part. The REFUSAL is the enhancement. If the
 #   two are ever in tension, keep the stamp.
+#
+#   The after-run comparison is a cheap shared-tree guard, not decisive clean-SHA
+#   certification. An in-place edit while already dirty can leave porcelain text
+#   unchanged, and ignored files are outside it. Use a detached clean worktree at
+#   the named SHA for decisive local certification.
 #
 # WHAT THIS DOES NOT COVER
 #   This wrapper gates the MERGE-GATE suite run only. It requires a git
@@ -27,9 +35,10 @@
 #   verify-gate-tree.sh <declared-worktree-path> <capture-file> [pytest args...]
 #
 # EXIT CODES
-#   0    pytest ran and passed
+#   0    pytest passed and the tree stayed stable
 #   2    refused before pytest started
-#   1    a usage error, or the pytest exit code
+#   1    a usage error, or pytest was green but the tree became unattributable
+#   any other nonzero pytest status is preserved verbatim
 
 set -u
 
@@ -95,7 +104,21 @@ if [ "$declared_real" != "$actual_real" ]; then
 fi
 
 head_sha="$(git -C "$actual_real" rev-parse HEAD)"
-dirty_count="$(git -C "$actual_real" status --porcelain | wc -l | tr -d ' ')"
+porcelain_before="$(mktemp)" || {
+    printf 'GATE REFUSED: cannot allocate the before-run porcelain capture.\n' >&2
+    exit 1
+}
+porcelain_after="$(mktemp)" || {
+    rm -f "$porcelain_before"
+    printf 'GATE REFUSED: cannot allocate the after-run porcelain capture.\n' >&2
+    exit 1
+}
+trap 'rm -f "$porcelain_before" "$porcelain_after"' EXIT
+if ! git -C "$actual_real" status --porcelain > "$porcelain_before"; then
+    printf 'GATE REFUSED: git status failed before pytest.\n' >&2
+    exit 2
+fi
+dirty_count="$(wc -l < "$porcelain_before" | tr -d ' ')"
 
 # Make the capture directory, because a missing directory is a faithful call
 # with an absent parent, and a refusal there would teach the operator nothing.
@@ -117,5 +140,30 @@ mkdir -p "$capture_dir" || {
 python3 -m pytest "$@" >> "$capture" 2>&1
 status=$?
 
-printf 'GATE-PYTEST-EXIT %s\n' "$status" >> "$capture"
-exit "$status"
+head_after="$(git -C "$actual_real" rev-parse HEAD 2>/dev/null || true)"
+porcelain_readable=1
+if ! git -C "$actual_real" status --porcelain > "$porcelain_after"; then
+    porcelain_readable=0
+fi
+dirty_after="$(wc -l < "$porcelain_after" | tr -d ' ')"
+attribution="unattributable"
+if [ "$porcelain_readable" -eq 1 ] && [ -n "$head_after" ] \
+        && [ "$head_after" = "$head_sha" ] \
+        && cmp -s "$porcelain_before" "$porcelain_after"; then
+    attribution="stable"
+fi
+
+{
+    printf 'GATE-HEAD-AFTER %s\n' "$head_after"
+    printf 'GATE-DIRTY-PATHS-AFTER %s\n' "$dirty_after"
+    printf 'GATE-TREE-ATTRIBUTION %s\n' "$attribution"
+    printf 'GATE-PYTEST-EXIT %s\n' "$status"
+} >> "$capture"
+
+if [ "$status" -ne 0 ]; then
+    exit "$status"
+fi
+if [ "$attribution" != "stable" ]; then
+    exit 1
+fi
+exit 0
