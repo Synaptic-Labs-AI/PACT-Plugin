@@ -3,9 +3,11 @@
 A warm reviewer that reuses a teammate from an earlier phase of the session
 carries that teammate's context into the review. The rule lives in prose, at
 the point where the reviewer identity and `name=` are chosen, so the pins
-are token and phrase pins bound to that paragraph and to the persona's
-Reuse-vs-Spawn row. Each region ends at its own blank line, so a token
-living in a neighbouring clause cannot satisfy an arm.
+are pattern pins bound to that paragraph and to the persona's
+Reuse-vs-Spawn row. The command region ends at its own blank line; the
+persona region is heading-bounded, and the workflow arm scans one line. A
+token living in a neighbouring SENTENCE inside the same region can still
+satisfy an arm, so the structural arms bind the words that matter.
 
 WHAT THIS DOES NOT CATCH: behaviour. The pins certify TEXT — that the rule
 is stated, that its load-bearing words survive a rewording, and that a
@@ -37,6 +39,20 @@ NEGATION_NEAR_REUSE = re.compile(
 EXCLUSIVITY_NEAR_CHANNEL = re.compile(
     r"\bchannel\b[^.;]{0,60}\b(?:only|nowhere else|limited to)\b"
     r"|\b(?:only|nowhere else|limited to)\b[^.;]{0,60}\bchannel\b"
+)
+# A freshness claim on a spawn, in either word order: 'freshly spawned' and
+# 'spawned fresh' both carry the rule, and 'Freshness closes ...' does not,
+# because no spawn sits within 40 chars before the sentence ends.
+FRESHNESS_ON_SPAWN = re.compile(
+    r"\bfresh\w*\b[^.;]{0,40}\bspawn\w*\b"
+    r"|\bspawn\w*\b[^.;]{0,40}\bfresh\w*\b"
+)
+# The gate-refusal corollary: a refusal is never permission to re-task the
+# existing teammate. Bound like the reuse negation, so a stray negation in a
+# neighbouring sentence cannot satisfy it.
+NEGATION_NEAR_RETASK = re.compile(
+    r"\b(?:never|not)\b[^.;]{0,60}\bre-?task\b"
+    r"|\bre-?task\w*\b[^.;]{0,60}\b(?:never|not)\b"
 )
 
 
@@ -116,24 +132,24 @@ def _clause() -> str:
     return clause
 
 
-@pytest.mark.parametrize("tokens, lost", [
-    (("freshly spawn",), "the reviewer is freshly spawned, not merely fresh"),
-    (("spawn",), "the action the rule requires"),
-    (("name",), "the uniqueness lever"),
-    (("distinct", "unique", "different"), "the name the reviewer must take"),
-    (("teammate",), "the object of the reuse bar"),
-    (("reus",), "the reuse bar itself"),
-    (("verify-only",), "the one re-review reuse exception"),
-    (("fixer",), "the reviewer-to-fixer reuse exception"),
-    (("memory",), "the agent-memory channel a fresh spawn does not close"),
-    (("cold",), "the cold lane's decisive read"),
-    (("only", "nowhere else", "limited to"), "the exclusivity of the conversational channel"),
+@pytest.mark.parametrize("pattern, lost", [
+    (FRESHNESS_ON_SPAWN, "a freshness claim bound to a spawn (either word order)"),
+    (re.compile(r"\bspawn"), "the action the rule requires"),
+    (re.compile(r"\bname\b"), "the uniqueness lever"),
+    (re.compile(r"\b(?:distinct|unique|different)\b"), "the name the reviewer must take"),
+    (re.compile(r"\bteammate"), "the object of the reuse bar"),
+    (re.compile(r"\breus"), "the reuse bar itself"),
+    (re.compile(r"verify-only"), "the one re-review reuse exception"),
+    (re.compile(r"fixer"), "the reviewer-to-fixer reuse exception"),
+    (re.compile(r"memory"), "the pointer to the REVIEWER-MEMORY-CHANNEL clause that names the channel freshness does not close"),
+    (re.compile(r"\bcold\b"), "the cold lane's type-based independence"),
+    (re.compile(r"\b(?:only|nowhere else|limited to)\b"), "an exclusivity word (its channel binding is pinned separately)"),
 ])
-def test_clause_keeps_its_load_bearing_tokens(tokens, lost):
+def test_clause_keeps_its_load_bearing_tokens(pattern, lost):
     clause = _clause()
-    assert any(token in clause for token in tokens), (
-        f"the reviewer-freshness clause no longer names {lost} "
-        f"({tokens!r}) — without it the rule is not stated"
+    assert pattern.search(clause), (
+        f"the reviewer-freshness clause no longer carries {lost} "
+        f"({pattern.pattern!r}) — without it the rule is not stated"
     )
 
 
@@ -145,6 +161,18 @@ def test_negation_is_bound_to_reuse():
     assert NEGATION_NEAR_REUSE.search(clause), (
         "the freshness clause mentions reuse without a negation bound to it "
         "— 'never a teammate reused' is the load-bearing shape"
+    )
+
+
+def test_negation_is_bound_to_retasking():
+    """The gate-refusal corollary: a refusal is not permission to re-task the
+    existing teammate. Bound like the reuse negation, so a negation in a
+    neighbouring sentence cannot satisfy it."""
+    clause = _clause()
+    assert NEGATION_NEAR_RETASK.search(clause), (
+        "the freshness clause no longer binds a negation to re-tasking the "
+        "existing teammate — the gate-refusal corollary was deleted or "
+        "detached, and nothing else pins it"
     )
 
 
@@ -176,7 +204,14 @@ def test_exclusivity_is_bound_to_the_conversational_channel():
 
 def test_clause_sits_before_the_spawn_template():
     """The identity and `name=` are chosen before the spawn call, so the rule
-    must sit before the Agent template that dispatches it."""
+    must sit before the Agent template that dispatches it.
+
+    In the current document order the step-1 assertion below subsumes the
+    template assertion: any anchor before step 1 is also before the template.
+    The template arm fires independently only if the steps and the template
+    are reordered, so it guards that reordering rather than acting as an
+    independent witness today.
+    """
     section = _section()
     anchor = section.find(ANCHOR)
     template = section.find("\nAgent(\n")
@@ -254,9 +289,9 @@ def _review_row(section: str) -> str:
 def test_persona_has_one_review_dispatch_row():
     row = _review_row(_persona_reuse_section())
     action = _cells(row)[1].lower()
-    assert "spawn" in action and "never" in action, (
+    assert "spawn" in action and re.search(r"\b(?:never|not)\b", action), (
         f"the review-dispatch row no longer says to spawn fresh and never "
-        f"reuse: {row!r}"
+        f"(or not) reuse: {row!r}"
     )
     assert "sendmessage" not in action, (
         f"the review-dispatch row routes the reviewer through SendMessage "
@@ -264,25 +299,39 @@ def test_persona_has_one_review_dispatch_row():
     )
 
 
-def test_persona_review_row_is_the_first_data_row():
+def test_persona_review_row_precedes_the_generic_idle_agent_row():
     """The generic 'Idle agent has relevant context' row is a plausible match
-    for a reviewer, so the review row must precede it."""
-    first = _data_rows(_persona_reuse_section())[0]
-    assert REVIEW_ROW in _cells(first)[0].lower(), (
-        f"the review-dispatch row is no longer the FIRST data row of the "
-        f"Reuse vs. Spawn table — the generic idle-agent row now wins: "
-        f"{first!r}"
+    for a reviewer, so the review row must precede it — not occupy the very
+    first slot, which would reject an unrelated row legitimately added above."""
+    section = _persona_reuse_section()
+    rows = _data_rows(section)
+    review = _review_row(section)
+    idle = next(
+        (i for i, row in enumerate(rows)
+         if "idle agent has relevant context" in _cells(row)[0].lower()),
+        None,
+    )
+    assert idle is not None, (
+        "the Reuse vs. Spawn table lost its generic idle-agent row — the "
+        "ordering arm has no anchor"
+    )
+    assert rows.index(review) < idle, (
+        f"the review-dispatch row no longer precedes the generic idle-agent "
+        f"row: {rows[idle]!r}"
     )
 
 
 def test_persona_default_scopes_reuse_away_from_review_dispatch():
     """The Default sentence is a reuse absolute; without its exception the
-    table row is contradicted four lines below it."""
-    text = _persona_text()
-    start = text.find("**Default**")
-    assert start != -1, "the persona lost its **Default** sentence"
-    end = text.find("\n\n", start)
-    default = text[start:end if end != -1 else None].lower()
+    table row is contradicted four lines below it.
+
+    This pin asserts the SCOPING, not a restatement of the rule: the fresh
+    spawn is carried by the review row above it."""
+    section = _persona_reuse_section()
+    start = section.find("**Default**")
+    assert start != -1, "the Reuse vs. Spawn section lost its **Default** sentence"
+    end = section.find("\n\n", start)
+    default = section[start:end if end != -1 else None].lower()
     assert "reuse" in default and "review" in default, (
         "the **Default** sentence no longer mentions both reuse and review "
         "dispatch, so its exception cannot be stated"
@@ -294,16 +343,27 @@ def test_persona_default_scopes_reuse_away_from_review_dispatch():
     )
 
 
+def _persona_shutdown_section() -> str:
+    """The Agent Shutdown Guidance section, with liveness controls."""
+    text = _persona_text()
+    start = text.find(PERSONA_END)
+    assert start != -1, f"the persona lost the {PERSONA_END!r} section"
+    end = text.find("\n### ", start + len(PERSONA_END))
+    section = text[start:end if end != -1 else None]
+    assert "Do **not** shut down teammates preemptively." in section, (
+        "the Agent Shutdown Guidance section lost its preemptive-shutdown "
+        "absolute — the extraction is looking at the wrong region"
+    )
+    return section
+
+
 def test_shutdown_guidance_scopes_reuse_away_from_review_dispatch():
     """The shutdown absolute is a second reuse surface; unpinned, its
     exception can be dropped without reddening any other arm."""
-    text = _persona_text()
-    start = text.find("Do **not** shut down teammates preemptively.")
-    assert start != -1, (
-        "the persona lost its Agent Shutdown Guidance absolute"
-    )
-    end = text.find("\n\n", start)
-    paragraph = text[start:end if end != -1 else None].lower()
+    section = _persona_shutdown_section()
+    start = section.find("Do **not** shut down teammates preemptively.")
+    end = section.find("\n\n", start)
+    paragraph = section[start:end if end != -1 else None].lower()
     assert "reuse idle teammates whenever possible" in paragraph, (
         "the shutdown guidance no longer states the reuse default"
     )
@@ -314,7 +374,7 @@ def test_shutdown_guidance_scopes_reuse_away_from_review_dispatch():
     )
 
 
-def test_persona_review_workflow_line_requires_a_fresh_spawn():
+def _warm_review_workflow_line() -> str:
     text = _persona_text()
     lines = [ln for ln in text.splitlines()
              if "Invoke **at least 3 warm reviewers in parallel**" in ln]
@@ -322,7 +382,25 @@ def test_persona_review_workflow_line_requires_a_fresh_spawn():
         f"expected exactly 1 persona line invoking the warm reviewer "
         f"combination, found {len(lines)}"
     )
-    assert "freshly spawned" in lines[0] and "distinct" in lines[0], (
+    return lines[0]
+
+
+def test_persona_review_workflow_line_requires_a_fresh_spawn():
+    line = _warm_review_workflow_line().lower()
+    assert FRESHNESS_ON_SPAWN.search(line) and re.search(r"\bdistinct\b", line), (
         f"the persona's PR Review Workflow no longer requires each warm "
-        f"reviewer to be freshly spawned under a distinct name: {lines[0]!r}"
+        f"reviewer to be spawned fresh under a distinct name: {line!r}"
+    )
+
+
+def test_persona_workflow_line_scopes_freshness_to_warm_reviewers():
+    """The cold reviewer is an anonymous general-purpose subagent with no
+    `name=` and no teammate role. A freshness quantifier that does not name
+    warm reviewers distributes over the whole coordination, cold reviewer
+    included — the defect this arm exists to prevent."""
+    line = _warm_review_workflow_line().lower()
+    assert re.search(r"\beach\b[^.;]{0,20}\bwarm\b", line), (
+        "the PR Review Workflow line's 'each' no longer names warm reviewers "
+        "— as a bare 'each freshly spawned' it distributes over the cold "
+        f"reviewer too, which the Cold Reviewer Lane forbids: {line!r}"
     )

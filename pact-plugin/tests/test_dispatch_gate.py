@@ -941,7 +941,7 @@ def test_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsys):
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "is already a live member" in reason
-    assert "If this is a review dispatch" in reason
+    assert "If this is a fresh review dispatch" in reason
     assert "do not re-task" in reason
 
 
