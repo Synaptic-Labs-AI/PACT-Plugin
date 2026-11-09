@@ -15,17 +15,16 @@ must not be reused — are not themselves pinned.
 
 WHAT THIS DOES NOT CATCH: behaviour. The pins certify TEXT — that the rule
 is stated, that its load-bearing words survive a rewording, and that a
-deletion or a move reds. Whether a lead follows the rule on a live dispatch
-is runtime behaviour no fixture observes; the first live review under this
-prose is the probe. Each arm binds its claim's vocabulary, the noun its scope
-word modifies, and — where a negation or exception word is present — its
-polarity; the arms do not parse English. Two measured wordings still pass and
-are recorded here rather than claimed closed: 'Freshness closes the
-conversational channel only loosely, and also closes the agent-memory
-channel' (an additive contradiction with no negation word) and 'Review
-dispatch is the exception to freshness: reuse the warm reviewer who already
-has context' (the exception word still binds to review dispatch, but the
-direction of the exception inverts).
+deletion or an inversion reds. Whether a lead follows the rule on a live
+dispatch is runtime behaviour no fixture observes; the first live review
+under this prose is the probe. Each arm binds its claim's vocabulary, the
+noun its scope word modifies, and — where a negation or exception word is
+present — its polarity; the arms do not parse English. One unbounded class
+remains stated rather than claimed closed: any contradictory wording that
+carries no negation or exception word — an appended sentence that permits
+what a pinned claim forbids, or a rewritten exception direction that keeps
+the exception word but reverses what it excepts — still passes. Closing that
+class would need exact-wording pins, which fail on benign rewordings.
 """
 import re
 from pathlib import Path
@@ -47,9 +46,22 @@ NEGATION_NEAR_REUSE = re.compile(
     r"(?:(?:never|not|no)\b[^.;,]{0,80}\breus)"
     r"|(?:\breus\w*\b[^.;,]{0,80}\b(?:never|not\b|prohibit|forbid|barred|forbidden))"
 )
-EXCLUSIVITY_NEAR_CHANNEL = re.compile(
-    r"\bchannel\b[^.;]{0,60}\b(?:only|nowhere else|limited to)\b"
-    r"|\b(?:only|nowhere else|limited to)\b[^.;]{0,60}\bchannel\b"
+# The rule is that freshness closes the CONVERSATIONAL channel only. Binding a
+# bare `only` to a bare `channel` accepts a noun swap ('closes the agent-memory
+# channel only') and, without the polarity guard, a negated verb ('does not
+# close the conversational channel only').
+EXCLUSIVITY_ON_CONVERSATIONAL = re.compile(
+    r"\bconversational\s+channel\b[^.;]{0,40}\b(?:only|nowhere else|limited to)\b"
+    r"|\b(?:only|nowhere else|limited to)\b[^.;]{0,40}\bconversational\s+channel\b"
+)
+# The other half of the claim: the agent-memory channel is what freshness does
+# NOT close. A channel swap satisfies any bare-token arm, so bind the noun to
+# the negation that qualifies it.
+AGENT_MEMORY_NOT_CLOSED = re.compile(
+    r"\bagent-memory\s+channel\b[^.;]{0,40}\b(?:does\s+not|do\s+not|never|not)\b"
+    r"[^.;]{0,20}\bclose"
+    r"|\b(?:does\s+not|do\s+not|never|not)\b[^.;]{0,20}\bclose\b[^.;]{0,40}"
+    r"\bagent-memory\s+channel\b"
 )
 # A freshness claim on a spawn, in either word order: 'freshly spawned' and
 # 'spawned fresh' both carry the rule, and 'Freshness closes ...' does not,
@@ -101,6 +113,17 @@ EXCLUSIVITY_NEAR_REUSE = re.compile(
     r"(?<!-)\bonly\b[^.;]{0,60}\breuse\w*\b"
     r"|\breuse\w*\b[^.;]{0,60}(?<!-)\bonly\b"
 )
+# 'anything but a verify-only re-review' keeps 'only' bound to reuse while
+# reversing the permitted set, so the tail check must see exception words too.
+NEGATION_OR_EXCEPTION = re.compile(
+    r"\b(?:never|not|no|without|cannot|unless|but|except)\b"
+)
+# The distinct-name lever: a bare 'distinct' token accepts 'a distinct role'
+# and a negated 'a name that need not be distinct'.
+DISTINCT_ON_NAME = re.compile(
+    r"\bdistinct\b[^.;,]{0,40}\bname\b"
+    r"|\bname\b[^.;,]{0,40}\bdistinct\b"
+)
 # The Default and shutdown paragraphs scope review dispatch OUT of the reuse
 # default. A bare 'not' anywhere is satisfied by 'not the qualification' (or by
 # an inverted 'not different'), so the exception word must bind to REVIEW
@@ -119,6 +142,27 @@ NEGATION = re.compile(r"\b(?:never|not|no|without|cannot|unless)\b")
 # reused is acceptable' reads as permission.
 NEGATION_GOVERNS_REUSE = re.compile(
     r"\b(?:never|not)\b\s+(?:(?:a|an|the|any|one)\s+)?(?:\w+\s+){0,3}\breus\w*"
+)
+# The bar forbids reusing a PERSON. 'Continuing a warm reviewer … is not reuse'
+# is a scope clarification with no person in its negation's reach, so it must
+# not satisfy the bar: a negation that reaches only the abstract noun 'reuse'
+# is not the prohibition the clause exists to state.
+NEGATION_GOVERNS_PERSON_REUSE = re.compile(
+    r"\b(?:never|not)\b[^.;,]{0,80}\b(?:teammate|specialist|builder|reviewer)\b"
+    r"[^.;,]{0,80}\breus\w*"
+    r"|\b(?:never|not)\b[^.;,]{0,80}\breus\w*[^.;,]{0,80}"
+    r"\b(?:teammate|specialist|builder|reviewer)\b"
+)
+# The continuation carve-out is a SCOPE clarification: continuing a reviewer
+# this round already dispatched is NOT the reuse the rule forbids. Bind the
+# marker, the dispatch state, and the negated reuse in one sentence, so
+# deleting the clause or dropping its negation reds — and the surrounding
+# freshness sentence cannot satisfy the arm on its own.
+CONTINUATION_NOT_REUSE = re.compile(
+    r"\bcontinuing\b[^.;]{0,120}\bthis round already dispatched\b[^.;]{0,120}"
+    r"\bis\s+not\s+(?:a\s+)?re-?use\b"
+    r"|\bis\s+not\s+(?:a\s+)?re-?use\b[^.;]{0,120}\bcontinuing\b"
+    r"[^.;]{0,120}\bthis round already dispatched\b"
 )
 # The anti-re-task corollary is a denial of PERMISSION. 'never prohibited to
 # re-task' keeps the same tokens and inverts it to permission.
@@ -140,6 +184,13 @@ DISTINCT_FROM_LIVE = re.compile(r"\bdistinct\b[^.;,]{0,40}\blive\b")
 PRESENT_AND_READABLE = re.compile(
     r"\bpresent\b[^.;,]{0,20}\breadable\b"
     r"|\breadable\b[^.;,]{0,20}\bpresent\b"
+)
+# The precondition qualifies a CLAIM: the gate REFUSES a live name. Binding
+# only the precondition accepts 'the gate permits a live name' and, without a
+# polarity guard, 'the gate does not refuse a live name'.
+REFUSAL_ON_LIVE_NAME = re.compile(
+    r"\brefus(?:e|es|ed|ing)\b[^.;]{0,60}\bname\b"
+    r"|\bname\b[^.;]{0,60}\brefus(?:e|es|ed|ing)\b"
 )
 
 
@@ -239,18 +290,33 @@ def _unnegated(pattern: re.Pattern, text: str) -> bool:
     return False
 
 
-def _unnegated_tail(pattern: re.Pattern, text: str) -> bool:
+def _unnegated_tail(pattern: re.Pattern, text: str,
+                    negation: re.Pattern = NEGATION) -> bool:
     """A match of `pattern` whose own sentence adds no negation or exception.
 
     Catches the inversion that keeps the claim and appends an exception:
     'a distinct name unless its usual name is already live' and 'only when it
-    is not a verify-only re-review'.
+    is not a verify-only re-review'. The permitted-list arms pass
+    NEGATION_OR_EXCEPTION so 'anything but X' counts as the exception it is.
     """
     for match in pattern.finditer(text):
         end = text.find(".", match.end())
-        if not NEGATION.search(text[match.end():end if end != -1 else None]):
+        if not negation.search(text[match.end():end if end != -1 else None]):
             return True
     return False
+
+
+def _carveout_is_positive(text: str, case: str) -> bool:
+    """A permitted-reuse noun bound to a POSITIVE reuse verb.
+
+    The carve-out says verify-only and fixer work DO reuse the reviewer; a
+    bare token check accepts 'does not reuse that reviewer'.
+    """
+    pattern = re.compile(
+        rf"\b{re.escape(case)}\b[^.;]{{0,80}}\breus\w*"
+        rf"|\breus\w*[^.;]{{0,80}}\b{re.escape(case)}\b"
+    )
+    return _unnegated(pattern, text)
 
 
 def _governed_phrase_has_one_negation(text: str) -> bool:
@@ -311,6 +377,11 @@ def test_negation_is_bound_to_reuse():
         "bar — 'never a teammate not reused' reads as requiring the reuse "
         "the rule forbids"
     )
+    assert NEGATION_GOVERNS_PERSON_REUSE.search(clause), (
+        "the freshness clause no longer binds its reuse negation to a "
+        "PERSON — 'Continuing a warm reviewer … is not reuse' is a scope "
+        "clarification and must not stand in for the bar"
+    )
 
 
 def test_negation_is_bound_to_retasking():
@@ -356,13 +427,21 @@ def test_uniqueness_is_bound_to_name():
 
 
 def test_exclusivity_is_bound_to_the_conversational_channel():
-    """The rule is that freshness closes the CONVERSATIONAL channel only.
-    A bare `only` arm would pass on 'verify-only' elsewhere in the clause,
-    so the exclusivity word must sit near the channel it scopes."""
+    """The rule is that freshness closes the CONVERSATIONAL channel only and
+    does NOT close the agent-memory channel. A bare `only` arm would pass on
+    'verify-only' elsewhere in the clause; a bare `channel` arm accepts a
+    noun swap and a negated verb ('does not close the conversational channel
+    only')."""
     clause = _clause()
-    assert EXCLUSIVITY_NEAR_CHANNEL.search(clause), (
-        "the freshness clause no longer says what freshness does NOT close "
-        "— the memory-limit sentence was deleted or detached from 'channel'"
+    assert _unnegated(EXCLUSIVITY_ON_CONVERSATIONAL, clause), (
+        "the freshness clause no longer says freshness closes the "
+        "CONVERSATIONAL channel only — the memory-limit sentence was "
+        "deleted, detached, noun-swapped, or negated"
+    )
+    assert AGENT_MEMORY_NOT_CLOSED.search(clause), (
+        "the freshness clause no longer names the agent-memory channel as "
+        "the one freshness does NOT close — a channel swap leaves the rule "
+        "pointing at the wrong channel"
     )
 
 
@@ -380,10 +459,19 @@ def test_exclusivity_is_bound_to_reuse():
         "…' turns the permitted-reuse list into two examples rather than the "
         "exhaustive set"
     )
-    assert _unnegated_tail(EXCLUSIVITY_NEAR_REUSE, clause), (
+    assert _unnegated(EXCLUSIVITY_NEAR_REUSE, clause), (
+        "the freshness clause negates the permitted-reuse list before the "
+        "exclusivity word — 'not only for a verify-only re-review' keeps "
+        "'only' bound to reuse and widens the set beyond the one case it "
+        "permits"
+    )
+    assert _unnegated_tail(
+        EXCLUSIVITY_NEAR_REUSE, clause, NEGATION_OR_EXCEPTION
+    ), (
         "the freshness clause negates the permitted-reuse list — 'only when "
-        "it is not a verify-only re-review' keeps 'only' bound to reuse and "
-        "forbids exactly the cases the rule permits"
+        "it is not a verify-only re-review' or 'only for anything but a "
+        "verify-only re-review' keeps 'only' bound to reuse and forbids "
+        "exactly the cases the rule permits"
     )
 
 
@@ -428,12 +516,28 @@ def test_fresh_dispatch_scope_is_bound_to_the_freshness_claim():
 
 def test_gate_refusal_keeps_its_config_precondition():
     """The gate fails OPEN when the team config is absent or unreadable;
-    without the precondition the clause claims a refusal that cannot fire."""
+    without the precondition the clause claims a refusal that cannot fire.
+    The precondition is bound to the REFUSAL it qualifies, positively: a
+    'permits' verb or a 'not readable' precondition inverts the claim."""
     clause = _clause()
-    assert PRESENT_AND_READABLE.search(clause), (
+    presence = PRESENT_AND_READABLE.search(clause)
+    assert presence and _unnegated(PRESENT_AND_READABLE, clause), (
         "the freshness clause states the duplicate-name refusal without its "
-        "'present and readable' config precondition — a config-less session "
-        "would read as enforced when the gate has already failed open"
+        "positive 'present and readable' config precondition — a config-less "
+        "session would read as enforced when the gate has already failed open"
+    )
+    assert _unnegated(REFUSAL_ON_LIVE_NAME, clause), (
+        "the freshness clause no longer says the gate REFUSES a live name — "
+        "'permits a name=' or 'does not refuse' keeps every token and "
+        "inverts the mechanism the clause claims"
+    )
+    refusal = REFUSAL_ON_LIVE_NAME.search(clause)
+    lo, hi = sorted((presence.start(), refusal.start()))
+    between = clause[lo:hi]
+    assert "." not in between and ";" not in between, (
+        "the 'present and readable' precondition is no longer in the same "
+        "sentence as the refusal it qualifies — the reader cannot bind the "
+        "fails-open caveat to the claim"
     )
 
 
@@ -567,6 +671,11 @@ def test_persona_has_one_review_dispatch_row():
         f"bar — 'never a specialist not reused' reads as requiring the reuse "
         f"the row forbids: {row!r}"
     )
+    assert NEGATION_GOVERNS_PERSON_REUSE.search(action), (
+        f"the review-dispatch row no longer binds its reuse negation to a "
+        f"PERSON — 'Continuing a reviewer … is not reuse' must not stand in "
+        f"for the bar: {row!r}"
+    )
     assert WARM_ON_FRESHNESS.search(action), (
         f"the review-dispatch row no longer scopes its freshness claim to "
         f"WARM reviewers — a bare 'Spawn the reviewer fresh' also covers the "
@@ -591,10 +700,18 @@ def test_persona_has_one_review_dispatch_row():
         f"bound to it — dropping 'only' turns the permitted-reuse list into "
         f"two examples rather than the exhaustive set: {row!r}"
     )
-    assert _unnegated_tail(EXCLUSIVITY_NEAR_REUSE, action), (
+    assert _unnegated(EXCLUSIVITY_NEAR_REUSE, action), (
+        f"the review-dispatch row negates the permitted-reuse list before "
+        f"its exclusivity word — 'not only for a verify-only re-review' "
+        f"keeps 'only' bound to reuse and widens the set: {row!r}"
+    )
+    assert _unnegated_tail(
+        EXCLUSIVITY_NEAR_REUSE, action, NEGATION_OR_EXCEPTION
+    ), (
         f"the review-dispatch row negates its permitted-reuse list — 'only "
-        f"when it is not a verify-only re-review' forbids exactly the cases "
-        f"the row permits: {row!r}"
+        f"when it is not a verify-only re-review' or 'only for anything but "
+        f"a verify-only re-review' forbids exactly the cases the row "
+        f"permits: {row!r}"
     )
     # SendMessage is the PERMITTED-REUSE path, not the fresh-spawn path: the
     # row may name it for a verify-only re-review or fixer work, but a
@@ -607,6 +724,26 @@ def test_persona_has_one_review_dispatch_row():
                 f"SendMessage — SendMessage is the permitted-reuse path "
                 f"only: {row!r}"
             )
+
+
+def test_continuation_clause_is_not_reuse():
+    """Continuing a reviewer this round already dispatched is a SCOPE
+    clarification, not the reuse the rule forbids. The marker, the dispatch
+    state, and the negated reuse are bound in one sentence, so deleting the
+    clause or dropping its negation reds, and the surrounding freshness
+    sentence cannot satisfy the arm on its own."""
+    clause = _clause()
+    assert CONTINUATION_NOT_REUSE.search(clause), (
+        "the freshness clause lost its continuation carve-out — 'Continuing "
+        "a warm reviewer this round already dispatched … is not reuse' — so "
+        "a mid-round continuation now reads as the reuse the rule forbids"
+    )
+    action = _cells(_review_row(_persona_reuse_section()))[1].lower()
+    assert CONTINUATION_NOT_REUSE.search(action), (
+        "the review-dispatch row lost its continuation carve-out — the "
+        "command permits continuing a reviewer this round already dispatched, "
+        "and the row now reads as an absolute ban"
+    )
 
 
 def test_persona_review_row_precedes_the_generic_idle_agent_row():
@@ -646,16 +783,16 @@ def test_persona_default_scopes_reuse_away_from_review_dispatch():
         "the **Default** sentence no longer mentions both reuse and review "
         "dispatch, so its exception cannot be stated"
     )
-    assert REVIEW_DISPATCH_EXCEPTED.search(default), (
-        "the **Default** sentence states reuse without excepting review "
-        "dispatch — a bare negation anywhere ('not the qualification', or an "
-        "inverted 'not different') does not scope it, so the exception word "
-        "must bind to 'review dispatch'"
+    assert _unnegated(REVIEW_DISPATCH_EXCEPTED, default), (
+        "the **Default** sentence states reuse without POSITIVELY excepting "
+        "review dispatch — 'Review dispatch is not excepted' keeps the "
+        "exception word and excepts nothing"
     )
-    assert "verify-only" in default and "fixer" in default, (
-        "the **Default** sentence lost its permitted-reuse carve-out — "
-        "without it the sentence reads as an absolute fresh-spawn rule while "
-        "peer-review.md still reuses the reviewer for those two cases"
+    assert (_carveout_is_positive(default, "verify-only")
+            and _carveout_is_positive(default, "fixer")), (
+        "the **Default** sentence lost its POSITIVE permitted-reuse carve-out "
+        "— 'does not reuse that reviewer' keeps both tokens and forbids "
+        "exactly the cases the rule permits"
     )
 
 
@@ -683,24 +820,25 @@ def test_shutdown_guidance_scopes_reuse_away_from_review_dispatch():
     assert "reuse idle teammates whenever possible" in paragraph, (
         "the shutdown guidance no longer states the reuse default"
     )
-    assert REVIEW_DISPATCH_EXCEPTED.search(paragraph), (
-        "the shutdown guidance states reuse without excepting review "
-        "dispatch — 'review dispatch is not different' carries every token "
-        "this arm used to require and inverts the instruction, so the "
-        "exception word must bind to 'review dispatch'"
+    assert _unnegated(REVIEW_DISPATCH_EXCEPTED, paragraph), (
+        "the shutdown guidance states reuse without POSITIVELY excepting "
+        "review dispatch — 'review dispatch is not excepted' keeps the "
+        "exception word and excepts nothing"
     )
     assert _unnegated(FRESHNESS_ON_SPAWN, paragraph), (
         "the shutdown guidance no longer binds a POSITIVE freshness claim to "
         "the spawn — 'need not be spawned fresh' carries every token and "
         "inverts the exception"
     )
-    assert "distinct" in paragraph, (
-        "the shutdown guidance lost the distinct-name lever"
+    assert _unnegated(DISTINCT_ON_NAME, paragraph), (
+        "the shutdown guidance lost its POSITIVE distinct-NAME lever — "
+        "'a name that need not be distinct' keeps the token and negates it"
     )
-    assert "verify-only" in paragraph and "fixer" in paragraph, (
-        "the shutdown guidance lost its permitted-reuse carve-out — without "
-        "it the paragraph reads as an absolute fresh-spawn rule while "
-        "peer-review.md still reuses the reviewer for those two cases"
+    assert (_carveout_is_positive(paragraph, "verify-only")
+            and _carveout_is_positive(paragraph, "fixer")), (
+        "the shutdown guidance lost its POSITIVE permitted-reuse carve-out — "
+        "'does not reuse that reviewer' keeps both tokens and forbids exactly "
+        "the cases the rule permits"
     )
 
 
