@@ -84,10 +84,13 @@ WARM_ON_FRESHNESS = re.compile(
 # The absolute governs a FRESH review dispatch. Without the scope phrase the
 # sentence forbids the verify-only reuse the next sentence permits — the
 # contradiction the phrase exists to prevent — so the phrase must sit in the
-# same sentence as the freshness claim, not merely in the paragraph.
-FRESH_DISPATCH_SCOPE = re.compile(
-    r"\bfresh\s+review[-\s]+dispatch\b[^.;]{0,80}"
-    r"\b(?:every|each|all)\s+warm\s+reviewers?\b[^.;]{0,40}"
+# same sentence as the freshness claim, not merely in the paragraph. Phrase
+# and claim are separate patterns so a missing one is diagnosed as itself.
+FRESH_DISPATCH_PHRASE = re.compile(r"\bfresh\s+review[-\s]+dispatch\b")
+# The claim's subject may be a generic universal ('a warm reviewer', 'every
+# warm reviewer', 'all warm reviewers'); the bare noun phrase is accepted too.
+FRESHNESS_ON_WARM_SUBJECT = re.compile(
+    r"\b(?:(?:every|each|all|a)\s+)?warm\s+reviewers?\b[^.;]{0,40}"
     r"(?:\bfresh\w*\b[^.;]{0,40}\bspawn\w*\b"
     r"|\bspawn\w*\b[^.;]{0,40}\bfresh\w*\b)"
 )
@@ -397,16 +400,29 @@ def test_permitted_reuse_is_scoped_to_warm_reviewers():
 
 
 def test_fresh_dispatch_scope_is_bound_to_the_freshness_claim():
-    """The freshness absolute governs a FRESH review dispatch only. Without
-    the scope phrase, 'every warm reviewer is a freshly spawned teammate'
-    contradicts the verify-only reuse the same paragraph permits — the
-    contradiction the phrase exists to prevent."""
+    """The freshness absolute governs a FRESH review dispatch only. The
+    scope phrase and the freshness claim are asserted separately, so a
+    missing scope is not misreported as a missing claim (or the reverse);
+    the claim accepts a generic-universal subject ('a warm reviewer')."""
     clause = _clause()
-    assert FRESH_DISPATCH_SCOPE.search(clause), (
-        "the freshness clause states its absolute without scoping it to a "
-        "FRESH review dispatch — the phrase must sit with the freshness "
-        "claim, or the sentence forbids the verify-only reuse the next "
-        "sentence permits"
+    claim = FRESHNESS_ON_WARM_SUBJECT.search(clause)
+    assert claim, (
+        "the freshness clause lost its freshness claim — no 'warm reviewer "
+        "is freshly spawned' (either word order, any generic-universal "
+        "subject) — so the absolute it scopes is gone"
+    )
+    scope = FRESH_DISPATCH_PHRASE.search(clause)
+    assert scope, (
+        "the freshness clause states its absolute without the 'For a fresh "
+        "review dispatch' scope phrase — the sentence then forbids the "
+        "verify-only reuse the next sentence permits"
+    )
+    between = clause[scope.end():claim.start()]
+    assert (scope.start() < claim.start()
+            and "." not in between and ";" not in between), (
+        "the fresh-dispatch scope phrase no longer sits with the freshness "
+        "claim — the phrase must scope the claim, not merely appear in the "
+        "paragraph"
     )
 
 
