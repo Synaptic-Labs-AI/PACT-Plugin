@@ -2578,3 +2578,191 @@ class TestTheSuccessPathDoesNotRestoreTheVector:
             "the cascade re-stored a vector the content path already stored "
             f"under the new key; stores={stores!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# One arm per operand of the trigger's OR
+# ---------------------------------------------------------------------------
+
+class TestTheCascadeTriggersOnEachSoleDisjunct:
+    """The trigger is `project_changed or files_stale or vector_stale`.
+
+    An arm in which TWO surfaces are stale proves nothing about either probe
+    alone: blinding one leaves the other to fire, so the suite stays green
+    (the cold lane measured both mutations). Each arm below therefore records
+    the probe PAIR on the triggering call and asserts the opposite operand is
+    false, so neither arm can pass through a neighbour.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch):
+        """Record the probe pair and every cascade entry on the next call."""
+        probes, entries = [], []
+        real_files = PACTMemory._linked_file_partition_is_stale
+        real_vector = PACTMemory._vector_partition_is_stale
+        real_cascade = PACTMemory._cascade_rekey
+
+        def _files(conn, mid, target):
+            value = real_files(conn, mid, target)
+            probes.append(("files", value))
+            return value
+
+        def _vector(conn, mid, target):
+            value = real_vector(conn, mid, target)
+            probes.append(("vector", value))
+            return value
+
+        def _cascade(self, conn, mid, target, *, vector_current):
+            entries.append(mid)
+            return real_cascade(
+                self, conn, mid, target, vector_current=vector_current
+            )
+
+        monkeypatch.setattr(
+            PACTMemory, "_linked_file_partition_is_stale", staticmethod(_files)
+        )
+        monkeypatch.setattr(
+            PACTMemory, "_vector_partition_is_stale", staticmethod(_vector)
+        )
+        monkeypatch.setattr(PACTMemory, "_cascade_rekey", _cascade)
+        return probes, entries
+
+    @staticmethod
+    def _link_counts(db_path, memory_id, project):
+        with db_connection(db_path) as conn:
+            stale = conn.execute(
+                "SELECT COUNT(*) FROM files f JOIN memory_files mf "
+                "ON mf.file_id = f.id WHERE mf.memory_id = ? "
+                "AND f.project_id IS NOT ?",
+                (memory_id, project),
+            ).fetchone()[0]
+            fresh = conn.execute(
+                "SELECT COUNT(*) FROM files f JOIN memory_files mf "
+                "ON mf.file_id = f.id WHERE mf.memory_id = ? "
+                "AND f.project_id IS ?",
+                (memory_id, project),
+            ).fetchone()[0]
+        return stale, fresh
+
+    def test_only_the_file_partition_stale_triggers_the_repair(
+        self, tmp_path, monkeypatch
+    ):
+        """No vector row, links on the old project: ONLY the file probe can fire."""
+        db_path = tmp_path / "file-only.db"
+        first = tmp_path / "first.py"
+        second = tmp_path / "second.py"
+        first.write_text("x = 1\n", encoding="utf-8")
+        second.write_text("y = 2\n", encoding="utf-8")
+        memory_id = PACTMemory(
+            project_id="projA", session_id="s", db_path=db_path
+        ).save(
+            {"context": _REKEY_TOKEN},
+            files=[str(first), str(second)],
+            sync_to_claude=False,
+        )
+        assert _vector_partition(db_path, memory_id) == "projA", (
+            "fixture: the save stored no vector, so there is nothing to remove "
+            "and the vector probe's absence would be accidental"
+        )
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,)
+            )
+            conn.commit()
+        assert _vector_partition(db_path, memory_id) is None
+
+        real_track = memory_api.track_file
+        seen = {"n": 0}
+
+        def _raise_on_second(conn, path, project_id=None):
+            seen["n"] += 1
+            if seen["n"] == 2:
+                raise RuntimeError("simulated interruption")
+            return real_track(conn, path, project_id)
+
+        monkeypatch.setattr(memory_api, "track_file", _raise_on_second)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            PACTMemory(
+                project_id="projB", session_id="s", db_path=db_path
+            ).update(memory_id, {"project_id": "projB"})
+        monkeypatch.setattr(memory_api, "track_file", real_track)
+
+        # THE RETRY'S STATE, proven before the spies are installed: the row is
+        # already re-keyed (project_changed False) and the interrupted attempt
+        # never reached the vector tail, so there is still no vector row
+        # (vector_stale False).
+        with db_connection(db_path) as conn:
+            assert get_memory(conn, memory_id)["project_id"] == "projB"
+        assert _vector_partition(db_path, memory_id) is None
+        assert self._link_counts(db_path, memory_id, "projB") == (2, 0)
+
+        probes, entries = self._spy(monkeypatch)
+        assert PACTMemory(
+            project_id="projB", session_id="s", db_path=db_path
+        ).update(memory_id, {"project_id": "projB"}) == memory_id
+
+        assert probes == [("files", True), ("vector", False)], (
+            f"the retry was not file-ONLY: probes={probes!r}"
+        )
+        assert entries == [memory_id], (
+            "the file probe fired and nothing else could have, but the cascade "
+            f"was not entered; entries={entries!r}"
+        )
+        assert self._link_counts(db_path, memory_id, "projB") == (0, 2), (
+            "the retry did not repair the links"
+        )
+
+    def test_only_the_vector_partition_stale_triggers_the_repair(
+        self, tmp_path, monkeypatch
+    ):
+        """Links consistent, vector stranded: ONLY the vector probe can fire."""
+        db_path = tmp_path / "vector-only.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        memory = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": _REKEY_TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
+        assert memory.update(memory_id, {"project_id": "projB"}) == memory_id
+        assert self._link_counts(db_path, memory_id, "projB") == (0, 1)
+
+        # STRAND ONLY THE VECTOR. vec0 refuses an UPDATE that names the
+        # partition key, so the move is a delete plus an insert of the same
+        # blob.
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            row = conn.execute(
+                "SELECT embedding FROM vec_memories WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+            assert row is not None, (
+                "fixture: the successful re-key stored no vector, so there is "
+                "nothing to strand"
+            )
+            conn.execute(
+                "DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,)
+            )
+            conn.execute(
+                "INSERT INTO vec_memories (memory_id, project_id, embedding) "
+                "VALUES (?, ?, ?)",
+                (memory_id, "projA", row[0]),
+            )
+            conn.commit()
+        assert _vector_partition(db_path, memory_id) == "projA"
+
+        probes, entries = self._spy(monkeypatch)
+        assert PACTMemory(
+            project_id="projB", session_id="s", db_path=db_path
+        ).update(memory_id, {"project_id": "projB"}) == memory_id
+
+        assert probes == [("files", False), ("vector", True)], (
+            f"the retry was not vector-ONLY: probes={probes!r}"
+        )
+        assert entries == [memory_id], (
+            "the vector probe fired and nothing else could have, but the "
+            f"cascade was not entered; entries={entries!r}"
+        )
+        assert _vector_partition(db_path, memory_id) == "projB", (
+            "the retry did not re-store the vector under the memory's project"
+        )
