@@ -114,6 +114,28 @@ def _best_time(fn, arg, k=_K):
     return best
 
 
+def _best_paired_times(fn, arg, k=_K, reference_fn=str.split):
+    """Best target, reference, and per-pair normalized cost over k iterations."""
+    best_target = best_reference = best_normalized = float("inf")
+    for _ in range(k):
+        t0 = time.process_time()
+        fn(arg)
+        target = time.process_time() - t0
+        t0 = time.process_time()
+        reference_fn(arg)
+        reference = time.process_time() - t0
+        best_target = min(best_target, target)
+        best_reference = min(best_reference, reference)
+        best_normalized = min(best_normalized, target / reference)
+    return best_target, best_reference, best_normalized
+
+
+def _measure_paired_scaling(fn, build, sizes):
+    """Measure target/reference adjacently at each size, avoiding block bias."""
+    fn(build(100))
+    return tuple(_best_paired_times(fn, build(n)) for n in sizes)
+
+
 # Push-flag-walk is a single-anchor linear witness. Keep its absolute CPU-time
 # ceiling; restoring an unbounded global prefix does not make this case
 # quadratic, so its non-vacuity lives in TestFlagTokenBoundary instead.
@@ -186,10 +208,10 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
         return
 
     sizes = (N_MULTI_SMALL, N_SMALL, N_LARGE)
-    t_small, t_intermediate, t_large = _measure_scaling(fn, build, sizes=sizes)
-    reference_times = tuple(_best_time(str.split, build(n)) for n in sizes)
-    normalized = tuple(t / r for t, r in zip(
-        (t_small, t_intermediate, t_large), reference_times))
+    paired = _measure_paired_scaling(fn, build, sizes=sizes)
+    t_small, t_intermediate, t_large = tuple(row[0] for row in paired)
+    reference_times = tuple(row[1] for row in paired)
+    normalized = tuple(row[2] for row in paired)
     first_ratio = (t_intermediate / t_small) if t_small > 0 else float("inf")
     second_ratio = (t_large / t_intermediate) if t_intermediate > 0 else float("inf")
     print(
@@ -218,6 +240,51 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
         f"quadratic regression (target={t_large:.6f}s, "
         f"reference={reference_times[-1]:.6f}s)?"
     )
+
+
+def test_paired_samples_remove_cross_block_normalized_bias(monkeypatch):
+    """A slow target block must not be normalized by a later fast reference block."""
+    now = 0.0
+    factor = 1.0
+
+    def process_time():
+        return now
+
+    def target(_):
+        nonlocal now
+        now += 0.001 * factor
+
+    def reference(_):
+        nonlocal now
+        now += 0.0000005 * factor
+
+    monkeypatch.setattr(time, "process_time", process_time)
+    factor = 2.5
+    old_target = _best_time(target, None)
+    factor = 1.0
+    old_reference = _best_time(reference, None)
+    old_normalized = old_target / old_reference
+    assert old_normalized > NORMALIZED_ABSOLUTE_CEILING
+
+    pair = 0
+    factors = (2.5, 1.0, 2.5, 1.0, 2.5)
+
+    def paired_target(_):
+        nonlocal now
+        now += 0.001 * factors[pair]
+
+    def paired_reference(_):
+        nonlocal now, pair
+        now += 0.0000005 * factors[pair]
+        pair += 1
+
+    now = 0.0
+    new_target, new_reference, new_normalized = _best_paired_times(
+        paired_target, None, reference_fn=paired_reference)
+    assert new_target == pytest.approx(0.001)
+    assert new_reference == pytest.approx(0.0000005)
+    assert new_normalized == pytest.approx(2000.0)
+    assert new_normalized < NORMALIZED_ABSOLUTE_CEILING < old_normalized
 
 
 # ---------------------------------------------------------------------------
