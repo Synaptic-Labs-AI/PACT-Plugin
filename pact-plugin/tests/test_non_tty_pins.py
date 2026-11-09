@@ -630,15 +630,29 @@ class TestCollapsedWaitWording:
         assert "If `team-lead` is unreachable, send the notify to `main`." in skill
 
 
-def test_tracked_doc_surface_population_controls_untracked_files():
-    for pattern, known in (
+def test_tracked_doc_surface_population_controls_untracked_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known_members = (
         ("commands/*.md", "commands/orchestrate.md"),
         ("skills/*/SKILL.md", "skills/pact-handoff-harvest/SKILL.md"),
         ("protocols/*.md", "protocols/pact-protocols.md"),
-    ):
-        assert _PLUGIN_ROOT / known in _tracked_surface(pattern)
+    )
+    for _, known in known_members:
+        path = plugin / known
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_PLUGIN_ROOT", plugin)
+
+    for pattern, known in known_members:
+        assert plugin / known in _tracked_surface(pattern)
     before = _tracked_surface("protocols/*.md")
-    stray = _PLUGIN_ROOT / "protocols" / "000_backend_non_tty_issue1714_probe.md"
+    stray = plugin / "protocols" / "000_backend_non_tty_issue1714_probe.md"
     stray.write_text("tasks/{team_name}\n", encoding="utf-8")
     try:
         assert _tracked_surface("protocols/*.md") == before

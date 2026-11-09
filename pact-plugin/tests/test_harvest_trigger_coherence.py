@@ -263,11 +263,24 @@ class TestConsolidationClaimsMatchTheDispatchSites:
         )
 
 
-def test_tracked_command_population_controls_untracked_files():
-    known = COMMANDS / "refresh.md"
+def test_tracked_command_population_controls_untracked_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("Follow the Consolidation Harvest workflow\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "COMMANDS", commands)
+
     before = _command_files()
     assert known in before
-    stray = COMMANDS / "000_backend_harvest_issue1714_probe.md"
+    stray = commands / "000_backend_harvest_issue1714_probe.md"
     stray.write_text("Follow the Consolidation Harvest workflow\n", encoding="utf-8")
     try:
         assert _command_files() == before

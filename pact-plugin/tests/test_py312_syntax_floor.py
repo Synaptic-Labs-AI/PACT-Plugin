@@ -185,12 +185,27 @@ class TestDiscoveryFloor:
         # Reuses iter_python_files so the guard and the scan cannot drift.
         for root in SCANNED_ROOTS:
             assert any(iter_python_files((root,))), root
-    def test_tracked_discovery_controls_untracked_files(self):
-        root = SCANNED_ROOTS[0]
+    def test_tracked_discovery_controls_untracked_files(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        for relative in KNOWN_TRACKED_MEMBERS.values():
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        roots = tuple(plugin / relative for relative in KNOWN_TRACKED_MEMBERS)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        monkeypatch.setitem(globals(), "SCANNED_ROOTS", roots)
+
+        root = roots[0]
         before = list(iter_python_files((root,)))
-        for scanned_root in SCANNED_ROOTS:
-            relative = scanned_root.relative_to(PLUGIN_ROOT).as_posix()
-            assert PLUGIN_ROOT / KNOWN_TRACKED_MEMBERS[relative] in list(
+        for scanned_root in roots:
+            relative = scanned_root.relative_to(plugin).as_posix()
+            assert plugin / KNOWN_TRACKED_MEMBERS[relative] in list(
                 iter_python_files((scanned_root,)))
         stray = root / "000_backend_issue1714_probe.py"
         stray.write_text("", encoding="utf-8")

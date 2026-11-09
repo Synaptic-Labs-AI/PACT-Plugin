@@ -375,6 +375,21 @@ def carries(text: str, sentence: str) -> bool:
     return sentence.casefold() in flatten(text).casefold()
 
 
+def _synthetic_tracked_package(tmp_path: Path) -> Path:
+    package = tmp_path / "repo" / "pact-plugin" / "scripts" / "memory_repair"
+    package.mkdir(parents=True)
+    text = f'"""Names the {BAR_SUBJECT}. {REQUIRED_CAUSE_CLAUSE}"""\n'
+    for name in MINIMUM_CARRIERS:
+        (package / name).write_text(text, encoding="utf-8")
+    repo = package.parents[2]
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    return package
+
+
 def _tracked_package_python_files() -> list[Path]:
     result = subprocess.run(
         ["git", "-C", str(PACKAGE_DIR.parents[2]), "ls-files", "-z", "--",
@@ -529,12 +544,17 @@ class TestTheInstrumentIsLive:
         )
         assert PACKAGE_DIR / "__init__.py" in tracked
 
-    def test_tracked_package_population_controls_untracked_and_synthetic(self, tmp_path):
+    def test_tracked_package_population_controls_untracked_and_synthetic(
+        self, tmp_path, monkeypatch
+    ):
+        package = _synthetic_tracked_package(tmp_path)
+        monkeypatch.setitem(globals(), "PACKAGE_DIR", package)
         before = _tracked_package_python_files()
-        stray = PACKAGE_DIR / "000_backend_issue1714_probe.py"
+        assert package / "__init__.py" in before
+        stray = package / "000_backend_issue1714_probe.py"
         stray.write_text("", encoding="utf-8")
         try:
-            assert _python_files(PACKAGE_DIR) == before
+            assert _python_files(package) == before
         finally:
             stray.unlink()
         synthetic = tmp_path / "package"
@@ -698,10 +718,12 @@ class TestTheFloorEarnsItsPlace:
         assert renamed != text, "the mutation changed nothing, so the arm proves nothing"
         path.write_text(renamed, encoding="utf-8")
 
-    def test_the_copy_excludes_untracked_source_files(self, tmp_path):
-        expected = {path.relative_to(PACKAGE_DIR)
+    def test_the_copy_excludes_untracked_source_files(self, tmp_path, monkeypatch):
+        source_package = _synthetic_tracked_package(tmp_path)
+        monkeypatch.setitem(globals(), "PACKAGE_DIR", source_package)
+        expected = {path.relative_to(source_package)
                     for path in _tracked_package_python_files()}
-        stray = PACKAGE_DIR / "000_backend_import_bar_copy_issue1714_probe.py"
+        stray = source_package / "000_backend_import_bar_copy_issue1714_probe.py"
         stray.write_text("", encoding="utf-8")
         try:
             package = self._copy(tmp_path)

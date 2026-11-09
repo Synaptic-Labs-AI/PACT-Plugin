@@ -447,16 +447,30 @@ def test_control_scan_population_is_non_empty():
     )
 
 
-def test_control_tracked_census_population_excludes_untracked_files():
-    for subdir, known in (
+def test_control_tracked_census_population_excludes_untracked_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known_members = (
         ("agents", "pact-orchestrator.md"),
         ("commands", "orchestrate.md"),
         ("protocols", "pact-protocols.md"),
         ("skills", "pact-handoff-harvest/SKILL.md"),
-    ):
-        assert PLUGIN_ROOT / subdir / known in _tracked_census_files(subdir)
+    )
+    for subdir, known in known_members:
+        path = plugin / subdir / known
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    for subdir, known in known_members:
+        assert plugin / subdir / known in _tracked_census_files(subdir)
     before = _tracked_census_files("protocols")
-    stray = PLUGIN_ROOT / "protocols" / "000_backend_prose_root_issue1714_probe.md"
+    stray = plugin / "protocols" / "000_backend_prose_root_issue1714_probe.md"
     stray.write_text("~/.claude/backend-issue1714\n", encoding="utf-8")
     try:
         assert _tracked_census_files("protocols") == before

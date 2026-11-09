@@ -142,11 +142,32 @@ def test_agent_frontmatter_name_matches_filename():
     )
 
 
-def test_tracked_manifest_population_controls_untracked_files():
-    for rel_dir, dir_path, known_name in (
-        ("commands", COMMANDS_DIR, "orchestrate.md"),
-        ("agents", AGENTS_DIR, "pact-orchestrator.md"),
+def _synthetic_plugin(tmp_path: Path, files: dict[str, str]) -> Path:
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    for relative, text in files.items():
+        path = plugin / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    return plugin
+
+
+def test_tracked_manifest_population_controls_untracked_files(tmp_path, monkeypatch):
+    plugin = _synthetic_plugin(tmp_path, {
+        "commands/orchestrate.md": "",
+        "agents/pact-orchestrator.md": "",
+    })
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    for rel_dir, known_name in (
+        ("commands", "orchestrate.md"),
+        ("agents", "pact-orchestrator.md"),
     ):
+        dir_path = plugin / rel_dir
         before = _tracked_markdown(rel_dir, dir_path)
         assert dir_path / known_name in before
         stray = dir_path / "000_backend_manifest_issue1714_probe.md"
@@ -155,6 +176,30 @@ def test_tracked_manifest_population_controls_untracked_files():
             assert _tracked_markdown(rel_dir, dir_path) == before
         finally:
             stray.unlink()
+
+
+def test_manifest_probe_coexists_with_raw_glob_teammate_consumer(tmp_path, monkeypatch):
+    plugin = _synthetic_plugin(
+        tmp_path, {"agents/pact-orchestrator.md": ""})
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    agents = plugin / "agents"
+    before = _tracked_markdown("agents", agents)
+    assert agents / "pact-orchestrator.md" in before
+    stray = agents / "000_backend_manifest_issue1714_probe.md"
+    shared_stray = AGENTS_DIR / stray.name
+    assert not shared_stray.exists()
+    stray.write_text("", encoding="utf-8")
+    try:
+        from test_lead_address_prose_pins import (
+            test_every_teammate_agent_preloads_the_rule,
+        )
+
+        test_every_teammate_agent_preloads_the_rule()
+        assert _tracked_markdown("agents", agents) == before
+        assert not shared_stray.exists()
+    finally:
+        stray.unlink()
+    assert not shared_stray.exists()
 
 
 def test_tracked_manifest_population_omits_a_deleted_member(monkeypatch):
