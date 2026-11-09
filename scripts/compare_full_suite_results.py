@@ -25,8 +25,10 @@ SUMMARY_OUTCOME = re.compile(
     r"\b(?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|no tests ran)\b")
 SUMMARY_TIME = re.compile(r"\bin \d+(?:\.\d+)?s\b")
 TIMESTAMP_TEXT = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z "
-TIMESTAMP = re.compile(r"^" + TIMESTAMP_TEXT)
-ACTIONS_ENVELOPE = re.compile(r"^[^\t\r\n]*\t[^\t\r\n]*\t" + TIMESTAMP_TEXT)
+OPTIONAL_BOM = re.escape(chr(0xFEFF)) + "?"
+TIMESTAMP = re.compile("^" + OPTIONAL_BOM + TIMESTAMP_TEXT)
+ACTIONS_ENVELOPE = re.compile(
+    r"^[^\t\r\n]*\t[^\t\r\n]*\t" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 RAW_PATHS = {"metadata": "metadata.json", "log": "run.log",
@@ -67,6 +69,10 @@ def _log_lines(path: Path) -> list[str]:
 
 def _summary_text(line: str) -> str:
     return line.strip().strip("=").strip()
+
+
+def _summary_identity(line: str) -> str:
+    return re.sub(r"\s+in \d+(?:\.\d+)?s(?: \([^)]*\))?$", "", line)
 
 
 def _junit_key(node_id: str) -> tuple[str, str]:
@@ -212,6 +218,16 @@ def _validate_skip_sites(record: dict, cases: list[dict],
         key = (case["classname"], case["name"])
         path = node_for_key[key].split("::", 1)[0]
         emitted[(Path(path).as_posix(), case["reason"] or "")] += 1
+    canonical_recorded = Counter()
+    for (file, reason), count in recorded.items():
+        candidates = [key for key in emitted
+                      if key[1] == reason
+                      and (key[0] == file or key[0].endswith("/" + file))]
+        if len(candidates) > 1:
+            raise EvidenceError(f"ambiguous skip-site path mapping for {file!r}")
+        target = candidates[0] if candidates else (file, reason)
+        canonical_recorded[target] += count
+    recorded = canonical_recorded
     remaining = recorded - emitted
     if sum(remaining.values()) != record["skipped_at_collection"] or recorded != remaining + emitted:
         raise EvidenceError("JUnit skip files/reasons do not reconcile with skip_sites")
@@ -294,8 +310,13 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     summary = _summary_text(record["summary_line"])
     if not SUMMARY_OUTCOME.search(summary) or not SUMMARY_TIME.search(summary):
         raise EvidenceError("record summary is not a real pytest summary")
-    if sum(_summary_text(line) == summary for line in lines) != 1:
+    summary_identity = _summary_identity(summary)
+    summary_indexes = [index for index, line in enumerate(lines)
+                       if SUMMARY_TIME.search(line)
+                       and _summary_identity(_summary_text(line)) == summary_identity]
+    if len(summary_indexes) != 1:
         raise EvidenceError("raw log does not contain exactly one matching summary")
+    summary_index = summary_indexes[0]
     collection_marker = f"FULL-COLLECTION-OK "
     if not any(line.startswith(collection_marker)
                and line.endswith(f"subject={expected_sha}") for line in lines):
@@ -305,8 +326,6 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
         raise EvidenceError("FULL-RUN-OK names a different SHA")
     environment_indexes = [index for index, line in enumerate(lines)
                            if "CI environment matches constraints-ci.txt." in line]
-    summary_index = next(index for index, line in enumerate(lines)
-                         if _summary_text(line) == summary)
     if (len(environment_indexes) < 2
             or min(environment_indexes) > summary_index
             or max(environment_indexes) < summary_index

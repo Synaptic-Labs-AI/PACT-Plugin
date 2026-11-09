@@ -50,11 +50,12 @@ def summary_for(counts):
     return ", ".join(parts) + " in 0.10s"
 
 
-def actions_line(text):
-    return f"full-suite\tUNKNOWN STEP\t2026-11-09T00:00:00.0000000Z {text}"
+def actions_line(text, bom=False):
+    prefix = chr(0xFEFF) if bom else ""
+    return f"full-suite\tUNKNOWN STEP\t{prefix}2026-11-09T00:00:00.0000000Z {text}"
 
 
-def make_run(root, name, run_id=100, nodes=None, cases=None,
+def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
              record_updates=None, collection_updates=None, metadata_updates=None):
     directory = root / name
     artifact = directory / "artifact"
@@ -111,10 +112,10 @@ def make_run(root, name, run_id=100, nodes=None, cases=None,
     ET.ElementTree(root_element).write(artifact / ".full-suite-results.xml",
                                        encoding="utf-8", xml_declaration=True)
 
-    command = ("python -m pytest -ra -n 4 --dist loadfile "
-               "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml")
+    command = (f'python -m pytest -ra -n 4 --dist "{dist}" '
+               '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
     lines = [
-        actions_line(f"##[group]Run {command}"),
+        actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
         actions_line("platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0"),
         actions_line("CI environment matches constraints-ci.txt."),
@@ -157,14 +158,14 @@ def test_forward_mapping_literal_control():
 def test_real_actions_job_step_timestamp_envelope(tmp_path):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101)
-    command = ("python -m pytest -ra -n 4 --dist loadfile "
-               "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml")
+    command = ('python -m pytest -ra -n 4 --dist "loadfile" '
+               '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
     for directory in (first, second):
         log = directory / "run.log"
         log.write_text(log.read_text().replace(
             actions_line(command),
             actions_line(f"\x1b[36;1m{command}\x1b[0m")), encoding="utf-8")
-        assert all(line.startswith("full-suite\tUNKNOWN STEP\t2026-11-09T")
+        assert all(line.startswith("full-suite\tUNKNOWN STEP\t")
                    for line in log.read_text().splitlines())
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
@@ -183,17 +184,71 @@ def test_byte_different_semantically_identical_runs(tmp_path):
     assert comparison["deltas"] == []
 
 
-def test_distribution_and_duration_changes_are_observations(tmp_path):
+def test_summary_duration_skew_is_not_an_outcome_delta(tmp_path):
     first = make_run(tmp_path, "one")
-    second = make_run(tmp_path, "two", 101,
-                      cases=[case(ALPHA, duration=0.8), case(BETA, duration=0.9)])
-    log = second / "run.log"
-    log.write_text(log.read_text().replace("--dist loadfile", "--dist load"),
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    log.write_text(log.read_text().replace("2 passed in 0.10s", "2 passed in 0.12s"),
                    encoding="utf-8")
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
     assert comparison["status"] == "identical"
+
+
+def test_summary_outcome_mismatch_is_invalid(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    log.write_text(log.read_text().replace("2 passed in 0.10s", "1 passed in 0.10s"),
+                   encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+
+
+def test_distribution_and_duration_changes_are_observations(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, dist="load",
+                      cases=[case(ALPHA, duration=0.8), case(BETA, duration=0.9)])
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
     assert {item["type"] for item in comparison["observations"]} == {"argv", "duration"}
+
+
+@pytest.mark.parametrize("dist", ["loadfile", "load"])
+def test_quoted_distribution_and_bom_command_envelope(tmp_path, dist):
+    first = make_run(tmp_path, "one", dist=dist)
+    second = make_run(tmp_path, "two", 101, dist=dist)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert f'--dist "{dist}"' in (first / "run.log").read_text(encoding="utf-8")
+    assert "\t" + chr(0xFEFF) + "2026-" in (first / "run.log").read_text(encoding="utf-8")
+    run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
+    assert run["argv"][7] == dist
+
+
+@pytest.mark.parametrize("mutation", ["arbitrary", "narrowing", "unsupported", "conflicting"])
+def test_dynamic_command_mutations_remain_invalid(tmp_path, mutation):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    text = log.read_text(encoding="utf-8")
+    if mutation == "arbitrary":
+        text = text.replace("--junitxml=", "--verbose --junitxml=")
+    elif mutation == "narrowing":
+        text = text.replace("--junitxml=", "tests/test_example.py --junitxml=")
+    elif mutation == "unsupported":
+        text = text.replace('"loadfile"', '"loadgroup"')
+    else:
+        command = ('python -m pytest -ra -n 4 --dist "loadfile" '
+                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+        conflicting = command.replace('"loadfile"', '"load"')
+        text = text.replace(actions_line(command), actions_line(conflicting))
+    log.write_text(text, encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, (mutation, comparison)
+    assert comparison["status"] == "invalid"
 
 
 def test_repeated_run_identity_is_invalid(tmp_path):
@@ -222,6 +277,32 @@ def test_skip_reason_change_is_a_named_delta(tmp_path):
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 1
     assert [delta["type"] for delta in comparison["deltas"]] == ["skip_reason"]
+
+
+def test_skip_sites_reconcile_unique_invocation_relative_paths(tmp_path):
+    nodes = ["pact-plugin/tests/test_example.py::test_alpha",
+             "pact-plugin/tests/test_example.py::test_beta"]
+    cases = [case(nodes[0]), case(nodes[1], "skip", "later")]
+    sites = [{"file": "tests/test_example.py", "reason": "later", "count": 1}]
+    first = make_run(tmp_path, "one", nodes=nodes, cases=cases,
+                     record_updates={"skip_sites": sites})
+    second = make_run(tmp_path, "two", 101, nodes=nodes, cases=cases,
+                      record_updates={"skip_sites": sites})
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+
+
+def test_skip_site_suffix_mapping_must_be_unambiguous(tmp_path):
+    nodes = ["pact-plugin/tests/test_example.py::test_alpha",
+             "other/tests/test_example.py::test_beta"]
+    cases = [case(node_id, "skip", "later") for node_id in nodes]
+    sites = [{"file": "tests/test_example.py", "reason": "later", "count": 2}]
+    first = make_run(tmp_path, "one", nodes=nodes, cases=cases,
+                     record_updates={"skip_sites": sites})
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert "ambiguous skip-site path" in comparison["evidence_errors"][0]["error"]
 
 
 def test_collection_skip_reason_change_is_a_skip_sites_delta(tmp_path):
