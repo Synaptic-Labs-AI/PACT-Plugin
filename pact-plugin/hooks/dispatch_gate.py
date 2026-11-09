@@ -502,7 +502,8 @@ def evaluate_dispatch(
                 f"member of team {session_team!r}. Use a unique name "
                 "(append a numeric suffix or role-descriptor variant). "
                 "If this is a fresh review dispatch, spawn the reviewer under "
-                "that distinct name; do not re-task the existing teammate.",
+                "a distinct new name; do not re-task the existing teammate. "
+                "A verify-only re-review reuses the reviewer by SendMessage.",
                 "name_not_unique")
 
     # ⑧ Task assignment — TaskCreate must precede Agent spawn so the

@@ -28,7 +28,7 @@ A warm reviewer is now stated to be a freshly spawned teammate, never one reused
 
 - The freshness rule as the first paragraph of the warm dispatch section in `/PACT:peer-review`, with the distinct-name mechanism, the dispatch gate's refusal framed as a naming rule, and a pointer to the agent-memory channel a fresh spawn does not close.
 - A review-dispatch row in the orchestrator persona's Reuse vs. Spawn table, ahead of the generic idle-agent row, plus a scoped default, the Agent Shutdown Guidance exception, and the PR Review Workflow line.
-- The duplicate-name refusal in the dispatch gate now says a review dispatch spawns the reviewer under that distinct name rather than re-tasking the existing teammate.
+- The duplicate-name refusal in the dispatch gate now says a fresh review dispatch spawns the reviewer under a distinct new name rather than re-tasking the existing teammate, and names the verify-only reuse path.
 - A structural pin covering the rule, its extraction boundary, and the persona surfaces.
 
 ### Why

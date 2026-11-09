@@ -942,7 +942,9 @@ def test_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsys):
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "is already a live member" in reason
     assert "If this is a fresh review dispatch" in reason
+    assert "a distinct new name" in reason
     assert "do not re-task" in reason
+    assert "verify-only re-review reuses the reviewer by SendMessage" in reason
 
 
 def test_allows_unique_name_when_other_members_present(
