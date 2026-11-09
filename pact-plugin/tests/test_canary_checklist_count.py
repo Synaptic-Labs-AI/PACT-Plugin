@@ -528,6 +528,12 @@ class TestCanaryTreeAttributionContract:
         assert "complete before/after `git status --porcelain` text is identical" in text
         assert "not merely that the two dirty counts match" in text
 
+    def test_capture_must_be_outside_the_declared_tree(self):
+        text = self._text()
+        assert "capture path must be outside the declared tree" in text
+        assert "in-tree capture is refused with exit code 2 before pytest starts" in text
+        assert "writes no capture" in text
+
     def test_exit_stamp_is_last_and_green_movement_is_not_a_pass(self):
         text = self._text()
         assert "`GATE-PYTEST-EXIT`** is `0` and is the last stamp" in text

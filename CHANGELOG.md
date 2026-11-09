@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.31: capture comparable full-suite diagnostic outcomes
+## v4.8.32: capture comparable full-suite diagnostic outcomes
 
 ### Summary
 
@@ -32,15 +32,16 @@ The full-suite workflow's manual dispatch can now select whole-file or per-test 
 - `scripts/compare_full_suite_results.py` and its focused tests compare per-test JUnit outcomes without replacing schema-v3 certification. The comparator preserves duplicate cases, reconciles raw XPASS evidence and skip identities, and fails closed on missing or ambiguous evidence; it also normalizes the real Actions log envelope, quoted distribution arguments, summary timing skew, and invocation-relative skip paths.
 - `pact-plugin/tests/test_memory_store_isolation.py` removes the predecessor sentinel that made memory-init reset verification depend on test order and worker placement. Both tests now establish their own initialized state, and the reset test calls the owner reset before its unchanged clean-state assertion; standalone, reversed-order, xdist-load, and reset-removal controls cover the isolation.
 - `pact-plugin/tests/test_merge_guard_perf.py` pairs target and reference timing observations so normalized cost no longer depends on separately timed blocks, and uses median raw target times to reject size-specific fast outliers without hiding sustained quadratic scaling. Best-of-K normalized cost, the 3.0 raw ratio bound, the 4000.0 ceiling, and unbounded-prefix detection remain, with fake-clock and mutation controls proving the schedules still detect regressions.
-- `scripts/verify-gate-tree.sh` now brackets local pytest with before/after HEAD and complete porcelain comparisons. Stable, moved, and red-child runs are distinguished explicitly, green moved trees become unattributable, and the canary requires the new evidence while decisive certification still uses a detached clean worktree.
+- `scripts/verify-gate-tree.sh` now brackets local pytest with before/after HEAD and complete porcelain comparisons. Stable, moved, and red-child runs are distinguished explicitly, green moved trees become unattributable, and capture paths inside the declared tree are refused before any snapshot or test work. The canary requires the new evidence while decisive certification still uses a detached clean worktree.
 - Instruction-surface tests for corpus writers, markers, lazy-load cross-references, and peer injection now enumerate their intended tracked files rather than stray untracked matches. Local controls check root/pattern filtering, known members, deletion detection, empty-population refusal, and the original raw-glob failure mode.
 - Harvest, import-bar, non-TTY, manifest, prose-root, and Python-floor tests now enumerate their shipped populations from git while retaining synthetic and intentional disk-based discovery. Known-member, untracked-exclusion, deletion, and count controls prove the new oracles are non-vacuous. The import-bar synthetic model also copies only its two tracked Python sources, closing the fixture-copy path around tracked enumeration without weakening deletion checks.
 - Post-merge, session-context, store-access, run-scope, and wake-ordering tests now use checked Git-index pathspecs for shipped artifacts while preserving deleted-member failures and synthetic temporary-root walks. Twenty-three before/after probes and three real deletion controls verify the isolation.
 - Agent, command, and skill structure tests now enumerate shipped files from the Git index with nonempty, rooted, and known-member controls. Filesystem walking remains only for gitless exports, while deleted tracked entries stay visible and raw-walk mutation controls preserve the original failure signal.
+- Verification closed 45 of 45 confirmed run-dependent walk hits across 18 modules, with untracked-match probes inert and required tracked-deletion controls preserved. The 28-module focused set reported 3,000 passed and 1 skipped under both `loadfile` and `load`; the final 10+4 fixed-head CI matrix produced 14 valid runs, each with 31,581 passed, 28 skipped, 0 failed, and 0 errors, with zero per-test outcome deltas and no evidence errors.
 
 ### Why
 
-Repeated diagnostic runs need per-test evidence, not only aggregate counts: equal totals can hide two tests swapping pass and skip. JUnit adds that comparison surface beside the existing certification records, while the constrained dispatch interface exposes per-test scheduling without arbitrary pytest arguments or a new job matrix.
+Repeated diagnostic runs need per-test evidence, not only aggregate counts: equal totals can hide two tests swapping pass and skip. JUnit adds that comparison surface beside the existing certification records, while the constrained dispatch interface exposes per-test scheduling without arbitrary pytest arguments or a new job matrix. The tracked-population, memory, timing, and tree-attribution fixes remove local run conditions that could change test outcomes or make a green run unattributable, so repeated runs measure the same shipped suite.
 
 ## v4.8.30: hold the cold report until its round's warm reviewers are accepted or stopped
 

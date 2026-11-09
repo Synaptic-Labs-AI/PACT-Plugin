@@ -347,6 +347,50 @@ class TestAfterRunTreeAttribution:
             "GATE-PYTEST-EXIT 7")
 
 
+class TestCapturePathContainment:
+    @pytest.mark.parametrize("relative", ["capture.txt", "nested/missing/capture.txt"])
+    def test_in_tree_capture_is_refused_before_pytest(self, tmp_path, relative):
+        repo = _make_repo(tmp_path / "repo")
+        capture = repo / relative
+
+        result = _run(str(repo), capture, repo)
+
+        assert result.returncode == _REFUSED, result.stdout
+        assert "capture path must be outside the declared tree" in result.stderr
+        assert not capture.exists()
+        assert not (repo / "nested").exists()
+
+    def test_relative_in_tree_capture_is_refused(self, tmp_path):
+        repo = _make_repo(tmp_path / "repo")
+
+        result = _run("capture.txt", repo / "capture.txt", repo)
+
+        assert result.returncode == _REFUSED
+        assert not (repo / "capture.txt").exists()
+
+    def test_symlink_target_inside_tree_is_refused(self, tmp_path):
+        repo = _make_repo(tmp_path / "repo")
+        capture = tmp_path / "capture-link"
+        capture.symlink_to(repo / "capture.txt")
+
+        result = _run(str(repo), capture, repo)
+
+        assert result.returncode == _REFUSED
+        assert not (repo / "capture.txt").exists()
+
+    def test_in_tree_symlink_to_outside_capture_proceeds(self, tmp_path):
+        repo = _make_repo(tmp_path / "repo")
+        capture = tmp_path / "outside.txt"
+        link = repo / "capture-link"
+        link.symlink_to(capture)
+
+        result = _run(str(repo), link, repo)
+
+        assert result.returncode != _REFUSED, result.stderr
+        assert capture.is_file()
+        assert _stamps(capture)["GATE-TREE-ATTRIBUTION"] == "stable"
+
+
 class TestWrongTreeIsRefused:
     """The catching leg. It must refuse BEFORE pytest starts."""
 

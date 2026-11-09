@@ -103,6 +103,17 @@ if [ "$declared_real" != "$actual_real" ]; then
     exit 2
 fi
 
+capture_real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$capture")"
+case "$capture_real" in
+    "$declared_real"|"$declared_real"/*)
+        printf 'GATE REFUSED: the capture path must be outside the declared tree.\n' >&2
+        printf '  declared: %s\n' "$declared_real" >&2
+        printf '  capture : %s\n' "$capture_real" >&2
+        printf '  Choose a capture path outside this worktree; no capture or pytest run was started.\n' >&2
+        exit 2
+        ;;
+esac
+
 head_sha="$(git -C "$actual_real" rev-parse HEAD)"
 porcelain_before="$(mktemp)" || {
     printf 'GATE REFUSED: cannot allocate the before-run porcelain capture.\n' >&2

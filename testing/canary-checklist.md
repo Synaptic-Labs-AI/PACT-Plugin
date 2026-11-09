@@ -65,7 +65,7 @@ env -u PYTEST_ADDOPTS ../scripts/verify-gate-tree.sh "$(cd -P .. && pwd)" "$CAPT
 echo "wrapper exit: $?"
 ```
 
-The first argument is the worktree the run must measure. The second is the capture file. Each argument after those two goes to pytest. The script writes `GATE-TREE`, `GATE-HEAD`, `GATE-DIRTY-PATHS`, `GATE-CWD` and `GATE-COMMAND` above the pytest output, then appends `GATE-HEAD-AFTER`, `GATE-DIRTY-PATHS-AFTER`, `GATE-TREE-ATTRIBUTION`, and finally `GATE-PYTEST-EXIT` as the last stamp. `GATE-TREE-ATTRIBUTION` is `stable` only when HEAD and the complete before/after `git status --porcelain` text are identical; equal dirty counts alone are insufficient. A nonzero pytest status is preserved. A green pytest run whose tree moved returns 1 and is `unattributable`, not a pass.
+The first argument is the worktree the run must measure. The second is the capture file. Each argument after those two goes to pytest. The capture path must be outside the declared tree: an in-tree capture is refused with exit code 2 before pytest starts and writes no capture, so use an outside path such as the `/tmp` path above. The script writes `GATE-TREE`, `GATE-HEAD`, `GATE-DIRTY-PATHS`, `GATE-CWD` and `GATE-COMMAND` above the pytest output, then appends `GATE-HEAD-AFTER`, `GATE-DIRTY-PATHS-AFTER`, `GATE-TREE-ATTRIBUTION`, and finally `GATE-PYTEST-EXIT` as the last stamp. `GATE-TREE-ATTRIBUTION` is `stable` only when HEAD and the complete before/after `git status --porcelain` text are identical; equal dirty counts alone are insufficient. A nonzero pytest status is preserved. A green pytest run whose tree moved returns 1 and is `unattributable`, not a pass.
 
 Five properties of that command are load-bearing. Keep each one:
 
