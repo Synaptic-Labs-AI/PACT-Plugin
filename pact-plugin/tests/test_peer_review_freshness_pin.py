@@ -77,9 +77,9 @@ def _section() -> str:
 def _clause() -> str:
     """The freshness paragraph alone, normalized and stripped of its anchor.
 
-    The anchor comment contains the word 'fresh'; without the strip the
-    `fresh` token arm passes with no prose carrying it. The region ends at
-    the first blank line, so the anchored prose must stay one paragraph.
+    The anchor comment contains the word 'fresh'; without the strip a token
+    arm can be satisfied with no prose carrying it. The region ends at the
+    first blank line, so the anchored prose must stay one paragraph.
     """
     section = _section()
     start = section.find(ANCHOR)
@@ -92,6 +92,15 @@ def _clause() -> str:
         "the anchor comment survived the strip — every token arm below can "
         "be satisfied by the anchor rather than by the rule"
     )
+    # The bold lead-in is a heading, not the rule. Left in the slice it is
+    # one more source of 'fresh', so a body stripped of the freshness
+    # statement could still pass a token arm.
+    lead_in = "**reviewer freshness.**"
+    assert clause.startswith(lead_in), (
+        "the freshness clause no longer opens with its bold lead-in — the "
+        "slice does not start at the rule"
+    )
+    clause = clause[len(lead_in):].strip()
     # Extraction sanity, following test_peer_review_independence_pin.py:
     # anchors run to the FIRST blank line, so a lost blank line silently
     # widens the slice into the numbered dispatch steps.
@@ -108,7 +117,7 @@ def _clause() -> str:
 
 
 @pytest.mark.parametrize("tokens, lost", [
-    (("fresh",), "the word the rule exists to state"),
+    (("freshly spawn",), "the reviewer is freshly spawned, not merely fresh"),
     (("spawn",), "the action the rule requires"),
     (("name",), "the uniqueness lever"),
     (("distinct", "unique", "different"), "the name the reviewer must take"),
@@ -171,8 +180,18 @@ def test_clause_sits_before_the_spawn_template():
     section = _section()
     anchor = section.find(ANCHOR)
     template = section.find("\nAgent(\n")
+    steps = section.find("\n1. `TaskCreate(")
     assert anchor != -1, f"peer-review.md lost the {ANCHOR!r} anchor"
     assert template != -1, "the dispatch section lost its Agent( spawn template"
+    assert steps != -1, (
+        "the dispatch section lost its numbered step 1 (`TaskCreate`) — the "
+        "position arm can no longer bind the clause to the steps"
+    )
+    assert anchor < steps, (
+        "the reviewer-freshness clause now sits after step 1 — the reviewer "
+        "identity and `name=` are chosen there, so the rule arrives after "
+        "the decision it governs"
+    )
     assert anchor < template, (
         "the reviewer-freshness clause now sits AFTER the Agent( spawn "
         "template — it arrives after the decision it governs"
