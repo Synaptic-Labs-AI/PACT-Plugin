@@ -516,6 +516,34 @@ def _scrub(msg: str) -> str:
     return msg
 
 
+def _project_scope_envelope(project_scope: dict | None) -> dict | None:
+    """The save disclosure with its identity and path fields rendered inert.
+
+    `PACTMemory.last_project_scope` stays RAW for programmatic callers; this
+    is the rendering boundary, so a bidi/format character in the filed
+    project or the cwd repo appears as its `<U+XXXX>` marker instead of
+    reaching a consumer that parses and prints the envelope.
+    """
+    if project_scope is None:
+        return None
+    rendered = dict(project_scope)
+    for field in ("project_id", "cwd_repo"):
+        value = rendered.get(field)
+        if value is not None:
+            rendered[field] = escape_for_envelope(value)
+    return rendered
+
+
+def _scope_disagreement_message(exc: BaseException) -> str:
+    """The refusal message as RENDERED: identity values made inert.
+
+    The exception carries them RAW for programmatic callers (see
+    `format_project_dir_disagreement`); this is where they become display
+    markers, matching how `DB_PATH_NOT_FOUND` renders its path.
+    """
+    return escape_for_envelope(_scrub(str(exc)))
+
+
 def cmd_save(args, db_path=None):
     """Handle the 'save' subcommand."""
     if args.stdin or args.json_data == "-":
@@ -566,7 +594,7 @@ def cmd_save(args, db_path=None):
     except ProjectScopeDisagreementError as exc:
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except ValueError as exc:
         _error(
             "ValueError",
@@ -644,7 +672,9 @@ def cmd_save(args, db_path=None):
     # written from the correct directory, shows False and is still misfiled.
     project_scope = memory.last_project_scope
     if project_scope is not None:
-        result["project_scope"] = project_scope
+        # DISPLAY-RENDERED, not raw: the property keeps the programmatic
+        # value; this envelope is a rendering surface.
+        result["project_scope"] = _project_scope_envelope(project_scope)
     _success(result)
 
 
@@ -706,7 +736,7 @@ def cmd_get(args, db_path=None):
         # without this clause it would reach main()'s generic handler as
         # SYSTEM_ERROR exit 2, which sends a caller looking for a bug in the
         # store instead of at its own project declaration.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
         _error(
             "PREFIX_TOO_SHORT",
@@ -797,7 +827,7 @@ def cmd_update(args, db_path=None):
         resolved_id = memory.update(args.memory_id, updates, replace=args.replace)
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
         # Order: PrefixTooShortError IS a ValueError; catch it before the
         # field-validation ValueError handler below.
@@ -877,7 +907,7 @@ def cmd_sync(args, db_path=None):
         memory_ids = memory.sync(**sync_kwargs)
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     _success({
         "sync_status": memory.last_sync_status,
         "projected": len(memory_ids),
@@ -934,7 +964,7 @@ def cmd_delete(args, db_path=None):
         resolved_id = memory.delete(args.memory_id)
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
         _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
     except AmbiguousPrefixError as exc:

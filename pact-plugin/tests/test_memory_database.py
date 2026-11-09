@@ -3562,6 +3562,130 @@ class TestGetStatusFoldsAnUnusableDetectedSessionId:
             f"{status['project_id']!r}"
         )
 
+    @pytest.mark.parametrize("char,marker", [
+        ("\u202e", "<U+202E>"),
+        ("\u2028", "<U+2028>"),
+    ])
+    def test_the_zeroed_arm_renders_a_display_unsafe_session_id(
+        self, tmp_path, monkeypatch, char, marker
+    ):
+        """The zeroed arm takes the same computed value, escape included."""
+        memory = self._memory(
+            tmp_path, monkeypatch, f"bad{char}id", project="proj\udcff"
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["project_id"] is None
+        assert status["session_id"] == f"bad{marker}id", (
+            "the zeroed arm dropped the display escape: "
+            f"{status['session_id']!r}"
+        )
+
+
+class TestTheStatusCountersBindTheRawProjectScope:
+    """The envelope escapes; the QUERIES must not.
+
+    `get_status` promises its counters use the raw scope. If they ever bound
+    the ESCAPED form, a row stored under a bidi-containing project id would
+    stop counting (`memory_count` 0) while the envelope still showed the
+    marker — a silent undercount no existing status arm reddens on.
+    """
+
+    def test_a_bidi_project_id_counts_its_rows_and_renders_inert(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts.memory_api import PACTMemory
+
+        project = "proj\u202eX"
+        db_path, conn = _memory_store(tmp_path, "bidi-count.db")
+        _insert_memories(conn, [("m-bidi", project)])
+        conn.close()
+
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (project, "cwd")),
+        )
+        memory = PACTMemory(
+            project_id=None, session_id="s", db_path=db_path
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["project_id"] == "proj<U+202E>X", status["project_id"]
+        assert status["memory_count"] >= 1, (
+            "the counter bound the ESCAPED project id and matched no rows: "
+            f"{status['memory_count']!r}"
+        )
+
+
+class TestTheStatusEnvelopeEscapesTheDbPath:
+    """A path is a rendering surface too; the property keeps it raw."""
+
+    def _memory(self, tmp_path, monkeypatch, detected=None):
+        from scripts.memory_api import PACTMemory
+
+        if detected is not None:
+            monkeypatch.setattr(
+                PACTMemory,
+                "_detect_project_id_with_source",
+                staticmethod(lambda: (detected, "cwd")),
+            )
+            return PACTMemory(
+                project_id=None,
+                session_id="s",
+                db_path=tmp_path / "store\u202eX.db",
+            )
+        return PACTMemory(
+            project_id="P",
+            session_id="s",
+            db_path=tmp_path / "store\u202eX.db",
+        )
+
+    def test_the_normal_arm_escapes_the_path_and_the_property_is_raw(
+        self, tmp_path, monkeypatch
+    ):
+        memory = self._memory(tmp_path, monkeypatch)
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert "<U+202E>" in status["db_path"], status["db_path"]
+        assert "\u202e" not in status["db_path"], (
+            f"the raw display-unsafe character reached the envelope: "
+            f"{status['db_path']!r}"
+        )
+        assert memory.db_path == tmp_path / "store\u202eX.db", (
+            "the programmatic accessor must return the RAW path"
+        )
+
+    def test_the_zeroed_arm_escapes_the_path(self, tmp_path, monkeypatch):
+        memory = self._memory(tmp_path, monkeypatch, detected="proj\udcff")
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["project_id"] is None
+        assert "<U+202E>" in status["db_path"], status["db_path"]
+
+
+class TestTheSaveDisclosureStaysRawOnTheInstance:
+    """`last_project_scope` is the programmatic value; the CLI renders it."""
+
+    def test_project_scope_identity_fields_stay_raw(self, tmp_path, monkeypatch):
+        from scripts.memory_api import PACTMemory
+
+        bidi = "proj\u202eX"
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_root",
+            lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        memory = PACTMemory(
+            project_id="P", session_id="s", db_path=tmp_path / "raw.db"
+        )
+        memory.save(
+            {"context": "RAW-SCOPE", "project_id": bidi},
+            sync_to_claude=False,
+        )
+        scope = memory.last_project_scope
+        assert scope["project_id"] == bidi
+        assert scope["cwd_repo"] == bidi
+
 
 class TestANonMappingUpdatePayload:
     @pytest.mark.parametrize("payload", [["x"], "x", 5, None, b"x"])

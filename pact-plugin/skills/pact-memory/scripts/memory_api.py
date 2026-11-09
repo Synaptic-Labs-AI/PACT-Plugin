@@ -852,21 +852,23 @@ class PACTMemory:
         return self._project_id
 
     def _session_id_for_envelope(self) -> Optional[str]:
-        """The session id a status envelope may report, FOLDED ONLY.
+        """The session id a status ENVELOPE may report; the FINAL value.
 
-        Folded exactly as `_project_scope()` folds the project id: a value
-        `_unusable_identifier` rejects (a control character or a lone
-        surrogate) becomes None, because no row can carry it. A bidi/format
-        character is ACCEPTED by design, so the fold does NOT remove it; the
-        envelope construction renders it inert with `escape_for_envelope`.
-        Calling this accessor and stopping would leave that value raw.
+        One contract with `_project_id_for_envelope()`: fold, then escape. A
+        value `_unusable_identifier` rejects (a control character or a lone
+        surrogate) becomes None, because no row can carry it; a bidi/format
+        or separator character is ACCEPTED by design, so it survives the fold
+        and `escape_for_envelope` renders it as its `<U+XXXX>` marker. This
+        is a DISPLAY value — never feed it back as an identifier.
         """
         if (
             self._session_id is not None
             and _unusable_identifier(self._session_id)
         ):
             return None
-        return self._session_id
+        if self._session_id is None:
+            return None
+        return escape_for_envelope(self._session_id)
 
     def _project_id_for_envelope(self) -> Optional[str]:
         """The project id a status or sync ENVELOPE may report.
@@ -953,8 +955,25 @@ class PACTMemory:
         exits. It makes a save's project resolution visible AT THE TIME and
         afterwards only in whatever output the caller kept. Do not build an
         after-the-fact audit on it.
+
+        RAW HERE; the CLI's save envelope display-renders `project_id` and
+        `cwd_repo` (`cli._project_scope_envelope`), so a programmatic caller
+        gets the values it can bind while a rendered consumer gets markers.
         """
         return self._last_project_scope
+
+    @property
+    def db_path(self) -> Path:
+        """The resolved store path — RAW, for programmatic callers.
+
+        The status ENVELOPE reports a display-escaped form; this property is
+        the value a caller may open, compare or bind. The store scope is
+        bound to THIS instance's path for the lookup, exactly as the
+        `_with_store_scope` methods do, so a caller-store instance reports
+        its own file rather than the default one.
+        """
+        with store_scope(self._db_path):
+            return resolve_db_path()
 
     @property
     def last_sync_status(self) -> Optional[str]:
@@ -2445,6 +2464,16 @@ class PACTMemory:
         """
         Get status information about the memory system.
 
+        DISPLAY CONTRACT, and the boundary it stops at: the identity fields
+        (`project_id`, `session_id`) and `db_path` are DIAGNOSTIC DISPLAY
+        values — folded to null when no row can carry them, and display-
+        escaped otherwise (a bidi/format character appears as its `<U+XXXX>`
+        marker and matches no rows), so a library caller must never feed
+        them back as identifiers or paths. MEMORY CONTENT stays RAW: the row
+        payloads from `search`, `list` and `get` are data, and escaping a
+        memory's own text or context would corrupt it. The RAW path is
+        available to programmatic callers as `memory.db_path`.
+
         Returns:
             Dictionary with database stats and capabilities.
         """
@@ -2471,18 +2500,16 @@ class PACTMemory:
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
         # value. The ENVELOPE VALUES are computed once so BOTH arms report
-        # them the same way, and they are the FOLDED + ESCAPED forms: the
-        # fold drops a value no row can carry, the escape renders a
-        # bidi/format/separator character (which the fold ACCEPTS by design)
-        # inert, because a consumer that parses this JSON and prints the
-        # field would otherwise let it steer a display. The counters below
-        # still use the RAW `project_scope` — an escaped value cannot be
-        # bound to a query.
+        # them the same way, and each accessor returns the FINAL display
+        # form: the fold drops a value no row can carry, the escape renders
+        # a bidi/format/separator character (which the fold ACCEPTS by
+        # design) inert, because a consumer that parses this JSON and prints
+        # the field would otherwise let it steer a display. The counters
+        # below still use the RAW `project_scope` — an escaped value cannot
+        # be bound to a query.
         project_scope = self._project_scope()
         project_id = self._project_id_for_envelope()
         session_id = self._session_id_for_envelope()
-        if session_id is not None:
-            session_id = escape_for_envelope(session_id)
         if project_scope is None:
             return {
                 "project_id": project_id,
@@ -2500,7 +2527,7 @@ class PACTMemory:
                 # A PROCESS fact, like session_id and capabilities, and part of
                 # the envelope every other status call returns. Dropping it on
                 # this arm alone would change the envelope's key set.
-                "db_path": str(resolve_db_path()),
+                "db_path": escape_for_envelope(str(resolve_db_path())),
             }
 
         from .database import get_memory_count
@@ -2539,7 +2566,7 @@ class PACTMemory:
             # above came from the caller store, so the envelope disagreed with
             # itself. The scope makes this the caller store, and the resolver
             # creates nothing.
-            "db_path": str(resolve_db_path())
+            "db_path": escape_for_envelope(str(resolve_db_path()))
         }
 
 

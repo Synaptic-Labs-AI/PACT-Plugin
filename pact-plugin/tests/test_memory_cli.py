@@ -4440,6 +4440,69 @@ class TestTheSyncAndStatusEnvelopesEscapeDisplayUnsafeIds:
         assert status_env["project_id"] == expected, status_env
 
 
+class TestTheDiagnosticEnvelopesEscapeIdentityValues:
+    """Save's disclosure and the disagreement message are rendering surfaces.
+
+    `last_project_scope` and the exception text stay RAW for programmatic
+    callers; the CLI envelopes display-render them, so a bidi/format
+    character appears as its `<U+XXXX>` marker.
+    """
+
+    def test_the_save_disclosure_renders_identity_fields_inert(
+        self, cli_db, monkeypatch, capsys
+    ):
+        from pathlib import Path
+
+        from scripts.cli import main
+
+        bidi = "proj\u202eX"
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_root",
+            lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        with patch("scripts.memory_api._ensure_ready"), patch(
+            "scripts.memory_api.sync_to_claude_md"
+        ):
+            with pytest.raises(SystemExit) as exit_info:
+                main([
+                    "save",
+                    json.dumps({"context": "X", "project_id": bidi}),
+                    "--db-path", str(cli_db),
+                ])
+        assert exit_info.value.code == 0, exit_info.value.code
+        env = json.loads(capsys.readouterr().out)["result"]
+        scope = env["project_scope"]
+        assert scope["project_id"] == "proj<U+202E>X", scope
+        assert scope["cwd_repo"] == "proj<U+202E>X", scope
+
+    def test_the_disagreement_message_renders_identity_values_inert(
+        self, cli_db, monkeypatch, capfd
+    ):
+        from scripts.cli import main
+        from scripts.pact_session import format_project_dir_disagreement
+
+        env_value = "/env/proj\u202eA"
+        record_value = "/record/proj\u202eB"
+        monkeypatch.setattr(
+            "scripts.memory_api.env_record_project_dir_disagreement",
+            lambda: (env_value, record_value),
+        )
+        with pytest.raises(SystemExit) as exit_info:
+            main([
+                "save", json.dumps({"context": "X"}),
+                "--db-path", str(cli_db),
+            ])
+        assert exit_info.value.code == 1, exit_info.value.code
+        envelope = json.loads(capfd.readouterr().err)
+        assert envelope["error"] == "SCOPE_DISAGREEMENT", envelope
+        assert "<U+202E>" in envelope["message"], envelope["message"]
+        assert "\u202e" not in envelope["message"], envelope["message"]
+
+        # PROGRAMMATIC CONTROL: the exception text keeps the RAW values.
+        raw = format_project_dir_disagreement(env_value, record_value)
+        assert "\u202e" in raw, raw
+
+
 # ---------------------------------------------------------------------------
 # The envelope escapes caller input, and the update boundary refuses null
 # ---------------------------------------------------------------------------

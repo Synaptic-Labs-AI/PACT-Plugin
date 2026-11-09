@@ -69,6 +69,10 @@ EXEMPT = {
     "last_embedding_status": "a read of the status left by the last save",
     "last_sync_status": "a read of the status left by the last save",
     "last_project_scope": "a read of the scope disclosure left by the last save",
+    "db_path": (
+        "binds the instance's own store scope with store_scope(self._db_path) "
+        "and resolves the path there; it opens no store"
+    ),
     "track_file": "records a path on the instance, and opens no store",
     "get_tracked_files": "reads the paths recorded on the instance",
     "clear_tracked_files": "clears the paths recorded on the instance",
