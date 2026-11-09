@@ -55,14 +55,14 @@ grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || echo '.worktrees/' 
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
 REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
 
-IFS= read -r BRANCH <<'PACT_BRANCH'
+IFS= read -r BRANCH <<'PACT BRANCH'
 {branch}
-PACT_BRANCH
+PACT BRANCH
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot create worktree: invalid branch name."; exit 1; }
 git worktree add "$REPO_ROOT/.worktrees/$BRANCH" -b "$BRANCH"
 ```
 
-Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes).
+Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes). `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
 
 **If creation fails**:
 - Branch already exists: Ask user whether to check out the existing branch. If yes, run the Step 3 block unchanged except for dropping `-b` (`git worktree add "$REPO_ROOT/.worktrees/$BRANCH" "$BRANCH"`), keeping the branch read and validation.
@@ -70,16 +70,16 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 
 ### Step 4: Link the Repo venv (if present)
 
-Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one.
+Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
 REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
 
-IFS= read -r BRANCH <<'PACT_BRANCH'
+IFS= read -r BRANCH <<'PACT BRANCH'
 {branch}
-PACT_BRANCH
+PACT BRANCH
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Venv link: skipped (invalid branch name)"; exit 0; }
 WORKTREE="$REPO_ROOT/.worktrees/$BRANCH"
 

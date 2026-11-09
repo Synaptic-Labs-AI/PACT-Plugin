@@ -182,7 +182,11 @@ def git(repo, *args, check=True):
 
 
 def make_repo(
-    tmp_path, gitignore=".worktrees/\n", with_venv=True, tracked_venv_link=False
+    tmp_path,
+    gitignore=".worktrees/\n",
+    with_venv=True,
+    tracked_venv_link=False,
+    branch=BRANCH,
 ):
     """A committed repo, optionally with a `.venv`, plus a real worktree.
 
@@ -207,8 +211,8 @@ def make_repo(
     if with_venv and not tracked_venv_link:
         (repo / ".venv").mkdir()
         (repo / ".venv" / "marker").write_text("real venv\n", encoding="utf-8")
-    worktree = repo / ".worktrees" / BRANCH
-    git(repo, "worktree", "add", "--quiet", str(worktree), "-b", BRANCH)
+    worktree = repo / ".worktrees" / branch
+    git(repo, "worktree", "add", "--quiet", str(worktree), "-b", branch)
     return repo, worktree
 
 
@@ -306,7 +310,7 @@ class TestFenceContract:
         reaches no expansion — the point is not that `$BRANCH` appears."""
         fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
         assert "{branch}" not in fence
-        delimiters = re.findall(r"<<\s*'([A-Za-z_][A-Za-z0-9_]*)'", fence)
+        delimiters = re.findall(r"<<\s*'([^']+)'", fence)
         assert len(delimiters) == 1, (
             f"expected exactly one QUOTED heredoc in Step 4; found {delimiters}. "
             "An unquoted heredoc, or an inline assignment, makes the branch "
@@ -462,6 +466,72 @@ class TestStep3BranchIsInertText:
         assert (
             git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
             == 0
+        )
+
+
+class TestDelimiterCannotBeForged:
+    """A branch legally named `PACT_BRANCH` must survive the heredoc.
+
+    Under the old underscore delimiter, that value IS the terminator: the body
+    ends empty, the branch reads as empty, and the fence reports an invalid
+    name. The space-bearing delimiter makes the same value ordinary body text,
+    so a valid ref named like the delimiter links normally.
+    """
+
+    def test_a_branch_named_like_the_old_delimiter_links_normally(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path, branch="PACT_BRANCH")
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="PACT_BRANCH"),
+            repo,
+        )
+        assert "invalid branch name" not in done.stdout, (
+            f"a valid ref named PACT_BRANCH was rejected: {done.stdout.strip()!r}"
+        )
+        assert "Venv link: .venv -> " in done.stdout
+        assert (worktree / ".venv").is_symlink()
+
+
+class TestMultiLineValueIsTheInstructionsJob:
+    """The heredoc CANNOT defend against a multi-line value.
+
+    Measured: substituting `evil\\nPACT BRANCH\\ntouch <marker>` terminates the
+    heredoc at the injected delimiter line, `read` takes `evil`, and the
+    leftover `touch` line runs as a top-level command — the marker IS created.
+    The defence is the skill's single-line rule, applied by the agent BEFORE
+    substituting. The two arms below pin each fact separately so neither is
+    mistaken for the other.
+    """
+
+    def test_the_single_line_rule_is_stated_in_both_steps(self):
+        text = SKILL_FILE.read_text(encoding="utf-8")
+        for start, end in (
+            ("### Step 3:", "### Step 4:"),
+            ("### Step 4:", "### Step 5:"),
+        ):
+            block = _section(text, start, end)
+            assert "must be a single line" in block, (
+                f"{start} lost the single-line rule. The heredoc alone cannot "
+                "stop a multi-line value; this sentence is the only defence."
+            )
+
+    def test_the_fence_alone_does_not_stop_a_multiline_value(
+        self, isolated_git_config, tmp_path
+    ):
+        """CHARACTERIZATION, not a safety claim: this passes while the marker
+        IS created. If the fence ever validates single-line input, replace it
+        with a positive 'no marker' assertion."""
+        repo, _ = make_repo(tmp_path)
+        marker = tmp_path / "PWNED"
+        value = f"evil\nPACT BRANCH\ntouch {marker}"
+        run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch=value), repo
+        )
+        assert marker.exists(), (
+            "the fence unexpectedly stopped a multi-line value — if it now "
+            "validates single-line input, this characterization should become "
+            "a positive assertion"
         )
 
 
