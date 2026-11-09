@@ -18,6 +18,21 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.31: reject an update payload that de-keys or re-keys a memory row
+
+### Summary
+
+`PACTMemory.update()` now refuses an update payload that carries a `project_id` which is not a non-empty string without control characters: explicit null, the empty string, non-string values and control characters raise `ValueError` before any store work, leaving the row unchanged. An update that omits `project_id` proceeds with no identity requirement, and a valid non-empty string still re-keys the row as a warranted destination. This closes the one identity-mutating path PR #1699 left outside its guard set: the memory CLI passes caller JSON through verbatim, so such a payload could scalar-replace a row's key to NULL, where no later read could find it.
+
+### What landed
+
+- `skills/pact-memory/scripts/memory_api.py`: in `PACTMemory.update()`, a payload-validation block keyed on presence (`"project_id" in updates`, never `.get()`, which cannot distinguish an explicit JSON null — the de-key hazard — from omission) mirrors `save()`'s payload guard, rejects the unusable values with `ValueError` and remedy text, and runs before `_ensure_ready()` so a refused update does no store work. The method's `Raises` contract documents the condition. `delete()` stays unguarded: by-id destruction is identity-independent.
+- `tests/test_removed_worktree_record.py`: a regression family beside `save()`'s F2 arms pins the guard — null, empty, non-string and control-character payloads are refused with the row's key unchanged; an update omitting `project_id` proceeds; a valid non-empty string re-keys the row.
+
+### Why
+
+`update_memory` scalar-replaces `project_id`, and the CLI's `update` command hands caller JSON to it verbatim, so any agent or script could send `{"project_id": null}` and silently re-key a memory row to a bucket no reader addresses. The refusal channel is `ValueError` for the same reason as on the create path: the CLI envelopes it as invalid input (exit 2), so it cannot read as an env/record disagreement. The null boundary is the opposite of `save()`'s on purpose — on create, null means auto-detect; on update, null is exactly the write the guard exists to stop.
+
 ## v4.8.30: hold the cold report until its round's warm reviewers are accepted or stopped
 
 ### Summary

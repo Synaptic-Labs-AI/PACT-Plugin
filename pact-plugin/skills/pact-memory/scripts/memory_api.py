@@ -1657,8 +1657,12 @@ class PACTMemory:
             the storage form.
 
         Raises:
-            ValueError: If updates contains unknown field names, or if any
-                dict-list item contains unknown sub-object keys.
+            ValueError: If updates contains unknown field names, if any
+                dict-list item contains unknown sub-object keys, or if a
+                supplied `project_id` is not a non-empty string without
+                control characters (explicit null included — it would
+                scalar-replace the row's key to NULL; omit the field to
+                leave the key unchanged).
             PrefixTooShortError: prefix is shorter than the minimum.
             AmbiguousPrefixError: prefix matches more than one memory.
             ProjectScopeDisagreementError: CLAUDE_PROJECT_DIR and the session
@@ -1681,6 +1685,37 @@ class PACTMemory:
             raise ProjectScopeDisagreementError(
                 format_project_dir_disagreement(*disagreement)
             )
+
+        # A PAYLOAD project_id ON AN UPDATE MUST BE A USABLE KEY, AND PRESENCE
+        # — NOT TRUTHINESS — DECIDES. `update_memory` scalar-replaces the
+        # field, so an explicit null or "" here would re-key the row to NULL:
+        # a key no reader can address and no instance can hold (the de-key
+        # hazard save()'s payload guard closes on the create path). `.get()`
+        # cannot make the needed distinction — on update, explicit null IS the
+        # hazard and omission is a no-op, the OPPOSITE boundary from save(),
+        # where null means "auto-detect" — so this guard keys on
+        # `"project_id" in updates` and validates the value it finds. Updates
+        # omitting the field proceed with no identity requirement: the row is
+        # already keyed, and refusing identity-free edits would block honest
+        # updates in a session whose declared directory has died.
+        #
+        # ValueError for the same reason as save()'s payload block: it is this
+        # module's bad-input channel and the CLI envelopes it as exit 2, so it
+        # cannot read as an env/record disagreement.
+        if "project_id" in updates:
+            payload_project = updates["project_id"]
+            if not isinstance(payload_project, str) or not payload_project or any(
+                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                for char in payload_project
+            ):
+                # Reject C0, DEL and C1 controls without restricting other
+                # Unicode, exactly as save()'s payload validation does.
+                raise ValueError(
+                    "project_id, when supplied to update, must be a non-empty "
+                    "string without control characters (U+0000-U+001F, "
+                    "U+007F-U+009F); omit it to leave the row's project "
+                    "unchanged. Nothing was written."
+                )
 
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()

@@ -1373,6 +1373,67 @@ class TestUnresolvedIdentityRefusesWrites:
         )
 
 
+class TestUpdatePayloadProjectIdGuard:
+    """An update payload cannot de-key or re-key a row (#1688 close-out).
+
+    `update_memory` scalar-replaces `project_id`, and the CLI passes caller
+    JSON through verbatim (cmd_update), so `{"project_id": null}` could write
+    a NULL key no reader can address. Mirrors the save() F2 family with the
+    OPPOSITE null boundary: on update, explicit null IS the hazard and
+    omission is the no-op, so the guard keys on presence, not truthiness.
+    """
+
+    @staticmethod
+    def _row_project(db_path: Path, memory_id: str):
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        return row[0] if row else None
+
+    @pytest.mark.parametrize("bad", [None, "", 123, "bad\x00id"])
+    def test_rejects_a_dekeying_or_mis_keying_payload(
+        self, tmp_path, bad
+    ):
+        """Null (the de-key), empty, non-str and control-char values refuse."""
+        db_path = tmp_path / "update-guard.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = memory.save({"context": "UPDATE-GUARD"}, sync_to_claude=False)
+
+        with pytest.raises(ValueError) as excinfo:
+            memory.update(memory_id, {"project_id": bad})
+
+        assert str(excinfo.value).startswith(
+            "project_id, when supplied to update, must be a non-empty string "
+        ), f"refused for a different reason: {str(excinfo.value)!r}"
+        assert self._row_project(db_path, memory_id) == "detected-b", (
+            "a refused payload changed the row; the guard must precede the "
+            "store write"
+        )
+
+    def test_omission_proceeds_with_no_identity_requirement(self, tmp_path):
+        """An update not touching project_id needs no identity (subset guard)."""
+        db_path = tmp_path / "update-omission.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = memory.save({"context": "UPDATE-OMISSION"}, sync_to_claude=False)
+
+        resolved = memory.update(memory_id, {"context": "UPDATE-OMISSION-2"})
+
+        assert resolved == memory_id
+        assert self._row_project(db_path, memory_id) == "detected-b"
+
+    def test_a_valid_string_rekeys_the_row(self, tmp_path):
+        """An explicit non-empty string is a warranted rekey, still accepted."""
+        db_path = tmp_path / "update-warrant.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = memory.save({"context": "UPDATE-WARRANT"}, sync_to_claude=False)
+
+        resolved = memory.update(memory_id, {"project_id": "warranted-c"})
+
+        assert resolved == memory_id
+        assert self._row_project(db_path, memory_id) == "warranted-c"
+
+
 class TestUnresolvedIdentityScopesReads:
     """R1: None means NO records, never every project's records."""
 
