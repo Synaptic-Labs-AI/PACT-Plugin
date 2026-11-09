@@ -142,7 +142,7 @@ def _clause() -> str:
     (re.compile(r"verify-only"), "the one re-review reuse exception"),
     (re.compile(r"fixer"), "the reviewer-to-fixer reuse exception"),
     (re.compile(r"memory"), "the pointer to the REVIEWER-MEMORY-CHANNEL clause that names the channel freshness does not close"),
-    (re.compile(r"\bcold\b"), "the cold lane's type-based independence"),
+    (re.compile(r"\bcold\b"), "the cold lane's decisive read"),
     (re.compile(r"\b(?:only|nowhere else|limited to)\b"), "an exclusivity word (its channel binding is pinned separately)"),
 ])
 def test_clause_keeps_its_load_bearing_tokens(pattern, lost):
