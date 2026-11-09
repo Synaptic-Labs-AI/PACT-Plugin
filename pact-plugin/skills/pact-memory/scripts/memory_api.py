@@ -850,6 +850,25 @@ class PACTMemory:
             )
         return self._project_id
 
+    def _session_id_for_envelope(self) -> Optional[str]:
+        """The session id a status ENVELOPE may report; None when unusable.
+
+        Folded exactly as `_project_scope()` folds the project id, so both
+        identity fields in one envelope follow one rule: a value no row can
+        carry is not reported as an identifier. An unusable detected value
+        also carries the control or bidi character the envelope would
+        otherwise render. This is a FOLD, not an escape — escaping would
+        leave the two identifiers disagreeing about what counts as
+        reportable, and the raw value stays readable in the session context
+        file. A SUPPLIED value was validated in the constructor.
+        """
+        if (
+            self._session_id is not None
+            and _unusable_identifier(self._session_id)
+        ):
+            return None
+        return self._session_id
+
     @property
     def session_id(self) -> Optional[str]:
         """Get the current session ID.
@@ -2437,12 +2456,14 @@ class PACTMemory:
         # an implementation choice, not a guarantee.
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
-        # value.
+        # value. The session id is folded by the same rule, computed once so
+        # BOTH arms of this envelope report it the same way.
         project_scope = self._project_scope()
+        session_id = self._session_id_for_envelope()
         if project_scope is None:
             return {
                 "project_id": None,
-                "session_id": self._session_id,
+                "session_id": session_id,
                 "memory_count": 0,
                 "tracked_files_count": len(self._session_files),
                 "graph_stats": {
@@ -2472,7 +2493,7 @@ class PACTMemory:
 
         return {
             "project_id": project_scope,
-            "session_id": self._session_id,
+            "session_id": session_id,
             "memory_count": memory_count,
             "tracked_files_count": len(self._session_files),
             "graph_stats": graph_stats,

@@ -3472,6 +3472,63 @@ class TestTheWriteIngressGuardsTheAdoptedSessionId:
         )
 
 
+class TestGetStatusFoldsAnUnusableDetectedSessionId:
+    """An unusable detected session id is reported as null, not echoed.
+
+    Same rule as the project id in the same envelope: a value no row can
+    carry is not reported as a session identifier, and echoing it would put
+    a control or bidi character into a rendered envelope. This is a FOLD,
+    not an escape — both identity fields follow one rule.
+    """
+
+    def _memory(self, tmp_path, monkeypatch, session_id, project=None):
+        monkeypatch.setattr(
+            PACTMemory, "_detect_session_id", staticmethod(lambda: session_id)
+        )
+        if project is not None:
+            monkeypatch.setattr(
+                PACTMemory,
+                "_detect_project_id_with_source",
+                staticmethod(lambda: (project, "CLAUDE_PROJECT_DIR")),
+            )
+        return PACTMemory(
+            project_id=None if project is not None else "P",
+            session_id=None,
+            db_path=tmp_path / "status.db",
+        )
+
+    def test_an_unusable_detected_session_id_is_reported_as_null(
+        self, tmp_path, monkeypatch
+    ):
+        memory = self._memory(tmp_path, monkeypatch, "bad\udcff")
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["session_id"] is None, (
+            "an unusable detected session id reached the envelope: "
+            f"{status['session_id']!r}"
+        )
+
+    def test_the_zeroed_arm_also_reports_null(self, tmp_path, monkeypatch):
+        memory = self._memory(
+            tmp_path, monkeypatch, "bad\udcff", project="proj\udcff"
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["project_id"] is None
+        assert status["session_id"] is None, (
+            "the zeroed arm echoed an unusable session id: "
+            f"{status['session_id']!r}"
+        )
+
+    def test_a_clean_detected_session_id_is_reported(
+        self, tmp_path, monkeypatch
+    ):
+        memory = self._memory(tmp_path, monkeypatch, "clean-session")
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["session_id"] == "clean-session"
+
+
 class TestANonMappingUpdatePayload:
     @pytest.mark.parametrize("payload", [["x"], "x", 5, None, b"x"])
     def test_is_refused_as_invalid_input(self, tmp_path, payload):
