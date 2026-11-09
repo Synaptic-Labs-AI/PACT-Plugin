@@ -47,7 +47,10 @@ if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/d
 else
   REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
 fi
-[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
 
 # Create directory and ensure gitignored
 mkdir -p "$REPO_ROOT/.worktrees"
@@ -65,7 +68,10 @@ if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/d
 else
   REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
 fi
-[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
 
 IFS= read -r BRANCH <<'PACT BRANCH'
 {branch}
@@ -93,7 +99,10 @@ if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/d
 else
   REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
 fi
-[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Venv link: skipped (cannot determine the main checkout root)"; exit 0; }
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Venv link: skipped (cannot determine the main checkout root)"; exit 0; }
 
 IFS= read -r BRANCH <<'PACT BRANCH'
 {branch}
@@ -119,13 +128,16 @@ else
   if [ -z "$EXCLUDE" ]; then
     IGNORE_FAILED=1
     EXCLUDE_RESOLVED=0
-  elif ! grep -qxF '/.venv' "$EXCLUDE" 2>/dev/null; then
-    # Terminate a final line that lacks a newline, so the new rule cannot merge into it.
-    if [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE" 2>/dev/null)" ]; then
-      printf '\n' 2>/dev/null >> "$EXCLUDE" || IGNORE_FAILED=1
-    fi
-    if [ "$IGNORE_FAILED" = 0 ]; then
-      printf '%s\n' '/.venv' 2>/dev/null >> "$EXCLUDE" || IGNORE_FAILED=1
+  else
+    mkdir -p "$(dirname "$EXCLUDE")" 2>/dev/null || IGNORE_FAILED=1
+    if [ "$IGNORE_FAILED" = 0 ] && ! grep -qxF '/.venv' "$EXCLUDE" 2>/dev/null; then
+      # Terminate a final line that lacks a newline, so the new rule cannot merge into it.
+      if [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE" 2>/dev/null)" ]; then
+        printf '\n' 2>/dev/null >> "$EXCLUDE" || IGNORE_FAILED=1
+      fi
+      if [ "$IGNORE_FAILED" = 0 ]; then
+        printf '%s\n' '/.venv' 2>/dev/null >> "$EXCLUDE" || IGNORE_FAILED=1
+      fi
     fi
   fi
   if [ "$IGNORE_FAILED" = 0 ]; then

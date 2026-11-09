@@ -77,8 +77,16 @@ if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/d
 else
   REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
 fi
-[ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
-cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/{branch}"
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
+
+IFS= read -r BRANCH <<'PACT BRANCH'
+{branch}
+PACT BRANCH
+git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot remove worktree: invalid branch name."; exit 1; }
+cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/$BRANCH"
 ```
 
 Note: Claude Code's `Bash` tool persists the working directory between calls. After this command, subsequent calls will run from `$REPO_ROOT`.
@@ -92,7 +100,7 @@ Surface this to the user:
 Cannot remove worktree — uncommitted changes exist in .worktrees/{branch}.
 Options:
   1. Commit or stash changes first, then retry cleanup
-  2. Force removal: git worktree remove --force "$REPO_ROOT/.worktrees/{branch}"
+  2. Force removal: repeat the Step 2 block with `--force` added to `git worktree remove`
      (This discards uncommitted changes permanently)
 ```
 
@@ -103,7 +111,11 @@ Do NOT force-remove automatically. The user must choose.
 After the worktree is removed, delete the local branch.
 
 ```bash
-git branch -d {branch}
+IFS= read -r BRANCH <<'PACT BRANCH'
+{branch}
+PACT BRANCH
+git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot delete branch: invalid branch name."; exit 1; }
+git branch -d "$BRANCH"
 ```
 
 **If deletion fails** (branch not fully merged):
@@ -115,7 +127,7 @@ Surface this to the user:
 Cannot delete branch — '{branch}' is not fully merged.
 Options:
   1. Merge the branch first, then retry cleanup
-  2. Force delete: git branch -D {branch}
+  2. Force delete: repeat the Step 3 block with `-D` instead of `-d`
      (This deletes the branch even if unmerged — changes may be lost)
 ```
 

@@ -66,6 +66,9 @@ import pytest
 SKILL_FILE = (
     Path(__file__).resolve().parents[1] / "skills" / "worktree-setup" / "SKILL.md"
 )
+CLEANUP_SKILL_FILE = (
+    Path(__file__).resolve().parents[1] / "skills" / "worktree-cleanup" / "SKILL.md"
+)
 BASH = Path("/bin/bash")
 SAFE_PATH = "/usr/bin:/bin"
 
@@ -92,21 +95,24 @@ def _section(skill_text, start_heading, end_heading):
     return block[:end]
 
 
-def _fence_in(skill_text, start_heading, end_heading, branch):
-    """The single bash fence between two headings, with `{branch}` substituted.
-
-    Fails closed: zero fences means the step lost its command block, more than
-    one means an assertion could measure a command nobody meant, and no
-    `{branch}` placeholder means the test would silently address the literal
-    placeholder path.
-    """
+def fence_block(skill_text, start_heading, end_heading):
+    """The single bash fence between two headings, unsubstituted."""
     block = _section(skill_text, start_heading, end_heading)
     fences = _FENCE.findall(block)
     assert len(fences) == 1, (
         f"expected exactly one bash fence between {start_heading!r} and "
         f"{end_heading!r}; found {len(fences)}"
     )
-    fence = fences[0]
+    return fences[0]
+
+
+def _fence_in(skill_text, start_heading, end_heading, branch):
+    """A fence with `{branch}` substituted.
+
+    Fails closed: no `{branch}` placeholder means the test would silently
+    address the literal placeholder path.
+    """
+    fence = fence_block(skill_text, start_heading, end_heading)
     assert "{branch}" in fence, (
         f"the fence after {start_heading!r} no longer carries a {{branch}} "
         "placeholder, so this test cannot address the worktree the skill creates"
@@ -122,6 +128,16 @@ def fence_for(skill_text, branch=BRANCH):
 def fence_for_step_3(skill_text, branch=BRANCH):
     """Step 3's fence — the worktree-creating half of the same injection surface."""
     return _fence_in(skill_text, "### Step 3:", "### Step 4:", branch)
+
+
+def fence_for_step_2(skill_text):
+    """Step 2's fence — creates `.worktrees/` and the gitignore rule (no branch)."""
+    return fence_block(skill_text, "### Step 2:", "### Step 3:")
+
+
+def cleanup_remove_fence(skill_text, branch=BRANCH):
+    """Cleanup Step 2's fence — the worktree-removal step."""
+    return _fence_in(skill_text, "### Step 2:", "### Step 3:", branch)
 
 
 def shipped_delimiter(skill_text):
@@ -286,6 +302,87 @@ def make_separate_git_dir_checkout(tmp_path):
     (checkout / ".venv").mkdir()
     (checkout / ".venv" / "marker").write_text("venv\n", encoding="utf-8")
     return checkout, git_dir
+
+
+def make_outer_repo_linked_worktree(tmp_path):
+    """A separate-git-dir checkout whose git dir sits INSIDE another repo.
+
+    From a linked worktree of the inner checkout, the common-dir parent is
+    `<outer>/area` — inside the OUTER repo's work tree. The pre-cycle-8 guard
+    accepted it because `git -C <outer>/area rev-parse --show-toplevel`
+    succeeds; the equality guard rejects it.
+    """
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(outer)], check=True)
+    (outer / "README.md").write_text("outer\n", encoding="utf-8")
+    git(outer, "add", "-A")
+    git(outer, *GIT_ID, "commit", "-qm", "init")
+
+    area = outer / "area"
+    area.mkdir()
+    inner = tmp_path / "inner"
+    subprocess.run(
+        [
+            "git", "init", "--quiet", "--separate-git-dir",
+            str(area / "gitdir-inner"), str(inner),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (inner / "README.md").write_text("inner\n", encoding="utf-8")
+    git(inner, "add", "-A")
+    git(inner, *GIT_ID, "commit", "-qm", "init")
+    linked = tmp_path / "linked"
+    git(inner, "worktree", "add", "--quiet", str(linked), "-b", "wt")
+    return outer, area, linked
+
+
+def make_outer_root_git_dir_linked_worktree(tmp_path):
+    """Case A: the separate git dir sits DIRECTLY under the outer repo's root.
+
+    Here the computed root `<outer>` IS a worktree toplevel, so the
+    toplevel-equality guard alone accepts it. Only the common-dir equality
+    (`<outer>` exposes `<outer>/.git`, not the inner repo's git dir) rejects it.
+    """
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(outer)], check=True)
+    (outer / "README.md").write_text("outer\n", encoding="utf-8")
+    git(outer, "add", "-A")
+    git(outer, *GIT_ID, "commit", "-qm", "init")
+
+    inner = tmp_path / "inner"
+    subprocess.run(
+        [
+            "git", "init", "--quiet", "--separate-git-dir",
+            str(outer / "gitdir-inner"), str(inner),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (inner / "README.md").write_text("inner\n", encoding="utf-8")
+    git(inner, "add", "-A")
+    git(inner, *GIT_ID, "commit", "-qm", "init")
+    linked = tmp_path / "linked"
+    git(inner, "worktree", "add", "--quiet", str(linked), "-b", "wt")
+    return outer, linked
+
+
+def make_template_less_repo(tmp_path):
+    """A repo initialised with an EMPTY template, so `.git/info/` is absent."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", "--template=", str(repo)], check=True)
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, *GIT_ID, "commit", "-qm", "init")
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "marker").write_text("venv\n", encoding="utf-8")
+    worktree = repo / ".worktrees" / BRANCH
+    git(repo, "worktree", "add", "--quiet", str(worktree), "-b", BRANCH)
+    return repo, worktree
 
 
 def run_fence(fence, repo, pwd=None):
@@ -461,12 +558,16 @@ class TestBranchIsInertText:
         self, isolated_git_config, tmp_path
     ):
         repo, _ = make_repo(tmp_path)
-        branch = "wt$(touch /tmp/rejected)"
+        marker = tmp_path / "PWNED"
+        branch = f"wt$(touch {marker})"
         done = run_fence(
             fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch=branch), repo
         )
         assert "Venv link: skipped (invalid branch name)" in done.stdout, (
             f"the invalid name was not rejected: {done.stdout.strip()!r}"
+        )
+        assert not marker.exists(), (
+            "the invalid-name path still evaluated the payload as shell code"
         )
         assert not os.path.lexists(repo / ".worktrees" / branch / ".venv")
 
@@ -903,6 +1004,130 @@ class TestRootResolutionOutsideASimpleCheckout:
             checkout,
             git_dir.parent / ".worktrees",
         )
+
+
+class TestOuterRepoRootIsRejected:
+    """A separate git dir inside ANOTHER repo must not donate that repo as root.
+
+    The pre-cycle-8 guard asked only "is the computed root inside a work
+    tree?", which is true for `<outer>/area`. The equality guard asks whether
+    the computed root IS a worktree toplevel, and stops before writing.
+    """
+
+    def test_step_2_stops_and_writes_nothing_to_the_outer_repo(
+        self, isolated_git_config, tmp_path
+    ):
+        outer, area, linked = make_outer_repo_linked_worktree(tmp_path)
+        done = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), linked
+        )
+        assert done.returncode != 0, (
+            f"the guard did not stop Step 2: {done.stdout.strip()!r}"
+        )
+        assert "Cannot determine the main checkout root (computed " in done.stdout, (
+            f"the stop message is missing: {done.stdout.strip()!r}"
+        )
+        assert str(area) in done.stdout, (
+            "the stop message does not name the computed root"
+        )
+        assert not os.path.lexists(area / ".worktrees"), (
+            "Step 2 created .worktrees inside the outer repository"
+        )
+        ignore = area / ".gitignore"
+        assert not ignore.exists() or ".worktrees" not in ignore.read_text(
+            encoding="utf-8"
+        ), "Step 2 wrote a .worktrees rule into the outer repository"
+
+    def test_step_4_skips_with_the_documented_message(
+        self, isolated_git_config, tmp_path
+    ):
+        outer, area, linked = make_outer_repo_linked_worktree(tmp_path)
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), linked)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "Venv link: skipped (cannot determine the main checkout root)" in done.stdout
+        assert not os.path.lexists(area / ".worktrees")
+
+    def test_direct_under_root_placement_is_rejected(self, isolated_git_config, tmp_path):
+        """Case A: `<outer>` is itself a toplevel, so ONLY the common-dir
+        equality can reject it. Without that condition the outer repo is
+        written to; with it, both steps stop."""
+        outer, linked = make_outer_root_git_dir_linked_worktree(tmp_path)
+        step2 = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), linked
+        )
+        assert step2.returncode != 0, (
+            f"Step 2 used the outer repo as the root: {step2.stdout.strip()!r}"
+        )
+        assert str(outer) in step2.stdout, (
+            "the stop message does not name the computed root"
+        )
+        assert not os.path.lexists(outer / ".worktrees"), (
+            "Step 2 created .worktrees in the outer repository"
+        )
+        ignore = outer / ".gitignore"
+        assert not ignore.exists() or ".worktrees" not in ignore.read_text(
+            encoding="utf-8"
+        ), "Step 2 wrote a .worktrees rule into the outer repository"
+
+        step4 = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), linked)
+        assert "Venv link: skipped (cannot determine the main checkout root)" in step4.stdout
+        assert not os.path.lexists(outer / ".worktrees")
+
+
+class TestCleanupBranchIsInertText:
+    """Cleanup Step 2 is the OTHER older injection site.
+
+    It hands the branch to `git worktree remove`. A legal ref carrying a
+    `$(...)` payload must be removed by its LITERAL name, with no execution —
+    the worktree is gone and the marker is not.
+    """
+
+    def test_hostile_ref_is_removed_literally_without_executing(
+        self, isolated_git_config, tmp_path
+    ):
+        marker = tmp_path / "PWNED"
+        branch = f"wt$(touch$IFS{marker})"
+        repo, worktree = make_repo(tmp_path, branch=branch)
+        assert (worktree / ".git").is_file()
+
+        done = run_fence(
+            cleanup_remove_fence(
+                CLEANUP_SKILL_FILE.read_text(encoding="utf-8"), branch=branch
+            ),
+            repo,
+        )
+        assert not marker.exists(), (
+            "the cleanup fence evaluated the branch as shell code — the "
+            f"substitution created {marker}"
+        )
+        assert done.returncode == 0, f"cleanup failed: {done.stderr.strip()}"
+        assert not os.path.lexists(worktree), (
+            "the literal worktree was not removed"
+        )
+        listed = git(repo, "worktree", "list", "--porcelain").stdout
+        assert str(worktree) not in listed
+
+
+class TestTemplateLessRepo:
+    """`git init --template=` leaves no `.git/info/`; the fence must create it.
+
+    Without the parent directory the exclude write fails, so the fence warns
+    and skips the link — a template-less checkout would never get a venv.
+    """
+
+    def test_exclude_parent_is_created_and_the_link_is_made(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_template_less_repo(tmp_path)
+        assert not (repo / ".git" / "info").exists()
+
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "Venv link: .venv -> " in done.stdout
+        assert (worktree / ".venv").is_symlink()
+        exclude = repo / ".git" / "info" / "exclude"
+        assert exclude.is_file(), "the fence did not create .git/info/exclude"
+        assert "/.venv" in exclude.read_text(encoding="utf-8")
 
 
 class TestInvocationLocus:

@@ -28,7 +28,7 @@ Or trigger it via `/PACT:orchestrate` or `/PACT:comPACT`, which invoke worktree 
 
 **What happens**: The worktree-setup skill follows its process:
 1. Checks for existing worktree (`git worktree list`)
-2. Resolves the main repo root via `git rev-parse --git-common-dir`
+2. Resolves the main checkout root from `--git-dir` and `--git-common-dir`, and stops when the result is not a checkout
 3. Creates `.worktrees/` directory if needed
 4. Ensures `.worktrees/` is in `.gitignore`
 5. Creates the worktree with `git worktree add`
@@ -220,6 +220,7 @@ Executed in a worktree created by the updated setup skill, on a checkout whose m
 - `.venv` in the worktree: symlink to the main checkout's `.venv`
 - `pyright pact-plugin/tests/test_peer_review_cold_lane_pin.py` from the worktree root: `0 errors, 0 warnings, 0 informations` (exit 0)
 - `cd pact-plugin && pyright tests/test_peer_review_cold_lane_pin.py`: `0 errors, 0 warnings, 0 informations` (exit 0)
-- `git check-ignore -v .venv` in the worktree: `.git/info/exclude:18:.venv	.venv` (exit 0); `git status --porcelain` lists no `.venv` entry
-- Control — the same command after removing the `info/exclude` line: `git check-ignore -v .venv` matches nothing (exit 1) and `git status --porcelain` shows `?? .venv`
+- `git check-ignore -v .venv` in the worktree against the shipped fence: `.git/info/exclude:19:/.venv	.venv` (exit 0); `git status --porcelain` lists no `.venv` entry
+- Control — after removing the `/.venv` line from `info/exclude`, `git check-ignore -v .venv` matches nothing (exit 1); `git check-ignore -v sub/.venv` also matches nothing (exit 1), so the rule is anchored to the root entry
+- Superseded earlier run (unanchored rule): `git check-ignore -v .venv` returned `.git/info/exclude:18:.venv	.venv`
 - Negative arm — a checkout with the `venvPath`/`venv` config but NO link, so no `.venv` directory exists: pyright writes `venv .venv subdirectory not found in venv path <dir>.` to stderr and continues with the interpreter on `PATH`. With `python3` resolving to `/home/ubuntu/projects/collab/PACT-prompt/.venv/bin/python3` (pytest 9.2.0) first on `PATH`: `0 errors, 0 warnings, 0 informations` (exit 0), so the config is safe for a venv-less checkout. Control with the default `PATH` interpreter (no pytest): `Import "pytest" could not be resolved (reportMissingImports)`, `1 error, 0 warnings, 0 informations` (exit 1) — that error came from the interpreter, not the config.
