@@ -99,6 +99,13 @@ WARM_ON_FRESHNESS = re.compile(
 # same sentence as the freshness claim, not merely in the paragraph. Phrase
 # and claim are separate patterns so a missing one is diagnosed as itself.
 FRESH_DISPATCH_PHRASE = re.compile(r"\bfresh\s+review[-\s]+dispatch\b")
+# The scope phrase DEFINES its rounds: the initial review and any later full
+# review round. Deleting that definition, or narrowing it to the initial
+# review alone, leaves 'fresh review dispatch' present but undefined.
+FRESH_DISPATCH_DEFINITION = re.compile(
+    r"\bthe initial review\b[^.;]{0,60}\bany later\b[^.;]{0,20}\breview round\b"
+    r"|\bany later\b[^.;]{0,20}\breview round\b[^.;]{0,60}\bthe initial review\b"
+)
 # The claim's subject may be a generic universal ('a warm reviewer', 'every
 # warm reviewer', 'all warm reviewers'); the bare noun phrase is accepted too.
 FRESHNESS_ON_WARM_SUBJECT = re.compile(
@@ -153,6 +160,15 @@ NEGATION_GOVERNS_PERSON_REUSE = re.compile(
     r"|\b(?:never|not)\b[^.;,]{0,80}\breus\w*[^.;,]{0,80}"
     r"\b(?:teammate|specialist|builder|reviewer)\b"
 )
+# The bar is scoped to THIS SESSION: the conflict is reuse from an EARLIER
+# phase of this session. Binding only the person accepts 'an earlier session'
+# (a different scope) and a bar stripped of its scope entirely.
+SESSION_SCOPE_ON_REUSE = re.compile(
+    r"\breus\w*\b[^.;]{0,80}\b(?:earlier|prior|previous)\b[^.;]{0,40}"
+    r"\bthis\s+session\b"
+    r"|\breus\w*\b[^.;]{0,80}\bthis\s+session\b[^.;]{0,40}"
+    r"\b(?:earlier|prior|previous)\b"
+)
 # The continuation carve-out is a SCOPE clarification: continuing a reviewer
 # this round already dispatched is NOT the reuse the rule forbids. Bind the
 # marker, the dispatch state, and the negated reuse in one sentence, so
@@ -191,6 +207,12 @@ PRESENT_AND_READABLE = re.compile(
 REFUSAL_ON_LIVE_NAME = re.compile(
     r"\brefus(?:e|es|ed|ing)\b[^.;]{0,60}\bname\b"
     r"|\bname\b[^.;]{0,60}\brefus(?:e|es|ed|ing)\b"
+)
+# The refusal is a NAMING RULE, not advice. 'guidance' or a deleted claim
+# turns the hard gate into a suggestion while every other token survives.
+NAMING_RULE_CLAIM = re.compile(
+    r"\bthat refusal is a naming rule\b"
+    r"|\brefus\w*\b[^.;]{0,40}\b(?:is|as)\s+(?:a\s+)?naming rule\b"
 )
 
 
@@ -382,6 +404,11 @@ def test_negation_is_bound_to_reuse():
         "PERSON — 'Continuing a warm reviewer … is not reuse' is a scope "
         "clarification and must not stand in for the bar"
     )
+    assert SESSION_SCOPE_ON_REUSE.search(clause), (
+        "the freshness clause no longer scopes the reuse bar to THIS "
+        "SESSION's earlier phase — 'an earlier session' or a scope-stripped "
+        "bar changes which teammates the rule forbids"
+    )
 
 
 def test_negation_is_bound_to_retasking():
@@ -512,6 +539,11 @@ def test_fresh_dispatch_scope_is_bound_to_the_freshness_claim():
         "claim — the phrase must scope the claim, not merely appear in the "
         "paragraph"
     )
+    assert FRESH_DISPATCH_DEFINITION.search(between), (
+        "the fresh-dispatch scope no longer DEFINES its rounds — 'the "
+        "initial review or any later full review round' was deleted or "
+        "narrowed, so the absolute is scoped to an undefined population"
+    )
 
 
 def test_gate_refusal_keeps_its_config_precondition():
@@ -538,6 +570,11 @@ def test_gate_refusal_keeps_its_config_precondition():
         "the 'present and readable' precondition is no longer in the same "
         "sentence as the refusal it qualifies — the reader cannot bind the "
         "fails-open caveat to the claim"
+    )
+    assert NAMING_RULE_CLAIM.search(clause), (
+        "the freshness clause no longer says the duplicate-name refusal is a "
+        "NAMING RULE — 'guidance' or a deleted claim turns a hard gate into "
+        "a suggestion while the refusal sentence survives"
     )
 
 
@@ -676,6 +713,11 @@ def test_persona_has_one_review_dispatch_row():
         f"PERSON — 'Continuing a reviewer … is not reuse' must not stand in "
         f"for the bar: {row!r}"
     )
+    assert SESSION_SCOPE_ON_REUSE.search(action), (
+        f"the review-dispatch row no longer scopes its reuse bar to THIS "
+        f"SESSION's earlier phase — 'an earlier session' or a scope-stripped "
+        f"bar changes which teammates the row forbids: {row!r}"
+    )
     assert WARM_ON_FRESHNESS.search(action), (
         f"the review-dispatch row no longer scopes its freshness claim to "
         f"WARM reviewers — a bare 'Spawn the reviewer fresh' also covers the "
@@ -690,10 +732,12 @@ def test_persona_has_one_review_dispatch_row():
         f"that need not be distinct' keeps the token and drops the lever: "
         f"{row!r}"
     )
-    assert "verify-only" in action and "fixer" in action, (
-        f"the review-dispatch row no longer names its permitted reuse cases "
-        f"('verify-only' and 'fixer') — without them the row reads as an "
-        f"absolute ban while peer-review.md still reuses the reviewer: {row!r}"
+    assert (_carveout_is_positive(action, "verify-only")
+            and _carveout_is_positive(action, "fixer")), (
+        f"the review-dispatch row lost its POSITIVE permitted-reuse cases — "
+        f"a bare token from the pointer ('see Verify-Only Re-Review') or "
+        f"'does not reuse that reviewer' keeps the words and drops the "
+        f"carve-out: {row!r}"
     )
     assert EXCLUSIVITY_NEAR_REUSE.search(action), (
         f"the review-dispatch row permits reuse without an exclusivity word "

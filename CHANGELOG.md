@@ -22,13 +22,14 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-A warm reviewer is now stated to be a freshly spawned teammate, never one reused from an earlier phase of the session. The rule sits where the dispatch decision is made, and the surfaces that pushed a lead toward reuse now name the exception.
+A warm reviewer for a fresh review dispatch is now stated to be a freshly spawned teammate, never one reused from an earlier phase of the session. The rule defines its own scope — the initial review or any later full review round — and treats continuing a reviewer this round already dispatched as not reuse. It sits where the dispatch decision is made, and the surfaces that pushed a lead toward reuse now name the exception.
 
 ### What landed
 
-- The freshness rule as the first paragraph of the warm dispatch section in `/PACT:peer-review`, with the distinct-name mechanism, the dispatch gate's refusal framed as a naming rule, and a pointer to the agent-memory channel a fresh spawn does not close.
-- A review-dispatch row in the orchestrator persona's Reuse vs. Spawn table, ahead of the generic idle-agent row, plus a scoped default, the Agent Shutdown Guidance exception, and the PR Review Workflow line.
-- The duplicate-name refusal in the dispatch gate now says a fresh review dispatch spawns the reviewer under a distinct new name rather than re-tasking the existing teammate, and names both permitted reuse paths (verify-only re-review and reviewer-to-fixer work).
+- The freshness rule as the first paragraph of the warm dispatch section in `/PACT:peer-review`. It scopes itself to a fresh review dispatch — the initial review or any later full review round — and states that continuing a reviewer this round already dispatched, whether a revision after a rejected HANDOFF, an `/PACT:imPACT` re-dispatch, or a resume, is not reuse. It carries the distinct-name mechanism, the dispatch gate's refusal framed as a naming rule, and a pointer to the agent-memory channel a fresh spawn does not close.
+- A review-dispatch row in the orchestrator persona's Reuse vs. Spawn table, ahead of the generic idle-agent row, with the same continuation carve-out; plus a scoped default, the Agent Shutdown Guidance exception, and the PR Review Workflow line.
+- The verify-only re-review table now says the full-review column's reviewers are each freshly spawned under a distinct `name=`, and the cold-lane lead-in runs the cold lane in a later full review round as well as the initial review and each verify-only re-review.
+- The duplicate-name refusal in the dispatch gate now tells a fresh review dispatch to create the new name's Task A (teachback) and Task B (work) before spawning the reviewer under that distinct name rather than re-tasking the existing teammate, and names both permitted reuse paths (verify-only re-review and reviewer-to-fixer work).
 - A structural pin covering the rule, its extraction boundary, and the persona surfaces.
 
 ### Why
