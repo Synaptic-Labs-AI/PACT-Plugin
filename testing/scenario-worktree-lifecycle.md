@@ -191,7 +191,7 @@ git worktree list  # Stale entry removed
 | Branch created | `git branch` | Feature branch exists |
 | .worktrees/ gitignored | `grep '.worktrees' .gitignore` | Entry present |
 | Repo venv linked | `test -L .worktrees/{branch}/.venv` | Symlink points at `{REPO_ROOT}/.venv`; skipped when the main checkout has no `.venv` |
-| Venv link ignored as a symlink | `git -C .worktrees/{branch} check-ignore -v .venv` and `git -C .worktrees/{branch} status --porcelain` | `check-ignore` reports the `info/exclude` `.venv` rule (no trailing slash); `status` lists no `.venv` entry |
+| Venv link ignored as a symlink | `git -C .worktrees/{branch} check-ignore -v .venv` and `git -C .worktrees/{branch} status --porcelain` | `check-ignore` reports the `info/exclude` `/.venv` rule (no trailing slash); `status` lists no `.venv` entry |
 | Filesystem isolation | File created in worktree not visible in main | `ls` in main directory fails for worktree-only files |
 | Worktree reuse | Second setup call for same branch | "Reusing existing worktree" message |
 | Cleanup removes directory | `ls .worktrees/{branch}` after cleanup | Directory does not exist |
@@ -209,7 +209,7 @@ git worktree list  # Stale entry removed
 | Branch not deleted | Branch persists after worktree removal | `git branch -d` failed because branch is not merged; user must choose force delete |
 | Worktree create fails | "fatal: '{branch}' is already checked out" | Branch exists in another worktree; the setup skill should detect this via `git worktree list` |
 | Plan files lost on cleanup | `docs/plans/` content created in worktree was not committed | Key lesson: always commit plan files before removing worktrees. Plan-mode creates files that are not auto-committed. |
-| Unignored `.venv` symlink | `git worktree remove` refuses with "contains modified or untracked files" (exit 128); `git status --porcelain` shows `?? .venv` | The slash-free `.venv` rule is missing from `info/exclude`, or the link is tracked. Re-run worktree setup to write the rule; do not use `--force` to work around it |
+| Unignored `.venv` symlink | `git worktree remove` refuses with "contains modified or untracked files" (exit 128); `git status --porcelain` shows `?? .venv` | The slash-free `/.venv` rule is missing from `info/exclude`, or the link is tracked. Re-run worktree setup to write the rule; do not use `--force` to work around it |
 | No `.venv` in the main checkout | Step 4 prints `Venv link: skipped (no .venv at $REPO_ROOT/.venv)` | Expected for non-Python repos; setup continues |
 
 ## Recorded Probe
