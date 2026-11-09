@@ -4330,6 +4330,70 @@ class TestApiSync:
         assert memory.last_sync_status == "failed"
 
 
+class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
+    """`sync` and `status` must agree about an adopted-but-unusable id.
+
+    The constructor ADOPTS a detected id as found so a read never fails on a
+    value only a write binds; `get_status` folds an unusable one to None.
+    The sync envelope echoed the raw attribute, so a C0/surrogate id that no
+    row can carry appeared as this session's project while `status` reported
+    None for the same session.
+    """
+
+    @staticmethod
+    def _detect(monkeypatch, value):
+        from scripts.memory_api import PACTMemory
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (value, "cwd")),
+        )
+
+    def test_an_unusable_detected_id_is_null_and_matches_status(
+        self, cli_db, monkeypatch, capsys
+    ):
+        from scripts.cli import main
+
+        self._detect(monkeypatch, "bad" + chr(0xDCFF) + "id")
+
+        # The unusable scope returns before any store work, so this arm reads
+        # the envelope, not the sync machinery.
+        with pytest.raises(SystemExit) as sync_exit:
+            main(["sync", "--db-path", str(cli_db)])
+        assert sync_exit.value.code == 0, sync_exit.value.code
+        sync_env = json.loads(capsys.readouterr().out)["result"]
+        assert sync_env["project_id"] is None, sync_env
+        assert sync_env["sync_status"] == "empty", sync_env
+
+        with patch("scripts.memory_api._ensure_ready"):
+            with pytest.raises(SystemExit) as status_exit:
+                main(["status", "--db-path", str(cli_db)])
+        assert status_exit.value.code == 0, status_exit.value.code
+        status_env = json.loads(capsys.readouterr().out)["result"]
+        assert status_env["project_id"] is None, status_env
+
+    def test_a_clean_detected_id_is_still_reported(
+        self, cli_db, monkeypatch, capsys
+    ):
+        from scripts.cli import main
+        from scripts.working_memory import SyncResult
+
+        self._detect(monkeypatch, "clean-project")
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch(
+                 "scripts.memory_api.project_memories_to_claude_md",
+                 return_value=SyncResult(SyncResult.EMPTY),
+             ):
+            with pytest.raises(SystemExit) as sync_exit:
+                main(["sync", "--db-path", str(cli_db)])
+        assert sync_exit.value.code == 0, sync_exit.value.code
+        env = json.loads(capsys.readouterr().out)["result"]
+        assert env["project_id"] == "clean-project", env
+
+
 # ---------------------------------------------------------------------------
 # The envelope escapes caller input, and the update boundary refuses null
 # ---------------------------------------------------------------------------

@@ -882,7 +882,13 @@ def cmd_sync(args, db_path=None):
         "sync_status": memory.last_sync_status,
         "projected": len(memory_ids),
         "memory_ids": memory_ids,
-        "project_id": memory.project_id,
+        # THE EFFECTIVE SCOPE, NOT THE RAW ATTRIBUTE. The constructor ADOPTS
+        # a detected id as found so a read never fails on a value only a
+        # write binds; `_project_scope()` folds an unusable one to None, and
+        # that is exactly what `get_status` reports for the same session.
+        # Echoing `memory.project_id` put a value in this envelope that no
+        # row can carry and that disagreed with `status`.
+        "project_id": memory._project_scope(),
     })
 
 

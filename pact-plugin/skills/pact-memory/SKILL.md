@@ -252,9 +252,13 @@ and noncharacters, is accepted by design; the residual is display
 spoofing only.
 
 A `project_id` or `session_id` DETECTED from the environment or the session
-context is held to the same rule: an unusable detected value is refused
-before any store work, and the message names the detection source. Supply a
-usable value in the payload when the detected one is at fault.
+context is held to the same rule, and the outcome depends on the operation. A
+write that would bind the value is refused at that point, and the message
+names its detection source. A read treats an unusable detected `project_id`
+as an unresolvable identity: `search`, `search_by_file`, `list` and `sync`
+return empty results, `status` returns zeroed counts, and a prefix is refused
+exactly as when no identity resolves. A full 32-character ID still resolves.
+Supply a usable value in the payload when the detected one is at fault.
 
 When no project identity resolves, `list`, `search`, and `search_by_file`
 return empty results, and `status` reports zero project-scoped counts. These
