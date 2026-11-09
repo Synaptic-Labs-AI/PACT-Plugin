@@ -234,7 +234,7 @@ def exclude_venv_lines(worktree):
     path = exclude_path(worktree)
     if not path.is_file():
         return []
-    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln == ".venv"]
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln == "/.venv"]
 
 
 def porcelain(worktree):
@@ -248,19 +248,24 @@ def is_tracked(worktree):
     )
 
 
+def check_ignore_path(worktree, path):
+    """Diagnostic only: `--no-index` so a tracked path still names the rule."""
+    return git(worktree, "check-ignore", "-v", "--no-index", path, check=False)
+
+
 def check_ignore(worktree):
-    """Diagnostic only: `--no-index` so a tracked link still names the rule."""
-    return git(worktree, "check-ignore", "-v", "--no-index", ".venv", check=False)
+    return check_ignore_path(worktree, ".venv")
 
 
 def link_state(fence, repo):
-    """The three properties the positive arms assert, for the mutation matrix."""
-    run_fence(fence, repo)
+    """The positive properties plus the unlink warning, for the mutation matrix."""
+    done = run_fence(fence, repo)
     worktree = repo / ".worktrees" / BRANCH
     return {
         "exists": (worktree / ".venv").is_symlink(),
         "clean": porcelain(worktree) == "",
         "not_tracked": not is_tracked(worktree),
+        "unlinked": "the link was removed" in done.stdout,
     }
 
 
@@ -273,10 +278,25 @@ class TestFenceContract:
     def test_step_4_has_exactly_one_bash_fence(self):
         fence_for(SKILL_FILE.read_text(encoding="utf-8"))
 
-    def test_substitution_addresses_the_branch_worktree(self):
+    def test_the_branch_arrives_as_data_through_one_quoted_heredoc(self):
+        """The branch is DATA. Exactly one QUOTED heredoc carries it, and it
+        reaches no expansion — the point is not that `$BRANCH` appears."""
         fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
-        assert f".worktrees/{BRANCH}" in fence
         assert "{branch}" not in fence
+        delimiters = re.findall(r"<<\s*'([A-Za-z_][A-Za-z0-9_]*)'", fence)
+        assert len(delimiters) == 1, (
+            f"expected exactly one QUOTED heredoc in Step 4; found {delimiters}. "
+            "An unquoted heredoc, or an inline assignment, makes the branch "
+            "shell code again."
+        )
+        delimiter = delimiters[0]
+        assert (
+            f"IFS= read -r BRANCH <<'{delimiter}'\n{BRANCH}\n{delimiter}" in fence
+        ), "the branch is not read through the quoted heredoc"
+        assert fence.count(BRANCH) == 1, (
+            f"the branch text appears {fence.count(BRANCH)} times; it must "
+            "appear only as the heredoc body, never inside an expansion"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +338,62 @@ class TestFenceCreatesAnIgnoredLink:
         )
 
 
+class TestBranchIsInertText:
+    """The branch name is DATA; a quoted heredoc keeps `$(...)` from running.
+
+    The previous fence substituted the branch into a double-quoted assignment,
+    where bash performs command substitution AS IT ASSIGNS. The marker file is
+    the observable: if it exists, the name was evaluated as shell code. The
+    benign arm runs beside it so this class cannot pass by breaking the link.
+    """
+
+    def test_ifs_payload_is_literal_data_and_never_executes(
+        self, isolated_git_config, tmp_path
+    ):
+        """`$IFS` avoids the space that `check-ref-format` would reject.
+
+        That matters: with a space the name is rejected for the wrong reason
+        and the arm never measures inertness. This payload PASSES name
+        validation, so the fence carries it through as a literal directory
+        name — and the marker must still be absent.
+        """
+        repo, _ = make_repo(tmp_path)
+        marker = tmp_path / "PWNED"
+        branch = f"wt$(touch$IFS{marker})"
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch=branch), repo
+        )
+        assert not marker.exists(), (
+            "the branch name was evaluated as shell code — a command "
+            f"substitution in it created {marker}"
+        )
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert branch in done.stdout, (
+            "the branch text did not survive as literal data in the report; "
+            f"stdout={done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(repo / ".worktrees" / branch / ".venv")
+
+    def test_an_invalid_branch_is_rejected_before_a_path_is_used(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, _ = make_repo(tmp_path)
+        branch = "wt$(touch /tmp/rejected)"
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch=branch), repo
+        )
+        assert "Venv link: skipped (invalid branch name)" in done.stdout, (
+            f"the invalid name was not rejected: {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(repo / ".worktrees" / branch / ".venv")
+
+    def test_a_benign_branch_still_gets_its_link(self, isolated_git_config, tmp_path):
+        repo, worktree = make_repo(tmp_path)
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert "Venv link: .venv -> " in done.stdout
+        assert (worktree / ".venv").is_symlink()
+
+
 # ---------------------------------------------------------------------------
 # Counter-arms: the assertions can fail, and the fence's rule is what works
 # ---------------------------------------------------------------------------
@@ -347,13 +423,44 @@ class TestCounterArms:
         repo, worktree = make_repo(tmp_path)
         run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
         path = exclude_path(worktree)
-        kept = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln != ".venv"]
+        kept = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln != "/.venv"]
         path.write_text("\n".join(kept) + "\n", encoding="utf-8")
         assert porcelain(worktree) == "?? .venv", (
             "removing the fence's info/exclude line left the tree clean, so "
             "something other than that line is ignoring the link and the "
             "positive arms prove less than they claim"
         )
+
+
+class TestAnchoredRule:
+    """The shipped rule is `/.venv`: the repo-root entry and nothing deeper.
+
+    An unanchored rule also matches `sub/.venv`, where the fence never creates
+    a link; the nesting behaviour is the property, not the spelling.
+    """
+
+    def test_root_level_venv_is_ignored(self, isolated_git_config, tmp_path):
+        repo, worktree = make_repo(tmp_path)
+        run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert check_ignore_path(worktree, ".venv").returncode == 0
+        assert porcelain(worktree) == ""
+
+    def test_nested_venv_is_not_matched_by_the_rule(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        sub = worktree / "sub"
+        sub.mkdir()
+        (sub / ".venv").symlink_to(repo / ".venv", target_is_directory=True)
+        report = check_ignore_path(worktree, "sub/.venv")
+        assert report.returncode == 1, (
+            "the rule matched a nested .venv, so it is not anchored to the "
+            f"repo root. check-ignore: {report.stdout.strip()}"
+        )
+        # Git collapses an untracked directory to `?? sub/`; either spelling
+        # proves the nested entry is visible to git rather than ignored.
+        assert "?? sub" in porcelain(worktree)
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +504,7 @@ class TestExcludeNewlineGuard:
         assert "keep-me" in lines, (
             f"the existing final line was destroyed by the append: {lines!r}"
         )
-        assert lines[-1] == ".venv", f"the rule is not on its own line: {lines!r}"
+        assert lines[-1] == "/.venv", f"the rule is not on its own line: {lines!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -497,11 +604,50 @@ class TestSymlinkedRootIsAValidWorktree:
         )
 
 
+class TestContainment:
+    """A worktree path that resolves outside `.worktrees/` is not ours.
+
+    A planted symlink there can point at another repository's real worktree
+    (its `.git` is a FILE, so the worktree guard passes). Resolution is what
+    catches it: the physical path must still sit under `$REPO_ROOT/.worktrees`.
+    The branch name is check-ref-format-valid, so this measures containment
+    rather than name validation.
+    """
+
+    def test_a_branch_resolving_outside_worktrees_is_skipped(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, _ = make_repo(tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(other)], check=True)
+        (other / "README.md").write_text("other\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, *GIT_ID, "commit", "-qm", "init")
+        other_wt = tmp_path / "other-wt"
+        git(other, "worktree", "add", "--quiet", str(other_wt), "-b", "other-branch")
+
+        evil = repo / ".worktrees" / "evil"
+        evil.symlink_to(other_wt, target_is_directory=True)
+        assert (evil / ".git").is_file(), "the planted path is not a real worktree"
+
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="evil"), repo
+        )
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "Venv link: skipped (worktree path is not under .worktrees/)" in done.stdout, (
+            f"containment did not fire; stdout={done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(other_wt / ".venv"), (
+            "a link was created in another repository's worktree"
+        )
+
+
 class TestNoVenvInMainCheckout:
     def test_skips_without_a_link_or_a_rule(self, isolated_git_config, tmp_path):
         repo, worktree = make_repo(tmp_path, with_venv=False)
         done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
-        assert "Venv link: skipped (no .venv in the main checkout)" in done.stdout
+        assert "Venv link: skipped (no .venv at " in done.stdout
         # lexists, not exists: a dangling symlink would read as absent to
         # `exists()` and this arm would then pass over the bug it names.
         assert not os.path.lexists(worktree / ".venv")
@@ -553,6 +699,30 @@ class TestTrackedLinkIsReported:
             "the check-ignore warning did not fire for a tracked link: deleting "
             f"that line would leave this state silently 'clean'. stdout={done.stdout.strip()!r}"
         )
+
+
+class TestUnlinkWhenNotIgnored:
+    """A tracked `!.venv` negation outranks `info/exclude`.
+
+    The fence creates the link, discovers it is NOT ignored, and must remove
+    the link IT created. Leaving an unignored symlink behind is the exact harm
+    the ignore rule exists to prevent, so the link's absence — and a clean
+    porcelain tree — are the assertions.
+    """
+
+    def test_the_created_link_is_removed_and_warned_about(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path, gitignore=".worktrees/\n!.venv\n")
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert not os.path.lexists(worktree / ".venv"), (
+            "the fence left an unignored .venv symlink behind; git add -A could "
+            "commit it and worktree removal would refuse without --force"
+        )
+        assert "the link was removed" in done.stdout, (
+            f"expected the unlink warning; got {done.stdout.strip()!r}"
+        )
+        assert porcelain(worktree) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +849,7 @@ class TestPyrightConfigPointsAtTheReposVenv:
 # ---------------------------------------------------------------------------
 
 _LINK_COMMAND = 'ln -s "$REPO_ROOT/.venv" "$WORKTREE/.venv"'
-_RULE_LITERAL = "'.venv'"
+_RULE_LITERAL = "'/.venv'"
 
 
 class TestMutationDiscrimination:
@@ -687,6 +857,11 @@ class TestMutationDiscrimination:
 
     Each mutation must apply, or the arm would pass over a reword it no longer
     matches. The expected matrices are the docstring's claim, measured.
+
+    THE TRAILING-SLASH REVERT IS NOW SELF-HEALING: the fence creates the link,
+    finds it NOT ignored, and removes it. So that mutation no longer leaves a
+    dirty tree — it leaves NO link plus the unlink warning, which is how the
+    matrix distinguishes it from a dropped link step.
     """
 
     @staticmethod
@@ -704,6 +879,7 @@ class TestMutationDiscrimination:
             "exists": True,
             "clean": True,
             "not_tracked": True,
+            "unlinked": False,
         }
 
     def test_dropped_link_reds_only_the_existence_arm(
@@ -712,18 +888,35 @@ class TestMutationDiscrimination:
         fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
         repo, _ = make_repo(tmp_path)
         state = link_state(self._mutate(fence, _LINK_COMMAND, "false"), repo)
-        assert state == {"exists": False, "clean": True, "not_tracked": True}, (
-            "a dropped link step must red the existence arm ONLY; if porcelain "
-            f"also reds the matrix in the docstring is wrong: {state}"
+        assert state == {
+            "exists": False,
+            "clean": True,
+            "not_tracked": True,
+            "unlinked": False,
+        }, (
+            "a dropped link step must red the existence arm ONLY; a dirty tree "
+            f"or an unlink warning here would mean the matrix is wrong: {state}"
         )
 
-    def test_trailing_slash_revert_reds_only_the_cleanliness_arm(
+    def test_trailing_slash_revert_creates_then_removes_the_link(
         self, isolated_git_config, tmp_path
     ):
+        """Under the anchored rule, `.venv/` means the link is not ignored.
+
+        The fence creates it, discovers that, and removes it. The subject is
+        the create-then-remove sequence and the removal warning — NOT a
+        surviving dirty tree, which the older expectation wrongly asserted.
+        """
         fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
-        repo, _ = make_repo(tmp_path)
-        state = link_state(self._mutate(fence, _RULE_LITERAL, "'.venv/'"), repo)
-        assert state == {"exists": True, "clean": False, "not_tracked": True}, (
-            "a `.venv/` revert must red the cleanliness arm ONLY; if existence "
-            f"or tracking also reds the docstring matrix is wrong: {state}"
+        repo, worktree = make_repo(tmp_path)
+        done = run_fence(self._mutate(fence, _RULE_LITERAL, "'.venv/'"), repo)
+        assert "Venv link: .venv -> " in done.stdout, (
+            f"the link was not created before the ignore check: {done.stdout.strip()!r}"
         )
+        assert "the link was removed" in done.stdout, (
+            f"the unlink warning did not fire: {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(worktree / ".venv"), (
+            "an unignored symlink was left behind"
+        )
+        assert porcelain(worktree) == ""
