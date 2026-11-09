@@ -535,9 +535,12 @@ def _project_scope_envelope(project_scope: dict | None) -> dict | None:
 
 
 def _scope_disagreement_message(exc: BaseException) -> str:
-    """The refusal message as RENDERED: identity values made inert.
+    """A scope-refusal message as RENDERED: its values made inert.
 
-    The exception carries them RAW for programmatic callers (see
+    Used by BOTH refusal arms — an env/record disagreement and an unresolved
+    identity — so every rendered CLI message follows one escaping discipline
+    and a marker-shaped sequence in the output was produced by the escaper.
+    The exception carries the values RAW for programmatic callers (see
     `format_project_dir_disagreement`); this is where they become display
     markers, matching how `DB_PATH_NOT_FOUND` renders its path.
     """
@@ -590,7 +593,9 @@ def cmd_save(args, db_path=None):
             save_kwargs["claude_md_root"] = Path(claude_md_root)
         memory_id = memory.save(memory_dict, **save_kwargs)
     except ProjectIdentityUnresolvedError as exc:
-        _error("PROJECT_IDENTITY_UNRESOLVED", _scrub(str(exc)))
+        # THE SAME RENDERER as the disagreement arm below: one escaping
+        # discipline for every rendered refusal message.
+        _error("PROJECT_IDENTITY_UNRESOLVED", _scope_disagreement_message(exc))
     except ProjectScopeDisagreementError as exc:
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.

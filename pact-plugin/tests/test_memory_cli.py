@@ -4502,6 +4502,51 @@ class TestTheDiagnosticEnvelopesEscapeIdentityValues:
         raw = format_project_dir_disagreement(env_value, record_value)
         assert "\u202e" in raw, raw
 
+    
+    def test_the_unresolved_identity_message_uses_the_same_renderer(
+        self, cli_db, monkeypatch, capfd
+    ):
+        """One escaping discipline for every rendered refusal message.
+
+        `_unresolved_identity_message` renders a declaration with `!r`, so a
+        RAW bidi character is already textualised; the literal ASCII `<U+`
+        sequence is the case that survives repr, and the shared renderer
+        turns its `<` into `<U+003C>` here exactly as on the disagreement
+        arm — a marker-shaped sequence in the output was produced by the
+        escaper.
+        """
+        from scripts.cli import main
+        from scripts.memory_api import (
+            PACTMemory, ProjectIdentityUnresolvedError,
+        )
+
+        declared = "/tmp/declared-<U+202E>"
+        monkeypatch.setattr(
+            "scripts.memory_api.get_project_dir_from_session_record",
+            lambda: declared,
+        )
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        with pytest.raises(SystemExit) as exit_info:
+            main([
+                "save", json.dumps({"context": "X"}),
+                "--db-path", str(cli_db),
+            ])
+        assert exit_info.value.code == 1, exit_info.value.code
+        envelope = json.loads(capfd.readouterr().err)
+        assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED", envelope
+        message = envelope["message"]
+        assert "<U+003C>U+202E>" in message, message
+        assert "<U+202E>" not in message, message
+
+        # PROGRAMMATIC CONTROL: the exception text keeps the repr rendering.
+        memory = PACTMemory(db_path=cli_db)
+        with pytest.raises(ProjectIdentityUnresolvedError) as raised:
+            memory.save({"context": "X"}, sync_to_claude=False)
+        assert "<U+202E>" in str(raised.value)
 
 # ---------------------------------------------------------------------------
 # The envelope escapes caller input, and the update boundary refuses null
