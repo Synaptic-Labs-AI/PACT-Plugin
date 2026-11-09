@@ -381,6 +381,78 @@ class TestInitStateDoesNotLeakBetweenStores:
         )
 
 
+class TestAutouseResetIntegration:
+    """The autouse reset is a separate integration obligation from B's unit assertion."""
+
+    def test_a_observer_establishes_dirty_flag(self, monkeypatch):
+        _dirty_process_flag(monkeypatch)
+
+    def test_b_observer_relies_on_autouse_reset(self):
+        from scripts import memory_init
+
+        assert not memory_init.is_initialized(), (
+            "the autouse reset did not clear the dirty flag from the previous test. "
+            "This observer deliberately has no owner-level reset of its own."
+        )
+
+    def test_removing_autouse_reset_reddens_the_observer(self, tmp_path):
+        """Enabled pair passes; only the reset's removal makes the observer fail."""
+        child_test = tmp_path / "test_autouse_reset_observer.py"
+        child_test.write_text(
+            "import os\n"
+            "import sys\n"
+            "sys.path.insert(0, os.environ['PACT_AUTOUSE_SOURCE_ROOT'] + '/skills/pact-memory')\n"
+            "from scripts import memory_init\n\n"
+            "def test_a_observer_establishes_dirty_flag(monkeypatch):\n"
+            "    for name in ('check_and_install_dependencies', 'maybe_migrate_embeddings', 'maybe_embed_pending'):\n"
+            "        monkeypatch.setattr(memory_init, name, lambda *a, **k: {'status': 'ok', 'installed': [], 'failed': []})\n"
+            "    memory_init.ensure_memory_ready()\n"
+            "    assert memory_init.is_initialized()\n\n"
+            "def test_b_observer_relies_on_autouse_reset():\n"
+            "    assert not memory_init.is_initialized(), (\n"
+            "        'the autouse reset did not clear the dirty flag from the previous test. '\n"
+            "        'This observer deliberately has no owner-level reset of its own.'\n"
+            "    )\n",
+            encoding="utf-8",
+        )
+        enabled_conftest = (
+            "import pytest\n\n"
+            "@pytest.fixture(autouse=True)\n"
+            "def _reset_memory_init_state():\n"
+            "    from scripts.memory_init import reset_initialization\n"
+            "    reset_initialization()\n"
+        )
+        (tmp_path / "conftest.py").write_text(enabled_conftest, encoding="utf-8")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env["PACT_AUTOUSE_SOURCE_ROOT"] = str(Path(__file__).parent.parent)
+        for name in ("PYTEST_ADDOPTS", "GITHUB_ACTIONS", "GITHUB_WORKSPACE"):
+            env.pop(name, None)
+        for name in list(env):
+            if name.startswith("PYTEST_XDIST_"):
+                env.pop(name, None)
+
+        def run_pair():
+            return subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "-p", "no:randomly", "-p", "no:xdist",
+                 "test_autouse_reset_observer.py"],
+                cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
+            )
+
+        enabled = run_pair()
+        assert enabled.returncode == 0, enabled.stdout + enabled.stderr
+        (tmp_path / "conftest.py").write_text(
+            "import pytest\n\n"
+            "@pytest.fixture(autouse=True)\n"
+            "def _reset_memory_init_state():\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        disabled = run_pair()
+        assert disabled.returncode == 1, disabled.stdout + disabled.stderr
+        assert "test_b_observer_relies_on_autouse_reset" in disabled.stdout
+
+
 class TestEachIsolationLayerHasAWitness:
     """One test per isolation layer, because ONE TEST CANNOT COVER BOTH.
 
