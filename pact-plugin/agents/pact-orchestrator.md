@@ -458,7 +458,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 
 | Situation | Action |
 |-----------|--------|
-| Review dispatch — a reviewer for a PR or a diff | **Spawn fresh** under a distinct name — never the builder, and never a specialist reused from an earlier phase of this session. Reuse a warm reviewer only for verify-only re-review or reviewer-to-fixer work |
+| Review dispatch — a reviewer for a PR or a diff | **Spawn the warm reviewer fresh** under a distinct name — never the builder, and never a specialist reused from an earlier phase of this session. Reuse a warm reviewer only for verify-only re-review or reviewer-to-fixer work |
 | Idle agent has relevant context (same files/domain) | `SendMessage` to reassign |
 | Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |

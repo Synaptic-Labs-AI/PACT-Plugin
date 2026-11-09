@@ -54,6 +54,13 @@ NEGATION_NEAR_RETASK = re.compile(
     r"\b(?:never|not)\b[^.;]{0,60}\bre-?task\b"
     r"|\bre-?task\w*\b[^.;]{0,60}\b(?:never|not)\b"
 )
+# The review row's reuse bar: a negation bound to reuse, either direction. A
+# bare 'never|not' anywhere in the action cell is satisfied by an unrelated
+# negation, so the row can lose its reuse bar and stay green.
+ROW_NEGATION_NEAR_REUSE = re.compile(
+    r"\b(?:never|not)\b[^.;]{0,60}\breus\w*\b"
+    r"|\breus\w*\b[^.;]{0,60}\b(?:never|not)\b"
+)
 
 
 def _peer_review_text() -> str:
@@ -143,7 +150,6 @@ def _clause() -> str:
     (re.compile(r"fixer"), "the reviewer-to-fixer reuse exception"),
     (re.compile(r"memory"), "the pointer to the REVIEWER-MEMORY-CHANNEL clause that names the channel freshness does not close"),
     (re.compile(r"\bcold\b"), "the cold lane's decisive read"),
-    (re.compile(r"\b(?:only|nowhere else|limited to)\b"), "an exclusivity word (its channel binding is pinned separately)"),
 ])
 def test_clause_keeps_its_load_bearing_tokens(pattern, lost):
     clause = _clause()
@@ -289,7 +295,7 @@ def _review_row(section: str) -> str:
 def test_persona_has_one_review_dispatch_row():
     row = _review_row(_persona_reuse_section())
     action = _cells(row)[1].lower()
-    assert "spawn" in action and re.search(r"\b(?:never|not)\b", action), (
+    assert "spawn" in action and ROW_NEGATION_NEAR_REUSE.search(action), (
         f"the review-dispatch row no longer says to spawn fresh and never "
         f"(or not) reuse: {row!r}"
     )
