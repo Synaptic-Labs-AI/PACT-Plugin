@@ -100,7 +100,7 @@ Surface this to the user:
 Cannot remove worktree — uncommitted changes exist in .worktrees/{branch}.
 Options:
   1. Commit or stash changes first, then retry cleanup
-  2. Force removal: repeat the Step 2 block with `--force` added to `git worktree remove`
+  2. Force removal: repeat the Step 2 block with --force added to git worktree remove
      (This discards uncommitted changes permanently)
 ```
 
@@ -127,7 +127,7 @@ Surface this to the user:
 Cannot delete branch — '{branch}' is not fully merged.
 Options:
   1. Merge the branch first, then retry cleanup
-  2. Force delete: repeat the Step 3 block with `-D` instead of `-d`
+  2. Force delete: repeat the Step 3 block with -D instead of -d
      (This deletes the branch even if unmerged — changes may be lost)
 ```
 
