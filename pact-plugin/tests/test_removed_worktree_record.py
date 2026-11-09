@@ -2462,9 +2462,24 @@ class TestAnInterruptedCascadeIsFinishedByReissuing:
             PACTMemory, "_store_embedding",
             staticmethod(lambda conn, mid, memory: stores.append(mid) or None),
         )
+        # THE CASCADE ITSELF IS COUNTED, not only the store it calls. A
+        # cascade entered and doing nothing produces zero store calls too, so
+        # the zero below means "not entered", which is the claim.
+        cascades = []
+        real_cascade = PACTMemory._cascade_rekey
+
+        def _spy_cascade(self, conn, mid, target, *, vector_current):
+            cascades.append((mid, target, vector_current))
+            return real_cascade(
+                self, conn, mid, target, vector_current=vector_current
+            )
+
+        monkeypatch.setattr(PACTMemory, "_cascade_rekey", _spy_cascade)
+
         assert PACTMemory(
             project_id="projB", session_id="s", db_path=db_path
         ).update(memory_id, {"project_id": "projB"}) == memory_id
+        assert cascades == [], "a satisfied invariant still entered the cascade"
         assert stores == [], "a satisfied invariant still re-stored the vector"
         assert probes == ["files", "vector"], (
             "the third update never evaluated the invariant, so its zero "
