@@ -715,7 +715,11 @@ def cmd_get(args, db_path=None):
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
-            prefix=exc.prefix,
+            # Echoed caller input, escaped for the same reason as the message:
+            # a parsed envelope is printed by its reader. `exc.prefix` stays
+            # raw on the exception for programmatic callers; this field and
+            # the message are the rendering boundary.
+            prefix=escape_for_envelope(exc.prefix),
             matches=scrubbed_matches,
             matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
@@ -800,7 +804,11 @@ def cmd_update(args, db_path=None):
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
-            prefix=exc.prefix,
+            # Echoed caller input, escaped for the same reason as the message:
+            # a parsed envelope is printed by its reader. `exc.prefix` stays
+            # raw on the exception for programmatic callers; this field and
+            # the message are the rendering boundary.
+            prefix=escape_for_envelope(exc.prefix),
             matches=scrubbed_matches,
             matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
@@ -924,7 +932,11 @@ def cmd_delete(args, db_path=None):
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
-            prefix=exc.prefix,
+            # Echoed caller input, escaped for the same reason as the message:
+            # a parsed envelope is printed by its reader. `exc.prefix` stays
+            # raw on the exception for programmatic callers; this field and
+            # the message are the rendering boundary.
+            prefix=escape_for_envelope(exc.prefix),
             matches=scrubbed_matches,
             matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,

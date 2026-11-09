@@ -124,8 +124,15 @@ class AmbiguousPrefixError(LookupError):
         self.matches_capped = matches_capped
         self.total_matches = total_matches if total_matches is not None else len(matches)
         suffix = f" (showing {len(matches)} of {self.total_matches})" if matches_capped else ""
+        # THE MESSAGE IS A RENDERING SURFACE, so the echoed prefix is escaped
+        # there. `self.prefix` stays RAW above: a caller may use it
+        # programmatically, and the CLI is the boundary that renders. Reaching
+        # this branch needs a stored id that is not hex-generated (create
+        # honours a caller-supplied `id`), so the prefix can carry the same
+        # control/bidi characters the memory-id envelope rule covers.
         super().__init__(
-            f"Prefix '{prefix}' is ambiguous — {self.total_matches} memories match.{suffix}"
+            f"Prefix '{escape_for_envelope(prefix)}' is ambiguous — "
+            f"{self.total_matches} memories match.{suffix}"
         )
 
 
