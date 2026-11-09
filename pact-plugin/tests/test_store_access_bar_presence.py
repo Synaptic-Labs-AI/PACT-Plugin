@@ -104,11 +104,25 @@ Used by: pytest.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
+    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    )
+    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
+    assert paths, f"tracked population is empty: {pattern}"
+    assert repo / known_member in paths, f"known member missing: {known_member}"
+    return paths
+
 
 # THE ADDRESS OF THE GUARDED REGION, and not a copy of it. An HTML comment does
 # not appear when a reader renders the markdown, so the pair costs a reader
@@ -579,6 +593,15 @@ def compared_carriers(root: Path) -> list[str]:
     return sorted(set(derived_carriers(root)) | set(DECLARED_CARRIERS))
 
 
+def _repair_package_paths(root: Path) -> list[Path]:
+    """Use the index for shipped artifacts; keep synthetic fixture walks intact."""
+    package = root / REPAIR_PACKAGE_DIR
+    if root != PLUGIN_DIR:
+        return sorted(package.glob("*.py"))
+    prefix = f"{root.name}/{REPAIR_PACKAGE_DIR}"
+    return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py")
+
+
 def repair_modules_without_the_bar(root: Path, exemptions: dict) -> list[str]:
     """Modules of the memory-repair package that hold no begin marker.
 
@@ -596,7 +619,7 @@ def repair_modules_without_the_bar(root: Path, exemptions: dict) -> list[str]:
         return []
     return sorted(
         relative_name(path, root)
-        for path in package.glob("*.py")
+        for path in _repair_package_paths(root)
         if relative_name(path, root) not in exemptions
         and MARKER_BEGIN not in path.read_text(encoding="utf-8", errors="replace")
     )
@@ -930,6 +953,33 @@ class TestTheInstrumentIsLive:
             )
 
 
+class TestTrackedPopulation:
+    def test_untracked_is_excluded_and_deleted_tracked_stays_visible(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / REPAIR_PACKAGE_DIR / "tracked.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        (tracked.parent / "untracked.py").write_text("untracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        tracked_rel = tracked.relative_to(repo).as_posix()
+        subprocess.run(["git", "add", "--", tracked_rel], cwd=repo, check=True)
+        pattern = f"pact-plugin/{REPAIR_PACKAGE_DIR}/*.py"
+        assert _tracked_glob(repo, pattern, tracked_rel) == [tracked]
+        tracked.unlink()
+        assert _tracked_glob(repo, pattern, tracked_rel) == [tracked]
+
+    def test_empty_and_wrong_roots_refuse(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        pattern = f"pact-plugin/{REPAIR_PACKAGE_DIR}/*.py"
+        known = f"pact-plugin/{REPAIR_PACKAGE_DIR}/tracked.py"
+        with pytest.raises(subprocess.CalledProcessError):
+            _tracked_glob(repo, pattern, known)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="tracked population is empty"):
+            _tracked_glob(repo, pattern, known)
+
+
 class TestEveryDeclaredCarrierIsPlaced:
     """The anti-shrinkage floor.
 
@@ -969,8 +1019,7 @@ class TestEveryDeclaredCarrierIsPlaced:
         and `test_each_repair_module_holds_the_marker` reddens. AN ENTRY THAT
         CANNOT DO WORK FAILS OPEN. So the burden sits on REMOVAL.
         """
-        package = PLUGIN_DIR / REPAIR_PACKAGE_DIR
-        walked = {relative_name(path, PLUGIN_DIR) for path in package.glob("*.py")}
+        walked = {relative_name(path, PLUGIN_DIR) for path in _repair_package_paths(PLUGIN_DIR)}
         idle = sorted(key for key in REPAIR_PACKAGE_EXEMPTIONS if key not in walked)
         assert not idle, (
             f"these repair-package exemptions cannot do work: {idle}. The "

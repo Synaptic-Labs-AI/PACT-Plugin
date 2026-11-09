@@ -38,6 +38,7 @@ import io
 import json
 import os
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
@@ -59,6 +60,19 @@ _PATH_BUILDER = "build_context_cache"
 _PATH_ACCESSORS = frozenset({"_get_context_file_path", "_context_file_path"})
 _TRACKED_APIS = _WRITE_APIS | {_PATH_BUILDER} | _PATH_ACCESSORS
 _CONTEXT_MODULE = "hooks/shared/pact_context.py"
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
+    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    )
+    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
+    assert paths, f"tracked population is empty: {pattern}"
+    assert repo / known_member in paths, f"known member missing: {known_member}"
+    return paths
+
 
 # Relocation and link calls: module functions, Path's link methods, Path.rename,
 # and Path.replace, which takes one argument where str.replace takes two.
@@ -424,18 +438,45 @@ def _shipped_text_census():
 
 
 def _code_bearing_dirs(plugin):
-    """Top-level plugin dirs, other than tests/, holding Python or an executable."""
+    """Top-level plugin dirs, other than tests/, holding tracked Python or an executable."""
     dirs = set()
-    for child in plugin.iterdir():
-        if not child.is_dir() or child.name in ("tests", "__pycache__") or child.name.startswith("."):
+    tracked = _tracked_glob(
+        plugin.parent, f"{plugin.name}/**", f"{plugin.name}/hooks/session_init.py",
+    )
+    for path in tracked:
+        parts = path.relative_to(plugin).parts
+        if len(parts) < 2:
             continue
-        for path in child.rglob("*"):
-            if path.is_file() and "__pycache__" not in path.relative_to(child).parts and (
-                path.suffix == ".py" or os.access(path, os.X_OK)
-            ):
-                dirs.add(child.name)
-                break
+        child = parts[0]
+        if child in ("tests", "__pycache__") or child.startswith(".") or "__pycache__" in parts:
+            continue
+        if path.suffix == ".py" or os.access(path, os.X_OK):
+            dirs.add(child)
     return dirs
+
+
+class TestTrackedPopulation:
+    def test_untracked_is_excluded_and_deleted_tracked_stays_visible(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "hooks" / "tracked.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        (tracked.parent / "untracked.py").write_text("untracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/hooks/tracked.py"], cwd=repo, check=True)
+        pattern = "pact-plugin/hooks/*.py"
+        assert _tracked_glob(repo, pattern, "pact-plugin/hooks/tracked.py") == [tracked]
+        tracked.unlink()
+        assert _tracked_glob(repo, pattern, "pact-plugin/hooks/tracked.py") == [tracked]
+
+    def test_empty_and_wrong_roots_refuse(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with pytest.raises(subprocess.CalledProcessError):
+            _tracked_glob(repo, "pact-plugin/hooks/*.py", "pact-plugin/hooks/tracked.py")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="tracked population is empty"):
+            _tracked_glob(repo, "pact-plugin/hooks/*.py", "pact-plugin/hooks/tracked.py")
 
 
 class TestCensus:

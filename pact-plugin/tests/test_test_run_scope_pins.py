@@ -138,12 +138,26 @@ from __future__ import annotations
 
 import collections
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 PLUGIN = Path(__file__).resolve().parents[1]
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
+    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    )
+    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
+    assert paths, f"tracked population is empty: {pattern}"
+    assert repo / known_member in paths, f"known member missing: {known_member}"
+    return paths
+
 
 SURFACE_GLOBS = (
     "commands/*.md",
@@ -162,6 +176,17 @@ SURFACE_GLOBS = (
     "templates/*.md",
     "protocols/*.md",
 )
+
+SURFACE_KNOWN_MEMBERS = {
+    "commands/*.md": "commands/refresh.md",
+    "agents/*.md": "agents/pact-orchestrator.md",
+    "skills/*/SKILL.md": "skills/pact-agent-teams/SKILL.md",
+    "skills/*/references/*.md": "skills/pact-testing-strategies/references/test-pyramid.md",
+    "skills/*/*.md": "skills/n8n-code-javascript/BUILTIN_FUNCTIONS.md",
+    "reference/*.md": "reference/config.md",
+    "templates/*.md": "templates/environment-model.md",
+    "protocols/*.md": "protocols/pact-protocols.md",
+}
 
 KNOWN_SITE_FILES = (
     "commands/orchestrate.md",
@@ -716,11 +741,37 @@ BASELINE_BY_FILE = {
 BASELINE_CANDIDATES = sum(BASELINE_BY_FILE.values())
 
 
+def test_tracked_population_excludes_untracked_and_keeps_deleted(tmp_path):
+    repo = tmp_path / "repo"
+    tracked = repo / "pact-plugin" / "agents" / "tracked.md"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked")
+    (tracked.parent / "untracked.md").write_text("untracked")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/agents/tracked.md"], cwd=repo, check=True)
+    pattern = "pact-plugin/agents/*.md"
+    assert _tracked_glob(repo, pattern, "pact-plugin/agents/tracked.md") == [tracked]
+    tracked.unlink()
+    assert _tracked_glob(repo, pattern, "pact-plugin/agents/tracked.md") == [tracked]
+
+
+def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(subprocess.CalledProcessError):
+        _tracked_glob(repo, "pact-plugin/agents/*.md", "pact-plugin/agents/tracked.md")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    with pytest.raises(AssertionError, match="tracked population is empty"):
+        _tracked_glob(repo, "pact-plugin/agents/*.md", "pact-plugin/agents/tracked.md")
+
+
 def _surfaces() -> list[Path]:
     found: list[Path] = []
     for pattern in SURFACE_GLOBS:
-        matches = sorted(PLUGIN.glob(pattern))
-        assert matches, f"surface glob {pattern!r} matched no files"
+        matches = _tracked_glob(
+            PLUGIN.parent, f"pact-plugin/{pattern}",
+            f"pact-plugin/{SURFACE_KNOWN_MEMBERS[pattern]}",
+        )
         found.extend(matches)
     return sorted(set(found))
 

@@ -6,11 +6,34 @@ Every pin reads the LLM-loaded markdown directly. Each docstring names the
 mutation that reddens it.
 """
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
+
 PLUGIN = Path(__file__).parent.parent
+REPO_ROOT = PLUGIN.parent
 COMMANDS_DIR = PLUGIN / "commands"
 PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
+    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    )
+    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
+    assert paths, f"tracked population is empty: {pattern}"
+    assert repo / known_member in paths, f"known member missing: {known_member}"
+    return paths
+
+
+def _command_files() -> list[Path]:
+    return _tracked_glob(
+        REPO_ROOT, "pact-plugin/commands/*.md", "pact-plugin/commands/refresh.md",
+    )
+
 
 _PACT_COMMAND_RE = re.compile(r"/PACT:[A-Za-z][A-Za-z-]*")
 _EXPLICIT_RETURN_RE = re.compile(r"(?:return|go) to step \d+|stay in this workflow", re.IGNORECASE)
@@ -62,6 +85,30 @@ def _next_top_level_step(text, offset):
     """The bold heading of the first top-level numbered step after `offset`."""
     m = _TOP_LEVEL_STEP_RE.search(text, offset)
     return m.group(2) if m else None
+
+
+class TestTrackedPopulation:
+    def test_untracked_is_excluded_and_deleted_tracked_stays_visible(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "commands" / "tracked.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        (tracked.parent / "untracked.md").write_text("untracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/commands/tracked.md"], cwd=repo, check=True)
+        pattern = "pact-plugin/commands/*.md"
+        assert _tracked_glob(repo, pattern, "pact-plugin/commands/tracked.md") == [tracked]
+        tracked.unlink()
+        assert _tracked_glob(repo, pattern, "pact-plugin/commands/tracked.md") == [tracked]
+
+    def test_empty_and_wrong_roots_refuse(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with pytest.raises(subprocess.CalledProcessError):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="tracked population is empty"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +189,7 @@ class TestEndOfFlowCheckpoints:
     def test_every_command_is_classified(self):
         """Reddens when a command file is added without being listed in
         CHECKPOINTS or EXEMPT, or when one is listed in both."""
-        on_disk = {p.name for p in COMMANDS_DIR.glob("*.md")}
+        on_disk = {p.name for p in _command_files()}
         checked = {c[0] for c in CHECKPOINTS if "/" not in c[0]}
         assert not checked & set(EXEMPT), sorted(checked & set(EXEMPT))
         assert on_disk == checked | set(EXEMPT), (
@@ -155,7 +202,7 @@ class TestEndOfFlowCheckpoints:
         matching the command files."""
         total = sum(
             len(_OPTION_BULLET_RE.findall(p.read_text(encoding="utf-8")))
-            for p in COMMANDS_DIR.glob("*.md")
+            for p in _command_files()
         )
         assert total >= OPTION_BULLET_FLOOR, total
 
@@ -277,7 +324,7 @@ class TestMergeHandsOffToWrapUp:
         name `/PACT:wrap-up`. Mutation: append ", then invoke `/PACT:wrap-up`"
         to the merge option, or delete peer-review step 8."""
         found = 0
-        for path in sorted(COMMANDS_DIR.glob("*.md")):
+        for path in sorted(_command_files()):
             text = path.read_text(encoding="utf-8")
             for m in _OPTION_BULLET_RE.finditer(text):
                 clause = m.group(1)
@@ -341,6 +388,23 @@ class TestMergeHandsOffToWrapUp:
 # ---------------------------------------------------------------------------
 
 _LLM_LOADED_GLOBS = ("commands/*.md", "agents/*.md", "protocols/*.md", "skills/*/SKILL.md")
+_LLM_KNOWN_MEMBERS = {
+    "commands/*.md": "commands/refresh.md",
+    "agents/*.md": "agents/pact-orchestrator.md",
+    "protocols/*.md": "protocols/pact-protocols.md",
+    "skills/*/SKILL.md": "skills/pact-agent-teams/SKILL.md",
+}
+
+
+def _llm_loaded_files() -> list[Path]:
+    return [
+        path
+        for pattern in _LLM_LOADED_GLOBS
+        for path in _tracked_glob(
+            REPO_ROOT, f"pact-plugin/{pattern}", f"pact-plugin/{_LLM_KNOWN_MEMBERS[pattern]}",
+        )
+    ]
+
 
 # A merge and `/PACT:wrap-up` joined by "or", in either order: the two offered
 # as alternative end points ("until after PR merge or `/PACT:wrap-up`").
@@ -362,7 +426,7 @@ class TestShutdownOwner:
         """Reddens when any LLM-loaded file offers a merge and `/PACT:wrap-up`
         as alternatives. Mutation: restore the persona's "Teammates persist
         until after PR merge or `/PACT:wrap-up`."."""
-        files = [p for g in _LLM_LOADED_GLOBS for p in sorted(PLUGIN.glob(g))]
+        files = _llm_loaded_files()
         assert files, "no LLM-loaded files found"
         hits = []
         for path in files:
@@ -410,7 +474,7 @@ class TestTeammateLifecycleNotKeyedOnMerge:
         alive or persists teammates until a merge without naming
         `/PACT:wrap-up` as the owner. Mutation: restore peer-review's "Teammates
         persist until after user-authorized merge."."""
-        files = [p for g in _LLM_LOADED_GLOBS for p in sorted(PLUGIN.glob(g))]
+        files = _llm_loaded_files()
         assert files, "no LLM-loaded files found"
         hits = []
         for path in files:
@@ -467,9 +531,9 @@ _CHAIN_RE = re.compile(r"^\*\*Chain\*\*: (.+?)\.(?: |$)", re.MULTILINE)
 def _successor_graph():
     """{command stem: set of command stems it imperatively invokes}. A target
     that is a skill rather than a command (worktree-setup) is not a node."""
-    stems = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+    stems = {p.stem for p in _command_files()}
     graph = {}
-    for path in COMMANDS_DIR.glob("*.md"):
+    for path in _command_files():
         targets = set(_EDGE_RE.findall(path.read_text(encoding="utf-8")))
         graph[path.stem] = targets & stems
     return graph
@@ -492,10 +556,10 @@ class TestWorkflowChain:
     def test_every_named_successor_exists(self):
         """Reddens when a command invokes `/PACT:x` and x is neither a command
         nor a skill. Mutation: rename a target to `/PACT:wrapup`."""
-        stems = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+        stems = {p.stem for p in _command_files()}
         skills = {p.name for p in (PLUGIN / "skills").iterdir() if p.is_dir()}
         missing = []
-        for path in COMMANDS_DIR.glob("*.md"):
+        for path in _command_files():
             for target in _EDGE_RE.findall(path.read_text(encoding="utf-8")):
                 if target not in stems | skills:
                     missing.append((path.name, target))
@@ -866,8 +930,7 @@ class TestCallerCheckNamesTheCurrentReview:
         """Reddens when a caller check appears outside the listed sites, so
         the per-site arm above cannot miss a new one."""
         found = set()
-        for g in _LLM_LOADED_GLOBS:
-            for path in PLUGIN.glob(g):
-                if _caller_checks(path.read_text(encoding="utf-8")):
-                    found.add(str(path.relative_to(PLUGIN)))
+        for path in _llm_loaded_files():
+            if _caller_checks(path.read_text(encoding="utf-8")):
+                found.add(str(path.relative_to(PLUGIN)))
         assert found == set(_CALLER_CHECK_SITES), sorted(found ^ set(_CALLER_CHECK_SITES))

@@ -70,11 +70,25 @@ recorded in the module-level comment at the bottom of this file.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
+    """Tracked files matching one Path.glob-shaped repo-relative pattern."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", f":(glob){pattern}"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    )
+    paths = [repo / entry for entry in result.stdout.split("\0") if entry]
+    assert paths, f"tracked population is empty: {pattern}"
+    assert repo / known_member in paths, f"known member missing: {known_member}"
+    return paths
+
 
 SKILL = PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md"
 COMPLETION_AUTHORITY = PLUGIN_ROOT / "protocols" / "pact-completion-authority.md"
@@ -535,15 +549,41 @@ def _retired_claim_clauses(text: str) -> list:
 
 
 def _non_test_plugin_files() -> list:
-    """Every text file under the plugin root outside tests/, from the tree."""
+    """Every tracked text file under the plugin root outside tests/."""
+    tracked = _tracked_glob(
+        PLUGIN_ROOT.parent, "pact-plugin/**", "pact-plugin/protocols/pact-protocols.md",
+    )
     return [
         path
-        for path in sorted(PLUGIN_ROOT.rglob("*"))
-        if path.is_file()
-        and path.suffix in _RETIRED_CLAIM_SUFFIXES
+        for path in tracked
+        if path.suffix in _RETIRED_CLAIM_SUFFIXES
         and path.relative_to(PLUGIN_ROOT).parts[0] != "tests"
         and "__pycache__" not in path.parts
     ]
+
+
+def test_tracked_population_excludes_untracked_and_keeps_deleted(tmp_path):
+    repo = tmp_path / "repo"
+    tracked = repo / "pact-plugin" / "protocols" / "tracked.md"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked")
+    (tracked.parent / "untracked.md").write_text("untracked")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/protocols/tracked.md"], cwd=repo, check=True)
+    pattern = "pact-plugin/protocols/*.md"
+    assert _tracked_glob(repo, pattern, "pact-plugin/protocols/tracked.md") == [tracked]
+    tracked.unlink()
+    assert _tracked_glob(repo, pattern, "pact-plugin/protocols/tracked.md") == [tracked]
+
+
+def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(subprocess.CalledProcessError):
+        _tracked_glob(repo, "pact-plugin/protocols/*.md", "pact-plugin/protocols/tracked.md")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    with pytest.raises(AssertionError, match="tracked population is empty"):
+        _tracked_glob(repo, "pact-plugin/protocols/*.md", "pact-plugin/protocols/tracked.md")
 
 
 @pytest.mark.parametrize(
