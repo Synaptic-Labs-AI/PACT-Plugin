@@ -212,10 +212,12 @@ git worktree list  # Stale entry removed
 
 ## Recorded Probe
 
-The lead fills these from the executed run.
+Executed in a worktree created by the updated setup skill, on a checkout whose main repo has a `.venv`.
 
-- Environment: git `<version>`, pyright `<version>`
-- `pyright pact-plugin/tests/test_peer_review_cold_lane_pin.py` from the worktree root: `<output>`
-- `cd pact-plugin && pyright tests/test_peer_review_cold_lane_pin.py`: `<output>`
-- `git check-ignore -v .venv` in the worktree: `<output>`
-- Control — the same command after removing the `info/exclude` line: `<output and exit code>`
+- Environment: git 2.43.0, pyright 1.1.414
+- `.venv` in the worktree: symlink to the main checkout's `.venv`
+- `pyright pact-plugin/tests/test_peer_review_cold_lane_pin.py` from the worktree root: `0 errors, 0 warnings, 0 informations` (exit 0)
+- `cd pact-plugin && pyright tests/test_peer_review_cold_lane_pin.py`: `0 errors, 0 warnings, 0 informations` (exit 0)
+- `git check-ignore -v .venv` in the worktree: `/home/ubuntu/projects/collab/PACT-prompt/.git/info/exclude:18:.venv	.venv` (exit 0); `git status --porcelain` lists no `.venv` entry
+- Control — the same command after removing the `info/exclude` line: `git check-ignore -v .venv` matches nothing (exit 1) and `git status --porcelain` shows `?? .venv`
+- Negative arm — a checkout with the `venvPath`/`venv` config but NO link, so no `.venv` directory exists: pyright writes `venv .venv subdirectory not found in venv path <dir>.` to stderr, reports `Import "pytest" could not be resolved (reportMissingImports)`, then `1 error, 0 warnings, 0 informations` (exit 1). The config is safe for a venv-less checkout: it warns and continues rather than refusing to run.
