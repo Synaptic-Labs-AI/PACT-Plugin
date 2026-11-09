@@ -1174,6 +1174,56 @@ class TestCleanupBranchIsInertText:
         assert str(worktree) not in listed
 
 
+class TestCleanupMultiLineValueIsTheInstructionsJob:
+    """The cleanup heredocs cannot stop a multi-line value either.
+
+    The heredoc parses BEFORE any command runs, so a value carrying the
+    delimiter leaves shell lines after the terminator and those lines execute.
+    The defence is the single-line rule in the prose of BOTH branch-reading
+    steps, stated BEFORE the fence that substitutes the value. These arms pin
+    that instruction and record the limitation; neither claims a shell
+    guarantee.
+    """
+
+    def test_the_single_line_rule_precedes_the_fence_in_both_steps(self):
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+        for start, end, label in (
+            ("### Step 2:", "### Step 3:", "remove-worktree"),
+            ("### Step 3:", "### Step 4:", "delete-branch"),
+        ):
+            block = _section(text, start, end)
+            assert "must be a single line" in block, (
+                f"the {label} step lost the single-line rule. The heredoc "
+                "parses before any command runs, so this sentence is the only "
+                "defence against a multi-line value."
+            )
+            assert block.index("must be a single line") < block.index("```bash"), (
+                f"the {label} single-line rule must precede the fence that "
+                "substitutes the value"
+            )
+
+    def test_the_fence_alone_does_not_stop_a_multiline_value(
+        self, isolated_git_config, tmp_path
+    ):
+        """CHARACTERIZATION, not a safety claim: this passes while the marker
+        IS created. If the fence ever validates single-line input, replace it
+        with a positive 'no marker' assertion."""
+        repo, _ = make_repo(tmp_path)
+        marker = tmp_path / "PWNED"
+        value = f"evil\nPACT BRANCH\ntouch {marker}"
+        run_fence(
+            cleanup_remove_fence(
+                CLEANUP_SKILL_FILE.read_text(encoding="utf-8"), branch=value
+            ),
+            repo,
+        )
+        assert marker.exists(), (
+            "the cleanup fence unexpectedly stopped a multi-line value — if it "
+            "now validates single-line input, this characterization should "
+            "become a positive assertion"
+        )
+
+
 class TestTemplateLessRepo:
     """`git init --template=` leaves no `.git/info/`; the fence must create it.
 

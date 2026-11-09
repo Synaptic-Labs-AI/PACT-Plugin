@@ -68,6 +68,8 @@ This guard is conditional by design: it must NOT unconditionally block, or it wo
 
 Before removal, the shell's working directory must NOT be inside the worktree being removed. Compute the repo root, `cd` to it, and remove the worktree — all in a single bash call. This is critical because if the shell CWD is inside the deleted worktree, all subsequent commands will fail.
 
+`{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
+
 ```bash
 # Compute repo root, cd there, then remove the worktree — must be ONE bash call
 LOCAL_GIT_DIR=$(git rev-parse --git-dir)
@@ -109,6 +111,8 @@ Do NOT force-remove automatically. The user must choose.
 ### Step 3: Delete the Branch
 
 After the worktree is removed, delete the local branch.
+
+`{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it.
 
 ```bash
 IFS= read -r BRANCH <<'PACT BRANCH'
