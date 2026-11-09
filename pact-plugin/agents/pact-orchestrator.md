@@ -458,6 +458,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 
 | Situation | Action |
 |-----------|--------|
+| Review dispatch — a warm reviewer for a PR or a diff | **Spawn the warm reviewer fresh** under a distinct name — never the builder, and never a specialist reused from an earlier phase of this session. Reuse a warm reviewer only for verify-only re-review or reviewer-to-fixer work; see Verify-Only Re-Review in the `peer-review` command for what that re-review covers. Continuing a reviewer this round already dispatched — a revision after a rejected HANDOFF, an `/PACT:imPACT` re-dispatch, or a resume — is not reuse |
 | Idle agent has relevant context (same files/domain) | `SendMessage` to reassign |
 | Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
@@ -465,11 +466,11 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 | Warm reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
 | Cold reviewer (found issues, or idle with relevant context) | Never a fixer and never reassigned — see the Cold Reviewer Lane in the `peer-review` command |
 
-**Default**: Prefer reuse when domain + context overlap. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
+**Default**: Prefer reuse when domain + context overlap. **Review dispatch is the exception**: spawn the warm reviewer fresh under a distinct name — see the review row above — because an earlier-phase specialist's overlap is the conflict, not the qualification; a verify-only re-review or reviewer-to-fixer work still reuses that reviewer. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
 
 ### Agent Shutdown Guidance
 
-Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible. Teammates persist until `/PACT:wrap-up` ends the session, or until `/PACT:pause` or `/PACT:refresh` shuts them down.
+Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible — except for review dispatch, where the warm reviewer is spawned fresh under a distinct name (a verify-only re-review or reviewer-to-fixer work still reuses that reviewer; see the Reuse vs. Spawn Decision). Teammates persist until `/PACT:wrap-up` ends the session, or until `/PACT:pause` or `/PACT:refresh` shuts them down.
 
 Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
@@ -791,7 +792,7 @@ Within each phase, invoke **multiple specialists concurrently** for non-conflict
 
 ### PR Review Workflow
 
-Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer:
+Invoke **at least 3 warm reviewers in parallel**, plus the cold reviewer; each warm reviewer is freshly spawned under a distinct `name=` (see the Reuse vs. Spawn Decision):
 
 - **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns, and project-policy conformance of the changed files against the project's policy files
 - **pact-test-engineer**: Test coverage, testability, performance implications, edge cases

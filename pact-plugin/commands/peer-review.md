@@ -87,7 +87,7 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 |--------|-------------|-------------|
 | **Scope** | Warm: only files changed during remediation; cold: the whole PR, per the Cold Reviewer Lane | Full PR diff |
 | **Depth** | Confirm each finding was addressed | Fresh architectural analysis |
-| **Agent** | Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings per the Cold Reviewer Lane | Multiple reviewers in parallel |
+| **Agent** | Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings per the Cold Reviewer Lane | Multiple reviewers in parallel, each freshly spawned under a distinct `name=` |
 | **Format** | Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 
@@ -204,7 +204,7 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 
 ### Cold Reviewer Lane
 
-Run the cold lane once in each review round — the initial review and each verify-only re-review — in the order below; each rule applies where it is written.
+Run the cold lane once in each review round — the initial review, any later full review round, and each verify-only re-review — in the order below; each rule applies where it is written.
 
 **Dispatch.** The cold reviewer is dispatched with every review, in the same parallel block as the warm reviewers, as an anonymous general-purpose subagent — a single inline `Agent(subagent_type="general-purpose", description="Cold diff-only review", prompt=<the cold prompt below, placeholders filled>)` call with NO `name=`, NO `team_name=`, and NO teammate role prelude. Do not convert it to a teammate spawn and do not create tasks for it. This lane skips the Task A + Task B sequence, the variety stamp, and the per-reviewer journal block. List it in the `review_dispatch` reviewers array as the string `"cold-reviewer"`.
 
@@ -257,6 +257,9 @@ Division of labour: the warm lanes read the project's policy files, and the arch
 ---
 
 **Dispatch reviewers** — for each warm reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
+
+<!-- ANCHOR-STABLE: REVIEWER-FRESHNESS -->
+**Reviewer freshness.** For a fresh review dispatch — the initial review or any later full review round — every warm reviewer is a freshly spawned teammate: never a teammate reused from an earlier phase of this session, not the one that wrote the code and not one that prepared or designed it. Reuse a warm reviewer only for a verify-only re-review or for reviewer-to-fixer work. Continuing a warm reviewer this round already dispatched — a revision after a rejected HANDOFF, an `/PACT:imPACT` re-dispatch, or a resume — is not reuse. Spawn each warm reviewer under a `name=` distinct from every live member: where the team config is present and readable, the dispatch gate refuses a `name=` already live in the team, and that refusal is a naming rule — spawn the reviewer under a distinct `name=`; it is never permission to re-task the existing teammate. Freshness closes the conversational channel only; the REVIEWER-MEMORY-CHANNEL clause below names the agent-memory channel it does not close and the cold lane's decisive read.
 
 1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>, metadata=<see below>)` — Task B.

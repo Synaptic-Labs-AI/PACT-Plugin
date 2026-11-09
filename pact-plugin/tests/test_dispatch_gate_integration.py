@@ -23,8 +23,9 @@ no longer find the roster, then run:
     python -m pytest tests/test_dispatch_gate_integration.py -k non_vacuity_gate
 EXPECTED cardinality: {1 failed} — _team_member_names returns set() -> no
 collision -> the dispatch is ALLOWED (or falls to a later rule) instead of the
-expected uniqueness DENY. Restore -> green. The same-fixture NEGATIVE control (roster WITHOUT the colliding
-name -> not a uniqueness DENY) proves the DENY is coupled to the real roster read.
+expected uniqueness DENY. Restore -> green. The same-fixture NEGATIVE
+control (roster WITHOUT the colliding name -> not a uniqueness DENY) proves
+the DENY is coupled to the real roster read.
 ================================================================================
 """
 from __future__ import annotations
@@ -76,6 +77,12 @@ class TestDispatchGateRosterSeam:
             f"{decision} / {rule} / {reason}"
         )
         assert "architect" in (reason or "")
+        # The changed observable is the hint, and only the real-roster read
+        # proves this seam carries it (the unit pin in test_dispatch_gate.py
+        # is mocked).
+        assert "do not re-task" in (reason or ""), (
+            f"the real-roster denial lost the freshness hint: {reason!r}"
+        )
 
     def test_negative_control_unique_name_not_a_uniqueness_deny(self, live_env):
         # Same fixture; the dispatched name is NOT in the roster -> the
