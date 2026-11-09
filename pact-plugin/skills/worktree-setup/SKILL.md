@@ -30,7 +30,7 @@ Before creating anything, check if a worktree already exists for this branch.
 git worktree list
 ```
 
-- If a worktree for the target branch already exists, **reuse it**. Report: "Reusing existing worktree at {path}" and skip to Step 4.
+- If a worktree for the target branch already exists, **reuse it**. Report: "Reusing existing worktree at {path}" and skip to Step 4. Only a worktree at `.worktrees/{branch}` receives the venv link; a reused worktree elsewhere is still reused, just without the link.
   - If the worktree appears in the list but is marked **prunable**, run `git worktree prune` first and proceed to create a new one.
 - If the branch exists but has no worktree, ask the user: "Branch `{branch}` already exists. Check out existing branch, or create a new branch name?"
 
@@ -72,25 +72,39 @@ WORKTREE="$REPO_ROOT/.worktrees/{branch}"
 
 if [ ! -d "$REPO_ROOT/.venv" ]; then
   echo "Venv link: skipped (no .venv in the main checkout)"
+elif ! git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Venv link: skipped (no git worktree at $WORKTREE)"
 else
   # Write .venv with no trailing slash so the rule matches the symlink as well as a directory.
-  EXCLUDE=$(git -C "$WORKTREE" rev-parse --git-path info/exclude)
-  if grep -qxF '.venv' "$EXCLUDE" 2>/dev/null || printf '%s\n' '.venv' >> "$EXCLUDE"; then
+  EXCLUDE=$(git -C "$WORKTREE" rev-parse --git-path info/exclude 2>/dev/null)
+  IGNORE_FAILED=0
+  if [ -z "$EXCLUDE" ]; then
+    IGNORE_FAILED=1
+  elif ! grep -qxF '.venv' "$EXCLUDE" 2>/dev/null; then
+    # Terminate a final line that lacks a newline, so the new rule cannot merge into it.
+    if [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE")" ]; then
+      printf '\n' >> "$EXCLUDE" 2>/dev/null || IGNORE_FAILED=1
+    fi
+    if [ "$IGNORE_FAILED" = 0 ]; then
+      printf '%s\n' '.venv' >> "$EXCLUDE" 2>/dev/null || IGNORE_FAILED=1
+    fi
+  fi
+  if [ "$IGNORE_FAILED" = 0 ]; then
     if [ -e "$WORKTREE/.venv" ] || [ -L "$WORKTREE/.venv" ]; then
       echo "Venv link: .venv already exists in the worktree — left untouched"
     elif ln -s "$REPO_ROOT/.venv" "$WORKTREE/.venv"; then
       echo "Venv link: .venv -> $REPO_ROOT/.venv"
     else
-      echo "WARNING: could not create the .venv link — pyright will not resolve imports in this worktree"
+      echo "WARNING: could not create the .venv link — tools will not resolve project dependencies in this worktree"
     fi
-    git -C "$WORKTREE" check-ignore -q .venv || echo "WARNING: .venv is NOT ignored in this worktree — git worktree remove will refuse without --force, and git add -A could commit the link"
+    git -C "$WORKTREE" check-ignore -q .venv || echo "WARNING: .venv is NOT ignored in this worktree — git add -A could commit it; an untracked unignored link also makes git worktree remove refuse without --force"
   else
     echo "WARNING: could not write $EXCLUDE — .venv link skipped so an unignored link cannot be committed"
   fi
 fi
 ```
 
-Include the line Step 4 printed in the Step 5 report, or the warning when the link could not be made.
+Include every line Step 4 printed in the Step 5 report, warnings included.
 
 A failed link is a warning, not an error: this step is a convenience, and failing the whole setup over it would regress platforms where `ln -s` is unavailable. This is the one deliberate exception to the stop-on-error rule at the top of this skill.
 
@@ -101,7 +115,7 @@ Output the result:
 ```
 Worktree ready at {REPO_ROOT}/.worktrees/{branch}
 Branch: {branch}
-<the line Step 4 printed>
+<every line Step 4 printed, warnings included>
 ```
 
 **Return the worktree path** so it can be passed to subsequent phases and agents.
@@ -116,5 +130,7 @@ Branch: {branch}
 | Creation fails (disk/permissions) | Surface error, offer fallback to main repo |
 | Main checkout has no `.venv` | Step 4 prints a one-line skip; no link is created and setup continues |
 | `.venv` already exists in the worktree (real directory or a foreign link) | Step 4 reports it and leaves it untouched |
-| `.venv` is not ignored (exclude write failed, or the link is tracked) | Step 4 prints a loud warning: `git worktree remove` will refuse without `--force`, and `git add -A` could commit the link. Re-run setup to retry the write |
+| Exclude write fails | Step 4 prints a warning and creates no link, so an unignored link cannot be committed. Re-run setup to retry the write |
+| `.venv` is tracked | Step 4 prints a loud warning and `git add -A` could commit changes to it. Clear the entry with `git rm --cached .venv`; re-running setup cannot untrack it |
+| An untracked `.venv` link is not ignored | `git worktree remove` refuses without `--force`, and `git add -A` could commit the link. Re-run setup to write a missing rule; if a later `!.venv` rule nullifies it, inspect the exclude file |
 | Platform without symlink support (e.g. Windows) | The link step warns, names the consequence, and setup continues; the worktree is still usable |

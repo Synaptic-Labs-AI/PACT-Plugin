@@ -6,7 +6,8 @@ arms here extract the one bash fence from Step 4 and RUN it, unmodified apart
 from the `{branch}` substitution the step itself specifies, against a
 throwaway `git init` repo with a real worktree in it.
 
-WHY THREE ASSERTIONS AND NOT ONE. Each is blind to what the others catch:
+WHY THREE POSITIVE ASSERTIONS AND NOT ONE. Each is blind to what the others
+catch:
 
 - `test -L .venv` proves the link EXISTS. A clean `git status --porcelain` is
   produced by "linked and ignored" AND by "never linked" alike, so the check
@@ -18,26 +19,36 @@ WHY THREE ASSERTIONS AND NOT ONE. Each is blind to what the others catch:
   and reports a tracked path as NOT ignored even when the rule matches. So
   neither of the other two can see that state.
 
+THE MUTATION META-TEST PINS THE DISCRIMINATION CLAIM. The paragraphs above say
+which arm catches which regression; `TestMutationDiscrimination` mutates the
+extracted fence in memory and asserts the exact matrix. A docstring claim
+without that test is an assertion about tests, not a measurement of them.
+
 `git check-ignore` is diagnostic here: its output names the matching rule and
 is printed on failure, but it is never the primary assertion. The skill's own
 runtime `check-ignore -q` is a different use — there, rc 1 is the intended loud
 warning, including for an already-tracked link.
 
-THE COUNTER-ARM IS THE DISCRIMINATION PROOF. A tracked `.venv/` rule (trailing
-slash) does not match a symlink, so the same link shows as `?? .venv`. Without
-that arm a green suite would say nothing about whether the assertions can fail
-at all.
+THE WRITE-FAILURE ARM USES A DIRECTORY, NOT A MISSING WORKTREE. A nonexistent
+worktree is preempted by the fence's own path guard and, worse, guarantees no
+link could exist there — so a fence that warned and then linked anyway would
+still pass. Making `<common-git-dir>/info/exclude` a directory keeps the
+worktree real: both write legs fail, and a stray `ln` would otherwise succeed
+and be caught by the no-link assertion. No chmod is used anywhere, because CI
+may run as root, where permission bits do not bite and the arm would pass
+vacuously.
 
 BINARY AND ENVIRONMENT, stated because it bounds what these arms prove: the
 fence runs under `/bin/bash` with `PATH` pinned to `/usr/bin:/bin`, matching
-the shipped-command house pattern. Git's global config is isolated (fake HOME,
-fake XDG_CONFIG_HOME, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` unset) because a
-developer's global excludesfile can change what this fixture measures — this
-host's ignores `.gitignore` itself, so an unisolated run would test a different
-tree locally than on CI. No remote and no worktree of the real repo is ever
-touched.
+the shipped-command house pattern. Git's global and system config is isolated
+(fake HOME, fake XDG_CONFIG_HOME, `GIT_CONFIG_NOSYSTEM=1`,
+`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` unset) because a developer's global
+excludesfile can change what this fixture measures — this host's ignores
+`.gitignore` itself, so an unisolated run would test a different tree locally
+than on CI. No remote and no worktree of the real repo is ever touched.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -45,6 +56,7 @@ from pathlib import Path
 
 import pytest
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_FILE = (
     Path(__file__).resolve().parents[1] / "skills" / "worktree-setup" / "SKILL.md"
 )
@@ -101,17 +113,18 @@ def fence_for(skill_text, branch=BRANCH):
 
 @pytest.fixture
 def isolated_git_config(tmp_path, monkeypatch):
-    """Keep the developer's real global git config out of the fixture.
+    """Keep the developer's real global and system git config out of the fixture.
 
-    This host's global excludesfile ignores `.gitignore` itself, but the
-    hazard is general: any `core.excludesFile` can change whether the fixture's
-    repo is clean, and the fixture would then measure the operator's machine
-    rather than the shipped commands.
+    This host's global excludesfile ignores `.gitignore` itself, but the hazard
+    is general: any `core.excludesFile` can change whether the fixture's repo is
+    clean, and the fixture would then measure the operator's machine rather than
+    the shipped commands. `GIT_CONFIG_NOSYSTEM` closes the system-file channel.
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
     return fake_home
@@ -123,20 +136,30 @@ def git(repo, *args, check=True):
     )
 
 
-def make_repo(tmp_path, gitignore=".worktrees/\n", with_venv=True):
-    """A committed repo, optionally with a real `.venv`, plus a real worktree.
+def make_repo(
+    tmp_path, gitignore=".worktrees/\n", with_venv=True, tracked_venv_link=False
+):
+    """A committed repo, optionally with a `.venv`, plus a real worktree.
 
-    `.venv` is created AFTER the commit on purpose: the point of the arms is an
-    untracked link, and a tracked one is a separate state the test surfaces.
+    The default `.venv` is created AFTER the commit on purpose: the point of the
+    positive arms is an untracked link. `tracked_venv_link` builds the opposite
+    state — a committed symlink that the worktree checks out — which is the
+    state `check-ignore` reports as not ignored.
     """
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(parents=True)
     subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
     (repo / "README.md").write_text("fixture\n", encoding="utf-8")
     (repo / ".gitignore").write_text(gitignore, encoding="utf-8")
+    if tracked_venv_link:
+        # A committed symlink to a committed directory: `-d` is true in the
+        # main checkout, and the worktree checks the link out as a TRACKED path.
+        (repo / "realvenv").mkdir()
+        (repo / "realvenv" / "marker").write_text("real venv\n", encoding="utf-8")
+        (repo / ".venv").symlink_to("realvenv", target_is_directory=True)
     git(repo, "add", "-A")
     git(repo, *GIT_ID, "commit", "-qm", "init")
-    if with_venv:
+    if with_venv and not tracked_venv_link:
         (repo / ".venv").mkdir()
         (repo / ".venv" / "marker").write_text("real venv\n", encoding="utf-8")
     worktree = repo / ".worktrees" / BRANCH
@@ -154,6 +177,7 @@ def run_fence(fence, repo):
             "PATH": SAFE_PATH,
             "HOME": os.environ["HOME"],
             "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
+            "GIT_CONFIG_NOSYSTEM": "1",
         },
     )
 
@@ -186,6 +210,17 @@ def check_ignore(worktree):
     return git(worktree, "check-ignore", "-v", "--no-index", ".venv", check=False)
 
 
+def link_state(fence, repo):
+    """The three properties the positive arms assert, for the mutation matrix."""
+    run_fence(fence, repo)
+    worktree = repo / ".worktrees" / BRANCH
+    return {
+        "exists": (worktree / ".venv").is_symlink(),
+        "clean": porcelain(worktree) == "",
+        "not_tracked": not is_tracked(worktree),
+    }
+
+
 # ---------------------------------------------------------------------------
 # The contract of the shipped fence
 # ---------------------------------------------------------------------------
@@ -209,14 +244,17 @@ class TestFenceContract:
 class TestFenceCreatesAnIgnoredLink:
     def test_link_exists(self, isolated_git_config, tmp_path):
         repo, worktree = make_repo(tmp_path)
-        run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
         link = worktree / ".venv"
         assert link.is_symlink(), (
             "the fence did not create the .venv symlink. A clean porcelain tree "
             "is also produced when the link was never created, so this assertion "
             "must come before the cleanliness arms."
         )
-        assert os.readlink(link) == str(repo / ".venv")
+        # Compare RESOLVED paths: a behaviour-preserving reword that changes the
+        # spelling of the target must stay green.
+        assert link.resolve() == (repo / ".venv").resolve()
+        assert "Venv link: .venv -> " in done.stdout
 
     def test_link_is_not_swept_into_a_commit(self, isolated_git_config, tmp_path):
         repo, worktree = make_repo(tmp_path)
@@ -276,7 +314,7 @@ class TestCounterArms:
 
 
 # ---------------------------------------------------------------------------
-# Idempotency: running the fence twice is how a reused worktree is handled
+# Idempotency and the exclude-file newline guard
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +327,7 @@ class TestRerunIsIdempotent:
         run_fence(fence, repo)
         first_target = os.readlink(worktree / ".venv")
         second = run_fence(fence, repo)
-        assert "left untouched" in second.stdout, (
+        assert "Venv link: .venv already exists in the worktree" in second.stdout, (
             f"the second run did not report the existing link: {second.stdout!r}"
         )
         assert len(exclude_venv_lines(worktree)) == 1, (
@@ -303,16 +341,56 @@ class TestRerunIsIdempotent:
         )
 
 
+class TestExcludeNewlineGuard:
+    def test_an_existing_final_line_without_a_newline_is_preserved(
+        self, isolated_git_config, tmp_path
+    ):
+        """Appending must not fuse the new rule onto the previous last line."""
+        repo, worktree = make_repo(tmp_path)
+        path = exclude_path(worktree)
+        path.write_text("keep-me", encoding="utf-8")  # deliberately no newline
+        run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert "keep-me" in lines, (
+            f"the existing final line was destroyed by the append: {lines!r}"
+        )
+        assert lines[-1] == ".venv", f"the rule is not on its own line: {lines!r}"
+
+
 # ---------------------------------------------------------------------------
-# Edge cases the skill promises
+# Edge cases and guards the skill promises
 # ---------------------------------------------------------------------------
+
+
+class TestPathGuard:
+    def test_skips_when_the_computed_path_is_not_a_git_worktree(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, _ = make_repo(tmp_path)
+        missing = repo / ".worktrees" / "missing" / "branch"
+        assert not os.path.lexists(missing)
+
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="missing/branch"),
+            repo,
+        )
+        assert done.returncode == 0, (
+            f"the fence must skip and continue, not fail: {done.stderr.strip()}"
+        )
+        assert "Venv link: skipped (no git worktree at " in done.stdout, (
+            f"expected the path-guard skip; got {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(missing), (
+            "something was created at a path that is not a git worktree"
+        )
+        assert exclude_venv_lines(repo) == []
 
 
 class TestNoVenvInMainCheckout:
     def test_skips_without_a_link_or_a_rule(self, isolated_git_config, tmp_path):
         repo, worktree = make_repo(tmp_path, with_venv=False)
         done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
-        assert "skipped (no .venv in the main checkout)" in done.stdout
+        assert "Venv link: skipped (no .venv in the main checkout)" in done.stdout
         # lexists, not exists: a dangling symlink would read as absent to
         # `exists()` and this arm would then pass over the bug it names.
         assert not os.path.lexists(worktree / ".venv")
@@ -326,13 +404,44 @@ class TestExistingRealDirectoryIsLeftAlone:
         real.mkdir()
         (real / "marker").write_text("local venv\n", encoding="utf-8")
         done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
-        assert "already exists" in done.stdout and "left untouched" in done.stdout
+        assert "Venv link: .venv already exists in the worktree" in done.stdout
         assert real.is_dir() and not real.is_symlink()
         assert (real / "marker").read_text(encoding="utf-8") == "local venv\n"
         # The fence writes the ignore rule BEFORE the guard, so the rule is
         # present even though the path was left alone. Asserting its absence
         # would encode a behaviour the skill deliberately does not have.
         assert len(exclude_venv_lines(worktree)) == 1
+
+
+class TestDanglingLinkIsLeftAlone:
+    def test_dangling_symlink_is_treated_as_existing(
+        self, isolated_git_config, tmp_path
+    ):
+        """`[ -e ]` is false for a dangling link; the `-L` leg must carry it."""
+        repo, worktree = make_repo(tmp_path)
+        dangling = worktree / ".venv"
+        dangling.symlink_to("/nonexistent/target")
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert "Venv link: .venv already exists in the worktree" in done.stdout, (
+            "a dangling .venv was not treated as existing, so the fence will "
+            f"try to link over it. stdout={done.stdout.strip()!r}"
+        )
+        assert os.readlink(dangling) == "/nonexistent/target"
+
+
+class TestTrackedLinkIsReported:
+    def test_tracked_link_gets_the_not_ignored_warning(
+        self, isolated_git_config, tmp_path
+    ):
+        """A tracked link is invisible to porcelain; the skill must warn loudly."""
+        repo, worktree = make_repo(tmp_path, tracked_venv_link=True)
+        assert is_tracked(worktree)
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert "Venv link: .venv already exists in the worktree" in done.stdout
+        assert "WARNING: .venv is NOT ignored in this worktree" in done.stdout, (
+            "the check-ignore warning did not fire for a tracked link: deleting "
+            f"that line would leave this state silently 'clean'. stdout={done.stdout.strip()!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -371,33 +480,125 @@ class TestRemovalSafety:
 
 
 class TestExcludeWriteFailureSkipsTheLink:
-    """The write-failure branch, forced portably.
+    """The write-failure branch, forced portably and without chmod.
 
-    No chmod: CI may run as root, where permission bits do not bite and the arm
-    would pass vacuously. Instead the failure is forced through what the fence
-    itself reads — a `{branch}` with no worktree behind it makes
-    `git -C <path> rev-parse` fail, so the exclude path comes back empty and
-    both write legs fail. The fence must warn and create no link.
+    `<common-git-dir>/info/exclude` is replaced by a DIRECTORY while the
+    worktree stays real. `grep` and `printf` both fail, the write branch warns,
+    and a stray `ln` would otherwise succeed — so the no-link assertion is what
+    makes this arm discriminate. A nonexistent worktree would NOT do: the path
+    guard preempts it, and no link could have existed there anyway.
     """
 
-    def test_warning_and_no_link_when_the_exclude_path_is_unresolvable(
+    def test_warning_and_no_link_but_only_after_the_real_worktree_guard(
         self, isolated_git_config, tmp_path
     ):
-        repo, _ = make_repo(tmp_path)
-        missing = repo / ".worktrees" / "missing" / "branch"
-        assert not os.path.lexists(missing)
+        repo, worktree = make_repo(tmp_path)
+        exclude = exclude_path(worktree)
+        exclude.unlink()
+        exclude.mkdir()
 
-        done = run_fence(
-            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="missing/branch"),
-            repo,
-        )
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
         assert done.returncode == 0, (
             f"the fence must warn and continue, not fail: {done.stderr.strip()}"
         )
-        assert "could not write" in done.stdout and ".venv link skipped" in done.stdout, (
+        assert "WARNING: could not write " in done.stdout, (
             f"expected the exclude-write warning; got {done.stdout.strip()!r}"
         )
-        assert not os.path.lexists(missing), (
+        assert not os.path.lexists(worktree / ".venv"), (
             "a link was created even though the ignore rule could not be written"
         )
-        assert exclude_venv_lines(repo) == []
+
+
+# ---------------------------------------------------------------------------
+# The pyright config contract
+# ---------------------------------------------------------------------------
+
+_CONFIGS = [
+    pytest.param(REPO_ROOT / "pyrightconfig.json", ".", id="repo-root"),
+    pytest.param(REPO_ROOT / "pact-plugin" / "pyrightconfig.json", "..", id="plugin"),
+]
+
+
+class TestPyrightConfigPointsAtTheReposVenv:
+    """Both configs must address the repo-root `.venv`, not a relative guess.
+
+    EXISTENCE IS NOT ASSERTED, deliberately: CI runs from a fresh checkout with
+    no `.venv`, so requiring one here would red on every CI run while proving
+    nothing about the config. The property that matters — the constructed path
+    IS the repo-root `.venv`, from both config depths — is path arithmetic and
+    holds on every runner. The fence arms and the recorded probe cover the
+    live-link half.
+    """
+
+    @pytest.mark.parametrize("config_path,venv_path", _CONFIGS)
+    def test_config_addresses_the_repo_root_venv(self, config_path, venv_path):
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert config["venv"] == ".venv", (
+            f"{config_path.name}: venv key changed, so pyright will not look "
+            f"where the skill puts the link"
+        )
+        assert config["venvPath"] == venv_path, (
+            f"{config_path.name}: venvPath must be {venv_path!r} from this "
+            f"config's own directory"
+        )
+        anchor = (config_path.parent / config["venvPath"]).resolve()
+        assert anchor.is_dir(), f"{config_path.name}: venvPath anchor is not a directory"
+        assert (anchor / config["venv"]).resolve() == (REPO_ROOT / ".venv").resolve(), (
+            f"{config_path.name}: the constructed venv path is not the "
+            f"repo-root .venv"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The mutation matrix: which arm reds on which regression
+# ---------------------------------------------------------------------------
+
+_LINK_COMMAND = 'ln -s "$REPO_ROOT/.venv" "$WORKTREE/.venv"'
+_RULE_LITERAL = "'.venv'"
+
+
+class TestMutationDiscrimination:
+    """Mutate the EXTRACTED fence in memory; SKILL.md is never touched.
+
+    Each mutation must apply, or the arm would pass over a reword it no longer
+    matches. The expected matrices are the docstring's claim, measured.
+    """
+
+    @staticmethod
+    def _mutate(fence, old, new):
+        mutated = fence.replace(old, new)
+        assert mutated != fence, (
+            f"the mutation target {old!r} is gone from the fence — a reword "
+            "means this meta-test no longer measures the regression it names"
+        )
+        return mutated
+
+    def test_shipped_fence_is_green_on_all_three(self, isolated_git_config, tmp_path):
+        repo, _ = make_repo(tmp_path)
+        assert link_state(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo) == {
+            "exists": True,
+            "clean": True,
+            "not_tracked": True,
+        }
+
+    def test_dropped_link_reds_only_the_existence_arm(
+        self, isolated_git_config, tmp_path
+    ):
+        fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
+        repo, _ = make_repo(tmp_path)
+        state = link_state(self._mutate(fence, _LINK_COMMAND, "false"), repo)
+        assert state == {"exists": False, "clean": True, "not_tracked": True}, (
+            "a dropped link step must red the existence arm ONLY; if porcelain "
+            f"also reds the matrix in the docstring is wrong: {state}"
+        )
+
+    def test_trailing_slash_revert_reds_only_the_cleanliness_arm(
+        self, isolated_git_config, tmp_path
+    ):
+        fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
+        repo, _ = make_repo(tmp_path)
+        state = link_state(self._mutate(fence, _RULE_LITERAL, "'.venv/'"), repo)
+        assert state == {"exists": True, "clean": False, "not_tracked": True}, (
+            "a `.venv/` revert must red the cleanliness arm ONLY; if existence "
+            f"or tracking also reds the docstring matrix is wrong: {state}"
+        )
