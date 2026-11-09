@@ -31,22 +31,35 @@ mechanically against the approved plan and PREPARE census):
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _PLUGIN_ROOT = _TESTS_DIR.parent
+
+
+def _tracked_surface(pattern):
+    result = subprocess.run(
+        ["git", "-C", str(_PLUGIN_ROOT.parent), "ls-files", "-z", "--", "pact-plugin"],
+        capture_output=True, check=False)
+    if result.returncode:
+        raise AssertionError(f"git ls-files failed for {pattern}: {result.stderr!r}")
+    paths = [_PLUGIN_ROOT.parent / raw.decode("utf-8")
+             for raw in result.stdout.split(b"\0") if raw]
+    return sorted(path for path in paths
+                  if Path(path.relative_to(_PLUGIN_ROOT)).match(pattern) and path.is_file())
 
 # LLM-loaded surfaces the census enumerates (agents, commands, skills,
 # protocols). The SSOT (pact-protocols.md) is enumerated SEPARATELY from its
 # extracts so per-class counts stay legible.
 _AGENT_SURFACE_FILES = [
     _PLUGIN_ROOT / "agents" / "pact-orchestrator.md",
-    *sorted((_PLUGIN_ROOT / "commands").glob("*.md")),
+    *_tracked_surface("commands/*.md"),
 ]
 _DOC_SURFACE_FILES = [
     *_AGENT_SURFACE_FILES,
-    *sorted((_PLUGIN_ROOT / "skills").glob("*/SKILL.md")),
-    *sorted((_PLUGIN_ROOT / "protocols").glob("*.md")),
+    *_tracked_surface("skills/*/SKILL.md"),
+    *_tracked_surface("protocols/*.md"),
 ]
 _SSOT = _PLUGIN_ROOT / "protocols" / "pact-protocols.md"
 _REPO_ROOT = _PLUGIN_ROOT.parent
@@ -615,3 +628,27 @@ class TestCollapsedWaitWording:
         skill = (_PLUGIN_ROOT / "skills" / "pact-teachback" / "SKILL.md").read_text(
             encoding="utf-8")
         assert "If `team-lead` is unreachable, send the notify to `main`." in skill
+
+
+def test_tracked_doc_surface_population_controls_untracked_files():
+    for pattern, known in (
+        ("commands/*.md", "commands/orchestrate.md"),
+        ("skills/*/SKILL.md", "skills/pact-handoff-harvest/SKILL.md"),
+        ("protocols/*.md", "protocols/pact-protocols.md"),
+    ):
+        assert _PLUGIN_ROOT / known in _tracked_surface(pattern)
+    before = _tracked_surface("protocols/*.md")
+    stray = _PLUGIN_ROOT / "protocols" / "000_backend_non_tty_issue1714_probe.md"
+    stray.write_text("tasks/{team_name}\n", encoding="utf-8")
+    try:
+        assert _tracked_surface("protocols/*.md") == before
+    finally:
+        stray.unlink()
+
+
+def test_tracked_protocol_population_omits_a_deleted_member(monkeypatch):
+    known = _PLUGIN_ROOT / "protocols" / "pact-protocols.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _tracked_surface("protocols/*.md")

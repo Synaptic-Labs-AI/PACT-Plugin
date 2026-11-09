@@ -36,6 +36,7 @@ The full-suite workflow's manual dispatch can now select whole-file or per-test 
 - Instruction-surface tests for corpus writers, markers, lazy-load cross-references, and peer injection now enumerate their intended tracked files rather than stray untracked matches. Local controls check root/pattern filtering, known members, deletion detection, empty-population refusal, and the original raw-glob failure mode.
 - Harvest, import-bar, non-TTY, manifest, prose-root, and Python-floor tests now enumerate their shipped populations from git while retaining synthetic and intentional disk-based discovery. Known-member, untracked-exclusion, deletion, and count controls prove the new oracles are non-vacuous.
 - Post-merge, session-context, store-access, run-scope, and wake-ordering tests now use checked Git-index pathspecs for shipped artifacts while preserving deleted-member failures and synthetic temporary-root walks. Twenty-three before/after probes and three real deletion controls verify the isolation.
+- Agent, command, and skill structure tests now enumerate shipped files from the Git index with nonempty, rooted, and known-member controls. Filesystem walking remains only for gitless exports, while deleted tracked entries stay visible and raw-walk mutation controls preserve the original failure signal.
 
 ### Why
 

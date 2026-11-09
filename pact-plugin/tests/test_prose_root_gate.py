@@ -12,6 +12,7 @@ appears to work, an interactive shell function may be rewriting `grep` to
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -138,9 +139,20 @@ ARM2_ALLOWLIST = [
 ]
 
 
+def _tracked_census_files(subdir):
+    result = subprocess.run(
+        ["git", "-C", str(PLUGIN_ROOT.parent), "ls-files", "-z", "--",
+         f"pact-plugin/{subdir}"], capture_output=True, check=False)
+    if result.returncode:
+        raise AssertionError(f"git ls-files failed for {subdir}: {result.stderr!r}")
+    paths = [PLUGIN_ROOT.parent / raw.decode("utf-8")
+             for raw in result.stdout.split(b"\0") if raw]
+    return sorted(path for path in paths if path.is_file())
+
+
 def _scanned_files():
     for subdir in CENSUS_DIRS:
-        for path in sorted((PLUGIN_ROOT / subdir).rglob("*")):
+        for path in _tracked_census_files(subdir):
             if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
                 continue
             rel = path.relative_to(PLUGIN_ROOT).as_posix()
@@ -433,3 +445,28 @@ def test_control_scan_population_is_non_empty():
     assert any(ARM1_KEY.search(t) for _, t in files), (
         "no allowlisted site was reached; the walk or the pattern is dead"
     )
+
+
+def test_control_tracked_census_population_excludes_untracked_files():
+    for subdir, known in (
+        ("agents", "pact-orchestrator.md"),
+        ("commands", "orchestrate.md"),
+        ("protocols", "pact-protocols.md"),
+        ("skills", "pact-handoff-harvest/SKILL.md"),
+    ):
+        assert PLUGIN_ROOT / subdir / known in _tracked_census_files(subdir)
+    before = _tracked_census_files("protocols")
+    stray = PLUGIN_ROOT / "protocols" / "000_backend_prose_root_issue1714_probe.md"
+    stray.write_text("~/.claude/backend-issue1714\n", encoding="utf-8")
+    try:
+        assert _tracked_census_files("protocols") == before
+    finally:
+        stray.unlink()
+
+
+def test_control_tracked_census_population_omits_a_deleted_member(monkeypatch):
+    known = PLUGIN_ROOT / "protocols" / "pact-protocols.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _tracked_census_files("protocols")

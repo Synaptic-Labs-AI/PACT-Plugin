@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -48,8 +49,20 @@ def _load_manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
 
+def _tracked_markdown(rel_dir: str, dir_path: Path) -> list[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(PLUGIN_ROOT.parent), "ls-files", "-z", "--",
+         f"pact-plugin/{rel_dir}"], capture_output=True, check=False)
+    if result.returncode:
+        raise AssertionError(f"git ls-files failed for {dir_path}: {result.stderr!r}")
+    paths = [PLUGIN_ROOT.parent / raw.decode("utf-8")
+             for raw in result.stdout.split(b"\0") if raw]
+    return sorted(path for path in paths
+                  if path.parent == dir_path and path.suffix == ".md" and path.is_file())
+
+
 def _on_disk(rel_dir: str, dir_path: Path) -> set[str]:
-    return {f"./{rel_dir}/{p.name}" for p in dir_path.glob("*.md")}
+    return {f"./{rel_dir}/{p.name}" for p in _tracked_markdown(rel_dir, dir_path)}
 
 
 def test_every_command_md_file_is_registered():
@@ -117,7 +130,7 @@ def test_agent_frontmatter_name_matches_filename():
     different identifier than the file's declared name.
     """
     mismatches = []
-    for md in sorted(AGENTS_DIR.glob("*.md")):
+    for md in _tracked_markdown("agents", AGENTS_DIR):
         declared = _frontmatter_name(md)
         if declared != md.stem:
             mismatches.append(
@@ -127,3 +140,26 @@ def test_agent_frontmatter_name_matches_filename():
         "Agent frontmatter `name:` diverges from filename stem:\n  "
         + "\n  ".join(mismatches)
     )
+
+
+def test_tracked_manifest_population_controls_untracked_files():
+    for rel_dir, dir_path, known_name in (
+        ("commands", COMMANDS_DIR, "orchestrate.md"),
+        ("agents", AGENTS_DIR, "pact-orchestrator.md"),
+    ):
+        before = _tracked_markdown(rel_dir, dir_path)
+        assert dir_path / known_name in before
+        stray = dir_path / "000_backend_manifest_issue1714_probe.md"
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert _tracked_markdown(rel_dir, dir_path) == before
+        finally:
+            stray.unlink()
+
+
+def test_tracked_manifest_population_omits_a_deleted_member(monkeypatch):
+    known = AGENTS_DIR / "pact-orchestrator.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _tracked_markdown("agents", AGENTS_DIR)
