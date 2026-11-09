@@ -15,7 +15,10 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "compare_full_suite_results.py"
+SCRIPT = Path(os.environ.get(
+    "PACT_COMPARE_FULL_SUITE_SCRIPT",
+    str(Path(__file__).resolve().parents[2] / "scripts" / "compare_full_suite_results.py"),
+))
 SPEC = importlib.util.spec_from_file_location("compare_full_suite_results", SCRIPT)
 comparator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(comparator)
@@ -42,6 +45,16 @@ def update_json(path, **updates):
     write_json(path, value)
 
 
+def set_step_conclusion(directory, name, conclusion):
+    path = directory / "metadata.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    steps = [step for job in metadata["jobs"] for step in job["steps"]
+             if step.get("name") == name]
+    assert len(steps) == 1
+    steps[0]["conclusion"] = conclusion
+    write_json(path, metadata)
+
+
 def summary_for(counts):
     labels = (("passed", "passed"), ("failed", "failed"),
               ("skipped", "skipped"), ("xfailed", "xfailed"),
@@ -53,6 +66,17 @@ def summary_for(counts):
 def actions_line(text, bom=False):
     prefix = chr(0xFEFF) if bom else ""
     return f"full-suite\tUNKNOWN STEP\t{prefix}2026-11-09T00:00:00.0000000Z {text}"
+
+
+ENVIRONMENT_STEP_NAMES = (
+    "Verify the CI environment (before tests)",
+    "Verify the CI environment (after tests)",
+)
+
+
+def environment_steps():
+    return [{"name": name, "conclusion": "success"}
+            for name in ENVIRONMENT_STEP_NAMES]
 
 
 def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
@@ -89,7 +113,10 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
                 "displayTitle": name, "event": "workflow_dispatch", "headSha": SHA,
                 "headBranch": "issue-1714", "status": "completed",
                 "conclusion": "failure" if red else "success",
-                "url": f"https://example.invalid/runs/{run_id}", "jobs": []}
+                "url": f"https://example.invalid/runs/{run_id}",
+                "jobs": [{"name": "full-suite",
+                          "conclusion": "failure" if red else "success",
+                          "steps": environment_steps()}]}
     metadata.update(metadata_updates or {})
     write_json(directory / "metadata.json", metadata)
 
@@ -459,6 +486,7 @@ def test_identical_valid_red_runs_are_not_certified_clean(tmp_path):
     assert comparison["status"] == "identical"
     runs = [json.loads(line) for line in (output / "runs.jsonl").read_text().splitlines()]
     assert [run["validity"] for run in runs] == ["test_outcome", "test_outcome"]
+    assert all(run["environment"]["overall_conclusion"] == "failure" for run in runs)
 
 
 def test_red_run_without_verifier_disposition_is_invalid(tmp_path):
@@ -475,7 +503,8 @@ def test_red_run_without_verifier_disposition_is_invalid(tmp_path):
 
 def test_red_run_with_explicitly_skipped_verifier_is_valid(tmp_path):
     cases = [case(ALPHA, "failure", "call"), case(BETA)]
-    jobs = [{"name": "full-suite", "steps": [
+    jobs = [{"name": "full-suite", "conclusion": "failure", "steps": [
+        *environment_steps(),
         {"name": "Verify the certifying run", "conclusion": "skipped"}]}]
     first = make_run(tmp_path, "one", cases=cases, metadata_updates={"jobs": jobs})
     second = make_run(tmp_path, "two", 101, cases=cases, metadata_updates={"jobs": jobs})
@@ -489,6 +518,79 @@ def test_red_run_with_explicitly_skipped_verifier_is_valid(tmp_path):
     run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
     assert run["validity"] == "test_outcome"
     assert run["verifier_results"]["full_run"] == "skipped"
+
+
+def test_failed_after_environment_step_is_invalid(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    set_step_conclusion(
+        first, "Verify the CI environment (after tests)", "failure")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+    assert "did not conclude success" in comparison["evidence_errors"][0]["error"]
+
+
+def test_nested_environment_success_text_cannot_spoof_failed_step(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    set_step_conclusion(
+        first, "Verify the CI environment (after tests)", "failure")
+    log = first / "run.log"
+    log.write_text(
+        log.read_text() + actions_line("CI environment matches constraints-ci.txt.") + "\n",
+        encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+    assert "did not conclude success" in comparison["evidence_errors"][0]["error"]
+
+
+def test_green_tests_with_overall_failure_are_invalid(tmp_path):
+    first = make_run(tmp_path, "one", metadata_updates={"conclusion": "failure"})
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+    assert "green test outcomes have an inconsistent overall conclusion" in (
+        comparison["evidence_errors"][0]["error"])
+
+
+def test_red_tests_with_overall_success_are_invalid(tmp_path):
+    cases = [case(ALPHA, "failure"), case(BETA)]
+    first = make_run(tmp_path, "one", cases=cases,
+                     metadata_updates={"conclusion": "success"})
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+    assert "red test outcomes have an inconsistent overall conclusion" in (
+        comparison["evidence_errors"][0]["error"])
+
+
+def test_missing_environment_step_is_invalid(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    path = first / "metadata.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    metadata["jobs"][0]["steps"] = [
+        step for step in metadata["jobs"][0]["steps"]
+        if step["name"] != "Verify the CI environment (after tests)"]
+    write_json(path, metadata)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+    assert "expected exactly one" in comparison["evidence_errors"][0]["error"]
+
+
+def test_zero_job_infrastructure_failure_is_invalid(tmp_path):
+    first = make_run(tmp_path, "one", metadata_updates={
+        "jobs": [], "conclusion": "failure"})
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2
+    assert comparison["status"] == "invalid"
+    assert "no workflow jobs" in comparison["evidence_errors"][0]["error"]
 
 
 def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):

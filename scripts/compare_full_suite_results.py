@@ -253,6 +253,36 @@ def _full_run_verifier(metadata: dict, lines: list[str], passed: bool) -> tuple[
     return "missing", failures
 
 
+_ENVIRONMENT_STEP_NAMES = (
+    "Verify the CI environment (before tests)",
+    "Verify the CI environment (after tests)",
+)
+
+
+def _require_environment_step_success(metadata: dict) -> str:
+    """Require actor evidence for both environment checks and overall coherence."""
+    jobs = metadata.get("jobs")
+    if not jobs:
+        raise EvidenceError("no workflow jobs carry environment-step evidence")
+    matched = {name: [] for name in _ENVIRONMENT_STEP_NAMES}
+    for job in jobs:
+        if not isinstance(job, dict) or not isinstance(job.get("steps"), list):
+            raise EvidenceError("workflow job steps are missing or malformed")
+        for step in job["steps"]:
+            if isinstance(step, dict) and step.get("name") in matched:
+                matched[step["name"]].append(step)
+    for name, steps in matched.items():
+        if len(steps) != 1:
+            raise EvidenceError(f"expected exactly one {name!r} step, found {len(steps)}")
+        if steps[0].get("conclusion") != "success":
+            raise EvidenceError(
+                f"{name!r} did not conclude success: {steps[0].get('conclusion')!r}")
+    conclusion = metadata.get("conclusion")
+    if conclusion not in ("success", "failure"):
+        raise EvidenceError(f"unexpected overall workflow conclusion: {conclusion!r}")
+    return conclusion
+
+
 def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     normalized = {"logical_name": logical, "validity": "invalid",
                   "raw_paths": RAW_PATHS, "evidence_errors": []}
@@ -333,6 +363,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
                    for line in lines)):
         raise EvidenceError("before/after environment evidence is not clean")
     environment_passes = len(environment_indexes)
+    overall_conclusion = _require_environment_step_success(metadata)
 
     cases = _parse_junit(artifact / ".full-suite-results.xml")
     node_for_key = {}
@@ -372,6 +403,10 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     verifier_state, verifier_failures = _full_run_verifier(
         metadata, lines, bool(full_run_ok))
     red = record["failed"] > 0 or record["errors"] > 0
+    if red and overall_conclusion != "failure":
+        raise EvidenceError("red test outcomes have an inconsistent overall conclusion")
+    if not red and overall_conclusion != "success":
+        raise EvidenceError("green test outcomes have an inconsistent overall conclusion")
     if red and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
         raise EvidenceError("red outcomes lack consistent exit and verifier evidence")
     if not red and record["exitstatus"] != 0:
@@ -388,6 +423,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
                      "url": metadata.get("url")},
         "argv": argv,
         "environment": {
+            "overall_conclusion": overall_conclusion,
             "passed_checks": environment_passes,
             "platform": [line for line in lines if line.startswith("platform ")],
             "measurements": [line for line in lines if "sys.executable=" in line],
