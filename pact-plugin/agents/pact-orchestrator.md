@@ -466,7 +466,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 | Warm reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
 | Cold reviewer (found issues, or idle with relevant context) | Never a fixer and never reassigned — see the Cold Reviewer Lane in the `peer-review` command |
 
-**Default**: Prefer reuse when domain + context overlap. **Review dispatch is the exception**: spawn the warm reviewer fresh under a distinct name — see the review row above — because the builder's overlap is the conflict, not the qualification. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
+**Default**: Prefer reuse when domain + context overlap. **Review dispatch is the exception**: spawn the warm reviewer fresh under a distinct name — see the review row above — because the builder's overlap is the conflict, not the qualification; a verify-only re-review or reviewer-to-fixer work still reuses that reviewer. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).
 
 ### Agent Shutdown Guidance
 
