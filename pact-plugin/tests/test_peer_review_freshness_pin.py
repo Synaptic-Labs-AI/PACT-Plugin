@@ -521,17 +521,17 @@ def test_gate_refusal_keeps_its_config_precondition():
     'permits' verb or a 'not readable' precondition inverts the claim."""
     clause = _clause()
     presence = PRESENT_AND_READABLE.search(clause)
-    assert presence and _unnegated(PRESENT_AND_READABLE, clause), (
+    refusal = REFUSAL_ON_LIVE_NAME.search(clause)
+    assert presence is not None and _unnegated(PRESENT_AND_READABLE, clause), (
         "the freshness clause states the duplicate-name refusal without its "
         "positive 'present and readable' config precondition — a config-less "
         "session would read as enforced when the gate has already failed open"
     )
-    assert _unnegated(REFUSAL_ON_LIVE_NAME, clause), (
+    assert refusal is not None and _unnegated(REFUSAL_ON_LIVE_NAME, clause), (
         "the freshness clause no longer says the gate REFUSES a live name — "
         "'permits a name=' or 'does not refuse' keeps every token and "
         "inverts the mechanism the clause claims"
     )
-    refusal = REFUSAL_ON_LIVE_NAME.search(clause)
     lo, hi = sorted((presence.start(), refusal.start()))
     between = clause[lo:hi]
     assert "." not in between and ";" not in between, (
