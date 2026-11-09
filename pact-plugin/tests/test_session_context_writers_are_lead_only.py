@@ -48,6 +48,7 @@ import pytest
 import bootstrap_marker_writer  # noqa: E402
 import session_init  # noqa: E402
 import shared.pact_context as pact_context  # noqa: E402
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 from shared.pact_context import _build_session_path, project_slug  # noqa: E402
 
@@ -355,13 +356,15 @@ class _Census(ast.NodeVisitor):
 def _shipped(root, pattern):
     """Shipped files under ``root``. The tests/ and __pycache__ exclusions read
     the path BELOW ``root``, so a checkout under a directory named tests is
-    still scanned."""
-    for path in sorted(root.rglob(pattern)):
-        parts = path.relative_to(root).parts
+    still scanned. Repository-backed inputs exclude untracked files; synthetic
+    and gitless inputs keep their filesystem population and may be empty.
+    """
+    for path in _shared_tracked_files(root.parent, root.name, allow_empty=True):
+        relative = path.relative_to(root)
         if (
-            path.is_file()
-            and "__pycache__" not in parts
-            and "tests" not in parts
+            relative.match(pattern)
+            and "__pycache__" not in relative.parts
+            and "tests" not in relative.parts
             and not path.name.startswith("test_")
         ):
             yield path
@@ -651,6 +654,33 @@ class TestCensus:
         assert ("hooks/session_init.py", "main", "persist_context") in found["write_calls"], (
             "the census cannot see session_init's writer, so it cannot see a new one"
         )
+
+    def test_untracked_file_under_existing_root_cannot_change_shipped_census(self, tmp_path):
+        plugin = tmp_path / "plugin"
+        hooks = plugin / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "tracked.py").write_text(
+            "def tracked(session_dir):\n"
+            "    return session_dir + '/pact-session-context.json'\n",
+            encoding="utf-8",
+        )
+        (hooks / "tracked.sh").write_text(
+            "echo 'pact-session-context.json'\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "init", "-q"], cwd=plugin, check=True)
+        subprocess.run(["git", "add", "hooks/tracked.py", "hooks/tracked.sh"], cwd=plugin, check=True)
+        before_python = _python_census(plugin)
+        before_text = _text_census(plugin)
+        (hooks / "untracked.py").write_text(
+            "def untracked(session_dir):\n"
+            "    return session_dir + '/pact-session-context.json'\n",
+            encoding="utf-8",
+        )
+        (hooks / "untracked.sh").write_text(
+            "echo 'pact-session-context.json'\n", encoding="utf-8"
+        )
+        assert _python_census(plugin) == before_python
+        assert _text_census(plugin) == before_text
 
     def test_every_directory_of_shipped_code_is_scanned(self):
         """A scan root that is dropped or misspelled would blind the census."""

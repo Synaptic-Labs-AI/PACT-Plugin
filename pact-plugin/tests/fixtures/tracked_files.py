@@ -18,8 +18,10 @@ def _git(repo_root, *args):
             text=True,
             check=False,
         )
-    except OSError:
-        return None
+    except FileNotFoundError as exc:
+        if exc.filename == "git":
+            return None
+        raise
 
 
 def _outside_repository(repo_root):
@@ -33,7 +35,7 @@ def _outside_repository(repo_root):
 
 
 def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
-                  keep_deleted=False):
+                  keep_deleted=False, allow_empty=False):
     """Return one nonempty, sorted tracked population or raise AssertionError.
 
     ``relative_dir`` and ``pattern`` are repository-relative and may not escape
@@ -74,7 +76,7 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
             "Refusing to widen the population with a filesystem fallback."
         )
 
-    if not files:
+    if not files and not allow_empty:
         raise AssertionError(f"empty tracked population for {pathspec!r} from {source}")
     if known_member is not None:
         member = Path(known_member)
@@ -85,7 +87,8 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
     return sorted(files)
 
 
-def tracked_glob(repo, pattern, known_member=None, *, keep_deleted=False):
+def tracked_glob(repo, pattern, known_member=None, *, keep_deleted=False,
+                 allow_empty=False):
     """Split a repository-relative glob at its first wildcard segment."""
     parts = PurePosixPath(pattern).parts
     split = next(
@@ -98,4 +101,5 @@ def tracked_glob(repo, pattern, known_member=None, *, keep_deleted=False):
     return tracked_files(
         repo, relative_dir, glob,
         known_member=known_member, keep_deleted=keep_deleted,
+        allow_empty=allow_empty,
     )

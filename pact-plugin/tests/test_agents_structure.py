@@ -118,6 +118,50 @@ class TestTrackedAgentPopulation:
         with pytest.raises(AssertionError, match="Refusing to widen"):
             _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
 
+    @pytest.mark.parametrize("command", ["ls-files", "rev-parse"])
+    def test_other_spawn_errors_never_fall_back(self, tmp_path, monkeypatch, command):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", command]:
+                raise PermissionError("synthetic spawn denial")
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: not a git repository"
+                )
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(PermissionError, match="spawn denial"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_non_git_filename_error_never_falls_back(self, tmp_path, monkeypatch):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+
+        def fake_run(args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", str(tmp_path))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(FileNotFoundError):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_absent_git_binary_keeps_gitless_fallback(self, tmp_path, monkeypatch):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        tracked = agents / "pact-devops-engineer.md"
+        tracked.write_text("exported\n", encoding="utf-8")
+
+        def fake_run(args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert tracked in _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
     def test_pathspec_cannot_escape_the_root(self, tmp_path):
         with pytest.raises(ValueError, match="escapes the repository"):
             _tracked_files(tmp_path, "../outside", "*.md")
