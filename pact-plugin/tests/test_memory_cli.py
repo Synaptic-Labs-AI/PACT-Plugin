@@ -4419,51 +4419,62 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
             conn.close()
 
     @staticmethod
-    def _get(cli_script_path, cli_db, prefix):
+    def _run(cli_script_path, cli_db, verb, prefix):
+        argv = [sys.executable, cli_script_path, verb, prefix]
+        stdin_data = None
+        if verb == "update":
+            argv.append("--stdin")
+            stdin_data = '{"context": "x"}'
+        argv += ["--db-path", str(cli_db)]
         return subprocess.run(
-            [sys.executable, cli_script_path, "get", prefix,
-             "--db-path", str(cli_db)],
-            capture_output=True, text=True, timeout=60,
+            argv, capture_output=True, text=True, timeout=60, input=stdin_data,
         )
 
+    # ALL THREE VERBS, because the handler body is copy-pasted into each and
+    # only the `prefix=` line differs. Reverting one verb's line leaves the
+    # message escaped (it comes from the shared exception) and regresses only
+    # that verb's `prefix` field — measured green across the module before
+    # this parameterisation.
+    @pytest.mark.parametrize("verb", ["get", "update", "delete"])
     def test_the_message_and_the_prefix_field_carry_markers(
-        self, cli_script_path, cli_db
+        self, cli_script_path, cli_db, verb
     ):
         self._seed(
             cli_db,
             [self._PREFIX, self._PREFIX + "0", self._ABOVE_WINDOW],
         )
 
-        result = self._get(cli_script_path, cli_db, self._PREFIX)
-        assert result.returncode == 1, (result.returncode, result.stderr)
+        result = self._run(cli_script_path, cli_db, verb, self._PREFIX)
+        assert result.returncode == 1, (verb, result.returncode, result.stderr)
         envelope = json.loads(result.stderr)
-        assert envelope["error"] == "AMBIGUOUS_PREFIX", envelope
+        assert envelope["error"] == "AMBIGUOUS_PREFIX", (verb, envelope)
 
         # THE WINDOW CONTROL: exactly the two in-window ids match. A resolver
         # that matched loosely would bring the above-window id in, and the
         # escaping assertions below would then be measuring the wrong fixture.
-        assert envelope["total_matches"] == 2, envelope
+        assert envelope["total_matches"] == 2, (verb, envelope)
         matched = {m["id"] for m in envelope["matches"]}
         assert matched == {self._PREFIX, self._PREFIX + "0"}, matched
         assert self._ABOVE_WINDOW not in matched
 
         for surface in ("message", "prefix"):
             text = envelope[surface]
-            assert "<U+202E>" in text, (surface, text)
-            assert not _has_raw_unsafe_char(text), (surface, repr(text))
+            assert "<U+202E>" in text, (verb, surface, text)
+            assert not _has_raw_unsafe_char(text), (verb, surface, repr(text))
 
+    @pytest.mark.parametrize("verb", ["get", "update", "delete"])
     def test_a_hex_only_prefix_envelope_is_unchanged(
-        self, cli_script_path, cli_db
+        self, cli_script_path, cli_db, verb
     ):
         """Control: the escaping rule leaves safe text exactly as it was."""
         plain = "abc1234"
         self._seed(cli_db, [plain, plain + "0"])
 
-        result = self._get(cli_script_path, cli_db, plain)
-        assert result.returncode == 1, (result.returncode, result.stderr)
+        result = self._run(cli_script_path, cli_db, verb, plain)
+        assert result.returncode == 1, (verb, result.returncode, result.stderr)
         envelope = json.loads(result.stderr)
-        assert envelope["error"] == "AMBIGUOUS_PREFIX", envelope
+        assert envelope["error"] == "AMBIGUOUS_PREFIX", (verb, envelope)
         assert envelope["message"] == (
             f"Prefix '{plain}' is ambiguous — 2 memories match."
-        ), envelope["message"]
-        assert envelope["prefix"] == plain, envelope["prefix"]
+        ), (verb, envelope["message"])
+        assert envelope["prefix"] == plain, (verb, envelope["prefix"])
