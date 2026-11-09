@@ -8,13 +8,65 @@ Tests cover:
 4. Skill names and descriptions are present
 5. SKILL.md body contains substantive content
 """
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from helpers import parse_frontmatter
 
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tracked_files(repo_root, relative_dir, pattern=None):
+    """Enumerate shipped files from the index, falling back only without git."""
+    pathspec = relative_dir if pattern is None else f"{relative_dir}/{pattern}"
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", pathspec],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        root = repo_root / relative_dir
+        files = [
+            root / PurePosixPath(entry).relative_to(relative_dir)
+            for entry in result.stdout.split("\0")
+            if entry
+        ]
+        source = "git index"
+    else:
+        root = repo_root / relative_dir
+        candidates = root.rglob("*") if pattern is None else root.glob(pattern)
+        files = [path for path in candidates if path.is_file()]
+        source = "filesystem fallback"
+
+    if not files:
+        raise AssertionError(
+            f"empty skill population for {pathspec} from {source}"
+        )
+    return sorted(files)
+
+
+def _tracked_skill_dirs(repo_root):
+    """Return every tracked top-level skill directory, even without SKILL.md."""
+    files = _tracked_files(repo_root, "pact-plugin/skills")
+    skills_dir = repo_root / "pact-plugin" / "skills"
+    known = skills_dir / "pact-team-registration" / "SKILL.md"
+    assert known in files
+    directories = set()
+    for path in files:
+        relative = path.relative_to(skills_dir)
+        if len(relative.parts) > 1:
+            directories.add(skills_dir / relative.parts[0])
+    return sorted(directories)
+
 
 EXPECTED_SKILLS = {
     "pact-agent-teams",
@@ -46,8 +98,8 @@ N8N_SKILLS = {
 
 @pytest.fixture
 def skill_dirs():
-    """Get all skill directories (excluding README)."""
-    return [d for d in SKILLS_DIR.iterdir() if d.is_dir()]
+    """Get every tracked skill directory, including incomplete skills."""
+    return _tracked_skill_dirs(REPO_ROOT)
 
 
 class TestSkillDirectoriesExist:
@@ -217,7 +269,9 @@ class TestPreResponseChannelCheckGate:
             "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§7)"
 
 
-_ALL_SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
+_ALL_SKILL_FILES = _tracked_files(
+    REPO_ROOT, "pact-plugin/skills", "*/SKILL.md"
+)
 
 
 # =============================================================================
@@ -231,7 +285,70 @@ _ALL_SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
 # carved out.
 PACT_AGENTS_DIR = SKILLS_DIR.parent / "agents"
 F20_CARVE_OUT_FILES = frozenset({"pact-orchestrator"})
-_PACT_AGENT_FILES = sorted(PACT_AGENTS_DIR.glob("pact-*.md"))
+_PACT_AGENT_FILES = _tracked_files(
+    REPO_ROOT, "pact-plugin/agents", "pact-*.md"
+)
+
+
+def test_collection_time_populations_have_known_members():
+    assert SKILLS_DIR / "pact-team-registration" / "SKILL.md" in _ALL_SKILL_FILES
+    assert PACT_AGENTS_DIR / "pact-devops-engineer.md" in _PACT_AGENT_FILES
+
+
+class TestTrackedSkillPopulation:
+    @staticmethod
+    def _git(root, *args):
+        subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, check=True
+        )
+
+    def test_untracked_is_invisible_and_tracked_deletion_stays(self, tmp_path):
+        skills = tmp_path / "pact-plugin" / "skills"
+        tracked = skills / "pact-team-registration" / "SKILL.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "add", "-A")
+        untracked = skills / "000_untracked_probe" / "SKILL.md"
+        untracked.parent.mkdir()
+        untracked.write_text("untracked\n", encoding="utf-8")
+
+        files = _tracked_files(tmp_path, "pact-plugin/skills", "*/SKILL.md")
+        assert tracked in files
+        assert untracked not in files
+
+        tracked.unlink()
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/skills", "*/SKILL.md"
+        )
+
+    def test_tracked_incomplete_skill_directory_still_fails(self, tmp_path):
+        skills = tmp_path / "pact-plugin" / "skills"
+        known = skills / "pact-team-registration" / "SKILL.md"
+        incomplete = skills / "incomplete-skill" / "README.md"
+        known.parent.mkdir(parents=True)
+        incomplete.parent.mkdir(parents=True)
+        known.write_text("known\n", encoding="utf-8")
+        incomplete.write_text("incomplete\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "add", "-A")
+
+        directories = _tracked_skill_dirs(tmp_path)
+        assert incomplete.parent in directories
+        with pytest.raises(AssertionError, match="incomplete-skill/ missing SKILL.md"):
+            TestSkillMdFiles().test_each_skill_has_skill_md(directories)
+
+    def test_gitless_fallback_is_nonempty_or_loud(self, tmp_path):
+        skills = tmp_path / "pact-plugin" / "skills"
+        tracked = skills / "pact-team-registration" / "SKILL.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("exported\n", encoding="utf-8")
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/skills", "*/SKILL.md"
+        )
+
+        with pytest.raises(AssertionError, match="empty skill population"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "pact-*.md")
 
 
 @pytest.mark.parametrize(

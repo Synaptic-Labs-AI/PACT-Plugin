@@ -10,13 +10,53 @@ Tests cover:
 6. Agent body contains expected sections
 """
 import re
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from helpers import frontmatter_block, parse_frontmatter
 
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tracked_files(repo_root, relative_dir, pattern):
+    """Enumerate shipped files from the index, falling back only without git."""
+    pathspec = f"{relative_dir}/{pattern}"
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", pathspec],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        root = repo_root / relative_dir
+        files = [
+            root / PurePosixPath(entry).relative_to(relative_dir)
+            for entry in result.stdout.split("\0")
+            if entry
+        ]
+        source = "git index"
+    else:
+        files = [
+            path
+            for path in (repo_root / relative_dir).glob(pattern)
+            if path.is_file()
+        ]
+        source = "filesystem fallback"
+
+    if not files:
+        raise AssertionError(
+            f"empty agent population for {pathspec} from {source}"
+        )
+    return sorted(files)
+
 
 # Expected agent files
 EXPECTED_AGENTS = {
@@ -40,8 +80,10 @@ REQUIRED_FRONTMATTER_KEYS = {"name", "description"}
 
 @pytest.fixture
 def agent_files():
-    """Load all agent markdown files (orchestrator + 12 teammates)."""
-    return list(AGENTS_DIR.glob("*.md"))
+    """Load tracked agent markdown files (orchestrator + 12 teammates)."""
+    files = _tracked_files(REPO_ROOT, "pact-plugin/agents", "*.md")
+    assert AGENTS_DIR / "pact-devops-engineer.md" in files
+    return files
 
 
 # Subset of agent files that are TEAMMATES — i.e., spawned via Agent() with
@@ -52,11 +94,51 @@ TEAMMATE_AGENT_NAMES = EXPECTED_AGENTS - {"pact-orchestrator"}
 
 @pytest.fixture
 def teammate_agent_files():
-    """Load only teammate agent files (excludes pact-orchestrator)."""
+    """Load only tracked teammate agent files (excludes pact-orchestrator)."""
     return [
-        p for p in AGENTS_DIR.glob("*.md")
+        p
+        for p in _tracked_files(REPO_ROOT, "pact-plugin/agents", "*.md")
         if p.stem in TEAMMATE_AGENT_NAMES
     ]
+
+
+class TestTrackedAgentPopulation:
+    @staticmethod
+    def _git(root, *args):
+        subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, check=True
+        )
+
+    def test_untracked_is_invisible_and_tracked_deletion_stays(self, tmp_path):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        tracked = agents / "pact-devops-engineer.md"
+        tracked.write_text("tracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "add", "-A")
+        untracked = agents / "000_untracked_probe.md"
+        untracked.write_text("untracked\n", encoding="utf-8")
+
+        files = _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+        assert tracked in files
+        assert untracked not in files
+
+        tracked.unlink()
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/agents", "*.md"
+        )
+
+    def test_gitless_fallback_is_nonempty_or_loud(self, tmp_path):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        tracked = agents / "pact-devops-engineer.md"
+        tracked.write_text("exported\n", encoding="utf-8")
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/agents", "*.md"
+        )
+
+        with pytest.raises(AssertionError, match="empty agent population"):
+            _tracked_files(tmp_path, "pact-plugin/commands", "*.md")
 
 
 class TestAgentFilesExist:

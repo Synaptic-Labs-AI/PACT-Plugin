@@ -17,7 +17,7 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -25,6 +25,42 @@ from helpers import parse_frontmatter
 from shared.intentional_wait import KNOWN_RESOLVERS
 
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tracked_files(repo_root, relative_dir, pattern=None):
+    """Enumerate shipped files from the index, falling back only without git."""
+    pathspec = relative_dir if pattern is None else f"{relative_dir}/{pattern}"
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", pathspec],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        root = repo_root / relative_dir
+        files = [
+            root / PurePosixPath(entry).relative_to(relative_dir)
+            for entry in result.stdout.split("\0")
+            if entry
+        ]
+        source = "git index"
+    else:
+        root = repo_root / relative_dir
+        candidates = root.rglob("*") if pattern is None else root.glob(pattern)
+        files = [path for path in candidates if path.is_file()]
+        source = "filesystem fallback"
+
+    if not files:
+        raise AssertionError(
+            f"empty command population for {pathspec} from {source}"
+        )
+    return sorted(files)
 
 # The shutdown loop's call AS IT APPEARS INSIDE THE FENCED BLOCK.
 #
@@ -88,8 +124,58 @@ EXPECTED_COMMANDS = {
 
 @pytest.fixture
 def command_files():
-    """Load all command markdown files."""
-    return list(COMMANDS_DIR.glob("*.md"))
+    """Load tracked command markdown files."""
+    files = _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md")
+    assert COMMANDS_DIR / "refresh.md" in files
+    return files
+
+
+class TestTrackedCommandPopulation:
+    @staticmethod
+    def _git(root, *args):
+        subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, check=True
+        )
+
+    def test_untracked_is_invisible_and_tracked_deletion_stays(self, tmp_path):
+        commands = tmp_path / "pact-plugin" / "commands"
+        nested = commands / "nested"
+        nested.mkdir(parents=True)
+        tracked = commands / "refresh.md"
+        deep_tracked = nested / "deep.py"
+        tracked.write_text("tracked\n", encoding="utf-8")
+        deep_tracked.write_text("tracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "add", "-A")
+        untracked = commands / "000_untracked_probe.md"
+        deep_untracked = nested / "untracked.py"
+        untracked.write_text("untracked\n", encoding="utf-8")
+        deep_untracked.write_text("untracked\n", encoding="utf-8")
+
+        direct = _tracked_files(tmp_path, "pact-plugin/commands", "*.md")
+        tree = _tracked_files(tmp_path, "pact-plugin/commands")
+        assert tracked in direct
+        assert untracked not in direct
+        assert deep_tracked in tree
+        assert deep_untracked not in tree
+
+        tracked.unlink()
+        deep_tracked.unlink()
+        tree_after_deletion = _tracked_files(tmp_path, "pact-plugin/commands")
+        assert tracked in tree_after_deletion
+        assert deep_tracked in tree_after_deletion
+
+    def test_gitless_fallback_is_nonempty_or_loud(self, tmp_path):
+        commands = tmp_path / "pact-plugin" / "commands"
+        commands.mkdir(parents=True)
+        tracked = commands / "refresh.md"
+        tracked.write_text("exported\n", encoding="utf-8")
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/commands", "*.md"
+        )
+
+        with pytest.raises(AssertionError, match="empty command population"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
 
 
 class TestCommandFilesExist:
@@ -789,26 +875,30 @@ class TestNoDanglingOrchestrationSkillRefs:
     SCAN_SUFFIXES = (".md", ".py", ".json")
     SCAN_DIRS = ("agents", "commands", "protocols", "skills", "hooks", "tests")
 
+    @classmethod
+    def _candidate_files(cls):
+        files = []
+        for subdir in cls.SCAN_DIRS:
+            for path in _tracked_files(REPO_ROOT, f"pact-plugin/{subdir}"):
+                if path.suffix not in cls.SCAN_SUFFIXES:
+                    continue
+                if path.relative_to(cls.PLUGIN_ROOT) in cls.IGNORED_PATHS:
+                    continue
+                files.append(path)
+        return files
+
     def test_no_plugin_file_references_deleted_orchestration_skill(self):
+        candidates = self._candidate_files()
+        assert self.PLUGIN_ROOT / "commands" / "refresh.md" in candidates
         offenders = []
-        for subdir in self.SCAN_DIRS:
-            root = self.PLUGIN_ROOT / subdir
-            if not root.is_dir():
+        for path in candidates:
+            rel = path.relative_to(self.PLUGIN_ROOT)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
                 continue
-            for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                if path.suffix not in self.SCAN_SUFFIXES:
-                    continue
-                rel = path.relative_to(self.PLUGIN_ROOT)
-                if rel in self.IGNORED_PATHS:
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
-                    continue
-                if self.FORBIDDEN_REF in text:
-                    offenders.append(str(rel))
+            if self.FORBIDDEN_REF in text:
+                offenders.append(str(rel))
         assert not offenders, (
             f"Files contain dangling xref to deleted {self.FORBIDDEN_REF!r}:\n"
             + "\n".join(f"  - {f}" for f in offenders)
@@ -976,7 +1066,7 @@ class TestPerLoopDispatchSites:
         # sole-row files (peer-review, plan-mode, rePACT) all survived.
         # Globbing also covers a command file that has no row at all.
         found = {}
-        for path in sorted(COMMANDS_DIR.glob("*.md")):
+        for path in _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md"):
             count = sum(
                 1 for line in path.read_text(encoding="utf-8").splitlines()
                 if self.LEAD_IN in line
@@ -1729,7 +1819,7 @@ def test_no_undeclared_teammate_stopping_command():
     declared = set(TERMINATION_SKELETON_SURFACES)
     found = [
         f"commands/{p.name}"
-        for p in sorted(COMMANDS_DIR.glob("*.md"))
+        for p in _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md")
         if "TaskStop(" in p.read_text(encoding="utf-8")
     ]
     # Non-vacuity control: an empty scan would make the assertion below pass
@@ -1795,15 +1885,12 @@ class TestResolverVocabularyIsSingleSourced:
         """Return [(relpath, lineno, value)] for every assignment found."""
         found = []
         for subdir in self.SCAN_DIRS:
-            root = self.PLUGIN_ROOT / subdir
-            if not root.is_dir():
-                continue
-            for path in sorted(root.rglob("*")):
-                if not path.is_file() or path.suffix not in self.SCAN_SUFFIXES:
+            for path in _tracked_files(REPO_ROOT, f"pact-plugin/{subdir}"):
+                if path.suffix not in self.SCAN_SUFFIXES:
                     continue
                 try:
                     text = path.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
+                except UnicodeDecodeError:
                     continue
                 rel = path.relative_to(self.PLUGIN_ROOT)
                 for lineno, line in enumerate(text.splitlines(), 1):
@@ -2207,7 +2294,7 @@ def _expected_write_guard(filename):
 @pytest.fixture(scope="module")
 def journal_site_map():
     sites = []
-    for path in sorted(COMMANDS_DIR.glob("*.md")):
+    for path in _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md"):
         sites.extend(_parse_journal_sites(path.name, path.read_text(encoding="utf-8")))
     return {(site.filename, site.ordinal): site for site in sites}
 
