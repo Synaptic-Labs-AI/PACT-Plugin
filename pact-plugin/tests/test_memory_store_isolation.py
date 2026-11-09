@@ -342,72 +342,42 @@ class TestTheSuiteIsActuallyIsolatedRightNow:
         )
 
 
-_LEFT_THE_FLAG_SET = False
+def _dirty_process_flag(monkeypatch):
+    """Set the lazy-init flag without doing environment-dependent real work."""
+    from scripts import memory_init
+
+    for name in (
+        "check_and_install_dependencies",
+        "maybe_migrate_embeddings",
+        "maybe_embed_pending",
+    ):
+        monkeypatch.setattr(
+            memory_init, name,
+            lambda *a, **k: {"status": "ok", "installed": [], "failed": []},
+        )
+    memory_init.ensure_memory_ready()
+    assert memory_init.is_initialized(), (
+        "the test could not establish its dirty-flag precondition"
+    )
+    return memory_init
 
 
 class TestInitStateDoesNotLeakBetweenStores:
-    """The process-global lazy-init flag must not carry across tests.
-
-    `memory_init.ensure_memory_ready()` returns early on a MODULE-LEVEL flag,
-    before resolving any path, and two of the three things it guards are
-    per-database. With the store now per-test, a test that runs after one which
-    initialised a DIFFERENT store would be told the work was already done for a
-    store nothing had touched.
-
-    AN ORDERED PAIR, WHICH IS A LIABILITY AND IS GUARDED. The first test leaves
-    the flag set; the second asserts it was cleared. If the two ever stop
-    running in this order, the second would pass for the wrong reason -- it
-    would find a clean flag because nothing had dirtied it. `_LEFT_THE_FLAG_SET`
-    exists to turn that false green into a loud failure. No ordering plugin is
-    installed in this suite today, so definition order holds; the guard is for
-    the day that stops being true.
-    """
+    """Each test owns its dirty precondition; no sibling or worker supplies it."""
 
     def test_a_leaves_the_process_flag_set_for_its_own_store(self, monkeypatch):
-        """Dirty the global deliberately. This is the precondition, not a check.
+        """The setup used by both tests sets the process-global flag."""
+        memory_init = _dirty_process_flag(monkeypatch)
+        assert memory_init.is_initialized()
 
-        The guarded work is replaced with no-ops: this pair is about the FLAG,
-        and running the real dependency check and migration here would make the
-        test slow and dependent on the environment for no added signal.
-        """
-        global _LEFT_THE_FLAG_SET
-        from scripts import memory_init
-
-        for name in (
-            "check_and_install_dependencies",
-            "maybe_migrate_embeddings",
-            "maybe_embed_pending",
-        ):
-            monkeypatch.setattr(
-                memory_init, name,
-                lambda *a, **k: {"status": "ok", "installed": [], "failed": []},
-            )
-
-        memory_init.ensure_memory_ready()
-        assert memory_init.is_initialized(), (
-            "this test could not establish its own precondition: the flag did "
-            "not become set, so the next test would prove nothing"
-        )
-        _LEFT_THE_FLAG_SET = True
-
-    def test_b_starts_from_a_clean_flag(self):
-        """FAILS without the reset fixture. Its own store would be skipped.
-
-        The failure this prevents is silent: the second store is simply told the
-        work is done, and nothing raises.
-        """
-        from scripts import memory_init
-
-        assert _LEFT_THE_FLAG_SET, (
-            "the sibling that dirties the flag did not run before this one, so "
-            "a clean flag here means nothing. The order this pair depends on "
-            "has changed -- fix the pair rather than trusting this pass."
-        )
+    def test_b_starts_from_a_clean_flag(self, monkeypatch):
+        """The owner reset clears a flag this test dirtied itself."""
+        memory_init = _dirty_process_flag(monkeypatch)
+        memory_init.reset_initialization()
         assert not memory_init.is_initialized(), (
-            "the lazy-init flag arrived already set, left by a test whose store "
-            "was a DIFFERENT directory. ensure_memory_ready() would return "
-            "early for this test's store and skip the per-database work it "
-            "guards. The reset fixture in conftest is not running."
+            "reset_initialization() left the lazy-init flag set after this test "
+            "established it. ensure_memory_ready() would return early for this "
+            "test's store and skip the per-database work it guards."
         )
 
 
