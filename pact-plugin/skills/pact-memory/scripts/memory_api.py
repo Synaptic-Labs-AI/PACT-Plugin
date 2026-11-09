@@ -45,6 +45,7 @@ from .database import (
     list_memories,
     ensure_initialized,
     resolve_memory_id_prefix,
+    escape_for_envelope,
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
 )
@@ -851,14 +852,14 @@ class PACTMemory:
         return self._project_id
 
     def _session_id_for_envelope(self) -> Optional[str]:
-        """The session id a status ENVELOPE may report; None when unusable.
+        """The session id a status envelope may report, FOLDED ONLY.
 
-        Folded exactly as `_project_scope()` folds the project id, so both
-        identity fields in one envelope follow one rule. The fold removes
-        what `_unusable_identifier` rejects — a control character or a lone
-        surrogate; a bidi/format character is ACCEPTED by design and is
-        still rendered, the documented display-spoofing residual. This is a
-        FOLD, not an escape.
+        Folded exactly as `_project_scope()` folds the project id: a value
+        `_unusable_identifier` rejects (a control character or a lone
+        surrogate) becomes None, because no row can carry it. A bidi/format
+        character is ACCEPTED by design, so the fold does NOT remove it; the
+        envelope construction renders it inert with `escape_for_envelope`.
+        Calling this accessor and stopping would leave that value raw.
         """
         if (
             self._session_id is not None
@@ -866,6 +867,21 @@ class PACTMemory:
         ):
             return None
         return self._session_id
+
+    def _project_id_for_envelope(self) -> Optional[str]:
+        """The project id a status or sync ENVELOPE may report.
+
+        The fold, then the display escape: `_project_scope()` yields None for
+        an unusable detected value or for no identity at all, and the
+        surviving value goes through `escape_for_envelope` so a bidi/format
+        or separator character renders as its `<U+XXXX>` marker. NEVER used
+        for query binding — the escaped form would stop matching rows, which
+        is why the escape lives here and not in `_project_scope()`.
+        """
+        project_scope = self._project_scope()
+        if project_scope is None:
+            return None
+        return escape_for_envelope(project_scope)
 
     @property
     def session_id(self) -> Optional[str]:
@@ -2454,13 +2470,22 @@ class PACTMemory:
         # an implementation choice, not a guarantee.
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
-        # value. The session id is folded by the same rule, computed once so
-        # BOTH arms of this envelope report it the same way.
+        # value. The ENVELOPE VALUES are computed once so BOTH arms report
+        # them the same way, and they are the FOLDED + ESCAPED forms: the
+        # fold drops a value no row can carry, the escape renders a
+        # bidi/format/separator character (which the fold ACCEPTS by design)
+        # inert, because a consumer that parses this JSON and prints the
+        # field would otherwise let it steer a display. The counters below
+        # still use the RAW `project_scope` — an escaped value cannot be
+        # bound to a query.
         project_scope = self._project_scope()
+        project_id = self._project_id_for_envelope()
         session_id = self._session_id_for_envelope()
+        if session_id is not None:
+            session_id = escape_for_envelope(session_id)
         if project_scope is None:
             return {
-                "project_id": None,
+                "project_id": project_id,
                 "session_id": session_id,
                 "memory_count": 0,
                 "tracked_files_count": len(self._session_files),
@@ -2490,7 +2515,7 @@ class PACTMemory:
         capabilities = get_search_capabilities()
 
         return {
-            "project_id": project_scope,
+            "project_id": project_id,
             "session_id": session_id,
             "memory_count": memory_count,
             "tracked_files_count": len(self._session_files),

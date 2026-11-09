@@ -882,13 +882,14 @@ def cmd_sync(args, db_path=None):
         "sync_status": memory.last_sync_status,
         "projected": len(memory_ids),
         "memory_ids": memory_ids,
-        # THE EFFECTIVE SCOPE, NOT THE RAW ATTRIBUTE. The constructor ADOPTS
-        # a detected id as found so a read never fails on a value only a
-        # write binds; `_project_scope()` folds an unusable one to None, and
-        # that is exactly what `get_status` reports for the same session.
-        # Echoing `memory.project_id` put a value in this envelope that no
-        # row can carry and that disagreed with `status`.
-        "project_id": memory._project_scope(),
+        # THE SAME ENVELOPE VALUE `get_status` REPORTS. The constructor ADOPTS a
+        # detected id as found so a read never fails on a value only a write
+        # binds; `_project_id_for_envelope()` then folds an unusable one to
+        # None AND renders a display-unsafe one inert, so sync and status
+        # agree on both the fold and the escape. Echoing `memory.project_id`
+        # put a raw value in this envelope that no row can carry (or a bidi
+        # character a consumer could print).
+        "project_id": memory._project_id_for_envelope(),
     })
 
 

@@ -4394,6 +4394,52 @@ class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
         assert env["project_id"] == "clean-project", env
 
 
+class TestTheSyncAndStatusEnvelopesEscapeDisplayUnsafeIds:
+    """A usable-but-display-unsafe detected id renders inert in BOTH envelopes.
+
+    `_unusable_identifier` ACCEPTS bidi/format/separator characters by
+    design, so the fold does not remove them; the envelope construction runs
+    the surviving value through `escape_for_envelope`. `sync` and `status`
+    must agree, so both report the same folded+escaped value.
+    """
+
+    @pytest.mark.parametrize("char,marker", [
+        ("\u202e", "<U+202E>"),
+        ("\u2028", "<U+2028>"),
+    ])
+    def test_a_display_unsafe_detected_id_renders_inert_in_sync_and_status(
+        self, cli_db, monkeypatch, capsys, char, marker
+    ):
+        from scripts.cli import main
+        from scripts.memory_api import PACTMemory
+        from scripts.working_memory import SyncResult
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (f"proj{char}X", "cwd")),
+        )
+        expected = f"proj{marker}X"
+
+        with patch("scripts.memory_api._ensure_ready"), patch(
+            "scripts.memory_api.project_memories_to_claude_md",
+            return_value=SyncResult(SyncResult.EMPTY),
+        ):
+            with pytest.raises(SystemExit) as sync_exit:
+                main(["sync", "--db-path", str(cli_db)])
+        assert sync_exit.value.code == 0, sync_exit.value.code
+        sync_env = json.loads(capsys.readouterr().out)["result"]
+        assert sync_env["project_id"] == expected, sync_env
+
+        with patch("scripts.memory_api._ensure_ready"):
+            with pytest.raises(SystemExit) as status_exit:
+                main(["status", "--db-path", str(cli_db)])
+        assert status_exit.value.code == 0, status_exit.value.code
+        status_env = json.loads(capsys.readouterr().out)["result"]
+        assert status_env["project_id"] == expected, status_env
+
+
 # ---------------------------------------------------------------------------
 # The envelope escapes caller input, and the update boundary refuses null
 # ---------------------------------------------------------------------------

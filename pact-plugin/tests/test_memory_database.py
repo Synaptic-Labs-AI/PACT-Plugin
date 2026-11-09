@@ -3473,12 +3473,13 @@ class TestTheWriteIngressGuardsTheAdoptedSessionId:
 
 
 class TestGetStatusFoldsAnUnusableDetectedSessionId:
-    """An unusable detected session id is reported as null, not echoed.
+    """The status envelope FOLDS an unusable id and ESCAPES a display-unsafe one.
 
-    Same rule as the project id in the same envelope: a value no row can
-    carry is not reported as a session identifier, and echoing it would put
-    a control or bidi character into a rendered envelope. This is a FOLD,
-    not an escape — both identity fields follow one rule.
+    Two rules, one envelope: `_unusable_identifier` rejects a control
+    character or lone surrogate, which no row can carry, so the field folds
+    to null; a bidi/format/separator character is ACCEPTED by design, so the
+    surviving value is rendered inert as its `<U+XXXX>` marker before it can
+    steer a consumer's display. A clean value passes through byte-identical.
     """
 
     def _memory(self, tmp_path, monkeypatch, session_id, project=None):
@@ -3523,10 +3524,43 @@ class TestGetStatusFoldsAnUnusableDetectedSessionId:
     def test_a_clean_detected_session_id_is_reported(
         self, tmp_path, monkeypatch
     ):
+        """Byte-identical control: the escape changes nothing safe."""
         memory = self._memory(tmp_path, monkeypatch, "clean-session")
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
         assert status["session_id"] == "clean-session"
+
+    @pytest.mark.parametrize("char,marker", [
+        ("\u202e", "<U+202E>"),
+        ("\u2028", "<U+2028>"),
+    ])
+    def test_a_display_unsafe_detected_session_id_renders_inert(
+        self, tmp_path, monkeypatch, char, marker
+    ):
+        memory = self._memory(tmp_path, monkeypatch, f"bad{char}id")
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["session_id"] == f"bad{marker}id", (
+            "a display-unsafe detected session id reached the envelope raw: "
+            f"{status['session_id']!r}"
+        )
+
+    @pytest.mark.parametrize("char,marker", [
+        ("\u202e", "<U+202E>"),
+        ("\u2028", "<U+2028>"),
+    ])
+    def test_a_display_unsafe_detected_project_id_renders_inert(
+        self, tmp_path, monkeypatch, char, marker
+    ):
+        memory = self._memory(
+            tmp_path, monkeypatch, "clean-session", project=f"proj{char}X"
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["project_id"] == f"proj{marker}X", (
+            "a display-unsafe detected project id reached the envelope raw: "
+            f"{status['project_id']!r}"
+        )
 
 
 class TestANonMappingUpdatePayload:
