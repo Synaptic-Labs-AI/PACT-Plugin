@@ -27,7 +27,8 @@ goes only above the newest version. Every PR checks the whole file with
 ### What landed
 
 - `skills/pact-memory/scripts/memory_api.py`: in `PACTMemory.update()`, a payload-validation block keyed on presence (`"project_id" in updates`, never `.get()`, which cannot distinguish an explicit JSON null — the de-key hazard — from omission) mirrors `save()`'s payload guard, rejects the unusable values with `ValueError` and remedy text, and runs before `_ensure_ready()` so a refused update does no store work. The method's `Raises` contract documents the condition. `delete()` stays unguarded: by-id destruction is identity-independent.
-- `tests/test_removed_worktree_record.py`: a regression family beside `save()`'s F2 arms pins the guard — null, empty, non-string and control-character payloads are refused with the row's key unchanged; an update omitting `project_id` proceeds; a valid non-empty string re-keys the row.
+- `tests/test_removed_worktree_record.py`: a regression family beside `save()`'s F2 arms pins the guard — null, empty, non-string and control-character payloads are refused with the row's key unchanged; an update omitting `project_id` proceeds; a valid non-empty string re-keys the row. A store-level decline arm reaches the unresolved identity through the production seam — the session record declaring a removed worktree with no identity record — proves the saved row live first, then asserts the read returns no rows rather than the whole store.
+- `tests/test_project_id.py`: a presence pin in the declared-dir helper's marker family asserts the helper carries the `recorded_main_root` consult, so the dead-path recovery arm of PR #1699 cannot be dropped from the helper undetected.
 
 ### Why
 

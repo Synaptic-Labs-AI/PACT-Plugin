@@ -1655,6 +1655,54 @@ class TestIssueCriterionALiteralShape:
         )
         assert "could not be resolved" in messages
 
+    def test_the_session_record_decline_reads_empty_not_whole_store(
+        self, layout_root, monkeypatch
+    ):
+        """LIVE AND EMPTY, PROVEN: the row exists, the declined read finds none.
+
+        The loudness half of the decline is pinned above; the empty-read half
+        is pinned in TestUnresolvedIdentityScopesReads, but that arm reaches
+        the unresolved identity through a patched detector. This one reaches
+        it through the production seam the issue names: the session record
+        declares a worktree that has been removed, no identity record answers
+        (the writer is deliberately NOT invoked), and the store provably holds
+        the row saved while the worktree was live. A read returning any row
+        here would be reading across the store on a None identity; an empty
+        store would pass vacuously, which is why the row is proven live first.
+        """
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _enable_record_reading(monkeypatch)
+        write_session_context(Path.home() / ".claude", SID, worktree)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(main)
+
+        db_path = layout_root / "decline-store.db"
+        live = PACTMemory(session_id="s", db_path=db_path)
+        assert live.project_id == "R", (
+            "the live session-record declaration did not resolve to the repo"
+        )
+        memory_id = live.save({"context": _TOKEN}, sync_to_claude=False)
+
+        # LIVE: the row is in the store under the repository's key.
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "R"
+        # No identity record exists for this session: after removal, nothing
+        # can answer for the dead declaration.
+        assert not _record_path(worktree).exists()
+
+        _remove_worktree(main, worktree)
+        monkeypatch.chdir(layout_root)
+
+        gone = PACTMemory(session_id="s", db_path=db_path)
+        assert gone.project_id is None
+        assert gone.list(limit=50) == [], (
+            "a declined identity read rows from the store instead of none"
+        )
+
     def test_a_corrupt_identity_record_after_removal_declines(
         self, layout_root, monkeypatch, caplog
     ):
