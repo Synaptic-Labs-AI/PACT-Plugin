@@ -371,6 +371,33 @@ def make_outer_root_git_dir_linked_worktree(tmp_path):
     return outer, linked
 
 
+def make_same_repo_subdirectory_git_dir_linked_worktree(tmp_path):
+    """A repo whose separate git dir sits under a SUBDIRECTORY of itself.
+
+    From a linked worktree the common-dir equality PASSES — both `<repo>/sub`
+    and the linked worktree resolve their common dir to `<repo>/sub/gitdir`.
+    Only the toplevel clause rejects the computed root `<repo>/sub`.
+    """
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    sub.mkdir(parents=True)
+    subprocess.run(
+        [
+            "git", "init", "--quiet", "--separate-git-dir",
+            str(sub / "gitdir"), str(repo),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "README.md").write_text("repo\n", encoding="utf-8")
+    git(repo, "add", "README.md")
+    git(repo, *GIT_ID, "commit", "-qm", "init")
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "--quiet", str(linked), "-b", "wt")
+    return repo, sub, linked
+
+
 def make_template_less_repo(tmp_path):
     """A repo initialised with an EMPTY template, so `.git/info/` is absent."""
     repo = tmp_path / "repo"
@@ -1072,6 +1099,45 @@ class TestOuterRepoRootIsRejected:
         step4 = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), linked)
         assert "Venv link: skipped (cannot determine the main checkout root)" in step4.stdout
         assert not os.path.lexists(outer / ".worktrees")
+
+
+class TestSameRepoSubdirectoryRootIsRejected:
+    """The TOPLEVEL clause is load-bearing on its own reachable state.
+
+    With the git dir at `<repo>/sub/gitdir`, the common-dir equality passes
+    (both sides resolve to `<repo>/sub/gitdir`) — so the case-A arm cannot
+    catch a toplevel-clause removal there. Here only the toplevel clause
+    rejects the computed root `<repo>/sub`; without it Step 2 writes into
+    `<repo>/sub`.
+    """
+
+    def test_same_repo_subdirectory_placement_is_rejected(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, sub, linked = make_same_repo_subdirectory_git_dir_linked_worktree(
+            tmp_path
+        )
+        step2 = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), linked
+        )
+        assert step2.returncode != 0, (
+            f"Step 2 used the subdirectory as the root: {step2.stdout.strip()!r}"
+        )
+        assert "Cannot determine the main checkout root (computed " in step2.stdout
+        assert str(sub) in step2.stdout, (
+            "the stop message does not name the computed root"
+        )
+        assert not os.path.lexists(sub / ".worktrees"), (
+            "Step 2 created .worktrees in the repo subdirectory"
+        )
+        ignore = sub / ".gitignore"
+        assert not ignore.exists() or ".worktrees" not in ignore.read_text(
+            encoding="utf-8"
+        ), "Step 2 wrote a .worktrees rule into the repo subdirectory"
+
+        step4 = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), linked)
+        assert "Venv link: skipped (cannot determine the main checkout root)" in step4.stdout
+        assert not os.path.lexists(sub / ".worktrees")
 
 
 class TestCleanupBranchIsInertText:
