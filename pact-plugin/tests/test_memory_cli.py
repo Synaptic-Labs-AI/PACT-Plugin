@@ -23,6 +23,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -4354,3 +4355,85 @@ class TestTheUpdateBoundaryRefusesANullIdentity:
         envelope = json.loads(result.stderr)
         assert envelope["error"] == "ValueError", envelope
         assert "project_id, when supplied to update" in envelope["message"]
+
+
+# ---------------------------------------------------------------------------
+# The AMBIGUOUS_PREFIX envelope escapes the prefix it echoes
+# ---------------------------------------------------------------------------
+
+def _has_raw_unsafe_char(text):
+    """True when rendered text still carries a Cc/Cf/Cs/Zl/Zp character."""
+    return any(
+        unicodedata.category(char) in ("Cc", "Cf", "Cs", "Zl", "Zp")
+        for char in text
+    )
+
+
+class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
+    """The prefix echoed on AMBIGUOUS_PREFIX is caller input at TWO surfaces.
+
+    Both the exception's message and the CLI's `prefix` field are rendered,
+    so both must carry markers. The exception's own `.prefix` attribute and
+    `matches[].id` stay RAW by design - the latter is a round-trip identifier
+    the caller replays to disambiguate, and an escaped form would match
+    nothing - so neither is asserted here.
+    """
+
+    # 7 chars (MIN_PREFIX_LENGTH) ending below "g". THE BOUND IS THE TRAP:
+    # the resolver scans [prefix, prefix + 'g'), so a continuation above 'g'
+    # falls outside the window and the fixture would match no rows at all.
+    _PREFIX = "ab\u202ecdef"  # written as an escape: the literal is invisible
+
+    @staticmethod
+    def _seed(cli_db, ids):
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            for memory_id in ids:
+                create_memory(conn, {"id": memory_id, "context": "snippet"})
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _get(cli_script_path, cli_db, prefix):
+        return subprocess.run(
+            [sys.executable, cli_script_path, "get", prefix,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def test_the_message_and_the_prefix_field_carry_markers(
+        self, cli_script_path, cli_db
+    ):
+        self._seed(cli_db, [self._PREFIX, self._PREFIX + "0"])
+
+        result = self._get(cli_script_path, cli_db, self._PREFIX)
+        assert result.returncode == 1, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "AMBIGUOUS_PREFIX", envelope
+        for surface in ("message", "prefix"):
+            text = envelope[surface]
+            assert "<U+202E>" in text, (surface, text)
+            assert not _has_raw_unsafe_char(text), (surface, repr(text))
+
+    def test_a_hex_only_prefix_envelope_is_unchanged(
+        self, cli_script_path, cli_db
+    ):
+        """Control: the escaping rule leaves safe text exactly as it was."""
+        plain = "abc1234"
+        self._seed(cli_db, [plain, plain + "0"])
+
+        result = self._get(cli_script_path, cli_db, plain)
+        assert result.returncode == 1, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "AMBIGUOUS_PREFIX", envelope
+        assert envelope["message"] == (
+            f"Prefix '{plain}' is ambiguous — 2 memories match."
+        ), envelope["message"]
+        assert envelope["prefix"] == plain, envelope["prefix"]
