@@ -87,7 +87,9 @@ WARM_ON_FRESHNESS = re.compile(
 # same sentence as the freshness claim, not merely in the paragraph.
 FRESH_DISPATCH_SCOPE = re.compile(
     r"\bfresh\s+review[-\s]+dispatch\b[^.;]{0,80}"
-    r"\b(?:every|each|all)\s+warm\s+reviewers?\b[^.;]{0,40}\bfresh\w*\s+spawn\w*"
+    r"\b(?:every|each|all)\s+warm\s+reviewers?\b[^.;]{0,40}"
+    r"(?:\bfresh\w*\b[^.;]{0,40}\bspawn\w*\b"
+    r"|\bspawn\w*\b[^.;]{0,40}\bfresh\w*\b)"
 )
 # The reuse exception is exhaustive: 'Reuse a warm reviewer ONLY for X or Y'.
 # A bare 'only' token is satisfied by 'verify-only', so the exclusivity word
@@ -249,12 +251,14 @@ def _unnegated_tail(pattern: re.Pattern, text: str) -> bool:
 
 
 def _governed_phrase_has_one_negation(text: str) -> bool:
-    """The leftmost negation governing a reuse noun phrase is the only one in
+    """EVERY negation governing a reuse noun phrase is the only negation in
     that phrase. 'never a teammate not reused' carries a second negation
-    INSIDE the governed phrase and reads as requiring the reuse."""
-    match = NEGATION_GOVERNS_REUSE.search(text)
-    return (match is not None
-            and len(NEGATION.findall(match.group(0))) == 1)
+    INSIDE the governed phrase and reads as requiring the reuse; a second
+    governed phrase appended later must not slip past the check."""
+    matches = list(NEGATION_GOVERNS_REUSE.finditer(text))
+    return bool(matches) and all(
+        len(NEGATION.findall(match.group(0))) == 1 for match in matches
+    )
 
 
 @pytest.mark.parametrize("pattern, lost", [
