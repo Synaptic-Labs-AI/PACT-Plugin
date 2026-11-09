@@ -243,9 +243,13 @@ on stderr, and nothing is written. An actual disagreement between
 instead.
 
 To proceed, supply `project_id` explicitly in the payload. A supplied
-`project_id` must be a non-empty string without C0, DEL, or C1 control
-characters (`U+0000-U+001F`, `U+007F-U+009F`). Other Unicode, including
-ordinary spaces, is allowed. Invalid values exit 2 and write nothing.
+`project_id` or `session_id`, on `save` or `update`, must be a non-empty
+string without C0, DEL, or C1 control characters (`U+0000-U+001F`,
+`U+007F-U+009F`) or surrogate code points (`U+D800-U+DFFF`); invalid
+values exit 2 and write nothing. Other Unicode, including ordinary
+spaces, Cf formatting characters, bidi overrides, zero-width characters
+and noncharacters, is accepted by design; the residual is display
+spoofing only.
 
 When no project identity resolves, `list`, `search`, and `search_by_file`
 return empty results, and `status` reports zero project-scoped counts. These
@@ -296,7 +300,7 @@ identity before interpreting them.
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
 
-On `update`, an omitted `project_id` leaves the row's project unchanged; an explicit `null`, empty string, or non-string `project_id` or `session_id` is refused with exit 2 — the opposite of `save`, where `null` means auto-detect — and a valid non-empty string re-keys the row, with its file and search rows following. A supplied `project_id` or `session_id` on either verb must be a non-empty string without control characters or lone surrogates; on `save`, `null` or omission auto-detects, while on `update` `null` is refused.
+On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row, and its file and search rows follow; a `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 
 ### Exit Codes
 
@@ -304,7 +308,7 @@ On `update`, an omitted `project_id` leaves the row's project unchanged; an expl
 |------|---------|
 | 0 | Success |
 | 1 | User error (bad args, invalid JSON, not found) |
-| 2 | Validation error (unknown field name, unknown sub-object key) — the error envelope includes an `allowed_fields` list |
+| 2 | Validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`) — the error envelope includes an `allowed_fields` list |
 | 3 | `project-file` only: this session's project memory file is unavailable; the printed line names why |
 
 ### Update Semantics
