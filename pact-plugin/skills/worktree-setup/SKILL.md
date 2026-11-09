@@ -40,8 +40,8 @@ All worktrees live in `.worktrees/` relative to the repo root.
 
 ```bash
 # Resolve the main checkout root.
-LOCAL_GIT_DIR=$(git rev-parse --git-dir)
-MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
+LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
 if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 else
@@ -54,15 +54,23 @@ MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/nul
 
 # Create directory and ensure gitignored
 mkdir -p "$REPO_ROOT/.worktrees"
-grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || echo '.worktrees/' >> "$REPO_ROOT/.gitignore"
+grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || {
+  # Terminate a final line that lacks a newline, so the entry cannot merge into it.
+  if [ -s "$REPO_ROOT/.gitignore" ] && [ -n "$(tail -c 1 "$REPO_ROOT/.gitignore" 2>/dev/null)" ]; then
+    printf '\n' >> "$REPO_ROOT/.gitignore"
+  fi
+  echo '.worktrees/' >> "$REPO_ROOT/.gitignore"
+}
 ```
 
 ### Step 3: Create the Worktree
 
+`{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
+
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
-LOCAL_GIT_DIR=$(git rev-parse --git-dir)
-MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
+LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
 if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 else
@@ -73,14 +81,18 @@ REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-comm
 MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
 [ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
 
-IFS= read -r BRANCH <<'PACT BRANCH'
+BRANCH=
+BRANCH_EXTRA=
+{ IFS= read -r BRANCH; IFS= read -r BRANCH_EXTRA || :; } <<'PACT BRANCH'
 {branch}
 PACT BRANCH
+[ -z "$BRANCH_EXTRA" ] || { echo "Cannot create worktree: the branch value must be a single line."; exit 1; }
+[ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot create worktree: the branch placeholder was not substituted."; exit 1; }
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot create worktree: invalid branch name."; exit 1; }
 git worktree add "$REPO_ROOT/.worktrees/$BRANCH" -b "$BRANCH"
 ```
 
-Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes). `{branch}` must be a single line; a value containing a newline is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
+Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes).
 
 **If creation fails**:
 - Branch already exists: Ask user whether to check out the existing branch. If yes, run the Step 3 block unchanged except for dropping `-b` (`git worktree add "$REPO_ROOT/.worktrees/$BRANCH" "$BRANCH"`), keeping the branch read and validation.
@@ -92,8 +104,8 @@ Link the main checkout's `.venv` into the worktree so tools resolve project depe
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
-LOCAL_GIT_DIR=$(git rev-parse --git-dir)
-MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
+LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
 if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 else
@@ -104,16 +116,20 @@ REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-comm
 MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
 [ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Venv link: skipped (cannot determine the main checkout root)"; exit 0; }
 
-IFS= read -r BRANCH <<'PACT BRANCH'
+BRANCH=
+BRANCH_EXTRA=
+{ IFS= read -r BRANCH; IFS= read -r BRANCH_EXTRA || :; } <<'PACT BRANCH'
 {branch}
 PACT BRANCH
+[ -z "$BRANCH_EXTRA" ] || { echo "Venv link: skipped (the branch value must be a single line)"; exit 0; }
+[ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Venv link: skipped (the branch placeholder was not substituted)"; exit 0; }
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Venv link: skipped (invalid branch name)"; exit 0; }
 WORKTREE="$REPO_ROOT/.worktrees/$BRANCH"
 
 if [ ! -d "$REPO_ROOT/.venv" ]; then
   echo "Venv link: skipped (no .venv at $REPO_ROOT/.venv)"
 elif [ ! -f "$WORKTREE/.git" ]; then
-  echo "Venv link: skipped (no git worktree at $WORKTREE)"
+  echo "Venv link: skipped (no git worktree at $WORKTREE; a reused worktree outside .worktrees/ is not linked)"
 else
   BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
   WORKTREE_PHYS=$(cd "$WORKTREE" 2>/dev/null && pwd -P)
@@ -122,7 +138,13 @@ else
     exit 0
   fi
   # Write /.venv anchored so the rule matches only the root-level entry.
-  EXCLUDE=$(git -C "$WORKTREE" rev-parse --git-path info/exclude 2>/dev/null)
+  # Resolve from inside the worktree so a relative result is relative to it.
+  EXCLUDE=$(cd "$WORKTREE" 2>/dev/null && git rev-parse --git-path info/exclude 2>/dev/null)
+  case "$EXCLUDE" in
+    /*) ;;
+    '') ;;
+    *) EXCLUDE="$WORKTREE_PHYS/$EXCLUDE" ;;
+  esac
   IGNORE_FAILED=0
   EXCLUDE_RESOLVED=1
   if [ -z "$EXCLUDE" ]; then
@@ -154,8 +176,12 @@ else
       if [ "$LINK_CREATED" = 1 ]; then
         rm -f "$WORKTREE/.venv"
         echo "WARNING: .venv is NOT ignored in this worktree — the link was removed so git add -A cannot commit it"
+      elif [ ! -e "$WORKTREE/.venv" ] && [ ! -L "$WORKTREE/.venv" ]; then
+        echo "WARNING: .venv is NOT ignored in this worktree, but no .venv exists there — nothing was created to commit"
+      elif git -C "$WORKTREE" ls-files --error-unmatch -- .venv >/dev/null 2>&1; then
+        echo "WARNING: .venv is NOT ignored in this worktree because it is tracked — git add -A can commit changes to it; clear it with git rm --cached .venv"
       else
-        echo "WARNING: .venv is NOT ignored in this worktree — git add -A could commit it; an untracked unignored link also makes git worktree remove refuse without --force"
+        echo "WARNING: .venv is NOT ignored in this worktree — git add -A could commit it; an untracked unignored path also makes git worktree remove refuse without --force"
       fi
     fi
   else
@@ -170,7 +196,7 @@ fi
 
 Include every line Step 4 printed in the Step 5 report, warnings included.
 
-Treat the link as a read-only, shared view of the main checkout's environment. Do not install into it, and do not delete it through the worktree path: `.venv/` with a trailing slash resolves into the shared environment and removes the main checkout's contents. When a branch needs its own dependency set, remove the link with `rm -f .venv` (no trailing slash) and create a local environment in the worktree.
+Treat the link as an advisory read-only, shared view of the main checkout's environment: the filesystem does not enforce it. Environment-managing tools write through it — `pip install`, `uv sync`, and `uv run` (which syncs the environment before running) modify the main checkout's environment, not a worktree-local one. Do not delete it through the worktree path either: `.venv/` with a trailing slash resolves into the shared environment and removes the main checkout's contents. When a branch needs its own dependency set, remove the link with `rm -f .venv` (no trailing slash) and create a local environment in the worktree.
 
 A failed link is a warning, not an error: this step is a convenience, and failing the whole setup over it would regress platforms where `ln -s` is unavailable. This is the one deliberate exception to the stop-on-error rule at the top of this skill.
 
@@ -191,18 +217,18 @@ Branch: {branch}
 | Case | Handling |
 |------|---------|
 | Already in a worktree for this feature | Detect via `git worktree list`, reuse existing |
-| Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE)`, and no link or rule is written |
+| Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE; a reused worktree outside .worktrees/ is not linked)`, and no link or rule is written. Pyright import resolution does not apply there, because no link is created |
 | Worktree path outside `.worktrees/` | Step 4 prints `Venv link: skipped (worktree path is not under .worktrees/)`; no link or rule is written |
-| Invalid branch name | Step 3 stops with an error; Step 4 prints `Venv link: skipped (invalid branch name)` and writes nothing |
+| Invalid branch name, a multi-line value, or an unsubstituted `{branch}` placeholder | Step 3 stops before `git worktree add`; Step 4 prints the corresponding `Venv link: skipped (…)` line and writes nothing |
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
 | Branch name already exists | Ask user: check out existing or create new name |
 | Creation fails (disk/permissions) | Surface error, offer fallback to main repo |
 | Main checkout has no `.venv` | Step 4 prints a one-line skip naming the path it checked; no link is created and setup continues |
 | `.venv` already exists in the worktree (real directory or a foreign link) | Step 4 reports it and leaves it untouched |
 | Exclude write fails | Step 4 prints a warning and creates no link, so an unignored link cannot be committed. Re-run setup to retry the write |
-| `.venv` is tracked | Step 4 prints a loud warning and `git add -A` could commit changes to it. Clear the entry with `git rm --cached .venv`; re-running setup cannot untrack it |
-| An untracked `.venv` link is not ignored | A link created by this run is removed before the warning, so `git add -A` cannot commit it. A pre-existing unignored link stays in place; `git worktree remove` refuses without `--force`. Re-run setup to write a missing rule; if a later `!.venv` rule nullifies it, inspect the exclude file |
-| Dependency work in a worktree | The link is read-only and shared. Remove the link and create a local environment in the worktree instead of installing through it |
+| `.venv` is tracked | `check-ignore` reports a tracked path as not ignored, so Step 4 prints `WARNING: .venv is NOT ignored in this worktree because it is tracked`; `git add -A` could commit changes to it. Clear the entry with `git rm --cached .venv`; re-running setup cannot untrack it |
+| An untracked `.venv` path is not ignored | A link created by this run is removed before the warning, so `git add -A` cannot commit it. A pre-existing unignored path stays in place; `git worktree remove` refuses without `--force`. Re-run setup to write a missing rule; if a later `!.venv` rule nullifies it, inspect the exclude file |
+| Dependency work in a worktree | The link is advisory read-only and shared: environment-managing tools (`pip install`, `uv sync`, `uv run`) write through it into the main checkout. Remove the link and create a local environment in the worktree instead |
 | `git clean -xdf` runs in a worktree | The ignored `.venv` link is removed; pyright reports `venv .venv subdirectory not found in venv path`. Re-run setup to restore the link |
 | Main checkout moved or renamed | Every worktree link is dangling. `git status` stays clean in the moved main checkout, but inside a worktree it reports `fatal: not a git repository: <old path>`. Run `git worktree repair <worktree-path>`, remove the dangling link with `rm .venv`, then re-run setup. Re-running Step 4 before the repair prints the unresolved-exclude-path warning and skips the link |
 | A linked worktree of a submodule or of a `--separate-git-dir` checkout | The main checkout root cannot be determined. The link step prints `Venv link: skipped (cannot determine the main checkout root)` and continues; the create and cleanup steps stop with `Cannot determine the main checkout root (computed …)` and create nothing |

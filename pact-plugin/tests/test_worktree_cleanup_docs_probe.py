@@ -64,10 +64,14 @@ def step_1_5(skill_text):
 
 
 def probe_commands(skill_text):
-    """The marker command and the listing command, in the order the step gives.
+    """The marker command and the listing command, each with the shipped preamble.
 
     Exactly one fence must sit in Step 1.5. A second would make `search` take
-    whichever came first and the arms would measure a command nobody meant.
+    whichever came first and the arms would measure a command nobody meant. The
+    fence reads the substituted path through a quoted heredoc before the two
+    commands, so each is returned with that preamble attached: both commands
+    address `$WORKTREE`, and running one without the preamble would measure an
+    empty path instead.
     """
     block = step_1_5(skill_text)
     fences = _FENCE.findall(block)
@@ -76,19 +80,25 @@ def probe_commands(skill_text):
         f"found {len(fences)}"
     )
     lines = [ln for ln in fences[0].strip().splitlines() if ln.strip()]
-    assert len(lines) == 2, f"expected a marker line and a listing line; got {lines}"
-    marker, listing = lines
-    assert "-d " in marker, f"the presence marker is gone: {marker!r}"
+    marker = next((ln for ln in lines if "-d " in ln and "echo" in ln), None)
+    listing = next((ln for ln in lines if ln.startswith("find ")), None)
+    assert marker is not None, f"the presence marker is gone: {lines!r}"
+    assert listing is not None, f"the listing is not `find`: {lines!r}"
+    assert lines[-1] == listing, f"the listing must be the last command: {lines!r}"
+    preamble = lines[:lines.index(marker)]
+    assert any("{abs_worktree}" in ln for ln in preamble), (
+        "the fence no longer reads {abs_worktree} into WORKTREE before the "
+        f"commands, so they would run against an empty path: {preamble!r}"
+    )
     assert marker.count("echo") == 3, (
         f"the marker no longer reports three states — an unobservable parent "
         f"and an absent directory may have collapsed onto one answer: {marker!r}"
     )
-    assert listing.startswith("find "), f"the listing is not `find`: {listing!r}"
     assert " -L" in listing, (
         f"`find` no longer follows symlinks, so a symlinked docs/ lists nothing "
         f"and reads as empty: {listing!r}"
     )
-    return marker, listing
+    return "\n".join(preamble + [marker]), "\n".join(preamble + [listing])
 
 
 @pytest.fixture
