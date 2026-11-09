@@ -941,6 +941,26 @@ def test_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsys):
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "is already a live member" in reason
+    # The hint ends the denial: name_not_unique is NOT in
+    # _STALE_DIAGNOSABLE_RULES, so no legitimate suffix exists and appended
+    # guidance is a defect. Pinning the tail makes an appended inversion or
+    # prohibition red; the four presence-only substrings it replaces stayed
+    # green on both.
+    hint = (
+        "If this is a fresh review dispatch, create Task A (teachback) and "
+        "Task B (work) under a distinct new name first, then spawn the "
+        "reviewer under that name; do not re-task the existing teammate. "
+        "A verify-only re-review or reviewer-to-fixer work reuses the "
+        "reviewer by SendMessage."
+    )
+    assert hint in reason, (
+        f"the duplicate-name denial lost or reworded its freshness hint: "
+        f"{reason!r}"
+    )
+    assert reason.endswith(hint), (
+        f"the duplicate-name denial continues past its freshness hint — the "
+        f"hint must end the denial: {reason!r}"
+    )
 
 
 def test_allows_unique_name_when_other_members_present(

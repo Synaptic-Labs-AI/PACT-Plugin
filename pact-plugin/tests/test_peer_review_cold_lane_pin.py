@@ -886,7 +886,7 @@ class TestLifecycleOrder:
     is not caught."""
 
     def test_lead_in_states_the_order_rule(self):
-        assert "Run the cold lane once in each review round — the initial review and each verify-only re-review — in the order below; each rule applies where it is written." in _lead_prose(), (
+        assert "Run the cold lane once in each review round — the initial review, any later full review round, and each verify-only re-review — in the order below; each rule applies where it is written." in _lead_prose(), (
             "the lane lost its ordering lead-in"
         )
 
