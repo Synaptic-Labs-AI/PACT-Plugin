@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.31: require a fresh reviewer for every warm review lane
+
+### Summary
+
+A warm reviewer is now stated to be a freshly spawned teammate, never one reused from an earlier phase of the session. The rule sits where the dispatch decision is made, and the surfaces that pushed a lead toward reuse now name the exception.
+
+### What landed
+
+- The freshness rule as the first paragraph of the warm dispatch section in `/PACT:peer-review`, with the distinct-name mechanism, the dispatch gate's refusal framed as a naming rule, and a pointer to the agent-memory channel a fresh spawn does not close.
+- A review-dispatch row in the orchestrator persona's Reuse vs. Spawn table, ahead of the generic idle-agent row, plus a scoped default, the Agent Shutdown Guidance exception, and the PR Review Workflow line.
+- The duplicate-name refusal in the dispatch gate now says a review dispatch spawns the reviewer under that distinct name rather than re-tasking the existing teammate.
+- A structural pin covering the rule, its extraction boundary, and the persona surfaces.
+
+### Why
+
+The command said to spawn warm reviewers but never said they must be fresh, while a reuse default, a shutdown absolute, and the gate's naming refusal all read as permission to re-task an existing teammate. A reviewer carrying the builder's context cannot give the independent read the lane exists to buy.
+
 ## v4.8.30: hold the cold report until its round's warm reviewers are accepted or stopped
 
 ### Summary
