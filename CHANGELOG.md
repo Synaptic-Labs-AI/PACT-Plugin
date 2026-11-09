@@ -26,7 +26,7 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### What landed
 
-- Step 4 of the `worktree-setup` skill: computes the repo root, skips with a one-line message when the main checkout has no `.venv`, writes `.venv` as an exact line to the common git `info/exclude` before linking, leaves an existing path untouched, creates the symlink, and verifies it with `git check-ignore`. The report gains a `Venv link:` line, and the edge cases cover a missing venv, an existing path, an unignored link, and platforms without symlink support.
+- Step 4 of the `worktree-setup` skill: computes the repo root; skips with a one-line message when the main checkout has no `.venv` or the computed path is not a git worktree; terminates a final `info/exclude` line that lacks a newline before writing `.venv` as an exact line to the common git `info/exclude`; leaves an existing path untouched; creates the symlink; and verifies it with `git check-ignore`. A failed link or an unignored link warns with the consequence named. The report carries every line the step printed, and the edge cases cover a missing venv, a non-worktree path, an existing path, a tracked link, an unignored link, and platforms without symlink support.
 - `venvPath` and `venv` in both `pyrightconfig.json` files, resolving to the repo root from each config's own directory.
 - The worktree lifecycle scenario gains the venv step, verification rows for the link and the symlink-matching ignore rule, a failure-mode row for an unignored link, and a recorded-probe section.
 - The reuse path now reaches the link step, repairing worktrees created before this change and any worktree whose link was removed.

@@ -46,6 +46,13 @@ the shipped-command house pattern. Git's global and system config is isolated
 excludesfile can change what this fixture measures — this host's ignores
 `.gitignore` itself, so an unisolated run would test a different tree locally
 than on CI. No remote and no worktree of the real repo is ever touched.
+
+THE CONFIG ARM REQUIRES A SOURCE CHECKOUT, and says so with a POSITIVE marker
+(`.claude-plugin/marketplace.json`), following `test_local_lint_parity.py`.
+From an INSTALLED PLUGIN CACHE the repo-root `pyrightconfig.json` does not
+exist by design, so that arm SKIPS with a "SKIPPED, NOT PASSED" message rather
+than failing on a file the cache never ships. The fence arms need only
+`SKILL.md`, which the cache does ship, so they run everywhere.
 """
 
 import json
@@ -56,7 +63,6 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_FILE = (
     Path(__file__).resolve().parents[1] / "skills" / "worktree-setup" / "SKILL.md"
 )
@@ -104,6 +110,33 @@ def fence_for(skill_text, branch=BRANCH):
         "test cannot address the worktree the skill creates"
     )
     return fence.replace("{branch}", branch)
+
+
+def _source_repo_root():
+    """Repo root by a POSITIVE marker, or None when this is not a checkout.
+
+    Deliberately not "did I find pyrightconfig.json?" — "I cannot find it" and
+    "it is wrong" must never produce the same outcome, or a config deleted
+    inside a checkout would skip instead of failing. Same marker and rationale
+    as `test_local_lint_parity.py::_source_repo_root`.
+    """
+    for base in Path(__file__).resolve().parents:
+        if (base / ".claude-plugin" / "marketplace.json").exists():
+            return base
+    return None
+
+
+def _require_checkout():
+    root = _source_repo_root()
+    if root is None:
+        pytest.skip(
+            "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json above "
+            f"{Path(__file__).resolve()}, so this is not a PACT source checkout. "
+            "The expected case is an INSTALLED PLUGIN CACHE, which ships no "
+            "repo-root pyrightconfig.json by design. This skip is NO "
+            "INFORMATION about the config arm — never read it as a pass."
+        )
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -167,18 +200,28 @@ def make_repo(
     return repo, worktree
 
 
-def run_fence(fence, repo):
+def run_fence(fence, repo, pwd=None):
+    """Run the fence with `repo` as cwd.
+
+    `pwd` is passed only by the symlinked-root arm: the fence computes its root
+    from `pwd`, and a shell reached through a symlink carries the LOGICAL path
+    in `PWD`. Without it bash resolves to the physical path and the arm would
+    not exercise the symlink at all.
+    """
+    env = {
+        "PATH": SAFE_PATH,
+        "HOME": os.environ["HOME"],
+        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    if pwd is not None:
+        env["PWD"] = str(pwd)
     return subprocess.run(
         [str(BASH), "-c", fence],
         cwd=str(repo),
         capture_output=True,
         text=True,
-        env={
-            "PATH": SAFE_PATH,
-            "HOME": os.environ["HOME"],
-            "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
-            "GIT_CONFIG_NOSYSTEM": "1",
-        },
+        env=env,
     )
 
 
@@ -386,6 +429,74 @@ class TestPathGuard:
         assert exclude_venv_lines(repo) == []
 
 
+class TestPlainDirectoryIsNotAWorktree:
+    """A directory under `.worktrees/` is inside the repo's work tree.
+
+    `git -C <dir> rev-parse --is-inside-work-tree` therefore reports TRUE for a
+    plain directory, so that predicate links into a directory that is not a
+    worktree. The `.git`-FILE predicate is the one that distinguishes a real
+    worktree. The skip must also be silent on stderr: shell noise on the normal
+    guard path is indistinguishable from a failure to a reader.
+    """
+
+    def test_skips_with_no_link_no_rule_and_no_stderr(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, _ = make_repo(tmp_path)
+        plain = repo / ".worktrees" / "feature" / "plain"
+        plain.mkdir(parents=True)
+        (plain / "obstruction").write_text("x\n", encoding="utf-8")
+
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch="feature/plain"),
+            repo,
+        )
+        assert done.returncode == 0, f"the guard must not fail: {done.stderr.strip()}"
+        assert "Venv link: skipped (no git worktree at " in done.stdout, (
+            f"a plain directory was not rejected; stdout={done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(plain / ".venv")
+        assert exclude_venv_lines(repo) == [], (
+            "the rule was written even though the guard rejected the path"
+        )
+        assert done.stderr == "", (
+            f"the skip path must be silent on stderr; got {done.stderr!r}"
+        )
+
+
+class TestSymlinkedRootIsAValidWorktree:
+    """A worktree reached through a symlinked root is still a valid worktree.
+
+    `git rev-parse --show-toplevel` reports the PHYSICAL path, so a predicate
+    that compares toplevel to the computed path rejects this state. The fence
+    computes its root from `pwd`, and `PWD` carries the LOGICAL spelling in a
+    shell that reached the directory through a symlink — passing it mirrors
+    that, and without it bash resolves to the physical path and this arm would
+    not exercise the symlink at all.
+    """
+
+    def test_link_is_created_through_the_symlinked_root(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        linked = tmp_path / "linked-root"
+        linked.symlink_to(repo, target_is_directory=True)
+
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8")), linked, pwd=linked
+        )
+        assert "skipped" not in done.stdout, (
+            f"a valid worktree behind a symlinked root was rejected: {done.stdout.strip()!r}"
+        )
+        assert "Venv link: .venv -> " in done.stdout
+        assert (linked / ".worktrees" / BRANCH / ".venv").is_symlink(), (
+            "the link was not created through the symlinked root"
+        )
+        assert (worktree / ".venv").is_symlink(), (
+            "the symlinked-root link does not reach the real worktree"
+        )
+
+
 class TestNoVenvInMainCheckout:
     def test_skips_without_a_link_or_a_rule(self, isolated_git_config, tmp_path):
         repo, worktree = make_repo(tmp_path, with_venv=False)
@@ -507,6 +618,10 @@ class TestExcludeWriteFailureSkipsTheLink:
         assert not os.path.lexists(worktree / ".venv"), (
             "a link was created even though the ignore rule could not be written"
         )
+        assert done.stderr == "", (
+            "the write-failure path must be silent on stderr after the redirect "
+            f"reordering; got {done.stderr!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -514,8 +629,8 @@ class TestExcludeWriteFailureSkipsTheLink:
 # ---------------------------------------------------------------------------
 
 _CONFIGS = [
-    pytest.param(REPO_ROOT / "pyrightconfig.json", ".", id="repo-root"),
-    pytest.param(REPO_ROOT / "pact-plugin" / "pyrightconfig.json", "..", id="plugin"),
+    pytest.param("pyrightconfig.json", ".", id="repo-root"),
+    pytest.param("pact-plugin/pyrightconfig.json", "..", id="plugin"),
 ]
 
 
@@ -528,24 +643,34 @@ class TestPyrightConfigPointsAtTheReposVenv:
     IS the repo-root `.venv`, from both config depths — is path arithmetic and
     holds on every runner. The fence arms and the recorded probe cover the
     live-link half.
+
+    OUTSIDE A SOURCE CHECKOUT THIS ARM SKIPS. An installed plugin cache ships
+    no repo-root `pyrightconfig.json`, so the marker check comes first and the
+    skip says "SKIPPED, NOT PASSED".
     """
 
-    @pytest.mark.parametrize("config_path,venv_path", _CONFIGS)
-    def test_config_addresses_the_repo_root_venv(self, config_path, venv_path):
+    @pytest.mark.parametrize("rel_path,venv_path", _CONFIGS)
+    def test_config_addresses_the_repo_root_venv(self, rel_path, venv_path):
+        root = _require_checkout()
+        config_path = root / rel_path
+        assert config_path.is_file(), (
+            f"source checkout detected at {root} but {rel_path} is missing. "
+            "This is a FAILURE, not a skip: inside a checkout both configs "
+            "are required."
+        )
         config = json.loads(config_path.read_text(encoding="utf-8"))
         assert config["venv"] == ".venv", (
-            f"{config_path.name}: venv key changed, so pyright will not look "
-            f"where the skill puts the link"
+            f"{rel_path}: venv key changed, so pyright will not look where the "
+            f"skill puts the link"
         )
         assert config["venvPath"] == venv_path, (
-            f"{config_path.name}: venvPath must be {venv_path!r} from this "
-            f"config's own directory"
+            f"{rel_path}: venvPath must be {venv_path!r} from this config's "
+            f"own directory"
         )
         anchor = (config_path.parent / config["venvPath"]).resolve()
-        assert anchor.is_dir(), f"{config_path.name}: venvPath anchor is not a directory"
-        assert (anchor / config["venv"]).resolve() == (REPO_ROOT / ".venv").resolve(), (
-            f"{config_path.name}: the constructed venv path is not the "
-            f"repo-root .venv"
+        assert anchor.is_dir(), f"{rel_path}: venvPath anchor is not a directory"
+        assert (anchor / config["venv"]).resolve() == (root / ".venv").resolve(), (
+            f"{rel_path}: the constructed venv path is not the repo-root .venv"
         )
 
 

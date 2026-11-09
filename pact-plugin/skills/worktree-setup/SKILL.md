@@ -72,7 +72,7 @@ WORKTREE="$REPO_ROOT/.worktrees/{branch}"
 
 if [ ! -d "$REPO_ROOT/.venv" ]; then
   echo "Venv link: skipped (no .venv in the main checkout)"
-elif ! git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+elif [ ! -f "$WORKTREE/.git" ]; then
   echo "Venv link: skipped (no git worktree at $WORKTREE)"
 else
   # Write .venv with no trailing slash so the rule matches the symlink as well as a directory.
@@ -82,11 +82,11 @@ else
     IGNORE_FAILED=1
   elif ! grep -qxF '.venv' "$EXCLUDE" 2>/dev/null; then
     # Terminate a final line that lacks a newline, so the new rule cannot merge into it.
-    if [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE")" ]; then
-      printf '\n' >> "$EXCLUDE" 2>/dev/null || IGNORE_FAILED=1
+    if [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE" 2>/dev/null)" ]; then
+      printf '\n' 2>/dev/null >> "$EXCLUDE" || IGNORE_FAILED=1
     fi
     if [ "$IGNORE_FAILED" = 0 ]; then
-      printf '%s\n' '.venv' >> "$EXCLUDE" 2>/dev/null || IGNORE_FAILED=1
+      printf '%s\n' '.venv' 2>/dev/null >> "$EXCLUDE" || IGNORE_FAILED=1
     fi
   fi
   if [ "$IGNORE_FAILED" = 0 ]; then
@@ -125,6 +125,7 @@ Branch: {branch}
 | Case | Handling |
 |------|---------|
 | Already in a worktree for this feature | Detect via `git worktree list`, reuse existing |
+| Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE)`, and no link or rule is written |
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
 | Branch name already exists | Ask user: check out existing or create new name |
 | Creation fails (disk/permissions) | Surface error, offer fallback to main repo |
