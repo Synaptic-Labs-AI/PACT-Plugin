@@ -332,11 +332,24 @@ def _carveout_is_positive(text: str, case: str) -> bool:
     """A permitted-reuse noun bound to a POSITIVE reuse verb.
 
     The carve-out says verify-only and fixer work DO reuse the reviewer; a
-    bare token check accepts 'does not reuse that reviewer'.
+    bare token check accepts 'does not reuse that reviewer', and a
+    sentence-wide negation scan accepts the exception-shaped inversion
+    'reviews other than verify-only still reuse that reviewer' because its
+    verb is positive. The qualifier directly before the case noun is what
+    flips the carve-out, so bind that qualifier rather than widening the
+    scan: the shutdown paragraph's 'except for review dispatch' sits in the
+    same sentence as its carve-out and would otherwise read as an inversion.
     """
+    escaped = re.escape(case)
+    inverted = re.compile(
+        rf"\b(?:other\s+than|except(?:\s+for)?|but|than)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{escaped}\b"
+    )
+    if inverted.search(text):
+        return False
     pattern = re.compile(
-        rf"\b{re.escape(case)}\b[^.;]{{0,80}}\breus\w*"
-        rf"|\breus\w*[^.;]{{0,80}}\b{re.escape(case)}\b"
+        rf"\b{escaped}\b[^.;]{{0,80}}\breus\w*"
+        rf"|\breus\w*[^.;]{{0,80}}\b{escaped}\b"
     )
     return _unnegated(pattern, text)
 
