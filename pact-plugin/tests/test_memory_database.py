@@ -2131,3 +2131,48 @@ class TestBug1EmbeddingSkipOnIdempotentUpdate:
                 f"regen (got {second_update_calls} extra calls — M7 "
                 "optimization is not firing)"
             )
+
+
+# ---------------------------------------------------------------------------
+# escape_for_envelope: the rendering rule for caller-supplied text
+# ---------------------------------------------------------------------------
+
+class TestEscapeForEnvelope:
+    """Unsafe characters become visible markers; safe text is UNCHANGED.
+
+    TWO-SIDED ON PURPOSE. An arm that only asserts a bidi override becomes a
+    marker cannot tell escaping from BLINDING: a function that replaced every
+    character would pass it. The literal ASCII text "u202e" and ordinary ids
+    must come back byte-identical, which is the direction a one-sided arm
+    misses. Every character in this table is written as an escape, so the
+    test says what it means to a reader.
+    """
+
+    @pytest.mark.parametrize("char,marker", [
+        ("\u202e", "<U+202E>"),  # RIGHT-TO-LEFT OVERRIDE, the reordering hazard
+        ("\x1b", "<U+001B>"),    # ESC, a C0 control
+        ("\x85", "<U+0085>"),    # a C1 control
+        ("\u2028", "<U+2028>"),  # LINE SEPARATOR (Zl)
+        ("\u2029", "<U+2029>"),  # PARAGRAPH SEPARATOR (Zp)
+    ])
+    def test_an_unsafe_character_becomes_a_visible_marker(self, char, marker):
+        from scripts.database import escape_for_envelope
+        assert escape_for_envelope(f"a{char}b") == f"a{marker}b"
+
+    def test_a_lone_surrogate_becomes_a_visible_marker(self):
+        from scripts.database import escape_for_envelope
+        assert escape_for_envelope("a\ud800b") == "a<U+D800>b"
+
+    def test_safe_text_is_unchanged(self):
+        from scripts.database import escape_for_envelope
+        assert escape_for_envelope("u202e") == "u202e", (
+            "the ASCII text that SPELLS a marker was escaped, so the rule "
+            "blinds text rather than rendering it inert"
+        )
+        assert escape_for_envelope("plain-id_42") == "plain-id_42"
+
+    def test_the_too_short_message_renders_the_prefix_inert(self):
+        from scripts.database import PrefixTooShortError
+        message = str(PrefixTooShortError("a\u202eb"))
+        assert "<U+202E>" in message, message
+        assert "\u202e" not in message, message

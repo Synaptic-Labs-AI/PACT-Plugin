@@ -46,11 +46,16 @@ from scripts.memory_api import (
 )
 from scripts.database import (
     db_connection,
+    ensure_initialized,
+    get_memory,
     list_memories,
     search_memories_by_text,
 )
 from scripts.database import PrefixTooShortError
-from scripts.graph import add_file_relation, get_file_id
+from scripts.config import store_scope
+from scripts.graph import add_file_relation, get_file_id, track_file
+import scripts.embedding_catchup as embedding_catchup
+import scripts.search as memory_search
 from scripts.working_memory import (
     AmbientSyncRefused,
     SyncResult,
@@ -1497,11 +1502,32 @@ class TestUpdatePayloadProjectIdGuard:
             "store write"
         )
 
-    def test_omission_proceeds_with_no_identity_requirement(self, tmp_path):
-        """An update not touching project_id needs no identity (subset guard)."""
+    def test_omission_proceeds_with_no_identity_requirement(
+        self, tmp_path, monkeypatch
+    ):
+        """An update not touching project_id needs no identity (subset guard).
+
+        THE INSTANCE MUST HAVE NO IDENTITY, and the first version of this arm
+        did not give it one: it built a RESOLVED instance, so it could not
+        detect the regression its name describes — adding an identity
+        requirement to update() left it green (measured). The row is therefore
+        created by a resolved instance and the UPDATE is issued by an
+        unresolved one.
+        """
         db_path = tmp_path / "update-omission.db"
-        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
-        memory_id = memory.save({"context": "UPDATE-OMISSION"}, sync_to_claude=False)
+        seed = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = seed.save({"context": "UPDATE-OMISSION"}, sync_to_claude=False)
+
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+        assert memory.project_id is None, (
+            "the fixture resolved an identity, so the update below would not "
+            "exercise the identity-free path"
+        )
 
         resolved = memory.update(memory_id, {"context": "UPDATE-OMISSION-2"})
 
@@ -1557,31 +1583,35 @@ class TestUpdatePayloadProjectIdGuard:
         )
 
         # The vec partition followed: no vector remains under the old key.
-        # Guarded on module availability: a vec0 table can only be queried
-        # from a connection that loaded sqlite_vec, and a process that
-        # cannot embed never wrote a vector to strand in the first place.
-        # When the module loads, the invariant is exact.
+        # The assertion is UNCONDITIONAL. It used to vanish when sqlite_vec
+        # would not load, on the reasoning that a process which cannot embed
+        # never wrote a vector — false for a shared store, where another
+        # process wrote one and this one merely cannot read it. A store with
+        # a vec0 table that this process cannot open is an environment that
+        # failed to measure the claim, so it fails loudly instead of
+        # reporting a pass. The degraded case has its own arm, with a
+        # faithful simulation, in
+        # TestAVectorHitIsConfirmedAgainstTheStoredProject.
         with db_connection(db_path) as conn:
             has_vec = conn.execute(
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name='vec_memories'"
             ).fetchone() is not None
-            if has_vec:
-                try:
-                    import sqlite_vec
+            assert has_vec, (
+                "the fixture's store has no vector table, so the partition "
+                "claim below was not measured"
+            )
+            import sqlite_vec
 
-                    sqlite_vec.load(conn)
-                except ImportError:
-                    pass
-                else:
-                    stale = conn.execute(
-                        "SELECT COUNT(*) FROM vec_memories "
-                        "WHERE memory_id = ? AND project_id = ?",
-                        (memory_id, "detected-b"),
-                    ).fetchone()[0]
-                    assert stale == 0, (
-                        "a vector remains in the old project's partition"
-                    )
+            sqlite_vec.load(conn)
+            stale = conn.execute(
+                "SELECT COUNT(*) FROM vec_memories "
+                "WHERE memory_id = ? AND project_id = ?",
+                (memory_id, "detected-b"),
+            ).fetchone()[0]
+            assert stale == 0, (
+                "a vector remains in the old project's partition"
+            )
 
     def test_a_rekeys_links_survive_an_embedding_fault(
         self, tmp_path, monkeypatch
@@ -1717,6 +1747,31 @@ class TestUpdatePayloadProjectIdGuard:
         )
         with pytest.raises(ProjectScopeDisagreementError):
             memory.update(memory_id, {"project_id": None})
+
+    def test_a_refusal_precedes_ensure_ready(self, tmp_path, monkeypatch):
+        """F2: a refused payload does no store work.
+
+        `_ensure_ready` may install dependencies, migrate the store and run
+        the embedding catch-up before the refusal, so its position is a
+        contract the CHANGELOG states and nothing pinned. Both refusals are
+        checked: the mapping guard's, and the identity loop's.
+        """
+        db_path = tmp_path / "ensure-ready.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = memory.save({"context": "ENSURE-READY"}, sync_to_claude=False)
+
+        called = []
+        monkeypatch.setattr(memory_api, "_ensure_ready", lambda: called.append(True))
+
+        with pytest.raises(ValueError, match="must be an object mapping"):
+            memory.update(memory_id, ["not", "a", "mapping"])
+        with pytest.raises(ValueError, match="when supplied to update"):
+            memory.update(memory_id, {"project_id": None})
+
+        assert called == [], (
+            "a refused payload reached _ensure_ready, which may install, "
+            "migrate and catch up before the refusal lands"
+        )
 
     def test_a_payload_refusal_precedes_the_prefix_check(
         self, tmp_path
@@ -1992,7 +2047,10 @@ class TestIssueCriterionALiteralShape:
         assert live.project_id == "R", (
             "the live session-record declaration did not resolve to the repo"
         )
-        memory_id = live.save({"context": _TOKEN}, sync_to_claude=False)
+        linked = main / "README"
+        memory_id = live.save(
+            {"context": _TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
 
         # LIVE: the row is in the store under the repository's key.
         with db_connection(db_path) as conn:
@@ -2000,6 +2058,23 @@ class TestIssueCriterionALiteralShape:
                 "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
             ).fetchone()
         assert row is not None and row[0] == "R"
+
+        # THE FILE ROW IS MADE NULL-KEYED, WHICH IS THE SHAPE THE HAZARD NEEDS.
+        # A row keyed "R" matches nothing under a None filter, so asserting []
+        # against it would be vacuous. R1c builds the same shape; the control
+        # below proves the unguarded read WOULD surface this memory.
+        with db_connection(db_path) as conn:
+            file_id = get_file_id(conn, str(linked), "R")
+            assert file_id, "the live save did not link the file row"
+            conn.execute(
+                "UPDATE files SET project_id = NULL WHERE id = ?", (file_id,)
+            )
+            conn.commit()
+        with db_connection(db_path) as conn:
+            assert get_file_id(conn, str(linked), None) == file_id, (
+                "the fixture does not exercise the NULL-keyed shape"
+            )
+
         # No identity record exists for this session: after removal, nothing
         # can answer for the dead declaration.
         assert not _record_path(worktree).exists()
@@ -2017,7 +2092,10 @@ class TestIssueCriterionALiteralShape:
         # search_by_file would match the shared NULL bucket, and get_status
         # would report whole-store counts as this session's.
         assert gone.search(_TOKEN, sync_to_claude=False) == []
-        assert gone.search_by_file(str(main / "README")) == []
+        assert gone.search_by_file(str(linked)) == [], (
+            "the declined identity surfaced the memory through the shared "
+            "NULL-keyed file row"
+        )
         status = gone.get_status()
         assert status["project_id"] is None
         assert status["memory_count"] == 0
@@ -2118,3 +2196,370 @@ def test_declaration_predicate_declines_a_broken_symlink(tmp_path):
     declared = tmp_path / "declaration"
     declared.symlink_to(tmp_path / "missing-target")
     assert memory_api._declared_path_exists(str(declared)) is False
+
+
+# ---------------------------------------------------------------------------
+# #1688 remediation: a re-key's cross-project reads are closed at every surface
+#
+# Every arm below shares one shape: a memory IS stored under one project while
+# a project-keyed surface still carries another, and the assertion is that the
+# read the other project issues does not hand the memory back. Each has a
+# matched control on the SAME fixture, because "returns []" is also what a
+# missing row returns.
+# ---------------------------------------------------------------------------
+
+_REKEY_TOKEN = "REKEY-CROSS-PROJECT-TOKEN"
+
+
+def _vector_partition(db_path: Path, memory_id: str):
+    """The project whose vec0 partition holds this memory, or None."""
+    with db_connection(db_path) as conn:
+        ensure_initialized(conn)
+        row = conn.execute(
+            "SELECT project_id FROM vec_memories WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def _saved_with_vector(db_path: Path, project: str) -> str:
+    """Save one memory under `project` and prove it stored a real vector.
+
+    The precondition is asserted rather than assumed: an environment without
+    an embedding backend would leave every arm below measuring fixture state.
+    """
+    memory_id = PACTMemory(
+        project_id=project, session_id="s", db_path=db_path
+    ).save({"context": _REKEY_TOKEN}, sync_to_claude=False)
+    partition = _vector_partition(db_path, memory_id)
+    assert partition == project, (
+        f"the fixture stored no vector under {project!r} (found {partition!r}); "
+        "this arm would measure the fixture, not the guard"
+    )
+    return memory_id
+
+
+def _degrade(monkeypatch) -> None:
+    """Make this process unable to open the vector table, faithfully.
+
+    THE FLAG ALONE IS NOT THE CONDITION. `_drop_existing_vector` imports
+    sqlite_vec and loads it without consulting SQLITE_EXTENSIONS_ENABLED, so a
+    fixture that patches only the flag still reaches the table and deletes the
+    row — three arms measured green for that reason. A process that cannot
+    embed cannot load the extension either, so both terms are broken here.
+    """
+    import sqlite_vec
+
+    def _cannot_load(conn):
+        raise RuntimeError("simulated: sqlite-vec cannot load in this process")
+
+    monkeypatch.setattr(sqlite_vec, "load", _cannot_load)
+    for module in (memory_api, memory_search, embedding_catchup):
+        monkeypatch.setattr(module, "SQLITE_EXTENSIONS_ENABLED", False)
+
+
+class TestSearchByFileConfirmsTheStoredProject:
+    def test_a_stale_link_does_not_serve_another_projects_memory(self, tmp_path):
+        """The graph lookup scopes the FILE; the row's own scope decides."""
+        db_path = tmp_path / "stale-link.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        memory_id = PACTMemory(
+            project_id="projB", session_id="s", db_path=db_path
+        ).save(
+            {"context": _REKEY_TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            for project in ("projA", None):
+                file_id = track_file(conn, str(linked), project)
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_files "
+                    "(memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+                    (memory_id, file_id),
+                )
+            conn.commit()
+
+        stale = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        assert stale.search_by_file(str(linked)) == [], (
+            "a stale link on projA's file row served a projB memory to projA"
+        )
+        # CONTROLS on the same fixture: the memory IS reachable when the
+        # filter matches and when no filter is applied, so the [] above is the
+        # confirmation's doing rather than a missing row.
+        live = PACTMemory(project_id="projB", session_id="s", db_path=db_path)
+        assert [m.id for m in live.search_by_file(str(linked))] == [memory_id]
+        with store_scope(db_path):
+            assert [
+                m.id for m in memory_search.search_by_file(str(linked))
+            ] == [memory_id], "the unscoped read lost its whole-store meaning"
+
+
+class TestAVectorHitIsConfirmedAgainstTheStoredProject:
+    def test_a_degraded_rekey_leaves_the_row_and_every_read_confirms_it(
+        self, tmp_path, monkeypatch
+    ):
+        """One fixture, three claims: the choke point, the join, the repair."""
+        db_path = tmp_path / "degraded.db"
+        memory_id = _saved_with_vector(db_path, "projA")
+
+        with monkeypatch.context() as degraded:
+            _degrade(degraded)
+            assert PACTMemory(
+                project_id="projB", session_id="s", db_path=db_path
+            ).update(memory_id, {"project_id": "projB"}) == memory_id
+
+        # THE SIMULATION WAS FAITHFUL, and this is the measurement that says
+        # so: a process that could still load the extension would have deleted
+        # the old row on the cascade's fault path. Patching the flag alone
+        # leaves it reachable, which is why that fixture proves nothing.
+        assert _vector_partition(db_path, memory_id) == "projA", (
+            "the degraded re-key dropped or moved the vector row, so this "
+            "fixture did not exercise the no-vector-store path"
+        )
+
+        with store_scope(db_path):
+            with db_connection(db_path) as conn:
+                ensure_initialized(conn)
+                assert memory_search.vector_search(
+                    conn, _REKEY_TOKEN, "projA"
+                ) == [], (
+                    "a stranded vector hit was served to the project the "
+                    "memory was re-keyed out of"
+                )
+                assert [
+                    hit for hit, _distance in memory_search.vector_search(
+                        conn, _REKEY_TOKEN, None
+                    )
+                ] == [memory_id], "the unscoped read lost its whole-store meaning"
+            unembedded = embedding_catchup.get_unembedded_memories()
+            assert unembedded.answerable, unembedded.reason
+            assert list(unembedded) == [memory_id], (
+                "the partition-aware join did not report the stranded row"
+            )
+            assert embedding_catchup.embed_single_memory(memory_id) is True
+        assert _vector_partition(db_path, memory_id) == "projB", (
+            "the repair did not move the vector into the memory's partition"
+        )
+
+
+class TestAFaultedCascadeDropsTheReachableOldRow:
+    def test_a_faulted_cascade_leaves_a_missing_row_the_catchup_repairs(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "fault.db"
+        memory_id = _saved_with_vector(db_path, "projA")
+
+        def _fault(conn, mid, memory):
+            # The real fault path rolls its own replace back, so the original
+            # row is restored; this stub leaves the same end state.
+            conn.rollback()
+            return "fault"
+
+        monkeypatch.setattr(PACTMemory, "_store_embedding", staticmethod(_fault))
+        assert PACTMemory(
+            project_id="projB", session_id="s", db_path=db_path
+        ).update(memory_id, {"project_id": "projB"}) == memory_id
+
+        assert _vector_partition(db_path, memory_id) is None, (
+            "a faulted cascade stranded the reachable old-partition row, "
+            "which the catch-up cannot see as unembedded"
+        )
+        with store_scope(db_path):
+            unembedded = embedding_catchup.get_unembedded_memories()
+            assert unembedded.answerable, unembedded.reason
+            assert list(unembedded) == [memory_id], (
+                "the catch-up did not report a memory whose vector was dropped"
+            )
+
+
+class TestAnInterruptedCascadeIsFinishedByReissuing:
+    def test_the_reissued_update_repairs_and_a_satisfied_one_stores_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "interrupted.db"
+        first = tmp_path / "first.py"
+        second = tmp_path / "second.py"
+        first.write_text("x = 1\n", encoding="utf-8")
+        second.write_text("y = 2\n", encoding="utf-8")
+        memory_id = PACTMemory(
+            project_id="projA", session_id="s", db_path=db_path
+        ).save(
+            {"context": _REKEY_TOKEN},
+            files=[str(first), str(second)],
+            sync_to_claude=False,
+        )
+        assert _vector_partition(db_path, memory_id) == "projA"
+
+        real_track = memory_api.track_file
+        seen = {"n": 0}
+
+        def _raise_on_second(conn, path, project_id=None):
+            seen["n"] += 1
+            if seen["n"] == 2:
+                raise RuntimeError("simulated interruption")
+            return real_track(conn, path, project_id)
+
+        monkeypatch.setattr(memory_api, "track_file", _raise_on_second)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            PACTMemory(
+                project_id="projB", session_id="s", db_path=db_path
+            ).update(memory_id, {"project_id": "projB"})
+        monkeypatch.setattr(memory_api, "track_file", real_track)
+
+        # The memories row moved and was committed before the cascade ran, so
+        # the re-issued update sees an already-re-keyed row.
+        with db_connection(db_path) as conn:
+            assert get_memory(conn, memory_id)["project_id"] == "projB"
+
+        assert PACTMemory(
+            project_id="projB", session_id="s", db_path=db_path
+        ).update(memory_id, {"project_id": "projB"}) == memory_id
+
+        with db_connection(db_path) as conn:
+            stale = conn.execute(
+                "SELECT COUNT(*) FROM files f JOIN memory_files mf "
+                "ON mf.file_id = f.id WHERE mf.memory_id = ? "
+                "AND f.project_id IS NOT ?",
+                (memory_id, "projB"),
+            ).fetchone()[0]
+            fresh = conn.execute(
+                "SELECT COUNT(*) FROM files f JOIN memory_files mf "
+                "ON mf.file_id = f.id WHERE mf.memory_id = ? "
+                "AND f.project_id IS ?",
+                (memory_id, "projB"),
+            ).fetchone()[0]
+        assert (stale, fresh) == (0, 2), (
+            f"the re-issued update did not finish the cascade: {stale} old, "
+            f"{fresh} new"
+        )
+        assert _vector_partition(db_path, memory_id) == "projB"
+
+        # THIRD UPDATE: the invariant is satisfied. Zero store calls is the
+        # claim, but a zero is also what an update that never reached the
+        # cascade produces, so the probes that decide it are spied too.
+        probes = []
+        real_files = PACTMemory._linked_file_partition_is_stale
+        real_vector = PACTMemory._vector_partition_is_stale
+        monkeypatch.setattr(
+            PACTMemory, "_linked_file_partition_is_stale",
+            staticmethod(
+                lambda conn, mid, target: (
+                    probes.append("files"), real_files(conn, mid, target)
+                )[1]
+            ),
+        )
+        monkeypatch.setattr(
+            PACTMemory, "_vector_partition_is_stale",
+            staticmethod(
+                lambda conn, mid, target: (
+                    probes.append("vector"), real_vector(conn, mid, target)
+                )[1]
+            ),
+        )
+        stores = []
+        monkeypatch.setattr(
+            PACTMemory, "_store_embedding",
+            staticmethod(lambda conn, mid, memory: stores.append(mid) or None),
+        )
+        assert PACTMemory(
+            project_id="projB", session_id="s", db_path=db_path
+        ).update(memory_id, {"project_id": "projB"}) == memory_id
+        assert stores == [], "a satisfied invariant still re-stored the vector"
+        assert probes == ["files", "vector"], (
+            "the third update never evaluated the invariant, so its zero "
+            f"store calls prove nothing; probes={probes!r}"
+        )
+
+
+class TestConstructorValidatesSuppliedIdentifiers:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"project_id": "bad\x00id"},
+            {"project_id": "bad\ud800id"},
+            {"session_id": "bad\x7fid"},
+            {"session_id": 123},
+        ],
+    )
+    def test_a_supplied_unusable_identifier_is_refused(self, tmp_path, kwargs):
+        db_path = tmp_path / "constructor.db"
+        with pytest.raises(ValueError, match="when supplied"):
+            PACTMemory(db_path=db_path, **kwargs)
+        assert not db_path.exists(), (
+            "the constructor refusal performed store work"
+        )
+
+    def test_a_falsy_supplied_identifier_still_auto_detects(
+        self, tmp_path, monkeypatch
+    ):
+        """The guard sits INSIDE the truthy branch, and this is its boundary."""
+        monkeypatch.setattr(
+            PACTMemory, "_detect_project_id_with_source",
+            staticmethod(lambda: ("detected-proj", "cwd")),
+        )
+        monkeypatch.setattr(
+            PACTMemory, "_detect_session_id",
+            staticmethod(lambda: "detected-session"),
+        )
+        memory = PACTMemory(project_id="", session_id="", db_path=tmp_path / "x.db")
+        assert memory.project_id == "detected-proj"
+        assert memory._project_id_source == "cwd"
+        assert memory.session_id == "detected-session"
+
+    def test_a_detected_unusable_session_id_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            PACTMemory, "_detect_session_id", staticmethod(lambda: "bad\nid")
+        )
+        with pytest.raises(ValueError, match="detected from the session context"):
+            PACTMemory(project_id="ok-proj", db_path=tmp_path / "x.db")
+
+
+class TestANonMappingUpdatePayload:
+    @pytest.mark.parametrize("payload", [["x"], "x", 5, None, b"x"])
+    def test_is_refused_as_invalid_input(self, tmp_path, payload):
+        db_path = tmp_path / "non-mapping.db"
+        memory = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": "NON-MAPPING"}, sync_to_claude=False
+        )
+        with pytest.raises(ValueError, match="must be an object mapping"):
+            memory.update(memory_id, payload)
+        assert memory.get(memory_id) is not None, (
+            "the refusal destroyed or removed the row"
+        )
+
+
+class TestTheSuccessPathDoesNotRestoreTheVector:
+    def test_a_content_change_and_a_rekey_store_the_vector_once(
+        self, tmp_path, monkeypatch
+    ):
+        """F4: the skip branch `vector_current` exists for is a real no-op.
+
+        The fixture has NO vector row: a missing row is deliberately not
+        stale, so the content path's successful store is what makes the
+        cascade skip. With a real row left under the old project the
+        partition would legitimately be stale and the cascade must re-store.
+        """
+        db_path = tmp_path / "once.db"
+        memory = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        memory_id = memory.save({"context": "ONCE-SEED"}, sync_to_claude=False)
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,)
+            )
+            conn.commit()
+
+        stores = []
+        monkeypatch.setattr(
+            PACTMemory, "_store_embedding",
+            staticmethod(lambda conn, mid, data: stores.append(mid) or None),
+        )
+        assert memory.update(
+            memory_id, {"context": "ONCE-CHANGED", "project_id": "projB"}
+        ) == memory_id
+        assert len(stores) == 1, (
+            "the cascade re-stored a vector the content path already stored "
+            f"under the new key; stores={stores!r}"
+        )

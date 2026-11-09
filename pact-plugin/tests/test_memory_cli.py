@@ -4280,3 +4280,77 @@ class TestApiSync:
                    side_effect=RuntimeError("disk")):
             assert memory.sync() == []
         assert memory.last_sync_status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# The envelope escapes caller input, and the update boundary refuses null
+# ---------------------------------------------------------------------------
+
+_RLO = "\u202e"  # written as an escape: the literal is invisible
+_FULL_ID_WITH_RLO = "a" * 15 + _RLO + "b" * 16  # 32 chars: no prefix lookup
+
+
+class TestEnvelopeEscapesCallerInput:
+    """A caller-supplied id echoed on a refusal path is rendered inert.
+
+    THE ASSERTION IS ON THE PARSED MESSAGE, not on the raw bytes: JSON
+    encoding already escapes the character, so a byte-level check would pass
+    for a consumer that never renders it. The hazard is a consumer that
+    PARSES the envelope and prints the message, and parsing is what this arm
+    does.
+    """
+
+    @staticmethod
+    def _run(cli_script_path, cli_db, argv, stdin_data=None):
+        return subprocess.run(
+            [sys.executable, cli_script_path, *argv, "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60, input=stdin_data,
+        )
+
+    @pytest.mark.parametrize("argv", [
+        ["get", _FULL_ID_WITH_RLO],
+        ["update", _FULL_ID_WITH_RLO, "--stdin"],
+        ["delete", _FULL_ID_WITH_RLO],
+    ], ids=["get", "update", "delete"])
+    def test_the_not_found_message_carries_a_marker_not_the_character(
+        self, cli_script_path, cli_db, argv
+    ):
+        stdin_data = '{"context": "x"}' if argv[0] == "update" else None
+        result = self._run(cli_script_path, cli_db, argv, stdin_data)
+        assert result.returncode == 1, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "NOT_FOUND", envelope
+        message = envelope["message"]
+        assert "<U+202E>" in message, message
+        assert _RLO not in message, (
+            "the raw bidi override reached the parsed message: "
+            f"{message!r}"
+        )
+
+    def test_the_too_short_message_escapes_the_prefix(
+        self, cli_script_path, cli_db
+    ):
+        short = "a" + _RLO + "bcde"  # 6 chars: MIN_PREFIX_LENGTH - 1
+        result = self._run(cli_script_path, cli_db, ["get", short])
+        assert result.returncode == 1, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "PREFIX_TOO_SHORT", envelope
+        assert "<U+202E>" in envelope["message"], envelope["message"]
+        assert _RLO not in envelope["message"], envelope["message"]
+
+
+class TestTheUpdateBoundaryRefusesANullIdentity:
+    def test_a_null_project_id_exits_two_with_the_refusal(
+        self, cli_script_path, cli_db
+    ):
+        """The CLI is the ingress this guard exists for; it was unpinned."""
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "update", _FULL_ID_WITH_RLO,
+             "--stdin", "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+            input='{"project_id": null}',
+        )
+        assert result.returncode == 2, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "ValueError", envelope
+        assert "project_id, when supplied to update" in envelope["message"]

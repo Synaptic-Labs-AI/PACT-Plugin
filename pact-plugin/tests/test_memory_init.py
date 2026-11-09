@@ -3218,3 +3218,46 @@ class TestProcessMarkerDoesNotOutliveItsProcess:
         finally:
             marker.unlink(missing_ok=True)
             shutil.rmtree(home, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# The embedding-attempt marker path is slug-sanitised
+# ---------------------------------------------------------------------------
+
+class TestTheEmbeddingAttemptMarkerPathIsSanitised:
+    """The session id is READ FROM A FILE, then composed into a /tmp filename.
+
+    It is therefore not this module's own text: path traversal, a separator, a
+    NUL or a control character in it must not survive into the path. The same
+    session id reaches `_build_session_path` as a directory component, and the
+    two surfaces share one substitution rule; these arms pin the marker
+    surface's half of it.
+    """
+
+    def test_traversal_and_a_nul_do_not_reach_the_filename(self, monkeypatch):
+        import memory_init
+
+        hostile = "../../evil\x00id"
+        monkeypatch.setattr(
+            memory_init, "get_session_id_from_context_file", lambda: hostile
+        )
+        marker = memory_init._get_embedding_attempted_path()
+
+        assert marker.parent == Path("/tmp"), marker
+        assert "\x00" not in marker.name, marker.name
+        assert "/" not in marker.name, marker.name
+        assert ".." not in marker.name, marker.name
+        # The value REACHED the filename, sanitised rather than dropped: a
+        # function that returned the process token for everything would also
+        # satisfy the containment assertions above.
+        assert "evil" in marker.name, marker.name
+
+    def test_an_ordinary_session_id_is_kept_verbatim(self, monkeypatch):
+        import memory_init
+
+        monkeypatch.setattr(
+            memory_init, "get_session_id_from_context_file", lambda: "abc-123_XY"
+        )
+        assert memory_init._get_embedding_attempted_path() == Path(
+            "/tmp/pact_embedding_attempted_abc-123_XY"
+        )
