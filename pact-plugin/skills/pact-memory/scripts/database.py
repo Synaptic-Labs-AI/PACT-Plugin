@@ -68,20 +68,34 @@ _PREFIX_UPPER_BOUND_CHAR = "g"
 
 # Characters that must not reach a rendered envelope raw: C0/DEL/C1 controls
 # (`Cc`), Unicode format characters (`Cf`, which include every bidi override
-# that can reorder or hide the text around it), lone surrogates (`Cs`), and
-# the line/paragraph separators (`Zl`/`Zp`) that break line-oriented logs.
-# JSON encoding alone does not cover this — a consumer that PARSES the
-# envelope and prints the message re-materialises the character.
+# that can reorder or hide the text around it), unassigned code points and
+# noncharacters (`Cn`), private-use code points (`Co`), lone surrogates
+# (`Cs`), and the line/paragraph separators (`Zl`/`Zp`) that break
+# line-oriented logs. JSON encoding alone does not cover this — a consumer
+# that PARSES the envelope and prints the message re-materialises the
+# character.
+#
+# `<` IS UNSAFE TOO, FOR A DIFFERENT REASON: it starts the marker form, so a
+# literal marker-shaped input (`a<U+000A>b`) would render byte-identically to
+# an escaped newline and the reader could not tell a typed sequence from an
+# escape. Escaping it keeps the marker form decodable on its own
+# (escape_for_envelope is injective), at the cost of displaying a literal
+# `<` as `<U+003C>`.
 def _char_is_unsafe_for_display(char: str) -> bool:
-    return unicodedata.category(char) in ("Cc", "Cf", "Cs", "Zl", "Zp")
+    return char == "<" or unicodedata.category(char) in (
+        "Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"
+    )
 
 
 def escape_for_envelope(text: str) -> str:
     """Render a caller-supplied value inert in a rendered JSON envelope.
 
-    Control and format characters become visible ``<U+XXXX>`` markers, so a
-    value the caller typed (a memory id or prefix, echoed back on an error
-    path) cannot steer a terminal or reorder the visible text around it.
+    Control, format, unassigned, private-use and lone-surrogate characters
+    become visible ``<U+XXXX>`` markers, so a value the caller typed (a
+    memory id or prefix, echoed back on an error path) cannot steer a
+    terminal or reorder the visible text around it. A literal ``<`` is
+    escaped as ``<U+003C>`` so the marker form is unambiguous: every
+    ``<U+...>`` in the output was produced by this function.
     The value is ESCAPED, not refused: the caller needs to see what it sent
     in order to correct it.
     """
@@ -1107,6 +1121,7 @@ def resolve_memory_id_prefix(
     conn: sqlite3.Connection,
     prefix: str,
     *,
+    project_id: Optional[str] = None,
     descriptor_chars: int = 60,
 ) -> Optional[str]:
     """
@@ -1118,9 +1133,22 @@ def resolve_memory_id_prefix(
     lowercased before bounds construction so `ABCD1234` and `abcd1234`
     resolve identically. IDs are stored as lowercase hex.
 
+    A SUPPLIED `project_id` SCOPES ALL THREE QUERIES, NOT JUST THE MATCH
+    LIST. The ambiguity verdict is decided by the LIMIT-2 pre-check, the
+    match list is capped by a second query and the true total comes from a
+    third; scoping only the list would let a prefix that names one row in
+    each of two projects take the ambiguous branch and then raise with a
+    single match, and would report a total that includes rows the caller
+    cannot see. With the scope applied to all three, a prefix that matches
+    only another project's row resolves as no row at all. `None` keeps the
+    unscoped whole-store behaviour callers had before the parameter existed.
+
     Args:
         conn: Active database connection.
         prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
+        project_id: Optional project scope. When not None, every query is
+            restricted to rows stored under that project; a NULL-project row
+            is NOT another project's row and is excluded from a scoped read.
         descriptor_chars: Length of the context snippet attached to each match
             on ambiguity (for terse disambiguation output). Security-relevant
             knob if multi-tenant access is ever introduced — context may carry
@@ -1152,11 +1180,22 @@ def resolve_memory_id_prefix(
     lo = prefix
     hi = prefix + _PREFIX_UPPER_BOUND_CHAR
 
+    # ONE SCOPE CLAUSE, APPLIED TO EVERY QUERY BELOW. `project_id = ?`
+    # rather than the null-safe `IS` form is deliberate: a scoped caller's
+    # project is a non-empty string (the write guards refuse anything else),
+    # so a NULL-keyed row is not this project's row and must not match.
+    scope_sql = ""
+    scope_params: tuple = ()
+    if project_id is not None:
+        scope_sql = " AND project_id = ?"
+        scope_params = (project_id,)
+
     # LIMIT 2 short-circuits the common case (unique match): we only need to
     # know whether more than one row matches before issuing a wider query.
     cursor = conn.execute(
-        "SELECT id FROM memories WHERE id >= ? AND id < ? LIMIT 2",
-        (lo, hi),
+        "SELECT id FROM memories WHERE id >= ? AND id < ?"
+        f"{scope_sql} LIMIT 2",
+        (lo, hi, *scope_params),
     )
     rows = cursor.fetchall()
 
@@ -1169,9 +1208,9 @@ def resolve_memory_id_prefix(
     # plus a separate COUNT for the true total. Both queries fire only on
     # this branch; the unique-match path above is single-query.
     cursor = conn.execute(
-        "SELECT id, context FROM memories WHERE id >= ? AND id < ? "
-        "ORDER BY id LIMIT ?",
-        (lo, hi, AMBIGUOUS_MATCH_CAP),
+        "SELECT id, context FROM memories WHERE id >= ? AND id < ?"
+        f"{scope_sql} ORDER BY id LIMIT ?",
+        (lo, hi, *scope_params, AMBIGUOUS_MATCH_CAP),
     )
     matches = []
     for row in cursor.fetchall():
@@ -1187,8 +1226,9 @@ def resolve_memory_id_prefix(
             "context_truncated": len(full_context) > descriptor_chars,
         })
     count_row = conn.execute(
-        "SELECT COUNT(*) AS n FROM memories WHERE id >= ? AND id < ?",
-        (lo, hi),
+        "SELECT COUNT(*) AS n FROM memories WHERE id >= ? AND id < ?"
+        f"{scope_sql}",
+        (lo, hi, *scope_params),
     ).fetchone()
     total_matches = count_row["n"]
     matches_capped = total_matches > len(matches)

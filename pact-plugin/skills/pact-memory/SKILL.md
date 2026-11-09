@@ -251,10 +251,21 @@ spaces, Cf formatting characters, bidi overrides, zero-width characters
 and noncharacters, is accepted by design; the residual is display
 spoofing only.
 
+A `project_id` or `session_id` DETECTED from the environment or the session
+context is held to the same rule: an unusable detected value is refused
+before any store work, and the message names the detection source. Supply a
+usable value in the payload when the detected one is at fault.
+
 When no project identity resolves, `list`, `search`, and `search_by_file`
 return empty results, and `status` reports zero project-scoped counts. These
 results do not prove that the store has no memories; resolve the project
 identity before interpreting them.
+
+For prefixes, the scope also decides discovery: a prefix resolves within the caller's project, so a prefix matching only another project's row is not found, and an `AMBIGUOUS_PREFIX` match list contains no other project's rows or context snippets. A full 32-character ID remains project-blind: `get`, `update` and `delete` accept a full ID stored under any project, which is the by-id capability, not a scoped read.
+
+When the project identity cannot be resolved, a full 32-character ID still resolves, but a prefix is refused with `ProjectIdentityUnresolvedError` (CLI exit 1, `SCOPE_DISAGREEMENT`) instead of listing matches from every project.
+
+Addressing mode, not the verb name, decides scope: `list`, `search` and `search_by_file` select from this project's rows, while `get`, `update` and `delete` act on the row a full ID names, whatever project holds it.
 
 ### Task Format
 ```python
@@ -300,7 +311,7 @@ identity before interpreting them.
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
 
-On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row, and its file and search rows follow; a `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
+On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 
 ### Exit Codes
 

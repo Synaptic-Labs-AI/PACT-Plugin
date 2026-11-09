@@ -698,6 +698,15 @@ def cmd_get(args, db_path=None):
     memory = PACTMemory(db_path=db_path)
     try:
         result = memory.get(args.memory_id)
+    except ProjectScopeDisagreementError as exc:
+        # A NAMED, EXPECTED REFUSAL, NOT AN INTERNAL FAULT. A prefix is
+        # refused when the project identity cannot be resolved (a full id
+        # still resolves), and `ProjectIdentityUnresolvedError` is this
+        # class's subclass. The envelope and exit code match update/delete;
+        # without this clause it would reach main()'s generic handler as
+        # SYSTEM_ERROR exit 2, which sends a caller looking for a bug in the
+        # store instead of at its own project declaration.
+        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
     except PrefixTooShortError as exc:
         _error(
             "PREFIX_TOO_SHORT",
@@ -1286,7 +1295,16 @@ def main(argv=None):
 
     handler = _COMMANDS.get(args.command)
     if handler is None:
-        _error("UNKNOWN_COMMAND", f"Unknown command: {args.command}")
+        # Caller input on a rendered surface, same rule as the NOT_FOUND
+        # echo: escape before it reaches a terminal. argparse rejects a
+        # truly unknown choice with its own repr-escaped error, so this
+        # branch is reachable only when a registered name loses its handler
+        # — hardened anyway so the branch cannot become the weaker surface
+        # the day it is reached.
+        _error(
+            "UNKNOWN_COMMAND",
+            f"Unknown command: {escape_for_envelope(str(args.command))}",
+        )
 
     if args.command in _COMMANDS_WITHOUT_A_STORE:
         handler(args)
@@ -1373,7 +1391,11 @@ def main(argv=None):
                 and args.command not in _COMMANDS_THAT_MAY_CREATE_A_CALLER_PATH
                 and not db_path.exists()
             ):
-                shown = _scrub(str(db_path))
+                # The path is caller input echoed back on a rendered
+                # surface; `_scrub` redacts HOME and this makes the rest
+                # inert (a control or bidi character would otherwise reach
+                # the reader's terminal after the envelope is parsed).
+                shown = escape_for_envelope(_scrub(str(db_path)))
                 _error(
                     "DB_PATH_NOT_FOUND",
                     f"--db-path '{shown}' did not answer as a store that is "

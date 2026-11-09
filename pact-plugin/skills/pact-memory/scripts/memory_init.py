@@ -22,6 +22,7 @@ Thread-safety: Uses threading.Lock for the session-scoped initialization flag.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import logging
 import os
 import uuid
@@ -300,6 +301,11 @@ except ImportError:
 # worst case is that a sweep runs more than once.
 _PROCESS_MARKER_TOKEN = f"process-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
+# Upper bound for the session-derived part of the /tmp marker filename. 64
+# keeps the whole name far below NAME_MAX (255 on the usual filesystems) while
+# leaving room for the hash suffix used when the slug is longer.
+_MAX_MARKER_SLUG_CHARS = 64
+
 
 def _remove_process_marker() -> None:
     """Delete this process's own fallback marker as the process exits.
@@ -342,14 +348,23 @@ def _get_embedding_attempted_path() -> Path:
     a path component under /tmp. Path traversal (`../`), a separator, a NUL
     or a control character must not survive into the filename; the shared
     substitution keeps the two surfaces on one rule.
+
+    THE SANITISER FILTERS CHARACTERS, NOT LENGTH, so it is bounded here. The
+    regex leaves every ASCII alphanumeric intact, which means a long context
+    value composes a filename past the filesystem's NAME_MAX and the first
+    `exists()` raises ENAMETOOLONG — out of `ensure_memory_ready` and into
+    every memory operation of the process. A bare truncation would make two
+    sessions sharing a long prefix share one marker and suppress each
+    other's catch-up, so the suffix is a hash of the full slug.
     """
     from shared.pact_context import _UNSAFE_SLUG_CHARS_RE
 
     session_id = get_session_id_from_context_file() or _PROCESS_MARKER_TOKEN
-    return (
-        Path("/tmp")
-        / f"pact_embedding_attempted_{_UNSAFE_SLUG_CHARS_RE.sub('_', str(session_id))}"
-    )
+    slug = _UNSAFE_SLUG_CHARS_RE.sub('_', str(session_id))
+    if len(slug) > _MAX_MARKER_SLUG_CHARS:
+        digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:16]
+        slug = f"{slug[:_MAX_MARKER_SLUG_CHARS - 17]}-{digest}"
+    return Path("/tmp") / f"pact_embedding_attempted_{slug}"
 
 
 def maybe_embed_pending() -> dict:
@@ -368,14 +383,16 @@ def maybe_embed_pending() -> dict:
     """
     result = {"status": "skipped", "message": None}
 
-    # Check if we've already attempted this session
+    # Check if we've already attempted this session, then mark it as attempted
+    # (first, to prevent retry on errors). BOTH FILESYSTEM CALLS SIT INSIDE
+    # THE GUARD: `exists()` raises OSError for more than a missing file
+    # (ENAMETOOLONG, EACCES on a parent, ...), and a marker fault is a reason
+    # to skip the sweep, not to fail the caller's memory operation.
     marker_path = _get_embedding_attempted_path()
-    if marker_path.exists():
-        result["message"] = "Already attempted this session"
-        return result
-
-    # Mark as attempted (do this first to prevent retry on errors)
     try:
+        if marker_path.exists():
+            result["message"] = "Already attempted this session"
+            return result
         marker_path.touch()
     except OSError:
         result["message"] = "Could not create session marker"

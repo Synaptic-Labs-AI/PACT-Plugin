@@ -97,6 +97,19 @@ def cli_script_path():
     )
 
 
+def _pinned_project_id(cli_db):
+    """The project_id the CLI resolves when pinned to this fixture's store.
+
+    PREFIX RESOLUTION IS PROJECT-SCOPED: a scoped caller never resolves
+    another project's row, so a fixture that seeds rows for a prefix test
+    must seed them under the SAME project the subprocess resolves.
+    `_pin_project_scope` pins `CLAUDE_PROJECT_DIR` to the store's directory,
+    whose basename is the project_id; that makes the fixture deterministic
+    instead of depending on whichever git root the checkout happens to have.
+    """
+    return Path(cli_db).parent.name
+
+
 class TestSubprocessClaudeMdIsolation:
     """Proof that the CONFTEST-LEVEL autouse redirect reaches a SPAWNED CHILD,
     not just this process. (This module used to carry its own
@@ -1847,6 +1860,17 @@ class TestCliErrorHandling:
 class TestCliSubprocess:
     """True black-box E2E tests via subprocess.run."""
 
+    @pytest.fixture(autouse=True)
+    def _pin_project_scope(self, cli_db, monkeypatch):
+        """Pin the CLI's project scope to this fixture's store directory.
+
+        The child inherits this value, so the rows the fixture seeds under
+        `_pinned_project_id()` are the rows the CLI can resolve by prefix.
+        Without a pin the child would resolve the checkout's git root, and a
+        prefix test would depend on where the repository was cloned.
+        """
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(cli_db.parent))
+
     def test_no_command_exits_1(self, cli_script_path):
         result = subprocess.run(
             [sys.executable, cli_script_path],
@@ -1930,7 +1954,10 @@ class TestCliSubprocess:
         conn = sqlite3.connect(str(cli_db))
         conn.row_factory = sqlite3.Row
         with patch("scripts.database.ensure_initialized"):
-            create_memory(conn, {"id": full_id, "context": "unique-prefix-roundtrip"})
+            create_memory(conn, {
+                "id": full_id, "context": "unique-prefix-roundtrip",
+                "project_id": _pinned_project_id(cli_db),
+            })
         conn.commit()
         conn.close()
 
@@ -1958,8 +1985,14 @@ class TestCliSubprocess:
         conn = sqlite3.connect(str(cli_db))
         conn.row_factory = sqlite3.Row
         with patch("scripts.database.ensure_initialized"):
-            create_memory(conn, {"id": id_a, "context": "first"})
-            create_memory(conn, {"id": id_b, "context": "second"})
+            create_memory(conn, {
+                "id": id_a, "context": "first",
+                "project_id": _pinned_project_id(cli_db),
+            })
+            create_memory(conn, {
+                "id": id_b, "context": "second",
+                "project_id": _pinned_project_id(cli_db),
+            })
         conn.commit()
         conn.close()
 
@@ -2009,7 +2042,10 @@ class TestCliSubprocess:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         with patch("scripts.database.ensure_initialized"):
-            create_memory(conn, {"id": memory_id, "context": context})
+            create_memory(conn, {
+                "id": memory_id, "context": context,
+                "project_id": _pinned_project_id(db_path),
+            })
         conn.commit()
         conn.close()
 
@@ -3266,6 +3302,11 @@ class TestErrorEnvelopeSurvivesASharedStderr:
     and one guards against the WRONG fix rather than against the defect.
     """
 
+    @pytest.fixture(autouse=True)
+    def _pin_project_scope(self, cli_db, monkeypatch):
+        """The pending rows and the CLI must name one project for a prefix."""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(cli_db.parent))
+
     def _store_with_pending_embeddings(self, cli_db):
         """Put rows carrying no vector into the caller store.
 
@@ -3284,8 +3325,14 @@ class TestErrorEnvelopeSurvivesASharedStderr:
         conn = sqlite3.connect(str(cli_db))
         conn.row_factory = sqlite3.Row
         with patch("scripts.database.ensure_initialized"):
-            create_memory(conn, {"id": id_a, "context": "first pending record"})
-            create_memory(conn, {"id": id_b, "context": "second pending record"})
+            create_memory(conn, {
+                "id": id_a, "context": "first pending record",
+                "project_id": _pinned_project_id(cli_db),
+            })
+            create_memory(conn, {
+                "id": id_b, "context": "second pending record",
+                "project_id": _pinned_project_id(cli_db),
+            })
         conn.commit()
         pending = conn.execute("SELECT COUNT(*) AS n FROM memories").fetchone()["n"]
         conn.close()
@@ -4388,6 +4435,11 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
     # matching.
     _ABOVE_WINDOW = _PREFIX + "h"
 
+    @pytest.fixture(autouse=True)
+    def _pin_project_scope(self, cli_db, monkeypatch):
+        """Rows seeded for a prefix test must live in the CLI's own project."""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(cli_db.parent))
+
     @staticmethod
     def _seed(cli_db, ids):
         """Seed the throwaway store, BOUND AND ASSERTED IN THIS PROCESS.
@@ -4414,7 +4466,11 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
             conn.row_factory = sqlite3.Row
             with patch("scripts.database.ensure_initialized"):
                 for memory_id in ids:
-                    create_memory(conn, {"id": memory_id, "context": "snippet"})
+                    create_memory(conn, {
+                        "id": memory_id,
+                        "context": "snippet",
+                        "project_id": _pinned_project_id(cli_db),
+                    })
             conn.commit()
             conn.close()
 
@@ -4478,3 +4534,428 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
             f"Prefix '{plain}' is ambiguous — 2 memories match."
         ), (verb, envelope["message"])
         assert envelope["prefix"] == plain, (verb, envelope["prefix"])
+
+
+# ---------------------------------------------------------------------------
+# #1688 remediation: a prefix resolver is PROJECT-SCOPED
+#
+# The AMBIGUOUS_PREFIX envelope hands the caller the ids and context snippets
+# of every row the prefix matches. The id is the capability `get`/`update`/
+# `delete` take, so a scoped surface that lists another project's rows is a
+# discovery channel. All THREE resolver queries carry the caller's project:
+# the LIMIT-2 ambiguity pre-check, the capped match SELECT and the COUNT.
+# ---------------------------------------------------------------------------
+
+_PREFIX = "abc1234"  # 7 chars, the minimum; continuations stay below "g"
+_ROW_A1 = _PREFIX + "1" + "0" * 24
+_ROW_A2 = _PREFIX + "2" + "0" * 24
+_ROW_B1 = _PREFIX + "3" + "0" * 24
+_ROW_B2 = _PREFIX + "4" + "0" * 24
+
+
+def _seed_scoped_rows(cli_db, rows):
+    """Seed (id, project_id) rows, BOUND to the throwaway store in-process."""
+    from scripts.config import resolve_db_path, store_scope
+    try:
+        import pysqlite3 as sqlite3
+    except ImportError:
+        import sqlite3
+
+    with store_scope(cli_db):
+        assert Path(resolve_db_path()).resolve() == Path(cli_db).resolve(), (
+            "the parent process is not bound to the throwaway store: "
+            f"resolved {resolve_db_path()!r}, expected {cli_db!r}"
+        )
+        from scripts.database import create_memory
+
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            for memory_id, project in rows:
+                create_memory(conn, {
+                    "id": memory_id,
+                    "context": f"snippet-{memory_id}",
+                    "project_id": project,
+                })
+        conn.commit()
+        conn.close()
+
+
+def _resolver_connection(cli_db):
+    try:
+        import pysqlite3 as sqlite3
+    except ImportError:
+        import sqlite3
+
+    conn = sqlite3.connect(str(cli_db))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+class TestThePrefixResolverIsProjectScoped:
+    """A scoped prefix never names, counts, or is made ambiguous by another
+    project's rows; an unscoped call keeps its whole-store meaning."""
+
+    def test_a_prefix_matching_only_another_projects_row_is_not_found(self, cli_db):
+        from scripts.database import resolve_memory_id_prefix
+
+        _seed_scoped_rows(cli_db, [(_ROW_B1, "proj-B")])
+        conn = _resolver_connection(cli_db)
+        try:
+            with patch("scripts.database.ensure_initialized"):
+                assert resolve_memory_id_prefix(
+                    conn, _PREFIX, project_id="proj-A"
+                ) is None
+                # CONTROLS on the same fixture: the row is reachable in its own
+                # scope and unscoped, so the None above is the scope's doing.
+                assert resolve_memory_id_prefix(
+                    conn, _PREFIX, project_id="proj-B"
+                ) == _ROW_B1
+                assert resolve_memory_id_prefix(conn, _PREFIX) == _ROW_B1
+        finally:
+            conn.close()
+
+    def test_a_cross_project_collision_is_not_ambiguous_within_a_scope(
+        self, cli_db
+    ):
+        """The LIMIT-2 pre-check must be scoped too.
+
+        One row in each project means each scope sees exactly ONE match. An
+        unscoped pre-check takes the ambiguous branch and then raises with the
+        single scoped match — an ambiguity the caller cannot observe.
+        """
+        from scripts.database import (
+            AmbiguousPrefixError, resolve_memory_id_prefix,
+        )
+
+        _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A"), (_ROW_B1, "proj-B")])
+        conn = _resolver_connection(cli_db)
+        try:
+            with patch("scripts.database.ensure_initialized"):
+                assert resolve_memory_id_prefix(
+                    conn, _PREFIX, project_id="proj-A"
+                ) == _ROW_A1
+                assert resolve_memory_id_prefix(
+                    conn, _PREFIX, project_id="proj-B"
+                ) == _ROW_B1
+                with pytest.raises(AmbiguousPrefixError) as unscoped:
+                    resolve_memory_id_prefix(conn, _PREFIX)
+                assert unscoped.value.total_matches == 2
+        finally:
+            conn.close()
+
+    def test_an_ambiguous_set_never_names_another_projects_rows(self, cli_db):
+        from scripts.database import (
+            AmbiguousPrefixError, resolve_memory_id_prefix,
+        )
+
+        _seed_scoped_rows(cli_db, [
+            (_ROW_A1, "proj-A"), (_ROW_A2, "proj-A"), (_ROW_B1, "proj-B"),
+        ])
+        conn = _resolver_connection(cli_db)
+        try:
+            with patch("scripts.database.ensure_initialized"):
+                with pytest.raises(AmbiguousPrefixError) as scoped:
+                    resolve_memory_id_prefix(
+                        conn, _PREFIX, project_id="proj-A"
+                    )
+                exc = scoped.value
+                assert {m["id"] for m in exc.matches} == {_ROW_A1, _ROW_A2}
+                assert exc.total_matches == 2, exc.total_matches
+                assert exc.matches_capped is False
+
+                # The other project is UNIQUE within its own scope, not
+                # ambiguous through this one's collision.
+                assert resolve_memory_id_prefix(
+                    conn, _PREFIX, project_id="proj-B"
+                ) == _ROW_B1
+
+                with pytest.raises(AmbiguousPrefixError) as unscoped:
+                    resolve_memory_id_prefix(conn, _PREFIX)
+                assert {m["id"] for m in unscoped.value.matches} == {
+                    _ROW_A1, _ROW_A2, _ROW_B1,
+                }
+                assert unscoped.value.total_matches == 3
+        finally:
+            conn.close()
+
+    def test_two_connections_interleaved_keep_each_scope(self, cli_db):
+        """Both connections resolve BEFORE either writes.
+
+        A per-call scope has no shared state to cross-contaminate; this arm
+        interleaves the two scopes so a resolver that mutated connection or
+        module state would be caught, and asserts the SELECT and the COUNT
+        stay consistent after each scope gains a second row.
+        """
+        from scripts.database import (
+            AmbiguousPrefixError, create_memory, resolve_memory_id_prefix,
+        )
+
+        _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A"), (_ROW_B1, "proj-B")])
+        conn_a = _resolver_connection(cli_db)
+        conn_b = _resolver_connection(cli_db)
+        try:
+            with patch("scripts.database.ensure_initialized"):
+                a_before = resolve_memory_id_prefix(
+                    conn_a, _PREFIX, project_id="proj-A"
+                )
+                b_before = resolve_memory_id_prefix(
+                    conn_b, _PREFIX, project_id="proj-B"
+                )
+                # Both resolved before either write.
+                create_memory(conn_a, {
+                    "id": _ROW_A2, "context": "second A", "project_id": "proj-A",
+                })
+                conn_a.commit()
+                create_memory(conn_b, {
+                    "id": _ROW_B2, "context": "second B", "project_id": "proj-B",
+                })
+                conn_b.commit()
+
+                with pytest.raises(AmbiguousPrefixError) as a_after:
+                    resolve_memory_id_prefix(conn_a, _PREFIX, project_id="proj-A")
+                with pytest.raises(AmbiguousPrefixError) as b_after:
+                    resolve_memory_id_prefix(conn_b, _PREFIX, project_id="proj-B")
+        finally:
+            conn_a.close()
+            conn_b.close()
+
+        assert a_before == _ROW_A1
+        assert b_before == _ROW_B1
+        assert {m["id"] for m in a_after.value.matches} == {_ROW_A1, _ROW_A2}
+        assert a_after.value.total_matches == 2
+        assert {m["id"] for m in b_after.value.matches} == {_ROW_B1, _ROW_B2}
+        assert b_after.value.total_matches == 2
+
+
+class TestThePrefixCallSiteIsScopedAndRefusesWithoutIdentity:
+    """`_resolve_id_or_full` is where the resolver's scope is actually reached.
+
+    Both halves are pinned: a scoped caller's prefix must not resolve another
+    project's row (the scope PASS is wired), and an unresolved caller resolves
+    a FULL id but refuses a prefix (None at the resolver means unscoped and
+    would enumerate the store). The by-id control in each arm is what proves
+    the refusal/None comes from the prefix branch, not a missing row.
+    """
+
+    @staticmethod
+    def _query_patches():
+        return (
+            patch("scripts.memory_api._ensure_ready"),
+            patch("scripts.memory_api.ensure_initialized"),
+            patch("scripts.graph.ensure_initialized"),
+        )
+
+    def test_a_scoped_prefix_does_not_resolve_another_projects_row(self, cli_db):
+        from scripts.memory_api import PACTMemory
+
+        _seed_scoped_rows(cli_db, [(_ROW_B1, "proj-B")])
+        memory = PACTMemory(
+            project_id="proj-A", session_id="s", db_path=cli_db
+        )
+        ready, init_api, init_graph = self._query_patches()
+        with ready, init_api, init_graph:
+            assert memory.get(_PREFIX) is None, (
+                "a proj-A prefix resolved proj-B's row: the scope pass is "
+                "not wired into resolve_memory_id_prefix"
+            )
+            # CONTROL: the same row IS reachable by its full id, so the None
+            # above is the prefix scope and not a missing row.
+            assert memory.get(_ROW_B1) is not None
+
+    def test_an_unresolved_identity_resolves_full_ids_but_refuses_prefixes(
+        self, cli_db, monkeypatch
+    ):
+        from scripts.memory_api import (
+            PACTMemory, ProjectIdentityUnresolvedError,
+        )
+
+        _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(db_path=cli_db)
+        assert memory.project_id is None, "precondition: identity is unresolved"
+
+        ready, init_api, init_graph = self._query_patches()
+        with ready, init_api, init_graph:
+            # HALF 1: a full id is a capability and still resolves.
+            assert memory.get(_ROW_A1) is not None
+            # HALF 2: a prefix is a discovery surface and refuses.
+            with pytest.raises(ProjectIdentityUnresolvedError) as refused:
+                memory.get(_PREFIX)
+        assert "prefix" in str(refused.value).lower(), refused.value
+
+
+class TestTheCliPrefixResolvesOnlyWithinItsProject:
+    """End-to-end through the real CLI: the deferred B2 arm.
+
+    The caller's project is pinned with CLAUDE_PROJECT_DIR (the store's
+    directory, so the project_id is its basename); the only matching row is
+    stored under a different project. A prefix must be NOT_FOUND, and the
+    full id must still resolve — the by-id capability is what distinguishes
+    the scope from a missing row.
+    """
+
+    _OTHER_PROJECT = "proj-other"
+
+    def test_a_prefix_matching_only_another_projects_row_is_not_found(
+        self, cli_script_path, cli_db
+    ):
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {
+                "id": _ROW_B1,
+                "context": "other-project-row",
+                "project_id": self._OTHER_PROJECT,
+            })
+        conn.commit()
+        conn.close()
+
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = str(cli_db.parent)
+
+        prefix_run = subprocess.run(
+            [sys.executable, cli_script_path, "get", _PREFIX,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert prefix_run.returncode == 1, (
+            f"stdout: {prefix_run.stdout}, stderr: {prefix_run.stderr}"
+        )
+        assert json.loads(prefix_run.stderr)["error"] == "NOT_FOUND"
+
+        # CONTROL: the same row is reachable by its full id, so NOT_FOUND
+        # above is the prefix scope, not an absent row.
+        full_run = subprocess.run(
+            [sys.executable, cli_script_path, "get", _ROW_B1,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert full_run.returncode == 0, f"stderr: {full_run.stderr}"
+        assert json.loads(full_run.stdout)["result"]["id"] == _ROW_B1
+
+
+class TestTheUnresolvedPrefixRefusalHasItsOwnEnvelope:
+    """`get` maps the unresolved-identity prefix refusal like update/delete.
+
+    MEASURED BEFORE THIS FIX: the refusal escaped `cmd_get` because it caught
+    only `PrefixTooShortError` and `AmbiguousPrefixError`, so `main()`'s
+    generic handler reported `SYSTEM_ERROR` exit 2 — an internal-fault
+    channel for a named, expected refusal. `update` and `delete` already map
+    the parent class to `SCOPE_DISAGREEMENT` exit 1.
+    """
+
+    def test_get_prefix_refuses_as_scope_disagreement_and_full_id_resolves(
+        self, cli_db, monkeypatch, capfd
+    ):
+        from scripts.cli import main
+        from scripts.memory_api import PACTMemory
+
+        _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        capfd.readouterr()
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.ensure_initialized"), \
+             patch("scripts.graph.ensure_initialized"):
+            with pytest.raises(SystemExit) as refused:
+                main(["get", _PREFIX, "--db-path", str(cli_db)])
+            assert refused.value.code == 1, refused.value.code
+            envelope = json.loads(capfd.readouterr().err)
+            assert envelope["error"] == "SCOPE_DISAGREEMENT", envelope
+            assert "prefix" in envelope["message"].lower(), envelope["message"]
+
+            # CONTROL: the same instance still resolves a FULL id, so the
+            # refusal above is the prefix policy and not a broken command.
+            with pytest.raises(SystemExit) as resolved:
+                main(["get", _ROW_A1, "--db-path", str(cli_db)])
+            assert resolved.value.code == 0, resolved.value.code
+            assert json.loads(capfd.readouterr().out)["result"]["id"] == _ROW_A1
+
+
+# ---------------------------------------------------------------------------
+# #1688 remediation: the envelope escaper is total and injective
+# ---------------------------------------------------------------------------
+
+def _has_raw_unsafe_char_total(text):
+    """True when rendered text still carries an unescaped control/format/etc.
+
+    `<` is NOT counted: the marker form itself contains it, and the
+    injectivity arm compares rendered strings instead.
+    """
+    return any(
+        unicodedata.category(char) in ("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp")
+        for char in text
+    )
+
+
+class TestEscapeForEnvelopeIsTotalAndInjective:
+    def test_unassigned_and_private_use_are_escaped(self):
+        from scripts.database import escape_for_envelope
+
+        assert escape_for_envelope("a" + chr(0xFFFE) + "b") == "a<U+FFFE>b"
+        assert escape_for_envelope("a" + chr(0xE000) + "b") == "a<U+E000>b"
+        assert not _has_raw_unsafe_char_total(
+            escape_for_envelope(chr(0xFFFE) + chr(0xE000))
+        )
+
+    def test_a_literal_marker_shaped_string_is_not_an_escape(self):
+        """A typed `<U+000A>` must not render like an escaped newline."""
+        from scripts.database import escape_for_envelope
+
+        typed_marker = escape_for_envelope("a<U+000A>b")
+        escaped_control = escape_for_envelope("a\nb")
+        assert typed_marker != escaped_control, (typed_marker, escaped_control)
+        assert typed_marker == "a<U+003C>U+000A>b", typed_marker
+        assert escaped_control == "a<U+000A>b", escaped_control
+
+
+class TestTheRemainingCallerEchoesAreEscaped:
+    def test_unknown_command_echo_carries_markers(self, capsys):
+        """UNKNOWN_COMMAND's argument is caller input on a rendered surface."""
+        from scripts import cli
+
+        crafted = "bog" + chr(0x202E) + "us"
+        parser = MagicMock()
+        parser.parse_args.return_value = MagicMock(command=crafted, db_path=None)
+        with patch("scripts.cli.build_parser", return_value=parser):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.main([])
+
+        assert exc_info.value.code == 1
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["error"] == "UNKNOWN_COMMAND", envelope
+        assert "<U+202E>" in envelope["message"], envelope["message"]
+        assert not _has_raw_unsafe_char_total(envelope["message"])
+
+    def test_db_path_not_found_echo_carries_markers(self, tmp_path, capfd):
+        """DB_PATH_NOT_FOUND echoes the `--db-path` the caller typed.
+
+        `capfd`, not `capsys`: the path refusal is raised INSIDE
+        `_own_stderr_for_envelope()`, which writes the envelope through a
+        private handle on descriptor 2 rather than through `sys.stderr`.
+        """
+        from scripts.cli import main
+
+        crafted = str(tmp_path / ("absent" + chr(0x202E) + "store.db"))
+        with pytest.raises(SystemExit) as exc_info:
+            main(["get", "abc1234", "--db-path", crafted])
+
+        assert exc_info.value.code == 1
+        envelope = json.loads(capfd.readouterr().err)
+        assert envelope["error"] == "DB_PATH_NOT_FOUND", envelope
+        assert "<U+202E>" in envelope["message"], envelope["message"]
+        assert not _has_raw_unsafe_char_total(envelope["message"])
