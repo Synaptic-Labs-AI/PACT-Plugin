@@ -81,35 +81,47 @@ pytestmark = pytest.mark.skipif(not BASH.exists(), reason="no /bin/bash")
 # ---------------------------------------------------------------------------
 
 
-def step_4(skill_text):
-    start = skill_text.find("### Step 4:")
-    assert start != -1, "no '### Step 4:' heading in worktree-setup SKILL.md"
+def _section(skill_text, start_heading, end_heading):
+    start = skill_text.find(start_heading)
+    assert start != -1, f"no {start_heading!r} heading in worktree-setup SKILL.md"
     block = skill_text[start:]
-    end = block.find("### Step 5:")
-    assert end != -1, "Step 4 does not run into Step 5 — the file changed shape"
+    end = block.find(end_heading)
+    assert end != -1, (
+        f"{start_heading!r} does not run into {end_heading!r} — the file changed shape"
+    )
     return block[:end]
 
 
-def fence_for(skill_text, branch=BRANCH):
-    """Step 4's single bash fence with `{branch}` substituted.
+def _fence_in(skill_text, start_heading, end_heading, branch):
+    """The single bash fence between two headings, with `{branch}` substituted.
 
     Fails closed: zero fences means the step lost its command block, more than
     one means an assertion could measure a command nobody meant, and no
     `{branch}` placeholder means the test would silently address the literal
     placeholder path.
     """
-    block = step_4(skill_text)
+    block = _section(skill_text, start_heading, end_heading)
     fences = _FENCE.findall(block)
     assert len(fences) == 1, (
-        f"expected exactly one bash fence in a {len(block)}-char Step 4; "
-        f"found {len(fences)}"
+        f"expected exactly one bash fence between {start_heading!r} and "
+        f"{end_heading!r}; found {len(fences)}"
     )
     fence = fences[0]
     assert "{branch}" in fence, (
-        "Step 4's fence no longer carries a {branch} placeholder, so this "
-        "test cannot address the worktree the skill creates"
+        f"the fence after {start_heading!r} no longer carries a {{branch}} "
+        "placeholder, so this test cannot address the worktree the skill creates"
     )
     return fence.replace("{branch}", branch)
+
+
+def fence_for(skill_text, branch=BRANCH):
+    """Step 4's fence — the venv-link step."""
+    return _fence_in(skill_text, "### Step 4:", "### Step 5:", branch)
+
+
+def fence_for_step_3(skill_text, branch=BRANCH):
+    """Step 3's fence — the worktree-creating half of the same injection surface."""
+    return _fence_in(skill_text, "### Step 3:", "### Step 4:", branch)
 
 
 def _source_repo_root():
@@ -198,6 +210,17 @@ def make_repo(
     worktree = repo / ".worktrees" / BRANCH
     git(repo, "worktree", "add", "--quiet", str(worktree), "-b", BRANCH)
     return repo, worktree
+
+
+def make_empty_repo(tmp_path):
+    """A repo with one commit and NO worktree — Step 3 creates the worktree."""
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, *GIT_ID, "commit", "-qm", "init")
+    return repo
 
 
 def run_fence(fence, repo, pwd=None):
@@ -392,6 +415,54 @@ class TestBranchIsInertText:
         done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
         assert "Venv link: .venv -> " in done.stdout
         assert (worktree / ".venv").is_symlink()
+
+
+class TestStep3BranchIsInertText:
+    """Step 3 is the OTHER site of the same injection, and the older one.
+
+    It creates the worktree, so the branch reaches `git worktree add` — the
+    command that pre-existed the Step 4 link. A `$()` payload that passes
+    ref-format must land as a literal directory and branch name, with no
+    execution; the benign arm proves the feature still works.
+    """
+
+    def test_payload_does_not_execute_and_lands_literally(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        marker = tmp_path / "PWNED"
+        branch = f"wt$(touch$IFS{marker})"
+        done = run_fence(
+            fence_for_step_3(SKILL_FILE.read_text(encoding="utf-8"), branch=branch),
+            repo,
+        )
+        assert not marker.exists(), (
+            "Step 3 evaluated the branch as shell code — the substitution "
+            f"created {marker}"
+        )
+        assert done.returncode == 0, f"Step 3 failed: {done.stderr.strip()}"
+        worktree = repo / ".worktrees" / branch
+        assert (worktree / ".git").is_file(), (
+            "the literal branch name did not create a worktree"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{branch}", check=False).returncode
+            == 0
+        ), "the branch was not created under its literal name"
+
+    def test_benign_branch_creates_the_worktree_and_branch(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        done = run_fence(
+            fence_for_step_3(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, f"Step 3 failed: {done.stderr.strip()}"
+        assert (repo / ".worktrees" / BRANCH / ".git").is_file()
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            == 0
+        )
 
 
 # ---------------------------------------------------------------------------
