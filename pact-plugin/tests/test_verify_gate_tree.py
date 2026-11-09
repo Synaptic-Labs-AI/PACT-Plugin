@@ -363,9 +363,11 @@ class TestCapturePathContainment:
     def test_relative_in_tree_capture_is_refused(self, tmp_path):
         repo = _make_repo(tmp_path / "repo")
 
-        result = _run("capture.txt", repo / "capture.txt", repo)
+        result = _run(str(repo), "capture.txt", repo)
 
-        assert result.returncode == _REFUSED
+        assert result.returncode == _REFUSED, result.stdout
+        assert "capture path must be outside the declared tree" in result.stderr
+        assert "GATE-PYTEST-EXIT" not in result.stdout + result.stderr
         assert not (repo / "capture.txt").exists()
 
     def test_symlink_target_inside_tree_is_refused(self, tmp_path):
