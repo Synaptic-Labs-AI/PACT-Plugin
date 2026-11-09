@@ -382,75 +382,69 @@ class TestInitStateDoesNotLeakBetweenStores:
 
 
 class TestAutouseResetIntegration:
-    """The autouse reset is a separate integration obligation from B's unit assertion."""
+    """One worker-local observer, independent of test order and distribution."""
 
-    def test_a_observer_establishes_dirty_flag(self, monkeypatch):
-        _dirty_process_flag(monkeypatch)
-
-    def test_b_observer_relies_on_autouse_reset(self):
-        from scripts import memory_init
-
-        assert not memory_init.is_initialized(), (
-            "the autouse reset did not clear the dirty flag from the previous test. "
-            "This observer deliberately has no owner-level reset of its own."
-        )
-
-    def test_removing_autouse_reset_reddens_the_observer(self, tmp_path):
-        """Enabled pair passes; only the reset's removal makes the observer fail."""
-        child_test = tmp_path / "test_autouse_reset_observer.py"
-        child_test.write_text(
+    def test_autouse_reset_removal_is_detected_in_all_distributions(self, tmp_path):
+        """Enabled reset clears the collection-time dirty flag; no-op reset reddens it."""
+        plugin = tmp_path / "plugin"
+        tests_dir = plugin / "tests"
+        tests_dir.mkdir(parents=True)
+        source_root = Path(__file__).parent.parent
+        conftest_source = (Path(__file__).parent / "conftest.py").read_text(encoding="utf-8")
+        (plugin / "conftest.py").write_text(conftest_source, encoding="utf-8")
+        (tests_dir / "test_autouse_reset_observer.py").write_text(
             "import os\n"
             "import sys\n"
             "sys.path.insert(0, os.environ['PACT_AUTOUSE_SOURCE_ROOT'] + '/skills/pact-memory')\n"
-            "from scripts import memory_init\n\n"
-            "def test_a_observer_establishes_dirty_flag(monkeypatch):\n"
-            "    for name in ('check_and_install_dependencies', 'maybe_migrate_embeddings', 'maybe_embed_pending'):\n"
-            "        monkeypatch.setattr(memory_init, name, lambda *a, **k: {'status': 'ok', 'installed': [], 'failed': []})\n"
-            "    memory_init.ensure_memory_ready()\n"
-            "    assert memory_init.is_initialized()\n\n"
-            "def test_b_observer_relies_on_autouse_reset():\n"
+            "from scripts import memory_init\n"
+            "for name in ('check_and_install_dependencies', 'maybe_migrate_embeddings', 'maybe_embed_pending'):\n"
+            "    setattr(memory_init, name, lambda *a, **k: {'status': 'ok', 'installed': [], 'failed': []})\n"
+            "memory_init.ensure_memory_ready()\n"
+            "assert memory_init.is_initialized()\n\n"
+            "def test_clean_at_start():\n"
             "    assert not memory_init.is_initialized(), (\n"
-            "        'the autouse reset did not clear the dirty flag from the previous test. '\n"
+            "        'the real autouse reset did not clear the collection-time dirty flag. '\n"
             "        'This observer deliberately has no owner-level reset of its own.'\n"
             "    )\n",
             encoding="utf-8",
         )
-        enabled_conftest = (
-            "import pytest\n\n"
-            "@pytest.fixture(autouse=True)\n"
-            "def _reset_memory_init_state():\n"
-            "    from scripts.memory_init import reset_initialization\n"
-            "    reset_initialization()\n"
-        )
-        (tmp_path / "conftest.py").write_text(enabled_conftest, encoding="utf-8")
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-        env["PACT_AUTOUSE_SOURCE_ROOT"] = str(Path(__file__).parent.parent)
+        env["PACT_AUTOUSE_SOURCE_ROOT"] = str(source_root)
+        env["PYTHONPATH"] = os.pathsep.join(str(path) for path in (
+            source_root / "tests",
+            source_root / "hooks",
+            source_root / "skills" / "pact-memory",
+            source_root / "skills" / "pact-memory" / "scripts",
+            source_root / "skills" / "pact-coding-standards" / "scripts",
+            source_root / "scripts",
+            source_root,
+        ))
         for name in ("PYTEST_ADDOPTS", "GITHUB_ACTIONS", "GITHUB_WORKSPACE"):
             env.pop(name, None)
         for name in list(env):
             if name.startswith("PYTEST_XDIST_"):
                 env.pop(name, None)
 
-        def run_pair():
+        def run_pair(mode):
+            plugin_control = [] if mode else ["-p", "no:xdist"]
             return subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                 "-p", "no:randomly", "-p", "no:xdist",
-                 "test_autouse_reset_observer.py"],
-                cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
+                 "-p", "no:randomly", *plugin_control, *mode,
+                 "tests/test_autouse_reset_observer.py"],
+                cwd=plugin, env=env, capture_output=True, text=True, timeout=120,
             )
 
-        enabled = run_pair()
-        assert enabled.returncode == 0, enabled.stdout + enabled.stderr
-        (tmp_path / "conftest.py").write_text(
-            "import pytest\n\n"
-            "@pytest.fixture(autouse=True)\n"
-            "def _reset_memory_init_state():\n"
-            "    pass\n",
-            encoding="utf-8",
-        )
-        disabled = run_pair()
-        assert disabled.returncode == 1, disabled.stdout + disabled.stderr
-        assert "test_b_observer_relies_on_autouse_reset" in disabled.stdout
+        reset_line = "    reset_initialization()\n"
+        assert conftest_source.count(reset_line) == 1
+        for mode in ((), ("-n", "2", "--dist", "load"), ("-n", "4", "--dist", "loadfile")):
+            enabled = run_pair(mode)
+            assert enabled.returncode == 0, (mode, enabled.stdout + enabled.stderr)
+            (plugin / "conftest.py").write_text(
+                conftest_source.replace(reset_line, "    return\n", 1), encoding="utf-8")
+            disabled = run_pair(mode)
+            assert disabled.returncode == 1, (mode, disabled.stdout + disabled.stderr)
+            assert "test_clean_at_start" in disabled.stdout, (mode, disabled.stdout)
+            (plugin / "conftest.py").write_text(conftest_source, encoding="utf-8")
 
 
 class TestEachIsolationLayerHasAWitness:
