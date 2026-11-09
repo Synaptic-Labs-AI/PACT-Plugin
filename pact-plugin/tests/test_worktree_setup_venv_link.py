@@ -935,6 +935,45 @@ class TestExcludeWriteFailureSkipsTheLink:
         )
 
 
+class TestUnresolvedExcludePathNamesTheCause:
+    """The EMPTY-`EXCLUDE` branch: the moved-repo state.
+
+    Every ordinary fixture yields a resolveable exclude path, so the branch
+    where `git -C "$WORKTREE" rev-parse --git-path` FAILS was never reached by
+    the suite. Moving the repo breaks the worktree's absolute `gitdir` pointer,
+    which is exactly that state. The message must name a cause instead of
+    printing a blank path (which produced a double space).
+    """
+
+    def test_moved_repo_warns_with_a_named_cause_and_keeps_the_link(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
+        run_fence(fence, repo)  # first run creates the link and the rule
+        first_target = os.readlink(worktree / ".venv")
+
+        moved = tmp_path / "moved-repo"
+        repo.rename(moved)  # the repo and its .worktrees move together
+        moved_worktree = moved / ".worktrees" / BRANCH
+
+        done = run_fence(fence, moved)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "could not resolve the exclude path" in done.stdout, (
+            "the warning did not name the cause; it must not print a blank "
+            f"path. stdout={done.stdout.strip()!r}"
+        )
+        assert "  " not in done.stdout, (
+            f"the warning contains a double space (blank path printed): {done.stdout!r}"
+        )
+        assert os.readlink(moved_worktree / ".venv") == first_target, (
+            "the unresolved-exclude run changed a link it did not create"
+        )
+        assert done.stderr == "", (
+            f"the unresolved-exclude branch must be silent on stderr; got {done.stderr!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # The pyright config contract
 # ---------------------------------------------------------------------------
