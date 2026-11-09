@@ -1249,7 +1249,8 @@ class TestUnresolvedIdentityRefusesWrites:
 
         assert str(excinfo.value).startswith(
             "project_id, when supplied, must be a non-empty string without "
-            "control characters (U+0000-U+001F, U+007F-U+009F); "
+            "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+            "surrogates (U+D800-U+DFFF); "
         )
         assert not db_path.exists(), (
             "the empty-payload refusal created the store; it must precede "
@@ -1273,7 +1274,8 @@ class TestUnresolvedIdentityRefusesWrites:
 
         assert str(excinfo.value).startswith(
             "project_id, when supplied, must be a non-empty string without "
-            "control characters (U+0000-U+001F, U+007F-U+009F); "
+            "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+            "surrogates (U+D800-U+DFFF); "
         )
         assert not db_path.exists(), (
             "the empty-payload refusal created the store; it must precede "
@@ -1329,7 +1331,8 @@ class TestUnresolvedIdentityRefusesWrites:
 
         assert str(excinfo.value).startswith(
             "project_id, when supplied, must be a non-empty string without "
-            "control characters (U+0000-U+001F, U+007F-U+009F); "
+            "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+            "surrogates (U+D800-U+DFFF); "
         ), f"refused for a different reason: {str(excinfo.value)!r}"
         assert not db_path.exists(), (
             "the integer-payload refusal created the store; the guard must "
@@ -1346,12 +1349,17 @@ class TestUnresolvedIdentityRefusesWrites:
             "bad\x7fid",
             "bad\x85id",
             "bad\x9fid",
+            "bad\ud800id",
         ],
     )
     def test_f2_control_characters_in_payload_project_are_rejected(
         self, tmp_path, project_id
     ):
-        """C0, DEL and C1 controls are invalid before any store work."""
+        """C0, DEL, C1 controls and lone surrogates are invalid before any
+        store work. The surrogate cell pins the clause that keeps an
+        unencodable value (`json.loads` accepts unpaired \\ud800 escapes)
+        off the utf-8 TEXT binding, where it would die as an unhandled
+        UnicodeEncodeError instead of this ValueError."""
         db_path = tmp_path / "control-id.db"
         memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
         linked = tmp_path / "linked.py"
@@ -1391,20 +1399,38 @@ class TestUpdatePayloadProjectIdGuard:
             ).fetchone()
         return row[0] if row else None
 
-    @pytest.mark.parametrize("bad", [None, "", 123, "bad\x00id"])
+    @pytest.mark.parametrize("field", ["project_id", "session_id"])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            None, "", 123,
+            "bad\x00id", "bad\nid", "bad\tid", "bad\x1fid",
+            "bad\x7fid", "bad\x85id", "bad\x9fid",
+            "bad\ud800id",
+        ],
+    )
     def test_rejects_a_dekeying_or_mis_keying_payload(
-        self, tmp_path, bad
+        self, tmp_path, field, bad
     ):
-        """Null (the de-key), empty, non-str and control-char values refuse."""
+        """Null (the de-key), empty, non-str, control-char and lone-surrogate
+        values refuse, for BOTH scalar identifiers.
+
+        The control sweep mirrors the save-side F2 family's seven values:
+        the update guard's C1/DEL clause is pinned by cells that fail
+        without it, not only by save()'s arms. The surrogate cell pins the
+        clause that keeps an unencodable value off the utf-8 TEXT binding.
+        session_id rides the same guard: `update_memory` scalar-replaces it
+        and the CLI passes it through verbatim on the same path.
+        """
         db_path = tmp_path / "update-guard.db"
         memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
         memory_id = memory.save({"context": "UPDATE-GUARD"}, sync_to_claude=False)
 
         with pytest.raises(ValueError) as excinfo:
-            memory.update(memory_id, {"project_id": bad})
+            memory.update(memory_id, {field: bad})
 
         assert str(excinfo.value).startswith(
-            "project_id, when supplied to update, must be a non-empty string "
+            f"{field}, when supplied to update, must be a non-empty string "
         ), f"refused for a different reason: {str(excinfo.value)!r}"
         assert self._row_project(db_path, memory_id) == "detected-b", (
             "a refused payload changed the row; the guard must precede the "
@@ -1432,6 +1458,89 @@ class TestUpdatePayloadProjectIdGuard:
 
         assert resolved == memory_id
         assert self._row_project(db_path, memory_id) == "warranted-c"
+
+    def test_a_warranted_rekey_cascades_to_every_project_keyed_row(
+        self, tmp_path
+    ):
+        """C-S1: the re-keyed row stays addressable from its new project.
+
+        files rows are keyed (path, project_id) and vec_memories partitions
+        by project_id, so a re-key that moved only the memories row would
+        strand the file link and the vector in the old project: the row
+        would vanish from search_by_file under the new key while remaining
+        findable under the old one. The pre-rekey assertion proves the
+        fixture live so the moved-state assertions cannot pass vacuously.
+        """
+        db_path = tmp_path / "cascade.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        old = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = old.save(
+            {"context": "CASCADE"}, files=[str(linked)], sync_to_claude=False
+        )
+        assert [m.id for m in old.search_by_file(str(linked))] == [memory_id], (
+            "the live fixture did not link the file; the cascade assertions "
+            "below would prove nothing"
+        )
+
+        assert old.update(memory_id, {"project_id": "warranted-c"}) == memory_id
+
+        new = PACTMemory(project_id="warranted-c", session_id="s", db_path=db_path)
+        old_view = PACTMemory(
+            project_id="detected-b", session_id="s", db_path=db_path
+        )
+        assert [m.id for m in new.search_by_file(str(linked))] == [memory_id], (
+            "the re-keyed row is not addressable from its new project"
+        )
+        assert [m.id for m in old_view.search_by_file(str(linked))] == [], (
+            "the re-keyed row is still addressable from its old project"
+        )
+
+        # The vec partition followed: no vector remains under the old key.
+        # Guarded on module availability: a vec0 table can only be queried
+        # from a connection that loaded sqlite_vec, and a process that
+        # cannot embed never wrote a vector to strand in the first place.
+        # When the module loads, the invariant is exact.
+        with db_connection(db_path) as conn:
+            has_vec = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='vec_memories'"
+            ).fetchone() is not None
+            if has_vec:
+                try:
+                    import sqlite_vec
+
+                    sqlite_vec.load(conn)
+                except ImportError:
+                    pass
+                else:
+                    stale = conn.execute(
+                        "SELECT COUNT(*) FROM vec_memories "
+                        "WHERE memory_id = ? AND project_id = ?",
+                        (memory_id, "detected-b"),
+                    ).fetchone()[0]
+                    assert stale == 0, (
+                        "a vector remains in the old project's partition"
+                    )
+
+    def test_a_disagreement_refusal_precedes_the_payload_guard(
+        self, tmp_path, monkeypatch
+    ):
+        """F3: ordering pin. The disagreement guard runs first, so a session
+        that disagrees refuses on the disagreement whatever the payload
+        carries. Flipping the order would change the CLI envelope channel
+        (SCOPE_DISAGREEMENT vs ValueError exit 2) with no other symptom."""
+        db_path = tmp_path / "ordering.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+        memory_id = memory.save({"context": "ORDERING"}, sync_to_claude=False)
+
+        monkeypatch.setattr(
+            memory_api,
+            "env_record_project_dir_disagreement",
+            lambda: ("/env/project", "/record/project"),
+        )
+        with pytest.raises(ProjectScopeDisagreementError):
+            memory.update(memory_id, {"project_id": None})
 
 
 class TestUnresolvedIdentityScopesReads:
@@ -1669,6 +1778,8 @@ class TestIssueCriterionALiteralShape:
         the row saved while the worktree was live. A read returning any row
         here would be reading across the store on a None identity; an empty
         store would pass vacuously, which is why the row is proven live first.
+        Every read surface is asserted (C-N2): list, search, search_by_file
+        and get_status's project-scoped counters all decline together.
         """
         main = _repo(layout_root / "R", document=True)
         worktree = _worktree(main, main / ".worktrees" / "W")
@@ -1702,6 +1813,21 @@ class TestIssueCriterionALiteralShape:
         assert gone.list(limit=50) == [], (
             "a declined identity read rows from the store instead of none"
         )
+        # C-N2: the SAME decline holds on every read surface, not list alone.
+        # search would drop its project filter on None (whole-store read),
+        # search_by_file would match the shared NULL bucket, and get_status
+        # would report whole-store counts as this session's.
+        assert gone.search(_TOKEN, sync_to_claude=False) == []
+        assert gone.search_by_file(str(main / "README")) == []
+        status = gone.get_status()
+        assert status["project_id"] is None
+        assert status["memory_count"] == 0
+        assert status["graph_stats"] == {
+            "files": 0,
+            "memories": 0,
+            "memory_file_links": 0,
+            "file_relations": 0,
+        }, status["graph_stats"]
 
     def test_a_corrupt_identity_record_after_removal_declines(
         self, layout_root, monkeypatch, caplog

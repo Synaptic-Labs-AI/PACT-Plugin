@@ -54,6 +54,7 @@ from .embeddings import (
 )
 from .graph import (
     link_memory_to_paths,
+    track_file,
     get_files_for_memory
 )
 from .models import MemoryObject, memory_from_db_row
@@ -270,6 +271,29 @@ class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
     Raised by `save()` only: every other write path either writes by
     `memory_id`, already refuses a None id, or funnels through `save()`.
     """
+
+
+def _unusable_identifier(value: object) -> bool:
+    """One rule for every payload identifier both write surfaces validate.
+
+    Unusable: not a non-empty string, or it carries C0/DEL/C1 control
+    characters or a lone surrogate. The surrogate clause exists because
+    `json.loads` accepts unpaired `\\ud800`-style escapes that no utf-8
+    TEXT binding can encode: without the clause such a value passes
+    validation and dies at the store as an unhandled UnicodeEncodeError,
+    bypassing the ValueError remedy channel. `save()` and `update()`
+    call this so the two ingresses cannot drift apart on any of it.
+    """
+    return (
+        not isinstance(value, str)
+        or not value
+        or any(
+            ord(char) < 0x20
+            or 0x7F <= ord(char) <= 0x9F
+            or 0xD800 <= ord(char) <= 0xDFFF
+            for char in value
+        )
+    )
 
 
 class PACTMemory:
@@ -1019,19 +1043,14 @@ class PACTMemory:
         # already envelopes it as invalid input (exit 2), so it cannot read as
         # an env/record disagreement.
         payload_project = memory.get("project_id")
-        if payload_project is not None and (
-            not isinstance(payload_project, str)
-            or not payload_project
-            or any(
-                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
-                for char in payload_project
-            )
-        ):
-            # Reject C0, DEL and C1 controls without restricting other Unicode.
+        if payload_project is not None and _unusable_identifier(payload_project):
+            # Reject C0, DEL and C1 controls and lone surrogates without
+            # restricting other Unicode.
             raise ValueError(
                 "project_id, when supplied, must be a non-empty string without "
-                "control characters (U+0000-U+001F, U+007F-U+009F); omit it "
-                "to auto-detect the project. Nothing was written."
+                "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+                "surrogates (U+D800-U+DFFF); omit it to auto-detect the "
+                "project. Nothing was written."
             )
 
         # AND FAIL CLOSED WHEN NO IDENTITY RESOLVED AT ALL. A None id is not a
@@ -1659,15 +1678,20 @@ class PACTMemory:
         Raises:
             ValueError: If updates contains unknown field names, if any
                 dict-list item contains unknown sub-object keys, or if a
-                supplied `project_id` is not a non-empty string without
-                control characters (explicit null included — it would
-                scalar-replace the row's key to NULL; omit the field to
-                leave the key unchanged).
+                supplied `project_id` or `session_id` is not a non-empty
+                string without control characters or lone surrogates
+                (explicit null included — it would scalar-replace the
+                row's key to NULL; omit the field to leave it
+                unchanged). Payload validation precedes id resolution:
+                such a payload is refused before the memory id is
+                resolved, so it reports the payload, never the prefix.
             PrefixTooShortError: prefix is shorter than the minimum.
             AmbiguousPrefixError: prefix matches more than one memory.
             ProjectScopeDisagreementError: CLAUDE_PROJECT_DIR and the session
                 record name different project directories (fail-closed write
-                refusal; reads follow env).
+                refusal; reads follow env). Evaluated before payload
+                validation: a session that disagrees refuses on the
+                disagreement, whatever the payload carries.
         """
         # Clear the embedding status FIRST, for the reason given at save()'s
         # entry: it is assigned only after the store write, so any exit above
@@ -1686,35 +1710,35 @@ class PACTMemory:
                 format_project_dir_disagreement(*disagreement)
             )
 
-        # A PAYLOAD project_id ON AN UPDATE MUST BE A USABLE KEY, AND PRESENCE
-        # — NOT TRUTHINESS — DECIDES. `update_memory` scalar-replaces the
-        # field, so an explicit null or "" here would re-key the row to NULL:
-        # a key no reader can address and no instance can hold (the de-key
-        # hazard save()'s payload guard closes on the create path). `.get()`
-        # cannot make the needed distinction — on update, explicit null IS the
-        # hazard and omission is a no-op, the OPPOSITE boundary from save(),
-        # where null means "auto-detect" — so this guard keys on
-        # `"project_id" in updates` and validates the value it finds. Updates
-        # omitting the field proceed with no identity requirement: the row is
-        # already keyed, and refusing identity-free edits would block honest
-        # updates in a session whose declared directory has died.
+        # A PAYLOAD project_id OR session_id ON AN UPDATE MUST BE A USABLE
+        # IDENTIFIER, AND PRESENCE — NOT TRUTHINESS — DECIDES.
+        # `update_memory` scalar-replaces both fields, so an explicit null or
+        # "" here would re-key the row to NULL: a key no reader can address
+        # and no instance can hold (the de-key hazard save()'s payload guard
+        # closes on the create path). `.get()` cannot make the needed
+        # distinction — on update, explicit null IS the hazard and omission is
+        # a no-op, the OPPOSITE boundary from save(), where null means
+        # "auto-detect" — so the guard keys on `"field" in updates` and
+        # validates the value it finds. Updates omitting the fields proceed
+        # with no identity requirement: the row is already keyed, and refusing
+        # identity-free edits would block honest updates in a session whose
+        # declared directory has died. session_id is validated by the same
+        # rule as project_id: it is the row's other scalar identifier, and the
+        # CLI passes it through verbatim on the same path.
         #
         # ValueError for the same reason as save()'s payload block: it is this
         # module's bad-input channel and the CLI envelopes it as exit 2, so it
         # cannot read as an env/record disagreement.
-        if "project_id" in updates:
-            payload_project = updates["project_id"]
-            if not isinstance(payload_project, str) or not payload_project or any(
-                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
-                for char in payload_project
+        for _identity_field in ("project_id", "session_id"):
+            if _identity_field in updates and _unusable_identifier(
+                updates[_identity_field]
             ):
-                # Reject C0, DEL and C1 controls without restricting other
-                # Unicode, exactly as save()'s payload validation does.
                 raise ValueError(
-                    "project_id, when supplied to update, must be a non-empty "
-                    "string without control characters (U+0000-U+001F, "
-                    "U+007F-U+009F); omit it to leave the row's project "
-                    "unchanged. Nothing was written."
+                    f"{_identity_field}, when supplied to update, must be a "
+                    "non-empty string without control characters "
+                    "(U+0000-U+001F, U+007F-U+009F) or lone surrogates "
+                    "(U+D800-U+DFFF); omit it to leave the row's "
+                    f"{_identity_field} unchanged. Nothing was written."
                 )
 
         # Ensure memory system is ready (lazy initialization)
@@ -1738,11 +1762,12 @@ class PACTMemory:
                 f for f in CONTENT_FIELDS if f in updates
             ]
             before_snapshot: Optional[Dict[str, Any]] = None
-            if content_keys_in_update:
+            if content_keys_in_update or "project_id" in updates:
                 before_snapshot = get_memory(conn, memory_id) or {}
 
             success = update_memory(conn, memory_id, updates, replace=replace)
 
+            vector_current = False
             if success and content_keys_in_update:
                 memory_dict = get_memory(conn, memory_id)
                 if memory_dict and _content_fields_changed(
@@ -1751,8 +1776,82 @@ class PACTMemory:
                     self._last_embedding_status = self._store_embedding(
                         conn, memory_id, memory_dict
                     )
+                    # The content re-store reads the re-keyed row, so it
+                    # already lands in the NEW project's vec partition; the
+                    # cascade below must not embed a second time for it.
+                    vector_current = True
+
+            if success and "project_id" in updates:
+                # A WARRANTED RE-KEY CASCADES. update_memory moved the
+                # memories row; three project-keyed surfaces still carry the
+                # old key and would make the row unaddressable from its new
+                # project: the linked files rows, the memory_files links
+                # pointing at them, and the vec_memories partition row.
+                # The comparison reads the PRE-update snapshot: by the time
+                # this runs, the row itself already carries the new key.
+                if before_snapshot.get("project_id") != updates["project_id"]:
+                    self._cascade_rekey(
+                        conn, memory_id, updates["project_id"],
+                        vector_current=vector_current,
+                    )
 
             return memory_id if success else None
+
+    def _cascade_rekey(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: str,
+        new_project: str,
+        *,
+        vector_current: bool,
+    ) -> None:
+        """Move every project-keyed row a warranted re-key leaves behind.
+
+        Files: each linked row is keyed (path, project_id) and
+        search_by_file filters by project, so the link is re-pointed to the
+        (path, new_project) row — created on demand by track_file, which
+        get-or-creates — and the old link removed. The old file ROW is left
+        in place: deleting it could dangle file_relations references, and a
+        row no memory links is inert, not a leak.
+
+        Vector: vec0 partitions by project_id, so a vector left in the old
+        partition is invisible to the new project's semantic search.
+        Re-stored through _store_embedding, which drops the old partition
+        row and inserts under the new one. When sqlite-vec is absent it
+        returns a degraded reason instead of raising, and the stale
+        partition row then survives by the same contract as every other
+        degraded write: unchanged until a process that can embed rewrites
+        it. `vector_current` skips the re-store when the content-change
+        path already stored the vector under the new key.
+        """
+        linked = conn.execute(
+            "SELECT f.id AS file_id, f.path AS path, f.project_id AS project_id, "
+            "mf.relationship AS relationship "
+            "FROM files f JOIN memory_files mf ON mf.file_id = f.id "
+            "WHERE mf.memory_id = ?",
+            (memory_id,),
+        ).fetchall()
+        for row in linked:
+            if row["project_id"] == new_project:
+                continue
+            new_file_id = track_file(conn, row["path"], new_project)
+            if new_file_id == row["file_id"]:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_files "
+                "(memory_id, file_id, relationship) VALUES (?, ?, ?)",
+                (memory_id, new_file_id, row["relationship"]),
+            )
+            conn.execute(
+                "DELETE FROM memory_files WHERE memory_id = ? AND file_id = ?",
+                (memory_id, row["file_id"]),
+            )
+        if not vector_current:
+            memory_dict = get_memory(conn, memory_id)
+            if memory_dict:
+                self._last_embedding_status = self._store_embedding(
+                    conn, memory_id, memory_dict
+                )
 
     @_with_store_scope
     def delete(self, memory_id: str) -> Optional[str]:
