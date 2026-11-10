@@ -74,11 +74,11 @@ GRAPH_CONFIRMATION_FETCH_CAP = 50
 def _scope_or_none(project_id: Optional[str]) -> Optional[str]:
     """One scope predicate at every public entry: absent and "" both mean ALL.
 
-    The SQL legs have always read the scope by truthiness, while the
-    stored-project confirmations read it by `is None`. Without this
-    normalisation `""` would run the query unscoped and then filter every hit
-    away, turning a whole-store search into an empty one. Normalise ONCE, at
-    each public entry; every later test is `is None`.
+    The SQL legs read the scope by `is not None` (as do the stored-project
+    confirmations), so without this normalisation an empty string would be
+    bound as a filter that matches no row and a whole-store search would
+    answer empty. Normalise ONCE, at each public entry; every later test is
+    `is None`.
     """
     return project_id or None
 
