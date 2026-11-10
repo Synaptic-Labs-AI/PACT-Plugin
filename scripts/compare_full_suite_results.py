@@ -38,9 +38,8 @@ COLLECTION_RECORD_SCHEMA_VERSION = 1
 # `gh api repos/{owner}/{repo}/actions/workflows/tests.yml --jq .id`. There is
 # no automated oracle for it: the id exists only behind an authenticated API
 # call and this comparator runs offline, so a test deriving the expected value
-# from this line would prove nothing. The architecture doc's section 4.1 states
-# the same number independently; re-derive both together if the workflow is
-# ever recreated.
+# from this line would prove nothing. Re-derive it if the workflow is ever
+# recreated.
 WORKFLOW_DATABASE_ID = 291463576
 SUMMARY_OUTCOME = re.compile(
     r"\b(?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|no tests ran)\b")
