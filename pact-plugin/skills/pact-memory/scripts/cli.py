@@ -1053,7 +1053,10 @@ def _positive_int(value):
     try:
         ivalue = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"invalid int value: '{value}'")
+        # `!r` renders a control or bidi character as an escape, so an
+        # untrusted value forwarded as --limit cannot steer the terminal
+        # through argparse's stderr `error:` line.
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}")
     if ivalue < 1:
         raise argparse.ArgumentTypeError(f"--limit must be a positive integer, got {ivalue}")
     return ivalue
