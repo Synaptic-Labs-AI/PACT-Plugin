@@ -72,6 +72,8 @@ git -C "$REPO_ROOT" check-ignore -q .worktrees 2>/dev/null || {
 
 `{branch}` must be a single line and must contain no `\n` or `\r` at all — a value that contains either is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
+A `.worktrees` that is itself a symlink is supported: the collection is wherever that link resolves, and the worktree is created at the resolved location. A symlink below the collection root, or a target that resolves outside the resolved root, is refused.
+
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
 LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
@@ -95,7 +97,7 @@ PACT BRANCH
 [ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot create worktree: the branch placeholder was not substituted."; exit 1; }
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot create worktree: invalid branch name."; exit 1; }
 
-# Refuse unless the target resolves under .worktrees/ — a symlink there can send the worktree elsewhere.
+# A symlinked .worktrees root is supported: containment anchors on its resolved location. Refuse only a symlink below the root, or a target resolving outside it.
 mkdir -p "$REPO_ROOT/.worktrees"
 TARGET="$REPO_ROOT/.worktrees/$BRANCH"
 BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
@@ -259,7 +261,7 @@ Branch: {branch}
 | Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (a worktree for $BRANCH is registered, but $WORKTREE is not a live worktree; no link is created)`, and no link or rule is written. Pyright import resolution does not apply there, because no link is created |
 | No worktree was created or registered for the branch (Step 3 failed or was skipped) | Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE — Step 3 did not create one)` and writes nothing |
 | Worktree path outside `.worktrees/` | Step 4 prints `Venv link: skipped (worktree path is not under .worktrees/)`; no link or rule is written |
-| The target path reaches outside `.worktrees/` through a symlink | Step 3 refuses before creating anything with `Cannot create worktree: … resolves outside .worktrees/.`; a symlinked target or a symlinked intermediate directory is not followed |
+| A symlink below `.worktrees/`, or a target that resolves outside it | Step 3 refuses before creating anything with `Cannot create worktree: … resolves outside .worktrees/.`; a symlinked target or intermediate directory below the root is not followed. A `.worktrees` ROOT that is itself a symlink is supported — containment anchors on its resolved location and the worktree is created there |
 | `.worktrees/{branch}` holds a worktree of a different repository | Step 4 prints `Venv link: skipped (the worktree at … belongs to a different repository)` and writes nothing; it does not borrow another repository's exclude file or worktree |
 | `.worktrees/{branch}` holds a worktree on a different branch, or on a detached HEAD | Step 4 prints `Venv link: skipped (the worktree at … is not on …)`; only the worktree for `{branch}` receives the link |
 | Branch name contains `/` | The worktree lives at `.worktrees/{branch}` with intermediate directories. A later setup for the parent segment (`foo` when `foo/bar` exists) fails because `.worktrees/foo` is a non-empty directory — choose another branch name or remove the nested worktree first; cleanup for the parent name refuses through the branch-identity check |
