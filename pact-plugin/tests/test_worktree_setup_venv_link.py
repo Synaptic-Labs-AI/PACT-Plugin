@@ -908,13 +908,17 @@ class TestStep3BranchIsInertText:
 class TestStep3RefusesASymlinkedCreationPath:
     """Step 3 must not create through a symlink under `.worktrees/`.
 
-    A symlinked collection root, a symlinked target, a symlinked intermediate
-    directory with a nested branch, and a dangling symlink each make the create
-    write somewhere other than the collection. The fence resolves the deepest
-    EXISTING ancestor rather than the full target, because a nested branch's
-    target does not exist yet; a dangling link is treated as existing so it
-    cannot be walked past. The nested-branch arm beside them proves the same
-    resolution still lets the legitimate `foo/bar` convention create.
+    A symlinked target, a symlinked intermediate directory with a nested branch,
+    and a dangling symlink each make the create write somewhere other than the
+    collection. The fence resolves the deepest EXISTING ancestor rather than the
+    full target, because a nested branch's target does not exist yet; a dangling
+    link is treated as existing so it cannot be walked past. The nested-branch
+    arm beside them proves the same resolution still lets the legitimate
+    `foo/bar` convention create.
+
+    A symlinked collection ROOT is NOT refused: it is a supported layout and the
+    worktree is created at the link's resolved location. See
+    `TestSymlinkedCollectionRootIsSupported` for that positive arm.
     """
 
     @staticmethod
