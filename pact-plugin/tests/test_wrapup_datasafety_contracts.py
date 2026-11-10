@@ -197,6 +197,28 @@ class TestStep6BranchCleanupDataSafety:
         assert not LOCAL_DELETE_VERB.search(branch_c), "a local delete verb (any wording) leaked into the unmerged branch"
         assert not REMOTE_DELETE_VERB.search(branch_c), "a remote delete verb (any wording) leaked into the unmerged branch"
 
+    def test_cleanup_force_delete_is_superseded_not_quoted(self, branch_a):
+        # DESIGN-INTENT: worktree-cleanup's own force-delete option is
+        # superseded by the minted prompt, which is the single authorized path.
+        # The line must REFERENCE that option, never QUOTE it: a quotation is a
+        # cross-surface literal that drifts on the skill's next legitimate
+        # reword (its branch-delete options line was reworded in this change,
+        # orphaning the previous quotation). This pins the contract on wrap-up's
+        # side only, so a skill reword cannot red it while the contract holds.
+        assert "superseded" in branch_a, (
+            "branch A no longer states that worktree-cleanup's force-delete "
+            "option is superseded by the minted prompt"
+        )
+        assert "single authorized force-delete path" in branch_a, (
+            "branch A no longer names the minted prompt as the single "
+            "authorized force-delete path"
+        )
+        assert '"force delete:' not in branch_a.lower(), (
+            "branch A quotes worktree-cleanup's options text again; the "
+            "quotation drifted once already, so this reference must stay "
+            "self-contained"
+        )
+
     def test_no_bundled_compound_delete(self, step6):
         # DESIGN-INTENT: the merge-guard mints a single-target, single-leg
         # delete; bundling the two deletes into one approval is refused by the
