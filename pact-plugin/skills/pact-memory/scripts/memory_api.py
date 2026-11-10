@@ -45,7 +45,6 @@ from .database import (
     list_memories,
     ensure_initialized,
     resolve_memory_id_prefix,
-    escape_for_envelope,
     _unusable_identifier,
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
@@ -823,14 +822,15 @@ class PACTMemory:
         return self._project_id
 
     def _session_id_for_envelope(self) -> Optional[str]:
-        """The session id a status ENVELOPE may report; the FINAL value.
+        """The session id a status ENVELOPE reports; the FINAL value.
 
-        One contract with `_project_id_for_envelope()`: fold, then escape. A
-        value `_unusable_identifier` rejects (a control character or a lone
-        surrogate) becomes None, because no row can carry it; a bidi/format
-        or separator character is ACCEPTED by design, so it survives the fold
-        and `escape_for_envelope` renders it as its `<U+XXXX>` marker. This
-        is a DISPLAY value — never feed it back as an identifier.
+        One contract with `_project_id_for_envelope()`: FOLD ONLY. A value
+        `_unusable_identifier` rejects (a control character or a lone
+        surrogate) becomes None, because no row can carry it. Everything
+        else is returned RAW: this is a structured payload value the caller
+        may feed back as an identifier, and escaping it here made the
+        reported id name no rows. Display escaping belongs to messages,
+        warnings and log lines, not to payloads.
         """
         if (
             self._session_id is not None
@@ -839,22 +839,22 @@ class PACTMemory:
             return None
         if self._session_id is None:
             return None
-        return escape_for_envelope(self._session_id)
+        return self._session_id
 
     def _project_id_for_envelope(self) -> Optional[str]:
-        """The project id a status or sync ENVELOPE may report.
+        """The project id a status or sync ENVELOPE reports.
 
-        The fold, then the display escape: `_project_scope()` yields None for
-        an unusable detected value or for no identity at all, and the
-        surviving value goes through `escape_for_envelope` so a bidi/format
-        or separator character renders as its `<U+XXXX>` marker. NEVER used
-        for query binding — the escaped form would stop matching rows, which
-        is why the escape lives here and not in `_project_scope()`.
+        Fold only: `_project_scope()` yields None for an unusable detected
+        value or for no identity at all. The surviving value is returned
+        RAW — it is a structured payload the caller may feed back as a
+        scope, and the CLI's sync envelope uses this same helper so status
+        and sync always agree. Display escaping stays in messages, warnings
+        and log lines.
         """
         project_scope = self._project_scope()
         if project_scope is None:
             return None
-        return escape_for_envelope(project_scope)
+        return project_scope
 
     @property
     def session_id(self) -> Optional[str]:
@@ -2516,15 +2516,15 @@ class PACTMemory:
         """
         Get status information about the memory system.
 
-        DISPLAY CONTRACT, and the boundary it stops at: the identity fields
-        (`project_id`, `session_id`) and `db_path` are DIAGNOSTIC DISPLAY
-        values — folded to null when no row can carry them, and display-
-        escaped otherwise (a bidi/format character appears as its `<U+XXXX>`
-        marker and matches no rows), so a library caller must never feed
-        them back as identifiers or paths. MEMORY CONTENT stays RAW: the row
-        payloads from `search`, `list` and `get` are data, and escaping a
-        memory's own text or context would corrupt it. The RAW path is
-        available to programmatic callers as `memory.db_path`.
+        PAYLOAD CONTRACT: the identity fields (`project_id`, `session_id`)
+        and `db_path` are STRUCTURED PAYLOAD values. Each is folded to null
+        when no row or address can carry it, and otherwise returned RAW so a
+        caller can feed it back — the ids as a scope, the path to
+        `--db-path`. Escaping them made the reported id name no rows and the
+        reported path open no store. Display escaping belongs to messages,
+        warnings, log lines and the AMBIGUOUS_PREFIX diagnostic, not to
+        payloads. MEMORY CONTENT is raw for the same reason: the row payloads
+        from `search`, `list` and `get` are data.
 
         Returns:
             Dictionary with database stats and capabilities.
@@ -2552,13 +2552,10 @@ class PACTMemory:
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
         # value. The ENVELOPE VALUES are computed once so BOTH arms report
-        # them the same way, and each accessor returns the FINAL display
-        # form: the fold drops a value no row can carry, the escape renders
-        # a bidi/format/separator character (which the fold ACCEPTS by
-        # design) inert, because a consumer that parses this JSON and prints
-        # the field would otherwise let it steer a display. The counters
-        # below still use the RAW `project_scope` — an escaped value cannot
-        # be bound to a query.
+        # them the same way, and each accessor FOLDS ONLY: a value no row
+        # can carry becomes None, and everything else is returned RAW so the
+        # caller can use it as a scope or a store address. The counters
+        # below use the same raw `project_scope`.
         project_scope = self._project_scope()
         project_id = self._project_id_for_envelope()
         session_id = self._session_id_for_envelope()
@@ -2579,7 +2576,7 @@ class PACTMemory:
                 # A PROCESS fact, like session_id and capabilities, and part of
                 # the envelope every other status call returns. Dropping it on
                 # this arm alone would change the envelope's key set.
-                "db_path": escape_for_envelope(str(resolve_db_path())),
+                "db_path": str(resolve_db_path()),
             }
 
         from .database import get_memory_count
@@ -2618,7 +2615,7 @@ class PACTMemory:
             # above came from the caller store, so the envelope disagreed with
             # itself. The scope makes this the caller store, and the resolver
             # creates nothing.
-            "db_path": escape_for_envelope(str(resolve_db_path()))
+            "db_path": str(resolve_db_path())
         }
 
 
