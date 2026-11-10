@@ -220,10 +220,12 @@ else
   else
     CAUSE="could not resolve the exclude path"
     [ "$EXCLUDE_RESOLVED" = 0 ] || CAUSE="could not write $EXCLUDE"
-    if [ -e "$WORKTREE/.venv" ] || [ -L "$WORKTREE/.venv" ]; then
-      echo "WARNING: $CAUSE — $WORKTREE/.venv exists and is NOT ignored; git add -A could commit it, and an untracked unignored path makes git worktree remove refuse without --force"
-    else
+    if [ ! -e "$WORKTREE/.venv" ] && [ ! -L "$WORKTREE/.venv" ]; then
       echo "WARNING: $CAUSE — .venv link skipped so an unignored link cannot be committed"
+    elif git -C "$WORKTREE" check-ignore -q .venv; then
+      echo "WARNING: $CAUSE — $WORKTREE/.venv stays in place and is still ignored by another rule; re-run setup to retry the exclude write"
+    else
+      echo "WARNING: $CAUSE — $WORKTREE/.venv exists and is NOT ignored; git add -A could commit it, and an untracked unignored path makes git worktree remove refuse without --force"
     fi
   fi
 fi
@@ -267,7 +269,8 @@ Branch: {branch}
 | Creation fails (disk/permissions) | Surface error, offer fallback to main repo |
 | Main checkout has no `.venv` | Step 4 prints a one-line skip naming the path it checked; no link is created and setup continues |
 | `.venv` already exists in the worktree (real directory or a foreign link) | Step 4 reports it and leaves it untouched |
-| Exclude write fails | Step 4 prints a warning and creates no link, so an unignored link cannot be committed. Re-run setup to retry the write |
+| Exclude write fails with no existing `.venv` | Step 4 prints a warning naming the cause and creates no link, so there is nothing to commit. Re-run setup to retry the write |
+| Exclude write fails with a pre-existing `.venv` | The path stays in place. If another rule already ignores it, Step 4 names the cause and says it remains ignored; if not, the unignored-path warning names it, because `git add -A` could commit it and `git worktree remove` refuses without `--force` |
 | `.venv` is tracked | `check-ignore` reports a tracked path as not ignored, so Step 4 prints `WARNING: .venv is NOT ignored in this worktree because it is tracked`; `git add -A` could commit changes to it. Clear the entry with `git rm --cached .venv`; re-running setup cannot untrack it |
 | An untracked `.venv` path is not ignored | A link created by this run is removed before the warning, so `git add -A` cannot commit it. A pre-existing unignored path stays in place; `git worktree remove` refuses without `--force`. Re-run setup to write a missing rule; if a later `!.venv` rule nullifies it, inspect the exclude file |
 | Dependency work in a worktree | The link is advisory read-only and shared: environment-managing tools (`pip install`, `uv sync`, `uv run`) write through it into the main checkout. Remove the link and create a local environment in the worktree instead |
