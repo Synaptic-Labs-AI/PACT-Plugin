@@ -342,14 +342,24 @@ def link_memory_to_paths(
 
 def get_files_for_memory(
     conn: sqlite3.Connection,
-    memory_id: str
+    memory_id: str,
+    project_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Get all files linked to a memory.
 
+    THE LINK DOES NOT CARRY A PROJECT, SO THE FILE ROW MUST: a legacy or
+    interrupted re-key can leave a memory linked to another project's file
+    row, and an unfiltered walk attaches that row's path to an otherwise
+    confirmed memory. When `project_id` is given, each returned file's OWN
+    stored project must match it (`IS`, so a NULL file row matches only a
+    caller that filters for NULL). `project_id=None` is NO FILTER — the
+    whole-store meaning existing callers rely on.
+
     Args:
         conn: Active database connection.
         memory_id: The memory ID.
+        project_id: Optional stored-project filter on the returned files.
 
     Returns:
         List of file dicts with relationship info.
@@ -361,10 +371,10 @@ def get_files_for_memory(
         SELECT f.*, mf.relationship
         FROM files f
         JOIN memory_files mf ON f.id = mf.file_id
-        WHERE mf.memory_id = ?
+        WHERE mf.memory_id = ? AND (? IS NULL OR f.project_id IS ?)
         ORDER BY mf.relationship, f.path
         """,
-        (memory_id,)
+        (memory_id, project_id, project_id)
     )
 
     return [dict(row) for row in cursor.fetchall()]
