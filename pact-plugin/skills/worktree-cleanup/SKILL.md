@@ -40,11 +40,21 @@ Present the list and ask: "Which worktree should I remove?"
 
 `git worktree remove` deletes the worktree's `docs/` directory **irrecoverably** — that directory is gitignored and worktree-ephemeral, so the phase artifacts it holds (`docs/preparation/`, `docs/architecture/`, `docs/plans/`, `docs/review/`, `docs/decision-logs/`) are gone the instant the worktree is removed. Those artifacts are the **fuller substance** behind each phase's distilled HANDOFF. This step is the single chokepoint that protects them for **all** teardown callers — `peer-review` auto-cleanup, CONSOLIDATE sub-scope early-teardown, and manual `/PACT:worktree-cleanup` alike — so harvest MUST precede remove.
 
-Run this exact command, substituting the target worktree's absolute path from Step 1 — the same path Step 2 will remove:
+Run this exact command, substituting the target worktree's absolute path from Step 1 — that path is the harvest target. Step 2 removes only the `.worktrees/{branch}` form, so a worktree named by a path elsewhere is harvested here and then refused by Step 2; report that mismatch instead of reading the harvest as covering the removal.
+
+`{abs_worktree}` must be a single line and must contain no `\n` or `\r` at all — a path, unlike a ref, may legally contain one, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. A value that is empty is also not a worktree path; report it. If the path still contains the literal `{abs_worktree}` placeholder, stop and report it.
 
 ```bash
-[ -d "{abs_worktree}/docs" ] && echo DIR_PRESENT || { [ -x "{abs_worktree}" ] && echo DIR_ABSENT || echo CANNOT_OBSERVE; }
-find -L "{abs_worktree}/docs" -type f
+WORKTREE=
+WORKTREE_EXTRA=
+{ IFS= read -r WORKTREE; IFS= read -r WORKTREE_EXTRA || :; } <<'PACT WORKTREE'
+{abs_worktree}
+PACT WORKTREE
+[ -z "$WORKTREE_EXTRA" ] || { echo "Cannot harvest: the worktree path must be a single line."; exit 1; }
+[ "$WORKTREE" != "$(printf '{%s}' abs_worktree)" ] || { echo "Cannot harvest: the worktree path placeholder was not substituted."; exit 1; }
+[ -n "$WORKTREE" ] || { echo "Cannot harvest: no worktree path was supplied."; exit 1; }
+[ -d "$WORKTREE/docs" ] && echo DIR_PRESENT || { [ -x "$WORKTREE" ] && echo DIR_ABSENT || echo CANNOT_OBSERVE; }
+find -L "$WORKTREE/docs" -type f
 ```
 
 Then apply this guard. It is **two independent decisions** — what to harvest, and whether removal is licensed. A failed probe must never suppress the harvest; it only withholds the removal.
@@ -68,25 +78,52 @@ This guard is conditional by design: it must NOT unconditionally block, or it wo
 
 Before removal, the shell's working directory must NOT be inside the worktree being removed. Compute the repo root, `cd` to it, and remove the worktree — all in a single bash call. This is critical because if the shell CWD is inside the deleted worktree, all subsequent commands will fail.
 
+`{branch}` must be a single line and must contain no `\n` or `\r` at all — a value that contains either is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
+
 ```bash
 # Compute repo root, cd there, then remove the worktree — must be ONE bash call
-MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
-REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
-cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/{branch}"
+LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
+
+BRANCH=
+BRANCH_EXTRA=
+{ IFS= read -r BRANCH; IFS= read -r BRANCH_EXTRA || :; } <<'PACT BRANCH'
+{branch}
+PACT BRANCH
+[ -z "$BRANCH_EXTRA" ] || { echo "Cannot remove worktree: the branch value must be a single line."; exit 1; }
+[ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot remove worktree: the branch placeholder was not substituted."; exit 1; }
+git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot remove worktree: invalid branch name."; exit 1; }
+
+# Refuse unless this path resolves to the worktree registered for the branch.
+TARGET=$(cd "$REPO_ROOT/.worktrees/$BRANCH" 2>/dev/null && pwd -P) || { echo "Cannot remove worktree: no worktree at $REPO_ROOT/.worktrees/$BRANCH."; exit 1; }
+BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
+[ -n "$BASE_PHYS" ] && [ "${TARGET#"$BASE_PHYS"/}" != "$TARGET" ] || { echo "Cannot remove worktree: $REPO_ROOT/.worktrees/$BRANCH resolves outside .worktrees/."; exit 1; }
+[ "$(git -C "$TARGET" symbolic-ref --short -q HEAD 2>/dev/null)" = "$BRANCH" ] || { echo "Cannot remove worktree: $TARGET is not the worktree for $BRANCH."; exit 1; }
+
+cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/$BRANCH"
 ```
 
 Note: Claude Code's `Bash` tool persists the working directory between calls. After this command, subsequent calls will run from `$REPO_ROOT`.
 
 **If removal fails** (uncommitted changes):
 
-Git will refuse with an error like: `fatal: cannot remove: '.worktrees/{branch}' has changes`.
+Git will refuse with an error like: `fatal: '<absolute worktree path>' contains modified or untracked files, use --force to delete it`.
 
 Surface this to the user:
 ```
 Cannot remove worktree — uncommitted changes exist in .worktrees/{branch}.
 Options:
   1. Commit or stash changes first, then retry cleanup
-  2. Force removal: git worktree remove --force "$REPO_ROOT/.worktrees/{branch}"
+  2. Force removal: repeat the Step 2 block with --force added to git worktree remove
      (This discards uncommitted changes permanently)
 ```
 
@@ -96,8 +133,34 @@ Do NOT force-remove automatically. The user must choose.
 
 After the worktree is removed, delete the local branch.
 
+`{branch}` must be a single line and must contain no `\n` or `\r` at all — a value that contains either is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
+
 ```bash
-git branch -d {branch}
+# Resolve the main checkout root; Step 2 may have exited before its cd.
+LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot delete branch: cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
+BRANCH=
+BRANCH_EXTRA=
+{ IFS= read -r BRANCH; IFS= read -r BRANCH_EXTRA || :; } <<'PACT BRANCH'
+{branch}
+PACT BRANCH
+[ -z "$BRANCH_EXTRA" ] || { echo "Cannot delete branch: the branch value must be a single line."; exit 1; }
+[ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot delete branch: the branch placeholder was not substituted."; exit 1; }
+git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot delete branch: invalid branch name."; exit 1; }
+if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "branch refs/heads/$BRANCH"; then
+  echo "Cannot delete branch: $BRANCH is still checked out in a worktree of $REPO_ROOT — remove that worktree wherever it lives (git worktree remove <path>, path from git worktree list) and retry; a .worktrees/ worktree is what Step 2 removes, and the main checkout needs a branch switch first."
+  exit 1
+fi
+git -C "$REPO_ROOT" branch -d "$BRANCH"
 ```
 
 **If deletion fails** (branch not fully merged):
@@ -109,7 +172,7 @@ Surface this to the user:
 Cannot delete branch — '{branch}' is not fully merged.
 Options:
   1. Merge the branch first, then retry cleanup
-  2. Force delete: git branch -D {branch}
+  2. Force delete: repeat the Step 3 block with -D instead of -d
      (This deletes the branch even if unmerged — changes may be lost)
 ```
 
@@ -129,8 +192,12 @@ Cleaned up worktree for {branch}
 |------|---------|
 | Worktree has uncommitted changes | Surface git error, offer commit/stash or force options |
 | Branch not fully merged | Surface git error, offer merge or force-delete options |
-| Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch |
+| Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch; the delete no longer needs `.worktrees/` to exist |
 | Currently inside the target worktree | Navigate to main repo root before removal |
+| The branch is still checked out in any worktree of this repository (the main checkout, a `.worktrees/` worktree, or a reused path) | Step 3 refuses before deleting. Find it with `git worktree list` and remove it with `git worktree remove <path>`, then retry; a worktree under `.worktrees/` is what Step 2 removes, and a branch checked out in the main checkout needs a branch switch first. If the worktree directory is already gone, `git worktree prune` clears the registration |
+| Step 3 runs from a different repository that has no worktree for the branch but does have a same-named branch | The registration check cannot fire there, so that branch can still be deleted; the branch name alone cannot identify the intended repository. Run cleanup from the target repository |
+| The worktree's local branch ref was deleted (for example by a force-delete elsewhere) | The identity check passes: the worktree's symbolic HEAD still names `{branch}` even though the ref is gone. If the worktree has tracked files, removal then stops on git's own refusal, because the dangling HEAD makes every tracked file look staged and `git worktree remove` reports modified or untracked files; confirm there is no real uncommitted work, then remove with `git worktree remove --force`. A worktree with no tracked files removes cleanly. In either case Step 3 finds no branch left to delete and reports git's error |
+| Target is not the worktree for the branch (a symlink, a relocated path, or a detached HEAD) | Step 2 refuses before removing anything: the path must resolve under `.worktrees/` and the branch its HEAD symbolically names must equal `{branch}`. A detached HEAD cannot confirm identity, so it is refused; remove such a worktree manually with `git worktree remove <path>` if that is what you want |
 | No worktrees exist | Report "No worktrees found" |
 | Multiple worktrees for related branches | List all, let user choose which to remove |
 

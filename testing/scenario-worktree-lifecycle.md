@@ -28,15 +28,17 @@ Or trigger it via `/PACT:orchestrate` or `/PACT:comPACT`, which invoke worktree 
 
 **What happens**: The worktree-setup skill follows its process:
 1. Checks for existing worktree (`git worktree list`)
-2. Resolves the main repo root via `git rev-parse --git-common-dir`
+2. Resolves the main checkout root from `--git-dir` and `--git-common-dir`, and stops when the result is not a checkout
 3. Creates `.worktrees/` directory if needed
 4. Ensures `.worktrees/` is in `.gitignore`
 5. Creates the worktree with `git worktree add`
+6. Links the repo's `.venv` into the worktree when the main checkout has one, and records the ignore rule
 
 **Expected outcome**:
 ```
 Worktree ready at {REPO_ROOT}/.worktrees/feature/test-worktree
 Branch: feature/test-worktree
+Venv link: .venv -> {REPO_ROOT}/.venv (read-only, shared with the main checkout — do not install through it)
 ```
 
 ### Step 2: Verify Worktree State
@@ -54,6 +56,11 @@ git -C {REPO_ROOT}/.worktrees/feature/test-worktree branch --show-current
 
 # .worktrees/ is gitignored
 grep '.worktrees' {REPO_ROOT}/.gitignore
+
+# Repo venv linked and ignored as a symlink (when the main checkout has a .venv)
+test -L {REPO_ROOT}/.worktrees/feature/test-worktree/.venv
+git -C {REPO_ROOT}/.worktrees/feature/test-worktree check-ignore -v .venv
+git -C {REPO_ROOT}/.worktrees/feature/test-worktree status --porcelain
 ```
 
 **Expected**:
@@ -61,6 +68,8 @@ grep '.worktrees' {REPO_ROOT}/.gitignore
 - The worktree directory contains the full repository file tree
 - The branch `feature/test-worktree` is checked out inside the worktree
 - `.worktrees/` appears in `.gitignore`
+- `.venv` is a symlink to `{REPO_ROOT}/.venv` (this check is skipped when the main checkout has no `.venv`)
+- `git check-ignore -v .venv` reports the `.git/info/exclude` rule, and `git status --porcelain` lists no `.venv` entry
 
 ### Step 3: Perform Work in Worktree
 
@@ -95,6 +104,7 @@ Invoke worktree setup again for the same branch.
 **Expected outcome**: The skill detects the existing worktree and reuses it:
 ```
 Reusing existing worktree at {REPO_ROOT}/.worktrees/feature/test-worktree
+Venv link: .venv already exists in the worktree — left untouched
 ```
 
 No new worktree is created. The existing worktree (with the test commit) is preserved.
@@ -180,6 +190,8 @@ git worktree list  # Stale entry removed
 | Worktree created | `git worktree list` | New entry at `.worktrees/{branch}` |
 | Branch created | `git branch` | Feature branch exists |
 | .worktrees/ gitignored | `grep '.worktrees' .gitignore` | Entry present |
+| Repo venv linked | `test -L .worktrees/{branch}/.venv` | Symlink points at `{REPO_ROOT}/.venv`; skipped when the main checkout has no `.venv` |
+| Venv link ignored as a symlink | `git -C .worktrees/{branch} check-ignore -v .venv` and `git -C .worktrees/{branch} status --porcelain` | `check-ignore` reports the `info/exclude` `/.venv` rule (no trailing slash); `status` lists no `.venv` entry |
 | Filesystem isolation | File created in worktree not visible in main | `ls` in main directory fails for worktree-only files |
 | Worktree reuse | Second setup call for same branch | "Reusing existing worktree" message |
 | Cleanup removes directory | `ls .worktrees/{branch}` after cleanup | Directory does not exist |
@@ -197,3 +209,25 @@ git worktree list  # Stale entry removed
 | Branch not deleted | Branch persists after worktree removal | `git branch -d` failed because branch is not merged; user must choose force delete |
 | Worktree create fails | "fatal: '{branch}' is already checked out" | Branch exists in another worktree; the setup skill should detect this via `git worktree list` |
 | Plan files lost on cleanup | `docs/plans/` content created in worktree was not committed | Key lesson: always commit plan files before removing worktrees. Plan-mode creates files that are not auto-committed. |
+| Unignored `.venv` symlink | `git worktree remove` refuses with "contains modified or untracked files" (exit 128); `git status --porcelain` shows `?? .venv`; `git check-ignore .venv` exits 1 with no rule | The slash-free `/.venv` rule is missing from `info/exclude`. Re-run worktree setup to write the rule; do not use `--force` to work around it |
+| Tracked `.venv` | `git ls-files .venv` lists it; `git status --porcelain` shows no `?? .venv` entry while the link is untouched, and `git worktree remove` succeeds — so the unignored-link signature above does not appear. `git check-ignore .venv` exits 1, because an ignore rule never applies to a tracked path | Re-running setup cannot untrack it: Step 4 reports the not-ignored warning and leaves the path alone. Clear the index entry inside the worktree with `git rm --cached .venv`, commit that deletion, and keep the `/.venv` rule so the now-untracked link stays ignored. Measured after that sequence: `git check-ignore -v .venv` reports the `info/exclude` rule, `git status --porcelain` is empty, and `git worktree remove` succeeds without `--force` |
+| No `.venv` in the main checkout | Step 4 prints `Venv link: skipped (no .venv at $REPO_ROOT/.venv)` | Expected for non-Python repos; setup continues |
+| Cleanup target is a symlink to another branch's worktree | Step 2 refuses with `Cannot remove worktree: <resolved path> is not the worktree for {branch}.` and the target survives | The path resolves physically to a worktree whose checked-out branch is not `{branch}`. Remove the symlink and run cleanup against the branch's own worktree |
+| Cleanup target resolves outside `.worktrees/` | Step 2 refuses with `Cannot remove worktree: <path> resolves outside .worktrees/.` and the target survives | The resolved path is not under `.worktrees/`, so nothing outside it is ever removed |
+| Cleanup target is a symlink to a plain directory | Step 2 refuses with `Cannot remove worktree: <resolved path> is not the worktree for {branch}.` and the target survives | A plain directory has no checked-out branch, so identity cannot be confirmed |
+| Target worktree is on a detached HEAD | Step 2 refuses with `Cannot remove worktree: <resolved path> is not the worktree for {branch}.` and the target survives | A detached HEAD reports `HEAD` rather than the branch, so identity cannot be confirmed. Remove such a worktree manually with `git worktree remove <path>` if that is what you want |
+
+The ordinary case is unchanged: when the target resolves under `.worktrees/` and its checked-out branch equals `{branch}`, Step 2 removes the worktree as before.
+
+## Recorded Probe
+
+Executed in a worktree created by the updated setup skill, on a checkout whose main repo has a `.venv`.
+
+- Environment: git 2.43.0, pyright 1.1.414
+- `.venv` in the worktree: symlink to the main checkout's `.venv`
+- `pyright pact-plugin/tests/test_peer_review_cold_lane_pin.py` from the worktree root: `0 errors, 0 warnings, 0 informations` (exit 0)
+- `cd pact-plugin && pyright tests/test_peer_review_cold_lane_pin.py`: `0 errors, 0 warnings, 0 informations` (exit 0)
+- `git check-ignore -v .venv` in the worktree against the shipped fence: `.git/info/exclude:19:/.venv	.venv` (exit 0); `git status --porcelain` lists no `.venv` entry
+- Control — after removing the `/.venv` line from `info/exclude`, `git check-ignore -v .venv` matches nothing (exit 1); `git check-ignore -v sub/.venv` also matches nothing (exit 1), so the rule is anchored to the root entry
+- Superseded earlier run (unanchored rule): `git check-ignore -v .venv` returned `.git/info/exclude:18:.venv	.venv`
+- Negative arm — a checkout with the `venvPath`/`venv` config but NO link, so no `.venv` directory exists: pyright writes `venv .venv subdirectory not found in venv path <dir>.` to stderr and continues with the interpreter on `PATH`. With `python3` resolving to `/home/ubuntu/projects/collab/PACT-prompt/.venv/bin/python3` (pytest 9.2.0) first on `PATH`: `0 errors, 0 warnings, 0 informations` (exit 0), so the config is safe for a venv-less checkout. Control with the default `PATH` interpreter (no pytest): `Import "pytest" could not be resolved (reportMissingImports)`, `1 error, 0 warnings, 0 informations` (exit 1) — that error came from the interpreter, not the config.

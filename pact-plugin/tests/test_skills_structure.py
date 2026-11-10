@@ -460,3 +460,42 @@ class TestOrphanRecoveryCarrierGuard:
             f"state in that update that step 4 removes nothing and that the "
             f"carrier test is expressed."
         )
+
+
+class TestWorktreeSetupVenvLinkReportPins:
+    """Content-presence pins for the non-executable half of the venv link step.
+
+    Both strings are LLM-read or printed instructions with no runtime path, so
+    no behavioural test reaches them. Measured: deleting either leaves the whole
+    fence suite green. They are pinned HERE because test_skills_structure.py is
+    the house content-pin module for instruction prose that no executable path
+    covers (see TestOrphanRecoveryCarrierGuard).
+
+    WHAT THIS CANNOT CATCH, stated so a green is read no wider than it is: a
+    rewording that keeps a phrase and defeats it in the next sentence, a
+    contradicting instruction added elsewhere in the file, and a phrase moved
+    into a section it does not govern.
+    """
+
+    REL_PATH = "worktree-setup/SKILL.md"
+    REQUIRED_PHRASES = (
+        "(read-only, shared with the main checkout — do not install through it)",
+        "<every line Step 4 printed, warnings included>",
+    )
+
+    @pytest.mark.parametrize("phrase", REQUIRED_PHRASES, ids=lambda p: p[:32])
+    def test_report_phrase_present(self, phrase):
+        skill_md = SKILLS_DIR / self.REL_PATH
+        assert skill_md.is_file(), f"{self.REL_PATH} must exist"
+        text = skill_md.read_text(encoding="utf-8")
+        assert phrase in text, (
+            f"{self.REL_PATH} must contain {phrase!r}. The first phrase is the "
+            "printed advisory that environment-managing tools write through the "
+            "shared link; without it an agent can run `pip install` or `uv sync` "
+            "believing the worktree has its own environment. The second is the "
+            "report instruction that carries every line Step 4 printed, "
+            "warnings included; without it a skipped or failed link disappears "
+            "from the setup report. If a deliberate rewording changed a phrase, "
+            "update REQUIRED_PHRASES and confirm both properties are still "
+            "expressed."
+        )
