@@ -1143,6 +1143,8 @@ class PACTMemory:
         Args:
             memory: Memory dictionary with fields like context, goal,
                     lessons_learned, decisions, entities, active_tasks.
+                    A caller-supplied `id` is normalised to lowercase — the
+                    stored representation every lookup computes.
             files: Optional explicit file list to link.
             include_tracked: Include automatically tracked session files.
             sync_to_claude: Whether to project this memory into CLAUDE.md's
@@ -1327,6 +1329,15 @@ class PACTMemory:
             memory["project_id"] = self._project_id
         if "session_id" not in memory or memory["session_id"] is None:
             memory["session_id"] = self._session_id
+
+        # ONE REPRESENTATION FOR AN ID. `_resolve_id_or_full` lowercases every
+        # lookup, while `create_memory` stores a caller-supplied id verbatim,
+        # so an uppercase id would be written and then unreachable by
+        # get/update/delete. Normalise at the write ingress so the stored form
+        # is the one every read path computes. Generated ids are already
+        # lowercase hex, so this only touches caller-supplied strings.
+        if isinstance(memory.get("id"), str):
+            memory["id"] = memory["id"].lower()
 
         # WARNING (secondary): the narrow, name-what-it-detects signal. It
         # WARNS and does not refuse — filing under another project is
