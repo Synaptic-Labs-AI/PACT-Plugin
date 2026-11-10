@@ -24,9 +24,11 @@ which arm catches which regression; `TestMutationDiscrimination` mutates the
 extracted fence in memory and asserts the exact matrix. A docstring claim
 without that test is an assertion about tests, not a measurement of them.
 
-`git check-ignore` is diagnostic here: its output names the matching rule and
-is printed on failure, but it is never the primary assertion. The skill's own
-runtime `check-ignore -q` is a different use — there, rc 1 is the intended loud
+`git check-ignore` is diagnostic in the positive arms: its output names the
+matching rule and is printed on failure. `TestAnchoredRule` is the exception —
+there the rule's anchoring IS the property under test, so its return code is
+asserted directly, with porcelain beside it. The skill's own runtime
+`check-ignore -q` is a different use — there, rc 1 is the intended loud
 warning, including for an already-tracked link.
 
 THE WRITE-FAILURE ARM USES A DIRECTORY, NOT A MISSING WORKTREE. A nonexistent
@@ -89,6 +91,13 @@ pytestmark = pytest.mark.skipif(not BASH.exists(), reason="no /bin/bash")
 def _section(skill_text, start_heading, end_heading):
     start = skill_text.find(start_heading)
     assert start != -1, f"no {start_heading!r} heading in worktree-setup SKILL.md"
+    assert skill_text.count(start_heading) == 1, (
+        f"{start_heading!r} appears {skill_text.count(start_heading)} times. "
+        "The FIRST occurrence is extracted, so a duplicate heading earlier in "
+        "the file (a quick reference, an example) makes every arm measure a "
+        "section that is not the operative one while the real fence regresses "
+        "silently."
+    )
     block = skill_text[start:]
     end = block.find(end_heading)
     assert end != -1, (
@@ -245,6 +254,23 @@ def shipped_delimiter(skill_text):
     delimiters = re.findall(r"<<\s*'([^']+)'", fence_for(skill_text))
     assert len(delimiters) == 1, (
         f"expected exactly one quoted heredoc delimiter; found {delimiters}"
+    )
+    return delimiters[0]
+
+
+def site_delimiter(label):
+    """The ONE quoted heredoc delimiter the named reading site uses.
+
+    Every substituted value reaches its commands through a quoted heredoc, so
+    each site's delimiter must be a string no legal value can equal. Pinned per
+    site because a tidy in one duplicated copy is invisible to the others.
+    """
+    site = _SITES[label]
+    fence = fence_block(site.path.read_text(encoding="utf-8"), site.start, site.end)
+    delimiters = re.findall(r"<<\s*'([^']+)'", fence)
+    assert len(delimiters) == 1, (
+        f"{label} must read its value through exactly one quoted heredoc; "
+        f"found {delimiters}"
     )
     return delimiters[0]
 
@@ -408,9 +434,10 @@ def make_outer_repo_linked_worktree(tmp_path):
     """A separate-git-dir checkout whose git dir sits INSIDE another repo.
 
     From a linked worktree of the inner checkout, the common-dir parent is
-    `<outer>/area` — inside the OUTER repo's work tree. The pre-cycle-8 guard
-    accepted it because `git -C <outer>/area rev-parse --show-toplevel`
-    succeeds; the equality guard rejects it.
+    `<outer>/area` — inside the OUTER repo's work tree. A guard that asks only
+    "is the computed root inside a work tree?" accepts it, because
+    `git -C <outer>/area rev-parse --show-toplevel` succeeds; the equality
+    guard rejects it.
     """
     outer = tmp_path / "outer"
     outer.mkdir()
@@ -440,7 +467,7 @@ def make_outer_repo_linked_worktree(tmp_path):
 
 
 def make_outer_root_git_dir_linked_worktree(tmp_path):
-    """Case A: the separate git dir sits DIRECTLY under the outer repo's root.
+    """The separate git dir sits DIRECTLY under the outer repo's root.
 
     Here the computed root `<outer>` IS a worktree toplevel, so the
     toplevel-equality guard alone accepts it. Only the common-dir equality
@@ -512,6 +539,22 @@ def make_template_less_repo(tmp_path):
     return repo, worktree
 
 
+def make_empty_tree_repo(tmp_path, branch=BRANCH):
+    """A repo whose HEAD tree is EMPTY, plus a worktree with no tracked files.
+
+    The cleanup skill's deleted-ref row distinguishes a worktree WITH tracked
+    files (git refuses as dirty) from one with none (removal succeeds). Only
+    this shape reaches the second outcome.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    git(repo, *GIT_ID, "commit", "--allow-empty", "-qm", "empty")
+    worktree = repo / ".worktrees" / branch
+    git(repo, "worktree", "add", "--quiet", str(worktree), "-b", branch)
+    return repo, worktree
+
+
 def run_fence(fence, repo, pwd=None):
     """Run the fence with `repo` as cwd.
 
@@ -525,6 +568,9 @@ def run_fence(fence, repo, pwd=None):
         "HOME": os.environ["HOME"],
         "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
         "GIT_CONFIG_NOSYSTEM": "1",
+        # Pin the locale: arms below match git's English stderr, and a
+        # translated message would red them for the wrong reason.
+        "LC_ALL": "C",
     }
     if pwd is not None:
         env["PWD"] = str(pwd)
@@ -560,6 +606,7 @@ def run_fence_without_tool(fence, repo, missing):
         "HOME": os.environ["HOME"],
         "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
         "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
     }
     return subprocess.run(
         [str(BASH), "-c", fence],
@@ -674,6 +721,45 @@ class TestFenceContract:
 # ---------------------------------------------------------------------------
 # The positive arm: the fence creates a link that is ignored and untracked
 # ---------------------------------------------------------------------------
+
+
+class TestExtractionFollowsTheOperativeHeading:
+    """The extractor must read the OPERATIVE section, not the first lookalike.
+
+    `_section` binds the first literal occurrence of a heading. Measured: a
+    duplicate earlier `### Step 4:`/`### Step 5:` pair carrying a byte-identical
+    fence let the whole suite stay green while the REAL Step 4 link command was
+    replaced by `false`. The uniqueness assertion in `_section` turns that
+    silent misselection into a red; this arm is its pin.
+    """
+
+    def test_a_duplicate_earlier_heading_reds_the_extraction(self):
+        text = SKILL_FILE.read_text(encoding="utf-8")
+        fence_for(text)  # the shipped file still has one operative section
+        block = _section(text, "### Step 4:", "### Step 5:")
+        decoy = (
+            "### Step 4: Quick reference (duplicate)\n"
+            + block[len("### Step 4:") :]
+            + "### Step 5: Quick reference end\n\n"
+        )
+        anchor = text.index("### Step 2:")
+        mutated = text[:anchor] + decoy + text[anchor:]
+
+        # Break the REAL fence after the decoy: if extraction read the decoy,
+        # no arm would ever execute this command.
+        decoy_end = mutated.index("### Step 5: Quick reference end") + len(
+            "### Step 5: Quick reference end"
+        )
+        head, tail = mutated[:decoy_end], mutated[decoy_end:]
+        link = 'ln -s "$REPO_ROOT/.venv" "$WORKTREE/.venv"'
+        assert tail.count(link) == 1, (
+            "the real link command moved or duplicated; this mutation no longer "
+            "measures the misselection it names"
+        )
+        mutated = head + tail.replace(link, "false")
+
+        with pytest.raises(AssertionError, match="appears 2 times"):
+            fence_for(mutated)
 
 
 class TestFenceCreatesAnIgnoredLink:
@@ -818,18 +904,27 @@ class TestStep3BranchIsInertText:
         )
 
 
+_DELIMITER_SITES = [pytest.param(label, id=label) for label in _SITES]
+
+
 class TestDelimiterCannotBeForged:
-    """The delimiter must be a string NO legal branch may equal.
+    """Every site's delimiter must be a string NO legal branch may equal.
 
     Pinning a hardcoded spelling (`PACT_BRANCH`) would stay green if a
     maintainer "tidied" the odd space delimiter to a hyphen form — and then a
     legitimate branch named `PACT-BRANCH` would terminate the heredoc and be
-    falsely rejected. The property below reds on any such tidy, and the
-    behavioural arm pins the identifier-shaped cousin end to end.
+    falsely rejected. The property below is parametrized over ALL FIVE sites
+    because a tidy in one duplicated copy is invisible to the other four. The
+    harvest site reads a filesystem path rather than a ref, so for it this arm
+    pins the delimiter's shape only; the forgeable case there is real and is
+    characterized separately.
     """
 
-    def test_the_shipped_delimiter_is_not_a_legal_branch_name(self, tmp_path):
-        delimiter = shipped_delimiter(SKILL_FILE.read_text(encoding="utf-8"))
+    @pytest.mark.parametrize("label", _DELIMITER_SITES)
+    def test_the_shipped_delimiter_is_not_a_legal_branch_name(
+        self, label, tmp_path
+    ):
+        delimiter = site_delimiter(label)
         done = subprocess.run(
             ["git", "check-ref-format", "--branch", delimiter],
             cwd=str(tmp_path),
@@ -840,13 +935,14 @@ class TestDelimiterCannotBeForged:
             env={**os.environ, "LC_ALL": "C"},
         )
         assert done.returncode != 0, (
-            f"the heredoc delimiter {delimiter!r} is a LEGAL branch name — a "
-            "ref with that exact value would terminate the heredoc and be "
+            f"{label}'s heredoc delimiter {delimiter!r} is a LEGAL branch name "
+            "— a ref with that exact value would terminate the heredoc and be "
             "falsely rejected. The delimiter must be unforgeable by any valid "
             "ref."
         )
         assert "not a valid branch name" in done.stderr, (
-            f"the delimiter was rejected for the wrong reason: {done.stderr!r}"
+            f"{label}'s delimiter was rejected for the wrong reason: "
+            f"{done.stderr!r}"
         )
 
     def test_a_ref_shaped_like_an_identifier_cousin_links_normally(
@@ -1246,8 +1342,8 @@ _GUARD_COPIES = [
 class TestOuterRepoRootIsRejected:
     """A separate git dir inside ANOTHER repo must not donate that repo as root.
 
-    The pre-cycle-8 guard asked only "is the computed root inside a work
-    tree?", which is true for `<outer>/area`. The equality guard asks whether
+    A guard that asks only "is the computed root inside a work tree?" accepts
+    `<outer>/area`. The equality guard asks whether
     the computed root IS a worktree toplevel, and stops before writing. Both
     copies of the guard (setup Step 2 and cleanup Step 2) are exercised so the
     duplicated text cannot drift.
@@ -1286,9 +1382,9 @@ class TestOuterRepoRootIsRejected:
         assert not os.path.lexists(area / ".worktrees")
 
     def test_direct_under_root_placement_is_rejected(self, isolated_git_config, tmp_path):
-        """Case A: `<outer>` is itself a toplevel, so ONLY the common-dir
-        equality can reject it. Without that condition the outer repo is
-        written to; with it, both steps stop."""
+        """Root directly under the outer repo: `<outer>` is itself a toplevel,
+        so ONLY the common-dir equality can reject it. Without that condition
+        the outer repo is written to; with it, both steps stop."""
         outer, linked = make_outer_root_git_dir_linked_worktree(tmp_path)
         step2 = run_fence(
             fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), linked
@@ -1316,8 +1412,8 @@ class TestSameRepoSubdirectoryRootIsRejected:
     """The TOPLEVEL clause is load-bearing on its own reachable state.
 
     With the git dir at `<repo>/sub/gitdir`, the common-dir equality passes
-    (both sides resolve to `<repo>/sub/gitdir`) — so the case-A arm cannot
-    catch a toplevel-clause removal there. Here only the toplevel clause
+    (both sides resolve to `<repo>/sub/gitdir`) — so the root-directly-under-
+    the-outer-repo arm cannot catch a toplevel-clause removal there. Here only the toplevel clause
     rejects the computed root `<repo>/sub`; without it Step 2 writes into
     `<repo>/sub`.
     """
@@ -1387,7 +1483,12 @@ class TestRootGuardCopiesAreIdentical:
 
 
 class TestStep2CreatesTheDirectoryAndIgnoreRule:
-    """Step 2's happy path: create `.worktrees/` and ignore it exactly once."""
+    """Step 2's happy path: create the directory and write one ignore rule.
+
+    The shipped rule is anchored and slash-free (`/.worktrees`): the leading
+    slash confines it to the repository root, and the missing trailing slash
+    keeps it matching a symlinked `.worktrees` directory as well as a real one.
+    """
 
     def _fence(self):
         return fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8"))
@@ -1402,7 +1503,7 @@ class TestStep2CreatesTheDirectoryAndIgnoreRule:
         assert second.returncode == 0, f"second run failed: {second.stderr.strip()}"
         assert (repo / ".worktrees").is_dir(), "Step 2 did not create .worktrees/"
         assert (repo / ".gitignore").read_text(encoding="utf-8").splitlines().count(
-            ".worktrees/"
+            "/.worktrees"
         ) == 1, "the rule was not written exactly once across two runs"
 
     def test_final_line_without_a_newline_is_preserved(
@@ -1413,8 +1514,76 @@ class TestStep2CreatesTheDirectoryAndIgnoreRule:
         gitignore.write_text("keep-me", encoding="utf-8")  # deliberately no newline
         run_fence(self._fence(), repo)
         lines = gitignore.read_text(encoding="utf-8").splitlines()
-        assert lines == ["keep-me", ".worktrees/"], (
+        assert lines == ["keep-me", "/.worktrees"], (
             f"the append merged into the existing final line: {lines!r}"
+        )
+
+
+class TestSymlinkedWorktreesIsIgnored:
+    """The shipped rule must match a SYMLINKED `.worktrees`, not just a dir.
+
+    A trailing-slash rule (`.worktrees/`) matches directories only, so a
+    symlinked `.worktrees` is invisible to it and `git add -A` would stage the
+    link and everything behind it. The slash-free form is what prevents that;
+    the counter-arm below proves the slash is the property being pinned.
+    """
+
+    def test_a_symlinked_worktrees_entry_is_ignored_and_not_staged(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        store = tmp_path / "store"
+        store.mkdir()
+        (store / "keep").write_text("x\n", encoding="utf-8")
+        (repo / ".worktrees").symlink_to(store, target_is_directory=True)
+        assert (repo / ".worktrees").is_symlink()
+
+        done = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, f"Step 2 failed: {done.stderr.strip()}"
+
+        ignored = git(repo, "check-ignore", "-v", ".worktrees", check=False)
+        assert ignored.returncode == 0, (
+            "the shipped rule does not match a symlinked .worktrees; a rule "
+            "with a trailing slash matches directories only. "
+            f"check-ignore: {ignored.stdout.strip() or ignored.stderr.strip()}"
+        )
+        assert "/.worktrees" in ignored.stdout, (
+            f"the matching rule is not the shipped one: {ignored.stdout!r}"
+        )
+
+        git(repo, "add", "-A")
+        staged = git(repo, "diff", "--cached", "--name-only").stdout.splitlines()
+        assert not any(p.startswith(".worktrees") for p in staged), (
+            f"git add -A staged the symlinked .worktrees: {staged!r}"
+        )
+
+    def test_the_trailing_slash_form_does_not_match_a_symlink(
+        self, isolated_git_config, tmp_path
+    ):
+        """Counter-arm: the slash is the property, not 'some rule exists'."""
+        repo = make_empty_repo(tmp_path)
+        store = tmp_path / "store"
+        store.mkdir()
+        (repo / ".worktrees").symlink_to(store, target_is_directory=True)
+
+        done = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, f"Step 2 failed: {done.stderr.strip()}"
+
+        gitignore = repo / ".gitignore"
+        lines = [
+            ln for ln in gitignore.read_text(encoding="utf-8").splitlines()
+            if ln != "/.worktrees"
+        ]
+        gitignore.write_text("\n".join(lines + [".worktrees/"]) + "\n", encoding="utf-8")
+
+        report = git(repo, "check-ignore", "-v", ".worktrees", check=False)
+        assert report.returncode == 1, (
+            "a trailing-slash `.worktrees/` rule unexpectedly matched a symlink "
+            f"— the slash-free form would then prove nothing. {report.stdout!r}"
         )
 
 
@@ -1463,9 +1632,12 @@ class TestCleanupMultiLineValueIsTheInstructionsJob:
     guarantee.
     """
 
-    def test_the_single_line_rule_precedes_the_fence_in_both_steps(self):
+    def test_the_single_line_rule_precedes_the_fence_in_every_reading_step(
+        self,
+    ):
         text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
         for start, end, label in (
+            ("### Step 1.5:", "### Step 2:", "harvest"),
             ("### Step 2:", "### Step 3:", "remove-worktree"),
             ("### Step 3:", "### Step 4:", "delete-branch"),
         ):
@@ -1498,6 +1670,32 @@ class TestCleanupMultiLineValueIsTheInstructionsJob:
         assert marker.exists(), (
             "the cleanup fence unexpectedly stopped a multi-line value — if it "
             "now validates single-line input, this characterization should "
+            "become a positive assertion"
+        )
+
+
+class TestHarvestPathDelimiterIsTheInstructionsJob:
+    """The harvest site reads a PATH, so the forgeable case is reachable.
+
+    `{abs_worktree}` is a filesystem path, not a ref: nothing stops a real path
+    from containing the delimiter line. The heredoc parses before any command
+    runs, so a value carrying that line leaves shell lines after the terminator
+    and those lines execute. The defence is the single-line rule in the step's
+    prose, stated before the fence. This arm is a CHARACTERIZATION: it passes
+    while the marker IS created. If the fence ever validates its value, replace
+    it with a positive 'no marker' assertion.
+    """
+
+    def test_the_fence_alone_does_not_stop_a_delimiter_injecting_path(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, _ = make_repo(tmp_path)
+        marker = tmp_path / "PWNED"
+        value = f"evil\nPACT WORKTREE\ntouch {marker}"
+        run_fence(read_site_fence("cleanup-step-1.5", value=value), repo)
+        assert marker.exists(), (
+            "the harvest fence unexpectedly stopped a delimiter-injecting path "
+            "— if it now validates its value, this characterization should "
             "become a positive assertion"
         )
 
@@ -1804,6 +2002,70 @@ class TestDeletedBranchRefIdentity:
         )
 
 
+    def test_no_tracked_files_removes_cleanly_and_step_3_reports_the_missing_branch(
+        self, isolated_git_config, tmp_path
+    ):
+        """The other half of the deleted-ref row: no tracked files, clean removal."""
+        repo, worktree = make_empty_tree_repo(tmp_path)
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+        deleted = git(repo, "update-ref", "-d", f"refs/heads/{BRANCH}", check=False)
+        assert deleted.returncode == 0, deleted.stderr
+        assert git(worktree, "ls-files").stdout.strip() == "", (
+            "the fixture's worktree is not empty, so it does not reach the "
+            "no-tracked-files outcome this arm pins"
+        )
+
+        removed = run_fence(cleanup_remove_fence(text), repo)
+        assert removed.returncode == 0, (
+            "a worktree with no tracked files should remove cleanly after its "
+            f"branch ref is deleted. stdout={removed.stdout!r} "
+            f"stderr={removed.stderr!r}"
+        )
+        assert not worktree.exists()
+
+        delete = run_fence(cleanup_delete_fence(text), repo)
+        assert delete.returncode != 0, (
+            f"Step 3 deleted a branch that does not exist: {delete.stdout!r}"
+        )
+        assert f"branch '{BRANCH}' not found" in delete.stderr, (
+            f"Step 3 did not report the missing branch: {delete.stderr!r}"
+        )
+
+    def test_a_ref_existence_guard_reds_the_no_tracked_files_arm(
+        self, isolated_git_config, tmp_path
+    ):
+        """Mutation: requiring the branch ref to exist changes the outcome."""
+        repo, worktree = make_empty_tree_repo(tmp_path)
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+        deleted = git(repo, "update-ref", "-d", f"refs/heads/{BRANCH}", check=False)
+        assert deleted.returncode == 0, deleted.stderr
+
+        fence = cleanup_remove_fence(text)
+        identity = (
+            '[ "$(git -C "$TARGET" symbolic-ref --short -q HEAD 2>/dev/null)" '
+            '= "$BRANCH" ]'
+        )
+        mutated = fence.replace(
+            identity,
+            identity
+            + ' && git -C "$TARGET" rev-parse --verify --quiet '
+            '"refs/heads/$BRANCH" >/dev/null',
+        )
+        assert mutated != fence, (
+            "the identity guard changed shape; this mutation no longer measures "
+            "the regression it names"
+        )
+        done = run_fence(mutated, repo)
+        assert done.returncode != 0, (
+            "the ref-existence guard did not change the outcome, so the arm "
+            "above would not discriminate"
+        )
+        assert "is not the worktree for" in done.stdout, (
+            f"the mutation failed for another reason: {done.stdout!r}"
+        )
+        assert worktree.exists(), "the mutated guard removed the worktree anyway"
+
+
 class TestTemplateLessRepo:
     """`git init --template=` leaves no `.git/info/`; the fence must create it.
 
@@ -1895,17 +2157,52 @@ class TestDanglingLinkIsLeftAlone:
 
 
 class TestTrackedLinkIsReported:
+    TRACKED_WARNING = (
+        "WARNING: .venv is NOT ignored in this worktree because it is tracked — "
+        "git add -A can commit changes to it; clear it with git rm --cached .venv"
+    )
+
     def test_tracked_link_gets_the_not_ignored_warning(
         self, isolated_git_config, tmp_path
     ):
-        """A tracked link is invisible to porcelain; the skill must warn loudly."""
+        """A tracked link is invisible to porcelain; the skill must warn loudly.
+
+        The whole cause-specific sentence is pinned, not the shared prefix: the
+        generic untracked branch prints the same prefix, and the remedy
+        (`git rm --cached .venv`) is the actionable half of this warning.
+        """
         repo, worktree = make_repo(tmp_path, tracked_venv_link=True)
         assert is_tracked(worktree)
         done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
         assert "Venv link: .venv already exists in the worktree" in done.stdout
+        assert self.TRACKED_WARNING in done.stdout, (
+            "the cause-specific tracked warning did not fire; the generic branch "
+            f"shares its prefix, so the remedy would vanish silently. "
+            f"stdout={done.stdout.strip()!r}"
+        )
+
+    def test_removing_the_tracked_leg_reds_the_pin(
+        self, isolated_git_config, tmp_path
+    ):
+        """Mutation: the tracked leg is what makes the pin above discriminate."""
+        repo, _ = make_repo(tmp_path, tracked_venv_link=True)
+        fence = fence_for(SKILL_FILE.read_text(encoding="utf-8"))
+        mutation = (
+            'elif git -C "$WORKTREE" ls-files --error-unmatch -- .venv '
+            ">/dev/null 2>&1; then"
+        )
+        mutated = fence.replace(mutation, "elif false; then")
+        assert mutated != fence, (
+            "the tracked-warning leg changed shape; this mutation no longer "
+            "measures the regression it names"
+        )
+        done = run_fence(mutated, repo)
         assert "WARNING: .venv is NOT ignored in this worktree" in done.stdout, (
-            "the check-ignore warning did not fire for a tracked link: deleting "
-            f"that line would leave this state silently 'clean'. stdout={done.stdout.strip()!r}"
+            "the mutated fence stopped warning entirely"
+        )
+        assert self.TRACKED_WARNING not in done.stdout, (
+            "the mutation did not remove the cause-specific warning, so the pin "
+            f"above would not discriminate. stdout={done.stdout.strip()!r}"
         )
 
 
@@ -1931,6 +2228,41 @@ class TestUnlinkWhenNotIgnored:
             f"expected the unlink warning; got {done.stdout.strip()!r}"
         )
         assert porcelain(worktree) == ""
+
+
+class TestPreExistingUnignoredPathIsKept:
+    """A pre-existing untracked `.venv` is left in place and reported.
+
+    The fence creates nothing here, so nothing may be removed; the warning must
+    still name the consequence. No fixture combined a pre-existing path with a
+    negated rule before, so this warning branch was never reached.
+    """
+
+    def test_pre_existing_path_stays_and_the_unignored_warning_names_it(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path, gitignore=".worktrees/\n!.venv\n")
+        pre = worktree / ".venv"
+        pre.mkdir()
+        (pre / "marker").write_text("local venv\n", encoding="utf-8")
+
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert "Venv link: .venv already exists in the worktree" in done.stdout, (
+            f"a pre-existing path was not left alone: {done.stdout.strip()!r}"
+        )
+        assert (
+            "an untracked unignored path also makes git worktree remove refuse "
+            "without --force"
+        ) in done.stdout, (
+            "the pre-existing-untracked warning branch did not fire; the fence "
+            f"either stayed silent or named the wrong cause. "
+            f"stdout={done.stdout.strip()!r}"
+        )
+        assert pre.is_dir() and not pre.is_symlink(), (
+            "the pre-existing path was replaced"
+        )
+        assert (pre / "marker").read_text(encoding="utf-8") == "local venv\n"
 
 
 class TestNoVenvExistsWarning:
@@ -2161,7 +2493,9 @@ class TestMutationDiscrimination:
         )
         return mutated
 
-    def test_shipped_fence_is_green_on_all_three(self, isolated_git_config, tmp_path):
+    def test_shipped_fence_is_green_on_all_four_properties(
+        self, isolated_git_config, tmp_path
+    ):
         repo, _ = make_repo(tmp_path)
         assert link_state(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo) == {
             "exists": True,

@@ -42,7 +42,7 @@ Present the list and ask: "Which worktree should I remove?"
 
 Run this exact command, substituting the target worktree's absolute path from Step 1 — the same path Step 2 will remove.
 
-`{abs_worktree}` must be a single line in intent: a value whose second line is non-empty is not the worktree path this step accepts, so report it instead of substituting it. If the path still contains braces after substitution, stop and report it.
+`{abs_worktree}` must be a single line in intent: a value whose second line is non-empty is not the worktree path this step accepts, so report it instead of substituting it. A path, unlike a ref, may legally contain a newline, so this rule is the only defence against a value that also supplies the heredoc delimiter line. If the path still contains the literal `{abs_worktree}` placeholder, stop and report it.
 
 ```bash
 WORKTREE=
@@ -77,7 +77,7 @@ This guard is conditional by design: it must NOT unconditionally block, or it wo
 
 Before removal, the shell's working directory must NOT be inside the worktree being removed. Compute the repo root, `cd` to it, and remove the worktree — all in a single bash call. This is critical because if the shell CWD is inside the deleted worktree, all subsequent commands will fail.
 
-`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it.
+`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Compute repo root, cd there, then remove the worktree — must be ONE bash call
@@ -132,9 +132,23 @@ Do NOT force-remove automatically. The user must choose.
 
 After the worktree is removed, delete the local branch.
 
-`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it.
+`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
+# Resolve the main checkout root; Step 2 may have exited before its cd.
+LOCAL_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+MAIN_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ "$(cd "$LOCAL_GIT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$MAIN_GIT_DIR" 2>/dev/null && pwd -P)" ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+else
+  REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" 2>/dev/null && pwd -P)
+fi
+REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
+REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+[ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot delete branch: cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
+[ -d "$REPO_ROOT/.worktrees" ] || { echo "Cannot delete branch: $REPO_ROOT/.worktrees is not a directory — refusing to delete in a repository this step did not create a worktree in."; exit 1; }
+
 BRANCH=
 BRANCH_EXTRA=
 { IFS= read -r BRANCH; IFS= read -r BRANCH_EXTRA || :; } <<'PACT BRANCH'
@@ -142,8 +156,8 @@ BRANCH_EXTRA=
 PACT BRANCH
 [ -z "$BRANCH_EXTRA" ] || { echo "Cannot delete branch: the branch value must be a single line."; exit 1; }
 [ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot delete branch: the branch placeholder was not substituted."; exit 1; }
-git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot delete branch: invalid branch name."; exit 1; }
-git branch -d "$BRANCH"
+git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot delete branch: invalid branch name."; exit 1; }
+git -C "$REPO_ROOT" branch -d "$BRANCH"
 ```
 
 **If deletion fails** (branch not fully merged):
@@ -177,6 +191,7 @@ Cleaned up worktree for {branch}
 | Branch not fully merged | Surface git error, offer merge or force-delete options |
 | Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch |
 | Currently inside the target worktree | Navigate to main repo root before removal |
+| Step 3 runs from a different repository that also has `.worktrees/` and a same-named branch | The `.worktrees` directory check passes there, so this remains a known residual: the branch name alone cannot identify the intended repository. Run cleanup from the target repository |
 | The worktree's local branch ref was deleted (for example by a force-delete elsewhere) | The identity check passes: the worktree's symbolic HEAD still names `{branch}` even though the ref is gone. If the worktree has tracked files, removal then stops on git's own refusal, because the dangling HEAD makes every tracked file look staged and `git worktree remove` reports modified or untracked files; confirm there is no real uncommitted work, then remove with `git worktree remove --force`. A worktree with no tracked files removes cleanly. In either case Step 3 finds no branch left to delete and reports git's error |
 | Target is not the worktree for the branch (a symlink, a relocated path, or a detached HEAD) | Step 2 refuses before removing anything: the path must resolve under `.worktrees/` and the branch its HEAD symbolically names must equal `{branch}`. A detached HEAD cannot confirm identity, so it is refused; remove such a worktree manually with `git worktree remove <path>` if that is what you want |
 | No worktrees exist | Report "No worktrees found" |

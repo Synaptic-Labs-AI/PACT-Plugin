@@ -54,18 +54,19 @@ MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/nul
 
 # Create directory and ensure gitignored
 mkdir -p "$REPO_ROOT/.worktrees"
-grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || {
+# Slash-free so a symlinked .worktrees is ignored too; the rule is only ever written in this form.
+grep -qxF '/.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || {
   # Terminate a final line that lacks a newline, so the entry cannot merge into it.
   if [ -s "$REPO_ROOT/.gitignore" ] && [ -n "$(tail -c 1 "$REPO_ROOT/.gitignore" 2>/dev/null)" ]; then
     printf '\n' >> "$REPO_ROOT/.gitignore"
   fi
-  echo '.worktrees/' >> "$REPO_ROOT/.gitignore"
+  echo '/.worktrees' >> "$REPO_ROOT/.gitignore"
 }
 ```
 
 ### Step 3: Create the Worktree
 
-`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
+`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
@@ -100,7 +101,7 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 
 ### Step 4: Link the Repo venv (if present)
 
-Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains braces after substitution, stop and report it.
+Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
@@ -129,7 +130,11 @@ WORKTREE="$REPO_ROOT/.worktrees/$BRANCH"
 if [ ! -d "$REPO_ROOT/.venv" ]; then
   echo "Venv link: skipped (no .venv at $REPO_ROOT/.venv)"
 elif [ ! -f "$WORKTREE/.git" ]; then
-  echo "Venv link: skipped (no git worktree at $WORKTREE; a reused worktree outside .worktrees/ is not linked)"
+  if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "branch refs/heads/$BRANCH"; then
+    echo "Venv link: skipped (a worktree for $BRANCH is registered, but $WORKTREE is not a live worktree; no link is created)"
+  else
+    echo "Venv link: skipped (no git worktree at $WORKTREE — Step 3 did not create one)"
+  fi
 else
   BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
   WORKTREE_PHYS=$(cd "$WORKTREE" 2>/dev/null && pwd -P)
@@ -217,7 +222,8 @@ Branch: {branch}
 | Case | Handling |
 |------|---------|
 | Already in a worktree for this feature | Detect via `git worktree list`, reuse existing |
-| Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE; a reused worktree outside .worktrees/ is not linked)`, and no link or rule is written. Pyright import resolution does not apply there, because no link is created |
+| Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (a worktree for $BRANCH is registered, but $WORKTREE is not a live worktree; no link is created)`, and no link or rule is written. Pyright import resolution does not apply there, because no link is created |
+| No worktree was created or registered for the branch (Step 3 failed or was skipped) | Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE — Step 3 did not create one)` and writes nothing |
 | Worktree path outside `.worktrees/` | Step 4 prints `Venv link: skipped (worktree path is not under .worktrees/)`; no link or rule is written |
 | Invalid branch name, a multi-line value, or an unsubstituted `{branch}` placeholder | Step 3 stops before `git worktree add`; Step 4 prints the corresponding `Venv link: skipped (…)` line and writes nothing |
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
