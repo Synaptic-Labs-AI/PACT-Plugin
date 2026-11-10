@@ -337,6 +337,11 @@ class TestSourceEquivalence:
         assert "main_repo_root(declared_dir)" in helper_body
         assert "os.path.normcase" in helper_body
         assert "declared_root or Path(declared_dir)" in helper_body
+        # The dead-path consult: when the declared path is gone, the helper
+        # asks the worktree identity record (recorded_main_root) before
+        # declining — presence pin only; the behavior is proven in
+        # test_removed_worktree_record.py.
+        assert "recorded_main_root(" in helper_body
 
     def test_main_repo_root_carries_the_git_derivation(self):
         """The extracted helper holds what the two strategies used to duplicate.

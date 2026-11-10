@@ -112,6 +112,12 @@ SHELL_MARKER = re.compile(
 FIND = {"find", "rfind", "index", "rindex", "split", "rsplit", "partition", "rpartition",
         "startswith", "endswith", "count", "replace", "removeprefix", "removesuffix"}
 RE_FUN = {"search", "match", "fullmatch", "finditer", "findall", "sub", "subn", "split"}
+# Names too ubiquitous for a bare-name callee match to mean the helper.
+# `update` used to sit here for a collision that ATTRIBUTE calls caused: once
+# `PACTMemory.update` became a helper, `heading_at.update(...)` in
+# `claude_md_manager._plan_migration` matched it by attribute name alone.
+# Attribute calls are no longer matched at all (see `_callee`), so the entry
+# was removed and the shipped census stayed green.
 NOT_HELPERS = FIND | RE_FUN | {"compile", "get", "write", "write_text", "read_text", "join", "format"}
 LINE_BREAKS = ("\n", "\r\n", "\r")
 # The finder's lookups. Their results carry states and rows, never marker text,
@@ -289,12 +295,20 @@ def _re_imports(tree):
 
 
 def _callee(call):
-    if isinstance(call.func, ast.Name):
-        name = call.func.id
-    elif isinstance(call.func, ast.Attribute):
-        name = call.func.attr
-    else:
+    """The helper a call names, or None. ATTRIBUTE CALLS NEVER NAME ONE.
+
+    A helper is a function this census can see DEFINED, and a bare name is the
+    only callee form that identifies one: the receiver of an attribute call is
+    not resolvable from the call, so `x.update(...)` says nothing about which
+    `update` was meant. Matching those by attribute name alone made every dict
+    `.update()` in the tree a candidate once a function named `update` became a
+    helper (the `heading_at.update(...)` collision in
+    `claude_md_manager._plan_migration`), and the same would follow any other
+    common method name.
+    """
+    if not isinstance(call.func, ast.Name):
         return None
+    name = call.func.id
     return None if name in NOT_HELPERS else name
 
 
@@ -907,6 +921,22 @@ def test_a_helper_searching_for_its_parameter_is_caught_at_its_marker_call():
            "    return _via(text, SESSION_START_MARKER)\n")
     found = census_sources({"hooks/seeded.py": src})
     assert [(f, k) for (_r, f, k, _e) in found] == [("caller", "helper call")], found
+
+
+def test_an_attribute_call_to_a_helper_is_not_a_site():
+    """A receiver does not identify a helper, and matching one by attribute
+    name made every dict `.update()` a candidate. The BARE call beside it is
+    still caught, so the fix narrows the matcher rather than blinding it."""
+    src = (_CONSTS +
+           "def update(doc, literal):\n    return literal in doc\n"
+           "def caller(doc, other):\n"
+           "    return update(doc, SESSION_START_MARKER), "
+           "other.update(SESSION_START_MARKER)\n")
+    found = sorted((f, k) for (_r, f, k, _e) in census_sources({"hooks/seeded.py": src}))
+    assert found == [("caller", "helper call")], (
+        "the attribute call was counted as a helper call, or the bare-name "
+        f"call was missed: {found!r}"
+    )
 
 
 def test_a_helper_searching_raw_text_for_its_parameter_stays_a_locator():

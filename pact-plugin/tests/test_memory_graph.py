@@ -26,9 +26,13 @@ import pytest
 
 from helpers import create_test_schema
 
-# graph.py imports standard `import sqlite3` (not pysqlite3), so its
-# `except sqlite3.IntegrityError` catches the standard library exception.
-# We must use standard sqlite3 for test connections to match.
+# graph.py catches BOTH IntegrityError classes (`_INTEGRITY_ERRORS`: the
+# stdlib one and `database.sqlite3`'s, which is pysqlite3 when installed), so
+# either connection works. The `db_conn` fixture below uses the stdlib
+# connection because that is the smaller dependency; the duplicate-write arms
+# ALSO run on the production connection class in
+# TestDuplicateWritesOnTheProductionConnection, since a stdlib-only matrix
+# could not see a regression that named only one class.
 import sqlite3
 
 
@@ -529,3 +533,73 @@ class TestGetGraphStats:
         stats = get_graph_stats(db_conn, project_id="p1")
         assert stats["files"] == 1
         assert stats["memories"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The production connection class (pysqlite3 when installed)
+# ---------------------------------------------------------------------------
+
+class TestDuplicateWritesOnTheProductionConnection:
+    """A duplicate write must return False on the CONNECTION CLASS IN USE.
+
+    `database.get_connection` returns pysqlite3 connections when it is
+    installed, and `pysqlite3.dbapi2.IntegrityError` is an unrelated class
+    from stdlib `sqlite3.IntegrityError`. A `except sqlite3.IntegrityError`
+    written against the stdlib missed the duplicate on the production class
+    and raised instead of returning False. The stdlib arms above pass either
+    way, so they cannot see that regression; these arms use the factory's own
+    connection.
+    """
+
+    @pytest.fixture
+    def prod_conn(self, tmp_path):
+        from scripts.database import get_connection, init_schema
+
+        conn = get_connection(tmp_path / "graph_prod.db")
+        init_schema(conn)
+        conn.commit()
+        yield conn
+        conn.close()
+
+    def test_the_fixture_is_on_the_production_connection_class(self, prod_conn):
+        from scripts import database
+
+        assert isinstance(prod_conn, database.sqlite3.Connection), (
+            "the fixture did not receive the class database.get_connection "
+            "returns"
+        )
+        if database.sqlite3 is sqlite3:
+            pytest.skip(
+                "pysqlite3 is not installed; the stdlib arms above already "
+                "exercise this class"
+            )
+        # The two classes are unrelated, which is why the catch had to name
+        # both. If they ever converge this arm is the alarm.
+        assert database.sqlite3.IntegrityError is not sqlite3.IntegrityError
+
+    def test_a_duplicate_link_returns_false_on_pysqlite3(self, prod_conn):
+        from scripts.database import create_memory
+        from scripts.graph import link_memory_to_file, track_file
+
+        create_memory(prod_conn, {"id": "mem-prod", "context": "x",
+                                  "project_id": "P"})
+        file_id = track_file(prod_conn, "/src/app.py", "P")
+
+        assert link_memory_to_file(prod_conn, "mem-prod", file_id) is True
+        assert link_memory_to_file(prod_conn, "mem-prod", file_id) is False, (
+            "a duplicate memory->file link raised instead of returning False "
+            "on the production connection class"
+        )
+
+    def test_a_duplicate_relation_returns_false_on_pysqlite3(self, prod_conn):
+        from scripts.graph import add_file_relation
+
+        assert add_file_relation(
+            prod_conn, "/src/app.py", "/src/utils.py", "imports"
+        ) is True
+        assert add_file_relation(
+            prod_conn, "/src/app.py", "/src/utils.py", "imports"
+        ) is False, (
+            "a duplicate file relation raised instead of returning False on "
+            "the production connection class"
+        )

@@ -56,13 +56,17 @@ For low-variety tasks (score 4-6), the orchestrator should offer comPACT as an a
 ```
 Worktree ready at {REPO_ROOT}/.worktrees/{branch-name}
 Branch: {branch-name}
+Venv link: .venv -> {REPO_ROOT}/.venv (read-only, shared with the main checkout — do not install through it)
 ```
+When the main checkout has no `.venv`, the third line is `Venv link: skipped (no .venv at {REPO_ROOT}/.venv)` instead, and setup continues.
 
 **Verification**:
 ```bash
 git worktree list
+test -L {REPO_ROOT}/.worktrees/{branch-name}/.venv
+git -C {REPO_ROOT}/.worktrees/{branch-name} check-ignore -v .venv
 ```
-Should show the new worktree alongside the main working directory. The `.worktrees/` entry should exist in `.gitignore`.
+Should show the new worktree alongside the main working directory. The `.worktrees/` entry should exist in `.gitignore`. When the main checkout has a `.venv`, the symlink check should succeed and `check-ignore` should report the `info/exclude` `/.venv` rule; skip both when the main checkout has no `.venv`.
 
 ### Step 5: Observe Phase Skip Decision Flow
 

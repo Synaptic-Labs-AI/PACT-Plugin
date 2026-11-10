@@ -19,6 +19,10 @@ Every repository lives under tmp_path, and the autouse conftest redirect puts
 the config root there too. Arms that read the record delete
 PYTEST_CURRENT_TEST in the test body, after asserting the home redirect holds,
 the way the session-record tests do.
+
+Store-facing arms (identity payload guards, the re-key cascade, and
+scoped-read confirmations) live in test_memory_database.py and
+test_memory_store_scope.py; this module's subject is the record itself.
 """
 
 from __future__ import annotations
@@ -38,17 +42,13 @@ import pytest
 from fixtures.project_dir import write_session_context
 from fixtures.role_frames import teammate_frame
 from scripts import memory_api, pact_session
+from scripts.database import db_connection
+from scripts.graph import get_file_id
 from scripts.memory_api import (
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
 )
-from scripts.database import (
-    db_connection,
-    list_memories,
-    search_memories_by_text,
-)
-from scripts.graph import add_file_relation, get_file_id
 from scripts.working_memory import (
     AmbientSyncRefused,
     SyncResult,
@@ -1249,7 +1249,8 @@ class TestUnresolvedIdentityRefusesWrites:
 
         assert str(excinfo.value).startswith(
             "project_id, when supplied, must be a non-empty string without "
-            "control characters (U+0000-U+001F, U+007F-U+009F); "
+            "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+            "surrogates (U+D800-U+DFFF); "
         )
         assert not db_path.exists(), (
             "the empty-payload refusal created the store; it must precede "
@@ -1273,7 +1274,8 @@ class TestUnresolvedIdentityRefusesWrites:
 
         assert str(excinfo.value).startswith(
             "project_id, when supplied, must be a non-empty string without "
-            "control characters (U+0000-U+001F, U+007F-U+009F); "
+            "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+            "surrogates (U+D800-U+DFFF); "
         )
         assert not db_path.exists(), (
             "the empty-payload refusal created the store; it must precede "
@@ -1329,7 +1331,8 @@ class TestUnresolvedIdentityRefusesWrites:
 
         assert str(excinfo.value).startswith(
             "project_id, when supplied, must be a non-empty string without "
-            "control characters (U+0000-U+001F, U+007F-U+009F); "
+            "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+            "surrogates (U+D800-U+DFFF); "
         ), f"refused for a different reason: {str(excinfo.value)!r}"
         assert not db_path.exists(), (
             "the integer-payload refusal created the store; the guard must "
@@ -1346,12 +1349,17 @@ class TestUnresolvedIdentityRefusesWrites:
             "bad\x7fid",
             "bad\x85id",
             "bad\x9fid",
+            "bad\ud800id",
         ],
     )
     def test_f2_control_characters_in_payload_project_are_rejected(
         self, tmp_path, project_id
     ):
-        """C0, DEL and C1 controls are invalid before any store work."""
+        """C0, DEL, C1 controls and lone surrogates are invalid before any
+        store work. The surrogate cell pins the clause that keeps an
+        unencodable value (`json.loads` accepts unpaired \\ud800 escapes)
+        off the utf-8 TEXT binding, where it would die as an unhandled
+        UnicodeEncodeError instead of this ValueError."""
         db_path = tmp_path / "control-id.db"
         memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
         linked = tmp_path / "linked.py"
@@ -1372,137 +1380,63 @@ class TestUnresolvedIdentityRefusesWrites:
             "was not established before _ensure_ready()"
         )
 
+    @pytest.mark.parametrize(
+        "session_id",
+        ["", 123, "bad\x00id", "bad\x7fid", "bad\x9fid", "bad\ud800id"],
+    )
+    def test_f2_a_supplied_payload_session_id_must_be_usable(
+        self, tmp_path, session_id
+    ):
+        """Save-side session_id, cycle 2: same rule, same verb.
 
-class TestUnresolvedIdentityScopesReads:
-    """R1: None means NO records, never every project's records."""
-
-    def _seed(self, db_path: Path):
-        memory = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
-        linked = db_path.parent / "linked.py"
-        linked.write_text("x = 1\n", encoding="utf-8")
-        target = db_path.parent / "target.py"
-        target.write_text("y = 2\n", encoding="utf-8")
-        memory_id = memory.save(
-            {"context": _TOKEN}, files=[str(linked)], sync_to_claude=False
-        )
-        with db_connection(db_path) as conn:
-            add_file_relation(
-                conn, str(linked), str(target), "imports", project_id="other-proj-a"
-            )
-        return memory_id, linked
-
-    def _unresolved(self, monkeypatch, db_path: Path) -> PACTMemory:
-        monkeypatch.setattr(
-            PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
-        )
-        memory = PACTMemory(session_id="s", db_path=db_path)
-        assert memory.project_id is None
-        return memory
-
-    def test_r1_control_a_scoped_instance_finds_the_seeded_rows(self, tmp_path):
-        """The positive control the other R1 arms rest on.
-
-        Without it an arm can pass because the fixture has nothing findable —
-        the same vacuous-pass class as I2.
+        A session_id SOMEONE ACTUALLY SENT must be usable — empty, non-str,
+        control-char and lone-surrogate values are refused before any store
+        work, through the same `_unusable_identifier` rule the project_id
+        guards and the update guard use. Null is NOT in this sweep: on save
+        a null session_id means "default me", exactly as a null project_id
+        means "auto-detect me" (pinned by the NULL-omission arm above).
         """
-        db_path = tmp_path / "store.db"
-        memory_id, linked = self._seed(db_path)
+        db_path = tmp_path / "session-id.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
 
-        scoped = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
-        assert [m.id for m in scoped.list()] == [memory_id]
-        assert [m.id for m in scoped.search(_TOKEN, sync_to_claude=False)] == [memory_id]
-        assert [m.id for m in scoped.search_by_file(str(linked))] == [memory_id]
-        status = scoped.get_status()
-        assert status["memory_count"] == 1
-        assert all(
-            status["graph_stats"][key] > 0
-            for key in ("files", "memories", "memory_file_links", "file_relations")
-        ), status["graph_stats"]
-
-    def test_r1_an_unresolved_identity_returns_no_records_from_any_surface(
-        self, tmp_path, monkeypatch
-    ):
-        db_path = tmp_path / "store.db"
-        self._seed(db_path)
-        empty = self._unresolved(monkeypatch, db_path)
-
-        assert empty.list() == []
-        assert empty.search(_TOKEN, sync_to_claude=False) == []
-        assert empty.search_by_file(str(db_path.parent / "linked.py")) == []
-
-        status = empty.get_status()
-        assert status["project_id"] is None
-        assert status["memory_count"] == 0
-        assert status["graph_stats"] == {
-            "files": 0,
-            "memories": 0,
-            "memory_file_links": 0,
-            "file_relations": 0,
-        }, status["graph_stats"]
-
-        scoped = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
-        assert set(status) == set(scoped.get_status()), (
-            "the zeroed envelope hides a key the populated one carries"
-        )
-
-        # The store really holds another project's rows, so [] above is the
-        # guard's doing rather than an empty store.
-        with db_connection(db_path) as conn:
-            assert list_memories(conn, project_id=None)
-            assert search_memories_by_text(conn, _TOKEN, project_id=None)
-
-    def test_r1c_the_file_search_would_surface_a_NULL_keyed_row_unguarded(
-        self, tmp_path, monkeypatch
-    ):
-        """`search_by_file` has a different causal shape: NULL, not all."""
-        db_path = tmp_path / "store.db"
-        linked = db_path.parent / "linked.py"
-        self._seed(db_path)
-        with db_connection(db_path) as conn:
-            file_id = get_file_id(conn, str(linked), "other-proj-a")
-            assert file_id
-            conn.execute("UPDATE files SET project_id = NULL WHERE id = ?", (file_id,))
-            conn.commit()
-        with db_connection(db_path) as conn:
-            assert get_file_id(conn, str(linked), None) == file_id, (
-                "the fixture does not exercise the NULL-keyed shape"
+        with pytest.raises(ValueError) as excinfo:
+            memory.save(
+                {"context": "SESSION-ID", "session_id": session_id},
+                sync_to_claude=False,
             )
 
-        empty = self._unresolved(monkeypatch, db_path)
-        assert empty.search_by_file(str(linked)) == []
-
-    def test_unresolved_search_clears_the_previous_sync_status(
-        self, tmp_path, monkeypatch
-    ):
-        """The identity early return must not inherit a save's `wrote`."""
-        empty = self._unresolved(monkeypatch, tmp_path / "store.db")
-        with patch(
-            "scripts.memory_api.sync_to_claude_md",
-            return_value=SyncResult(SyncResult.WROTE),
-        ):
-            empty.save({"context": "PREVIOUS", "project_id": "chosen"})
-        assert empty.last_sync_status == SyncResult.WROTE
-
-        assert empty.search("NO-RECORDS") == []
-        assert empty.last_sync_status is None
-
-    def test_empty_result_search_clears_the_previous_sync_status(self, tmp_path):
-        """An ordinary no-result search also attempts no sync."""
-        memory = PACTMemory(
-            project_id="detected-b", session_id="s", db_path=tmp_path / "store.db"
+        assert str(excinfo.value).startswith(
+            "session_id, when supplied, must be a non-empty string without "
+        ), f"refused for a different reason: {str(excinfo.value)!r}"
+        assert not db_path.exists(), (
+            "an invalid payload session_id created the store; the guard must "
+            "precede _ensure_ready()"
         )
-        with patch(
-            "scripts.memory_api.sync_to_claude_md",
-            return_value=SyncResult(SyncResult.WROTE),
-        ):
-            memory.save({"context": "PREVIOUS"})
-        assert memory.last_sync_status == SyncResult.WROTE
 
-        with patch("scripts.memory_api.graph_enhanced_search", return_value=[]):
-            assert memory.search("NO-MATCH") == []
-        assert memory.last_sync_status is None
+    def test_f2_a_NULL_payload_session_id_is_omission_not_a_refusal(
+        self, tmp_path
+    ):
+        """The save-side null boundary, pinned: null means "default me".
+
+        The update guard rejects an explicit null session_id (there it is
+        the hazard — scalar-replace to NULL); this arm holds save() to the
+        OPPOSITE boundary so the two verbs cannot silently converge.
+        """
+        db_path = tmp_path / "null-session.db"
+        memory = PACTMemory(project_id="detected-b", session_id="s", db_path=db_path)
+
+        memory_id = memory.save(
+            {"context": "NULL-SESSION", "session_id": None}, sync_to_claude=False
+        )
+
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT session_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "s", (
+            "a None payload session_id was not treated as omission; it "
+            "should default to the instance's session id, not be refused"
+        )
 
 
 class TestIssueCriterionALiteralShape:
@@ -1594,6 +1528,94 @@ class TestIssueCriterionALiteralShape:
         )
         assert "could not be resolved" in messages
 
+    def test_the_session_record_decline_reads_empty_not_whole_store(
+        self, layout_root, monkeypatch
+    ):
+        """LIVE AND EMPTY, PROVEN: the row exists, the declined read finds none.
+
+        The loudness half of the decline is pinned above; the empty-read half
+        is pinned in TestUnresolvedIdentityScopesReads, but that arm reaches
+        the unresolved identity through a patched detector. This one reaches
+        it through the production seam the issue names: the session record
+        declares a worktree that has been removed, no identity record answers
+        (the writer is deliberately NOT invoked), and the store provably holds
+        the row saved while the worktree was live. A read returning any row
+        here would be reading across the store on a None identity; an empty
+        store would pass vacuously, which is why the row is proven live first.
+        Every read surface is asserted (C-N2): list, search, search_by_file
+        and get_status's project-scoped counters all decline together.
+        """
+        main = _repo(layout_root / "R", document=True)
+        worktree = _worktree(main, main / ".worktrees" / "W")
+        _enable_record_reading(monkeypatch)
+        write_session_context(Path.home() / ".claude", SID, worktree)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(main)
+
+        db_path = layout_root / "decline-store.db"
+        live = PACTMemory(session_id="s", db_path=db_path)
+        assert live.project_id == "R", (
+            "the live session-record declaration did not resolve to the repo"
+        )
+        linked = main / "README"
+        memory_id = live.save(
+            {"context": _TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
+
+        # LIVE: the row is in the store under the repository's key.
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        assert row is not None and row[0] == "R"
+
+        # THE FILE ROW IS MADE NULL-KEYED, WHICH IS THE SHAPE THE HAZARD NEEDS.
+        # A row keyed "R" matches nothing under a None filter, so asserting []
+        # against it would be vacuous. R1c builds the same shape; the control
+        # below proves the unguarded read WOULD surface this memory.
+        with db_connection(db_path) as conn:
+            file_id = get_file_id(conn, str(linked), "R")
+            assert file_id, "the live save did not link the file row"
+            conn.execute(
+                "UPDATE files SET project_id = NULL WHERE id = ?", (file_id,)
+            )
+            conn.commit()
+        with db_connection(db_path) as conn:
+            assert get_file_id(conn, str(linked), None) == file_id, (
+                "the fixture does not exercise the NULL-keyed shape"
+            )
+
+        # No identity record exists for this session: after removal, nothing
+        # can answer for the dead declaration.
+        assert not _record_path(worktree).exists()
+
+        _remove_worktree(main, worktree)
+        monkeypatch.chdir(layout_root)
+
+        gone = PACTMemory(session_id="s", db_path=db_path)
+        assert gone.project_id is None
+        assert gone.list(limit=50) == [], (
+            "a declined identity read rows from the store instead of none"
+        )
+        # C-N2: the SAME decline holds on every read surface, not list alone.
+        # search would drop its project filter on None (whole-store read),
+        # search_by_file would match the shared NULL bucket, and get_status
+        # would report whole-store counts as this session's.
+        assert gone.search(_TOKEN, sync_to_claude=False) == []
+        assert gone.search_by_file(str(linked)) == [], (
+            "the declined identity surfaced the memory through the shared "
+            "NULL-keyed file row"
+        )
+        status = gone.get_status()
+        assert status["project_id"] is None
+        assert status["memory_count"] == 0
+        assert status["graph_stats"] == {
+            "files": 0,
+            "memories": 0,
+            "memory_file_links": 0,
+            "file_relations": 0,
+        }, status["graph_stats"]
+
     def test_a_corrupt_identity_record_after_removal_declines(
         self, layout_root, monkeypatch, caplog
     ):
@@ -1684,3 +1706,4 @@ def test_declaration_predicate_declines_a_broken_symlink(tmp_path):
     declared = tmp_path / "declaration"
     declared.symlink_to(tmp_path / "missing-target")
     assert memory_api._declared_path_exists(str(declared)) is False
+

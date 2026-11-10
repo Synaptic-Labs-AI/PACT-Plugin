@@ -53,6 +53,7 @@ from scripts.database import (
     CALLER_FACING_UPDATE_FIELDS,
     AmbiguousPrefixError,
     PrefixTooShortError,
+    escape_for_envelope,
 )
 from scripts.memory_api import (
     PACTMemory,
@@ -306,6 +307,13 @@ def _own_stderr_for_envelope():
 def _success(result):
     """Print a success JSON envelope to stdout and exit 0.
 
+    PAYLOADS ARE DATA, MESSAGES ARE DISPLAY. A success payload is a machine
+    contract, so no structured field in it is escaped: an identity a caller
+    must pass back (`id`, `memory_id`, `project_id`, `session_id`) is the
+    STORED value, byte for byte, or the round trip breaks. Display escaping
+    belongs to human-readable strings only, and those are produced by the
+    error and diagnostic paths (see `_error`), never here.
+
     THE EXIT STATUS DOES NOT DEPEND ON THE WRITE LANDING. A caller that pipes
     this command into a program that stops reading, such as `head`, leaves
     stdout a pipe with no reader. The operation is finished by then, so a
@@ -333,6 +341,13 @@ def _error(error_type, message, exit_code=1, **extra) -> NoReturn:
     """Print an error JSON envelope to stderr and exit with given code.
 
     Any extra kwargs are merged into the envelope (e.g. allowed_fields).
+
+    MESSAGES ARE DISPLAY, PAYLOADS ARE DATA. `message` is human-readable
+    text, so the call site renders every caller- or store-controlled value
+    in it inert with `escape_for_envelope` before it gets here; structured
+    fields carried in `**extra` are data and stay raw unless they are
+    themselves diagnostic display (the AMBIGUOUS_PREFIX list is the
+    documented exception, carrying a display `id` beside a replay `raw_id`).
 
     WRITES THROUGH `_envelope_stream()`, NOT THROUGH `sys.stderr` DIRECTLY.
     Inside a guarded handler that resolves to a private handle on the original
@@ -515,6 +530,19 @@ def _scrub(msg: str) -> str:
     return msg
 
 
+def _scope_disagreement_message(exc: BaseException) -> str:
+    """A scope-refusal message as RENDERED: its values made inert.
+
+    Used by BOTH refusal arms — an env/record disagreement and an unresolved
+    identity — so every rendered CLI message follows one escaping discipline
+    and a marker-shaped sequence in the output was produced by the escaper.
+    The exception carries the values RAW for programmatic callers (see
+    `format_project_dir_disagreement`); this is where they become display
+    markers, matching how `DB_PATH_NOT_FOUND` renders its path.
+    """
+    return escape_for_envelope(_scrub(str(exc)))
+
+
 def cmd_save(args, db_path=None):
     """Handle the 'save' subcommand."""
     if args.stdin or args.json_data == "-":
@@ -561,16 +589,20 @@ def cmd_save(args, db_path=None):
             save_kwargs["claude_md_root"] = Path(claude_md_root)
         memory_id = memory.save(memory_dict, **save_kwargs)
     except ProjectIdentityUnresolvedError as exc:
-        _error("PROJECT_IDENTITY_UNRESOLVED", _scrub(str(exc)))
+        # THE SAME RENDERER as the disagreement arm below: one escaping
+        # discipline for every rendered refusal message.
+        _error("PROJECT_IDENTITY_UNRESOLVED", _scope_disagreement_message(exc))
     except ProjectScopeDisagreementError as exc:
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except ValueError as exc:
         _error(
             "ValueError",
-            f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are accepted "
-            f"on save and stripped before validation.)",
+            # Rendered inert: a ValueError on this path can embed a
+            # caller-supplied identifier or field name.
+            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
+            f"'created_at' are accepted on save and stripped before validation.)",
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a
@@ -643,6 +675,9 @@ def cmd_save(args, db_path=None):
     # written from the correct directory, shows False and is still misfiled.
     project_scope = memory.last_project_scope
     if project_scope is not None:
+        # RAW, like every structured field: the disclosure is data a caller
+        # may compare, and the update path reads the same values from the
+        # instance. Display escaping belongs to messages only.
         result["project_scope"] = project_scope
     _success(result)
 
@@ -697,6 +732,15 @@ def cmd_get(args, db_path=None):
     memory = PACTMemory(db_path=db_path)
     try:
         result = memory.get(args.memory_id)
+    except ProjectScopeDisagreementError as exc:
+        # A NAMED, EXPECTED REFUSAL, NOT AN INTERNAL FAULT. A prefix is
+        # refused when the project identity cannot be resolved (a full id
+        # still resolves), and `ProjectIdentityUnresolvedError` is this
+        # class's subclass. The envelope and exit code match update/delete;
+        # without this clause it would reach main()'s generic handler as
+        # SYSTEM_ERROR exit 2, which sends a caller looking for a bug in the
+        # store instead of at its own project declaration.
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
         _error(
             "PREFIX_TOO_SHORT",
@@ -707,20 +751,33 @@ def cmd_get(args, db_path=None):
         # Scrub user HOME from each match's `context` snippet so a memory
         # whose context recorded an absolute path doesn't leak it via the
         # disambiguation envelope. Per-site scrub keeps the redaction
-        # obvious; do not centralize into `_error`.
+        # obvious; do not centralize into `_error`. THEN RENDER IT INERT:
+        # `_scrub` only redacts HOME and does not escape, so a control or
+        # bidi character would otherwise reach the terminal of a reader
+        # that parses the envelope and prints it. `matches[].id` is already
+        # the display form and `matches[].raw_id` is the replay-only raw
+        # value; see AmbiguousPrefixError for that contract.
         scrubbed_matches = [
-            {**m, "context": _scrub(m["context"])} for m in exc.matches
+            {**m, "context": escape_for_envelope(_scrub(m["context"]))}
+            for m in exc.matches
         ]
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
-            prefix=exc.prefix,
+            # Echoed caller input, escaped for the same reason as the message:
+            # a parsed envelope is printed by its reader. `exc.prefix` stays
+            # raw on the exception for programmatic callers; this field and
+            # the message are the rendering boundary.
+            prefix=escape_for_envelope(exc.prefix),
             matches=scrubbed_matches,
             matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
         )
     if result is None:
-        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+        # The id is CALLER INPUT and this is the one place it is echoed back.
+        # Escape it before it reaches a rendered envelope: a control or bidi
+        # character would otherwise reach the reader's terminal verbatim.
+        _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
     _success(result.to_dict())
 
 
@@ -780,7 +837,7 @@ def cmd_update(args, db_path=None):
         resolved_id = memory.update(args.memory_id, updates, replace=args.replace)
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
         # Order: PrefixTooShortError IS a ValueError; catch it before the
         # field-validation ValueError handler below.
@@ -789,14 +846,24 @@ def cmd_update(args, db_path=None):
         # Scrub user HOME from each match's `context` snippet so a memory
         # whose context recorded an absolute path doesn't leak it via the
         # disambiguation envelope. Per-site scrub keeps the redaction
-        # obvious; do not centralize into `_error`.
+        # obvious; do not centralize into `_error`. THEN RENDER IT INERT:
+        # `_scrub` only redacts HOME and does not escape, so a control or
+        # bidi character would otherwise reach the terminal of a reader
+        # that parses the envelope and prints it. `matches[].id` is already
+        # the display form and `matches[].raw_id` is the replay-only raw
+        # value; see AmbiguousPrefixError for that contract.
         scrubbed_matches = [
-            {**m, "context": _scrub(m["context"])} for m in exc.matches
+            {**m, "context": escape_for_envelope(_scrub(m["context"]))}
+            for m in exc.matches
         ]
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
-            prefix=exc.prefix,
+            # Echoed caller input, escaped for the same reason as the message:
+            # a parsed envelope is printed by its reader. `exc.prefix` stays
+            # raw on the exception for programmatic callers; this field and
+            # the message are the rendering boundary.
+            prefix=escape_for_envelope(exc.prefix),
             matches=scrubbed_matches,
             matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
@@ -804,8 +871,10 @@ def cmd_update(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are stripped "
-            f"before update validation.)",
+            # Rendered inert: a ValueError on this path can embed a
+            # caller-supplied identifier or field name.
+            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
+            f"'created_at' are stripped before update validation.)",
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a
@@ -814,7 +883,10 @@ def cmd_update(args, db_path=None):
             allowed_fields=getattr(exc, "allowed_fields", sorted(CALLER_FACING_UPDATE_FIELDS)),
         )
     if resolved_id is None:
-        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+        # The id is CALLER INPUT and this is the one place it is echoed back.
+        # Escape it before it reaches a rendered envelope: a control or bidi
+        # character would otherwise reach the reader's terminal verbatim.
+        _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
     # Mirror of the save envelope. An update that failed to re-embed is the
     # costlier case: a save that stored no vector leaves a record merely
     # invisible to semantic search, while an update leaves a vector describing
@@ -853,12 +925,21 @@ def cmd_sync(args, db_path=None):
         memory_ids = memory.sync(**sync_kwargs)
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     _success({
         "sync_status": memory.last_sync_status,
         "projected": len(memory_ids),
+        # Structured field: the stored ids, raw like every other payload.
         "memory_ids": memory_ids,
-        "project_id": memory.project_id,
+        # THE SAME PAYLOAD VALUE `get_status` REPORTS, AND RAW. The constructor
+        # ADOPTS a detected id as found so a read never fails on a value only
+        # a write binds; `_project_id_for_envelope()` folds an unusable one
+        # to None, because no row can carry it, and returns everything else
+        # as stored. It does NOT escape: a structured payload is data, and a
+        # caller must see the value the row holds. Calling `memory.project_id`
+        # here would skip the fold, so an unusable detected value could reach
+        # the envelope.
+        "project_id": memory._project_id_for_envelope(),
     })
 
 
@@ -903,27 +984,40 @@ def cmd_delete(args, db_path=None):
         resolved_id = memory.delete(args.memory_id)
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
-        _error("SCOPE_DISAGREEMENT", _scrub(str(exc)))
+        _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
         _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
     except AmbiguousPrefixError as exc:
         # Scrub user HOME from each match's `context` snippet so a memory
         # whose context recorded an absolute path doesn't leak it via the
         # disambiguation envelope. Per-site scrub keeps the redaction
-        # obvious; do not centralize into `_error`.
+        # obvious; do not centralize into `_error`. THEN RENDER IT INERT:
+        # `_scrub` only redacts HOME and does not escape, so a control or
+        # bidi character would otherwise reach the terminal of a reader
+        # that parses the envelope and prints it. `matches[].id` is already
+        # the display form and `matches[].raw_id` is the replay-only raw
+        # value; see AmbiguousPrefixError for that contract.
         scrubbed_matches = [
-            {**m, "context": _scrub(m["context"])} for m in exc.matches
+            {**m, "context": escape_for_envelope(_scrub(m["context"]))}
+            for m in exc.matches
         ]
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
-            prefix=exc.prefix,
+            # Echoed caller input, escaped for the same reason as the message:
+            # a parsed envelope is printed by its reader. `exc.prefix` stays
+            # raw on the exception for programmatic callers; this field and
+            # the message are the rendering boundary.
+            prefix=escape_for_envelope(exc.prefix),
             matches=scrubbed_matches,
             matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
         )
     if resolved_id is None:
-        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+        # The id is CALLER INPUT and this is the one place it is echoed back.
+        # Escape it before it reaches a rendered envelope: a control or bidi
+        # character would otherwise reach the reader's terminal verbatim.
+        _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
     _success({"deleted": True, "memory_id": resolved_id})
 
 
@@ -932,7 +1026,10 @@ def _positive_int(value):
     try:
         ivalue = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"invalid int value: '{value}'")
+        # `!r` renders a control or bidi character as an escape, so an
+        # untrusted value forwarded as --limit cannot steer the terminal
+        # through argparse's stderr `error:` line.
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}")
     if ivalue < 1:
         raise argparse.ArgumentTypeError(f"--limit must be a positive integer, got {ivalue}")
     return ivalue
@@ -1264,7 +1361,16 @@ def main(argv=None):
 
     handler = _COMMANDS.get(args.command)
     if handler is None:
-        _error("UNKNOWN_COMMAND", f"Unknown command: {args.command}")
+        # Caller input on a rendered surface, same rule as the NOT_FOUND
+        # echo: escape before it reaches a terminal. argparse rejects a
+        # truly unknown choice with its own repr-escaped error, so this
+        # branch is reachable only when a registered name loses its handler
+        # — hardened anyway so the branch cannot become the weaker surface
+        # the day it is reached.
+        _error(
+            "UNKNOWN_COMMAND",
+            f"Unknown command: {escape_for_envelope(str(args.command))}",
+        )
 
     if args.command in _COMMANDS_WITHOUT_A_STORE:
         handler(args)
@@ -1351,7 +1457,11 @@ def main(argv=None):
                 and args.command not in _COMMANDS_THAT_MAY_CREATE_A_CALLER_PATH
                 and not db_path.exists()
             ):
-                shown = _scrub(str(db_path))
+                # The path is caller input echoed back on a rendered
+                # surface; `_scrub` redacts HOME and this makes the rest
+                # inert (a control or bidi character would otherwise reach
+                # the reader's terminal after the envelope is parsed).
+                shown = escape_for_envelope(_scrub(str(db_path)))
                 _error(
                     "DB_PATH_NOT_FOUND",
                     f"--db-path '{shown}' did not answer as a store that is "
