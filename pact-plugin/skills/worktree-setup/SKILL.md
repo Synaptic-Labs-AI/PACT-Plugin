@@ -258,6 +258,7 @@ Branch: {branch}
 | The target path reaches outside `.worktrees/` through a symlink | Step 3 refuses before creating anything with `Cannot create worktree: … resolves outside .worktrees/.`; a symlinked target or a symlinked intermediate directory is not followed |
 | `.worktrees/{branch}` holds a worktree of a different repository | Step 4 prints `Venv link: skipped (the worktree at … belongs to a different repository)` and writes nothing; it does not borrow another repository's exclude file or worktree |
 | `.worktrees/{branch}` holds a worktree on a different branch, or on a detached HEAD | Step 4 prints `Venv link: skipped (the worktree at … is not on …)`; only the worktree for `{branch}` receives the link |
+| Branch name contains `/` | The worktree lives at `.worktrees/{branch}` with intermediate directories. A later setup for the parent segment (`foo` when `foo/bar` exists) fails because `.worktrees/foo` is a non-empty directory — choose another branch name or remove the nested worktree first; cleanup for the parent name refuses through the branch-identity check |
 | Invalid branch name, a multi-line value, or an unsubstituted `{branch}` placeholder | Step 3 stops before `git worktree add`; Step 4 prints the corresponding `Venv link: skipped (…)` line and writes nothing |
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
 | Branch name already exists | Ask user: check out existing or create new name |
