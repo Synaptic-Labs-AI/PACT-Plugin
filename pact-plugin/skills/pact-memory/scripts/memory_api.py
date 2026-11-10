@@ -1066,7 +1066,7 @@ class PACTMemory:
         return (
             f"location divergence: this memory is being filed under "
             f"{project_id!r}, but the working directory is inside repository "
-            f"{root.name!r} ({root}). If the record is about {root.name!r}, "
+            f"{root.name!r} ({str(root)!r}). If the record is about {root.name!r}, "
             f"pass project_id explicitly or save from that project. "
             f"THIS IS NOT A MISFILE DETECTOR: it compares the process LOCATION "
             f"against the filed project, so it cannot see what the record is "
