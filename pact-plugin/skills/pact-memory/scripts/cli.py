@@ -931,13 +931,14 @@ def cmd_sync(args, db_path=None):
         "projected": len(memory_ids),
         # Structured field: the stored ids, raw like every other payload.
         "memory_ids": memory_ids,
-        # THE SAME ENVELOPE VALUE `get_status` REPORTS. The constructor ADOPTS a
-        # detected id as found so a read never fails on a value only a write
-        # binds; `_project_id_for_envelope()` then folds an unusable one to
-        # None AND renders a display-unsafe one inert, so sync and status
-        # agree on both the fold and the escape. Echoing `memory.project_id`
-        # put a raw value in this envelope that no row can carry (or a bidi
-        # character a consumer could print).
+        # THE SAME PAYLOAD VALUE `get_status` REPORTS, AND RAW. The constructor
+        # ADOPTS a detected id as found so a read never fails on a value only
+        # a write binds; `_project_id_for_envelope()` folds an unusable one
+        # to None, because no row can carry it, and returns everything else
+        # as stored. It does NOT escape: a structured payload is data, and a
+        # caller must see the value the row holds. Calling `memory.project_id`
+        # here would skip the fold, so an unusable detected value could reach
+        # the envelope.
         "project_id": memory._project_id_for_envelope(),
     })
 
