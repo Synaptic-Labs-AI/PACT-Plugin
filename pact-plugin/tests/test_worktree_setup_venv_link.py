@@ -193,7 +193,7 @@ _SITES = {
     ),
 }
 
-# The four fences that resolve the main checkout root. The body is duplicated
+# The five fences that resolve the main checkout root. The body is duplicated
 # by design (shell variables do not survive between Bash calls); only the
 # guard's failure branch differs, 1 to stop and 0 to skip the link step.
 _ROOT_GUARD_SITES = {
@@ -201,6 +201,7 @@ _ROOT_GUARD_SITES = {
     "setup-step-3": (SKILL_FILE, "### Step 3:", "### Step 4:", 1),
     "setup-step-4": (SKILL_FILE, "### Step 4:", "### Step 5:", 0),
     "cleanup-step-2": (CLEANUP_SKILL_FILE, "### Step 2:", "### Step 3:", 1),
+    "cleanup-step-3": (CLEANUP_SKILL_FILE, "### Step 3:", "### Step 4:", 1),
 }
 
 
@@ -1208,6 +1209,58 @@ class TestPlainDirectoryIsNotAWorktree:
         )
 
 
+class TestStep4NamesTheCauseOfAMissingWorktree:
+    """The two missing-worktree states are different causes and must stay split.
+
+    A branch whose worktree exists at a non-conventional path is REGISTERED;
+    the conventional path simply has no live worktree. A branch with no
+    worktree anywhere means Step 3 did not create one. The fence prints a
+    different line for each, and each arm asserts the other line is ABSENT so a
+    reword that re-conflates the two states reds here.
+    """
+
+    def test_a_registered_worktree_elsewhere_names_that_cause(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        (repo / ".venv").mkdir()
+        (repo / ".venv" / "marker").write_text("real venv\n", encoding="utf-8")
+        elsewhere = tmp_path / "reused-worktree"
+        git(repo, "worktree", "add", "--quiet", str(elsewhere), "-b", BRANCH)
+
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert (
+            f"Venv link: skipped (a worktree for {BRANCH} is registered, but "
+            f"{repo / '.worktrees' / BRANCH} is not a live worktree; no link is created)"
+        ) in done.stdout, (
+            f"a registered worktree elsewhere was misreported: {done.stdout.strip()!r}"
+        )
+        assert "Step 3 did not create one" not in done.stdout, (
+            "the registered state also printed the no-registration cause, so the "
+            f"two states are conflated again: {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(elsewhere / ".venv")
+
+    def test_no_registration_names_step_3(self, isolated_git_config, tmp_path):
+        repo, _ = make_repo(tmp_path)
+        missing = "feature/never-created"
+        done = run_fence(
+            fence_for(SKILL_FILE.read_text(encoding="utf-8"), branch=missing), repo
+        )
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert (
+            f"Venv link: skipped (no git worktree at {repo / '.worktrees' / missing} "
+            "— Step 3 did not create one)"
+        ) in done.stdout, (
+            f"a missing worktree was misreported: {done.stdout.strip()!r}"
+        )
+        assert "is registered, but" not in done.stdout, (
+            "the no-registration state also printed the registered cause, so the "
+            f"two states are conflated again: {done.stdout.strip()!r}"
+        )
+
+
 class TestSymlinkedRootIsAValidWorktree:
     """A worktree reached through a symlinked root is still a valid worktree.
 
@@ -1448,13 +1501,13 @@ class TestSameRepoSubdirectoryRootIsRejected:
 
 
 class TestRootGuardCopiesAreIdentical:
-    """The root guard is duplicated four times because shell state does not
-    survive between Bash calls. Four copies can drift; this pin compares the
+    """The root guard is duplicated five times because shell state does not
+    survive between Bash calls. Five copies can drift; this pin compares the
     bodies and allows only the documented difference — exit 1 to stop the
     step, exit 0 to skip the link step.
     """
 
-    def test_all_four_sites_share_one_body_modulo_the_exit_branch(self):
+    def test_all_five_sites_share_one_body_modulo_the_exit_branch(self):
         bodies, tails = {}, {}
         for label, (path, start, end, expected_exit) in _ROOT_GUARD_SITES.items():
             fence = fence_block(path.read_text(encoding="utf-8"), start, end)
@@ -1585,6 +1638,54 @@ class TestSymlinkedWorktreesIsIgnored:
             "a trailing-slash `.worktrees/` rule unexpectedly matched a symlink "
             f"— the slash-free form would then prove nothing. {report.stdout!r}"
         )
+
+
+class TestIgnoreDetectionIsExactAndEffective:
+    """A `.gitignore` line that merely MENTIONS `.worktrees` must not suppress it.
+
+    `.worktrees-old/` contains the substring `.worktrees`; a substring
+    detection sees it and skips the append, leaving `.worktrees` unignored so
+    `git add -A` can stage the directory. The shipped check asks git whether the
+    path is effectively ignored, then whether the exact rule exists, so this
+    state gets the rule appended.
+    """
+
+    def test_a_superstring_line_does_not_suppress_the_rule(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        gitignore = repo / ".gitignore"
+        gitignore.write_text(".worktrees-old/\n", encoding="utf-8")
+        done = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, f"Step 2 failed: {done.stderr.strip()}"
+        lines = gitignore.read_text(encoding="utf-8").splitlines()
+        assert "/.worktrees" in lines, (
+            "the slash-free rule was not appended; a superstring line in "
+            f".gitignore suppressed the detection. lines={lines!r}"
+        )
+        effective = git(repo, "check-ignore", "-q", ".worktrees", check=False)
+        assert effective.returncode == 0, (
+            "`.worktrees` is not effectively ignored after Step 2, so git add -A "
+            f"could stage it. lines={lines!r}"
+        )
+
+    def test_a_substring_detection_reds_this_arm(self, isolated_git_config, tmp_path):
+        """Mutation: the old `grep -q '.worktrees'` form suppresses the append."""
+        repo = make_empty_repo(tmp_path)
+        gitignore = repo / ".gitignore"
+        gitignore.write_text(".worktrees-old/\n", encoding="utf-8")
+        fence = fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8"))
+        mutated = fence.replace("grep -qxF '/.worktrees'", "grep -q '\\.worktrees'")
+        assert mutated != fence, "the exact-match detection changed shape"
+        run_fence(mutated, repo)
+        effective = git(repo, "check-ignore", "-q", ".worktrees", check=False)
+        assert effective.returncode != 0, (
+            "the substring mutation still ignored .worktrees, so the arm above "
+            "would not discriminate"
+        )
+        assert "/.worktrees" not in gitignore.read_text(encoding="utf-8").splitlines()
 
 
 class TestCleanupBranchIsInertText:
@@ -1939,6 +2040,95 @@ class TestCleanupRefusesMisidentifiedTargets:
             f"{done.stdout.strip()!r}"
         )
         assert (detached / ".git").is_file(), "the detached worktree was removed"
+
+
+class TestCleanupStep3RegistrationGate:
+    """Step 3 must not delete a branch whose worktree is still registered.
+
+    `git branch -d` alone refuses a checked-out branch, but with its own error
+    and only for THIS checkout; the shipped gate names the cause and refuses
+    before the command. The second arm pins the other direction, so a gate that
+    always refuses cannot pass this class.
+    """
+
+    def test_a_registered_worktree_refuses_and_keeps_the_branch(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        done = run_fence(
+            cleanup_delete_fence(CLEANUP_SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode != 0, (
+            f"Step 3 deleted a branch whose worktree is still registered: "
+            f"{done.stdout!r}"
+        )
+        assert (
+            f"Cannot delete branch: a worktree for {BRANCH} is still registered "
+            f"in {repo} — remove the worktree first."
+        ) in done.stdout, (
+            f"the shipped refusal message is missing: {done.stdout.strip()!r}"
+        )
+        assert (worktree / ".git").is_file(), "the worktree was removed"
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            == 0
+        ), "the branch was deleted"
+
+    def test_no_registration_deletes_the_branch(self, isolated_git_config, tmp_path):
+        repo, _ = make_repo(tmp_path)
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+        removed = run_fence(cleanup_remove_fence(text), repo)
+        assert removed.returncode == 0, f"removal failed: {removed.stderr.strip()}"
+        done = run_fence(cleanup_delete_fence(text), repo)
+        assert done.returncode == 0, (
+            f"Step 3 refused after the worktree was removed: {done.stdout.strip()!r}"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            != 0
+        ), "the branch was not deleted"
+
+    def test_removing_the_gate_reds_the_refusal_arm(
+        self, isolated_git_config, tmp_path
+    ):
+        """Mutation: without the gate the shipped message never appears."""
+        repo, worktree = make_repo(tmp_path)
+        fence = cleanup_delete_fence(CLEANUP_SKILL_FILE.read_text(encoding="utf-8"))
+        start = fence.index('if git -C "$REPO_ROOT" worktree list')
+        stop = fence.index('git -C "$REPO_ROOT" branch -d "$BRANCH"')
+        mutated = fence[:start] + fence[stop:]
+        assert mutated != fence, "the registration gate changed shape"
+        done = run_fence(mutated, repo)
+        assert "is still registered in" not in done.stdout, (
+            "the mutated fence still printed the registration refusal"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            == 0
+        ), "the mutated fence deleted a checked-out branch"
+
+    def test_forcing_the_gate_reds_the_delete_arm(
+        self, isolated_git_config, tmp_path
+    ):
+        """Mutation: a gate that always refuses stops the ordinary delete."""
+        repo, _ = make_repo(tmp_path)
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+        removed = run_fence(cleanup_remove_fence(text), repo)
+        assert removed.returncode == 0, f"removal failed: {removed.stderr.strip()}"
+        fence = cleanup_delete_fence(text)
+        cond = (
+            'if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null '
+            '| grep -Fxq "branch refs/heads/$BRANCH"; then'
+        )
+        mutated = fence.replace(cond, "if true; then")
+        assert mutated != fence, "the registration condition changed shape"
+        done = run_fence(mutated, repo)
+        assert done.returncode != 0, "the forced gate did not refuse"
+        assert "is still registered in" in done.stdout
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            == 0
+        ), "the branch was deleted despite the refusal"
 
 
 class TestDeletedBranchRefIdentity:

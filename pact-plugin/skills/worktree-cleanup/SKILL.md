@@ -147,8 +147,6 @@ REPO_TOP=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)
 REPO_COMMON_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
 MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
 [ -n "$REPO_ROOT" ] && [ -n "$REPO_TOP" ] && [ -n "$REPO_COMMON_PHYS" ] && [ "$REPO_COMMON_PHYS" = "$MAIN_COMMON_PHYS" ] && [ "$(cd "$REPO_TOP" 2>/dev/null && pwd -P)" = "$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" ] || { echo "Cannot delete branch: cannot determine the main checkout root (computed ${REPO_ROOT:-<none>})."; exit 1; }
-[ -d "$REPO_ROOT/.worktrees" ] || { echo "Cannot delete branch: $REPO_ROOT/.worktrees is not a directory — refusing to delete in a repository this step did not create a worktree in."; exit 1; }
-
 BRANCH=
 BRANCH_EXTRA=
 { IFS= read -r BRANCH; IFS= read -r BRANCH_EXTRA || :; } <<'PACT BRANCH'
@@ -157,6 +155,10 @@ PACT BRANCH
 [ -z "$BRANCH_EXTRA" ] || { echo "Cannot delete branch: the branch value must be a single line."; exit 1; }
 [ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot delete branch: the branch placeholder was not substituted."; exit 1; }
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot delete branch: invalid branch name."; exit 1; }
+if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "branch refs/heads/$BRANCH"; then
+  echo "Cannot delete branch: a worktree for $BRANCH is still registered in $REPO_ROOT — remove the worktree first."
+  exit 1
+fi
 git -C "$REPO_ROOT" branch -d "$BRANCH"
 ```
 
@@ -189,9 +191,10 @@ Cleaned up worktree for {branch}
 |------|---------|
 | Worktree has uncommitted changes | Surface git error, offer commit/stash or force options |
 | Branch not fully merged | Surface git error, offer merge or force-delete options |
-| Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch |
+| Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch; the delete no longer needs `.worktrees/` to exist |
 | Currently inside the target worktree | Navigate to main repo root before removal |
-| Step 3 runs from a different repository that also has `.worktrees/` and a same-named branch | The `.worktrees` directory check passes there, so this remains a known residual: the branch name alone cannot identify the intended repository. Run cleanup from the target repository |
+| A worktree for the branch is still registered in this repository | Step 3 refuses before deleting, because Step 2 did not remove it; run Step 2 or `git worktree remove <path>` first. If the directory is already gone, `git worktree prune` clears the registration |
+| Step 3 runs from a different repository that has no worktree for the branch but does have a same-named branch | The registration check cannot fire there, so that branch can still be deleted; the branch name alone cannot identify the intended repository. Run cleanup from the target repository |
 | The worktree's local branch ref was deleted (for example by a force-delete elsewhere) | The identity check passes: the worktree's symbolic HEAD still names `{branch}` even though the ref is gone. If the worktree has tracked files, removal then stops on git's own refusal, because the dangling HEAD makes every tracked file look staged and `git worktree remove` reports modified or untracked files; confirm there is no real uncommitted work, then remove with `git worktree remove --force`. A worktree with no tracked files removes cleanly. In either case Step 3 finds no branch left to delete and reports git's error |
 | Target is not the worktree for the branch (a symlink, a relocated path, or a detached HEAD) | Step 2 refuses before removing anything: the path must resolve under `.worktrees/` and the branch its HEAD symbolically names must equal `{branch}`. A detached HEAD cannot confirm identity, so it is refused; remove such a worktree manually with `git worktree remove <path>` if that is what you want |
 | No worktrees exist | Report "No worktrees found" |

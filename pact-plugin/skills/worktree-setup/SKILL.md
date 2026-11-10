@@ -54,13 +54,15 @@ MAIN_COMMON_PHYS=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/nul
 
 # Create directory and ensure gitignored
 mkdir -p "$REPO_ROOT/.worktrees"
-# Slash-free so a symlinked .worktrees is ignored too; the rule is only ever written in this form.
-grep -qxF '/.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || {
-  # Terminate a final line that lacks a newline, so the entry cannot merge into it.
-  if [ -s "$REPO_ROOT/.gitignore" ] && [ -n "$(tail -c 1 "$REPO_ROOT/.gitignore" 2>/dev/null)" ]; then
-    printf '\n' >> "$REPO_ROOT/.gitignore"
-  fi
-  echo '/.worktrees' >> "$REPO_ROOT/.gitignore"
+# Append the slash-free rule only when git does not already ignore the path (".worktrees/" does not match a symlink).
+git -C "$REPO_ROOT" check-ignore -q .worktrees 2>/dev/null || {
+  grep -qxF '/.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || {
+    # Terminate a final line that lacks a newline, so the entry cannot merge into it.
+    if [ -s "$REPO_ROOT/.gitignore" ] && [ -n "$(tail -c 1 "$REPO_ROOT/.gitignore" 2>/dev/null)" ]; then
+      printf '\n' >> "$REPO_ROOT/.gitignore"
+    fi
+    echo '/.worktrees' >> "$REPO_ROOT/.gitignore"
+  }
 }
 ```
 
