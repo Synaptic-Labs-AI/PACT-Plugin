@@ -2267,18 +2267,27 @@ class PACTMemory:
         rather than reading as a no-op.
         """
         linked = conn.execute(
-            "SELECT f.id AS file_id, f.path AS path, f.project_id AS project_id, "
+            "SELECT f.id AS file_id, f.path AS path, "
             "mf.relationship AS relationship "
             "FROM files f JOIN memory_files mf ON mf.file_id = f.id "
             "WHERE mf.memory_id = ?",
             (memory_id,),
         ).fetchall()
         for row in linked:
-            if row["project_id"] == new_project:
-                continue
             new_file_id = track_file(conn, row["path"], new_project)
+            # `new_file_id == row["file_id"]` IS THE "already in the target"
+            # TEST. track_file resolves (path, new_project), which is this
+            # very row iff it already carries the target, so a separate
+            # project comparison would duplicate this one.
             if new_file_id == row["file_id"]:
                 continue
+            # OR IGNORE, BECAUSE TWO CONCURRENT CASCADES CAN COMPUTE THE SAME
+            # LINK. Both re-point this memory at the same (path, project)
+            # file row; the first commits, the second's INSERT then violates
+            # the (memory_id, file_id) primary key. A plain INSERT would
+            # raise IntegrityError and abort that update AFTER its row write
+            # committed; the ignored duplicate is already the link this loop
+            # wants, and the DELETE below still retires the old one.
             conn.execute(
                 "INSERT OR IGNORE INTO memory_files "
                 "(memory_id, file_id, relationship) VALUES (?, ?, ?)",
