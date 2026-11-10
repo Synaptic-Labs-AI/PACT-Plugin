@@ -713,11 +713,13 @@ def _reject_unknown_columns(
     caller_facing = sorted(allowed - _STRIPPED_ON_INGRESS)
     allowed_list = ", ".join(caller_facing)
     unknown_list = ", ".join(repr(k) for k in unknown)
-    # Rendered inert, not repr'd: this message is echoed by the CLI's
-    # ValueError arm, and a caller-supplied id can carry a control or bidi
-    # character. Escaping (rather than quoting) keeps the byte-identical
-    # message for the generated hex ids that reach this line normally.
-    target = f" (memory {escape_for_envelope(str(memory_id))})" if memory_id else ""
+    # RAW, ESCAPED ONCE AT THE RENDERER. The CLI's ValueError arm renders
+    # this message through `escape_for_envelope`, so escaping the id here
+    # too would double-escape it: the injective escaper turns the '<' of a
+    # real marker into '<U+003C>', and the caller could no longer match the
+    # rendered id to the stored one. A programmatic caller gets the raw id,
+    # like every other payload; display escaping is the CLI's job.
+    target = f" (memory {str(memory_id)})" if memory_id else ""
     error = ValueError(
         f"Unknown memory field(s) for {operation}{target}: {unknown_list}. "
         f"Allowed fields: {allowed_list}"
