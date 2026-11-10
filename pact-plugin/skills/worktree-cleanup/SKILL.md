@@ -156,7 +156,7 @@ PACT BRANCH
 [ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot delete branch: the branch placeholder was not substituted."; exit 1; }
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot delete branch: invalid branch name."; exit 1; }
 if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "branch refs/heads/$BRANCH"; then
-  echo "Cannot delete branch: a worktree for $BRANCH is still registered in $REPO_ROOT — remove the worktree first."
+  echo "Cannot delete branch: $BRANCH is still checked out in a worktree of $REPO_ROOT — remove that worktree if it is under .worktrees/, or switch the main checkout to another branch first."
   exit 1
 fi
 git -C "$REPO_ROOT" branch -d "$BRANCH"
@@ -193,7 +193,7 @@ Cleaned up worktree for {branch}
 | Branch not fully merged | Surface git error, offer merge or force-delete options |
 | Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch; the delete no longer needs `.worktrees/` to exist |
 | Currently inside the target worktree | Navigate to main repo root before removal |
-| A worktree for the branch is still registered in this repository | Step 3 refuses before deleting, because Step 2 did not remove it; run Step 2 or `git worktree remove <path>` first. If the directory is already gone, `git worktree prune` clears the registration |
+| The branch is still checked out in a worktree of this repository (including the main checkout) | Step 3 refuses before deleting. If the worktree is under `.worktrees/`, remove it first with Step 2 or `git worktree remove <path>`; if the branch is checked out in the main checkout, switch the main checkout to another branch first. If the worktree directory is already gone, `git worktree prune` clears the registration |
 | Step 3 runs from a different repository that has no worktree for the branch but does have a same-named branch | The registration check cannot fire there, so that branch can still be deleted; the branch name alone cannot identify the intended repository. Run cleanup from the target repository |
 | The worktree's local branch ref was deleted (for example by a force-delete elsewhere) | The identity check passes: the worktree's symbolic HEAD still names `{branch}` even though the ref is gone. If the worktree has tracked files, removal then stops on git's own refusal, because the dangling HEAD makes every tracked file look staged and `git worktree remove` reports modified or untracked files; confirm there is no real uncommitted work, then remove with `git worktree remove --force`. A worktree with no tracked files removes cleanly. In either case Step 3 finds no branch left to delete and reports git's error |
 | Target is not the worktree for the branch (a symlink, a relocated path, or a detached HEAD) | Step 2 refuses before removing anything: the path must resolve under `.worktrees/` and the branch its HEAD symbolically names must equal `{branch}`. A detached HEAD cannot confirm identity, so it is refused; remove such a worktree manually with `git worktree remove <path>` if that is what you want |

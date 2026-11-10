@@ -1571,6 +1571,34 @@ class TestStep2CreatesTheDirectoryAndIgnoreRule:
             f"the append merged into the existing final line: {lines!r}"
         )
 
+    def test_an_effective_existing_rule_is_left_untouched(
+        self, isolated_git_config, tmp_path
+    ):
+        """The effectiveness gate leaves a working ignore rule alone.
+
+        A committed `.worktrees/` rule matches the REAL directory, so
+        `git check-ignore -q .worktrees` succeeds and the fence must not append
+        the slash-free rule or dirty the file. Without the outer gate the inner
+        exact-match check sees `.worktrees/` as different and appends.
+        """
+        repo = make_empty_repo(tmp_path)
+        gitignore = repo / ".gitignore"
+        original = ".worktrees/\n"
+        gitignore.write_text(original, encoding="utf-8")
+        git(repo, "add", ".gitignore")
+        git(repo, *GIT_ID, "commit", "-qm", "ignore worktrees")
+        (repo / ".worktrees").mkdir()
+
+        done = run_fence(self._fence(), repo)
+        assert done.returncode == 0, f"Step 2 failed: {done.stderr.strip()}"
+        assert gitignore.read_text(encoding="utf-8") == original, (
+            "the fence rewrote an effective .gitignore instead of leaving it "
+            f"untouched: {gitignore.read_text(encoding='utf-8')!r}"
+        )
+        assert porcelain(repo) == "", (
+            f"Step 2 left the tree dirty: {porcelain(repo)!r}"
+        )
+
 
 class TestSymlinkedWorktreesIsIgnored:
     """The shipped rule must match a SYMLINKED `.worktrees`, not just a dir.
@@ -1637,6 +1665,37 @@ class TestSymlinkedWorktreesIsIgnored:
         assert report.returncode == 1, (
             "a trailing-slash `.worktrees/` rule unexpectedly matched a symlink "
             f"— the slash-free form would then prove nothing. {report.stdout!r}"
+        )
+
+    def test_a_legacy_rule_does_not_suppress_the_rule_for_a_symlink(
+        self, isolated_git_config, tmp_path
+    ):
+        """`.worktrees/` stays in the file but does not match a symlink.
+
+        A gate keyed on the legacy line would find it, skip the append, and
+        leave the symlink visible to `git add -A`; the effectiveness check asks
+        git, which answers no for a symlink and lets the slash-free rule be
+        appended.
+        """
+        repo = make_empty_repo(tmp_path)
+        store = tmp_path / "store"
+        store.mkdir()
+        (repo / ".worktrees").symlink_to(store, target_is_directory=True)
+        gitignore = repo / ".gitignore"
+        gitignore.write_text(".worktrees/\n", encoding="utf-8")
+
+        done = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, f"Step 2 failed: {done.stderr.strip()}"
+        lines = gitignore.read_text(encoding="utf-8").splitlines()
+        assert "/.worktrees" in lines, (
+            "the legacy line suppressed the append, so the symlinked "
+            f".worktrees stays unignored. lines={lines!r}"
+        )
+        effective = git(repo, "check-ignore", "-q", ".worktrees", check=False)
+        assert effective.returncode == 0, (
+            f"the symlink is still not ignored. lines={lines!r}"
         )
 
 
@@ -1952,6 +2011,41 @@ class TestCleanupDeletesTheBranch:
             != 0
         ), "the branch was not deleted"
 
+    def test_a_pruned_stale_registration_does_not_block_the_delete(
+        self, isolated_git_config, tmp_path
+    ):
+        """Prune-then-delete: no `.worktrees` directory and no registration.
+
+        The replaced gate required `$REPO_ROOT/.worktrees` to exist, which
+        blocked exactly this recovery path: the worktree directory is already
+        gone, `git worktree prune` clears the stale registration, and Step 3
+        must delete the branch without a `.worktrees` directory.
+        """
+        repo, worktree = make_repo(tmp_path)
+        shutil.rmtree(repo / ".worktrees")
+        assert not (repo / ".worktrees").exists(), (
+            "the fixture still has a .worktrees directory, so it does not reach "
+            "the prune-then-delete path"
+        )
+        pruned = git(repo, "worktree", "prune", check=False)
+        assert pruned.returncode == 0, pruned.stderr
+        assert (
+            f"branch refs/heads/{BRANCH}"
+            not in git(repo, "worktree", "list", "--porcelain").stdout
+        ), "the stale registration survived the prune"
+
+        done = run_fence(
+            cleanup_delete_fence(CLEANUP_SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, (
+            "Step 3 refused with no .worktrees directory, blocking the "
+            f"prune-then-delete recovery. stdout={done.stdout.strip()!r}"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            != 0
+        ), "the branch was not deleted"
+
 
 class TestCleanupRefusesMisidentifiedTargets:
     """Removal must target the worktree registered for the requested branch.
@@ -2063,8 +2157,9 @@ class TestCleanupStep3RegistrationGate:
             f"{done.stdout!r}"
         )
         assert (
-            f"Cannot delete branch: a worktree for {BRANCH} is still registered "
-            f"in {repo} — remove the worktree first."
+            f"Cannot delete branch: {BRANCH} is still checked out in a worktree "
+            f"of {repo} — remove that worktree if it is under .worktrees/, or "
+            "switch the main checkout to another branch first."
         ) in done.stdout, (
             f"the shipped refusal message is missing: {done.stdout.strip()!r}"
         )
@@ -2099,7 +2194,7 @@ class TestCleanupStep3RegistrationGate:
         mutated = fence[:start] + fence[stop:]
         assert mutated != fence, "the registration gate changed shape"
         done = run_fence(mutated, repo)
-        assert "is still registered in" not in done.stdout, (
+        assert "is still checked out in a worktree of" not in done.stdout, (
             "the mutated fence still printed the registration refusal"
         )
         assert (
@@ -2124,7 +2219,7 @@ class TestCleanupStep3RegistrationGate:
         assert mutated != fence, "the registration condition changed shape"
         done = run_fence(mutated, repo)
         assert done.returncode != 0, "the forced gate did not refuse"
-        assert "is still registered in" in done.stdout
+        assert "is still checked out in a worktree of" in done.stdout
         assert (
             git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
             == 0
