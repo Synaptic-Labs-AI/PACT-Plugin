@@ -2129,7 +2129,20 @@ class PACTMemory:
                 # links and the vector on the old project forever. Both
                 # observations are indexed lookups, so the satisfied case —
                 # the normal one — writes nothing.
-                target_project = updates["project_id"]
+                # THE ROW'S OBSERVED PROJECT, NOT THE REQUESTED ONE. A
+                # concurrent writer can re-key the row between update_memory's
+                # commit and this cascade; driving the links and the vector at
+                # the REQUESTED target would then key them to a project the
+                # row no longer carries (measured: row projC, links
+                # [projC, projB]). Re-read AFTER the commit and treat the
+                # committed row as the truth. A row that vanished between the
+                # two reads has nothing left to cascade (`delete()` has
+                # already removed its vector and links), so stop rather than
+                # moving anything to a NULL target.
+                row_after_update = get_memory(conn, memory_id)
+                if row_after_update is None:
+                    return memory_id if success else None
+                target_project = row_after_update.get("project_id")
                 # The CHANGE half is kept as it was: a call that re-keyed the
                 # row cascades even when the content store faulted, which is
                 # what the faulted-re-embed arm pins.
@@ -2210,6 +2223,11 @@ class PACTMemory:
         vector_current: bool,
     ) -> None:
         """Move what a re-key leaves behind: file LINKS and the vector row.
+
+        `new_project` IS THE ROW'S OBSERVED PROJECT, not the payload's
+        requested one: the caller re-reads the row after update_memory's
+        commit, so a concurrent re-key that won the race is the target the
+        links and the vector follow.
 
         Files: each linked row is keyed (path, project_id) and
         search_by_file filters by project, so the link is re-pointed to the
