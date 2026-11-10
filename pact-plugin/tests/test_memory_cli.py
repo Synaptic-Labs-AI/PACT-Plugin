@@ -652,11 +652,16 @@ class TestCliSaveVerification:
 # ---------------------------------------------------------------------------
 
 class TestApiSaveVerification:
-    """Test save-then-get verification in PACTMemory.save() (#245).
+    """Test save-then-verify in PACTMemory.save() (#245).
 
     Verification lives in the API layer so all callers benefit.
-    PACTMemory.save() calls self.get(memory_id) after saving and raises
-    RuntimeError if the result is None or if memory_id itself is None.
+    PACTMemory.save() reads the just-written row with the storage layer's
+    get_memory(conn, memory_id) — NOT self.get() — and raises RuntimeError if
+    the row is missing or carries a different project than the call filed it
+    under. It must not route through self.get(): that call sends an id
+    shorter than 32 characters through the project-scoped PREFIX resolver, so
+    a caller-supplied short id under a payload project was reported "not
+    found" after the row had already committed.
 
     Tests use a properly initialized PACTMemory with a real temp database
     where possible, mocking only _ensure_ready (to skip dependency checks)
@@ -690,11 +695,26 @@ class TestApiSaveVerification:
         result = api_memory.get(memory_id)
         assert result is not None
 
-    def test_save_verification_calls_get_with_returned_id(self, api_memory):
-        """Verification calls get() with the exact ID from the save."""
-        with patch.object(api_memory, "get", wraps=api_memory.get) as spy_get:
+    def test_save_verification_calls_get_memory_with_returned_id(self, api_memory):
+        """Verification reads the exact id from the storage layer.
+
+        The spy is on `scripts.memory_api.get_memory`, the function save()
+        now calls; `PACTMemory.get` must NOT be called, because routing a
+        short caller-supplied id through the scoped prefix resolver is the
+        defect this shape replaces.
+        """
+        import scripts.memory_api as memory_api_module
+
+        real_get_memory = memory_api_module.get_memory
+        with patch(
+            "scripts.memory_api.get_memory", wraps=real_get_memory
+        ) as spy_get_memory, patch.object(PACTMemory, "get") as spy_get:
             memory_id = api_memory.save({"context": "spy test"})
-        spy_get.assert_called_once_with(memory_id)
+
+        assert spy_get_memory.call_count == 1, spy_get_memory.call_args_list
+        call_args = spy_get_memory.call_args.args
+        assert call_args[-1] == memory_id, call_args
+        spy_get.assert_not_called()
 
     def test_save_raises_on_none_memory_id(self, api_memory):
         """save() raises RuntimeError if create_memory returns None."""
@@ -703,17 +723,20 @@ class TestApiSaveVerification:
                 api_memory.save({"context": "test"})
 
     def test_save_raises_on_verification_failure(self, api_memory):
-        """save() raises RuntimeError if get() returns None after save."""
-        with patch.object(api_memory, "get", return_value=None):
-            with pytest.raises(RuntimeError, match="not found after save"):
+        """save() raises RuntimeError if the row is gone after the write."""
+        with patch("scripts.memory_api.get_memory", return_value=None):
+            with pytest.raises(RuntimeError, match="not found under project .* after save"):
                 api_memory.save({"context": "test"})
 
     def test_save_verifies_before_syncing_to_claude_md(self, tmp_path):
-        """get() (verification) is called BEFORE sync_to_claude_md().
+        """The verification read happens BEFORE sync_to_claude_md().
 
         Ensures we never write a phantom memory reference to CLAUDE.md.
-        Uses a call-order recording pattern to assert ordering.
+        Uses a call-order recording pattern to assert ordering over the
+        storage-layer read save() actually performs.
         """
+        import scripts.memory_api as memory_api_module
+
         import sqlite3
         db_path = tmp_path / "order_test.db"
         conn = sqlite3.connect(str(db_path))
@@ -722,18 +745,18 @@ class TestApiSaveVerification:
 
         call_order = []
 
-        original_get = PACTMemory.get
+        real_get_memory = memory_api_module.get_memory
 
-        def recording_get(self_inner, *args, **kwargs):
-            call_order.append("get")
-            return original_get(self_inner, *args, **kwargs)
+        def recording_get_memory(*args, **kwargs):
+            call_order.append("get_memory")
+            return real_get_memory(*args, **kwargs)
 
         def recording_sync(*args, **kwargs):
             call_order.append("sync")
 
         with patch("scripts.memory_api._ensure_ready"), \
-             patch("scripts.memory_api.sync_to_claude_md", side_effect=recording_sync), \
-             patch.object(PACTMemory, "get", recording_get):
+             patch("scripts.memory_api.get_memory", recording_get_memory), \
+             patch("scripts.memory_api.sync_to_claude_md", side_effect=recording_sync):
             memory = PACTMemory(
                 project_id="test-project",
                 session_id="test-session",
@@ -741,7 +764,54 @@ class TestApiSaveVerification:
             )
             memory.save({"context": "ordering test"})
 
-        assert call_order == ["get", "sync"]
+        assert call_order == ["get_memory", "sync"]
+
+
+class TestAShortSuppliedIdUnderAPayloadProject:
+    """Cold B1: a save that COMMITTED was then reported as a failed save.
+
+    Pre-fix shape (origin/main 903f9eeb, measured): save() verified through
+    self.get(), which routes an id shorter than 32 characters through the
+    project-scoped PREFIX resolver. A caller-supplied short id filed under a
+    PAYLOAD project that differs from the instance's detected identity was
+    therefore not found — after create_memory had already committed the row.
+    The CLI enveloped the RuntimeError as SYSTEM_ERROR exit 2 while a row
+    ('abc9999', 'proj-B') sat in the store, and a retry collided on the
+    primary key. The row is now read by its exact id, so the call succeeds
+    and returns the id.
+    """
+
+    def test_a_short_id_under_a_payload_project_succeeds(
+        self, cli_script_path, cli_db, tmp_path
+    ):
+        other_project = tmp_path / "other-project"
+        other_project.mkdir()
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = str(other_project)
+
+        payload = json.dumps({
+            "context": "SHORT-ID-UNDER-PAYLOAD-PROJECT",
+            "id": "abc9999",
+            "project_id": "proj-B",
+        })
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "save", payload,
+             "--db-path", str(cli_db), "--no-sync"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert result.returncode == 0, (result.returncode, result.stderr)
+        envelope = json.loads(result.stdout)
+        assert envelope["result"]["memory_id"] == "abc9999", envelope
+
+        # The row really is committed under the payload project (the pre-fix
+        # defect's other half was that it WAS committed).
+        from scripts.database import get_connection, get_memory
+        conn = get_connection(cli_db)
+        try:
+            row = get_memory(conn, "abc9999")
+        finally:
+            conn.close()
+        assert row is not None and row["project_id"] == "proj-B", row
 
 
 # ---------------------------------------------------------------------------
@@ -4635,13 +4705,15 @@ def _has_raw_unsafe_char(text):
 
 
 class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
-    """The prefix echoed on AMBIGUOUS_PREFIX is caller input at TWO surfaces.
+    """The prefix echoed on AMBIGUOUS_PREFIX is caller input at THREE surfaces.
 
-    Both the exception's message and the CLI's `prefix` field are rendered,
-    so both must carry markers. The exception's own `.prefix` attribute and
-    `matches[].id` stay RAW by design - the latter is a round-trip identifier
-    the caller replays to disambiguate, and an escaped form would match
-    nothing - so neither is asserted here.
+    The exception's message, the CLI's `prefix` field, and each
+    `matches[].id` are rendered, so all three must carry markers. The
+    exception's own `.prefix` attribute stays RAW for programmatic callers.
+    `matches[].id` is the DISPLAY form and `matches[].raw_id` is the
+    replay-only RAW value: the caller replays `raw_id` to disambiguate, and
+    an escaped form would match nothing, so this arm asserts the pair — id
+    marker-escaped, raw_id byte-identical to the stored id.
     """
 
     # 7 chars (MIN_PREFIX_LENGTH) ending below "g". THE BOUND IS THE TRAP:
@@ -4727,9 +4799,19 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
         # that matched loosely would bring the above-window id in, and the
         # escaping assertions below would then be measuring the wrong fixture.
         assert envelope["total_matches"] == 2, (verb, envelope)
-        matched = {m["id"] for m in envelope["matches"]}
+        # `id` is the DISPLAY form and `raw_id` the REPLAY form. The set
+        # comparison is on raw_id, because that is the value a caller feeds
+        # back; a test comparing `id` would silently stop measuring the
+        # stored ids the moment escaping changed.
+        matched = {m["raw_id"] for m in envelope["matches"]}
         assert matched == {self._PREFIX, self._PREFIX + "0"}, matched
         assert self._ABOVE_WINDOW not in matched
+        # The display half: every id carries markers and no raw unsafe
+        # character, while raw_id carries the stored value verbatim.
+        for match in envelope["matches"]:
+            assert "<U+202E>" in match["id"], (verb, match)
+            assert not _has_raw_unsafe_char(match["id"]), (verb, match["id"])
+            assert _has_raw_unsafe_char(match["raw_id"]), (verb, match["raw_id"])
 
         for surface in ("message", "prefix"):
             text = envelope[surface]
@@ -5177,3 +5259,64 @@ class TestTheRemainingCallerEchoesAreEscaped:
         assert envelope["error"] == "DB_PATH_NOT_FOUND", envelope
         assert "<U+202E>" in envelope["message"], envelope["message"]
         assert not _has_raw_unsafe_char_total(envelope["message"])
+
+
+class TestTheRecordPayloadEscapesIdentityButNotContent:
+    """F2: one display policy for record identity fields.
+
+    `MemoryObject.to_dict()` stays raw for programmatic callers; the CLI's
+    `_record_envelope` renders `id`/`memory_id`/`project_id`/`session_id`
+    inert while leaving memory CONTENT raw. A full 32-character id is used so
+    the read is identity-independent and needs no project pin.
+    """
+
+    def test_a_bidi_project_and_session_render_inert_context_stays_raw(
+        self, cli_script_path, cli_db
+    ):
+        from scripts.database import create_memory, get_connection
+
+        full_id = "a" * 31 + "1"
+        bidi_project = "proj\u202eX"
+        bidi_session = "sess\u202eY"
+        raw_context = "RAW-CONTENT\u202e"
+        conn = get_connection(cli_db)
+        try:
+            create_memory(conn, {
+                "id": full_id,
+                "context": raw_context,
+                "project_id": bidi_project,
+                "session_id": bidi_session,
+            })
+        finally:
+            conn.close()
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, (result.returncode, result.stderr)
+        record = json.loads(result.stdout)["result"]
+        assert record["project_id"] == "proj<U+202E>X", record["project_id"]
+        assert record["session_id"] == "sess<U+202E>Y", record["session_id"]
+        assert record["context"] == raw_context, (
+            "memory content was escaped, which corrupts the data the caller "
+            f"asked for: {record['context']!r}"
+        )
+
+
+class TestAnInvalidLimitValueIsRenderedInert:
+    """F4: argparse's own stderr line is a rendering surface."""
+
+    def test_a_control_character_in_limit_is_repr_escaped(self, capsys):
+        from scripts.cli import build_parser
+
+        with pytest.raises(SystemExit) as exited:
+            build_parser().parse_args(["list", "--limit", "bog\x1bus"])
+        assert exited.value.code == 2
+        err = capsys.readouterr().err
+        assert "\\x1b" in err, err
+        assert "\x1b" not in err, (
+            "the raw control character reached argparse's stderr: "
+            f"{err!r}"
+        )

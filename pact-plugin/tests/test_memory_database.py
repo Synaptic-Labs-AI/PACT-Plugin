@@ -27,6 +27,7 @@ from scripts.database import (
     db_connection,
     ensure_initialized,
     get_memory,
+    init_schema,
 )
 from scripts.graph import get_file_id, track_file
 from scripts.memory_api import PACTMemory, ProjectScopeDisagreementError
@@ -2197,12 +2198,24 @@ class TestEscapeForEnvelope:
 
 
 def _memory_store(tmp_path, name):
-    """A production-schema store with the graph tables and no vector table."""
+    """A store built by the PRODUCTION schema, with the graph tables.
+
+    Built by `init_schema`, not `create_test_schema`: the two schemas differ
+    (production declares `created_at`/`updated_at` NOT NULL with no default,
+    the test schema defaults them), and a fixture that CLAIMS production
+    schema while creating the test one hides the class of write that fails
+    only in production. Rows inserted directly carry the timestamps —
+    `_insert_memories` supplies them. Any raw INSERT added here must too.
+
+    `init_schema` also attempts the vector table, so this helper does not
+    mean "no vector table"; a test that needs its own fixed-dimension vec
+    table drops the auto-created one first.
+    """
     db_path = tmp_path / name
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    create_test_schema(conn)
+    init_schema(conn)
     conn.commit()
     return db_path, conn
 
@@ -2210,8 +2223,9 @@ def _memory_store(tmp_path, name):
 def _insert_memories(conn, rows):
     for memory_id, project in rows:
         conn.execute(
-            "INSERT INTO memories (id, context, project_id, session_id)"
-            " VALUES (?, ?, ?, ?)",
+            "INSERT INTO memories "
+            "(id, context, project_id, session_id, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
             (memory_id, "c", project, "s"),
         )
     conn.commit()
@@ -2328,6 +2342,28 @@ class TestTheDetectedProjectIdIsValidated:
             f"reports it: {message!r}"
         )
         assert "\udcff" not in message, message
+        assert not (tmp_path / "d.db").exists(), (
+            "the adopted-project refusal performed store work"
+        )
+
+    @pytest.mark.parametrize("bad", ["proj\x00X", "proj\x85X"])
+    def test_a_control_character_detected_value_is_refused_on_write(
+        self, tmp_path, monkeypatch, bad
+    ):
+        """The CONTROL half of the shared rule on the DETECTION branch.
+
+        `_BAD` above is a lone surrogate, so the surrogate clause is pinned;
+        without these cells a regression limiting the detected-value check to
+        surrogates would ship green, and the write would store a project id
+        no envelope could render raw. A U+0000 (C0) and a U+0085 (C1) cell
+        cover both ends of the control clause.
+        """
+        memory = self._memory(tmp_path, monkeypatch, value=bad)
+        with pytest.raises(ValueError) as excinfo:
+            memory.save({"context": "X"}, sync_to_claude=False)
+        message = str(excinfo.value)
+        assert "not a non-empty string free of control characters" in message, message
+        assert "Supply project_id explicitly" in message, message
         assert not (tmp_path / "d.db").exists(), (
             "the adopted-project refusal performed store work"
         )
@@ -2471,6 +2507,282 @@ class TestGraphContextConfirmsTheStoredProject:
             f"{[row['path'] for row in unscoped]!r}"
         )
 
+    def test_an_incoming_cross_project_relation_is_not_returned(self, tmp_path):
+        """The INCOMING half of the endpoint filter, which had no arm.
+
+        `file_relations` carries no project column, so a legacy/backfilled
+        edge can point from another project's file INTO this one. The
+        outgoing arm above drives fr.source_file; this one drives
+        fr.target_file, and `get_file_context` inherits it because its
+        default direction is "both".
+
+        Both directions are measured on ONE fixture. The NULL-project row
+        `/repo/a.py` is the unscoped control: with project_id=None the
+        resolver picks it up and the same foreign edge IS visible, so the
+        scoped [] is the filter's doing rather than an absent fixture row.
+        """
+        from scripts import graph
+
+        _db_path, conn = _memory_store(tmp_path, "incoming-relation.db")
+        for file_id, path, project in (
+            ("f-a-p1", "/repo/a.py", "P1"),
+            ("f-a-null", "/repo/a.py", None),
+            ("f-b-p1", "/repo/b.py", "P1"),
+            ("f-other-p2", "/repo/secret_project.py", "P2"),
+        ):
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+        for source, target in (
+            ("f-a-p1", "f-b-p1"),      # the same-project OUTGOING control
+            ("f-other-p2", "f-a-p1"),  # the cross-project INCOMING edge
+            ("f-other-p2", "f-a-null"),  # its unscoped-control twin
+        ):
+            conn.execute(
+                "INSERT INTO file_relations"
+                " (source_file, target_file, relationship)"
+                " VALUES (?, ?, 'imports')",
+                (source, target),
+            )
+        conn.commit()
+
+        with patch("scripts.graph.ensure_initialized"):
+            incoming = graph.get_file_relations(
+                conn, "/repo/a.py", "P1", direction="incoming"
+            )
+            both = graph.get_file_relations(conn, "/repo/a.py", "P1")
+            context = graph.get_file_context(conn, "/repo/a.py", "P1")
+            unscoped = graph.get_file_relations(conn, "/repo/a.py", None)
+
+        assert incoming == [], (
+            "a cross-project INCOMING edge returned another project's file "
+            f"row: {[row['path'] for row in incoming]!r}"
+        )
+        assert [row["path"] for row in both] == ["/repo/b.py"], (
+            "the incoming filter removed the same-project outgoing edge too: "
+            f"{[row['path'] for row in both]!r}"
+        )
+        assert [row["path"] for row in context["direct_relations"]] == [
+            "/repo/b.py"
+        ], context["direct_relations"]
+        # THE UNSCOPED CONTROL: the fixture really does carry the foreign
+        # edge, reachable when the NULL-project row is the one resolved.
+        assert [row["path"] for row in unscoped] == ["/repo/secret_project.py"], (
+            "the unscoped read lost its whole-store meaning: "
+            f"{[row['path'] for row in unscoped]!r}"
+        )
+
+
+class TestTheBatchFileReadsConfirmTheStoredProject:
+    """The two batch/file-list helpers, each pinned directly.
+
+    `get_memories_for_files` is the batch wrapper `_get_graph_related_memories`
+    calls; a reverted pass-through leaves its callers to a belt that may not
+    exist. `get_files_for_memory` is the memory-to-files direction: the LINK
+    carries no project, so a stale link from an interrupted re-key attaches
+    another project's path to a confirmed memory. One memory linked to two
+    same-project files and one cross-project file pins all three counts.
+    """
+
+    def test_get_memories_for_files_excludes_a_p2_linked_memory(self, tmp_path):
+        from scripts import graph
+
+        _db_path, conn = _memory_store(tmp_path, "batch-file-memories.db")
+        _insert_memories(conn, [("m-p1", "P1"), ("m-p2", "P2")])
+        for file_id, path, project in (
+            ("f-a-p1", "/repo/a.py", "P1"),
+            ("f-a-null", "/repo/a.py", None),
+        ):
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+        for memory_id, file_id in (("m-p1", "f-a-p1"), ("m-p2", "f-a-p1"),
+                                   ("m-p1", "f-a-null"), ("m-p2", "f-a-null")):
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id, relationship)"
+                " VALUES (?, ?, 'modified')",
+                (memory_id, file_id),
+            )
+        conn.commit()
+
+        with patch("scripts.graph.ensure_initialized"):
+            scoped = graph.get_memories_for_files(conn, ["/repo/a.py"], "P1")
+            unscoped = graph.get_memories_for_files(conn, ["/repo/a.py"], None)
+
+        assert scoped == ["m-p1"], (
+            "the batch wrapper passed no project and returned another "
+            f"project's memory: {scoped!r}"
+        )
+        assert set(unscoped) == {"m-p1", "m-p2"}, (
+            "the unscoped control was narrowed: "
+            f"{unscoped!r}"
+        )
+
+    def test_get_files_for_memory_confirms_each_files_stored_project(
+        self, tmp_path
+    ):
+        from scripts import graph
+
+        _db_path, conn = _memory_store(tmp_path, "memory-files-matrix.db")
+        _insert_memories(conn, [("m-p1", "P1")])
+        for file_id, path, project in (
+            ("f-a-p1", "/repo/a.py", "P1"),
+            ("f-b-p1", "/repo/b.py", "P1"),
+            ("f-c-p2", "/repo/c.py", "P2"),
+        ):
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id, relationship)"
+                " VALUES (?, ?, 'modified')",
+                ("m-p1", file_id),
+            )
+        conn.commit()
+
+        with patch("scripts.graph.ensure_initialized"):
+            unscoped = graph.get_files_for_memory(conn, "m-p1")
+            own = graph.get_files_for_memory(conn, "m-p1", "P1")
+            other = graph.get_files_for_memory(conn, "m-p1", "P2")
+
+        assert {f["path"] for f in unscoped} == {
+            "/repo/a.py", "/repo/b.py", "/repo/c.py"
+        }, unscoped
+        assert {f["path"] for f in own} == {"/repo/a.py", "/repo/b.py"}, own
+        assert {f["path"] for f in other} == {"/repo/c.py"}, (
+            "the filter did not key on the FILE's stored project: "
+            f"{[f['path'] for f in other]!r}"
+        )
+
+    def test_get_graph_stats_counts_only_rows_visible_to_the_scope(
+        self, tmp_path
+    ):
+        """A legacy cross-project link/relation is visible from NEITHER
+        scope, so counting it under either would be false; the unscoped count
+        still includes it (whole-store)."""
+        from scripts import graph
+
+        _db_path, conn = _memory_store(tmp_path, "stats-scope.db")
+        _insert_memories(conn, [("m-p1", "P1"), ("m-z-p1", "P1"),
+                                ("m-p2", "P2"), ("m-z-p2", "P2")])
+        for file_id, path, project in (
+            ("f-p1", "/repo/p1.py", "P1"),
+            ("f-p2", "/repo/p2.py", "P2"),
+        ):
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+        for memory_id, file_id in (
+            ("m-p1", "f-p1"), ("m-z-p1", "f-p1"),   # P1's own links
+            ("m-p2", "f-p2"), ("m-z-p2", "f-p2"),   # P2's own links
+            ("m-p1", "f-p2"),                        # legacy cross-project link
+        ):
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id, relationship)"
+                " VALUES (?, ?, 'modified')",
+                (memory_id, file_id),
+            )
+        for source, target in (
+            ("f-p1", "f-p1"),  # self-loop, same project (one P1 relation)
+            ("f-p2", "f-p2"),  # same project (one P2 relation)
+            ("f-p1", "f-p2"),  # legacy cross-project relation
+        ):
+            conn.execute(
+                "INSERT INTO file_relations"
+                " (source_file, target_file, relationship)"
+                " VALUES (?, ?, 'imports')",
+                (source, target),
+            )
+        conn.commit()
+
+        with patch("scripts.graph.ensure_initialized"):
+            p1 = graph.get_graph_stats(conn, "P1")
+            p2 = graph.get_graph_stats(conn, "P2")
+            whole = graph.get_graph_stats(conn, None)
+
+        assert (p1["memory_file_links"], p1["file_relations"]) == (2, 1), p1
+        assert (p2["memory_file_links"], p2["file_relations"]) == (2, 1), p2
+        assert (whole["memory_file_links"], whole["file_relations"]) == (5, 3), whole
+
+
+class TestTheRelationWalkConfirmsEveryNeighbour:
+    """`get_related_files`: the START is scoped; a NEIGHBOUR is not, unless
+    confirmed.
+
+    `file_relations` has no project column, so a legacy edge can join two
+    projects. An unconfirmed neighbour is worse than one leaked path: its id
+    is the next hop's cursor, so the walk would also expose the rest of the
+    foreign project's graph. The NULL-project start is the unscoped control —
+    there the whole-store meaning is intended and still spans projects.
+    """
+
+    @staticmethod
+    def _fixture(tmp_path, name="relation-walk.db"):
+        db_path, conn = _memory_store(tmp_path, name)
+        for file_id, path, project in (
+            ("f-a-p1", "/A/a.py", "P1"),
+            ("f-b-p1", "/A/b.py", "P1"),
+            ("f-secret-p2", "/B/secret.py", "P2"),
+            ("f-deep-p2", "/B/deep.py", "P2"),
+            ("f-a-null", "/A/a.py", None),
+        ):
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+        for source, target in (
+            ("f-a-p1", "f-b-p1"),        # same-project neighbour (control)
+            ("f-a-p1", "f-secret-p2"),   # legacy cross-project edge
+            ("f-secret-p2", "f-deep-p2"),  # reachable ONLY by traversing it
+            ("f-a-null", "f-secret-p2"),   # the unscoped control's edge
+        ):
+            conn.execute(
+                "INSERT INTO file_relations"
+                " (source_file, target_file, relationship)"
+                " VALUES (?, ?, 'imports')",
+                (source, target),
+            )
+        conn.commit()
+        return db_path, conn
+
+    def test_a_cross_project_neighbour_is_neither_returned_nor_traversed(
+        self, tmp_path
+    ):
+        from scripts import graph
+
+        _db_path, conn = self._fixture(tmp_path)
+        with patch("scripts.graph.ensure_initialized"):
+            depth1 = graph.get_related_files(conn, "/A/a.py", "P1", max_depth=1)
+            depth2 = graph.get_related_files(conn, "/A/a.py", "P1", max_depth=2)
+            unscoped = graph.get_related_files(conn, "/A/a.py", None, max_depth=1)
+
+        assert depth1 == ["/A/b.py"], (
+            "a cross-project neighbour was returned by a scoped walk: "
+            f"{depth1!r}"
+        )
+        assert depth2 == ["/A/b.py"], (
+            "the scoped walk TRAVERSED THROUGH the foreign endpoint and "
+            f"reached its graph: {depth2!r}"
+        )
+        assert unscoped == ["/B/secret.py"], (
+            "the unscoped walk from a NULL-project start lost its "
+            f"whole-store meaning: {unscoped!r}"
+        )
+
+    def test_discover_related_inherits_the_neighbour_scope(self, tmp_path):
+        from scripts import graph
+        from scripts.config import store_scope
+
+        db_path, conn = self._fixture(tmp_path, "discover-walk.db")
+        conn.close()
+        with store_scope(db_path), patch("scripts.graph.ensure_initialized"):
+            related = graph.discover_related("/A/a.py", "P1")
+        assert sorted(related) == ["/A/b.py"], related
+
 
 class TestTrackFileAdoptsARaceLoser:
     """Two writers that both miss the SELECT must converge on one file row.
@@ -2561,6 +2873,9 @@ class TestAnEmptyScopeMeansWholeStore:
         db_path, conn = _memory_store(tmp_path, "empty-scope-vec.db")
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
+        # The production schema already created a vec table at the model's
+        # dimension; this arm needs a known 4-dimension one.
+        conn.execute("DROP TABLE IF EXISTS vec_memories")
         conn.execute(
             "CREATE VIRTUAL TABLE vec_memories USING vec0("
             "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
@@ -2579,6 +2894,41 @@ class TestAnEmptyScopeMeansWholeStore:
             empty = search.vector_search(conn, "q", "", limit=3)
             absent = search.vector_search(conn, "q", None, limit=3)
         assert empty == absent == [("m-p1", 0.0)]
+
+    def test_graph_enhanced_search_treats_an_empty_scope_as_unscoped(
+        self, tmp_path, monkeypatch
+    ):
+        """The public entry whose normalisation was unpinned.
+
+        `graph_enhanced_search` applies the stored-project BELT, which reads
+        the scope by `is not None`: with `""` bound as a filter every real
+        row's project differs from it and the belt drops the lot, so the
+        whole-store search answers empty. Normalise once at the entry (as
+        the other four entries do) and `""` matches `None`. The ranking is
+        stubbed so the arm measures the scope contract, not the embedding
+        backend.
+        """
+        from scripts import search
+        from scripts.config import store_scope
+
+        db_path, _conn = self._fixture(tmp_path)
+
+        def fake_boosted(conn, query, current_file, project_id, fetch):
+            return [("m-null", 1.0)]
+
+        monkeypatch.setattr(search, "graph_boosted_search", fake_boosted)
+        with store_scope(db_path), patch(
+            "scripts.search.ensure_initialized"
+        ), patch("scripts.graph.ensure_initialized"):
+            empty = search.graph_enhanced_search("q", project_id="")
+            absent = search.graph_enhanced_search("q", project_id=None)
+        assert [memory.id for memory in empty] == ["m-null"], (
+            "graph_enhanced_search bound the empty scope as a filter and the "
+            "belt dropped every row"
+        )
+        assert [memory.id for memory in empty] == [
+            memory.id for memory in absent
+        ]
 
 
 class TestTheConfirmationFiltersOverFetch:
@@ -2676,6 +3026,9 @@ class TestTheConfirmationFiltersOverFetch:
         db_path, conn = _memory_store(tmp_path, "vec-overfetch.db")
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
+        # The production schema already created a vec table at the model's
+        # dimension; this arm needs a known 4-dimension one.
+        conn.execute("DROP TABLE IF EXISTS vec_memories")
         conn.execute(
             "CREATE VIRTUAL TABLE vec_memories USING vec0("
             "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
@@ -2710,6 +3063,77 @@ class TestTheConfirmationFiltersOverFetch:
             rows = search.vector_search(conn, "q", "P2", limit=3)
         assert sorted(memory_id for memory_id, _ in rows) == ["v0", "v1", "v2"], (
             "the stale top-k consumed the SQL LIMIT and shortened the result"
+        )
+
+    def test_the_vector_leg_stops_at_its_cap(self, tmp_path):
+        """The VECTOR leg's bound, mirroring the graph-leg cap arm.
+
+        Every top hit is stale (memories in P1, vector rows in P2's
+        partition), so the confirmation discards them all and the fetch
+        widens: 3, 6, 12, ... up to CONFIRMATION_FETCH_CAP. The recorded
+        LIMIT values are the evidence — a store that merely runs out of rows
+        would also terminate, so termination alone proves nothing.
+        """
+        import struct
+
+        import sqlite_vec
+        from scripts import search
+
+        db_path, conn = _memory_store(tmp_path, "vec-cap.db")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute("DROP TABLE IF EXISTS vec_memories")
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_memories USING vec0("
+            "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
+            "embedding float[4])"
+        )
+        stale_count = search.CONFIRMATION_FETCH_CAP
+        _insert_memories(conn, [(f"s{i}", "P1") for i in range(stale_count)])
+        exact = struct.pack("4f", 1.0, 0.0, 0.0, 0.0)
+        for i in range(stale_count):
+            conn.execute(
+                "INSERT INTO vec_memories (memory_id, project_id, embedding)"
+                " VALUES (?, ?, ?)",
+                (f"s{i}", "P2", exact),
+            )
+        conn.commit()
+
+        class _RecordingConnection:
+            """Delegates everything; records each vector query's LIMIT."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.limits = []
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def execute(self, sql, params=()):
+                if "FROM vec_memories" in sql and params:
+                    self.limits.append(params[-1])
+                return self._inner.execute(sql, params)
+
+        proxy = _RecordingConnection(conn)
+        with patch.object(
+            search, "generate_embedding", lambda text: [1.0, 0.0, 0.0, 0.0]
+        ):
+            rows = search.vector_search(proxy, "q", "P2", limit=3)
+
+        assert rows == [], rows
+        # THE CLAIMED BOUND, not just the constant's current value: the PR
+        # body states 200 for the vector leg, and comparing against
+        # `search.CONFIRMATION_FETCH_CAP` alone would still pass if the
+        # constant itself were raised.
+        assert search.CONFIRMATION_FETCH_CAP == 200, (
+            f"the vector leg's claimed bound moved: {search.CONFIRMATION_FETCH_CAP}"
+        )
+        assert proxy.limits[-1] == 200, (
+            "the vector leg did not stop at its own ceiling: "
+            f"{proxy.limits!r}"
+        )
+        assert proxy.limits == sorted(proxy.limits), (
+            f"the fetch window shrank instead of widening: {proxy.limits!r}"
         )
 
 
@@ -3000,6 +3424,57 @@ class TestUpdatePayloadProjectIdGuard:
             f"no re-key means no cascade re-embed; store calls: {len(calls)}"
         )
         assert content_only.last_embedding_status == "fault"
+
+    def test_two_cascades_computing_the_same_link_converge(self, tmp_path):
+        """OR IGNORE on the cascade's link insert, pinned by constructing
+        the loser's state.
+
+        Two cascades re-pointing this memory at the same (path, project)
+        file row compute the same `memory_files` primary key. The winner
+        commits; the loser's INSERT then violates (memory_id, file_id). A
+        plain INSERT aborts that update AFTER its memories row committed —
+        the same class track_file's OR IGNORE exists for. The fixture
+        pre-inserts the winning link and re-adds the old one, so the next
+        cascade sees exactly the loser's `linked` view: one row still under
+        the old project while the target link already exists.
+        """
+        db_path = tmp_path / "or-ignore.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        memory = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": "OR-IGNORE"}, files=[str(linked)], sync_to_claude=False
+        )
+        # First cascade: the winning writer's effect.
+        assert memory.update(memory_id, {"project_id": "projB"}) == memory_id
+
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            old_file_id = conn.execute(
+                "SELECT f.id FROM files f WHERE f.path = ? AND f.project_id = ?",
+                (str(linked), "projA"),
+            ).fetchone()[0]
+            # The losing cascade's view: the old link is back, and the
+            # winning (memory, projB-file) link already exists.
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_files"
+                " (memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+                (memory_id, old_file_id),
+            )
+            conn.commit()
+
+        assert memory.update(memory_id, {"project_id": "projB"}) == memory_id
+
+        with db_connection(db_path) as conn:
+            rows = conn.execute(
+                "SELECT f.project_id FROM files f JOIN memory_files mf"
+                " ON mf.file_id = f.id WHERE mf.memory_id = ? ORDER BY f.project_id",
+                (memory_id,),
+            ).fetchall()
+        assert [row[0] for row in rows] == ["projB"], (
+            "the duplicate link aborted the cascade or left the old link "
+            f"behind: {[row[0] for row in rows]!r}"
+        )
 
     def test_a_disagreement_refusal_precedes_the_payload_guard(
         self, tmp_path, monkeypatch
@@ -4108,3 +4583,179 @@ class TestASessionOnlyUpdateMovesNothingElse:
             tuple(row) for row in before_links
         ], (before_links, after_links)
         assert _vector_partition(db_path, memory_id) == before_vec
+
+
+# ---------------------------------------------------------------------------
+# Fix-round arms: id normalisation, the cascade's observed target, and the
+# file list a scoped read attaches after an interrupted re-key.
+# ---------------------------------------------------------------------------
+
+class TestACallerSuppliedIdIsStoredLowercase:
+    """One representation for an id, at the write ingress.
+
+    `_resolve_id_or_full` lowercases every lookup while `create_memory` used
+    to store a caller-supplied id verbatim, so an uppercase id was written
+    and then unreachable by get/update/delete. Generated ids are already
+    lowercase hex; only supplied strings needed the normalisation.
+    """
+
+    def test_an_uppercase_id_is_normalised_and_resolvable_either_case(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "upper-id.db"
+        memory = PACTMemory(project_id="P", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": "UPPER", "id": "ABC9999"}, sync_to_claude=False
+        )
+        assert memory_id == "abc9999", memory_id
+        with db_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM memories WHERE id = ?", ("abc9999",)
+            ).fetchone()
+        assert row is not None, "the supplied id was not stored lowercase"
+        assert memory.get("abc9999") is not None
+        assert memory.get("ABC9999") is not None, (
+            "an uppercase lookup did not reach the lowercased stored id"
+        )
+
+
+class TestTheCascadeFollowsTheRowsObservedProject:
+    """The re-key cascade targets the row AFTER update_memory's commit.
+
+    A concurrent writer can re-key the row between that commit and the
+    cascade. Driving links and vector at the REQUESTED target would key them
+    to a project the row no longer carries; the re-read makes the committed
+    row the truth. The fixture forces the interleaving deterministically by
+    wrapping update_memory: the real write runs, then the wrapper writes the
+    competing project and commits, exactly as the racing session would.
+    """
+
+    def test_a_concurrent_rekey_is_the_target_the_links_follow(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "observed-target.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        memory = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": "RACE-TARGET"}, files=[str(linked)], sync_to_claude=False
+        )
+
+        real_update_memory = memory_api.update_memory
+
+        def racing_update(conn, memory_id_inner, updates, replace=False):
+            ok = real_update_memory(
+                conn, memory_id_inner, updates, replace=replace
+            )
+            # The competing session wins the key before the cascade runs.
+            conn.execute(
+                "UPDATE memories SET project_id = 'projC' WHERE id = ?",
+                (memory_id_inner,),
+            )
+            conn.commit()
+            return ok
+
+        monkeypatch.setattr(memory_api, "update_memory", racing_update)
+        assert memory.update(memory_id, {"project_id": "projB"}) == memory_id
+
+        with db_connection(db_path) as conn:
+            row = get_memory(conn, memory_id)
+            links = conn.execute(
+                "SELECT f.project_id FROM files f JOIN memory_files mf"
+                " ON mf.file_id = f.id WHERE mf.memory_id = ?"
+                " ORDER BY f.project_id",
+                (memory_id,),
+            ).fetchall()
+        assert row["project_id"] == "projC", row["project_id"]
+        assert [link[0] for link in links] == ["projC"], (
+            "the cascade keyed the link to the requested target instead of "
+            f"the row's observed project: {[link[0] for link in links]!r}"
+        )
+
+
+class TestAScopedReadExcludesAStaleLinkAfterAnInterruptedRekey:
+    """The memory -> files read confirms the MEMORY's stored project.
+
+    An interrupted re-key can leave the memories row on the new project
+    while the map/file link still points at the old project's file row. The
+    link carries no project, so the file's row decides; without the
+    confirmation the old path is attached to a memory the new project owns.
+    """
+
+    def test_get_and_list_attach_no_old_project_path(self, tmp_path):
+        db_path = tmp_path / "interrupted-read.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        memory = PACTMemory(project_id="projA", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": "INTERRUPTED-READ"}, files=[str(linked)],
+            sync_to_claude=False,
+        )
+        # The interrupted state: row moved, link not moved.
+        with db_connection(db_path) as conn:
+            conn.execute(
+                "UPDATE memories SET project_id = 'projB' WHERE id = ?",
+                (memory_id,),
+            )
+            conn.commit()
+
+        new_view = PACTMemory(project_id="projB", session_id="s", db_path=db_path)
+        got = new_view.get(memory_id)
+        assert got is not None
+        assert got.files == [], (
+            "get() attached the old project's path to a projB memory: "
+            f"{got.files!r}"
+        )
+        listed = new_view.list()
+        assert [m.files for m in listed if m.id == memory_id] == [[]], [
+            m.files for m in listed
+        ]
+
+class TestTheFixtureStoreIsTheProductionSchema:
+    """The `_memory_store` docstring's production claim, measured."""
+
+    def test_an_insert_without_timestamps_is_refused(self, tmp_path):
+        """The test schema defaults `created_at`; production declares it NOT
+        NULL with no default. A fixture that claims production schema while
+        building the test one hides exactly the write that fails only in
+        production (cold N1). This arm fails if `_memory_store` ever reverts
+        to `create_test_schema`.
+        """
+        _db_path, conn = _memory_store(tmp_path, "schema-honesty.db")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO memories (id, context) VALUES ('no-stamp', 'c')"
+            )
+
+
+class TestACallerSuppliedIdIsHeldToTheIdentifierRule:
+    """`create_memory` honours a caller-supplied id, so it validates it.
+
+    Without the guard a control character or lone surrogate reaches the
+    `memories.id` TEXT bind; the lone-surrogate case dies there as an
+    unhandled UnicodeEncodeError, bypassing the ValueError remedy channel.
+    A falsy id keeps its documented `or generate_id()` meaning.
+    """
+
+    @pytest.mark.parametrize(
+        "bad", ["bad\x00id", "bad\x7fid", "bad\x85id", "bad\ud800id", 123]
+    )
+    def test_create_memory_refuses_an_unusable_id(self, tmp_path, bad):
+        from scripts.database import create_memory
+
+        _db_path, conn = _memory_store(tmp_path, "supplied-id.db")
+        with pytest.raises(ValueError, match="id, when supplied"):
+            create_memory(conn, {"id": bad, "context": "x",
+                                 "project_id": "P"})
+        count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        assert count == 0, "a refused id still wrote a row"
+
+    def test_an_empty_id_still_generates_one(self, tmp_path):
+        from scripts.database import create_memory
+
+        _db_path, conn = _memory_store(tmp_path, "empty-id.db")
+        memory_id = create_memory(
+            conn, {"id": "", "context": "x", "project_id": "P"}
+        )
+        assert len(memory_id) == 32, memory_id
+        assert memory_id == memory_id.lower()
