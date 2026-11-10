@@ -4731,13 +4731,17 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(cli_db.parent))
 
     @staticmethod
-    def _seed(cli_db, ids):
+    def _seed(cli_db, ids, context="snippet"):
         """Seed the throwaway store, BOUND AND ASSERTED IN THIS PROCESS.
 
         A parent-process write that resolves through the default store lands
         in the operator's live memory file; the security lane measured exactly
         that with four seed rows. The scope plus the assertion make the
         destination a measured fact instead of an assumption.
+
+        `context` is a parameter because the MATCH LIST carries it into the
+        envelope too — a hostile context is the fixture for the per-match
+        content assertion below.
         """
         from scripts.config import resolve_db_path, store_scope
         try:
@@ -4758,7 +4762,7 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
                 for memory_id in ids:
                     create_memory(conn, {
                         "id": memory_id,
-                        "context": "snippet",
+                        "context": context,
                         "project_id": _pinned_project_id(cli_db),
                     })
             conn.commit()
@@ -4785,9 +4789,15 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
     def test_the_message_and_the_prefix_field_carry_markers(
         self, cli_script_path, cli_db, verb
     ):
+        # HOSTILE CONTEXT, not "snippet": each match's context is echoed in
+        # the envelope, and the CLI escapes it AFTER _scrub. The JSON BYTES
+        # contain no raw 0x1b because json.dumps escapes it, so only an
+        # assertion on the PARSED field can see the difference.
+        hostile_context = "ctx \x1b[2J STEER\u202e"
         self._seed(
             cli_db,
             [self._PREFIX, self._PREFIX + "0", self._ABOVE_WINDOW],
+            context=hostile_context,
         )
 
         result = self._run(cli_script_path, cli_db, verb, self._PREFIX)
@@ -4812,6 +4822,17 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
             assert "<U+202E>" in match["id"], (verb, match)
             assert not _has_raw_unsafe_char(match["id"]), (verb, match["id"])
             assert _has_raw_unsafe_char(match["raw_id"]), (verb, match["raw_id"])
+            # THE CONTEXT FIELD, which the id/prefix/message arms above do
+            # not measure. The CLI escapes it after _scrub, so the parsed
+            # field carries markers; a byte-level check would pass on the
+            # broken code because json.dumps already escapes the control
+            # character in the transport.
+            context = match["context"]
+            assert "<U+001B>" in context, (verb, context)
+            assert "<U+202E>" in context, (verb, context)
+            assert not _has_raw_unsafe_char(context), (
+                verb, repr(context)
+            )
 
         for surface in ("message", "prefix"):
             text = envelope[surface]
@@ -5302,6 +5323,59 @@ class TestTheRecordPayloadEscapesIdentityButNotContent:
         assert record["context"] == raw_context, (
             "memory content was escaped, which corrupts the data the caller "
             f"asked for: {record['context']!r}"
+        )
+
+    def test_a_bidi_stored_id_renders_inert_in_get_and_delete(
+        self, cli_script_path, cli_db
+    ):
+        """The `id` / `memory_id` pair of `_RECORD_IDENTITY_FIELDS`.
+
+        The arm above uses a safe hex id, so reducing the field tuple to
+        ('project_id', 'session_id') left the module green. A 32-character id
+        (identity-independent read) carries U+202E here and pins BOTH fields:
+        `get` reports it as the record's `id`, `delete` reports it as
+        `memory_id`. Memory CONTENT stays raw in the same payload.
+        """
+        from scripts.database import create_memory, get_connection
+
+        bidi_id = "a" * 15 + "\u202e" + "b" * 16
+        assert len(bidi_id) == 32
+        expected_id = "a" * 15 + "<U+202E>" + "b" * 16
+
+        conn = get_connection(cli_db)
+        try:
+            create_memory(conn, {
+                "id": bidi_id,
+                "context": "ID-CONTENT",
+                "project_id": "P",
+            })
+        finally:
+            conn.close()
+
+        got = subprocess.run(
+            [sys.executable, cli_script_path, "get", bidi_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert got.returncode == 0, (got.returncode, got.stderr)
+        record = json.loads(got.stdout)["result"]
+        assert record["id"] == expected_id, record["id"]
+        assert not _has_raw_unsafe_char(record["id"]), repr(record["id"])
+        assert record["context"] == "ID-CONTENT", (
+            "content was escaped alongside the identity field: "
+            f"{record['context']!r}"
+        )
+
+        deleted = subprocess.run(
+            [sys.executable, cli_script_path, "delete", bidi_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert deleted.returncode == 0, (deleted.returncode, deleted.stderr)
+        result = json.loads(deleted.stdout)["result"]
+        assert result["memory_id"] == expected_id, result["memory_id"]
+        assert not _has_raw_unsafe_char(result["memory_id"]), repr(
+            result["memory_id"]
         )
 
 
