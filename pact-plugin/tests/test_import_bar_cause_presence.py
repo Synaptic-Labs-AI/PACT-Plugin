@@ -89,6 +89,8 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 PACKAGE_DIR = Path(__file__).resolve().parent.parent / "scripts" / "memory_repair"
 
 # The anti-permission clause. Its absence is the defect this file exists for.
@@ -391,14 +393,10 @@ def _synthetic_tracked_package(tmp_path: Path) -> Path:
 
 
 def _tracked_package_python_files() -> list[Path]:
-    result = subprocess.run(
-        ["git", "-C", str(PACKAGE_DIR.parents[2]), "ls-files", "-z", "--",
-         "pact-plugin/scripts/memory_repair"], capture_output=True, check=False)
-    if result.returncode:
-        raise AssertionError(f"git ls-files failed for {PACKAGE_DIR}: {result.stderr!r}")
-    paths = [PACKAGE_DIR.parents[2] / raw.decode("utf-8")
-             for raw in result.stdout.split(b"\0") if raw]
-    return sorted(path for path in paths if path.suffix == ".py" and path.is_file())
+    repo_root = PACKAGE_DIR.parents[2]
+    relative = PACKAGE_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
 
 
 def _python_files(package_dir: Path) -> list[Path]:

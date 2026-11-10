@@ -34,20 +34,17 @@ import re
 import subprocess
 from pathlib import Path
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 _TESTS_DIR = Path(__file__).resolve().parent
 _PLUGIN_ROOT = _TESTS_DIR.parent
 
 
 def _tracked_surface(pattern):
-    result = subprocess.run(
-        ["git", "-C", str(_PLUGIN_ROOT.parent), "ls-files", "-z", "--", "pact-plugin"],
-        capture_output=True, check=False)
-    if result.returncode:
-        raise AssertionError(f"git ls-files failed for {pattern}: {result.stderr!r}")
-    paths = [_PLUGIN_ROOT.parent / raw.decode("utf-8")
-             for raw in result.stdout.split(b"\0") if raw]
-    return sorted(path for path in paths
-                  if Path(path.relative_to(_PLUGIN_ROOT)).match(pattern) and path.is_file())
+    relative = _PLUGIN_ROOT.relative_to(_PLUGIN_ROOT.parent).as_posix()
+    return sorted(
+        path for path in _tracked_files(_PLUGIN_ROOT.parent, relative)
+        if Path(path.relative_to(_PLUGIN_ROOT)).match(pattern))
 
 # LLM-loaded surfaces the census enumerates (agents, commands, skills,
 # protocols). The SSOT (pact-protocols.md) is enumerated SEPARATELY from its

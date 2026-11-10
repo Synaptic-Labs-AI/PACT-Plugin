@@ -20,6 +20,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 COMMANDS_DIR = PLUGIN_ROOT / "commands"
@@ -49,20 +51,14 @@ def _load_manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
 
-def _tracked_markdown(rel_dir: str, dir_path: Path) -> list[Path]:
-    result = subprocess.run(
-        ["git", "-C", str(PLUGIN_ROOT.parent), "ls-files", "-z", "--",
-         f"pact-plugin/{rel_dir}"], capture_output=True, check=False)
-    if result.returncode:
-        raise AssertionError(f"git ls-files failed for {dir_path}: {result.stderr!r}")
-    paths = [PLUGIN_ROOT.parent / raw.decode("utf-8")
-             for raw in result.stdout.split(b"\0") if raw]
-    return sorted(path for path in paths
-                  if path.parent == dir_path and path.suffix == ".md" and path.is_file())
+def _tracked_markdown(dir_path: Path) -> list[Path]:
+    relative = dir_path.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted(path for path in _tracked_files(PLUGIN_ROOT.parent, relative)
+                  if path.parent == dir_path and path.suffix == ".md")
 
 
 def _on_disk(rel_dir: str, dir_path: Path) -> set[str]:
-    return {f"./{rel_dir}/{p.name}" for p in _tracked_markdown(rel_dir, dir_path)}
+    return {f"./{rel_dir}/{p.name}" for p in _tracked_markdown(dir_path)}
 
 
 def test_every_command_md_file_is_registered():
@@ -130,7 +126,7 @@ def test_agent_frontmatter_name_matches_filename():
     different identifier than the file's declared name.
     """
     mismatches = []
-    for md in _tracked_markdown("agents", AGENTS_DIR):
+    for md in _tracked_markdown(AGENTS_DIR):
         declared = _frontmatter_name(md)
         if declared != md.stem:
             mismatches.append(
@@ -168,12 +164,12 @@ def test_tracked_manifest_population_controls_untracked_files(tmp_path, monkeypa
         ("agents", "pact-orchestrator.md"),
     ):
         dir_path = plugin / rel_dir
-        before = _tracked_markdown(rel_dir, dir_path)
+        before = _tracked_markdown(dir_path)
         assert dir_path / known_name in before
         stray = dir_path / "000_backend_manifest_issue1714_probe.md"
         stray.write_text("", encoding="utf-8")
         try:
-            assert _tracked_markdown(rel_dir, dir_path) == before
+            assert _tracked_markdown(dir_path) == before
         finally:
             stray.unlink()
 
@@ -183,7 +179,7 @@ def test_manifest_probe_coexists_with_raw_glob_teammate_consumer(tmp_path, monke
         tmp_path, {"agents/pact-orchestrator.md": ""})
     monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
     agents = plugin / "agents"
-    before = _tracked_markdown("agents", agents)
+    before = _tracked_markdown(agents)
     assert agents / "pact-orchestrator.md" in before
     stray = agents / "000_backend_manifest_issue1714_probe.md"
     shared_stray = AGENTS_DIR / stray.name
@@ -195,7 +191,7 @@ def test_manifest_probe_coexists_with_raw_glob_teammate_consumer(tmp_path, monke
         )
 
         test_every_teammate_agent_preloads_the_rule()
-        assert _tracked_markdown("agents", agents) == before
+        assert _tracked_markdown(agents) == before
         assert not shared_stray.exists()
     finally:
         stray.unlink()
@@ -207,4 +203,4 @@ def test_tracked_manifest_population_omits_a_deleted_member(monkeypatch):
     is_file = Path.is_file
     monkeypatch.setattr(
         Path, "is_file", lambda path: False if path == known else is_file(path))
-    assert known not in _tracked_markdown("agents", AGENTS_DIR)
+    assert known not in _tracked_markdown(AGENTS_DIR)

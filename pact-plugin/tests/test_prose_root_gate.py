@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 # claude_md_ambient (module-wide): the prose-root refusal is this module's
 # subject and is orthogonal to the CLAUDE.md resolution redirect; marked so
 # the redirect is explicitly not applied here. See tests/conftest.py.
@@ -140,14 +142,9 @@ ARM2_ALLOWLIST = [
 
 
 def _tracked_census_files(subdir):
-    result = subprocess.run(
-        ["git", "-C", str(PLUGIN_ROOT.parent), "ls-files", "-z", "--",
-         f"pact-plugin/{subdir}"], capture_output=True, check=False)
-    if result.returncode:
-        raise AssertionError(f"git ls-files failed for {subdir}: {result.stderr!r}")
-    paths = [PLUGIN_ROOT.parent / raw.decode("utf-8")
-             for raw in result.stdout.split(b"\0") if raw]
-    return sorted(path for path in paths if path.is_file())
+    directory = PLUGIN_ROOT / subdir
+    relative = directory.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted(_tracked_files(PLUGIN_ROOT.parent, relative))
 
 
 def _scanned_files():

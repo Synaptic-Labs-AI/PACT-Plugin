@@ -66,6 +66,8 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 PLUGIN = Path(__file__).resolve().parent.parent
 COMMANDS = PLUGIN / "commands"
 PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
@@ -95,16 +97,9 @@ _CONSOLIDATION_CLAIMS = {
 
 def _command_files():
     """Tracked shipped commands, excluding untracked and deleted files."""
-    result = subprocess.run(
-        ["git", "-C", str(PLUGIN.parent), "ls-files", "-z", "--",
-         "pact-plugin/commands"],
-        capture_output=True, check=False,
-    )
-    if result.returncode:
-        raise AssertionError(f"git ls-files failed for {COMMANDS}: {result.stderr!r}")
-    paths = [PLUGIN.parent / raw.decode("utf-8") for raw in result.stdout.split(b"\0") if raw]
-    return sorted(path for path in paths
-                  if path.parent == COMMANDS and path.suffix == ".md" and path.is_file())
+    relative = COMMANDS.relative_to(PLUGIN.parent).as_posix()
+    return sorted(path for path in _tracked_files(PLUGIN.parent, relative)
+                  if path.parent == COMMANDS and path.suffix == ".md")
 
 
 def _dispatched():

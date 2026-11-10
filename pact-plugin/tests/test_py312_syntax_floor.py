@@ -48,6 +48,8 @@ from typing import Iterable, Iterator, List
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 PLUGIN_ROOT = Path(__file__).parent.parent
 
 # Every bare-python3 surface in the plugin: code a consumer can end up running
@@ -80,15 +82,9 @@ KNOWN_TRACKED_MEMBERS = {
 
 
 def _tracked_python_files(root: Path) -> list[Path]:
-    relative_root = root.relative_to(PLUGIN_ROOT).as_posix()
-    result = subprocess.run(
-        ["git", "-C", str(PLUGIN_ROOT.parent), "ls-files", "-z", "--",
-         f"pact-plugin/{relative_root}"], capture_output=True, check=False)
-    if result.returncode:
-        raise AssertionError(f"git ls-files failed for {root}: {result.stderr!r}")
-    paths = [PLUGIN_ROOT.parent / raw.decode("utf-8")
-             for raw in result.stdout.split(b"\0") if raw]
-    return sorted(path for path in paths if path.suffix == ".py" and path.is_file())
+    relative = root.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted(path for path in _tracked_files(PLUGIN_ROOT.parent, relative)
+                  if path.suffix == ".py")
 
 
 def iter_python_files(roots: Iterable[Path] = SCANNED_ROOTS) -> Iterator[Path]:
