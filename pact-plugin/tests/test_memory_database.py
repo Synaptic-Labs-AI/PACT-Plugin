@@ -3948,13 +3948,14 @@ class TestTheWriteIngressGuardsTheAdoptedSessionId:
 
 
 class TestGetStatusFoldsAnUnusableDetectedSessionId:
-    """The status envelope FOLDS an unusable id and ESCAPES a display-unsafe one.
+    """The status envelope FOLDS an unusable id and reports a usable one RAW.
 
     Two rules, one envelope: `_unusable_identifier` rejects a control
     character or lone surrogate, which no row can carry, so the field folds
     to null; a bidi/format/separator character is ACCEPTED by design, so the
-    surviving value is rendered inert as its `<U+XXXX>` marker before it can
-    steer a consumer's display. A clean value passes through byte-identical.
+    surviving value is the stored value byte for byte — the caller may feed
+    it back as an identity, and the round-trip arms below do exactly that. A
+    clean value passes through byte-identical.
     """
 
     def _memory(self, tmp_path, monkeypatch, session_id, project=None):
@@ -4005,68 +4006,87 @@ class TestGetStatusFoldsAnUnusableDetectedSessionId:
             status = memory.get_status()
         assert status["session_id"] == "clean-session"
 
-    @pytest.mark.parametrize("char,marker", [
-        ("\u202e", "<U+202E>"),
-        ("\u2028", "<U+2028>"),
-    ])
-    def test_a_display_unsafe_detected_session_id_renders_inert(
-        self, tmp_path, monkeypatch, char, marker
+    @pytest.mark.parametrize("char", ["\u202e", "\u2028"])
+    def test_a_display_unsafe_detected_session_id_is_reported_raw(
+        self, tmp_path, monkeypatch, char
     ):
-        memory = self._memory(tmp_path, monkeypatch, f"bad{char}id")
-        with patch("scripts.memory_api._ensure_ready"):
-            status = memory.get_status()
-        assert status["session_id"] == f"bad{marker}id", (
-            "a display-unsafe detected session id reached the envelope raw: "
-            f"{status['session_id']!r}"
-        )
-
-    @pytest.mark.parametrize("char,marker", [
-        ("\u202e", "<U+202E>"),
-        ("\u2028", "<U+2028>"),
-    ])
-    def test_a_display_unsafe_detected_project_id_renders_inert(
-        self, tmp_path, monkeypatch, char, marker
-    ):
-        memory = self._memory(
-            tmp_path, monkeypatch, "clean-session", project=f"proj{char}X"
+        session_id = f"bad{char}id"
+        memory = self._memory(tmp_path, monkeypatch, session_id)
+        memory_id = memory.save(
+            {"context": "RAW-SESSION"}, sync_to_claude=False
         )
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
-        assert status["project_id"] == f"proj{marker}X", (
-            "a display-unsafe detected project id reached the envelope raw: "
-            f"{status['project_id']!r}"
+        assert status["session_id"] == session_id, (
+            "a display-unsafe detected session id did not reach the payload "
+            f"raw: {status['session_id']!r}"
         )
+        # ROUND TRIP: the reported session id filters to the saved row.
+        again = PACTMemory(
+            project_id=memory.project_id,
+            session_id=status["session_id"],
+            db_path=tmp_path / "status.db",
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            assert [m.id for m in again.list(session_only=True)] == [memory_id], (
+                "the reported session id did not filter to the saved row"
+            )
 
-    @pytest.mark.parametrize("char,marker", [
-        ("\u202e", "<U+202E>"),
-        ("\u2028", "<U+2028>"),
-    ])
-    def test_the_zeroed_arm_renders_a_display_unsafe_session_id(
-        self, tmp_path, monkeypatch, char, marker
+    @pytest.mark.parametrize("char", ["\u202e", "\u2028"])
+    def test_a_display_unsafe_detected_project_id_is_reported_raw(
+        self, tmp_path, monkeypatch, char
     ):
-        """The zeroed arm takes the same computed value, escape included."""
+        project = f"proj{char}X"
         memory = self._memory(
-            tmp_path, monkeypatch, f"bad{char}id", project="proj\udcff"
+            tmp_path, monkeypatch, "clean-session", project=project
+        )
+        memory.save({"context": "RAW-PROJECT"}, sync_to_claude=False)
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        assert status["project_id"] == project, (
+            "a display-unsafe detected project id did not reach the payload "
+            f"raw: {status['project_id']!r}"
+        )
+        # ROUND TRIP: the reported project id scopes to the saved row.
+        scoped = PACTMemory(
+            project_id=status["project_id"],
+            session_id="s",
+            db_path=tmp_path / "status.db",
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            assert scoped.get_status()["memory_count"] == 1, (
+                "the reported project id did not scope to the saved row"
+            )
+
+    @pytest.mark.parametrize("char", ["\u202e", "\u2028"])
+    def test_the_zeroed_arm_reports_a_display_unsafe_session_id_raw(
+        self, tmp_path, monkeypatch, char
+    ):
+        """The zeroed arm takes the same computed value, raw included."""
+        session_id = f"bad{char}id"
+        memory = self._memory(
+            tmp_path, monkeypatch, session_id, project="proj\udcff"
         )
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
         assert status["project_id"] is None
-        assert status["session_id"] == f"bad{marker}id", (
-            "the zeroed arm dropped the display escape: "
+        assert status["session_id"] == session_id, (
+            "the zeroed arm altered the session id: "
             f"{status['session_id']!r}"
         )
 
 
 class TestTheStatusCountersBindTheRawProjectScope:
-    """The envelope escapes; the QUERIES must not.
+    """The envelope carries the raw value; the QUERIES must bind the same.
 
     `get_status` promises its counters use the raw scope. If they ever bound
-    the ESCAPED form, a row stored under a bidi-containing project id would
-    stop counting (`memory_count` 0) while the envelope still showed the
-    marker — a silent undercount no existing status arm reddens on.
+    a transformed form, a row stored under a bidi-containing project id would
+    stop counting while the payload still reported the id — a silent
+    undercount no existing status arm reddens on. The round-trip below is the
+    stronger claim: the REPORTED id is the scope that counts the rows.
     """
 
-    def test_a_bidi_project_id_counts_its_rows_and_renders_inert(
+    def test_a_bidi_project_id_counts_its_rows_and_reports_it_raw(
         self, tmp_path, monkeypatch
     ):
         from scripts.memory_api import PACTMemory
@@ -4086,15 +4106,25 @@ class TestTheStatusCountersBindTheRawProjectScope:
         )
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
-        assert status["project_id"] == "proj<U+202E>X", status["project_id"]
+        assert status["project_id"] == project, status["project_id"]
         assert status["memory_count"] >= 1, (
-            "the counter bound the ESCAPED project id and matched no rows: "
-            f"{status['memory_count']!r}"
+            "the counter did not bind the raw project id and matched no "
+            f"rows: {status['memory_count']!r}"
         )
+        # ROUND TRIP: the reported id is the scope that counts these rows.
+        again = PACTMemory(
+            project_id=status["project_id"], session_id="s", db_path=db_path
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            assert again.get_status()["memory_count"] == status["memory_count"]
 
 
-class TestTheStatusEnvelopeEscapesTheDbPath:
-    """A path is a rendering surface too; the property keeps it raw."""
+class TestTheStatusEnvelopeCarriesTheDbPathRaw:
+    """The db path is a STRUCTURED payload value: raw, and it opens.
+
+    A caller that takes `status["db_path"]` and opens it must reach the same
+    store; an escaped payload made that path name no file.
+    """
 
     def _memory(self, tmp_path, monkeypatch, detected=None):
         from scripts.memory_api import PACTMemory
@@ -4116,27 +4146,36 @@ class TestTheStatusEnvelopeEscapesTheDbPath:
             db_path=tmp_path / "store\u202eX.db",
         )
 
-    def test_the_normal_arm_escapes_the_path_and_the_property_is_raw(
+    def test_the_normal_arm_reports_the_path_raw_and_it_opens(
         self, tmp_path, monkeypatch
     ):
         memory = self._memory(tmp_path, monkeypatch)
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
-        assert "<U+202E>" in status["db_path"], status["db_path"]
-        assert "\u202e" not in status["db_path"], (
-            f"the raw display-unsafe character reached the envelope: "
-            f"{status['db_path']!r}"
-        )
+        expected = str(tmp_path / "store\u202eX.db")
+        assert status["db_path"] == expected, status["db_path"]
         assert memory.db_path == tmp_path / "store\u202eX.db", (
             "the programmatic accessor must return the RAW path"
         )
+        # ROUND TRIP: the reported path opens the same store.
+        from scripts.database import get_connection
 
-    def test_the_zeroed_arm_escapes_the_path(self, tmp_path, monkeypatch):
+        conn = get_connection(Path(status["db_path"]))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_the_zeroed_arm_reports_the_path_raw(self, tmp_path, monkeypatch):
         memory = self._memory(tmp_path, monkeypatch, detected="proj\udcff")
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
         assert status["project_id"] is None
-        assert "<U+202E>" in status["db_path"], status["db_path"]
+        assert status["db_path"] == str(tmp_path / "store\u202eX.db"), (
+            status["db_path"]
+        )
 
 
 class TestTheSaveDisclosureStaysRawOnTheInstance:

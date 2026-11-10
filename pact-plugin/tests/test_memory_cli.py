@@ -4464,33 +4464,32 @@ class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
         assert env["project_id"] == "clean-project", env
 
 
-class TestTheSyncAndStatusEnvelopesEscapeDisplayUnsafeIds:
-    """A usable-but-display-unsafe detected id renders inert in BOTH envelopes.
+class TestTheSyncAndStatusEnvelopesCarryDisplayUnsafeIdsRaw:
+    """A usable-but-display-unsafe detected id is a STRUCTURED payload value.
 
     `_unusable_identifier` ACCEPTS bidi/format/separator characters by
-    design, so the fold does not remove them; the envelope construction runs
-    the surviving value through `escape_for_envelope`. `sync` and `status`
-    must agree, so both report the same folded+escaped value.
+    design, so the fold does not remove them; the payload carries the value
+    byte for byte so the caller can feed it back as a scope. `sync` and
+    `status` must agree, so both report the same raw value. The round-trip
+    below is the point: a row stored under the reported id is counted when
+    that id is fed back as a scope.
     """
 
-    @pytest.mark.parametrize("char,marker", [
-        ("\u202e", "<U+202E>"),
-        ("\u2028", "<U+2028>"),
-    ])
-    def test_a_display_unsafe_detected_id_renders_inert_in_sync_and_status(
-        self, cli_db, monkeypatch, capsys, char, marker
+    @pytest.mark.parametrize("char", ["\u202e", "\u2028"])
+    def test_a_display_unsafe_detected_id_is_reported_raw_in_sync_and_status(
+        self, cli_db, monkeypatch, capsys, char
     ):
         from scripts.cli import main
         from scripts.memory_api import PACTMemory
         from scripts.working_memory import SyncResult
 
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        detected = f"proj{char}X"
         monkeypatch.setattr(
             PACTMemory,
             "_detect_project_id_with_source",
-            staticmethod(lambda: (f"proj{char}X", "cwd")),
+            staticmethod(lambda: (detected, "cwd")),
         )
-        expected = f"proj{marker}X"
 
         with patch("scripts.memory_api._ensure_ready"), patch(
             "scripts.memory_api.project_memories_to_claude_md",
@@ -4500,30 +4499,55 @@ class TestTheSyncAndStatusEnvelopesEscapeDisplayUnsafeIds:
                 main(["sync", "--db-path", str(cli_db)])
         assert sync_exit.value.code == 0, sync_exit.value.code
         sync_env = json.loads(capsys.readouterr().out)["result"]
-        assert sync_env["project_id"] == expected, sync_env
+        assert sync_env["project_id"] == detected, sync_env
 
         with patch("scripts.memory_api._ensure_ready"):
             with pytest.raises(SystemExit) as status_exit:
                 main(["status", "--db-path", str(cli_db)])
         assert status_exit.value.code == 0, status_exit.value.code
         status_env = json.loads(capsys.readouterr().out)["result"]
-        assert status_env["project_id"] == expected, status_env
+        assert status_env["project_id"] == detected, status_env
+
+        # ROUND TRIP: the reported project id addresses a row stored under it.
+        from scripts.database import create_memory, get_connection
+
+        conn = get_connection(cli_db)
+        try:
+            create_memory(conn, {
+                "id": "m-raw-report",
+                "context": "ROUND-TRIP",
+                "project_id": status_env["project_id"],
+            })
+        finally:
+            conn.close()
+        scoped = PACTMemory(
+            project_id=status_env["project_id"],
+            session_id="s",
+            db_path=cli_db,
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            assert scoped.get_status()["memory_count"] == 1, (
+                "the reported project id did not scope to the stored row"
+            )
 
 
-class TestTheDiagnosticEnvelopesEscapeIdentityValues:
-    """Save's disclosure and the disagreement message are rendering surfaces.
+class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
+    """The split, pinned from both sides.
 
-    `last_project_scope` and the exception text stay RAW for programmatic
-    callers; the CLI envelopes display-render them, so a bidi/format
-    character appears as its `<U+XXXX>` marker.
+    Save's `project_scope` is a STRUCTURED payload: identity fields are the
+    stored value byte for byte, so the reported project id can be fed back as
+    a scope. The refusal and diagnostic `message` strings in the same class
+    are human-readable text and stay escaped. `last_project_scope` and the
+    exception text are raw for programmatic callers either way.
     """
 
-    def test_the_save_disclosure_renders_identity_fields_inert(
+    def test_the_save_disclosure_reports_identity_fields_raw(
         self, cli_db, monkeypatch, capsys
     ):
         from pathlib import Path
 
         from scripts.cli import main
+        from scripts.memory_api import PACTMemory
 
         bidi = "proj\u202eX"
         monkeypatch.setattr(
@@ -4542,8 +4566,19 @@ class TestTheDiagnosticEnvelopesEscapeIdentityValues:
         assert exit_info.value.code == 0, exit_info.value.code
         env = json.loads(capsys.readouterr().out)["result"]
         scope = env["project_scope"]
-        assert scope["project_id"] == "proj<U+202E>X", scope
-        assert scope["cwd_repo"] == "proj<U+202E>X", scope
+        assert scope["project_id"] == bidi, scope
+        assert scope["cwd_repo"] == bidi, scope
+
+        # ROUND TRIP: the reported project id addresses the saved row.
+        scoped = PACTMemory(
+            project_id=scope["project_id"],
+            session_id="s",
+            db_path=cli_db,
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            assert [memory.id for memory in scoped.list()] == [
+                env["memory_id"]
+            ], "the reported project id did not scope to the saved row"
 
     def test_the_disagreement_message_renders_identity_values_inert(
         self, cli_db, monkeypatch, capfd
@@ -5282,19 +5317,34 @@ class TestTheRemainingCallerEchoesAreEscaped:
         assert not _has_raw_unsafe_char_total(envelope["message"])
 
 
-class TestTheRecordPayloadEscapesIdentityButNotContent:
-    """F2: one display policy for record identity fields.
+class TestTheRecordPayloadCarriesStoredIdentitiesRaw:
+    """Structured record payloads carry the STORED identity, not display text.
 
-    `MemoryObject.to_dict()` stays raw for programmatic callers; the CLI's
-    `_record_envelope` renders `id`/`memory_id`/`project_id`/`session_id`
-    inert while leaving memory CONTENT raw. A full 32-character id is used so
-    the read is identity-independent and needs no project pin.
+    A caller reads an id from `get`/`list`/`save` and passes it back to
+    `get`/`update`/`delete`; escaping the payload value broke that round trip
+    (Bugbot). Identity fields are the stored value byte for byte, and memory
+    CONTENT stays raw too — it is the data the caller asked for. Escaping is
+    confined to human-readable `message` strings, which the companion arm
+    below pins for the same hostile values.
     """
 
-    def test_a_bidi_project_and_session_render_inert_context_stays_raw(
+    # 32 characters: the by-id branch, so no project-scoped prefix resolver
+    # is involved and the id is the whole subject of the round trip.
+    _ANGLE_ID = "a" * 15 + "<" + "b" * 16
+    _BIDI_ID = "a" * 15 + "\u202e" + "b" * 16
+
+    @staticmethod
+    def _run(cli_script_path, cli_db, argv, stdin_data=None):
+        return subprocess.run(
+            [sys.executable, cli_script_path, *argv, "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60, input=stdin_data,
+        )
+
+    def test_a_bidi_project_and_session_are_reported_raw(
         self, cli_script_path, cli_db
     ):
         from scripts.database import create_memory, get_connection
+        from scripts.memory_api import PACTMemory
 
         full_id = "a" * 31 + "1"
         bidi_project = "proj\u202eX"
@@ -5311,71 +5361,103 @@ class TestTheRecordPayloadEscapesIdentityButNotContent:
         finally:
             conn.close()
 
-        result = subprocess.run(
-            [sys.executable, cli_script_path, "get", full_id,
-             "--db-path", str(cli_db)],
-            capture_output=True, text=True, timeout=60,
-        )
+        result = self._run(cli_script_path, cli_db, ["get", full_id])
         assert result.returncode == 0, (result.returncode, result.stderr)
         record = json.loads(result.stdout)["result"]
-        assert record["project_id"] == "proj<U+202E>X", record["project_id"]
-        assert record["session_id"] == "sess<U+202E>Y", record["session_id"]
+        assert record["project_id"] == bidi_project, record["project_id"]
+        assert record["session_id"] == bidi_session, record["session_id"]
         assert record["context"] == raw_context, (
             "memory content was escaped, which corrupts the data the caller "
             f"asked for: {record['context']!r}"
         )
 
-    def test_a_bidi_stored_id_renders_inert_in_get_and_delete(
-        self, cli_script_path, cli_db
+        # ROUND TRIP: both reported values address the stored row.
+        scoped = PACTMemory(
+            project_id=record["project_id"],
+            session_id=record["session_id"],
+            db_path=cli_db,
+        )
+        with patch("scripts.memory_api._ensure_ready"):
+            assert [
+                memory.id for memory in scoped.list(session_only=True)
+            ] == [full_id], (
+                "the reported identity fields did not scope to the stored row"
+            )
+
+    @pytest.mark.parametrize(
+        "hostile_id", [_ANGLE_ID, _BIDI_ID], ids=["angle", "bidi"]
+    )
+    def test_a_hostile_id_round_trips_through_get_update_delete(
+        self, cli_script_path, cli_db, hostile_id
     ):
-        """The `id` / `memory_id` pair of `_RECORD_IDENTITY_FIELDS`.
+        """Bugbot's regression: the value read back must be the address.
 
-        The arm above uses a safe hex id, so reducing the field tuple to
-        ('project_id', 'session_id') left the module green. A 32-character id
-        (identity-independent read) carries U+202E here and pins BOTH fields:
-        `get` reports it as the record's `id`, `delete` reports it as
-        `memory_id`. Memory CONTENT stays raw in the same payload.
+        Save the hostile id, read it back from `get`, then feed THAT RETURNED
+        VALUE to get/update/delete and assert all three succeed. Re-adding a
+        payload escape turns the returned value into marker text and every
+        replay fails with NOT_FOUND.
         """
-        from scripts.database import create_memory, get_connection
+        saved = self._run(cli_script_path, cli_db, ["save", json.dumps({
+            "context": "ROUND-TRIP",
+            "id": hostile_id,
+        }), "--no-sync"])
+        assert saved.returncode == 0, (saved.returncode, saved.stderr)
+        assert json.loads(saved.stdout)["result"]["memory_id"] == hostile_id
 
-        bidi_id = "a" * 15 + "\u202e" + "b" * 16
-        assert len(bidi_id) == 32
-        expected_id = "a" * 15 + "<U+202E>" + "b" * 16
-
-        conn = get_connection(cli_db)
-        try:
-            create_memory(conn, {
-                "id": bidi_id,
-                "context": "ID-CONTENT",
-                "project_id": "P",
-            })
-        finally:
-            conn.close()
-
-        got = subprocess.run(
-            [sys.executable, cli_script_path, "get", bidi_id,
-             "--db-path", str(cli_db)],
-            capture_output=True, text=True, timeout=60,
-        )
+        got = self._run(cli_script_path, cli_db, ["get", hostile_id])
         assert got.returncode == 0, (got.returncode, got.stderr)
-        record = json.loads(got.stdout)["result"]
-        assert record["id"] == expected_id, record["id"]
-        assert not _has_raw_unsafe_char(record["id"]), repr(record["id"])
-        assert record["context"] == "ID-CONTENT", (
-            "content was escaped alongside the identity field: "
-            f"{record['context']!r}"
+        returned_id = json.loads(got.stdout)["result"]["id"]
+        assert returned_id == hostile_id, (
+            "the payload id is not the stored value: "
+            f"{returned_id!r}"
         )
 
-        deleted = subprocess.run(
-            [sys.executable, cli_script_path, "delete", bidi_id,
-             "--db-path", str(cli_db)],
-            capture_output=True, text=True, timeout=60,
+        replay_get = self._run(cli_script_path, cli_db, ["get", returned_id])
+        assert replay_get.returncode == 0, (
+            "the get payload could not be fed back to get: "
+            f"{(replay_get.returncode, replay_get.stderr)}"
         )
-        assert deleted.returncode == 0, (deleted.returncode, deleted.stderr)
-        result = json.loads(deleted.stdout)["result"]
-        assert result["memory_id"] == expected_id, result["memory_id"]
-        assert not _has_raw_unsafe_char(result["memory_id"]), repr(
-            result["memory_id"]
+        replay_update = self._run(
+            cli_script_path, cli_db, ["update", returned_id, "--stdin"],
+            stdin_data=json.dumps({"context": "UPDATED"}),
+        )
+        assert replay_update.returncode == 0, (
+            "the get payload could not be fed back to update: "
+            f"{(replay_update.returncode, replay_update.stderr)}"
+        )
+        replay_delete = self._run(
+            cli_script_path, cli_db, ["delete", returned_id]
+        )
+        assert replay_delete.returncode == 0, (
+            "the get payload could not be fed back to delete: "
+            f"{(replay_delete.returncode, replay_delete.stderr)}"
+        )
+        assert json.loads(replay_delete.stdout)["result"]["memory_id"] == (
+            hostile_id
+        )
+
+    @pytest.mark.parametrize(
+        "hostile_id", [_ANGLE_ID, _BIDI_ID], ids=["angle", "bidi"]
+    )
+    def test_the_same_value_is_still_escaped_in_an_error_message(
+        self, cli_script_path, cli_db, hostile_id
+    ):
+        """The split's other direction: `message` is display, not data.
+
+        The store is empty, so the read refuses with NOT_FOUND and the
+        caller-supplied id appears only in the human-readable message, where
+        it is marker-escaped exactly once.
+        """
+        result = self._run(cli_script_path, cli_db, ["get", hostile_id])
+        assert result.returncode == 1, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "NOT_FOUND", envelope
+        escaped = hostile_id.replace("<", "<U+003C>").replace(
+            "\u202e", "<U+202E>"
+        )
+        assert escaped in envelope["message"], envelope["message"]
+        assert not _has_raw_unsafe_char(envelope["message"]), repr(
+            envelope["message"]
         )
 
 
