@@ -375,6 +375,12 @@ class TestCiInvocationCollectsTheWholeCorpus:
             with pytest.raises(AssertionError, match="PARSE FAILURE"):
                 ci_contract.normalized_workflow_test_argv(command)
 
+    def test_unbalanced_quote_is_a_named_parse_failure(self):
+        with pytest.raises(AssertionError,
+                           match="PARSE FAILURE.*does not tokenize"):
+            ci_contract.normalized_workflow_test_argv(
+                'python -m pytest -ra -n 4 --dist "loadfile')
+
     def test_ci_invocation_and_full_corpus_collect_the_same_tests(self):
         """COLLECTION PARITY: what CI collects must equal the whole corpus.
 
