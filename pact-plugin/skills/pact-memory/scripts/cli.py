@@ -752,9 +752,15 @@ def cmd_get(args, db_path=None):
         # Scrub user HOME from each match's `context` snippet so a memory
         # whose context recorded an absolute path doesn't leak it via the
         # disambiguation envelope. Per-site scrub keeps the redaction
-        # obvious; do not centralize into `_error`.
+        # obvious; do not centralize into `_error`. THEN RENDER IT INERT:
+        # `_scrub` only redacts HOME and does not escape, so a control or
+        # bidi character would otherwise reach the terminal of a reader
+        # that parses the envelope and prints it. `matches[].id` is already
+        # the display form and `matches[].raw_id` is the replay-only raw
+        # value; see AmbiguousPrefixError for that contract.
         scrubbed_matches = [
-            {**m, "context": _scrub(m["context"])} for m in exc.matches
+            {**m, "context": escape_for_envelope(_scrub(m["context"]))}
+            for m in exc.matches
         ]
         _error(
             "AMBIGUOUS_PREFIX",
@@ -841,9 +847,15 @@ def cmd_update(args, db_path=None):
         # Scrub user HOME from each match's `context` snippet so a memory
         # whose context recorded an absolute path doesn't leak it via the
         # disambiguation envelope. Per-site scrub keeps the redaction
-        # obvious; do not centralize into `_error`.
+        # obvious; do not centralize into `_error`. THEN RENDER IT INERT:
+        # `_scrub` only redacts HOME and does not escape, so a control or
+        # bidi character would otherwise reach the terminal of a reader
+        # that parses the envelope and prints it. `matches[].id` is already
+        # the display form and `matches[].raw_id` is the replay-only raw
+        # value; see AmbiguousPrefixError for that contract.
         scrubbed_matches = [
-            {**m, "context": _scrub(m["context"])} for m in exc.matches
+            {**m, "context": escape_for_envelope(_scrub(m["context"]))}
+            for m in exc.matches
         ]
         _error(
             "AMBIGUOUS_PREFIX",
@@ -976,9 +988,15 @@ def cmd_delete(args, db_path=None):
         # Scrub user HOME from each match's `context` snippet so a memory
         # whose context recorded an absolute path doesn't leak it via the
         # disambiguation envelope. Per-site scrub keeps the redaction
-        # obvious; do not centralize into `_error`.
+        # obvious; do not centralize into `_error`. THEN RENDER IT INERT:
+        # `_scrub` only redacts HOME and does not escape, so a control or
+        # bidi character would otherwise reach the terminal of a reader
+        # that parses the envelope and prints it. `matches[].id` is already
+        # the display form and `matches[].raw_id` is the replay-only raw
+        # value; see AmbiguousPrefixError for that contract.
         scrubbed_matches = [
-            {**m, "context": _scrub(m["context"])} for m in exc.matches
+            {**m, "context": escape_for_envelope(_scrub(m["context"]))}
+            for m in exc.matches
         ]
         _error(
             "AMBIGUOUS_PREFIX",

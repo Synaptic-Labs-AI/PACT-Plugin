@@ -120,9 +120,21 @@ class PrefixTooShortError(ValueError):
 class AmbiguousPrefixError(LookupError):
     """Raised when a memory-ID prefix matches multiple stored memories.
 
-    The `matches` attribute is a list of {"id", "context"} dicts capped at
-    AMBIGUOUS_MATCH_CAP entries. `total_matches` is the true row count and
-    `matches_capped` is True when the cap was applied.
+    The `matches` attribute is a list of {"id", "raw_id", "context",
+    "context_truncated"} dicts capped at AMBIGUOUS_MATCH_CAP entries.
+    `total_matches` is the true row count and `matches_capped` is True when
+    the cap was applied.
+
+    `id` IS THE DISPLAY FORM and `raw_id` IS THE REPLAY FORM. A stored id may
+    be caller-supplied, so it can carry a control or bidi character the
+    store accepts and no display can safely render; `id` therefore goes
+    through `escape_for_envelope` here, at the envelope's payload
+    construction, so every consumer of this exception gets a safe display
+    value. A caller that must replay the id (to disambiguate, then fetch)
+    uses `raw_id`, which is deliberately NOT escaped and MUST NOT be printed.
+    `context` stays RAW here: it is memory content, and escaping it would
+    corrupt the data a programmatic caller reads. The CLI is the rendering
+    boundary that scrubs and escapes it.
     """
 
     def __init__(
@@ -1217,7 +1229,10 @@ def resolve_memory_id_prefix(
         full_context = row["context"] or ""
         snippet = full_context[:descriptor_chars]
         matches.append({
-            "id": row["id"],
+            # `id` is the display form, `raw_id` the replay form; see the
+            # exception's docstring for the contract and why this boundary.
+            "id": escape_for_envelope(row["id"]),
+            "raw_id": row["id"],
             "context": snippet,
             # Per-match flag distinct from the list-level `matches_capped`
             # on the exception: signals that THIS row's `context` was
