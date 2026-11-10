@@ -974,7 +974,12 @@ class TestStep3RefusesASymlinkedCreationPath:
         self._assert_no_branch(repo, "foo/bar")
 
     def test_a_dangling_symlink_is_refused(self, isolated_git_config, tmp_path):
-        """A dangling link is `-L` true and `-e` false; walking past it would escape."""
+        """A dangling link is `-L` true and `-e` false; walking past it would escape.
+
+        The cause is UNRESOLVABLE, not an escape: the link cannot be resolved to a
+        directory at all, so the message names that rather than claiming a path
+        outside `.worktrees/`.
+        """
         repo = make_empty_repo(tmp_path)
         (repo / ".worktrees").mkdir()
         target = repo / ".worktrees" / BRANCH
@@ -985,9 +990,46 @@ class TestStep3RefusesASymlinkedCreationPath:
         assert done.returncode != 0, (
             f"Step 3 walked past a dangling symlink: {done.stdout!r}"
         )
-        assert "resolves outside .worktrees/." in done.stdout, (
-            f"the refusal lost its cause: {done.stdout.strip()!r}"
+        assert (
+            f"Cannot create worktree: {target} cannot be resolved to a "
+            f"directory, so {target} cannot be created."
+        ) in done.stdout, f"the refusal lost its cause: {done.stdout.strip()!r}"
+        self._assert_no_branch(repo, BRANCH)
+
+    def test_a_plain_file_target_is_refused(self, isolated_git_config, tmp_path):
+        """A regular file at the target exists, so the walk stops there, and
+        `cd` cannot enter it — the same unresolvable cause, not an escape."""
+        repo = make_empty_repo(tmp_path)
+        (repo / ".worktrees").mkdir()
+        target = repo / ".worktrees" / BRANCH
+        target.parent.mkdir(parents=True)
+        target.write_text("not a directory\n", encoding="utf-8")
+
+        done = run_fence(self._step3(), repo)
+        assert done.returncode != 0, (
+            f"Step 3 accepted a plain file at the target: {done.stdout!r}"
         )
+        assert (
+            f"Cannot create worktree: {target} cannot be resolved to a "
+            f"directory, so {target} cannot be created."
+        ) in done.stdout, f"the refusal lost its cause: {done.stdout.strip()!r}"
+        self._assert_no_branch(repo, BRANCH)
+
+    def test_a_dangling_collection_root_is_refused(
+        self, isolated_git_config, tmp_path
+    ):
+        """A root that cannot be resolved is its own cause, not a target escape:
+        `mkdir -p` cannot make it and `cd` cannot enter it."""
+        repo = make_empty_repo(tmp_path)
+        (repo / ".worktrees").symlink_to(tmp_path / "nowhere", target_is_directory=True)
+
+        done = run_fence(self._step3(), repo)
+        assert done.returncode != 0, (
+            f"Step 3 accepted a dangling collection root: {done.stdout!r}"
+        )
+        assert (
+            f"Cannot create worktree: cannot resolve {repo / '.worktrees'}."
+        ) in done.stdout, f"the refusal lost its cause: {done.stdout.strip()!r}"
         self._assert_no_branch(repo, BRANCH)
 
     def test_a_nested_branch_still_creates_under_worktrees(
@@ -1042,6 +1084,30 @@ class TestSymlinkedCollectionRootIsSupported:
             .returncode
             == 0
         ), "the branch was not created under the resolved root"
+
+    def test_the_step_states_the_root_is_supported(self):
+        """The instruction surface must not fall silent about the supported root.
+
+        The executable arm above proves the behaviour; an agent reading Step 3
+        acts on the prose, so the prose must say the root is supported and that
+        the worktree is created at its resolved location. The reverted refusal
+        left this surface saying the opposite, and silence would let an agent
+        refuse the layout the fence accepts.
+        """
+        block = _section(
+            SKILL_FILE.read_text(encoding="utf-8"), "### Step 3:", "### Step 4:"
+        )
+        assert "A `.worktrees` that is itself a symlink is supported" in block, (
+            "Step 3 no longer states that a symlinked .worktrees root is "
+            "supported, so an agent can refuse the layout the fence accepts"
+        )
+        assert "created at the resolved location" in block, (
+            "Step 3 no longer states that the worktree is created at the "
+            "resolved location"
+        )
+        assert block.index("is supported") < block.index("```bash"), (
+            "the supported-root statement must reach the agent before the fence"
+        )
 
 
 _DELIMITER_SITES = [pytest.param(label, id=label) for label in _SITES]
@@ -3161,6 +3227,53 @@ class TestExcludeWriteFailureWithAPreExistingLink:
         assert link.is_symlink(), "the fence removed a link it did not create"
         assert done.stderr == "", (
             f"the write-failure path must stay silent on stderr; got {done.stderr!r}"
+        )
+
+    def test_a_link_ignored_by_another_rule_is_not_called_a_hazard(
+        self, isolated_git_config, tmp_path
+    ):
+        """The warning must not cry a hazard a real `check-ignore` disproves.
+
+        A committed `.gitignore` already ignores `/.venv`, so the link is safe
+        even though this run could not write `info/exclude`. The old text said
+        "NOT ignored" without asking git; the fence now probes and reports that
+        the link stays in place and is still ignored by another rule. This is the
+        state the probe exists for: the only one where the two branches differ.
+        """
+        repo, worktree = make_repo(tmp_path, gitignore="/.venv\n.worktrees/\n")
+        link = worktree / ".venv"
+        link.symlink_to(repo / ".venv", target_is_directory=True)
+        exclude = exclude_path(worktree)
+        # A regular file where `info/` should be makes `mkdir -p` fail, WITHOUT
+        # breaking git's exclude machinery. A directory AT info/exclude would
+        # also make `check-ignore` itself fatal (measured: rc 128), which would
+        # route the fence to the NOT-ignored branch and skip this state.
+        shutil.rmtree(exclude.parent)
+        exclude.parent.write_text("not a directory\n", encoding="utf-8")
+        assert (
+            git(worktree, "check-ignore", "-q", ".venv", check=False).returncode == 0
+        ), (
+            "the fixture no longer ignores .venv by the committed .gitignore, so "
+            "this arm would not reach the 'still ignored' branch"
+        )
+
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert done.returncode == 0, (
+            f"the fence must warn and continue, not fail: {done.stderr.strip()}"
+        )
+        assert (
+            f"WARNING: could not write {exclude} — {link} stays in place and is "
+            "still ignored by another rule; re-run setup to retry the exclude write"
+        ) in done.stdout, (
+            "the warning named a hazard that check-ignore disproves, or lost the "
+            f"remedy. stdout={done.stdout.strip()!r}"
+        )
+        assert link.is_symlink(), "the fence removed a pre-existing link"
+        assert porcelain(worktree) == "", (
+            f"an ignored link left the worktree dirty: {porcelain(worktree)!r}"
+        )
+        assert done.stderr == "", (
+            f"the ignored branch must stay silent on stderr; got {done.stderr!r}"
         )
 
 
