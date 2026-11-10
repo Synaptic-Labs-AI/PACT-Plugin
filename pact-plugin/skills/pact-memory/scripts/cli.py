@@ -548,7 +548,9 @@ def _record_envelope(record: dict) -> dict:
     project id appears as its `<U+XXXX>` marker instead of reaching a
     reader's terminal. MEMORY CONTENT STAYS RAW: a memory's own text and
     context are the data the caller asked for, and escaping them would
-    corrupt it.
+    corrupt it. That exception covers the CLAUDE.md projection too (`sync`
+    writes the user's own text): escaping content there would corrupt the
+    memory rather than protect a reader.
     """
     rendered = dict(record)
     for field in _RECORD_IDENTITY_FIELDS:
