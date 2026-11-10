@@ -1929,6 +1929,10 @@ class PACTMemory:
         Raises:
             PrefixTooShortError: prefix is shorter than the minimum.
             AmbiguousPrefixError: prefix matches more than one memory.
+            ProjectIdentityUnresolvedError: a prefix was supplied while no
+                USABLE project identity could be resolved (absent, or a
+                detected value that cannot be bound). A full 32-character
+                id still resolves.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
