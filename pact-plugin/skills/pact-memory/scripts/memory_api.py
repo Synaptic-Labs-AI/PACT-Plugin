@@ -2247,6 +2247,18 @@ class PACTMemory:
         the OBSERVED invariant is still broken. The second half means
         re-issuing the same update after an interrupted cascade finishes it
         rather than reading as a no-op.
+
+        BOUND ON CONCURRENT RE-KEYS, stated here because it is the one
+        window the re-read cannot close: the target is read ONCE, after
+        update_memory's commit, and a writer that lands INSIDE this cascade
+        can still leave one link keyed to its own project while the row
+        carries another's (measured: row projC, links [projB, projC]). No
+        read serves that link — every memory and vector read confirms the
+        row's stored project — and `get_graph_stats` counts the file under
+        the scope that owns its row. Re-issuing the same update sees the
+        link as stale and clears it. Documentation rather than an unbounded
+        second pass: any further pass only narrows a window a later write
+        reopens, and the re-issue already repairs it.
         """
         linked = conn.execute(
             "SELECT f.id AS file_id, f.path AS path, "
