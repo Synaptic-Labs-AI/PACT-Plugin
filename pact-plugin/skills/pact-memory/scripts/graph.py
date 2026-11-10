@@ -745,6 +745,17 @@ def get_graph_stats(
     """
     Get statistics about the graph.
 
+    EVERY COUNTER FOLLOWS THE SAME VISIBILITY RULE when `project_id` is
+    given: a row is counted under a project only when every stored row a
+    scoped read would confirm belongs to that project. Files and memories are
+    single-row counts. A memory-file link is counted only when BOTH its file
+    row and its memory row are in the project, and a file-file relation only
+    when BOTH endpoints are, because that is exactly the set the scoped read
+    surfaces (`get_memories_for_file`, `get_file_relations`) can return. A
+    legacy cross-project link or relation is therefore counted under NEITHER
+    project — it is invisible from both scoped reads and visible only in the
+    unscoped (`project_id=None`) whole-store count.
+
     Args:
         conn: Active database connection.
         project_id: Optional project filter.
@@ -776,12 +787,36 @@ def get_graph_stats(
         cursor = conn.execute("SELECT COUNT(*) FROM memories")
     stats["memories"] = cursor.fetchone()[0]
 
-    # Memory-file links
-    cursor = conn.execute("SELECT COUNT(*) FROM memory_files")
+    # Memory-file links: both the file's and the memory's stored project must
+    # match, or the link is not visible to a scoped read of either side.
+    if project_id:
+        cursor = conn.execute(
+            """
+            SELECT COUNT(*) FROM memory_files mf
+            JOIN files f ON f.id = mf.file_id
+            JOIN memories m ON m.id = mf.memory_id
+            WHERE f.project_id = ? AND m.project_id = ?
+            """,
+            (project_id, project_id)
+        )
+    else:
+        cursor = conn.execute("SELECT COUNT(*) FROM memory_files")
     stats["memory_file_links"] = cursor.fetchone()[0]
 
-    # File-file relations
-    cursor = conn.execute("SELECT COUNT(*) FROM file_relations")
+    # File-file relations: both endpoints must match, because a scoped
+    # relation read confirms the endpoint's stored project.
+    if project_id:
+        cursor = conn.execute(
+            """
+            SELECT COUNT(*) FROM file_relations fr
+            JOIN files sf ON sf.id = fr.source_file
+            JOIN files tf ON tf.id = fr.target_file
+            WHERE sf.project_id = ? AND tf.project_id = ?
+            """,
+            (project_id, project_id)
+        )
+    else:
+        cursor = conn.execute("SELECT COUNT(*) FROM file_relations")
     stats["file_relations"] = cursor.fetchone()[0]
 
     return stats
