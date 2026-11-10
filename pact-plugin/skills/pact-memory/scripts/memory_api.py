@@ -1381,10 +1381,26 @@ class PACTMemory:
         # so we never reference a phantom memory in working memory)
         if memory_id is None:
             raise RuntimeError("Save failed — no memory_id returned")
-        verification = self.get(memory_id)
-        if verification is None:
+        # VERIFY BY EXACT ID, NOT THROUGH THE PREFIX RESOLVER. `self.get()`
+        # routes an id shorter than 32 characters through the project-scoped
+        # prefix resolver, so it judged a SUCCESSFUL save with a lookup scoped
+        # to the INSTANCE's identity: a payload project that differs from the
+        # detected one, or no usable detected identity at all, turned a
+        # committed row into "not found" — and a retry then collided on the
+        # primary key. The row just written is addressable by its exact id;
+        # read it that way and confirm it carries the project this call filed
+        # it under.
+        effective_project = memory.get("project_id")
+        with db_connection() as conn:
+            ensure_initialized(conn)
+            verification = get_memory(conn, memory_id)
+        if (
+            verification is None
+            or verification.get("project_id") != effective_project
+        ):
             raise RuntimeError(
-                f"Save verification failed — memory_id {memory_id} not found after save"
+                f"Save verification failed — memory_id {memory_id} not found "
+                f"under project {effective_project!r} after save"
             )
 
         # DISCLOSURE (primary): report, IN THIS CALL'S RETURN VALUE, how this
