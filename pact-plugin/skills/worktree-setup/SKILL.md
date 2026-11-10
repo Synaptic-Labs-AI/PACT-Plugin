@@ -92,13 +92,24 @@ PACT BRANCH
 [ -z "$BRANCH_EXTRA" ] || { echo "Cannot create worktree: the branch value must be a single line."; exit 1; }
 [ "$BRANCH" != "$(printf '{%s}' branch)" ] || { echo "Cannot create worktree: the branch placeholder was not substituted."; exit 1; }
 git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { echo "Cannot create worktree: invalid branch name."; exit 1; }
-git worktree add "$REPO_ROOT/.worktrees/$BRANCH" -b "$BRANCH"
+
+# Refuse unless the target resolves under .worktrees/ — a symlink there can send the worktree elsewhere.
+mkdir -p "$REPO_ROOT/.worktrees"
+TARGET="$REPO_ROOT/.worktrees/$BRANCH"
+BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
+EXISTING="$TARGET"
+while [ ! -e "$EXISTING" ] && [ ! -L "$EXISTING" ] && [ "$EXISTING" != "$REPO_ROOT/.worktrees" ]; do
+  EXISTING=$(dirname "$EXISTING")
+done
+EXISTING_PHYS=$(cd "$EXISTING" 2>/dev/null && pwd -P)
+[ -n "$BASE_PHYS" ] && [ -n "$EXISTING_PHYS" ] && { [ "$EXISTING_PHYS" = "$BASE_PHYS" ] || [ "${EXISTING_PHYS#"$BASE_PHYS"/}" != "$EXISTING_PHYS" ]; } || { echo "Cannot create worktree: $TARGET resolves outside .worktrees/."; exit 1; }
+git worktree add "$TARGET" -b "$BRANCH"
 ```
 
 Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-auth--backend` for sub-scopes).
 
 **If creation fails**:
-- Branch already exists: Ask user whether to check out the existing branch. If yes, run the Step 3 block unchanged except for dropping `-b` (`git worktree add "$REPO_ROOT/.worktrees/$BRANCH" "$BRANCH"`), keeping the branch read and validation.
+- Branch already exists: Ask user whether to check out the existing branch. If yes, run the Step 3 block unchanged except for dropping `-b` (`git worktree add "$TARGET" "$BRANCH"`), keeping the branch read, validation and containment check.
 - Disk/permissions error: Surface git's error message and offer fallback to working in the main repo directory
 
 ### Step 4: Link the Repo venv (if present)
@@ -227,6 +238,7 @@ Branch: {branch}
 | Reused worktree at a non-conventional path | The worktree is still reused; Step 4 prints `Venv link: skipped (a worktree for $BRANCH is registered, but $WORKTREE is not a live worktree; no link is created)`, and no link or rule is written. Pyright import resolution does not apply there, because no link is created |
 | No worktree was created or registered for the branch (Step 3 failed or was skipped) | Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE — Step 3 did not create one)` and writes nothing |
 | Worktree path outside `.worktrees/` | Step 4 prints `Venv link: skipped (worktree path is not under .worktrees/)`; no link or rule is written |
+| The target path reaches outside `.worktrees/` through a symlink | Step 3 refuses before creating anything with `Cannot create worktree: … resolves outside .worktrees/.`; a symlinked target or a symlinked intermediate directory is not followed |
 | Invalid branch name, a multi-line value, or an unsubstituted `{branch}` placeholder | Step 3 stops before `git worktree add`; Step 4 prints the corresponding `Venv link: skipped (…)` line and writes nothing |
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
 | Branch name already exists | Ask user: check out existing or create new name |
