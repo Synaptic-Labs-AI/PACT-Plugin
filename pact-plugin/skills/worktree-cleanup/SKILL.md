@@ -40,9 +40,9 @@ Present the list and ask: "Which worktree should I remove?"
 
 `git worktree remove` deletes the worktree's `docs/` directory **irrecoverably** — that directory is gitignored and worktree-ephemeral, so the phase artifacts it holds (`docs/preparation/`, `docs/architecture/`, `docs/plans/`, `docs/review/`, `docs/decision-logs/`) are gone the instant the worktree is removed. Those artifacts are the **fuller substance** behind each phase's distilled HANDOFF. This step is the single chokepoint that protects them for **all** teardown callers — `peer-review` auto-cleanup, CONSOLIDATE sub-scope early-teardown, and manual `/PACT:worktree-cleanup` alike — so harvest MUST precede remove.
 
-Run this exact command, substituting the target worktree's absolute path from Step 1 — the same path Step 2 will remove.
+Run this exact command, substituting the target worktree's absolute path from Step 1 — that path is the harvest target. Step 2 removes only the `.worktrees/{branch}` form, so a worktree named by a path elsewhere is harvested here and then refused by Step 2; report that mismatch instead of reading the harvest as covering the removal.
 
-`{abs_worktree}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a worktree path this step accepts — a path, unlike a ref, may legally contain one, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the path still contains the literal `{abs_worktree}` placeholder, stop and report it.
+`{abs_worktree}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a worktree path this step accepts — a path, unlike a ref, may legally contain one, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. A value that is empty is also not a worktree path; report it. If the path still contains the literal `{abs_worktree}` placeholder, stop and report it.
 
 ```bash
 WORKTREE=
@@ -52,6 +52,7 @@ WORKTREE_EXTRA=
 PACT WORKTREE
 [ -z "$WORKTREE_EXTRA" ] || { echo "Cannot harvest: the worktree path must be a single line."; exit 1; }
 [ "$WORKTREE" != "$(printf '{%s}' abs_worktree)" ] || { echo "Cannot harvest: the worktree path placeholder was not substituted."; exit 1; }
+[ -n "$WORKTREE" ] || { echo "Cannot harvest: no worktree path was supplied."; exit 1; }
 [ -d "$WORKTREE/docs" ] && echo DIR_PRESENT || { [ -x "$WORKTREE" ] && echo DIR_ABSENT || echo CANNOT_OBSERVE; }
 find -L "$WORKTREE/docs" -type f
 ```
