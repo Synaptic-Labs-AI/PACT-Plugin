@@ -101,12 +101,14 @@ git -C "$REPO_ROOT" check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || { ech
 mkdir -p "$REPO_ROOT/.worktrees"
 TARGET="$REPO_ROOT/.worktrees/$BRANCH"
 BASE_PHYS=$(cd "$REPO_ROOT/.worktrees" 2>/dev/null && pwd -P)
+[ -n "$BASE_PHYS" ] || { echo "Cannot create worktree: cannot resolve $REPO_ROOT/.worktrees."; exit 1; }
 EXISTING="$TARGET"
 while [ ! -e "$EXISTING" ] && [ ! -L "$EXISTING" ] && [ "$EXISTING" != "$REPO_ROOT/.worktrees" ]; do
   EXISTING=$(dirname "$EXISTING")
 done
 EXISTING_PHYS=$(cd "$EXISTING" 2>/dev/null && pwd -P)
-[ -n "$BASE_PHYS" ] && [ -n "$EXISTING_PHYS" ] && { [ "$EXISTING_PHYS" = "$BASE_PHYS" ] || [ "${EXISTING_PHYS#"$BASE_PHYS"/}" != "$EXISTING_PHYS" ]; } || { echo "Cannot create worktree: $TARGET resolves outside .worktrees/."; exit 1; }
+[ -n "$EXISTING_PHYS" ] || { echo "Cannot create worktree: $EXISTING cannot be resolved to a directory, so $TARGET cannot be created."; exit 1; }
+{ [ "$EXISTING_PHYS" = "$BASE_PHYS" ] || [ "${EXISTING_PHYS#"$BASE_PHYS"/}" != "$EXISTING_PHYS" ]; } || { echo "Cannot create worktree: $TARGET resolves outside .worktrees/."; exit 1; }
 git worktree add "$TARGET" -b "$BRANCH"
 ```
 
@@ -262,6 +264,7 @@ Branch: {branch}
 | No worktree was created or registered for the branch (Step 3 failed or was skipped) | Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE — Step 3 did not create one)` and writes nothing |
 | Worktree path outside `.worktrees/` | Step 4 prints `Venv link: skipped (worktree path is not under .worktrees/)`; no link or rule is written |
 | A symlink below `.worktrees/`, or a target that resolves outside it | Step 3 refuses before creating anything with `Cannot create worktree: … resolves outside .worktrees/.`; a symlinked target or intermediate directory below the root is not followed. A `.worktrees` ROOT that is itself a symlink is supported — containment anchors on its resolved location and the worktree is created there |
+| A dangling symlink or a plain file sits at the target path | Step 3 refuses with `Cannot create worktree: … cannot be resolved to a directory, so … cannot be created.` The path is inside `.worktrees/` but unusable — remove it or choose another branch name |
 | `.worktrees/{branch}` holds a worktree of a different repository | Step 4 prints `Venv link: skipped (the worktree at … belongs to a different repository)` and writes nothing; it does not borrow another repository's exclude file or worktree |
 | `.worktrees/{branch}` holds a worktree on a different branch, or on a detached HEAD | Step 4 prints `Venv link: skipped (the worktree at … is not on …)`; only the worktree for `{branch}` receives the link |
 | Branch name contains `/` | The worktree lives at `.worktrees/{branch}` with intermediate directories. A later setup for the parent segment (`foo` when `foo/bar` exists) fails because `.worktrees/foo` is a non-empty directory — choose another branch name or remove the nested worktree first; cleanup for the parent name refuses through the branch-identity check |
