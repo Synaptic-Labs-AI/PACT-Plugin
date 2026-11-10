@@ -2158,8 +2158,10 @@ class TestCleanupStep3RegistrationGate:
         )
         assert (
             f"Cannot delete branch: {BRANCH} is still checked out in a worktree "
-            f"of {repo} — remove that worktree if it is under .worktrees/, or "
-            "switch the main checkout to another branch first."
+            f"of {repo} — remove that worktree wherever it lives (git worktree "
+            "remove <path>, path from git worktree list) and retry; a "
+            ".worktrees/ worktree is what Step 2 removes, and the main checkout "
+            "needs a branch switch first."
         ) in done.stdout, (
             f"the shipped refusal message is missing: {done.stdout.strip()!r}"
         )
@@ -2168,6 +2170,90 @@ class TestCleanupStep3RegistrationGate:
             git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
             == 0
         ), "the branch was deleted"
+
+    def test_a_branch_checked_out_in_the_main_checkout_refuses(
+        self, isolated_git_config, tmp_path
+    ):
+        """The main checkout is itself a `git worktree list` entry.
+
+        A branch checked out in the main repository cannot be deleted either.
+        The gate must name the shipped remedy and leave the branch untouched;
+        the worktree is torn down first so the branch is free to check out.
+        """
+        repo, worktree = make_repo(tmp_path)
+        removed = git(repo, "worktree", "remove", "--force", str(worktree), check=False)
+        assert removed.returncode == 0, removed.stderr
+        switched = git(repo, "checkout", BRANCH, check=False)
+        assert switched.returncode == 0, switched.stderr
+        assert (
+            git(repo, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
+            == BRANCH
+        ), "the fixture did not check the branch out in the main checkout"
+
+        done = run_fence(
+            cleanup_delete_fence(CLEANUP_SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode != 0, (
+            f"Step 3 deleted the branch checked out in the main checkout: "
+            f"{done.stdout!r}"
+        )
+        assert (
+            f"Cannot delete branch: {BRANCH} is still checked out in a worktree "
+            f"of {repo} — remove that worktree wherever it lives (git worktree "
+            "remove <path>, path from git worktree list) and retry; a "
+            ".worktrees/ worktree is what Step 2 removes, and the main checkout "
+            "needs a branch switch first."
+        ) in done.stdout, (
+            f"the shipped refusal message is missing: {done.stdout.strip()!r}"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            == 0
+        ), "the branch checked out in the main checkout was deleted"
+
+    def test_a_non_conventional_worktree_path_refuses_then_the_retry_deletes(
+        self, isolated_git_config, tmp_path
+    ):
+        """The message promises `git worktree remove <path>` as the general exit.
+
+        A worktree outside `.worktrees/` is registered, so Step 3 refuses. The
+        remedy the message names — remove that path — then lets the retry
+        delete the branch.
+        """
+        repo = make_empty_repo(tmp_path)
+        elsewhere = tmp_path / "reused-worktree"
+        git(repo, "worktree", "add", "--quiet", str(elsewhere), "-b", BRANCH)
+        text = CLEANUP_SKILL_FILE.read_text(encoding="utf-8")
+
+        refused = run_fence(cleanup_delete_fence(text), repo)
+        assert refused.returncode != 0, (
+            f"Step 3 deleted a branch whose worktree lives elsewhere: "
+            f"{refused.stdout!r}"
+        )
+        assert (
+            f"Cannot delete branch: {BRANCH} is still checked out in a worktree "
+            f"of {repo} — remove that worktree wherever it lives (git worktree "
+            "remove <path>, path from git worktree list) and retry; a "
+            ".worktrees/ worktree is what Step 2 removes, and the main checkout "
+            "needs a branch switch first."
+        ) in refused.stdout, (
+            f"the shipped refusal message is missing: {refused.stdout.strip()!r}"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            == 0
+        ), "the branch was deleted despite the refusal"
+
+        removed = git(repo, "worktree", "remove", str(elsewhere), check=False)
+        assert removed.returncode == 0, removed.stderr
+        retry = run_fence(cleanup_delete_fence(text), repo)
+        assert retry.returncode == 0, (
+            f"the documented retry did not delete the branch: {retry.stdout!r}"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
+            != 0
+        ), "the branch was not deleted after the documented remedy"
 
     def test_no_registration_deletes_the_branch(self, isolated_git_config, tmp_path):
         repo, _ = make_repo(tmp_path)
@@ -2194,7 +2280,7 @@ class TestCleanupStep3RegistrationGate:
         mutated = fence[:start] + fence[stop:]
         assert mutated != fence, "the registration gate changed shape"
         done = run_fence(mutated, repo)
-        assert "is still checked out in a worktree of" not in done.stdout, (
+        assert "remove that worktree wherever it lives" not in done.stdout, (
             "the mutated fence still printed the registration refusal"
         )
         assert (
@@ -2219,7 +2305,7 @@ class TestCleanupStep3RegistrationGate:
         assert mutated != fence, "the registration condition changed shape"
         done = run_fence(mutated, repo)
         assert done.returncode != 0, "the forced gate did not refuse"
-        assert "is still checked out in a worktree of" in done.stdout
+        assert "remove that worktree wherever it lives" in done.stdout
         assert (
             git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False).returncode
             == 0
