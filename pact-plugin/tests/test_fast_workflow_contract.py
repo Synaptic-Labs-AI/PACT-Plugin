@@ -540,9 +540,11 @@ def _assert_full_workflow_contract(root):
         f"full-SHA action {ci_contract.UPLOAD_ARTIFACT_ACTION!r}"
     )
     assert str(upload.get("if", "")).strip() == (
-        "always() && (failure() || github.event_name == 'workflow_dispatch')"), (
+        "always() && (failure() || cancelled() || "
+        "github.event_name == 'workflow_dispatch')"), (
         f"diagnostic upload condition is {upload.get('if')!r}; it must upload "
-        "after a red step on every event and after either outcome on a dispatch"
+        "after a red or cancelled step on every event and after either outcome "
+        "on a dispatch"
     )
     upload_with = upload.get("with") or {}
     assert upload_with.get("name") == (

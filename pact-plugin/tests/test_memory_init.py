@@ -653,7 +653,8 @@ class TestDependencyDriftIsDetectable:
         if step.get("uses") != ci_contract.UPLOAD_ARTIFACT_ACTION:
             problems.append(f"{where}: diagnostic upload action/ref drift")
         if str(step.get("if", "")).strip() != (
-                "always() && (failure() || github.event_name == 'workflow_dispatch')"):
+                "always() && (failure() || cancelled() || "
+                "github.event_name == 'workflow_dispatch')"):
             problems.append(f"{where}: diagnostic upload condition drift")
         with_block = step.get("with") or {}
         if with_block.get("name") != (
@@ -1483,10 +1484,15 @@ class TestDependencyDriftIsDetectable:
                     "        run: ", "        if: github.event_name == 'push'\n"
                     "        run: "), 1)),
             ("upload-condition", real.replace(
-                "        if: always() && (failure() || "
+                "        if: always() && (failure() || cancelled() || "
                 "github.event_name == 'workflow_dispatch')\n",
                 "        if: always() && github.event_name == 'workflow_dispatch'\n",
                 1)),
+            ("upload-cancelled-leg", real.replace(
+                "        if: always() && (failure() || cancelled() || "
+                "github.event_name == 'workflow_dispatch')\n",
+                "        if: always() && (failure() || "
+                "github.event_name == 'workflow_dispatch')\n", 1)),
             ("upload-before-run-verifier", without_upload.replace(
                 "      - name: Verify the certifying run\n",
                 upload_block + "      - name: Verify the certifying run\n", 1)),
