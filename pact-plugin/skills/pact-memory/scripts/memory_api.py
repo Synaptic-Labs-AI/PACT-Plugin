@@ -46,6 +46,7 @@ from .database import (
     ensure_initialized,
     resolve_memory_id_prefix,
     escape_for_envelope,
+    _unusable_identifier,
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
 )
@@ -272,36 +273,6 @@ class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
     Raised by `save()` only: every other write path either writes by
     `memory_id`, already refuses a None id, or funnels through `save()`.
     """
-
-
-def _unusable_identifier(value: object) -> bool:
-    """One rule for every identifier the memory surfaces validate.
-
-    Unusable: not a non-empty string, or it carries C0/DEL/C1 control
-    characters or a lone surrogate. The surrogate clause exists because such
-    a value can arrive from `json.loads` (which accepts unpaired
-    `\\ud800`-style escapes) or from a filesystem/environment string decoded
-    with surrogateescape, and none of them can bind to a utf-8 TEXT column:
-    without the clause the value passes validation and dies at the store as
-    an unhandled UnicodeEncodeError, bypassing the ValueError remedy channel.
-    `save()`, `update()` and the constructor call this so the payload
-    ingresses and the identity the instance ADOPTS cannot drift apart.
-
-    SINKS, named because the rule is only as wide as where the value goes:
-    `project_id` reaches the `memories.project_id` and `files.project_id`
-    TEXT bindings and every project-scoped read filter; `session_id` reaches
-    `memories.session_id` and a /tmp marker path component.
-    """
-    return (
-        not isinstance(value, str)
-        or not value
-        or any(
-            ord(char) < 0x20
-            or 0x7F <= ord(char) <= 0x9F
-            or 0xD800 <= ord(char) <= 0xDFFF
-            for char in value
-        )
-    )
 
 
 class PACTMemory:

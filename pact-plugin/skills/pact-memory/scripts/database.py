@@ -1020,6 +1020,37 @@ def generate_id() -> str:
     return secrets.token_hex(16)
 
 
+def _unusable_identifier(value: object) -> bool:
+    """One rule for every identifier the memory surfaces validate.
+
+    Unusable: not a non-empty string, or it carries C0/DEL/C1 control
+    characters or a lone surrogate. The surrogate clause exists because such
+    a value can arrive from `json.loads` (which accepts unpaired
+    `\\ud800`-style escapes) or from a filesystem/environment string decoded
+    with surrogateescape, and none of them can bind to a utf-8 TEXT column:
+    without the clause the value passes validation and dies at the store as
+    an unhandled UnicodeEncodeError, bypassing the ValueError remedy channel.
+    `save()`, `update()` and the constructor call this so the payload
+    ingresses and the identity the instance ADOPTS cannot drift apart.
+
+    SINKS, named because the rule is only as wide as where the value goes:
+    `project_id` reaches the `memories.project_id` and `files.project_id`
+    TEXT bindings and every project-scoped read filter; `session_id` reaches
+    `memories.session_id` and a /tmp marker path component; `id` reaches the
+    `memories.id` primary key.
+    """
+    return (
+        not isinstance(value, str)
+        or not value
+        or any(
+            ord(char) < 0x20
+            or 0x7F <= ord(char) <= 0x9F
+            or 0xD800 <= ord(char) <= 0xDFFF
+            for char in value
+        )
+    )
+
+
 def create_memory(
     conn: sqlite3.Connection,
     memory: Dict[str, Any]
@@ -1054,12 +1085,10 @@ def create_memory(
     # the lone-surrogate case dies there as an unhandled UnicodeEncodeError
     # (a ValueError subclass, so it is caught, but it bypasses the remedy text
     # and fires after the validation phase). A falsy id keeps its documented
-    # `or generate_id()` meaning. The rule is imported lazily because the API
-    # module imports this one at load time; it is the single live definition.
+    # `or generate_id()` meaning. THE RULE LIVES IN THIS MODULE, so the API
+    # layer imports it downward and there is exactly one live definition.
     supplied_id = memory.get("id")
     if supplied_id:
-        from .memory_api import _unusable_identifier
-
         if _unusable_identifier(supplied_id):
             raise ValueError(
                 "id, when supplied, must be a non-empty string without control "
