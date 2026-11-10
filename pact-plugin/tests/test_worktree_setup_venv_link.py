@@ -905,6 +905,141 @@ class TestStep3BranchIsInertText:
         )
 
 
+class TestStep3RefusesASymlinkedCreationPath:
+    """Step 3 must not create through a symlink under `.worktrees/`.
+
+    A symlinked collection root, a symlinked target, a symlinked intermediate
+    directory with a nested branch, and a dangling symlink each make the create
+    write somewhere other than the collection. The fence resolves the deepest
+    EXISTING ancestor rather than the full target, because a nested branch's
+    target does not exist yet; a dangling link is treated as existing so it
+    cannot be walked past. The nested-branch arm beside them proves the same
+    resolution still lets the legitimate `foo/bar` convention create.
+    """
+
+    @staticmethod
+    def _step3(branch=BRANCH):
+        return fence_for_step_3(SKILL_FILE.read_text(encoding="utf-8"), branch=branch)
+
+    @staticmethod
+    def _assert_no_branch(repo, branch):
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{branch}", check=False)
+            .returncode
+            != 0
+        ), f"the refused value still created branch {branch}"
+
+    def test_a_symlinked_target_is_refused(self, isolated_git_config, tmp_path):
+        repo = make_empty_repo(tmp_path)
+        (repo / ".worktrees").mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = repo / ".worktrees" / BRANCH
+        target.parent.mkdir(parents=True)
+        target.symlink_to(outside, target_is_directory=True)
+
+        done = run_fence(self._step3(), repo)
+        assert done.returncode != 0, (
+            f"Step 3 accepted a symlinked target: {done.stdout!r}"
+        )
+        assert (
+            f"Cannot create worktree: {target} resolves outside .worktrees/."
+        ) in done.stdout, f"the refusal lost its cause: {done.stdout.strip()!r}"
+        assert list(outside.iterdir()) == [], "Step 3 wrote through the symlinked target"
+        self._assert_no_branch(repo, BRANCH)
+
+    def test_a_symlinked_intermediate_with_a_nested_branch_is_refused(
+        self, isolated_git_config, tmp_path
+    ):
+        """`foo/bar` does not exist yet, so the walk stops at the `foo` link."""
+        repo = make_empty_repo(tmp_path)
+        (repo / ".worktrees").mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (repo / ".worktrees" / "foo").symlink_to(outside, target_is_directory=True)
+
+        done = run_fence(self._step3("foo/bar"), repo)
+        assert done.returncode != 0, (
+            f"Step 3 followed a symlinked intermediate directory: {done.stdout!r}"
+        )
+        assert (
+            f"Cannot create worktree: {repo / '.worktrees' / 'foo' / 'bar'} "
+            "resolves outside .worktrees/."
+        ) in done.stdout, f"the refusal lost its cause: {done.stdout.strip()!r}"
+        assert list(outside.iterdir()) == [], "Step 3 wrote through the intermediate link"
+        self._assert_no_branch(repo, "foo/bar")
+
+    def test_a_dangling_symlink_is_refused(self, isolated_git_config, tmp_path):
+        """A dangling link is `-L` true and `-e` false; walking past it would escape."""
+        repo = make_empty_repo(tmp_path)
+        (repo / ".worktrees").mkdir()
+        target = repo / ".worktrees" / BRANCH
+        target.parent.mkdir(parents=True)
+        target.symlink_to(tmp_path / "does-not-exist", target_is_directory=True)
+
+        done = run_fence(self._step3(), repo)
+        assert done.returncode != 0, (
+            f"Step 3 walked past a dangling symlink: {done.stdout!r}"
+        )
+        assert "resolves outside .worktrees/." in done.stdout, (
+            f"the refusal lost its cause: {done.stdout.strip()!r}"
+        )
+        self._assert_no_branch(repo, BRANCH)
+
+    def test_a_nested_branch_still_creates_under_worktrees(
+        self, isolated_git_config, tmp_path
+    ):
+        """The documented `foo/bar` convention must survive the containment check."""
+        repo = make_empty_repo(tmp_path)
+        done = run_fence(self._step3("foo/bar"), repo)
+        assert done.returncode == 0, f"Step 3 failed: {done.stderr.strip()}"
+        assert (repo / ".worktrees" / "foo" / "bar" / ".git").is_file(), (
+            "the nested worktree was not created under .worktrees/"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", "refs/heads/foo/bar", check=False)
+            .returncode
+            == 0
+        ), "the nested branch was not created"
+
+
+class TestSymlinkedCollectionRootIsSupported:
+    """A symlinked `.worktrees` ROOT is a supported layout, not an escape.
+
+    Step 2 deliberately writes the slash-free `/.worktrees` rule so a symlinked
+    collection is ignored and not staged, so Step 3 must create through it.
+    Containment anchors on the physically resolved root: the worktree lands under
+    the link's target and no branch is refused. Refusing the root would break the
+    layout the earlier step supports, which is why this arm sits beside the
+    target/intermediate refusals rather than among them.
+    """
+
+    def test_step_3_creates_under_the_resolved_root(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        store = tmp_path / "store"
+        store.mkdir()
+        (repo / ".worktrees").symlink_to(store, target_is_directory=True)
+        assert (repo / ".worktrees").is_symlink(), "the fixture root is not a symlink"
+
+        done = run_fence(
+            fence_for_step_3(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, (
+            "Step 3 refused the supported symlinked collection root: "
+            f"{done.stdout!r} {done.stderr!r}"
+        )
+        assert (store / BRANCH / ".git").is_file(), (
+            "the worktree was not created at the resolved root"
+        )
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False)
+            .returncode
+            == 0
+        ), "the branch was not created under the resolved root"
+
+
 _DELIMITER_SITES = [pytest.param(label, id=label) for label in _SITES]
 
 
@@ -1035,6 +1170,42 @@ class TestMultiLineValueIsTheInstructionsJob:
 # ---------------------------------------------------------------------------
 # Counter-arms: the assertions can fail, and the fence's rule is what works
 # ---------------------------------------------------------------------------
+
+
+class TestNewlineRuleIsStatedAtEveryReadSite:
+    """The shell cannot refuse a value that supplies its own delimiter line.
+
+    A heredoc body is parsed before any command in the fence runs, so the
+    newline-free requirement is an INSTRUCTION the agent applies before
+    substitution. The fence's double read refuses a non-empty second line; an
+    EMPTY second line (a trailing newline) passes it, which is why the prose
+    states the absence of `\\n` or `\\r` rather than "the second line is empty".
+    Pinned per site because the paragraph is duplicated five times and a tidy in
+    one copy is invisible to the other four.
+    """
+
+    REQUIRED = (
+        "must be a single line and must contain no `\\n` or `\\r` at all",
+        "Do not substitute a value you have not checked for newlines",
+        "the fence cannot stop a value that supplies its own heredoc delimiter line",
+    )
+
+    @pytest.mark.parametrize("label", [pytest.param(l, id=l) for l in _SITES])
+    def test_the_newline_rule_precedes_the_fence(self, label):
+        site = _SITES[label]
+        block = _section(
+            site.path.read_text(encoding="utf-8"), site.start, site.end
+        )
+        for phrase in self.REQUIRED:
+            assert phrase in block, (
+                f"{label} lost the phrase {phrase!r}. The fence cannot parse-check "
+                "a heredoc body it is about to execute, so this sentence is the "
+                "only defence against a value that supplies the delimiter line."
+            )
+        assert block.index(self.REQUIRED[0]) < block.index("```bash"), (
+            f"{label}'s newline rule must reach the agent before the fence that "
+            "substitutes the value"
+        )
 
 
 class TestCounterArms:
@@ -1258,6 +1429,86 @@ class TestStep4NamesTheCauseOfAMissingWorktree:
         assert "is registered, but" not in done.stdout, (
             "the no-registration state also printed the registered cause, so the "
             f"two states are conflated again: {done.stdout.strip()!r}"
+        )
+
+
+class TestStep4RefusesAWorktreeOfAnotherRepositoryOrBranch:
+    """The link must go to THIS repository's worktree for THIS branch.
+
+    A real directory under `.worktrees/` can still be another repository's
+    worktree (its common dir differs) or a worktree of this repository checked
+    out on another branch; the physical containment check passes both times. The
+    common-dir comparison answers what the exclude write depends on, and the
+    symbolic-HEAD check answers which branch owns the path. Both skips must also
+    leave the other repository's exclude untouched.
+    """
+
+    @staticmethod
+    def _fence():
+        return fence_for(SKILL_FILE.read_text(encoding="utf-8"))
+
+    def test_a_worktree_of_another_repository_is_skipped(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        (repo / ".venv").mkdir()
+        (repo / ".venv" / "marker").write_text("real venv\n", encoding="utf-8")
+
+        other = tmp_path / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(other)], check=True)
+        (other / "README.md").write_text("other\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, *GIT_ID, "commit", "-qm", "init")
+        foreign = repo / ".worktrees" / BRANCH
+        git(other, "worktree", "add", "--quiet", str(foreign), "-b", BRANCH)
+        assert (foreign / ".git").is_file(), "the fixture is not a real worktree"
+
+        done = run_fence(self._fence(), repo)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert (
+            f"Venv link: skipped (the worktree at {foreign} belongs to a "
+            "different repository)"
+        ) in done.stdout, (
+            f"a foreign worktree was linked as ours: {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(foreign / ".venv"), (
+            "a link was created inside another repository's worktree"
+        )
+        foreign_exclude = Path(
+            git(other, "rev-parse", "--git-path", "info/exclude").stdout.strip()
+        )
+        if not foreign_exclude.is_absolute():
+            foreign_exclude = other / foreign_exclude
+        assert not foreign_exclude.is_file() or (
+            "/.venv" not in foreign_exclude.read_text(encoding="utf-8")
+        ), "the fence wrote its ignore rule into the foreign repository's exclude"
+
+    def test_a_worktree_on_a_different_branch_is_skipped(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        (repo / ".venv").mkdir()
+        (repo / ".venv" / "marker").write_text("real venv\n", encoding="utf-8")
+        worktree = repo / ".worktrees" / BRANCH
+        git(repo, "worktree", "add", "--quiet", str(worktree), "-b", "other-branch")
+        assert (
+            git(worktree, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
+            == "other-branch"
+        ), "the fixture worktree is not on the other branch"
+
+        done = run_fence(self._fence(), repo)
+        assert done.returncode == 0, f"the fence failed: {done.stderr.strip()}"
+        assert (
+            f"Venv link: skipped (the worktree at {worktree} is not on {BRANCH})"
+        ) in done.stdout, (
+            f"a worktree of another branch was linked: {done.stdout.strip()!r}"
+        )
+        assert not os.path.lexists(worktree / ".venv"), (
+            "a link was created in a worktree that is not the requested branch"
+        )
+        assert exclude_venv_lines(worktree) == [], (
+            "the fence wrote the ignore rule for a worktree it did not link"
         )
 
 
@@ -1747,6 +1998,47 @@ class TestIgnoreDetectionIsExactAndEffective:
         assert "/.worktrees" not in gitignore.read_text(encoding="utf-8").splitlines()
 
 
+class TestStep2WarnsWhenANegationCancelsTheRule:
+    """A later `!` rule makes the exact line ineffective; appending cannot fix it.
+
+    Git applies the LAST matching rule, so `/.worktrees` followed by
+    `!/.worktrees` leaves the path unignored. The exact-line check would see the
+    line and skip the append, and writing it again would still not take effect —
+    so the fence must SAY the path is unignored instead of producing a file the
+    reader can mistake for a fix. This is the one state where `grep -qxF`
+    succeeds and the path is still visible to `git add -A`.
+    """
+
+    def test_the_cancelled_rule_warns_and_is_not_duplicated(
+        self, isolated_git_config, tmp_path
+    ):
+        repo = make_empty_repo(tmp_path)
+        gitignore = repo / ".gitignore"
+        original = "/.worktrees\n!/.worktrees\n"
+        gitignore.write_text(original, encoding="utf-8")
+
+        done = run_fence(
+            fence_for_step_2(SKILL_FILE.read_text(encoding="utf-8")), repo
+        )
+        assert done.returncode == 0, f"Step 2 failed: {done.stderr.strip()}"
+        assert (
+            "WARNING: .worktrees is NOT ignored even though .gitignore has a "
+            "'/.worktrees' line — a later negation rule cancels it, so git add -A "
+            "can stage the worktree collection"
+        ) in done.stdout, (
+            "the cancelled-rule state stayed silent; the caller cannot tell the "
+            f"path is still visible to git. stdout={done.stdout.strip()!r}"
+        )
+        assert gitignore.read_text(encoding="utf-8") == original, (
+            "the fence appended a rule the later negation still cancels, leaving "
+            f"a file that looks fixed: {gitignore.read_text(encoding='utf-8')!r}"
+        )
+        assert (
+            git(repo, "check-ignore", "-q", ".worktrees", check=False).returncode
+            != 0
+        ), "the fixture's negation does not actually leave .worktrees unignored"
+
+
 class TestCleanupBranchIsInertText:
     """Cleanup Step 2 is the OTHER older injection site.
 
@@ -1948,6 +2240,33 @@ class TestEveryReadSiteRefusesTheUnsubstitutedPlaceholder:
         _assert_site_wrote_nothing(label, repo, worktree, done)
 
 
+class TestHarvestRefusesAnEmptyPath:
+    """An empty value is not a worktree path, and the probe must not run on it.
+
+    The double read cannot produce this refusal on its own: an empty heredoc body
+    leaves WORKTREE and the remainder both empty, so only the explicit emptiness
+    check stops the probe. Without it the commands would evaluate `/docs` against
+    whatever directory the shell happens to be in, not against a harvest target.
+    """
+
+    def test_an_empty_value_is_refused_before_the_probe(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, _ = make_repo(tmp_path)
+        done = run_fence(read_site_fence("cleanup-step-1.5", value=""), repo)
+        assert "Cannot harvest: no worktree path was supplied." in done.stdout, (
+            f"an empty path was not refused: {done.stdout.strip()!r}"
+        )
+        assert done.returncode == 1, (
+            f"an empty path returned {done.returncode}, expected 1: "
+            f"{done.stderr.strip()}"
+        )
+        assert not any(
+            marker in done.stdout
+            for marker in ("DIR_PRESENT", "DIR_ABSENT", "CANNOT_OBSERVE")
+        ), f"the harvest probe ran on an empty path: {done.stdout.strip()!r}"
+
+
 class TestPreviousBranchShortcutIsRefused:
     def test_at_minus_one_is_rejected_before_a_worktree_is_added(
         self, isolated_git_config, tmp_path
@@ -2136,13 +2455,74 @@ class TestCleanupRefusesMisidentifiedTargets:
         assert (detached / ".git").is_file(), "the detached worktree was removed"
 
 
+class TestCleanupRefusesAnInvalidRefAndAMissingWorktree:
+    """Cause-specific refusals the multi-line and placeholder arms do not reach.
+
+    Neither guard is the only thing standing between the input and the damage —
+    the containment and identity checks in the same fence still refuse these
+    values, measured — but the message is what the skill's failure table tells
+    the agent to act on, so a lost cause silently costs the documented remedy.
+    """
+
+    def test_a_missing_worktree_names_the_path_it_checked(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        missing = "absent-branch"
+        done = run_fence(
+            cleanup_remove_fence(
+                CLEANUP_SKILL_FILE.read_text(encoding="utf-8"), branch=missing
+            ),
+            repo,
+        )
+        assert done.returncode != 0, (
+            f"Step 2 removed a worktree that does not exist: {done.stdout!r}"
+        )
+        assert (
+            f"Cannot remove worktree: no worktree at {repo / '.worktrees' / missing}."
+        ) in done.stdout, (
+            f"the refusal lost the path it checked: {done.stdout.strip()!r}"
+        )
+        assert (worktree / ".git").is_file(), "the recorded worktree was removed"
+
+    @pytest.mark.parametrize(
+        "label,expected",
+        [
+            ("cleanup-step-2", "Cannot remove worktree: invalid branch name."),
+            ("cleanup-step-3", "Cannot delete branch: invalid branch name."),
+        ],
+        ids=["cleanup-step-2", "cleanup-step-3"],
+    )
+    def test_an_invalid_ref_is_refused_with_its_cause(
+        self, isolated_git_config, tmp_path, label, expected
+    ):
+        """`foo.lock` is single-line and carries no placeholder, so only the
+        ref-format validation can produce this refusal."""
+        repo, worktree = make_repo(tmp_path)
+        done = run_fence(read_site_fence(label, value="foo.lock"), repo)
+        assert expected in done.stdout, (
+            f"{label} lost the invalid-ref cause: {done.stdout.strip()!r}"
+        )
+        assert done.returncode == _SITES[label].exit_code, (
+            f"{label} returned {done.returncode}, expected "
+            f"{_SITES[label].exit_code}: {done.stderr.strip()}"
+        )
+        assert (worktree / ".git").is_file(), "the worktree was removed"
+        assert (
+            git(repo, "rev-parse", "--verify", f"refs/heads/{BRANCH}", check=False)
+            .returncode
+            == 0
+        ), "the branch was deleted"
+
+
 class TestCleanupStep3RegistrationGate:
     """Step 3 must not delete a branch whose worktree is still registered.
 
-    `git branch -d` alone refuses a checked-out branch, but with its own error
-    and only for THIS checkout; the shipped gate names the cause and refuses
-    before the command. The second arm pins the other direction, so a gate that
-    always refuses cannot pass this class.
+    `git branch -d` alone refuses a branch checked out in ANY worktree of the
+    repository, but with its own error and without naming the remedy; the
+    shipped gate names the cause and refuses before the command. The second arm
+    pins the other direction, so a gate that always refuses cannot pass this
+    class.
     """
 
     def test_a_registered_worktree_refuses_and_keeps_the_branch(
@@ -2742,6 +3122,44 @@ class TestExcludeWriteFailureSkipsTheLink:
         )
 
 
+class TestExcludeWriteFailureWithAPreExistingLink:
+    """The write-failure branch must distinguish a still-present unignored path.
+
+    The link-skipped sentence is true only when this run created nothing. With a
+    pre-existing `.venv` the fence cannot silently claim nothing exists: the path
+    is unignored, `git add -A` could commit it, and `git worktree remove` will
+    refuse without `--force`. The warning must name that consequence and must not
+    remove a link it did not create.
+    """
+
+    def test_the_warning_names_the_still_present_unignored_link(
+        self, isolated_git_config, tmp_path
+    ):
+        repo, worktree = make_repo(tmp_path)
+        link = worktree / ".venv"
+        link.symlink_to(repo / ".venv", target_is_directory=True)
+        exclude = exclude_path(worktree)
+        exclude.unlink()
+        exclude.mkdir()  # both write legs fail; the worktree stays real
+
+        done = run_fence(fence_for(SKILL_FILE.read_text(encoding="utf-8")), repo)
+        assert done.returncode == 0, (
+            f"the fence must warn and continue, not fail: {done.stderr.strip()}"
+        )
+        assert (
+            f"WARNING: could not write {exclude} — {link} exists and is NOT "
+            "ignored; git add -A could commit it, and an untracked unignored "
+            "path makes git worktree remove refuse without --force"
+        ) in done.stdout, (
+            "the write-failure warning claimed nothing exists while an unignored "
+            f"link is present. stdout={done.stdout.strip()!r}"
+        )
+        assert link.is_symlink(), "the fence removed a link it did not create"
+        assert done.stderr == "", (
+            f"the write-failure path must stay silent on stderr; got {done.stderr!r}"
+        )
+
+
 class TestUnresolvedExcludePathNamesTheCause:
     """The EMPTY-`EXCLUDE` branch: the moved-repo state.
 
@@ -2769,6 +3187,28 @@ class TestUnresolvedExcludePathNamesTheCause:
         assert "could not resolve the exclude path" in done.stdout, (
             "the warning did not name the cause; it must not print a blank "
             f"path. stdout={done.stdout.strip()!r}"
+        )
+        assert (
+            f"WARNING: could not resolve the exclude path — {moved_worktree}/.venv "
+            "exists and is NOT ignored; git add -A could commit it, and an "
+            "untracked unignored path makes git worktree remove refuse without "
+            "--force"
+        ) in done.stdout, (
+            "the cause-specific warning must name the still-present unignored "
+            f"link. stdout={done.stdout.strip()!r}"
+        )
+        # GATED IDENTITY CHECKS. The common dir does not resolve in this state,
+        # so both Step 4 identity skips must be bypassed; a first draft that
+        # compared unconditionally preempted this warning with "belongs to a
+        # different repository".
+        assert "belongs to a different repository" not in done.stdout, (
+            "the repository-identity check fired on a moved repository; it must "
+            "be gated on the common dir resolving so this state reaches the "
+            "exclude warning"
+        )
+        assert f"is not on {BRANCH}" not in done.stdout, (
+            "the branch-identity check fired on a moved repository; it must be "
+            "gated on the common dir resolving"
         )
         assert "  " not in done.stdout, (
             f"the warning contains a double space (blank path printed): {done.stdout!r}"
@@ -2832,6 +3272,69 @@ class TestPyrightConfigPointsAtTheReposVenv:
         assert anchor.is_dir(), f"{rel_path}: venvPath anchor is not a directory"
         assert (anchor / config["venv"]).resolve() == (root / ".venv").resolve(), (
             f"{rel_path}: the constructed venv path is not the repo-root .venv"
+        )
+
+
+class TestPyrightResolvesTheReposVenv:
+    """The executable half of the config claim: ask pyright, do not re-derive it.
+
+    The path-arithmetic arm above proves the CONSTRUCTED path is the repo-root
+    `.venv`; it cannot see a config pyright rejects or a venv pyright never adds
+    to its search path. This arm reads pyright's own `--verbose` Search paths,
+    from both config depths, because pyright loads the config relative to its
+    own cwd.
+
+    GATED ON TWO EXISTENCE FACTS so a skip cannot read as a pass: pyright is not
+    installed in CI (it is deliberately absent from constraints-ci.txt) and a
+    fresh checkout has no `.venv`. Either absence SKIPS with the reason named.
+    When both exist — a developer machine — the arm runs and asserts on
+    pyright's resolved paths.
+    """
+
+    @pytest.mark.parametrize("rel_path,venv_path", _CONFIGS)
+    def test_pyright_search_path_reaches_the_repo_venv(self, rel_path, venv_path):
+        root = _require_checkout()
+        pyright = shutil.which("pyright")
+        if pyright is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — pyright is not on PATH. It is deliberately "
+                "not in constraints-ci.txt, so CI cannot run this arm; install it "
+                "locally to execute it. The path-arithmetic arm above still runs."
+            )
+        venv = root / ".venv"
+        if not venv.is_dir():
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no repo-root .venv exists, so there is "
+                "nothing for pyright to resolve. Create the venv to execute this arm."
+            )
+        cwd = (root / rel_path).parent
+        source = Path(__file__).resolve().relative_to(cwd)
+        done = subprocess.run(
+            [pyright, "--verbose", str(source)],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        config = cwd / Path(rel_path).name
+        assert f"Loading configuration file at {config}" in done.stdout, (
+            f"{rel_path}: pyright did not load the config under test. "
+            f"stdout={done.stdout[:2000]!r} stderr={done.stderr[:1000]!r}"
+        )
+        assert done.returncode in (0, 1), (
+            f"{rel_path}: pyright did not complete (rc={done.returncode}): "
+            f"{done.stderr.strip()}"
+        )
+        resolved = [
+            line.strip()
+            for line in done.stdout.splitlines()
+            if line.strip().startswith(str(venv)) and line.strip().endswith("site-packages")
+        ]
+        assert resolved, (
+            f"{rel_path}: pyright's resolved Search paths do not include "
+            f"{venv}/lib*/python*/site-packages. The config arithmetic can agree "
+            "with the venv path and still leave pyright without the environment. "
+            f"stdout tail: {done.stdout[-2000:]!r}"
         )
 
 

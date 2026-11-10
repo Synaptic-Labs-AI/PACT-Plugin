@@ -85,6 +85,14 @@ def probe_commands(skill_text):
     assert marker is not None, f"the presence marker is gone: {lines!r}"
     assert listing is not None, f"the listing is not `find`: {lines!r}"
     assert lines[-1] == listing, f"the listing must be the last command: {lines!r}"
+    # The two commands below are run individually, so anything BETWEEN them is
+    # executed by the shipped fence and never by this probe. Adjacency keeps the
+    # probe from measuring a subset while a command it should exercise is
+    # skipped (the pre-preamble form asserted exactly two non-empty lines).
+    assert lines.index(listing) == lines.index(marker) + 1, (
+        "a command sits between the presence marker and the listing; the probe "
+        f"would skip it while the shipped fence runs it: {lines!r}"
+    )
     preamble = lines[:lines.index(marker)]
     assert any("{abs_worktree}" in ln for ln in preamble), (
         "the fence no longer reads {abs_worktree} into WORKTREE before the "
