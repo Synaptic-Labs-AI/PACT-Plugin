@@ -27,10 +27,9 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
-_SCRIPT = Path(os.environ.get(
-    "PACT_VERIFY_GATE_TREE_SCRIPT",
-    str(_REPO_ROOT / "scripts" / "verify-gate-tree.sh"),
-))
+# One unconditional subject: an env override here would let an ambient value
+# redirect every arm to a different script with no writer and no record.
+_SCRIPT = _REPO_ROOT / "scripts" / "verify-gate-tree.sh"
 
 _REFUSED = 2
 
