@@ -840,6 +840,11 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     the error, and a module-level skip emits a <testcase> with an EMPTY
     classname. The record comes from the real in-band plugin, so no part of
     the shape model is reconstructed here.
+
+    ``PACT_COMPARE_FULL_SUITE_SCRIPT`` points this arm at another copy of the
+    comparator for mutation probing (e.g. the pre-fix script). Every failure
+    message below carries the script actually loaded, so an ambient value
+    cannot change what was tested without showing up in the failure text.
     """
     child = tmp_path / "child"
     child.mkdir()
@@ -874,6 +879,7 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     workspace = tmp_path / "rig"
     workspace.mkdir()
     xml = workspace / ".full-suite-results.xml"
+    where = f"comparator script actually loaded: {SCRIPT}"
     env = {**os.environ, "GITHUB_ACTIONS": "true",
            "GITHUB_WORKSPACE": str(workspace), "GITHUB_RUN_ID": "200",
            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": SHA}
@@ -883,28 +889,37 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
          f"--junitxml={xml}"],
         cwd=child, env=env, capture_output=True, text=True, check=False)
-    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert completed.returncode == 1, (
+        completed.stdout + completed.stderr + "\n" + where)
     record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
     assert (record["collected"], record["passed"], record["failed"],
             record["errors"], record["skipped"],
-            record["skipped_at_collection"]) == (4, 2, 1, 3, 1, 1)
+            record["skipped_at_collection"]) == (4, 2, 1, 3, 1, 1), (
+                record, where)
 
     shapes = {}
     for element in ET.parse(xml).getroot().iter("testcase"):
         shapes.setdefault((element.get("classname"), element.get("name")), []).append(
             [(child.tag, child.get("message") or "") for child in element])
     teardown_after_pass = shapes[("test_shapes", "test_pass_then_teardown_error")]
-    assert len(teardown_after_pass) == 1
-    assert [item[0][0] for item in teardown_after_pass] == ["error"]
-    assert teardown_after_pass[0][0][1].startswith("failed on teardown with")
+    assert len(teardown_after_pass) == 1, (shapes, where)
+    assert [item[0][0] for item in teardown_after_pass] == ["error"], (
+        teardown_after_pass, where)
+    assert teardown_after_pass[0][0][1].startswith("failed on teardown with"), (
+        teardown_after_pass, where)
     call_and_teardown = shapes[("test_shapes", "test_fail_then_teardown_error")]
-    assert [item[0][0] for item in call_and_teardown] == ["failure", "error"]
-    assert call_and_teardown[1][0][1].startswith("failed on teardown with")
+    assert [item[0][0] for item in call_and_teardown] == ["failure", "error"], (
+        call_and_teardown, where)
+    assert call_and_teardown[1][0][1].startswith("failed on teardown with"), (
+        call_and_teardown, where)
     setup_error = shapes[("test_shapes", "test_setup_error")]
-    assert [item[0][0] for item in setup_error] == ["error"]
-    assert setup_error[0][0][1].startswith("failed on setup with")
-    assert [item[0][0] for item in shapes[("", "test_modskip")]] == ["skipped"]
-    assert shapes[("", "test_modskip")][0][0][1] == "collection skipped"
+    assert [item[0][0] for item in setup_error] == ["error"], (setup_error, where)
+    assert setup_error[0][0][1].startswith("failed on setup with"), (
+        setup_error, where)
+    assert [item[0][0] for item in shapes[("", "test_modskip")]] == ["skipped"], (
+        shapes, where)
+    assert shapes[("", "test_modskip")][0][0][1] == "collection skipped", (
+        shapes, where)
 
     def build(logical, run_id):
         directory = tmp_path / logical
@@ -943,8 +958,8 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     first = build("one", 100)
     second = build("two", 101)
     completed, comparison, output = invoke(tmp_path, first, second)
-    assert completed.returncode == 0, comparison
-    assert comparison["status"] == "identical"
-    assert comparison["evidence_errors"] == []
+    assert completed.returncode == 0, (comparison, where)
+    assert comparison["status"] == "identical", (comparison, where)
+    assert comparison["evidence_errors"] == [], (comparison, where)
     run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
-    assert run["validity"] == "test_outcome"
+    assert run["validity"] == "test_outcome", (run, where)
