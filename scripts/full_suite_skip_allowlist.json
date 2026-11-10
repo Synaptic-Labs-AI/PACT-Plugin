@@ -91,6 +91,12 @@
       "reason": "Already at max dimension",
       "match": "exact",
       "allowed": 2
+    },
+    {
+      "file": "tests/test_worktree_setup_venv_link.py",
+      "reason": "SKIPPED, NOT PASSED — pyright is not on PATH. It is deliberately not in constraints-ci.txt, so CI cannot run this arm; install it locally to execute it. The path-arithmetic arm above still runs.",
+      "match": "exact",
+      "allowed": 2
     }
   ]
 }
