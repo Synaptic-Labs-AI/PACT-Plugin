@@ -627,8 +627,10 @@ def cmd_save(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are accepted "
-            f"on save and stripped before validation.)",
+            # Rendered inert: a ValueError on this path can embed a
+            # caller-supplied identifier or field name.
+            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
+            f"'created_at' are accepted on save and stripped before validation.)",
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a
@@ -896,8 +898,10 @@ def cmd_update(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are stripped "
-            f"before update validation.)",
+            # Rendered inert: a ValueError on this path can embed a
+            # caller-supplied identifier or field name.
+            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
+            f"'created_at' are stripped before update validation.)",
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a

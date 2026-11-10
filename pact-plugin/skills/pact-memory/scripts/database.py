@@ -713,7 +713,11 @@ def _reject_unknown_columns(
     caller_facing = sorted(allowed - _STRIPPED_ON_INGRESS)
     allowed_list = ", ".join(caller_facing)
     unknown_list = ", ".join(repr(k) for k in unknown)
-    target = f" (memory {memory_id})" if memory_id else ""
+    # Rendered inert, not repr'd: this message is echoed by the CLI's
+    # ValueError arm, and a caller-supplied id can carry a control or bidi
+    # character. Escaping (rather than quoting) keeps the byte-identical
+    # message for the generated hex ids that reach this line normally.
+    target = f" (memory {escape_for_envelope(str(memory_id))})" if memory_id else ""
     error = ValueError(
         f"Unknown memory field(s) for {operation}{target}: {unknown_list}. "
         f"Allowed fields: {allowed_list}"
@@ -1044,7 +1048,25 @@ def create_memory(
     ensure_initialized(conn)
 
     # Generate ID if not provided
-    memory_id = memory.get("id") or generate_id()
+    # A SUPPLIED ID IS AN IDENTIFIER, HELD TO THE SAME RULE AS project_id AND
+    # session_id. `create` honours a caller-supplied `id`, so without this a
+    # control character or lone surrogate reaches the `memories.id` TEXT bind:
+    # the lone-surrogate case dies there as an unhandled UnicodeEncodeError
+    # (a ValueError subclass, so it is caught, but it bypasses the remedy text
+    # and fires after the validation phase). A falsy id keeps its documented
+    # `or generate_id()` meaning. The rule is imported lazily because the API
+    # module imports this one at load time; it is the single live definition.
+    supplied_id = memory.get("id")
+    if supplied_id:
+        from .memory_api import _unusable_identifier
+
+        if _unusable_identifier(supplied_id):
+            raise ValueError(
+                "id, when supplied, must be a non-empty string without control "
+                "characters (U+0000-U+001F, U+007F-U+009F) or lone surrogates "
+                "(U+D800-U+DFFF); omit it to generate one. Nothing was written."
+            )
+    memory_id = supplied_id or generate_id()
 
     # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
     # ALLOWED_CREATE_COLUMNS includes 'id' and 'created_at' so create payloads
