@@ -534,6 +534,30 @@ def _project_scope_envelope(project_scope: dict | None) -> dict | None:
     return rendered
 
 
+# Identity fields on a stored record. These are RENDERED at the CLI boundary;
+# every other field is memory CONTENT and stays raw, because escaping a
+# memory's own text or context would corrupt the data the caller asked for.
+_RECORD_IDENTITY_FIELDS = ("id", "memory_id", "project_id", "session_id")
+
+
+def _record_envelope(record: dict) -> dict:
+    """A stored record with its identity fields rendered inert.
+
+    `MemoryObject.to_dict()` stays RAW for programmatic callers; this is the
+    CLI's rendering boundary, so a bidi/control character in a stored id or
+    project id appears as its `<U+XXXX>` marker instead of reaching a
+    reader's terminal. MEMORY CONTENT STAYS RAW: a memory's own text and
+    context are the data the caller asked for, and escaping them would
+    corrupt it.
+    """
+    rendered = dict(record)
+    for field in _RECORD_IDENTITY_FIELDS:
+        value = rendered.get(field)
+        if isinstance(value, str):
+            rendered[field] = escape_for_envelope(value)
+    return rendered
+
+
 def _scope_disagreement_message(exc: BaseException) -> str:
     """A scope-refusal message as RENDERED: its values made inert.
 
@@ -680,7 +704,7 @@ def cmd_save(args, db_path=None):
         # DISPLAY-RENDERED, not raw: the property keeps the programmatic
         # value; this envelope is a rendering surface.
         result["project_scope"] = _project_scope_envelope(project_scope)
-    _success(result)
+    _success(_record_envelope(result))
 
 
 def cmd_search(args, db_path=None):
@@ -713,14 +737,14 @@ def cmd_search(args, db_path=None):
         args.query, current_file=current_file, limit=args.limit,
         sync_to_claude=False, **search_kwargs
     )
-    _success([r.to_dict() for r in results])
+    _success([_record_envelope(r.to_dict()) for r in results])
 
 
 def cmd_list(args, db_path=None):
     """Handle the 'list' subcommand."""
     memory = PACTMemory(db_path=db_path)
     results = memory.list(limit=args.limit)
-    _success([r.to_dict() for r in results])
+    _success([_record_envelope(r.to_dict()) for r in results])
 
 
 def cmd_get(args, db_path=None):
@@ -779,7 +803,7 @@ def cmd_get(args, db_path=None):
         # Escape it before it reaches a rendered envelope: a control or bidi
         # character would otherwise reach the reader's terminal verbatim.
         _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
-    _success(result.to_dict())
+    _success(_record_envelope(result.to_dict()))
 
 
 def cmd_status(args, db_path=None):
@@ -901,7 +925,7 @@ def cmd_update(args, db_path=None):
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
         result["embedding_status"] = embedding_status
-    _success(result)
+    _success(_record_envelope(result))
 
 
 def cmd_sync(args, db_path=None):
@@ -928,7 +952,9 @@ def cmd_sync(args, db_path=None):
     _success({
         "sync_status": memory.last_sync_status,
         "projected": len(memory_ids),
-        "memory_ids": memory_ids,
+        # Same display rule as the record payloads: an id is an identifier,
+        # not content, so it is rendered inert at this boundary.
+        "memory_ids": [escape_for_envelope(mid) for mid in memory_ids],
         # THE SAME ENVELOPE VALUE `get_status` REPORTS. The constructor ADOPTS a
         # detected id as found so a read never fails on a value only a write
         # binds; `_project_id_for_envelope()` then folds an unusable one to
@@ -1015,7 +1041,7 @@ def cmd_delete(args, db_path=None):
         # Escape it before it reaches a rendered envelope: a control or bidi
         # character would otherwise reach the reader's terminal verbatim.
         _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
-    _success({"deleted": True, "memory_id": resolved_id})
+    _success(_record_envelope({"deleted": True, "memory_id": resolved_id}))
 
 
 def _positive_int(value):
