@@ -655,3 +655,111 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
     assert Counter(outcome["outcome"] for entry in run["cases"]
                    for outcome in entry["outcomes"]) == {
                        "failure": 1, "error": 1, "xpass": 1}
+
+
+def test_environment_difference_beside_a_delta_is_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "skip", "later")])
+    log = second / "run.log"
+    log.write_text(log.read_text().replace(
+        "platform linux -- Python 3.12.3", "platform darwin -- Python 3.12.3"),
+        encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["status"] == "invalid"
+    assert comparison["deltas"], "the delta is still reported as evidence"
+    assert "platform" in comparison["evidence_errors"][0]["error"]
+    assert "cannot be attributed" in comparison["evidence_errors"][0]["error"]
+
+
+def test_environment_difference_without_a_delta_is_an_observation(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = second / "run.log"
+    log.write_text(log.read_text().replace(
+        "platform linux -- Python 3.12.3", "platform darwin -- Python 3.12.3"),
+        encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    assert comparison["observations"] == [
+        {"type": "environment", "run": "two", "fields": ["platform"]}]
+
+
+def test_duplicate_same_outcome_junit_case_is_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    classname, name = comparator._junit_key(ALPHA)
+    xml_path = second / "artifact" / ".full-suite-results.xml"
+    tree = ET.parse(xml_path)
+    ET.SubElement(tree.getroot().find("testsuite"), "testcase",
+                  classname=classname, name=name, time="0.01")
+    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+    update_json(second / "artifact" / ".full-run-record.json", passed=3)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "duplicate JUnit outcome" in comparison["evidence_errors"][0]["error"]
+
+
+def test_internal_error_exits_three_and_still_writes_evidence(tmp_path, monkeypatch):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    real = comparator._normalize_run
+
+    def boom(logical, directory, expected_sha):
+        if logical == "one":
+            raise RuntimeError("synthetic fault")
+        return real(logical, directory, expected_sha)
+
+    monkeypatch.setattr(comparator, "_normalize_run", boom)
+    output = tmp_path / "out"
+    code = comparator.main(["--expected-sha", SHA, "--output-dir", str(output),
+                            f"--run=one={first}", f"--run=two={second}"])
+    assert code == 3
+    comparison = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
+    assert comparison["status"] == "invalid"
+    assert comparison["internal_errors"] == [
+        {"run": "one", "error": "RuntimeError: synthetic fault"}]
+    assert (output / "runs.jsonl").is_file()
+
+
+def test_vendored_mangling_matches_pytest_internal():
+    mangle = pytest.importorskip("_pytest.junitxml").mangle_test_address
+    for address in ("tests/test_demo.py",
+                    "tests/test_demo.py::test_case",
+                    "tests/test_demo.py::TestThing::test_case[a-b]",
+                    "tests/test_demo.py::TestThing::test_case[a[b]]",
+                    "test[1].py::test_case"):
+        assert comparator._mangle_test_address(address) == mangle(address)
+
+
+def test_metadata_identity_failure_names_the_mismatched_field(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    update_json(first / "metadata.json", event="push")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "metadata event" in comparison["evidence_errors"][0]["error"]
+    assert "workflow_dispatch" in comparison["evidence_errors"][0]["error"]
+
+
+def test_material_duration_slowdown_names_the_test_and_both_values(tmp_path):
+    first = make_run(tmp_path, "one",
+                     cases=[case(ALPHA, duration=0.1), case(BETA, duration=0.1)])
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA, duration=3.0), case(BETA, duration=0.2)])
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["observations"] == [{
+        "type": "duration", "run": "two", "count": 1,
+        "tests": [{"test": "tests.test_example.test_alpha",
+                   "before_seconds": 0.1, "after_seconds": 3.0}]}]
+
+
+def test_subthreshold_duration_noise_is_not_an_observation(tmp_path):
+    first = make_run(tmp_path, "one", cases=[case(ALPHA, duration=0.10), case(BETA)])
+    second = make_run(tmp_path, "two", 101, cases=[case(ALPHA, duration=0.11), case(BETA)])
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["observations"] == []

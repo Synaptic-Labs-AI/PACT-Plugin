@@ -1,8 +1,9 @@
 """Strict tracked-file enumeration for test oracles.
 
 The caller chooses whether deleted index entries stay visible. Filesystem
-fallback is for gitless exports only; a repository query failure never widens
-the population to untracked files.
+fallback is for gitless exports only — it refuses when a ``.git`` entry exists
+at or above the root — and a repository query failure never widens the
+population to untracked files.
 """
 
 import subprocess
@@ -34,6 +35,17 @@ def _outside_repository(repo_root):
     )
 
 
+def _inside_git_worktree(repo_root):
+    """True when a .git entry exists at or above the root.
+
+    An absent git binary and a gitless export are indistinguishable from the
+    probe alone; this is the evidence that separates them, so a checkout with
+    git stripped from PATH cannot silently fall back to a filesystem walk.
+    """
+    return any((candidate / ".git").exists()
+               for candidate in (repo_root, *repo_root.parents))
+
+
 def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
                   keep_deleted=False, allow_empty=False):
     """Return one nonempty, sorted tracked population or raise AssertionError.
@@ -52,6 +64,8 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
             raise ValueError(f"pattern escapes the repository: {pattern!r}")
     pathspec = str(relative) if pattern is None else f"{relative}/{pattern}"
     repo_root = Path(repo_root)
+    if not repo_root.is_dir():
+        raise AssertionError(f"repository root is not a directory: {repo_root}")
     root = repo_root / Path(relative)
 
     result = _git(repo_root, "ls-files", "-z", "--",
@@ -66,6 +80,11 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
             files = [path for path in files if path.is_file()]
         source = "git index"
     elif result is None or _outside_repository(repo_root):
+        if _inside_git_worktree(repo_root):
+            raise AssertionError(
+                f"git is unavailable for {repo_root} but a .git entry exists at or "
+                "above it; refusing the filesystem fallback because it cannot tell "
+                "tracked from untracked files.")
         candidates = root.rglob("*") if pattern is None else root.glob(pattern)
         files = [path for path in candidates if path.is_file()]
         source = "gitless filesystem fallback"
@@ -82,7 +101,7 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
         member = Path(known_member)
         if not member.is_absolute():
             member = repo_root / member
-        if member not in files:
+        if member.resolve() not in {path.resolve() for path in files}:
             raise AssertionError(f"known member missing: {known_member}")
     return sorted(files)
 

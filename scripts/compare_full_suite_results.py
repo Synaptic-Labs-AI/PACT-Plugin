@@ -5,6 +5,10 @@ Location: scripts/compare_full_suite_results.py
 Used by: development evidence collection for the fixed-SHA full-suite matrix.
 Reads downloaded metadata, raw logs, schema-v3 records, and JUnit artifacts;
 writes runs.jsonl and comparison.json under --output-dir.
+
+Exit codes: 0 identical, 1 deltas found, 2 refused (the evidence cannot be
+compared), 3 internal error. A refusal names the reason; a crash never reads
+as a delta.
 """
 
 from __future__ import annotations
@@ -20,6 +24,23 @@ import shlex
 import sys
 import xml.etree.ElementTree as ET
 
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+# The run record's schema has one owner; a third copy here could drift from
+# the certifier. scripts/verify_full_collection.py writes the collection
+# record's version inline and exports no constant, so it is named here.
+from verify_full_run import SCHEMA_VERSION as RUN_RECORD_SCHEMA_VERSION  # noqa: E402
+
+COLLECTION_RECORD_SCHEMA_VERSION = 1
+
+# The `tests.yml` workflow's immutable database id, read with
+# `gh api repos/{owner}/{repo}/actions/workflows/tests.yml --jq .id`. There is
+# no automated oracle for it: the id exists only behind an authenticated API
+# call and this comparator runs offline, so a test deriving the expected value
+# from this line would prove nothing. The architecture doc's section 4.1 states
+# the same number independently; re-derive both together if the workflow is
+# ever recreated.
 WORKFLOW_DATABASE_ID = 291463576
 SUMMARY_OUTCOME = re.compile(
     r"\b(?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|no tests ran)\b")
@@ -35,6 +56,14 @@ RAW_PATHS = {"metadata": "metadata.json", "log": "run.log",
              "junit": "artifact/.full-suite-results.xml",
              "run_record": "artifact/.full-run-record.json",
              "collection_record": "artifact/.full-collection-record.json"}
+# Actions cache messages carry the restored key; matching the prefix keeps a
+# test that merely mentions "cache" out of the environment comparison.
+CACHE_PREFIXES = ("Cache restored from key:", "Cache not found for input keys:",
+                  "Cache saved with key:")
+# Durations differ on every run, so exact inequality carries no signal. Both
+# the factor and the floor must be exceeded before a slowdown is evidence.
+DURATION_FACTOR = 2.0
+DURATION_FLOOR_SECONDS = 0.5
 
 
 class EvidenceError(ValueError):
@@ -75,14 +104,30 @@ def _summary_identity(line: str) -> str:
     return re.sub(r"\s+in \d+(?:\.\d+)?s(?: \([^)]*\))?$", "", line)
 
 
+def _mangle_test_address(address: str) -> list[str]:
+    """Vendor of _pytest.junitxml.mangle_test_address (pytest 9.2).
+
+    pytest delegates the parse to _pytest.nodeid.NodeId.parse: the params
+    bracket is peeled off the tail FIRST and kept as one opaque string,
+    because the '-' separators inside it cannot be recovered reliably.
+    """
+    path, separator, tail = address.partition("::")
+    if not separator:
+        names, params = [path], None
+    else:
+        name_part, bracket, param_part = tail.partition("[")
+        names = [path, *name_part.split("::")]
+        params = param_part.removesuffix("]") if bracket else None
+    names[0] = names[0].replace("/", ".")  # _pytest.nodes.SEP is "/"
+    names[0] = re.sub(r"\.py$", "", names[0])
+    if params is not None:
+        names[-1] += f"[{params}]"
+    return names
+
+
 def _junit_key(node_id: str) -> tuple[str, str]:
-    try:
-        from _pytest.junitxml import mangle_test_address
-        parts = mangle_test_address(node_id)
-    except (ImportError, AttributeError, TypeError, ValueError) as exc:
-        raise EvidenceError(f"cannot map terminal node ID {node_id!r}: {exc}") from exc
-    if (not isinstance(parts, list) or not parts
-            or any(not isinstance(part, str) or not part for part in parts)):
+    parts = _mangle_test_address(node_id) if isinstance(node_id, str) and node_id else []
+    if not parts or any(not isinstance(part, str) or not part for part in parts):
         raise EvidenceError(f"incompatible JUnit mapping for {node_id!r}: {parts!r}")
     return ".".join(parts[:-1]), parts[-1]
 
@@ -269,8 +314,9 @@ def _require_environment_step_success(metadata: dict) -> str:
         if not isinstance(job, dict) or not isinstance(job.get("steps"), list):
             raise EvidenceError("workflow job steps are missing or malformed")
         for step in job["steps"]:
-            if isinstance(step, dict) and step.get("name") in matched:
-                matched[step["name"]].append(step)
+            name = step.get("name") if isinstance(step, dict) else None
+            if isinstance(name, str) and name in matched:
+                matched[name].append(step)
     for name, steps in matched.items():
         if len(steps) != 1:
             raise EvidenceError(f"expected exactly one {name!r} step, found {len(steps)}")
@@ -283,25 +329,34 @@ def _require_environment_step_success(metadata: dict) -> str:
     return conclusion
 
 
-def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
-    normalized = {"logical_name": logical, "validity": "invalid",
-                  "raw_paths": RAW_PATHS, "evidence_errors": []}
-    metadata = _json_object(directory / "metadata.json")
+def _validate_metadata(metadata: dict, expected_sha: str) -> None:
+    """Reject metadata that is not a completed attempt-1 dispatch on the SHA."""
     for key in ("attempt", "databaseId", "workflowDatabaseId"):
         _integer(metadata, key, minimum=1)
-    if (metadata["attempt"] != 1
-            or metadata["workflowDatabaseId"] != WORKFLOW_DATABASE_ID
-            or metadata.get("event") != "workflow_dispatch"
-            or metadata.get("headSha") != expected_sha
-            or metadata.get("status") != "completed"):
-        raise EvidenceError("metadata is not a completed attempt-1 dispatch on the expected SHA")
+    for key, expected in (("attempt", 1),
+                          ("workflowDatabaseId", WORKFLOW_DATABASE_ID),
+                          ("event", "workflow_dispatch"),
+                          ("headSha", expected_sha),
+                          ("status", "completed")):
+        if metadata.get(key) != expected:
+            raise EvidenceError(
+                f"metadata {key} is {metadata.get(key)!r}, expected {expected!r}")
     if not isinstance(metadata.get("jobs"), list):
         raise EvidenceError("metadata jobs must be a list")
-    artifact = directory / "artifact"
-    record = _json_object(artifact / ".full-run-record.json")
-    collection = _json_object(artifact / ".full-collection-record.json")
-    if record.get("schema_version") != 3 or collection.get("schema_version") != 1:
-        raise EvidenceError("unexpected run or collection record schema")
+
+
+def _validate_records(metadata: dict, record: dict, collection: dict,
+                      expected_sha: str) -> tuple[int, list[str]]:
+    """Cross-check the two in-band records against the API metadata."""
+    if record.get("schema_version") != RUN_RECORD_SCHEMA_VERSION:
+        raise EvidenceError(
+            f"run record schema_version is {record.get('schema_version')!r}, "
+            f"expected {RUN_RECORD_SCHEMA_VERSION}")
+    if collection.get("schema_version") != COLLECTION_RECORD_SCHEMA_VERSION:
+        raise EvidenceError(
+            f"collection record schema_version is "
+            f"{collection.get('schema_version')!r}, "
+            f"expected {COLLECTION_RECORD_SCHEMA_VERSION}")
     if (record.get("run_id") != str(metadata["databaseId"])
             or collection.get("run_id") != record["run_id"]
             or record.get("run_attempt") != "1"
@@ -334,7 +389,12 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
         raise EvidenceError("run record has no summary line")
     if record["skipped_at_collection"] > record["skipped"]:
         raise EvidenceError("skipped_at_collection exceeds skipped")
+    return collected, terminal
 
+
+def _validate_log(directory: Path, record: dict,
+                  expected_sha: str) -> tuple[list[str], list[str], str, int]:
+    """Validate the raw log against the record; return lines, argv, summary, checks."""
     lines = _log_lines(directory / "run.log")
     argv = _command_argv(lines)
     summary = _summary_text(record["summary_line"])
@@ -347,7 +407,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     if len(summary_indexes) != 1:
         raise EvidenceError("raw log does not contain exactly one matching summary")
     summary_index = summary_indexes[0]
-    collection_marker = f"FULL-COLLECTION-OK "
+    collection_marker = "FULL-COLLECTION-OK "
     if not any(line.startswith(collection_marker)
                and line.endswith(f"subject={expected_sha}") for line in lines):
         raise EvidenceError("FULL-COLLECTION-OK on the expected SHA is absent")
@@ -362,9 +422,28 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
             or any("CI ENVIRONMENT DRIFT" in line or "PYTEST_ADDOPTS is set" in line
                    for line in lines)):
         raise EvidenceError("before/after environment evidence is not clean")
-    environment_passes = len(environment_indexes)
-    overall_conclusion = _require_environment_step_success(metadata)
+    return lines, argv, summary, len(environment_indexes)
 
+
+def _require_one_outcome_kind_per_node(cases: list[dict]) -> None:
+    """Refuse two identical outcome kinds for one node.
+
+    pytest opens a second <testcase> element only for a call failure plus a
+    teardown error (_pytest/junitxml.py), so distinct kinds are legitimate and
+    a repeated kind is a duplicated representation.
+    """
+    seen = {}
+    for case in cases:
+        kinds = seen.setdefault(case["node_id"], set())
+        if case["outcome"] in kinds:
+            raise EvidenceError(
+                f"{case['node_id']}: duplicate JUnit outcome {case['outcome']!r}")
+        kinds.add(case["outcome"])
+
+
+def _validate_junit(record: dict, lines: list[str], terminal: list[str],
+                    artifact: Path) -> tuple[list[dict], list, list]:
+    """Map every JUnit case to a terminal node and reconcile the aggregates."""
     cases = _parse_junit(artifact / ".full-suite-results.xml")
     node_for_key = {}
     for node_id in terminal:
@@ -388,6 +467,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     if seen_keys != set(node_for_key):
         raise EvidenceError("one or more terminal IDs have no JUnit case")
     _apply_xpass(cases, lines, terminal, record["xpassed"])
+    _require_one_outcome_kind_per_node(cases)
     outcome_counts = Counter(case["outcome"] for case in cases)
     expected_counts = {
         "pass": record["passed"], "failure": record["failed"],
@@ -399,7 +479,13 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
         raise EvidenceError(
             f"JUnit aggregates {dict(outcome_counts)} != record {expected_counts}")
     skip_sites, collection_skip_sites = _validate_skip_sites(record, cases, node_for_key)
+    return cases, skip_sites, collection_skip_sites
 
+
+def _validate_run_outcomes(record: dict, metadata: dict, lines: list[str],
+                           overall_conclusion: str) -> tuple[str, list[str], bool]:
+    """Reconcile exit status, verifier disposition, and the workflow conclusion."""
+    full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
     verifier_state, verifier_failures = _full_run_verifier(
         metadata, lines, bool(full_run_ok))
     red = record["failed"] > 0 or record["errors"] > 0
@@ -414,7 +500,25 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     clean = not red and record["exitstatus"] == 0
     if clean and (len(full_run_ok) != 1 or record["passed"] <= 0 or verifier_failures):
         raise EvidenceError("a clean run needs positive passes and one FULL-RUN-OK")
-    normalized.update({
+    return verifier_state, verifier_failures, clean
+
+
+def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
+    metadata = _json_object(directory / "metadata.json")
+    _validate_metadata(metadata, expected_sha)
+    artifact = directory / "artifact"
+    record = _json_object(artifact / ".full-run-record.json")
+    collection = _json_object(artifact / ".full-collection-record.json")
+    collected, terminal = _validate_records(metadata, record, collection, expected_sha)
+    lines, argv, summary, environment_passes = _validate_log(
+        directory, record, expected_sha)
+    overall_conclusion = _require_environment_step_success(metadata)
+    cases, skip_sites, collection_skip_sites = _validate_junit(
+        record, lines, terminal, artifact)
+    verifier_state, verifier_failures, clean = _validate_run_outcomes(
+        record, metadata, lines, overall_conclusion)
+    return {
+        "logical_name": logical, "raw_paths": RAW_PATHS, "evidence_errors": [],
         "validity": "clean" if clean else "test_outcome",
         "identity": {"database_id": metadata["databaseId"],
                      "workflow_database_id": metadata["workflowDatabaseId"],
@@ -430,7 +534,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
             "runner": [{"name": job.get("name"), "runner_name": job.get("runnerName")}
                        for job in metadata.get("jobs", []) if isinstance(job, dict)],
             "pins": [line for line in lines if "constraints-ci.txt" in line],
-            "cache": [line for line in lines if "cache" in line.lower()],
+            "cache": [line for line in lines if line.startswith(CACHE_PREFIXES)],
             "pytest_addopts_absent": True},
         "collection": {"collected": collected,
                        "collected_files": collection["collected_files"],
@@ -446,8 +550,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
                                  "duration": case["duration"]}]} for case in cases],
         "verifier_results": {"full_collection": True, "full_run": verifier_state,
                              "failures": verifier_failures},
-    })
-    return normalized
+    }
 
 
 def _case_multiset(run: dict) -> dict[tuple[str, str], Counter]:
@@ -477,10 +580,85 @@ def _outcome_totals(counter: Counter) -> Counter:
     return totals
 
 
-def _duration_multiset(run: dict) -> Counter:
-    return Counter(json.dumps({"classname": case["classname"], "name": case["name"],
-                               "duration": outcome["duration"]}, sort_keys=True)
-                   for case in run["cases"] for outcome in case["outcomes"])
+def _durations_by_case(run: dict) -> dict[tuple[str, str], list[float]]:
+    grouped = {}
+    for case in run["cases"]:
+        grouped.setdefault((case["classname"], case["name"]), []).extend(
+            outcome["duration"] for outcome in case["outcomes"])
+    return {key: sorted(values) for key, values in grouped.items()}
+
+
+def _material_duration_changes(reference: dict, run: dict) -> list[dict]:
+    """Per-test duration changes large enough to be evidence, with both values."""
+    current = _durations_by_case(run)
+    changes = []
+    for key in set(reference) & set(current):
+        before, after = sum(reference[key]), sum(current[key])
+        slower, faster = max(before, after), min(before, after)
+        if slower >= DURATION_FLOOR_SECONDS and slower >= faster * DURATION_FACTOR:
+            changes.append({"test": f"{key[0]}.{key[1]}",
+                            "before_seconds": round(before, 3),
+                            "after_seconds": round(after, 3)})
+    return sorted(changes, key=lambda change: change["test"])
+
+
+# Derived from the test outcome or from the log shape, not an environment axis:
+# a red-vs-green pair always differs in overall_conclusion, which is the delta
+# itself rather than evidence about where the runs executed.
+_DERIVED_ENVIRONMENT_KEYS = ("overall_conclusion", "passed_checks",
+                             "pytest_addopts_absent")
+
+
+def _environment_differences(reference: dict, run: dict) -> list[str]:
+    return sorted(key for key in set(reference) | set(run)
+                  if key not in _DERIVED_ENVIRONMENT_KEYS
+                  and reference.get(key) != run.get(key))
+
+
+def _case_deltas(reference_cases: dict, cases: dict, label: str) -> list[dict]:
+    """Per-test differences between the reference and one run."""
+    deltas = []
+    for key in sorted(set(reference_cases) | set(cases)):
+        before, after = reference_cases.get(key, Counter()), cases.get(key, Counter())
+        if before == after:
+            continue
+        before_outcomes = _outcome_totals(before)
+        after_outcomes = _outcome_totals(after)
+        if any(json.loads(encoded)["outcome"] == "xpass"
+               for encoded in set(before) | set(after)
+               if before[encoded] != after[encoded]):
+            kind = "xpass"
+        elif before_outcomes == after_outcomes:
+            kind = "skip_reason" if set(before_outcomes) == {"skip"} else "reason"
+        else:
+            kind = "outcome"
+        deltas.append({
+            "type": kind, "run": label, "classname": key[0], "name": key[1],
+            "before": _outcome_list(before), "after": _outcome_list(after)})
+    return deltas
+
+
+def _classify_environment(comparison: dict, reference: dict,
+                          differences: list) -> None:
+    """Observe a lone environment difference; refuse one beside a delta.
+
+    A delta next to a changed environment cannot be attributed to run
+    dependence, so the comparison is refused rather than reported as a finding.
+    """
+    if not differences:
+        return
+    if not comparison["deltas"]:
+        for label, fields in differences:
+            comparison["observations"].append(
+                {"type": "environment", "run": label, "fields": fields})
+        return
+    for label, fields in differences:
+        comparison["evidence_errors"].append({
+            "run": label,
+            "error": f"environment differs from {reference['logical_name']!r} in "
+                     f"{', '.join(fields)} while {len(comparison['deltas'])} "
+                     "outcome delta(s) exist; the delta cannot be attributed"})
+    comparison["status"] = "invalid"
 
 
 def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
@@ -493,8 +671,9 @@ def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
     if errors:
         return comparison
     reference, reference_cases = runs[0], _case_multiset(runs[0])
-    reference_durations = _duration_multiset(runs[0])
+    reference_durations = _durations_by_case(runs[0])
     reference_nodes = set(reference["collection"]["terminal_node_ids"])
+    environment_differences = []
     for run in runs[1:]:
         label = run["logical_name"]
         nodes = set(run["collection"]["terminal_node_ids"])
@@ -503,37 +682,26 @@ def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
             if values:
                 comparison["deltas"].append(
                     {"type": kind, "run": label, "node_ids": sorted(values)})
-        cases = _case_multiset(run)
-        for key in sorted(set(reference_cases) | set(cases)):
-            before, after = reference_cases.get(key, Counter()), cases.get(key, Counter())
-            if before == after:
-                continue
-            before_outcomes = _outcome_totals(before)
-            after_outcomes = _outcome_totals(after)
-            if any(json.loads(encoded)["outcome"] == "xpass"
-                   for encoded in set(before) | set(after)
-                   if before[encoded] != after[encoded]):
-                kind = "xpass"
-            elif before_outcomes == after_outcomes:
-                kind = "skip_reason"
-            else:
-                kind = "outcome"
-            comparison["deltas"].append({
-                "type": kind, "run": label, "classname": key[0], "name": key[1],
-                "before": _outcome_list(before), "after": _outcome_list(after)})
+        comparison["deltas"].extend(
+            _case_deltas(reference_cases, _case_multiset(run), label))
         if run["collection_skip_sites"] != reference["collection_skip_sites"]:
             comparison["deltas"].append({"type": "skip_sites", "run": label,
                                          "before": reference["collection_skip_sites"],
                                          "after": run["collection_skip_sites"]})
         if run["argv"] != reference["argv"]:
             comparison["observations"].append({"type": "argv", "run": label})
-        if _duration_multiset(run) != reference_durations:
-            comparison["observations"].append({"type": "duration", "run": label})
+        duration_changes = _material_duration_changes(reference_durations, run)
+        if duration_changes:
+            comparison["observations"].append(
+                {"type": "duration", "run": label, "tests": duration_changes[:10],
+                 "count": len(duration_changes)})
         if run["collection"]["terminal_node_ids"] != reference["collection"]["terminal_node_ids"]:
             comparison["observations"].append({"type": "ordering", "run": label})
-        if run["environment"] != reference["environment"]:
-            comparison["observations"].append({"type": "environment", "run": label})
-    if comparison["deltas"]:
+        differing = _environment_differences(reference["environment"], run["environment"])
+        if differing:
+            environment_differences.append((label, differing))
+    _classify_environment(comparison, reference, environment_differences)
+    if comparison["deltas"] and comparison["status"] == "identical":
         comparison["status"] = "different"
     return comparison
 
@@ -547,6 +715,71 @@ def _atomic_write(path: Path, text: str) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _run_specs(values: list[str]) -> tuple[list[tuple[str, Path]] | None, str | None]:
+    """Parse LOGICAL=ABSOLUTE_DIRECTORY arguments or name the first problem."""
+    specs, names = [], set()
+    for value in values:
+        logical, separator, raw_directory = value.partition("=")
+        directory = Path(raw_directory)
+        if not logical or not separator or not directory.is_absolute():
+            return None, f"invalid --run {value!r}"
+        if logical in names:
+            return None, f"duplicate logical run name {logical!r}"
+        names.add(logical)
+        specs.append((logical, directory))
+    return specs, None
+
+
+def _load_runs(specs: list[tuple[str, Path]],
+               expected_sha: str) -> tuple[list[dict], list[dict], list[dict]]:
+    """Normalize every run; a failure becomes evidence or an internal error."""
+    runs, errors, internal_errors = [], [], []
+    for logical, directory in specs:
+        try:
+            runs.append(_normalize_run(logical, directory, expected_sha))
+        except EvidenceError as exc:
+            error = {"run": logical, "error": str(exc)}
+            errors.append(error)
+            runs.append({"logical_name": logical, "validity": "invalid",
+                         "raw_paths": RAW_PATHS, "evidence_errors": [str(exc)]})
+        except Exception as exc:  # a crash must never read as a delta (exit 1)
+            message = f"{type(exc).__name__}: {exc}"
+            internal_errors.append({"run": logical, "error": message})
+            print(f"internal error for run {logical!r}: {message}", file=sys.stderr)
+            runs.append({"logical_name": logical, "validity": "invalid",
+                         "raw_paths": RAW_PATHS, "evidence_errors": []})
+    return runs, errors, internal_errors
+
+
+def _reject_repeated_identities(runs: list[dict], errors: list[dict]) -> None:
+    """Refuse two input runs that report the same workflow run id."""
+    identities = {}
+    for run in runs:
+        database_id = run.get("identity", {}).get("database_id")
+        if database_id is None:
+            continue
+        if database_id in identities:
+            error = {"run": run["logical_name"],
+                     "error": f"databaseId {database_id} is repeated across input runs"}
+            errors.append(error)
+            run["validity"] = "invalid"
+            run["evidence_errors"] = [error["error"]]
+            identities[database_id]["validity"] = "invalid"
+            identities[database_id]["evidence_errors"] = [error["error"]]
+        else:
+            identities[database_id] = run
+
+
+def _invalid_comparison(expected_sha: str, runs: list[dict],
+                        errors: list[dict]) -> dict:
+    return {"schema_version": 1, "expected_sha": expected_sha,
+            "input_runs": [{"logical_name": run["logical_name"],
+                            "identity": run.get("identity"),
+                            "validity": run["validity"]} for run in runs],
+            "status": "invalid", "deltas": [], "observations": [],
+            "evidence_errors": errors}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -566,43 +799,25 @@ def main(argv: list[str] | None = None) -> int:
     if len(args.run) < 2:
         print("at least two --run arguments are required", file=sys.stderr)
         return 2
-    specs, names = [], set()
-    for value in args.run:
-        logical, separator, raw_directory = value.partition("=")
-        directory = Path(raw_directory)
-        if not logical or not separator or not directory.is_absolute():
-            print(f"invalid --run {value!r}", file=sys.stderr)
-            return 2
-        if logical in names:
-            print(f"duplicate logical run name {logical!r}", file=sys.stderr)
-            return 2
-        names.add(logical)
-        specs.append((logical, directory))
-    runs, errors = [], []
-    for logical, directory in specs:
+    specs, problem = _run_specs(args.run)
+    if problem is not None:
+        print(problem, file=sys.stderr)
+        return 2
+    runs, errors, internal_errors = _load_runs(specs, args.expected_sha.lower())
+    _reject_repeated_identities(runs, errors)
+    comparison = None
+    if not internal_errors:
         try:
-            runs.append(_normalize_run(logical, directory, args.expected_sha.lower()))
-        except EvidenceError as exc:
-            error = {"run": logical, "error": str(exc)}
-            errors.append(error)
-            runs.append({"logical_name": logical, "validity": "invalid",
-                         "raw_paths": RAW_PATHS, "evidence_errors": [str(exc)]})
-    identities = {}
-    for run in runs:
-        database_id = run.get("identity", {}).get("database_id")
-        if database_id is None:
-            continue
-        if database_id in identities:
-            error = {"run": run["logical_name"],
-                     "error": f"databaseId {database_id} is repeated across input runs"}
-            errors.append(error)
-            run["validity"] = "invalid"
-            run["evidence_errors"] = [error["error"]]
-            identities[database_id]["validity"] = "invalid"
-            identities[database_id]["evidence_errors"] = [error["error"]]
-        else:
-            identities[database_id] = run
-    comparison = _compare(runs, args.expected_sha.lower(), errors)
+            comparison = _compare(runs, args.expected_sha.lower(), errors)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            internal_errors.append({"run": None, "error": message})
+            print(f"internal error during comparison: {message}", file=sys.stderr)
+    if comparison is None:
+        comparison = _invalid_comparison(args.expected_sha.lower(), runs, errors)
+    if internal_errors:
+        comparison["internal_errors"] = internal_errors
+        comparison["status"] = "invalid"
     try:
         _atomic_write(args.output_dir / "runs.jsonl", "".join(
             json.dumps(run, sort_keys=True) + "\n" for run in runs))
@@ -610,9 +825,14 @@ def main(argv: list[str] | None = None) -> int:
                       json.dumps(comparison, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
         print(f"cannot write comparison outputs: {exc}", file=sys.stderr)
-        return 2
+        return 3
+    for error in comparison["evidence_errors"]:
+        print(f"evidence error ({error['run']}): {error['error']}", file=sys.stderr)
     print(f"comparison: {comparison['status']} ({len(comparison['deltas'])} deltas, "
-          f"{len(errors)} evidence errors)")
+          f"{len(comparison['evidence_errors'])} evidence errors, "
+          f"{len(comparison.get('internal_errors', []))} internal errors)")
+    if internal_errors:
+        return 3
     return {"identical": 0, "different": 1, "invalid": 2}[comparison["status"]]
 
 

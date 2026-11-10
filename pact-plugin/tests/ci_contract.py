@@ -46,7 +46,10 @@ def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
     token. Any spelling or argument drift is a parse failure: a normalizer that
     accepted more than the reviewed command could hide a scope regression.
     """
-    words = shlex.split(command)
+    try:
+        words = shlex.split(command)
+    except ValueError as exc:
+        raise AssertionError(f"PARSE FAILURE: {command!r} does not tokenize: {exc}") from exc
     assert words == shlex.split(WORKFLOW_TEST_CMD), (
         f"PARSE FAILURE: {command!r} is not the exact diagnostic workflow "
         f"command {WORKFLOW_TEST_CMD!r}; refusing to pass expression fragments "
