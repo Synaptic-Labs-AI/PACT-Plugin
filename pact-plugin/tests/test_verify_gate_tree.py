@@ -346,6 +346,63 @@ class TestAfterRunTreeAttribution:
         assert capture.read_text(encoding="utf-8").splitlines()[-1] == (
             "GATE-PYTEST-EXIT 7")
 
+    def test_git_config_cannot_hide_a_midrun_untracked_file(self, tmp_path):
+        """status.showUntrackedFiles=no must not disarm the guard."""
+        repo = _make_blocking_repo(tmp_path / "repo")
+        _git(repo, "config", "status.showUntrackedFiles", "no")
+
+        def create_untracked(repo):
+            (repo / "hidden-untracked.txt").write_text("x", encoding="utf-8")
+
+        result, capture = _run_with_mutation(repo, tmp_path, create_untracked)
+
+        assert result.returncode == 1, result.stderr
+        stamps = _stamps(capture)
+        assert stamps["GATE-PYTEST-EXIT"] == "0"
+        assert stamps["GATE-DIRTY-PATHS-AFTER"] == "1"
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
+
+    def test_unreadable_after_status_reports_unknown_not_zero(self, tmp_path):
+        """A failed after-run status is not evidence of a clean tree."""
+        repo = _make_blocking_repo(tmp_path / "repo")
+
+        def corrupt_index(repo):
+            (repo / ".git" / "index").write_bytes(b"garbage")
+
+        result, capture = _run_with_mutation(repo, tmp_path, corrupt_index)
+
+        assert result.returncode == 1, result.stderr
+        stamps = _stamps(capture)
+        assert stamps["GATE-PYTEST-EXIT"] == "0"
+        assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
+        assert stamps["GATE-DIRTY-PATHS-AFTER"] == "unknown"
+
+
+class TestAmbientPytestAddoptsCannotNarrowTheRun:
+    """The stamp records argv only, so the wrapper clears the env channel."""
+
+    def test_ambient_addopts_cannot_deselect_a_failing_test(self, tmp_path):
+        repo = _make_repo(tmp_path / "repo")
+        (repo / "test_two.py").write_text(
+            "def test_ok():\n    assert True\n\n"
+            "def test_red():\n    assert False\n", encoding="utf-8")
+        _git(repo, "add", "test_two.py")
+        _git(repo, "commit", "--quiet", "-m", "one pass, one failure")
+        capture = tmp_path / "capture.txt"
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTEST_ADDOPTS"] = "-k test_ok"
+
+        result = subprocess.run(
+            ["bash", str(_SCRIPT), str(repo), str(capture),
+             "-q", "-p", "no:cacheprovider"],
+            cwd=str(repo), env=env, capture_output=True, text=True)
+
+        assert result.returncode == 1, result.stderr
+        stamps = _stamps(capture)
+        assert stamps["GATE-PYTEST-EXIT"] == "1"
+        assert "deselected" not in capture.read_text(encoding="utf-8")
+
 
 class TestCapturePathContainment:
     @pytest.mark.parametrize("relative", ["capture.txt", "nested/missing/capture.txt"])

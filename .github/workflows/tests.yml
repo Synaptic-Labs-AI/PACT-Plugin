@@ -520,14 +520,18 @@ jobs:
 
       # DIAGNOSTIC EVIDENCE ONLY. JUnit supplements, never replaces, the
       # schema-v3 certification record above. All three files are dotfiles, so
-      # hidden-file inclusion is mandatory. Upload even after a red test step,
-      # but only for an explicit diagnostic dispatch; merge gates do not gain a
-      # new artifact dependency.
+      # hidden-file inclusion is mandatory. Upload after a red test step on
+      # EVERY event — a merge-queue or push failure is exactly the run a
+      # diagnostic reader needs, and a job re-run keeps its original event, so
+      # a dispatch-only upload could never recover it. Every dispatch uploads
+      # regardless of outcome; a green merge-queue or push run uploads nothing,
+      # so the merge gate pays no artifact cost. The name carries the dispatch
+      # `dist`, so `load` and `loadfile` evidence is self-describing.
       - name: Upload full-suite diagnostic evidence
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always() && (failure() || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist || 'loadfile' }}
           path: |
             .full-suite-results.xml
             .full-run-record.json

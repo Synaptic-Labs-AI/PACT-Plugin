@@ -540,13 +540,14 @@ def _assert_full_workflow_contract(root):
         f"full-SHA action {ci_contract.UPLOAD_ARTIFACT_ACTION!r}"
     )
     assert str(upload.get("if", "")).strip() == (
-        "always() && github.event_name == 'workflow_dispatch'"), (
-        f"diagnostic upload condition is {upload.get('if')!r}; it must run "
-        "after either test outcome but only for workflow_dispatch"
+        "always() && (failure() || github.event_name == 'workflow_dispatch')"), (
+        f"diagnostic upload condition is {upload.get('if')!r}; it must upload "
+        "after a red step on every event and after either outcome on a dispatch"
     )
     upload_with = upload.get("with") or {}
     assert upload_with.get("name") == (
-        "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}")
+        "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+        "-${{ inputs.dist || 'loadfile' }}")
     assert (upload_with.get("path") or "").splitlines() == [
         ".full-suite-results.xml",
         ".full-run-record.json",

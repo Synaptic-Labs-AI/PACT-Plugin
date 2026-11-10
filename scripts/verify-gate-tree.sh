@@ -36,8 +36,9 @@
 #
 # EXIT CODES
 #   0    pytest passed and the tree stayed stable
-#   2    refused before pytest started
-#   1    a usage error, or pytest was green but the tree became unattributable
+#   2    refused before pytest started; a refusal writes no capture
+#   1    a usage error, a failed temporary-file allocation, pytest exited 1
+#        (test failures), or pytest was green but the tree became unattributable
 #   any other nonzero pytest status is preserved verbatim
 
 set -u
@@ -65,6 +66,15 @@ shift 2
 
 if ! command -v git >/dev/null 2>&1; then
     printf 'GATE REFUSED: git is not available, so the tree cannot be identified.\n' >&2
+    printf '  To run the suite without this check, call pytest directly.\n' >&2
+    exit 2
+fi
+
+# The capture-path containment check below is computed by python3. Without it
+# that check would read an empty path, match nothing, and silently proceed to
+# write the capture inside the tree it is meant to keep clear.
+if ! command -v python3 >/dev/null 2>&1; then
+    printf 'GATE REFUSED: python3 is not available, so the capture path cannot be checked.\n' >&2
     printf '  To run the suite without this check, call pytest directly.\n' >&2
     exit 2
 fi
@@ -125,7 +135,9 @@ porcelain_after="$(mktemp)" || {
     exit 1
 }
 trap 'rm -f "$porcelain_before" "$porcelain_after"' EXIT
-if ! git -C "$actual_real" status --porcelain > "$porcelain_before"; then
+# --untracked-files=all overrides status.showUntrackedFiles from git config;
+# without it a repo configured to hide untracked files disarms this check.
+if ! git -C "$actual_real" status --porcelain --untracked-files=all > "$porcelain_before"; then
     printf 'GATE REFUSED: git status failed before pytest.\n' >&2
     exit 2
 fi
@@ -148,15 +160,23 @@ mkdir -p "$capture_dir" || {
     printf 'GATE-COMMAND python3 -m pytest %s\n' "$*"
 } > "$capture"
 
+# The stamp records only argv. An ambient PYTEST_ADDOPTS can narrow the run
+# without appearing in it, so enforce what the canary asks the operator to
+# remember.
+unset PYTEST_ADDOPTS
 python3 -m pytest "$@" >> "$capture" 2>&1
 status=$?
 
 head_after="$(git -C "$actual_real" rev-parse HEAD 2>/dev/null || true)"
 porcelain_readable=1
-if ! git -C "$actual_real" status --porcelain > "$porcelain_after"; then
+if ! git -C "$actual_real" status --porcelain --untracked-files=all > "$porcelain_after"; then
     porcelain_readable=0
 fi
-dirty_after="$(wc -l < "$porcelain_after" | tr -d ' ')"
+if [ "$porcelain_readable" -eq 1 ]; then
+    dirty_after="$(wc -l < "$porcelain_after" | tr -d ' ')"
+else
+    dirty_after="unknown"
+fi
 attribution="unattributable"
 if [ "$porcelain_readable" -eq 1 ] && [ -n "$head_after" ] \
         && [ "$head_after" = "$head_sha" ] \
