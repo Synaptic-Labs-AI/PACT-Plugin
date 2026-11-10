@@ -156,9 +156,20 @@ def _command_argv(lines: list[str]) -> list[str]:
 
 
 def _parse_junit(path: Path) -> list[dict]:
+    # The JUnit file crossed a trust boundary (downloaded CI artifact). A DTD
+    # declaration is never emitted by pytest and is the only way to define
+    # entities, so refuse it BEFORE ElementTree can expand anything.
     try:
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError) as exc:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
+    if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)", raw, re.IGNORECASE):
+        raise EvidenceError(
+            f"{path}: JUnit XML declares a DOCTYPE or ENTITY declaration; "
+            "refusing to parse a document that can expand entities")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
     cases = []
     for element in root.iter("testcase"):

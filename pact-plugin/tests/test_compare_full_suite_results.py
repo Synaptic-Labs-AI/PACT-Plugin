@@ -963,3 +963,27 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     assert comparison["evidence_errors"] == [], (comparison, where)
     run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
     assert run["validity"] == "test_outcome", (run, where)
+
+
+def test_junit_with_an_entity_declaration_is_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    (first / "artifact" / ".full-suite-results.xml").write_text(
+        '<!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;">]>'
+        '<testsuites><testsuite><testcase classname="tests.test_example" '
+        'name="test_alpha" time="0.01">&lol2;</testcase></testsuite></testsuites>',
+        encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "DOCTYPE or ENTITY" in comparison["evidence_errors"][0]["error"]
+    assert "can expand entities" in comparison["evidence_errors"][0]["error"]
+
+
+def test_ordinary_junit_without_a_doctype_still_parses(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    text = (first / "artifact" / ".full-suite-results.xml").read_text(encoding="utf-8")
+    assert text.startswith("<?xml") and "DOCTYPE" not in text
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
