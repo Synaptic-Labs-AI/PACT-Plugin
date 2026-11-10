@@ -5394,3 +5394,124 @@ class TestAnInvalidLimitValueIsRenderedInert:
             "the raw control character reached argparse's stderr: "
             f"{err!r}"
         )
+
+
+class TestAnUnknownFieldMessageEscapesTheIdOnce:
+    """The unknown-field raiser emits the RAW id; the CLI is the ONLY pass.
+
+    `database._reject_unknown_columns` used to escape the id in the raised
+    message while the CLI's ValueError arm escaped the whole message again.
+    Double-escaping made an id carrying U+202E render as `<U+003C>U+202E>` and
+    a literal `<` render as `<U+003C>U+003C>` — a real marker became
+    indistinguishable from text the caller typed. The raiser now emits the
+    raw value; the CLI's single pass is the rendering boundary. Each arm is
+    proven by re-adding the raiser's escape (the mutant named in its
+    docstring).
+    """
+
+    # A full 32-character id so the update path uses the by-id branch and
+    # never the project-scoped prefix resolver.
+    _ANGLE_ID = "a" * 15 + "<" + "b" * 16
+    _BIDI_ID = "a" * 15 + "\u202e" + "b" * 16
+
+    @staticmethod
+    def _run(cli_script_path, cli_db, argv, stdin_data=None):
+        return subprocess.run(
+            [sys.executable, cli_script_path, *argv, "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60, input=stdin_data,
+        )
+
+    @staticmethod
+    def _seed_row(cli_db, memory_id):
+        from scripts.database import create_memory, get_connection
+
+        conn = get_connection(cli_db)
+        try:
+            create_memory(conn, {
+                "id": memory_id,
+                "context": "SEED",
+                "project_id": _pinned_project_id(cli_db),
+            })
+        finally:
+            conn.close()
+
+    def _save_envelope(self, cli_script_path, cli_db, memory_id):
+        payload = json.dumps({
+            "context": "X",
+            "id": memory_id,
+            "bogus_field": 1,
+        })
+        result = self._run(
+            cli_script_path, cli_db,
+            ["save", payload, "--no-sync"],
+        )
+        assert result.returncode == 2, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "ValueError", envelope
+        return envelope["message"]
+
+    def _update_envelope(self, cli_script_path, cli_db, memory_id):
+        result = self._run(
+            cli_script_path, cli_db,
+            ["update", memory_id, "--stdin"],
+            stdin_data=json.dumps({"bogus_field": 1}),
+        )
+        assert result.returncode == 2, (result.returncode, result.stderr)
+        envelope = json.loads(result.stderr)
+        assert envelope["error"] == "ValueError", envelope
+        return envelope["message"]
+
+    def test_save_with_a_literal_angle_id_escapes_once(
+        self, cli_script_path, cli_db
+    ):
+        """MUTANT: re-add `escape_for_envelope` around the raiser's id — this
+        arm then sees `<U+003C>U+003C>` and fails."""
+        message = self._save_envelope(cli_script_path, cli_db, self._ANGLE_ID)
+        rendered = "a" * 15 + "<U+003C>" + "b" * 16
+        assert f"(memory {rendered})" in message, message
+        assert "<U+003C>U+003C>" not in message, (
+            "the id was escaped twice, so a literal '<' became a marker of a "
+            f"marker: {message!r}"
+        )
+
+    def test_save_with_a_bidi_id_escapes_once(self, cli_script_path, cli_db):
+        """MUTANT: same raiser escape — this arm then sees
+        `<U+003C>U+202E>` and fails."""
+        message = self._save_envelope(cli_script_path, cli_db, self._BIDI_ID)
+        rendered = "a" * 15 + "<U+202E>" + "b" * 16
+        assert f"(memory {rendered})" in message, message
+        assert "<U+003C>U+202E>" not in message, (
+            "a real U+202E marker was re-escaped, so the reader cannot tell "
+            f"it from typed text: {message!r}"
+        )
+
+    def test_update_with_a_literal_angle_id_escapes_once(
+        self, cli_script_path, cli_db
+    ):
+        """MUTANT: same raiser escape on the update path."""
+        self._seed_row(cli_db, self._ANGLE_ID)
+        message = self._update_envelope(
+            cli_script_path, cli_db, self._ANGLE_ID
+        )
+        rendered = "a" * 15 + "<U+003C>" + "b" * 16
+        assert f"(memory {rendered})" in message, message
+        assert "<U+003C>U+003C>" not in message, message
+
+    def test_update_with_a_bidi_id_escapes_once(self, cli_script_path, cli_db):
+        """MUTANT: same raiser escape on the update path."""
+        self._seed_row(cli_db, self._BIDI_ID)
+        message = self._update_envelope(cli_script_path, cli_db, self._BIDI_ID)
+        rendered = "a" * 15 + "<U+202E>" + "b" * 16
+        assert f"(memory {rendered})" in message, message
+        assert "<U+003C>U+202E>" not in message, message
+
+    def test_a_hex_id_renders_byte_identically(self, cli_script_path, cli_db):
+        """CONTROL: escaping a safe id is the identity, so the mutant leaves
+        this arm green — it pins that the fix did not change the ordinary
+        message (same `memory <id>` form, no quoting)."""
+        message = self._save_envelope(cli_script_path, cli_db, "abc9999")
+        assert "(memory abc9999)" in message, message
+        assert "(memory 'abc9999')" not in message, (
+            f"the id was quoted instead of rendered: {message!r}"
+        )
+        assert "<U+003C>" not in message, message
