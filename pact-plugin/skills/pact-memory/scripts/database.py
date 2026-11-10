@@ -1147,7 +1147,7 @@ def create_memory(
     ))
 
     conn.commit()
-    logger.debug(f"Created memory with ID: {memory_id}")
+    logger.debug(f"Created memory with ID: {memory_id!r}")
     return memory_id
 
 
@@ -1485,7 +1485,7 @@ def update_memory(
             pass
         raise
 
-    logger.debug("Updated memory %s (replace=%s)", memory_id, replace)
+    logger.debug("Updated memory %r (replace=%s)", memory_id, replace)
     return True
 
 
@@ -1515,7 +1515,7 @@ def delete_memory(
 
     deleted = cursor.rowcount > 0
     if deleted:
-        logger.debug(f"Deleted memory {memory_id}")
+        logger.debug(f"Deleted memory {memory_id!r}")
     return deleted
 
 

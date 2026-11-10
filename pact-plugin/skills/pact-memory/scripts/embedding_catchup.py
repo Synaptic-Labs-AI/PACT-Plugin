@@ -259,19 +259,19 @@ def embed_single_memory(memory_id: str) -> bool:
             # Load the memory
             memory_dict = get_memory(conn, memory_id)
             if memory_dict is None:
-                logger.debug(f"Memory {memory_id} not found")
+                logger.debug(f"Memory {memory_id!r} not found")
                 return False
 
             # Generate text for embedding
             text = generate_embedding_text(memory_dict)
             if not text:
-                logger.debug(f"No text to embed for memory {memory_id}")
+                logger.debug(f"No text to embed for memory {memory_id!r}")
                 return False
 
             # Generate embedding
             embedding = generate_embedding(text)
             if embedding is None:
-                logger.debug(f"Embedding generation failed for {memory_id}")
+                logger.debug(f"Embedding generation failed for {memory_id!r}")
                 return False
 
             # Store embedding
@@ -301,7 +301,7 @@ def embed_single_memory(memory_id: str) -> bool:
                 )
                 conn.commit()
 
-                logger.debug(f"Embedded memory {memory_id}")
+                logger.debug(f"Embedded memory {memory_id!r}")
                 return True
 
             except ImportError:
@@ -309,7 +309,7 @@ def embed_single_memory(memory_id: str) -> bool:
                 return False
 
     except Exception as e:
-        logger.debug(f"Error embedding memory {memory_id}: {e}")
+        logger.debug(f"Error embedding memory {memory_id!r}: {e}")
         return False
 
 
