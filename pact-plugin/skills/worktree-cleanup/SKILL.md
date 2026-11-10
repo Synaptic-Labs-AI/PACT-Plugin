@@ -42,7 +42,7 @@ Present the list and ask: "Which worktree should I remove?"
 
 Run this exact command, substituting the target worktree's absolute path from Step 1 — that path is the harvest target. Step 2 removes only the `.worktrees/{branch}` form, so a worktree named by a path elsewhere is harvested here and then refused by Step 2; report that mismatch instead of reading the harvest as covering the removal.
 
-`{abs_worktree}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a worktree path this step accepts — a path, unlike a ref, may legally contain one, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. A value that is empty is also not a worktree path; report it. If the path still contains the literal `{abs_worktree}` placeholder, stop and report it.
+`{abs_worktree}` must be a single line and must contain no `\n` or `\r` at all — a path, unlike a ref, may legally contain one, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. A value that is empty is also not a worktree path; report it. If the path still contains the literal `{abs_worktree}` placeholder, stop and report it.
 
 ```bash
 WORKTREE=
@@ -78,7 +78,7 @@ This guard is conditional by design: it must NOT unconditionally block, or it wo
 
 Before removal, the shell's working directory must NOT be inside the worktree being removed. Compute the repo root, `cd` to it, and remove the worktree — all in a single bash call. This is critical because if the shell CWD is inside the deleted worktree, all subsequent commands will fail.
 
-`{branch}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
+`{branch}` must be a single line and must contain no `\n` or `\r` at all — a value that contains either is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Compute repo root, cd there, then remove the worktree — must be ONE bash call
@@ -133,7 +133,7 @@ Do NOT force-remove automatically. The user must choose.
 
 After the worktree is removed, delete the local branch.
 
-`{branch}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
+`{branch}` must be a single line and must contain no `\n` or `\r` at all — a value that contains either is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Resolve the main checkout root; Step 2 may have exited before its cd.
