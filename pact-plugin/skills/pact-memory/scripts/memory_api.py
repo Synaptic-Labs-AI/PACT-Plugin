@@ -1949,8 +1949,15 @@ class PACTMemory:
             if memory_dict is None:
                 return None
 
-            # Get associated files
-            files_data = get_files_for_memory(conn, memory_id)
+            # Get associated files, CONFIRMED AGAINST THE MEMORY'S OWN
+            # PROJECT. The link carries no project, so a stale link left by
+            # an interrupted re-key would attach another project's file path
+            # to this memory. A NULL value keeps the whole-store meaning: a
+            # NULL project cannot be expressed as a filter here without also
+            # meaning "no filter".
+            files_data = get_files_for_memory(
+                conn, memory_id, memory_dict.get("project_id")
+            )
             file_paths = [f["path"] for f in files_data]
 
             return memory_from_db_row(memory_dict, file_paths)
@@ -2441,7 +2448,11 @@ class PACTMemory:
 
             memories = []
             for memory_dict in memories_data:
-                files_data = get_files_for_memory(conn, memory_dict["id"])
+                # Same confirmation as get(): the memory row decides which
+                # project's file rows may appear in its file list.
+                files_data = get_files_for_memory(
+                    conn, memory_dict["id"], memory_dict.get("project_id")
+                )
                 file_paths = [f["path"] for f in files_data]
                 memories.append(memory_from_db_row(memory_dict, file_paths))
 
