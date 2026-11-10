@@ -88,12 +88,19 @@ def track_file(
 
     # Create new file entry.
     #
-    # OR IGNORE, BECAUSE THE SELECT ABOVE IS NOT A LOCK. Two writers can both
-    # see no row and both INSERT; UNIQUE(path, project_id) then makes the
-    # second raise IntegrityError, which aborts the caller's whole operation
-    # (a save, or a re-key cascade) after its other writes have committed. An
-    # ignored insert is not a lost file: the re-SELECT below adopts the row
-    # the winner created, so both writers address one file.
+    # OR IGNORE, BECAUSE THE SELECT ABOVE IS NOT A LOCK — FOR THE PROJECTED
+    # SCOPE ONLY. Two writers can both see no row and both INSERT; with a
+    # non-NULL project_id, UNIQUE(path, project_id) makes the second raise
+    # IntegrityError, which aborts the caller's whole operation (a save, or a
+    # re-key cascade) after its other writes have committed. An ignored insert
+    # is not a lost file: the re-SELECT below adopts the row the winner
+    # created.
+    #
+    # THE NULL-PROJECT SCOPE IS NOT PROTECTED: SQLite treats NULLs as distinct
+    # in a UNIQUE constraint, so two writers inserting the same path with
+    # project_id NULL BOTH succeed and OR IGNORE never fires; a partial unique
+    # index would be needed to close that scope, and no in-repo caller writes
+    # it (save refuses an unresolved project).
     file_id = generate_id()
     cursor = conn.execute(
         """
