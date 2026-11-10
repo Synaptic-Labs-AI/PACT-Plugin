@@ -307,6 +307,13 @@ def _own_stderr_for_envelope():
 def _success(result):
     """Print a success JSON envelope to stdout and exit 0.
 
+    PAYLOADS ARE DATA, MESSAGES ARE DISPLAY. A success payload is a machine
+    contract, so no structured field in it is escaped: an identity a caller
+    must pass back (`id`, `memory_id`, `project_id`, `session_id`) is the
+    STORED value, byte for byte, or the round trip breaks. Display escaping
+    belongs to human-readable strings only, and those are produced by the
+    error and diagnostic paths (see `_error`), never here.
+
     THE EXIT STATUS DOES NOT DEPEND ON THE WRITE LANDING. A caller that pipes
     this command into a program that stops reading, such as `head`, leaves
     stdout a pipe with no reader. The operation is finished by then, so a
@@ -334,6 +341,13 @@ def _error(error_type, message, exit_code=1, **extra) -> NoReturn:
     """Print an error JSON envelope to stderr and exit with given code.
 
     Any extra kwargs are merged into the envelope (e.g. allowed_fields).
+
+    MESSAGES ARE DISPLAY, PAYLOADS ARE DATA. `message` is human-readable
+    text, so the call site renders every caller- or store-controlled value
+    in it inert with `escape_for_envelope` before it gets here; structured
+    fields carried in `**extra` are data and stay raw unless they are
+    themselves diagnostic display (the AMBIGUOUS_PREFIX list is the
+    documented exception, carrying a display `id` beside a replay `raw_id`).
 
     WRITES THROUGH `_envelope_stream()`, NOT THROUGH `sys.stderr` DIRECTLY.
     Inside a guarded handler that resolves to a private handle on the original
@@ -516,50 +530,6 @@ def _scrub(msg: str) -> str:
     return msg
 
 
-def _project_scope_envelope(project_scope: dict | None) -> dict | None:
-    """The save disclosure with its identity and path fields rendered inert.
-
-    `PACTMemory.last_project_scope` stays RAW for programmatic callers; this
-    is the rendering boundary, so a bidi/format character in the filed
-    project or the cwd repo appears as its `<U+XXXX>` marker instead of
-    reaching a consumer that parses and prints the envelope.
-    """
-    if project_scope is None:
-        return None
-    rendered = dict(project_scope)
-    for field in ("project_id", "cwd_repo"):
-        value = rendered.get(field)
-        if value is not None:
-            rendered[field] = escape_for_envelope(value)
-    return rendered
-
-
-# Identity fields on a stored record. These are RENDERED at the CLI boundary;
-# every other field is memory CONTENT and stays raw, because escaping a
-# memory's own text or context would corrupt the data the caller asked for.
-_RECORD_IDENTITY_FIELDS = ("id", "memory_id", "project_id", "session_id")
-
-
-def _record_envelope(record: dict) -> dict:
-    """A stored record with its identity fields rendered inert.
-
-    `MemoryObject.to_dict()` stays RAW for programmatic callers; this is the
-    CLI's rendering boundary, so a bidi/control character in a stored id or
-    project id appears as its `<U+XXXX>` marker instead of reaching a
-    reader's terminal. MEMORY CONTENT STAYS RAW: a memory's own text and
-    context are the data the caller asked for, and escaping them would
-    corrupt it. That exception covers the CLAUDE.md projection too (`sync`
-    writes the user's own text): escaping content there would corrupt the
-    memory rather than protect a reader.
-    """
-    rendered = dict(record)
-    for field in _RECORD_IDENTITY_FIELDS:
-        value = rendered.get(field)
-        if isinstance(value, str):
-            rendered[field] = escape_for_envelope(value)
-    return rendered
-
-
 def _scope_disagreement_message(exc: BaseException) -> str:
     """A scope-refusal message as RENDERED: its values made inert.
 
@@ -705,10 +675,11 @@ def cmd_save(args, db_path=None):
     # written from the correct directory, shows False and is still misfiled.
     project_scope = memory.last_project_scope
     if project_scope is not None:
-        # DISPLAY-RENDERED, not raw: the property keeps the programmatic
-        # value; this envelope is a rendering surface.
-        result["project_scope"] = _project_scope_envelope(project_scope)
-    _success(_record_envelope(result))
+        # RAW, like every structured field: the disclosure is data a caller
+        # may compare, and the update path reads the same values from the
+        # instance. Display escaping belongs to messages only.
+        result["project_scope"] = project_scope
+    _success(result)
 
 
 def cmd_search(args, db_path=None):
@@ -741,14 +712,14 @@ def cmd_search(args, db_path=None):
         args.query, current_file=current_file, limit=args.limit,
         sync_to_claude=False, **search_kwargs
     )
-    _success([_record_envelope(r.to_dict()) for r in results])
+    _success([r.to_dict() for r in results])
 
 
 def cmd_list(args, db_path=None):
     """Handle the 'list' subcommand."""
     memory = PACTMemory(db_path=db_path)
     results = memory.list(limit=args.limit)
-    _success([_record_envelope(r.to_dict()) for r in results])
+    _success([r.to_dict() for r in results])
 
 
 def cmd_get(args, db_path=None):
@@ -807,7 +778,7 @@ def cmd_get(args, db_path=None):
         # Escape it before it reaches a rendered envelope: a control or bidi
         # character would otherwise reach the reader's terminal verbatim.
         _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
-    _success(_record_envelope(result.to_dict()))
+    _success(result.to_dict())
 
 
 def cmd_status(args, db_path=None):
@@ -931,7 +902,7 @@ def cmd_update(args, db_path=None):
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
         result["embedding_status"] = embedding_status
-    _success(_record_envelope(result))
+    _success(result)
 
 
 def cmd_sync(args, db_path=None):
@@ -958,9 +929,8 @@ def cmd_sync(args, db_path=None):
     _success({
         "sync_status": memory.last_sync_status,
         "projected": len(memory_ids),
-        # Same display rule as the record payloads: an id is an identifier,
-        # not content, so it is rendered inert at this boundary.
-        "memory_ids": [escape_for_envelope(mid) for mid in memory_ids],
+        # Structured field: the stored ids, raw like every other payload.
+        "memory_ids": memory_ids,
         # THE SAME ENVELOPE VALUE `get_status` REPORTS. The constructor ADOPTS a
         # detected id as found so a read never fails on a value only a write
         # binds; `_project_id_for_envelope()` then folds an unusable one to
@@ -1047,7 +1017,7 @@ def cmd_delete(args, db_path=None):
         # Escape it before it reaches a rendered envelope: a control or bidi
         # character would otherwise reach the reader's terminal verbatim.
         _error("NOT_FOUND", f"Memory '{escape_for_envelope(args.memory_id)}' not found")
-    _success(_record_envelope({"deleted": True, "memory_id": resolved_id}))
+    _success({"deleted": True, "memory_id": resolved_id})
 
 
 def _positive_int(value):
