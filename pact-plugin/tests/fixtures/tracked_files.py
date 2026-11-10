@@ -6,6 +6,7 @@ at or above the root — and a repository query failure never widens the
 population to untracked files.
 """
 
+import os
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -17,6 +18,11 @@ def _git(repo_root, *args):
             cwd=repo_root,
             capture_output=True,
             text=True,
+            # Filenames are bytes on POSIX; a strict UTF-8 decode would crash on
+            # a non-UTF-8 name instead of enumerating it. surrogateescape keeps
+            # the round trip to Path exact.
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
         )
     except FileNotFoundError as exc:
@@ -41,16 +47,33 @@ def _inside_git_worktree(repo_root):
     An absent git binary and a gitless export are indistinguishable from the
     probe alone; this is the evidence that separates them, so a checkout with
     git stripped from PATH cannot silently fall back to a filesystem walk.
+    ``lexists`` rather than ``exists``: a dangling ``.git`` symlink is still a
+    checkout marker, and following it would misreport a broken checkout as a
+    gitless export.
     """
-    return any((candidate / ".git").exists()
+    return any(os.path.lexists(candidate / ".git")
                for candidate in (repo_root, *repo_root.parents))
+
+
+def _glob_literal(text):
+    """Escape pathspec-glob metacharacters so a literal directory stays literal."""
+    for token in ("\\", "*", "?", "["):
+        text = text.replace(token, "\\" + token)
+    return text
+
+
+def _pathspec(relative, pattern):
+    """The git pathspec for one literal directory, optionally globbed inside it."""
+    if pattern is None:
+        return f":(literal){relative}"
+    return f":(glob){_glob_literal(str(relative))}/{pattern}"
 
 
 def _tracked_population(repo_root, root, relative, pathspec, pattern,
                         keep_deleted):
     """The git-index population, or the gitless export fallback."""
     result = _git(repo_root, "ls-files", "-z", "--",
-                  f":(glob){pathspec}" if pattern is not None else pathspec)
+                  _pathspec(relative, pattern))
     if result is not None and result.returncode == 0:
         files = [
             root / PurePosixPath(entry).relative_to(relative)
@@ -66,7 +89,11 @@ def _tracked_population(repo_root, root, relative, pathspec, pattern,
                 f"git is unavailable for {repo_root} but a .git entry exists at or "
                 "above it; refusing the filesystem fallback because it cannot tell "
                 "tracked from untracked files.")
-        candidates = root.rglob("*") if pattern is None else root.glob(pattern)
+        # ``Path.glob("**")`` yields only directories, so a bare ``**`` pattern
+        # would enumerate nothing and raise as an empty population.
+        candidates = (root.rglob("*")
+                      if pattern is None or PurePosixPath(pattern) == PurePosixPath("**")
+                      else root.glob(pattern))
         return ([path for path in candidates if path.is_file()],
                 "gitless filesystem fallback")
     raise AssertionError(
@@ -105,7 +132,12 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
         member = Path(known_member)
         if not member.is_absolute():
             member = repo_root / member
-        if member.resolve() not in {path.resolve() for path in files}:
+        # Normalize to an absolute path WITHOUT resolving symlinks: resolve()
+        # would let an untracked symlink pointing at a tracked file satisfy the
+        # control, and abspath also makes a relative root comparable to an
+        # absolute member without touching the filesystem.
+        if Path(os.path.abspath(member)) not in {
+                Path(os.path.abspath(path)) for path in files}:
             raise AssertionError(f"known member missing: {known_member}")
     return sorted(files)
 

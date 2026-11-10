@@ -6,6 +6,16 @@ Used by: development evidence collection for the fixed-SHA full-suite matrix.
 Reads downloaded metadata, raw logs, schema-v3 records, and JUnit artifacts;
 writes runs.jsonl and comparison.json under --output-dir.
 
+A --run directory is one downloaded workflow run, assembled by hand:
+  metadata.json   the ``/actions/runs/<id>`` object with a ``jobs`` array
+                  merged in from the separate ``/actions/runs/<id>/jobs``
+                  call (the run object does not carry its jobs)
+  run.log         the merged job log, stderr included: verify_full_run.py
+                  writes RUN-VERIFY-FAILURE to stderr
+  artifact/.full-suite-results.xml, artifact/.full-run-record.json,
+  artifact/.full-collection-record.json
+Both runs must be attempt 1 of a workflow_dispatch on --expected-sha.
+
 Exit codes: 0 identical, 1 deltas found, 2 refused (the evidence cannot be
 compared), 3 internal error. A refusal names the reason; a crash never reads
 as a delta.
@@ -51,6 +61,10 @@ ACTIONS_ENVELOPE = re.compile(
     r"^[^\t\r\n]*\t[^\t\r\n]*\t" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
+# A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
+# the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
+# UTF-32 LE.
+_WIDE_ENCODING_BOMS = (b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
 RAW_PATHS = {"metadata": "metadata.json", "log": "run.log",
              "junit": "artifact/.full-suite-results.xml",
              "run_record": "artifact/.full-run-record.json",
@@ -72,7 +86,9 @@ class EvidenceError(ValueError):
 def _json_object(path: Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        # RecursionError is malformed evidence (pathological nesting), not an
+        # internal fault, so it must refuse rather than exit 3.
         raise EvidenceError(f"{path}: unreadable JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise EvidenceError(f"{path}: expected a JSON object")
@@ -160,11 +176,21 @@ def _junit_bytes(path: Path) -> bytes:
     The file crossed a trust boundary (downloaded CI artifact). A DTD
     declaration is never emitted by pytest and is the only way to define
     entities, so refuse it BEFORE ElementTree can expand anything.
+
+    Scope: the scan below reads ASCII-compatible encodings only, so a wide
+    encoding is refused by its byte-order mark first. pytest emits UTF-8, and
+    the scan's guarantee is therefore total over every document this tool
+    accepts.
     """
     try:
         raw = path.read_bytes()
     except OSError as exc:
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
+    if raw.startswith(_WIDE_ENCODING_BOMS):
+        raise EvidenceError(
+            f"{path}: JUnit XML is not UTF-8 (UTF-16/32 byte-order mark); "
+            "pytest emits UTF-8 only, and the entity scan cannot read a wide "
+            "encoding")
     if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)", raw, re.IGNORECASE):
         raise EvidenceError(
             f"{path}: JUnit XML declares a DOCTYPE or ENTITY declaration; "
@@ -905,8 +931,25 @@ def _invalid_comparison(expected_sha: str, runs: list[dict],
             "evidence_errors": errors}
 
 
+_RUN_LAYOUT_EPILOG = """\
+A --run directory is one downloaded workflow run:
+  metadata.json                          the /actions/runs/<id> object with a
+                                         "jobs" array merged in from the
+                                         separate /actions/runs/<id>/jobs call
+  run.log                                the merged job log, stderr included
+                                         (verify_full_run.py writes
+                                         RUN-VERIFY-FAILURE there)
+  artifact/.full-suite-results.xml       pytest JUnit output
+  artifact/.full-run-record.json         schema-v3 in-band record
+  artifact/.full-collection-record.json  collection verifier record
+Both runs must be attempt 1 of a workflow_dispatch on --expected-sha.
+"""
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, epilog=_RUN_LAYOUT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--expected-sha", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--run", action="append", required=True,

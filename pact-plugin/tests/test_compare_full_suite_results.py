@@ -9,16 +9,22 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
 import pytest
 
-SCRIPT = Path(os.environ.get(
-    "PACT_COMPARE_FULL_SUITE_SCRIPT",
-    str(Path(__file__).resolve().parents[2] / "scripts" / "compare_full_suite_results.py"),
-))
+# One unconditional subject: an env override here would let an ambient value
+# redirect every arm to a different script with no writer and no record.
+SCRIPT = (Path(__file__).resolve().parents[2]
+          / "scripts" / "compare_full_suite_results.py")
+if not SCRIPT.is_file():
+    pytest.skip(
+        f"repo-level comparator not present in this layout: {SCRIPT}; this "
+        "module exercises a repo script and is not part of the plugin payload",
+        allow_module_level=True)
 SPEC = importlib.util.spec_from_file_location("compare_full_suite_results", SCRIPT)
 comparator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(comparator)
@@ -841,10 +847,12 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     classname. The record comes from the real in-band plugin, so no part of
     the shape model is reconstructed here.
 
-    ``PACT_COMPARE_FULL_SUITE_SCRIPT`` points this arm at another copy of the
-    comparator for mutation probing (e.g. the pre-fix script). Every failure
-    message below carries the script actually loaded, so an ambient value
-    cannot change what was tested without showing up in the failure text.
+    ``test_imperative_xfail_then_teardown_error`` is the shape that reaches
+    ``_teardown_after_pass_count``'s xfail guard: an imperative ``pytest.xfail()``
+    whose teardown errors emits ``[skipped/pytest.xfail, error]`` on one
+    element, while a plain ``@pytest.mark.xfail`` mark emits two skips and no
+    error, so the guard stays untaken. Every failure message below carries the
+    script actually loaded.
     """
     child = tmp_path / "child"
     child.mkdir()
@@ -876,7 +884,9 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         '@pytest.mark.xfail(reason="expected")\n'
         "def test_xfail_then_teardown_error(boom):\n    assert False\n\n\n"
         '@pytest.mark.xfail(reason="expected pass")\n'
-        "def test_xpass_then_teardown_error(boom):\n    assert True\n",
+        "def test_xpass_then_teardown_error(boom):\n    assert True\n\n\n"
+        "def test_imperative_xfail_then_teardown_error(boom):\n"
+        '    pytest.xfail("imperative")\n',
         encoding="utf-8")
     (child / "test_modskip.py").write_text(
         'import pytest\n\npytest.skip("module skip", allow_module_level=True)\n\n\n'
@@ -901,8 +911,12 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
     assert (record["collected"], record["passed"], record["failed"],
             record["errors"], record["skipped"], record["skipped_at_collection"],
-            record["xfailed"], record["xpassed"]) == (8, 2, 1, 6, 2, 1, 3, 1), (
+            record["xfailed"], record["xpassed"]) == (9, 2, 1, 7, 2, 1, 4, 1), (
                 record, where)
+    # The triple the teardown-after-pass reconciliation keys on: the imperative
+    # xfail contributes an xfail and an error, never a pass.
+    assert (record["passed"], record["errors"], record["xfailed"]) == (2, 7, 4), (
+        record, where)
 
     shapes = {}
     for element in ET.parse(xml).getroot().iter("testcase"):
@@ -945,6 +959,8 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         ("skipped", "pytest.xfail"), ("skipped", "pytest.xfail")], (typed, where)
     assert typed[("test_shapes", "test_xpass_then_teardown_error")] == [
         ("skipped", "pytest.xfail")], (typed, where)
+    assert typed[("test_shapes", "test_imperative_xfail_then_teardown_error")] == [
+        ("skipped", "pytest.xfail"), ("error", None)], (typed, where)
 
     def build(logical, run_id):
         directory = tmp_path / logical
@@ -1014,6 +1030,39 @@ def test_ordinary_junit_without_a_doctype_still_parses(tmp_path):
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
     assert comparison["status"] == "identical"
+
+
+def test_junit_with_a_wide_encoding_is_refused(tmp_path):
+    """A wide encoding hides an ASCII DOCTYPE behind interleaved NUL bytes.
+
+    The entity rewrites a name the mapping otherwise validates, so an unguarded
+    parser expands it and reconciles (exit 0) while the guard refuses: the arm
+    reddens on the unfixed code rather than merely failing to parse.
+    """
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    (first / "artifact" / ".full-suite-results.xml").write_bytes(
+        ('<?xml version="1.0" encoding="UTF-16"?>\n'
+         '<!DOCTYPE testsuites [<!ENTITY n "test_alpha">]>\n'
+         '<testsuites><testsuite name="pytest">'
+         '<testcase classname="tests.test_example" name="&n;" time="0.01"/>'
+         '<testcase classname="tests.test_example" name="test_beta" time="0.01"/>'
+         '</testsuite></testsuites>').encode("utf-16"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "not UTF-8" in comparison["evidence_errors"][0]["error"]
+
+
+def test_deeply_nested_json_evidence_is_refused(tmp_path):
+    """Pathological JSON nesting is malformed evidence (2), never a fault (3)."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    (first / "metadata.json").write_text("[" * 200000 + "]" * 200000,
+                                         encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "unreadable JSON" in comparison["evidence_errors"][0]["error"]
+    assert "internal_errors" not in comparison
 
 
 def _set_runner_name(directory, value):
@@ -1147,3 +1196,34 @@ def test_xpass_with_teardown_xfail_reconciles(tmp_path):
     completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
     assert completed.returncode == 0, comparison
     assert comparison["status"] == "identical"
+
+
+def test_ambient_script_override_cannot_redirect_the_subject(tmp_path):
+    """The module's subject is fixed; an ambient env value must not change it."""
+    decoy = tmp_path / "decoy.py"
+    decoy.write_text("raise SystemExit('decoy loaded')\n", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-c",
+         "import test_compare_full_suite_results as module; print(module.SCRIPT)"],
+        cwd=Path(__file__).parent,
+        env={**os.environ, "PACT_COMPARE_FULL_SUITE_SCRIPT": str(decoy)},
+        capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == str(SCRIPT)
+
+
+def test_module_skips_loudly_outside_the_repo_layout(tmp_path):
+    """Where the repo-level script does not ship, skip with a named reason."""
+    layout = tmp_path / "pact-plugin" / "tests"
+    layout.mkdir(parents=True)
+    copied = layout / Path(__file__).name
+    shutil.copy(Path(__file__), copied)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", str(copied), "-q", "-rA",
+         "--noconftest", "-p", "no:cacheprovider"],
+        cwd=layout, capture_output=True, text=True, check=False)
+    output = completed.stdout + completed.stderr
+    # 5 is pytest's "no tests collected": the module skipped instead of failing
+    # to import. A missing script used to abort collection with exit 2.
+    assert completed.returncode == 5, output
+    assert "repo-level comparator not present" in output
