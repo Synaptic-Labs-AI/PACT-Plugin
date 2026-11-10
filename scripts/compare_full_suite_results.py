@@ -154,10 +154,13 @@ def _command_argv(lines: list[str]) -> list[str]:
     return argv
 
 
-def _parse_junit(path: Path) -> list[dict]:
-    # The JUnit file crossed a trust boundary (downloaded CI artifact). A DTD
-    # declaration is never emitted by pytest and is the only way to define
-    # entities, so refuse it BEFORE ElementTree can expand anything.
+def _junit_bytes(path: Path) -> bytes:
+    """Read the JUnit bytes, refusing a document that declares entities.
+
+    The file crossed a trust boundary (downloaded CI artifact). A DTD
+    declaration is never emitted by pytest and is the only way to define
+    entities, so refuse it BEFORE ElementTree can expand anything.
+    """
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -166,52 +169,59 @@ def _parse_junit(path: Path) -> list[dict]:
         raise EvidenceError(
             f"{path}: JUnit XML declares a DOCTYPE or ENTITY declaration; "
             "refusing to parse a document that can expand entities")
+    return raw
+
+
+def _junit_case(element) -> dict:
+    """One <testcase> element as a case record."""
+    classname, name = element.get("classname"), element.get("name")
+    if classname is None or not name:
+        raise EvidenceError("every JUnit testcase needs classname and name")
+    children = [child for child in element
+                if child.tag in ("failure", "error", "skipped")]
+    if len(children) > 1:
+        raise EvidenceError(f"{classname or name}: multiple outcome children")
+    outcome, reason, message = "pass", None, None
+    if children:
+        child = children[0]
+        message = child.get("message")
+        if not classname:
+            # Collection-phase case: pytest names the MODULE in `name` and
+            # leaves classname empty (measured on 9.2.0, serial and xdist).
+            if child.tag == "skipped":
+                outcome = "collection_skip"
+            elif child.tag == "error":
+                outcome = "collection_error"
+            else:
+                raise EvidenceError(
+                    f"{name}: unknown collection-phase outcome {child.tag!r}")
+        elif child.tag in ("failure", "error"):
+            outcome = child.tag
+        elif child.get("type") == "pytest.skip":
+            outcome = "skip"
+        elif child.get("type") == "pytest.xfail":
+            outcome = "xfail"
+        else:
+            raise EvidenceError(f"{classname}.{name}: unknown skip type")
+        if child.tag == "skipped" and classname:
+            reason = message
     try:
-        root = ET.fromstring(raw)
+        duration = float(element.get("time", ""))
+    except ValueError as exc:
+        raise EvidenceError(f"{classname or name}: invalid duration") from exc
+    if not math.isfinite(duration) or duration < 0:
+        raise EvidenceError(f"{classname or name}: invalid duration")
+    return {"classname": classname, "name": name, "outcome": outcome,
+            "reason": reason, "message": message, "duration": duration,
+            "file": element.get("file")}
+
+
+def _parse_junit(path: Path) -> list[dict]:
+    try:
+        root = ET.fromstring(_junit_bytes(path))
     except ET.ParseError as exc:
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
-    cases = []
-    for element in root.iter("testcase"):
-        classname, name = element.get("classname"), element.get("name")
-        if classname is None or not name:
-            raise EvidenceError("every JUnit testcase needs classname and name")
-        children = [child for child in element
-                    if child.tag in ("failure", "error", "skipped")]
-        if len(children) > 1:
-            raise EvidenceError(f"{classname or name}: multiple outcome children")
-        outcome, reason, message = "pass", None, None
-        if children:
-            child = children[0]
-            message = child.get("message")
-            if not classname:
-                # Collection-phase case: pytest names the MODULE in `name` and
-                # leaves classname empty (measured on 9.2.0, serial and xdist).
-                if child.tag == "skipped":
-                    outcome = "collection_skip"
-                elif child.tag == "error":
-                    outcome = "collection_error"
-                else:
-                    raise EvidenceError(
-                        f"{name}: unknown collection-phase outcome {child.tag!r}")
-            elif child.tag in ("failure", "error"):
-                outcome = child.tag
-            elif child.get("type") == "pytest.skip":
-                outcome = "skip"
-            elif child.get("type") == "pytest.xfail":
-                outcome = "xfail"
-            else:
-                raise EvidenceError(f"{classname}.{name}: unknown skip type")
-            if child.tag == "skipped" and classname:
-                reason = message
-        try:
-            duration = float(element.get("time", ""))
-        except ValueError as exc:
-            raise EvidenceError(f"{classname or name}: invalid duration") from exc
-        if not math.isfinite(duration) or duration < 0:
-            raise EvidenceError(f"{classname or name}: invalid duration")
-        cases.append({"classname": classname, "name": name, "outcome": outcome,
-                      "reason": reason, "message": message, "duration": duration,
-                      "file": element.get("file")})
+    cases = [_junit_case(element) for element in root.iter("testcase")]
     if not cases:
         raise EvidenceError("JUnit contains no testcase elements")
     return cases

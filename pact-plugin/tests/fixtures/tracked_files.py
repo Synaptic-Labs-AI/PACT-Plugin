@@ -46,6 +46,36 @@ def _inside_git_worktree(repo_root):
                for candidate in (repo_root, *repo_root.parents))
 
 
+def _tracked_population(repo_root, root, relative, pathspec, pattern,
+                        keep_deleted):
+    """The git-index population, or the gitless export fallback."""
+    result = _git(repo_root, "ls-files", "-z", "--",
+                  f":(glob){pathspec}" if pattern is not None else pathspec)
+    if result is not None and result.returncode == 0:
+        files = [
+            root / PurePosixPath(entry).relative_to(relative)
+            for entry in result.stdout.split("\0")
+            if entry
+        ]
+        if not keep_deleted:
+            files = [path for path in files if path.is_file()]
+        return files, "git index"
+    if result is None or _outside_repository(repo_root):
+        if _inside_git_worktree(repo_root):
+            raise AssertionError(
+                f"git is unavailable for {repo_root} but a .git entry exists at or "
+                "above it; refusing the filesystem fallback because it cannot tell "
+                "tracked from untracked files.")
+        candidates = root.rglob("*") if pattern is None else root.glob(pattern)
+        return ([path for path in candidates if path.is_file()],
+                "gitless filesystem fallback")
+    raise AssertionError(
+        f"git ls-files failed for {pathspec!r} under {repo_root}: "
+        f"status {result.returncode}, stderr {result.stderr.strip()!r}. "
+        "Refusing to widen the population with a filesystem fallback."
+    )
+
+
 def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
                   keep_deleted=False, allow_empty=False):
     """Return one nonempty, sorted tracked population or raise AssertionError.
@@ -66,35 +96,9 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
     repo_root = Path(repo_root)
     if not repo_root.is_dir():
         raise AssertionError(f"repository root is not a directory: {repo_root}")
-    root = repo_root / Path(relative)
-
-    result = _git(repo_root, "ls-files", "-z", "--",
-                  f":(glob){pathspec}" if pattern is not None else pathspec)
-    if result is not None and result.returncode == 0:
-        files = [
-            root / PurePosixPath(entry).relative_to(relative)
-            for entry in result.stdout.split("\0")
-            if entry
-        ]
-        if not keep_deleted:
-            files = [path for path in files if path.is_file()]
-        source = "git index"
-    elif result is None or _outside_repository(repo_root):
-        if _inside_git_worktree(repo_root):
-            raise AssertionError(
-                f"git is unavailable for {repo_root} but a .git entry exists at or "
-                "above it; refusing the filesystem fallback because it cannot tell "
-                "tracked from untracked files.")
-        candidates = root.rglob("*") if pattern is None else root.glob(pattern)
-        files = [path for path in candidates if path.is_file()]
-        source = "gitless filesystem fallback"
-    else:
-        raise AssertionError(
-            f"git ls-files failed for {pathspec!r} under {repo_root}: "
-            f"status {result.returncode}, stderr {result.stderr.strip()!r}. "
-            "Refusing to widen the population with a filesystem fallback."
-        )
-
+    files, source = _tracked_population(
+        repo_root, repo_root / Path(relative), relative, pathspec, pattern,
+        keep_deleted)
     if not files and not allow_empty:
         raise AssertionError(f"empty tracked population for {pathspec!r} from {source}")
     if known_member is not None:
