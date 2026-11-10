@@ -172,48 +172,58 @@ def _junit_bytes(path: Path) -> bytes:
     return raw
 
 
-def _junit_case(element) -> dict:
-    """One <testcase> element as a case record."""
+def _junit_case(element, index: int) -> list[dict]:
+    """One <testcase> element as one case per outcome child.
+
+    A single element can carry several children: pytest writes a setup error
+    plus a teardown error into one element, and a call skip plus a teardown
+    error into another (measured on 9.2.0). The record counts each child as a
+    separate outcome, so each becomes a case. The element's duration is
+    assigned to the first case only, keeping per-node duration sums equal.
+    """
     classname, name = element.get("classname"), element.get("name")
     if classname is None or not name:
         raise EvidenceError("every JUnit testcase needs classname and name")
     children = [child for child in element
                 if child.tag in ("failure", "error", "skipped")]
-    if len(children) > 1:
-        raise EvidenceError(f"{classname or name}: multiple outcome children")
-    outcome, reason, message = "pass", None, None
-    if children:
-        child = children[0]
-        message = child.get("message")
-        if not classname:
-            # Collection-phase case: pytest names the MODULE in `name` and
-            # leaves classname empty (measured on 9.2.0, serial and xdist).
-            if child.tag == "skipped":
-                outcome = "collection_skip"
-            elif child.tag == "error":
-                outcome = "collection_error"
-            else:
-                raise EvidenceError(
-                    f"{name}: unknown collection-phase outcome {child.tag!r}")
-        elif child.tag in ("failure", "error"):
-            outcome = child.tag
-        elif child.get("type") == "pytest.skip":
-            outcome = "skip"
-        elif child.get("type") == "pytest.xfail":
-            outcome = "xfail"
-        else:
-            raise EvidenceError(f"{classname}.{name}: unknown skip type")
-        if child.tag == "skipped" and classname:
-            reason = message
     try:
         duration = float(element.get("time", ""))
     except ValueError as exc:
         raise EvidenceError(f"{classname or name}: invalid duration") from exc
     if not math.isfinite(duration) or duration < 0:
         raise EvidenceError(f"{classname or name}: invalid duration")
-    return {"classname": classname, "name": name, "outcome": outcome,
-            "reason": reason, "message": message, "duration": duration,
-            "file": element.get("file")}
+    emitted = element.get("file")
+    if not children:
+        return [{"classname": classname, "name": name, "outcome": "pass",
+                 "reason": None, "message": None, "duration": duration,
+                 "file": emitted, "element": index}]
+    cases = []
+    for position, child in enumerate(children):
+        outcome, reason = _junit_outcome(classname, name, child)
+        cases.append({"classname": classname, "name": name, "outcome": outcome,
+                      "reason": reason, "message": child.get("message"),
+                      "duration": duration if position == 0 else 0.0,
+                      "file": emitted, "element": index})
+    return cases
+
+
+def _junit_outcome(classname: str, name: str, child) -> tuple[str, str | None]:
+    """(outcome, reason) for one outcome child, refusing unknown tags."""
+    if not classname:
+        # Collection-phase case: pytest names the MODULE in `name` and
+        # leaves classname empty (measured on 9.2.0, serial and xdist).
+        if child.tag == "skipped":
+            return "collection_skip", None
+        if child.tag == "error":
+            return "collection_error", None
+        raise EvidenceError(f"{name}: unknown collection-phase outcome {child.tag!r}")
+    if child.tag in ("failure", "error"):
+        return child.tag, None
+    if child.get("type") == "pytest.skip":
+        return "skip", child.get("message")
+    if child.get("type") == "pytest.xfail":
+        return "xfail", child.get("message")
+    raise EvidenceError(f"{classname}.{name}: unknown skip type")
 
 
 def _parse_junit(path: Path) -> list[dict]:
@@ -221,7 +231,9 @@ def _parse_junit(path: Path) -> list[dict]:
         root = ET.fromstring(_junit_bytes(path))
     except ET.ParseError as exc:
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
-    cases = [_junit_case(element) for element in root.iter("testcase")]
+    cases = []
+    for index, element in enumerate(root.iter("testcase")):
+        cases.extend(_junit_case(element, index))
     if not cases:
         raise EvidenceError("JUnit contains no testcase elements")
     return cases
@@ -457,35 +469,47 @@ def _validate_log(directory: Path, record: dict,
 
 
 def _require_one_outcome_kind_per_node(cases: list[dict]) -> None:
-    """Refuse two identical outcome kinds for one node.
+    """Refuse the same outcome kind on two <testcase> ELEMENTS for one node.
 
-    pytest opens a second <testcase> element only for a call failure plus a
-    teardown error (_pytest/junitxml.py), so distinct kinds are legitimate and
-    a repeated kind is a duplicated representation.
+    One element may carry several children: pytest writes a setup error plus a
+    teardown error into one element, and a skip plus a teardown error into
+    another (measured on 9.2.0). Those are separate phase outcomes, not a
+    duplicate. Two ELEMENTS for one node repeating a kind is never produced by
+    pytest and is refused; the legitimate two-element pair is a call failure
+    plus a teardown error, whose kinds differ.
     """
-    seen = {}
+    by_node = {}
     for case in cases:
-        kinds = seen.setdefault(case["node_id"], set())
-        if case["outcome"] in kinds:
+        by_node.setdefault(case["node_id"], []).append(
+            (case["element"], case["outcome"]))
+    for node_id, entries in by_node.items():
+        elements = {index for index, _ in entries}
+        kinds = [kind for _, kind in entries]
+        if len(elements) > 1 and len(kinds) != len(set(kinds)):
             raise EvidenceError(
-                f"{case['node_id']}: duplicate JUnit outcome {case['outcome']!r}")
-        kinds.add(case["outcome"])
+                f"{node_id}: duplicate JUnit outcome across testcase elements")
 
 
 def _teardown_after_pass_count(cases: list[dict]) -> int:
     """Items whose call passed and whose teardown errored.
 
-    pytest emits ONE <testcase> carrying the <error> for that shape and does
-    not write the pass, so the record counts one more pass than the JUnit
-    does. A call failure plus a teardown error emits TWO elements and is
-    excluded by the failing-key set; a setup error's message says setup.
+    pytest writes ONE error-only case for that shape and does not write the
+    pass, so the record counts one more pass than the JUnit does. A node that
+    has a failure, a skip, or a setup error did not pass, so its teardown
+    error attributes no missing pass (a setup error plus a teardown error, or
+    a call skip plus a teardown error, both arrive on one node).
     """
-    failing = {(case["classname"], case["name"])
-               for case in cases if case["outcome"] == "failure"}
+    did_not_pass = set()
+    for case in cases:
+        if case["outcome"] in ("failure", "skip"):
+            did_not_pass.add(case["node_id"])
+        elif (case["outcome"] == "error"
+              and (case["message"] or "").startswith("failed on setup")):
+            did_not_pass.add(case["node_id"])
     return sum(1 for case in cases
                if case["outcome"] == "error"
                and (case["message"] or "").startswith("failed on teardown")
-               and (case["classname"], case["name"]) not in failing)
+               and case["node_id"] not in did_not_pass)
 
 
 def _terminal_cases(cases: list[dict], record: dict) -> list[dict]:
@@ -551,9 +575,12 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
     if expected_counts["pass"] < 0 or any(
             outcome_counts[outcome] != count
             for outcome, count in expected_counts.items()):
+        shortfall = expected_counts["pass"] - outcome_counts["pass"]
+        detail = (f"; {shortfall} pass(es) cannot be attributed: a pass whose "
+                  "teardown skipped is not marked in JUnit" if shortfall > 0 else "")
         raise EvidenceError(
             f"JUnit aggregates {dict(outcome_counts)} != record {expected_counts} "
-            f"(teardown-after-pass items: {teardown_after_pass})")
+            f"(teardown-after-pass items: {teardown_after_pass}{detail})")
     skip_sites, collection_skip_sites = _validate_skip_sites(record, cases, node_for_key)
     return cases, skip_sites, collection_skip_sites
 
@@ -607,8 +634,10 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
             "passed_checks": environment_passes,
             "platform": [line for line in lines if line.startswith("platform ")],
             "measurements": [line for line in lines if "sys.executable=" in line],
-            "runner": [{"name": job.get("name"), "runner_name": job.get("runnerName")}
-                       for job in metadata.get("jobs", []) if isinstance(job, dict)],
+            # Job NAMES identify the workflow shape; the runner instance id is
+            # a fresh value on every GitHub-hosted run and attributes nothing.
+            "job_names": [job.get("name") for job in metadata.get("jobs", [])
+                          if isinstance(job, dict)],
             "pins": [line for line in lines if "constraints-ci.txt" in line],
             "cache": [line for line in lines if line.startswith(CACHE_PREFIXES)],
             "pytest_addopts_absent": True},
@@ -678,16 +707,22 @@ def _material_duration_changes(reference: dict, run: dict) -> list[dict]:
     return sorted(changes, key=lambda change: change["test"])
 
 
-# Derived from the test outcome or from the log shape, not an environment axis:
-# a red-vs-green pair always differs in overall_conclusion, which is the delta
-# itself rather than evidence about where the runs executed.
-_DERIVED_ENVIRONMENT_KEYS = ("overall_conclusion", "passed_checks",
-                             "pytest_addopts_absent")
+# Not attribution axes. overall_conclusion and passed_checks are derived from
+# the outcome; pytest_addopts_absent is a constant; cache lines are incidental
+# log text (cold vs warm is not a reason a test outcome changed).
+_NON_ATTRIBUTION_ENVIRONMENT_KEYS = (
+    "overall_conclusion", "passed_checks", "pytest_addopts_absent", "cache")
 
 
 def _environment_differences(reference: dict, run: dict) -> list[str]:
+    """Material environment axes that differ between two runs.
+
+    Only platform, measurements, job names and pins can attribute an outcome
+    change. Ephemeral per-run values (runner instance ids) are not recorded as
+    an axis at all.
+    """
     return sorted(key for key in set(reference) | set(run)
-                  if key not in _DERIVED_ENVIRONMENT_KEYS
+                  if key not in _NON_ATTRIBUTION_ENVIRONMENT_KEYS
                   and reference.get(key) != run.get(key))
 
 

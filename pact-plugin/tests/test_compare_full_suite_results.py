@@ -870,7 +870,13 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         "@pytest.fixture\n"
         "def broken():\n"
         '    raise RuntimeError("setup boom")\n\n\n'
-        "def test_setup_error(broken):\n    assert True\n",
+        "def test_setup_error(broken):\n    assert True\n\n\n"
+        "@pytest.fixture\n"
+        "def broken_after_boom(boom):\n"
+        '    raise RuntimeError("setup boom")\n\n\n'
+        "def test_setup_and_teardown_error(broken_after_boom):\n    assert True\n\n\n"
+        "def test_call_skip_then_teardown_error(boom):\n"
+        '    pytest.skip("call skip")\n',
         encoding="utf-8")
     (child / "test_modskip.py").write_text(
         'import pytest\n\npytest.skip("module skip", allow_module_level=True)\n\n\n'
@@ -894,7 +900,7 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
     assert (record["collected"], record["passed"], record["failed"],
             record["errors"], record["skipped"],
-            record["skipped_at_collection"]) == (4, 2, 1, 3, 1, 1), (
+            record["skipped_at_collection"]) == (6, 2, 1, 6, 2, 1), (
                 record, where)
 
     shapes = {}
@@ -916,6 +922,17 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     assert [item[0][0] for item in setup_error] == ["error"], (setup_error, where)
     assert setup_error[0][0][1].startswith("failed on setup with"), (
         setup_error, where)
+    setup_and_teardown = shapes[("test_shapes", "test_setup_and_teardown_error")]
+    assert [child[0] for child in setup_and_teardown[0]] == ["error", "error"], (
+        setup_and_teardown, where)
+    assert setup_and_teardown[0][0][1].startswith("failed on setup with"), (
+        setup_and_teardown, where)
+    assert setup_and_teardown[0][1][1].startswith("failed on teardown with"), (
+        setup_and_teardown, where)
+    skip_and_teardown = shapes[
+        ("test_shapes", "test_call_skip_then_teardown_error")]
+    assert [child[0] for child in skip_and_teardown[0]] == ["skipped", "error"], (
+        skip_and_teardown, where)
     assert [item[0][0] for item in shapes[("", "test_modskip")]] == ["skipped"], (
         shapes, where)
     assert shapes[("", "test_modskip")][0][0][1] == "collection skipped", (
@@ -987,3 +1004,115 @@ def test_ordinary_junit_without_a_doctype_still_parses(tmp_path):
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
     assert comparison["status"] == "identical"
+
+
+def _set_runner_name(directory, value):
+    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    metadata["jobs"][0]["runnerName"] = value
+    write_json(directory / "metadata.json", metadata)
+
+
+def _append_junit_child(directory, node_id, tag, message, child_type=None):
+    classname, name = comparator._junit_key(node_id)
+    xml_path = directory / "artifact" / ".full-suite-results.xml"
+    tree = ET.parse(xml_path)
+    for element in tree.getroot().iter("testcase"):
+        if (element.get("classname"), element.get("name")) == (classname, name):
+            child = ET.SubElement(element, tag)
+            child.set("message", message)
+            if child_type is not None:
+                child.set("type", child_type)
+            break
+    else:
+        raise AssertionError(f"{node_id} has no JUnit element")
+    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+
+
+def _rewrite_log_summary(directory, old, new):
+    log_path = directory / "run.log"
+    log_path.write_text(log_path.read_text(encoding="utf-8").replace(old, new),
+                        encoding="utf-8")
+
+
+def test_runner_instance_id_does_not_suppress_a_delta(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "skip", "later")])
+    _set_runner_name(first, "GitHub Actions 1023381672")
+    _set_runner_name(second, "GitHub Actions 1023380269")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == []
+    assert [(delta["type"], delta["name"]) for delta in comparison["deltas"]] == [
+        ("outcome", "test_beta")]
+
+
+def test_cache_line_difference_does_not_suppress_a_delta(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "skip", "later")])
+    log_path = second / "run.log"
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    lines.insert(1, actions_line("Cache restored from key: Linux-pip-abc123"))
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == []
+    assert any(delta["name"] == "test_beta" for delta in comparison["deltas"])
+
+
+def test_setup_and_teardown_error_in_one_element_reconciles(tmp_path):
+    """Measured shape: one element, two <error> children, record errors=2."""
+    def build(name, run_id):
+        directory = make_run(
+            tmp_path, name, run_id, nodes=[ALPHA],
+            cases=[case(ALPHA, "error", 'failed on teardown with "boom"')],
+            record_updates={"errors": 2, "summary_line": "2 errors in 0.10s"})
+        _append_junit_child(directory, ALPHA, "error",
+                            'failed on setup with "setup boom"')
+        _rewrite_log_summary(directory, "1 error in 0.10s", "2 errors in 0.10s")
+        return directory
+
+    completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+
+
+def test_skip_and_teardown_error_in_one_element_reconciles(tmp_path):
+    """Measured shape: one element, <skipped> + <error>, record skip=1 error=1."""
+    def build(name, run_id):
+        # ALPHA keeps the run red so the metadata conclusion and verifier
+        # disposition match the record after the error count is bumped.
+        directory = make_run(
+            tmp_path, name, run_id, nodes=[ALPHA, BETA],
+            cases=[case(ALPHA, "failure", "assert False"),
+                   case(BETA, "skip", "call skip")],
+            record_updates={"errors": 1,
+                            "summary_line": "1 failed, 1 skipped, 1 error in 0.10s"})
+        _append_junit_child(directory, BETA, "error",
+                            'failed on teardown with "boom"')
+        _rewrite_log_summary(directory, "1 failed, 1 skipped in 0.10s",
+                             "1 failed, 1 skipped, 1 error in 0.10s")
+        return directory
+
+    completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+
+
+def test_pass_with_teardown_skip_is_refused_by_name(tmp_path):
+    """A pass whose teardown skipped is not marked in JUnit; refuse by name."""
+    def build(name, run_id):
+        directory = make_run(
+            tmp_path, name, run_id, nodes=[ALPHA],
+            cases=[case(ALPHA, "skip", "teardown skip")],
+            record_updates={"passed": 1,
+                            "summary_line": "1 passed, 1 skipped in 0.10s"})
+        _rewrite_log_summary(directory, "1 skipped in 0.10s",
+                             "1 passed, 1 skipped in 0.10s")
+        return directory
+
+    completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
+    assert completed.returncode == 2, comparison
+    assert "teardown skipped is not marked in JUnit" in (
+        comparison["evidence_errors"][0]["error"])
