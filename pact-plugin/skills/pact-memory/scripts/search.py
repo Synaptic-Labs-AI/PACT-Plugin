@@ -374,7 +374,7 @@ def _get_graph_related_memories(
     # Get memories directly linked to this file
     file_id = get_file_id(conn, file_path, project_id)
     if file_id:
-        direct_memories = get_memories_for_file(conn, file_id)
+        direct_memories = get_memories_for_file(conn, file_id, project_id)
         memory_ids.update(direct_memories)
 
     # Get memories linked through file relationships
@@ -446,7 +446,9 @@ def graph_enhanced_search(
                         continue
                     # Get associated files
                     from .graph import get_files_for_memory
-                    files_data = get_files_for_memory(conn, memory_id)
+                    files_data = get_files_for_memory(
+                        conn, memory_id, memory_dict.get("project_id")
+                    )
                     file_paths = [f["path"] for f in files_data]
 
                     memory_obj = memory_from_db_row(memory_dict, file_paths)
@@ -546,21 +548,20 @@ def search_by_file(
             for memory_id in ordered[index:window]:
                 memory_dict = get_memory(conn, memory_id)
                 if memory_dict:
-                    # THE GRAPH LOOKUP SCOPES THE FILE, NOT THE MEMORY. A
-                    # stale link left on the old project's file row still
-                    # yields this memory id (get_memories_for_file is
-                    # file-id-addressed and checks no project), so a re-keyed
-                    # row would be served to its old project. Confirm the
-                    # row's own stored project here, exactly as vector_search
-                    # confirms a vector hit; an unscoped call (project_id
-                    # None) keeps its whole-store meaning.
+                    # THE GRAPH LOOKUP SCOPES THE FILE, NOT THE MEMORY, and
+                    # get_memories_for_file now also confirms the memory's
+                    # stored project. This is still the last place an id
+                    # becomes a returned memory, so a re-keyed row cannot be
+                    # served to its old project by any id source.
                     if (
                         project_id is not None
                         and memory_dict.get("project_id") != project_id
                     ):
                         continue
                     from .graph import get_files_for_memory
-                    files_data = get_files_for_memory(conn, memory_id)
+                    files_data = get_files_for_memory(
+                        conn, memory_id, memory_dict.get("project_id")
+                    )
                     file_paths = [f["path"] for f in files_data]
 
                     memory_obj = memory_from_db_row(memory_dict, file_paths)
