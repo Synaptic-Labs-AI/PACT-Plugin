@@ -68,7 +68,7 @@ git -C "$REPO_ROOT" check-ignore -q .worktrees 2>/dev/null || {
 
 ### Step 3: Create the Worktree
 
-`{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains the literal `{branch}` placeholder, stop and report it.
+`{branch}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
@@ -103,7 +103,7 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 
 ### Step 4: Link the Repo venv (if present)
 
-Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line in intent: a value whose second line is non-empty is not a branch name, so report it instead of substituting it. If the name still contains the literal `{branch}` placeholder, stop and report it.
+Link the main checkout's `.venv` into the worktree so tools resolve project dependencies from inside it. This step runs for a newly created worktree and for a reused one. `{branch}` must be a single line: a value that contains any newline at all (`\n` or `\r`) is not a branch name, so report it instead of substituting it. Do not substitute a value you have not checked for newlines — the fence cannot stop a value that supplies its own heredoc delimiter line. If the name still contains the literal `{branch}` placeholder, stop and report it.
 
 ```bash
 # Shell variables do not survive between Bash calls, so recompute the paths here.
