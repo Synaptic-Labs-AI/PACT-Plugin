@@ -216,16 +216,20 @@ else
       fi
     fi
   else
-    if [ "$EXCLUDE_RESOLVED" = 0 ]; then
-      echo "WARNING: could not resolve the exclude path — .venv link skipped so an unignored link cannot be committed"
+    CAUSE="could not resolve the exclude path"
+    [ "$EXCLUDE_RESOLVED" = 0 ] || CAUSE="could not write $EXCLUDE"
+    if [ -e "$WORKTREE/.venv" ] || [ -L "$WORKTREE/.venv" ]; then
+      echo "WARNING: $CAUSE — $WORKTREE/.venv exists and is NOT ignored; git add -A could commit it, and an untracked unignored path makes git worktree remove refuse without --force"
     else
-      echo "WARNING: could not write $EXCLUDE — .venv link skipped so an unignored link cannot be committed"
+      echo "WARNING: $CAUSE — .venv link skipped so an unignored link cannot be committed"
     fi
   fi
 fi
 ```
 
 Include every line Step 4 printed in the Step 5 report, warnings included.
+
+The `/.venv` rule is written to the clone's common `info/exclude`, so it applies to the main checkout and every linked worktree of the clone, and it stays in place after the worktree or its link is removed.
 
 Treat the link as an advisory read-only, shared view of the main checkout's environment: the filesystem does not enforce it. Environment-managing tools write through it — `pip install`, `uv sync`, and `uv run` (which syncs the environment before running) modify the main checkout's environment, not a worktree-local one. Do not delete it through the worktree path either: `.venv/` with a trailing slash resolves into the shared environment and removes the main checkout's contents. When a branch needs its own dependency set, remove the link with `rm -f .venv` (no trailing slash) and create a local environment in the worktree.
 
