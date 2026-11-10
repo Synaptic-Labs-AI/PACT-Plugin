@@ -25,7 +25,17 @@ from typing import Any, Dict, List, Optional, Set
 from .database import (
     db_connection,
     ensure_initialized,
-    generate_id
+    generate_id,
+    sqlite3 as _connection_sqlite3,
+)
+
+# A CONNECTION CAN COME FROM EITHER IMPLEMENTATION. `database.get_connection`
+# uses pysqlite3 when it is installed and stdlib sqlite3 otherwise, and a
+# caller may hand in a stdlib connection. The two IntegrityError classes are
+# unrelated, so naming only one silently misses half the valid connections.
+_INTEGRITY_ERRORS = (
+    sqlite3.IntegrityError,
+    _connection_sqlite3.IntegrityError,
 )
 
 # Configure logging
@@ -270,7 +280,7 @@ def link_memory_to_file(
         conn.commit()
         logger.debug(f"Linked memory {memory_id} to file {file_id} ({relationship})")
         return True
-    except sqlite3.IntegrityError:
+    except _INTEGRITY_ERRORS:
         # Link already exists
         return False
 
@@ -472,7 +482,7 @@ def add_file_relation(
         conn.commit()
         logger.debug(f"Added file relation: {source_path} -> {target_path} ({relationship})")
         return True
-    except sqlite3.IntegrityError:
+    except _INTEGRITY_ERRORS:
         # Relation already exists
         return False
 
