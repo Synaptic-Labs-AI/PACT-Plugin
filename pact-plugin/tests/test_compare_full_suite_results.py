@@ -876,7 +876,11 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         '    raise RuntimeError("setup boom")\n\n\n'
         "def test_setup_and_teardown_error(broken_after_boom):\n    assert True\n\n\n"
         "def test_call_skip_then_teardown_error(boom):\n"
-        '    pytest.skip("call skip")\n',
+        '    pytest.skip("call skip")\n\n\n'
+        '@pytest.mark.xfail(reason="expected")\n'
+        "def test_xfail_then_teardown_error(boom):\n    assert False\n\n\n"
+        '@pytest.mark.xfail(reason="expected pass")\n'
+        "def test_xpass_then_teardown_error(boom):\n    assert True\n",
         encoding="utf-8")
     (child / "test_modskip.py").write_text(
         'import pytest\n\npytest.skip("module skip", allow_module_level=True)\n\n\n'
@@ -899,8 +903,8 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         completed.stdout + completed.stderr + "\n" + where)
     record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
     assert (record["collected"], record["passed"], record["failed"],
-            record["errors"], record["skipped"],
-            record["skipped_at_collection"]) == (6, 2, 1, 6, 2, 1), (
+            record["errors"], record["skipped"], record["skipped_at_collection"],
+            record["xfailed"], record["xpassed"]) == (8, 2, 1, 6, 2, 1, 3, 1), (
                 record, where)
 
     shapes = {}
@@ -937,6 +941,13 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         shapes, where)
     assert shapes[("", "test_modskip")][0][0][1] == "collection skipped", (
         shapes, where)
+    typed = {(element.get("classname"), element.get("name")):
+             [(child.tag, child.get("type")) for child in element]
+             for element in ET.parse(xml).getroot().iter("testcase")}
+    assert typed[("test_shapes", "test_xfail_then_teardown_error")] == [
+        ("skipped", "pytest.xfail"), ("skipped", "pytest.xfail")], (typed, where)
+    assert typed[("test_shapes", "test_xpass_then_teardown_error")] == [
+        ("skipped", "pytest.xfail")], (typed, where)
 
     def build(logical, run_id):
         directory = tmp_path / logical
@@ -966,6 +977,8 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
             actions_line("CI environment matches constraints-ci.txt."),
             actions_line(f"FULL-COLLECTION-OK 2 test files and "
                          f"{run_record['collected']} items match discovery; subject={SHA}"),
+            *[actions_line(raw) for raw in completed.stdout.splitlines()
+              if raw.startswith("XPASS ")],
             actions_line(f"===== {run_record['summary_line']} ====="),
             actions_line("RUN-VERIFY-FAILURE FAILED: real-shape rig is red"),
             actions_line("CI environment matches constraints-ci.txt."),
@@ -1116,3 +1129,24 @@ def test_pass_with_teardown_skip_is_refused_by_name(tmp_path):
     assert completed.returncode == 2, comparison
     assert "teardown skipped is not marked in JUnit" in (
         comparison["evidence_errors"][0]["error"])
+
+
+def test_xpass_with_teardown_xfail_reconciles(tmp_path):
+    """Measured shape: an xpass whose teardown errors emits only the xfail."""
+    def build(name, run_id):
+        old = "1 passed, 1 xfailed in 0.10s"
+        new = "1 passed, 1 xfailed, 1 xpassed in 0.10s"
+        directory = make_run(
+            tmp_path, name, run_id, nodes=[ALPHA, BETA],
+            cases=[case(ALPHA), case(BETA, "xfail", "expected")],
+            record_updates={"xpassed": 1, "summary_line": new})
+        log_path = directory / "run.log"
+        lines = log_path.read_text(encoding="utf-8").replace(old, new).splitlines()
+        index = next(i for i, line in enumerate(lines) if new in line)
+        lines.insert(index, actions_line(f"XPASS {BETA} - expected"))
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return directory
+
+    completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"

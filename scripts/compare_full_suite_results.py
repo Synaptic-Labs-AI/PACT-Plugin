@@ -277,12 +277,24 @@ def _apply_xpass(cases: list[dict], lines: list[str], terminal: list[str],
         key = _junit_key(node_id)
         candidates = [case for case in by_key.get(key, [])
                       if case["outcome"] == "pass"]
-        if len(candidates) != 1:
+        if len(candidates) > 1:
             raise EvidenceError(
                 f"XPASS {node_id!r} needs one unambiguous JUnit pass, "
                 f"found {len(candidates)}")
-        candidates[0]["outcome"] = "xpass"
-        candidates[0]["reason"] = reason
+        if candidates:
+            candidates[0]["outcome"] = "xpass"
+            candidates[0]["reason"] = reason
+            continue
+        # Measured: an xpass whose teardown errors emits ONE element carrying
+        # only the teardown xfail, so the call pass has no element of its own.
+        # The raw XPASS line is the evidence for that pass; synthesize it.
+        fabricated = {"classname": key[0], "name": key[1], "outcome": "xpass",
+                      "reason": reason, "message": None, "duration": 0.0,
+                      "file": None, "node_id": node_id,
+                      "element": max((case["element"] for case in cases),
+                                     default=-1) + 1}
+        cases.append(fabricated)
+        by_key.setdefault(key, []).append(fabricated)
 
 
 def _validate_skip_sites(record: dict, cases: list[dict],
@@ -501,7 +513,7 @@ def _teardown_after_pass_count(cases: list[dict]) -> int:
     """
     did_not_pass = set()
     for case in cases:
-        if case["outcome"] in ("failure", "skip"):
+        if case["outcome"] in ("failure", "skip", "xfail", "xpass"):
             did_not_pass.add(case["node_id"])
         elif (case["outcome"] == "error"
               and (case["message"] or "").startswith("failed on setup")):
