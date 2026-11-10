@@ -850,11 +850,7 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     child.mkdir()
     tests_dir = Path(__file__).resolve().parent
     (child / "conftest.py").write_text(
-        "import sys\n\n"
-        f"TESTS = {str(tests_dir)!r}\n\n\n"
         "def pytest_configure(config):\n"
-        "    if TESTS not in sys.path:\n"
-        "        sys.path.insert(0, TESTS)\n"
         "    from ci_full_run_record import FullRunRecord\n"
         '    config.pluginmanager.register(FullRunRecord(), "full-run-record")\n',
         encoding="utf-8")
@@ -892,7 +888,8 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     where = f"comparator script actually loaded: {SCRIPT}"
     env = {**os.environ, "GITHUB_ACTIONS": "true",
            "GITHUB_WORKSPACE": str(workspace), "GITHUB_RUN_ID": "200",
-           "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": SHA}
+           "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": SHA,
+           "PYTHONPATH": str(tests_dir)}
     env.pop("PACT_FULL_RUN_RECORD_OWNER", None)
     env.pop("PYTEST_ADDOPTS", None)
     completed = subprocess.run(
