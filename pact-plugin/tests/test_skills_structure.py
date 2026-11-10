@@ -16,8 +16,9 @@ import pytest
 from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
 
-SKILLS_DIR = Path(__file__).parent.parent / "skills"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+SKILLS_DIR = PLUGIN_ROOT / "skills"
+REPO_ROOT = PLUGIN_ROOT.parent
 
 
 def _tracked_files(repo_root, relative_dir, pattern=None):
@@ -27,10 +28,32 @@ def _tracked_files(repo_root, relative_dir, pattern=None):
     )
 
 
-def _tracked_skill_dirs(repo_root):
+def _collection_population(relative_dir, pattern):
+    """A collection-time population, derived from the plugin directory's own name.
+
+    The name is read rather than hardcoded because an installed plugin cache
+    places the plugin under a version directory (``.../PACT/4.8.34``), where a
+    literal ``pact-plugin/`` prefix matches nothing. A slim install that omits
+    the artifact skips this module by name instead of aborting collection; a
+    dev checkout whose population is empty still fails loudly.
+    """
+    try:
+        return _tracked_files(REPO_ROOT, relative_dir, pattern)
+    except AssertionError:
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no {relative_dir!r}; "
+            "the structural claims are about the dev checkout",
+            allow_module_level=True,
+        )
+
+
+def _tracked_skill_dirs(plugin_root):
     """Return every tracked top-level skill directory, even without SKILL.md."""
-    files = _tracked_files(repo_root, "pact-plugin/skills")
-    skills_dir = repo_root / "pact-plugin" / "skills"
+    plugin_root = Path(plugin_root)
+    files = _tracked_files(plugin_root.parent, f"{plugin_root.name}/skills")
+    skills_dir = plugin_root / "skills"
     known = skills_dir / "pact-team-registration" / "SKILL.md"
     assert known in files
     directories = set()
@@ -72,7 +95,7 @@ N8N_SKILLS = {
 @pytest.fixture
 def skill_dirs():
     """Get every tracked skill directory, including incomplete skills."""
-    return _tracked_skill_dirs(REPO_ROOT)
+    return _tracked_skill_dirs(PLUGIN_ROOT)
 
 
 class TestSkillDirectoriesExist:
@@ -242,8 +265,8 @@ class TestPreResponseChannelCheckGate:
             "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§7)"
 
 
-_ALL_SKILL_FILES = _tracked_files(
-    REPO_ROOT, "pact-plugin/skills", "*/SKILL.md"
+_ALL_SKILL_FILES = _collection_population(
+    f"{PLUGIN_ROOT.name}/skills", "*/SKILL.md"
 )
 
 
@@ -258,8 +281,8 @@ _ALL_SKILL_FILES = _tracked_files(
 # carved out.
 PACT_AGENTS_DIR = SKILLS_DIR.parent / "agents"
 F20_CARVE_OUT_FILES = frozenset({"pact-orchestrator"})
-_PACT_AGENT_FILES = _tracked_files(
-    REPO_ROOT, "pact-plugin/agents", "pact-*.md"
+_PACT_AGENT_FILES = _collection_population(
+    f"{PLUGIN_ROOT.name}/agents", "pact-*.md"
 )
 
 
@@ -306,7 +329,7 @@ class TestTrackedSkillPopulation:
         self._git(tmp_path, "init", "-q")
         self._git(tmp_path, "add", "-A")
 
-        directories = _tracked_skill_dirs(tmp_path)
+        directories = _tracked_skill_dirs(tmp_path / "pact-plugin")
         assert incomplete.parent in directories
         with pytest.raises(AssertionError, match="incomplete-skill/ missing SKILL.md"):
             TestSkillMdFiles().test_each_skill_has_skill_md(directories)
@@ -348,7 +371,7 @@ def test_skill_dirs_fixture_excludes_untracked_skill_directories(
         ["git", "add", "--", "pact-plugin/skills/pact-team-registration/SKILL.md"],
         cwd=repo, check=True,
     )
-    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
     monkeypatch.setitem(globals(), "SKILLS_DIR", skills)
 
     directories = request.getfixturevalue("skill_dirs")

@@ -546,9 +546,19 @@ def _retired_claim_clauses(text: str) -> list:
 
 
 def _non_test_plugin_files() -> list:
-    """Every tracked text file under the plugin root outside tests/."""
+    """Every tracked text file under the plugin root outside tests/.
+
+    The directory name is READ from the plugin root rather than hardcoded: an
+    installed plugin cache places it under a version directory
+    (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
+    nothing and the empty population aborts collection of this module.
+    """
+    # ``**/*`` rather than a bare ``**``: identical pathspec in git (verified
+    # against the index), but pathlib's glob yields only DIRECTORIES for a
+    # trailing ``**``, so the gitless export fallback would return no files.
     tracked = _tracked_glob(
-        PLUGIN_ROOT.parent, "pact-plugin/**", "pact-plugin/protocols/pact-protocols.md",
+        PLUGIN_ROOT.parent, f"{PLUGIN_ROOT.name}/**/*",
+        f"{PLUGIN_ROOT.name}/protocols/pact-protocols.md",
     )
     return [
         path
@@ -583,9 +593,24 @@ def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
         _tracked_glob(repo, "pact-plugin/protocols/*.md", "pact-plugin/protocols/tracked.md")
 
 
+def _collection_population() -> list:
+    """The collection-time scan, or a named skip in a layout that omits it."""
+    try:
+        return _non_test_plugin_files()
+    except AssertionError:
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no "
+            f"{PLUGIN_ROOT.name}/protocols tree; the retired-claim scan is "
+            "about the dev checkout",
+            allow_module_level=True,
+        )
+
+
 @pytest.mark.parametrize(
     "doc_path",
-    _non_test_plugin_files(),
+    _collection_population(),
     ids=lambda p: p.relative_to(PLUGIN_ROOT).as_posix(),
 )
 def test_retired_sendmessage_hook_denial_absent(doc_path: Path):
