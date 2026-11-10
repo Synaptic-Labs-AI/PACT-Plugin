@@ -155,6 +155,19 @@ else
     echo "Venv link: skipped (worktree path is not under .worktrees/)"
     exit 0
   fi
+  WORKTREE_COMMON_DIR=$(cd "$WORKTREE" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null)
+  WORKTREE_COMMON_PHYS=
+  if [ -n "$WORKTREE_COMMON_DIR" ]; then
+    WORKTREE_COMMON_PHYS=$(cd "$WORKTREE" 2>/dev/null && cd "$WORKTREE_COMMON_DIR" 2>/dev/null && pwd -P)
+  fi
+  if [ -n "$WORKTREE_COMMON_PHYS" ] && [ "$WORKTREE_COMMON_PHYS" != "$MAIN_COMMON_PHYS" ]; then
+    echo "Venv link: skipped (the worktree at $WORKTREE belongs to a different repository)"
+    exit 0
+  fi
+  if [ -n "$WORKTREE_COMMON_PHYS" ] && [ "$(git -C "$WORKTREE" symbolic-ref --short -q HEAD 2>/dev/null)" != "$BRANCH" ]; then
+    echo "Venv link: skipped (the worktree at $WORKTREE is not on $BRANCH)"
+    exit 0
+  fi
   # Write /.venv anchored so the rule matches only the root-level entry.
   # Resolve from inside the worktree so a relative result is relative to it.
   EXCLUDE=$(cd "$WORKTREE" 2>/dev/null && git rev-parse --git-path info/exclude 2>/dev/null)
@@ -239,6 +252,8 @@ Branch: {branch}
 | No worktree was created or registered for the branch (Step 3 failed or was skipped) | Step 4 prints `Venv link: skipped (no git worktree at $WORKTREE — Step 3 did not create one)` and writes nothing |
 | Worktree path outside `.worktrees/` | Step 4 prints `Venv link: skipped (worktree path is not under .worktrees/)`; no link or rule is written |
 | The target path reaches outside `.worktrees/` through a symlink | Step 3 refuses before creating anything with `Cannot create worktree: … resolves outside .worktrees/.`; a symlinked target or a symlinked intermediate directory is not followed |
+| `.worktrees/{branch}` holds a worktree of a different repository | Step 4 prints `Venv link: skipped (the worktree at … belongs to a different repository)` and writes nothing; it does not borrow another repository's exclude file or worktree |
+| `.worktrees/{branch}` holds a worktree on a different branch, or on a detached HEAD | Step 4 prints `Venv link: skipped (the worktree at … is not on …)`; only the worktree for `{branch}` receives the link |
 | Invalid branch name, a multi-line value, or an unsubstituted `{branch}` placeholder | Step 3 stops before `git worktree add`; Step 4 prints the corresponding `Venv link: skipped (…)` line and writes nothing |
 | Worktree directory exists but is stale | Run `git worktree prune` first, then retry |
 | Branch name already exists | Ask user: check out existing or create new name |
