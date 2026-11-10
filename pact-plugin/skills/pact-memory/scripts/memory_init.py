@@ -22,6 +22,7 @@ Thread-safety: Uses threading.Lock for the session-scoped initialization flag.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import logging
 import os
 import uuid
@@ -300,6 +301,11 @@ except ImportError:
 # worst case is that a sweep runs more than once.
 _PROCESS_MARKER_TOKEN = f"process-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
+# Upper bound for the session-derived part of the /tmp marker filename. 64
+# keeps the whole name far below NAME_MAX (255 on the usual filesystems) while
+# leaving room for the hash suffix used when the slug is longer.
+_MAX_MARKER_SLUG_CHARS = 64
+
 
 def _remove_process_marker() -> None:
     """Delete this process's own fallback marker as the process exits.
@@ -334,9 +340,31 @@ atexit.register(_remove_process_marker)
 
 
 def _get_embedding_attempted_path() -> Path:
-    """Get path to session-scoped embedding attempt marker file."""
+    """Get path to session-scoped embedding attempt marker file.
+
+    The session id is SANITISED, exactly as `_build_session_path` sanitises
+    the directory it composes from the same value: it is read from a session
+    context file, so it is not this module's own text, and it is about to be
+    a path component under /tmp. Path traversal (`../`), a separator, a NUL
+    or a control character must not survive into the filename; the shared
+    substitution keeps the two surfaces on one rule.
+
+    THE SANITISER FILTERS CHARACTERS, NOT LENGTH, so it is bounded here. The
+    regex leaves every ASCII alphanumeric intact, which means a long context
+    value composes a filename past the filesystem's NAME_MAX and the first
+    `exists()` raises ENAMETOOLONG — out of `ensure_memory_ready` and into
+    every memory operation of the process. A bare truncation would make two
+    sessions sharing a long prefix share one marker and suppress each
+    other's catch-up, so the suffix is a hash of the full slug.
+    """
+    from shared.pact_context import _UNSAFE_SLUG_CHARS_RE
+
     session_id = get_session_id_from_context_file() or _PROCESS_MARKER_TOKEN
-    return Path("/tmp") / f"pact_embedding_attempted_{session_id}"
+    slug = _UNSAFE_SLUG_CHARS_RE.sub('_', str(session_id))
+    if len(slug) > _MAX_MARKER_SLUG_CHARS:
+        digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:16]
+        slug = f"{slug[:_MAX_MARKER_SLUG_CHARS - 17]}-{digest}"
+    return Path("/tmp") / f"pact_embedding_attempted_{slug}"
 
 
 def maybe_embed_pending() -> dict:
@@ -355,13 +383,25 @@ def maybe_embed_pending() -> dict:
     """
     result = {"status": "skipped", "message": None}
 
-    # Check if we've already attempted this session
+    # Check if we've already attempted this session, then mark it as attempted
+    # (first, to prevent retry on errors). BOTH FILESYSTEM CALLS ARE GUARDED:
+    # `exists()` raises OSError for more than a missing file (ENAMETOOLONG,
+    # EACCES on a parent, ...), and a marker fault is a reason to skip the
+    # sweep, not to fail the caller's memory operation.
+    #
+    # THE TWO FAILURES ARE REPORTED SEPARATELY. When the PROBE fails, the
+    # file may exist and be unreadable; telling the caller creation failed
+    # sends them to the wrong remedy (permissions or the path, not a write
+    # that was never attempted). Both skip the sweep.
     marker_path = _get_embedding_attempted_path()
-    if marker_path.exists():
+    try:
+        already_attempted = marker_path.exists()
+    except OSError:
+        result["message"] = "Could not check session marker"
+        return result
+    if already_attempted:
         result["message"] = "Already attempted this session"
         return result
-
-    # Mark as attempted (do this first to prevent retry on errors)
     try:
         marker_path.touch()
     except OSError:

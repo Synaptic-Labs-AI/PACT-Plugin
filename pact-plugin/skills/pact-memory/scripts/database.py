@@ -66,6 +66,45 @@ AMBIGUOUS_MATCH_CAP = 50
 _PREFIX_UPPER_BOUND_CHAR = "g"
 
 
+# Characters that must not reach a rendered envelope raw: C0/DEL/C1 controls
+# (`Cc`), Unicode format characters (`Cf`, which include every bidi override
+# that can reorder or hide the text around it), unassigned code points and
+# noncharacters (`Cn`), private-use code points (`Co`), lone surrogates
+# (`Cs`), and the line/paragraph separators (`Zl`/`Zp`) that break
+# line-oriented logs. JSON encoding alone does not cover this — a consumer
+# that PARSES the envelope and prints the message re-materialises the
+# character.
+#
+# `<` IS UNSAFE TOO, FOR A DIFFERENT REASON: it starts the marker form, so a
+# literal marker-shaped input (`a<U+000A>b`) would render byte-identically to
+# an escaped newline and the reader could not tell a typed sequence from an
+# escape. Escaping it keeps the marker form decodable on its own
+# (escape_for_envelope is injective), at the cost of displaying a literal
+# `<` as `<U+003C>`.
+def _char_is_unsafe_for_display(char: str) -> bool:
+    return char == "<" or unicodedata.category(char) in (
+        "Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"
+    )
+
+
+def escape_for_envelope(text: str) -> str:
+    """Render a caller-supplied value inert in a rendered JSON envelope.
+
+    Control, format, unassigned, private-use and lone-surrogate characters
+    become visible ``<U+XXXX>`` markers, so a value the caller typed (a
+    memory id or prefix, echoed back on an error path) cannot steer a
+    terminal or reorder the visible text around it. A literal ``<`` is
+    escaped as ``<U+003C>`` so the marker form is unambiguous: every
+    ``<U+...>`` in the output was produced by this function.
+    The value is ESCAPED, not refused: the caller needs to see what it sent
+    in order to correct it.
+    """
+    return "".join(
+        f"<U+{ord(char):04X}>" if _char_is_unsafe_for_display(char) else char
+        for char in text
+    )
+
+
 class PrefixTooShortError(ValueError):
     """Raised when a memory-ID prefix is shorter than MIN_PREFIX_LENGTH."""
 
@@ -73,16 +112,29 @@ class PrefixTooShortError(ValueError):
         self.prefix = prefix
         self.minimum = minimum
         super().__init__(
-            f"Prefix '{prefix}' is too short — provide at least {minimum} characters."
+            f"Prefix '{escape_for_envelope(prefix)}' is too short — "
+            f"provide at least {minimum} characters."
         )
 
 
 class AmbiguousPrefixError(LookupError):
     """Raised when a memory-ID prefix matches multiple stored memories.
 
-    The `matches` attribute is a list of {"id", "context"} dicts capped at
-    AMBIGUOUS_MATCH_CAP entries. `total_matches` is the true row count and
-    `matches_capped` is True when the cap was applied.
+    The `matches` attribute is a list of {"id", "raw_id", "context",
+    "context_truncated"} dicts capped at AMBIGUOUS_MATCH_CAP entries.
+    `total_matches` is the true row count and `matches_capped` is True when
+    the cap was applied.
+
+    `id` IS THE DISPLAY FORM and `raw_id` IS THE REPLAY FORM. A stored id may
+    be caller-supplied, so it can carry a control or bidi character the
+    store accepts and no display can safely render; `id` therefore goes
+    through `escape_for_envelope` here, at the envelope's payload
+    construction, so every consumer of this exception gets a safe display
+    value. A caller that must replay the id (to disambiguate, then fetch)
+    uses `raw_id`, which is deliberately NOT escaped and MUST NOT be printed.
+    `context` stays RAW here: it is memory content, and escaping it would
+    corrupt the data a programmatic caller reads. The CLI is the rendering
+    boundary that scrubs and escapes it.
     """
 
     def __init__(
@@ -98,8 +150,15 @@ class AmbiguousPrefixError(LookupError):
         self.matches_capped = matches_capped
         self.total_matches = total_matches if total_matches is not None else len(matches)
         suffix = f" (showing {len(matches)} of {self.total_matches})" if matches_capped else ""
+        # THE MESSAGE IS A RENDERING SURFACE, so the echoed prefix is escaped
+        # there. `self.prefix` stays RAW above: a caller may use it
+        # programmatically, and the CLI is the boundary that renders. Reaching
+        # this branch needs a stored id that is not hex-generated (create
+        # honours a caller-supplied `id`), so the prefix can carry the same
+        # control/bidi characters the memory-id envelope rule covers.
         super().__init__(
-            f"Prefix '{prefix}' is ambiguous — {self.total_matches} memories match.{suffix}"
+            f"Prefix '{escape_for_envelope(prefix)}' is ambiguous — "
+            f"{self.total_matches} memories match.{suffix}"
         )
 
 
@@ -654,7 +713,13 @@ def _reject_unknown_columns(
     caller_facing = sorted(allowed - _STRIPPED_ON_INGRESS)
     allowed_list = ", ".join(caller_facing)
     unknown_list = ", ".join(repr(k) for k in unknown)
-    target = f" (memory {memory_id})" if memory_id else ""
+    # RAW, ESCAPED ONCE AT THE RENDERER. The CLI's ValueError arm renders
+    # this message through `escape_for_envelope`, so escaping the id here
+    # too would double-escape it: the injective escaper turns the '<' of a
+    # real marker into '<U+003C>', and the caller could no longer match the
+    # rendered id to the stored one. A programmatic caller gets the raw id,
+    # like every other payload; display escaping is the CLI's job.
+    target = f" (memory {str(memory_id)})" if memory_id else ""
     error = ValueError(
         f"Unknown memory field(s) for {operation}{target}: {unknown_list}. "
         f"Allowed fields: {allowed_list}"
@@ -957,6 +1022,37 @@ def generate_id() -> str:
     return secrets.token_hex(16)
 
 
+def _unusable_identifier(value: object) -> bool:
+    """One rule for every identifier the memory surfaces validate.
+
+    Unusable: not a non-empty string, or it carries C0/DEL/C1 control
+    characters or a lone surrogate. The surrogate clause exists because such
+    a value can arrive from `json.loads` (which accepts unpaired
+    `\\ud800`-style escapes) or from a filesystem/environment string decoded
+    with surrogateescape, and none of them can bind to a utf-8 TEXT column:
+    without the clause the value passes validation and dies at the store as
+    an unhandled UnicodeEncodeError, bypassing the ValueError remedy channel.
+    `save()`, `update()` and the constructor call this so the payload
+    ingresses and the identity the instance ADOPTS cannot drift apart.
+
+    SINKS, named because the rule is only as wide as where the value goes:
+    `project_id` reaches the `memories.project_id` and `files.project_id`
+    TEXT bindings and every project-scoped read filter; `session_id` reaches
+    `memories.session_id` and a /tmp marker path component; `id` reaches the
+    `memories.id` primary key.
+    """
+    return (
+        not isinstance(value, str)
+        or not value
+        or any(
+            ord(char) < 0x20
+            or 0x7F <= ord(char) <= 0x9F
+            or 0xD800 <= ord(char) <= 0xDFFF
+            for char in value
+        )
+    )
+
+
 def create_memory(
     conn: sqlite3.Connection,
     memory: Dict[str, Any]
@@ -985,7 +1081,23 @@ def create_memory(
     ensure_initialized(conn)
 
     # Generate ID if not provided
-    memory_id = memory.get("id") or generate_id()
+    # A SUPPLIED ID IS AN IDENTIFIER, HELD TO THE SAME RULE AS project_id AND
+    # session_id. `create` honours a caller-supplied `id`, so without this a
+    # control character or lone surrogate reaches the `memories.id` TEXT bind:
+    # the lone-surrogate case dies there as an unhandled UnicodeEncodeError
+    # (a ValueError subclass, so it is caught, but it bypasses the remedy text
+    # and fires after the validation phase). A falsy id keeps its documented
+    # `or generate_id()` meaning. THE RULE LIVES IN THIS MODULE, so the API
+    # layer imports it downward and there is exactly one live definition.
+    supplied_id = memory.get("id")
+    if supplied_id:
+        if _unusable_identifier(supplied_id):
+            raise ValueError(
+                "id, when supplied, must be a non-empty string without control "
+                "characters (U+0000-U+001F, U+007F-U+009F) or lone surrogates "
+                "(U+D800-U+DFFF); omit it to generate one. Nothing was written."
+            )
+    memory_id = supplied_id or generate_id()
 
     # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
     # ALLOWED_CREATE_COLUMNS includes 'id' and 'created_at' so create payloads
@@ -1066,7 +1178,7 @@ def create_memory(
     ))
 
     conn.commit()
-    logger.debug(f"Created memory with ID: {memory_id}")
+    logger.debug(f"Created memory with ID: {memory_id!r}")
     return memory_id
 
 
@@ -1074,6 +1186,7 @@ def resolve_memory_id_prefix(
     conn: sqlite3.Connection,
     prefix: str,
     *,
+    project_id: Optional[str] = None,
     descriptor_chars: int = 60,
 ) -> Optional[str]:
     """
@@ -1085,9 +1198,22 @@ def resolve_memory_id_prefix(
     lowercased before bounds construction so `ABCD1234` and `abcd1234`
     resolve identically. IDs are stored as lowercase hex.
 
+    A SUPPLIED `project_id` SCOPES ALL THREE QUERIES, NOT JUST THE MATCH
+    LIST. The ambiguity verdict is decided by the LIMIT-2 pre-check, the
+    match list is capped by a second query and the true total comes from a
+    third; scoping only the list would let a prefix that names one row in
+    each of two projects take the ambiguous branch and then raise with a
+    single match, and would report a total that includes rows the caller
+    cannot see. With the scope applied to all three, a prefix that matches
+    only another project's row resolves as no row at all. `None` keeps the
+    unscoped whole-store behaviour callers had before the parameter existed.
+
     Args:
         conn: Active database connection.
         prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
+        project_id: Optional project scope. When not None, every query is
+            restricted to rows stored under that project; a NULL-project row
+            is NOT another project's row and is excluded from a scoped read.
         descriptor_chars: Length of the context snippet attached to each match
             on ambiguity (for terse disambiguation output). Security-relevant
             knob if multi-tenant access is ever introduced — context may carry
@@ -1119,11 +1245,22 @@ def resolve_memory_id_prefix(
     lo = prefix
     hi = prefix + _PREFIX_UPPER_BOUND_CHAR
 
+    # ONE SCOPE CLAUSE, APPLIED TO EVERY QUERY BELOW. `project_id = ?`
+    # rather than the null-safe `IS` form is deliberate: a scoped caller's
+    # project is a non-empty string (the write guards refuse anything else),
+    # so a NULL-keyed row is not this project's row and must not match.
+    scope_sql = ""
+    scope_params: tuple = ()
+    if project_id is not None:
+        scope_sql = " AND project_id = ?"
+        scope_params = (project_id,)
+
     # LIMIT 2 short-circuits the common case (unique match): we only need to
     # know whether more than one row matches before issuing a wider query.
     cursor = conn.execute(
-        "SELECT id FROM memories WHERE id >= ? AND id < ? LIMIT 2",
-        (lo, hi),
+        "SELECT id FROM memories WHERE id >= ? AND id < ?"
+        f"{scope_sql} LIMIT 2",
+        (lo, hi, *scope_params),
     )
     rows = cursor.fetchall()
 
@@ -1136,16 +1273,19 @@ def resolve_memory_id_prefix(
     # plus a separate COUNT for the true total. Both queries fire only on
     # this branch; the unique-match path above is single-query.
     cursor = conn.execute(
-        "SELECT id, context FROM memories WHERE id >= ? AND id < ? "
-        "ORDER BY id LIMIT ?",
-        (lo, hi, AMBIGUOUS_MATCH_CAP),
+        "SELECT id, context FROM memories WHERE id >= ? AND id < ?"
+        f"{scope_sql} ORDER BY id LIMIT ?",
+        (lo, hi, *scope_params, AMBIGUOUS_MATCH_CAP),
     )
     matches = []
     for row in cursor.fetchall():
         full_context = row["context"] or ""
         snippet = full_context[:descriptor_chars]
         matches.append({
-            "id": row["id"],
+            # `id` is the display form, `raw_id` the replay form; see the
+            # exception's docstring for the contract and why this boundary.
+            "id": escape_for_envelope(row["id"]),
+            "raw_id": row["id"],
             "context": snippet,
             # Per-match flag distinct from the list-level `matches_capped`
             # on the exception: signals that THIS row's `context` was
@@ -1154,8 +1294,9 @@ def resolve_memory_id_prefix(
             "context_truncated": len(full_context) > descriptor_chars,
         })
     count_row = conn.execute(
-        "SELECT COUNT(*) AS n FROM memories WHERE id >= ? AND id < ?",
-        (lo, hi),
+        "SELECT COUNT(*) AS n FROM memories WHERE id >= ? AND id < ?"
+        f"{scope_sql}",
+        (lo, hi, *scope_params),
     ).fetchone()
     total_matches = count_row["n"]
     matches_capped = total_matches > len(matches)
@@ -1375,7 +1516,7 @@ def update_memory(
             pass
         raise
 
-    logger.debug("Updated memory %s (replace=%s)", memory_id, replace)
+    logger.debug("Updated memory %r (replace=%s)", memory_id, replace)
     return True
 
 
@@ -1405,7 +1546,7 @@ def delete_memory(
 
     deleted = cursor.rowcount > 0
     if deleted:
-        logger.debug(f"Deleted memory {memory_id}")
+        logger.debug(f"Deleted memory {memory_id!r}")
     return deleted
 
 

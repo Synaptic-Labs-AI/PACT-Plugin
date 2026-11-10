@@ -25,7 +25,17 @@ from typing import Any, Dict, List, Optional, Set
 from .database import (
     db_connection,
     ensure_initialized,
-    generate_id
+    generate_id,
+    sqlite3 as _connection_sqlite3,
+)
+
+# A CONNECTION CAN COME FROM EITHER IMPLEMENTATION. `database.get_connection`
+# uses pysqlite3 when it is installed and stdlib sqlite3 otherwise, and a
+# caller may hand in a stdlib connection. The two IntegrityError classes are
+# unrelated, so naming only one silently misses half the valid connections.
+_INTEGRITY_ERRORS = (
+    sqlite3.IntegrityError,
+    _connection_sqlite3.IntegrityError,
 )
 
 # Configure logging
@@ -76,19 +86,57 @@ def track_file(
         conn.commit()
         return row["id"]
 
-    # Create new file entry
+    # Create new file entry.
+    #
+    # OR IGNORE, BECAUSE THE SELECT ABOVE IS NOT A LOCK — FOR THE PROJECTED
+    # SCOPE ONLY. Two writers can both see no row and both INSERT; with a
+    # non-NULL project_id, UNIQUE(path, project_id) makes the second raise
+    # IntegrityError, which aborts the caller's whole operation (a save, or a
+    # re-key cascade) after its other writes have committed. An ignored insert
+    # is not a lost file: the re-SELECT below adopts the row the winner
+    # created.
+    #
+    # THE NULL-PROJECT SCOPE IS NOT PROTECTED: SQLite treats NULLs as distinct
+    # in a UNIQUE constraint, so two writers inserting the same path with
+    # project_id NULL BOTH succeed and OR IGNORE never fires; a partial unique
+    # index would be needed to close that scope, and no in-repo caller writes
+    # it (save refuses an unresolved project).
     file_id = generate_id()
-    conn.execute(
+    cursor = conn.execute(
         """
-        INSERT INTO files (id, path, project_id, last_modified)
+        INSERT OR IGNORE INTO files (id, path, project_id, last_modified)
         VALUES (?, ?, ?, ?)
         """,
         (file_id, normalized_path, project_id, datetime.now(timezone.utc).isoformat())
     )
     conn.commit()
 
-    logger.debug(f"Tracked new file: {normalized_path} (ID: {file_id})")
-    return file_id
+    if cursor.rowcount:
+        logger.debug(f"Tracked new file: {normalized_path} (ID: {file_id})")
+        return file_id
+
+    # LOST THE RACE: another writer created (path, project_id) between our
+    # SELECT and this INSERT. Read the winner on THIS connection, which sees
+    # the committed row. A conflict that leaves no row to adopt would mean an
+    # ignored constraint other than the one this branch is for, so it raises
+    # rather than returning an id that was never stored.
+    row = conn.execute(
+        """
+        SELECT id FROM files
+        WHERE path = ? AND (project_id = ? OR (project_id IS NULL AND ? IS NULL))
+        """,
+        (normalized_path, project_id, project_id)
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"track_file: INSERT was ignored but no row exists for "
+            f"({normalized_path!r}, {project_id!r})"
+        )
+    logger.debug(
+        f"Tracked existing file after a create race: {normalized_path} "
+        f"(ID: {row['id']})"
+    )
+    return row["id"]
 
 
 def get_file_id(
@@ -239,7 +287,7 @@ def link_memory_to_file(
         conn.commit()
         logger.debug(f"Linked memory {memory_id} to file {file_id} ({relationship})")
         return True
-    except sqlite3.IntegrityError:
+    except _INTEGRITY_ERRORS:
         # Link already exists
         return False
 
@@ -301,14 +349,24 @@ def link_memory_to_paths(
 
 def get_files_for_memory(
     conn: sqlite3.Connection,
-    memory_id: str
+    memory_id: str,
+    project_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Get all files linked to a memory.
 
+    THE LINK DOES NOT CARRY A PROJECT, SO THE FILE ROW MUST: a legacy or
+    interrupted re-key can leave a memory linked to another project's file
+    row, and an unfiltered walk attaches that row's path to an otherwise
+    confirmed memory. When `project_id` is given, each returned file's OWN
+    stored project must match it (`IS`, so a NULL file row matches only a
+    caller that filters for NULL). `project_id=None` is NO FILTER — the
+    whole-store meaning existing callers rely on.
+
     Args:
         conn: Active database connection.
         memory_id: The memory ID.
+        project_id: Optional stored-project filter on the returned files.
 
     Returns:
         List of file dicts with relationship info.
@@ -320,10 +378,10 @@ def get_files_for_memory(
         SELECT f.*, mf.relationship
         FROM files f
         JOIN memory_files mf ON f.id = mf.file_id
-        WHERE mf.memory_id = ?
+        WHERE mf.memory_id = ? AND (? IS NULL OR f.project_id IS ?)
         ORDER BY mf.relationship, f.path
         """,
-        (memory_id,)
+        (memory_id, project_id, project_id)
     )
 
     return [dict(row) for row in cursor.fetchall()]
@@ -331,14 +389,24 @@ def get_files_for_memory(
 
 def get_memories_for_file(
     conn: sqlite3.Connection,
-    file_id: str
+    file_id: str,
+    project_id: Optional[str] = None
 ) -> List[str]:
     """
     Get all memory IDs linked to a file.
 
+    THE FILE ID NAMES A (path, project_id) ROW, BUT THE LINK DOES NOT: a
+    legacy or interrupted re-key can leave a memory from another project
+    linked to this file, and an id-only walk returns it as if it belonged
+    here. When `project_id` is given, the memory's OWN stored project must
+    match it (`IS`, so a NULL stored project matches only the caller that
+    filters for NULL). `project_id=None` is NO FILTER — the whole-store
+    meaning every existing caller relies on.
+
     Args:
         conn: Active database connection.
         file_id: The file ID.
+        project_id: Optional stored-project filter on the returned memories.
 
     Returns:
         List of memory IDs.
@@ -347,11 +415,12 @@ def get_memories_for_file(
 
     cursor = conn.execute(
         """
-        SELECT DISTINCT memory_id
-        FROM memory_files
-        WHERE file_id = ?
+        SELECT DISTINCT mf.memory_id
+        FROM memory_files mf
+        JOIN memories m ON m.id = mf.memory_id
+        WHERE mf.file_id = ? AND (? IS NULL OR m.project_id IS ?)
         """,
-        (file_id,)
+        (file_id, project_id, project_id)
     )
 
     return [row["memory_id"] for row in cursor.fetchall()]
@@ -380,7 +449,10 @@ def get_memories_for_files(
     for path in file_paths:
         file_id = get_file_id(conn, path, project_id)
         if file_id:
-            memories = get_memories_for_file(conn, file_id)
+            # The file was resolved under `project_id`, so the memories it
+            # yields must carry that stored project too — a link left by a
+            # re-key otherwise returns another project's ids here.
+            memories = get_memories_for_file(conn, file_id, project_id)
             memory_ids.update(memories)
 
     return list(memory_ids)
@@ -427,7 +499,7 @@ def add_file_relation(
         conn.commit()
         logger.debug(f"Added file relation: {source_path} -> {target_path} ({relationship})")
         return True
-    except sqlite3.IntegrityError:
+    except _INTEGRITY_ERRORS:
         # Relation already exists
         return False
 
@@ -458,6 +530,20 @@ def get_file_relations(
 
     relations = []
 
+    # THE RESOLVED ROW IS PROJECT-SCOPED; THE ENDPOINT IS NOT, UNLESS CHECKED.
+    # `get_file_id` above returns this project's (path, project) row, but
+    # `file_relations` has no project column and the JOIN returns whatever row
+    # sits at the other end. `add_file_relation` cannot create a cross-project
+    # edge (it resolves both endpoints under ONE project), but a legacy or
+    # backfilled row can, and this scoped read would then hand the caller
+    # another project's file row. Confirm the ENDPOINT's stored project with
+    # the same null-safe rule as the other graph reads; `project_id=None` is
+    # NO FILTER.
+    #
+    # SCOPE, RECORDED SO IT IS NOT RE-LITIGATED: this is a READ-side defence.
+    # The WRITE side is out of scope for this PR — with no project column, a
+    # cross-project edge remains hand-insertable, and that is data corruption
+    # owned by the NULL-key/relations backfill arc, not a read-path defect.
     if direction in ("outgoing", "both"):
         cursor = conn.execute(
             """
@@ -465,8 +551,9 @@ def get_file_relations(
             FROM files f
             JOIN file_relations fr ON f.id = fr.target_file
             WHERE fr.source_file = ?
+              AND (? IS NULL OR f.project_id IS ?)
             """,
-            (file_id,)
+            (file_id, project_id, project_id)
         )
         relations.extend([dict(row) for row in cursor.fetchall()])
 
@@ -477,8 +564,9 @@ def get_file_relations(
             FROM files f
             JOIN file_relations fr ON f.id = fr.source_file
             WHERE fr.target_file = ?
+              AND (? IS NULL OR f.project_id IS ?)
             """,
-            (file_id,)
+            (file_id, project_id, project_id)
         )
         relations.extend([dict(row) for row in cursor.fetchall()])
 
@@ -495,6 +583,14 @@ def get_related_files(
     Get all files related to a given file through the graph.
 
     Performs breadth-first traversal up to max_depth hops.
+
+    THE START FILE IS SCOPED; A NEIGHBOUR IS NOT, UNLESS CHECKED.
+    `file_relations` has no project column, so a legacy or backfilled edge can
+    join two projects. Each neighbour's own stored project is confirmed with
+    the same null-safe rule as `get_file_relations`, so a scoped walk neither
+    returns nor traverses into another project's file row. `project_id=None`
+    applies NO FILTER to the neighbour rows; the START is resolved by
+    `get_file_id`, which already treats None as the NULL-project row.
 
     Args:
         conn: Active database connection.
@@ -519,14 +615,25 @@ def get_related_files(
         next_level: Set[str] = set()
 
         for current_id in current_level:
-            # Get directly connected files
+            # CONFIRM THE NEIGHBOUR'S STORED PROJECT BEFORE USING ITS ID OR
+            # PATH: the id is what the next hop traverses from, so an
+            # unconfirmed neighbour would also expose the rest of its own
+            # graph. `(? IS NULL OR ...)` keeps the unscoped whole-store
+            # meaning.
             cursor = conn.execute(
                 """
-                SELECT target_file as file_id FROM file_relations WHERE source_file = ?
-                UNION
-                SELECT source_file as file_id FROM file_relations WHERE target_file = ?
+                SELECT f.id AS file_id, f.path AS path
+                FROM files f
+                JOIN (
+                    SELECT target_file AS file_id
+                    FROM file_relations WHERE source_file = ?
+                    UNION
+                    SELECT source_file AS file_id
+                    FROM file_relations WHERE target_file = ?
+                ) rel ON rel.file_id = f.id
+                WHERE (? IS NULL OR f.project_id IS ?)
                 """,
-                (current_id, current_id)
+                (current_id, current_id, project_id, project_id)
             )
 
             for row in cursor.fetchall():
@@ -534,11 +641,7 @@ def get_related_files(
                 if neighbor_id not in visited:
                     visited.add(neighbor_id)
                     next_level.add(neighbor_id)
-
-                    # Get the path for this file
-                    file_info = get_file_by_id(conn, neighbor_id)
-                    if file_info:
-                        related_paths.append(file_info["path"])
+                    related_paths.append(row["path"])
 
         current_level = next_level
 
@@ -572,7 +675,13 @@ def get_related_files_via_memories(
     if not file_id:
         return []
 
-    # Find all files that share a memory with this file
+    # Find all files that share a memory with this file.
+    #
+    # THE SHARED MEMORY CAN BE STALE. `file_id` is the (path, project_id) row
+    # the caller asked about, but a link left on it by another project's
+    # memory still yields that memory's other files — which are not this
+    # project's related files. Confirm each returned file's own stored
+    # project, null-safe; `project_id=None` keeps the whole-store meaning.
     cursor = conn.execute(
         """
         SELECT DISTINCT f.path
@@ -582,8 +691,9 @@ def get_related_files_via_memories(
             SELECT memory_id FROM memory_files WHERE file_id = ?
         )
         AND f.id != ?
+        AND (? IS NULL OR f.project_id IS ?)
         """,
-        (file_id, file_id)
+        (file_id, file_id, project_id, project_id)
     )
 
     return [row["path"] for row in cursor.fetchall()]
@@ -629,7 +739,9 @@ def get_file_context(
         "tracked": True,
         "direct_relations": get_file_relations(conn, file_path, project_id),
         "memory_related_files": get_related_files_via_memories(conn, file_path, project_id),
-        "memory_ids": get_memories_for_file(conn, file_id)
+        # Confirmed against the MEMORY's stored project: the file row is the
+        # project-scoped one, but its links may predate a re-key.
+        "memory_ids": get_memories_for_file(conn, file_id, project_id)
     }
 
 
@@ -639,6 +751,17 @@ def get_graph_stats(
 ) -> Dict[str, int]:
     """
     Get statistics about the graph.
+
+    EVERY COUNTER FOLLOWS THE SAME VISIBILITY RULE when `project_id` is
+    given: a row is counted under a project only when every stored row a
+    scoped read would confirm belongs to that project. Files and memories are
+    single-row counts. A memory-file link is counted only when BOTH its file
+    row and its memory row are in the project, and a file-file relation only
+    when BOTH endpoints are, because that is exactly the set the scoped read
+    surfaces (`get_memories_for_file`, `get_file_relations`) can return. A
+    legacy cross-project link or relation is therefore counted under NEITHER
+    project — it is invisible from both scoped reads and visible only in the
+    unscoped (`project_id=None`) whole-store count.
 
     Args:
         conn: Active database connection.
@@ -671,12 +794,36 @@ def get_graph_stats(
         cursor = conn.execute("SELECT COUNT(*) FROM memories")
     stats["memories"] = cursor.fetchone()[0]
 
-    # Memory-file links
-    cursor = conn.execute("SELECT COUNT(*) FROM memory_files")
+    # Memory-file links: both the file's and the memory's stored project must
+    # match, or the link is not visible to a scoped read of either side.
+    if project_id:
+        cursor = conn.execute(
+            """
+            SELECT COUNT(*) FROM memory_files mf
+            JOIN files f ON f.id = mf.file_id
+            JOIN memories m ON m.id = mf.memory_id
+            WHERE f.project_id = ? AND m.project_id = ?
+            """,
+            (project_id, project_id)
+        )
+    else:
+        cursor = conn.execute("SELECT COUNT(*) FROM memory_files")
     stats["memory_file_links"] = cursor.fetchone()[0]
 
-    # File-file relations
-    cursor = conn.execute("SELECT COUNT(*) FROM file_relations")
+    # File-file relations: both endpoints must match, because a scoped
+    # relation read confirms the endpoint's stored project.
+    if project_id:
+        cursor = conn.execute(
+            """
+            SELECT COUNT(*) FROM file_relations fr
+            JOIN files sf ON sf.id = fr.source_file
+            JOIN files tf ON tf.id = fr.target_file
+            WHERE sf.project_id = ? AND tf.project_id = ?
+            """,
+            (project_id, project_id)
+        )
+    else:
+        cursor = conn.execute("SELECT COUNT(*) FROM file_relations")
     stats["file_relations"] = cursor.fetchone()[0]
 
     return stats

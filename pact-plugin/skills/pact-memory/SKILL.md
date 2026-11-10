@@ -243,14 +243,33 @@ on stderr, and nothing is written. An actual disagreement between
 instead.
 
 To proceed, supply `project_id` explicitly in the payload. A supplied
-`project_id` must be a non-empty string without C0, DEL, or C1 control
-characters (`U+0000-U+001F`, `U+007F-U+009F`). Other Unicode, including
-ordinary spaces, is allowed. Invalid values exit 2 and write nothing.
+`project_id` or `session_id`, on `save` or `update`, must be a non-empty
+string without C0, DEL, or C1 control characters (`U+0000-U+001F`,
+`U+007F-U+009F`) or surrogate code points (`U+D800-U+DFFF`); invalid
+values exit 2 and write nothing. Other Unicode, including ordinary
+spaces, Cf formatting characters, bidi overrides, zero-width characters
+and noncharacters, is accepted by design; the residual is display
+spoofing only.
+
+A `project_id` or `session_id` DETECTED from the environment or the session
+context is held to the same rule, and the outcome depends on the operation. A
+write that would bind the value is refused at that point, and the message
+names its detection source. A read treats an unusable detected `project_id`
+as an unresolvable identity: `search`, `search_by_file`, `list` and `sync`
+return empty results, `status` returns zeroed counts, and a prefix is refused
+exactly as when no identity resolves. A full 32-character ID still resolves.
+Supply a usable value in the payload when the detected one is at fault.
 
 When no project identity resolves, `list`, `search`, and `search_by_file`
 return empty results, and `status` reports zero project-scoped counts. These
 results do not prove that the store has no memories; resolve the project
 identity before interpreting them.
+
+For prefixes, the scope also decides discovery: a prefix resolves within the caller's project, so a prefix matching only another project's row is not found, and an `AMBIGUOUS_PREFIX` match list contains no other project's rows or context snippets. A full 32-character ID remains project-blind: `get`, `update` and `delete` accept a full ID stored under any project, which is the by-id capability, not a scoped read.
+
+When the project identity cannot be resolved, a full 32-character ID still resolves, but a prefix is refused with `ProjectIdentityUnresolvedError` (CLI exit 1, `SCOPE_DISAGREEMENT`) instead of listing matches from every project.
+
+Addressing mode, not the verb name, decides scope: `list`, `search` and `search_by_file` select from this project's rows, while `get`, `update` and `delete` act on the row a full ID names, whatever project holds it.
 
 ### Task Format
 ```python
@@ -296,13 +315,15 @@ identity before interpreting them.
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
 
+On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
+
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
 | 1 | User error (bad args, invalid JSON, not found) |
-| 2 | Validation error (unknown field name, unknown sub-object key) — the error envelope includes an `allowed_fields` list |
+| 2 | Validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`) — the error envelope includes an `allowed_fields` list |
 | 3 | `project-file` only: this session's project memory file is unavailable; the printed line names why |
 
 ### Update Semantics

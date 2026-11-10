@@ -45,6 +45,7 @@ from .database import (
     list_memories,
     ensure_initialized,
     resolve_memory_id_prefix,
+    _unusable_identifier,
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
 )
@@ -54,6 +55,7 @@ from .embeddings import (
 )
 from .graph import (
     link_memory_to_paths,
+    track_file,
     get_files_for_memory
 )
 from .models import MemoryObject, memory_from_db_row
@@ -313,6 +315,22 @@ class PACTMemory:
                         directory basename (home scope warns).
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
+
+        Raises:
+            ValueError: If a SUPPLIED `project_id` or `session_id` is not a
+                non-empty string free of control characters and lone
+                surrogates. A falsy supplied value still means "auto-detect"
+                — the guard sits INSIDE the truthy branch, so
+                `project_id=""` keeps its documented detection meaning
+                instead of becoming a refusal. A value is refused here
+                rather than at its first use because a SUPPLIED identifier
+                is caller input that will reach a utf-8 TEXT binding, where
+                it would otherwise fail as an unhandled UnicodeEncodeError.
+                A DETECTED project id or session id is deliberately NOT
+                validated here: by-id and read-only commands construct this
+                object without binding it, so the paths that DO bind it
+                refuse at their own ingress (see the `project_id` and
+                `session_id` properties).
         """
         if project_id:
             # A caller-supplied project_id short-circuits detection entirely —
@@ -320,13 +338,63 @@ class PACTMemory:
             # env/record scope guard, which takes no arguments and never sees
             # a payload, so "supplied" is the least-checked source of the six
             # and is exactly the one worth naming in the disclosure.
+            #
+            # THE GUARD SITS INSIDE THIS BRANCH, NOT IN FRONT OF IT. In front,
+            # a falsy-but-present id would be refused, and `PACTMemory("")`
+            # flips from "auto-detect" (documented, and the route the save
+            # guard's remedy text names) to an error. The rule here is about
+            # values a caller actually supplied; omission and falsy stay the
+            # detection signal they have always been.
+            if _unusable_identifier(project_id):
+                raise ValueError(
+                    "project_id, when supplied, must be a non-empty string "
+                    "without control characters (U+0000-U+001F, "
+                    "U+007F-U+009F) or lone surrogates (U+D800-U+DFFF); "
+                    "pass nothing to auto-detect the project."
+                )
             self._project_id: Optional[str] = project_id
             self._project_id_source = "supplied"
         else:
             self._project_id, self._project_id_source = (
                 self._detect_project_id_with_source()
             )
-        self._session_id = session_id or self._detect_session_id()
+            # THE DETECTED ID IS ADOPTED AS FOUND, NOT VALIDATED HERE — the
+            # same rule as the detected session id below, for the same
+            # reason. A by-id command (`get`/`update`/`delete` with a full
+            # 32-character id) never binds this value, so refusing at
+            # construction would gate the identity-independent by-id
+            # capability on a value those calls do not use, and the CLI would
+            # surface it as SYSTEM_ERROR. The public `project_id` property
+            # may therefore expose an unusable value; every path that WOULD
+            # bind it goes through `_project_scope()` (reads treat it as
+            # unresolvable) or `_project_id_for_write()` (writes refuse with
+            # the remedy text). Do not re-add the constructor check.
+        if session_id:
+            # Same branch placement and the same reason as project_id above.
+            if _unusable_identifier(session_id):
+                raise ValueError(
+                    "session_id, when supplied, must be a non-empty string "
+                    "without control characters (U+0000-U+001F, "
+                    "U+007F-U+009F) or lone surrogates (U+D800-U+DFFF); "
+                    "pass nothing to auto-detect the session."
+                )
+            self._session_id: Optional[str] = session_id
+        else:
+            # THE DETECTED ID IS ADOPTED AS FOUND, NOT VALIDATED HERE. It is
+            # read from the session context file — a value this process did
+            # not type — but a malformed one must not gate a READ: `search`,
+            # `list`, `get`, `status` and `sync` construct this object and do
+            # not bind the session id, so refusing at construction turns a
+            # listing or diagnostics command into a crash over a value it
+            # never uses. The public `session_id` property may therefore
+            # expose an unusable value; every path that WOULD bind it guards
+            # at its own ingress: save() validates the adopted value before
+            # defaulting it into the row, update() validates any
+            # payload-supplied session id, and list(session_only=True)
+            # treats an unusable value as "no records from this session"
+            # rather than binding it. Do not re-add the constructor check —
+            # it is exactly what made reads gate on a write value.
+            self._session_id = self._detect_session_id()
         self._db_path = db_path
 
         # Cache for the cwd's main repo root, resolved lazily by
@@ -695,12 +763,112 @@ class PACTMemory:
 
     @property
     def project_id(self) -> Optional[str]:
-        """Get the current project ID."""
+        """Get the current project ID.
+
+        A DETECTED value is exposed AS FOUND and may be unusable (a control
+        character, a lone surrogate); a SUPPLIED constructor value was
+        validated and is always usable. This asymmetry is deliberate: by-id
+        commands (`get`/`update`/`delete` with a full 32-character id) and
+        most reads construct a PACTMemory without binding the project id, so
+        the constructor must not refuse a value those calls never use. Every
+        path that WOULD bind the value goes through `_project_scope()` (reads
+        treat it as unresolvable) or `_project_id_for_write()` (writes refuse
+        with remedy text).
+        """
         return self._project_id
+
+    def _detected_project_id_is_unusable(self) -> bool:
+        """Whether the ADOPTED project id cannot bind to a utf-8 TEXT column.
+
+        A SUPPLIED value is validated in the constructor, so this can only be
+        true for a DETECTED one: a control character or lone surrogate from
+        an environment, git or cwd-derived basename, which
+        `_unusable_identifier` is the single rule for.
+        """
+        return (
+            self._project_id is not None
+            and _unusable_identifier(self._project_id)
+        )
+
+    def _project_scope(self) -> Optional[str]:
+        """The project id a READ may bind, or None when identity is unusable.
+
+        "Unusable" covers BOTH no detected identity and a detected value that
+        cannot be bound. Callers treat None as no records — never as "every
+        project" — so a malformed directory name degrades a project-scoped
+        read to the empty answer instead of raising from the TEXT binding.
+        """
+        if self._detected_project_id_is_unusable():
+            return None
+        return self._project_id
+
+    def _project_id_for_write(self) -> Optional[str]:
+        """The project id a WRITE may bind; ValueError for an unusable one.
+
+        This is the write ingress's remedy channel: a detected value that no
+        utf-8 TEXT column can hold refuses HERE, naming the detection source
+        and the directory to fix, rather than dying later as an unhandled
+        UnicodeEncodeError. A SUPPLIED value was validated already.
+        """
+        if self._detected_project_id_is_unusable():
+            raise ValueError(
+                "the project id detected from "
+                f"{self._project_id_source!r} ({self._project_id!r}) is not a "
+                "non-empty string free of control characters and lone "
+                "surrogates; refusing to write it. Supply project_id "
+                "explicitly, or fix the project directory name or session "
+                "record it was derived from. Nothing was written."
+            )
+        return self._project_id
+
+    def _session_id_for_envelope(self) -> Optional[str]:
+        """The session id a status ENVELOPE reports; the FINAL value.
+
+        One contract with `_project_id_for_envelope()`: FOLD ONLY. A value
+        `_unusable_identifier` rejects (a control character or a lone
+        surrogate) becomes None, because no row can carry it. Everything
+        else is returned RAW: this is a structured payload value the caller
+        may feed back as an identifier, and escaping it here made the
+        reported id name no rows. Display escaping belongs to messages,
+        warnings and log lines, not to payloads.
+        """
+        if (
+            self._session_id is not None
+            and _unusable_identifier(self._session_id)
+        ):
+            return None
+        if self._session_id is None:
+            return None
+        return self._session_id
+
+    def _project_id_for_envelope(self) -> Optional[str]:
+        """The project id a status or sync ENVELOPE reports.
+
+        Fold only: `_project_scope()` yields None for an unusable detected
+        value or for no identity at all. The surviving value is returned
+        RAW — it is a structured payload the caller may feed back as a
+        scope, and the CLI's sync envelope uses this same helper so status
+        and sync always agree. Display escaping stays in messages, warnings
+        and log lines.
+        """
+        project_scope = self._project_scope()
+        if project_scope is None:
+            return None
+        return project_scope
 
     @property
     def session_id(self) -> Optional[str]:
-        """Get the current session ID."""
+        """Get the current session ID.
+
+        A DETECTED value is exposed AS FOUND and may be unusable (a control
+        character, a lone surrogate); a SUPPLIED constructor value was
+        validated and is always usable. This asymmetry is deliberate: reads
+        construct a PACTMemory without binding the session id, so the
+        constructor must not refuse a value those commands never use. Every
+        path that WOULD bind the value guards first — save() refuses to write
+        an unusable adopted id, update() refuses an unusable payload id, and
+        list(session_only=True) returns no records instead of binding it.
+        """
         return self._session_id
 
     @property
@@ -758,8 +926,25 @@ class PACTMemory:
         exits. It makes a save's project resolution visible AT THE TIME and
         afterwards only in whatever output the caller kept. Do not build an
         after-the-fact audit on it.
+
+        RAW HERE; the CLI's save envelope display-renders `project_id` and
+        `cwd_repo` (`cli._project_scope_envelope`), so a programmatic caller
+        gets the values it can bind while a rendered consumer gets markers.
         """
         return self._last_project_scope
+
+    @property
+    def db_path(self) -> Path:
+        """The resolved store path — RAW, for programmatic callers.
+
+        The status ENVELOPE reports a display-escaped form; this property is
+        the value a caller may open, compare or bind. The store scope is
+        bound to THIS instance's path for the lookup, exactly as the
+        `_with_store_scope` methods do, so a caller-store instance reports
+        its own file rather than the default one.
+        """
+        with store_scope(self._db_path):
+            return resolve_db_path()
 
     @property
     def last_sync_status(self) -> Optional[str]:
@@ -852,7 +1037,7 @@ class PACTMemory:
         return (
             f"location divergence: this memory is being filed under "
             f"{project_id!r}, but the working directory is inside repository "
-            f"{root.name!r} ({root}). If the record is about {root.name!r}, "
+            f"{root.name!r} ({str(root)!r}). If the record is about {root.name!r}, "
             f"pass project_id explicitly or save from that project. "
             f"THIS IS NOT A MISFILE DETECTOR: it compares the process LOCATION "
             f"against the filed project, so it cannot see what the record is "
@@ -929,6 +1114,8 @@ class PACTMemory:
         Args:
             memory: Memory dictionary with fields like context, goal,
                     lessons_learned, decisions, entities, active_tasks.
+                    A caller-supplied `id` is normalised to lowercase — the
+                    stored representation every lookup computes.
             files: Optional explicit file list to link.
             include_tracked: Include automatically tracked session files.
             sync_to_claude: Whether to project this memory into CLAUDE.md's
@@ -1019,19 +1206,52 @@ class PACTMemory:
         # already envelopes it as invalid input (exit 2), so it cannot read as
         # an env/record disagreement.
         payload_project = memory.get("project_id")
-        if payload_project is not None and (
-            not isinstance(payload_project, str)
-            or not payload_project
-            or any(
-                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
-                for char in payload_project
-            )
-        ):
-            # Reject C0, DEL and C1 controls without restricting other Unicode.
+        if payload_project is not None and _unusable_identifier(payload_project):
+            # Reject C0, DEL and C1 controls and lone surrogates without
+            # restricting other Unicode.
             raise ValueError(
                 "project_id, when supplied, must be a non-empty string without "
-                "control characters (U+0000-U+001F, U+007F-U+009F); omit it "
-                "to auto-detect the project. Nothing was written."
+                "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+                "surrogates (U+D800-U+DFFF); omit it to auto-detect the "
+                "project. Nothing was written."
+            )
+
+        # THE SAME RULE FOR session_id, SAME VERB, SAME SHAPE: a supplied
+        # value must be usable; null does NOT apply here — on save, a null
+        # session_id means "default me" exactly as a null project_id means
+        # "auto-detect me", and only a value someone actually sent can be
+        # bad input. Sits beside the project_id guard, before `_ensure_ready`
+        # and before the defaulting, so a refused payload does no store work.
+        payload_session = memory.get("session_id")
+        if payload_session is not None and _unusable_identifier(payload_session):
+            raise ValueError(
+                "session_id, when supplied, must be a non-empty string without "
+                "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
+                "surrogates (U+D800-U+DFFF); omit it to default the session. "
+                "Nothing was written."
+            )
+
+        # THE ADOPTED SESSION ID IS VALIDATED AT THE WRITE INGRESS, NOT AT
+        # CONSTRUCTION. The constructor exposes a DETECTED value as it found
+        # it so read-only commands do not gate on it (see __init__); this is
+        # the point where that value would be WRITTEN into a row, so the rule
+        # applies here. A payload-supplied value was validated just above;
+        # only the adopted default is left to check, and it is checked before
+        # _ensure_ready() and before the defaulting, so a refusal does no
+        # store work. `session_id` is the row's other scalar identifier, so it
+        # gets the same remedy channel as the payload guard: ValueError, which
+        # the CLI envelopes as exit 2 rather than SYSTEM_ERROR.
+        if (
+            memory.get("session_id") is None
+            and self._session_id is not None
+            and _unusable_identifier(self._session_id)
+        ):
+            raise ValueError(
+                "the session id detected from the session context file "
+                f"({self._session_id!r}) is not a non-empty string free of "
+                "control characters and lone surrogates; refusing to write "
+                "it. Pass session_id explicitly, or fix the session context "
+                "file. Nothing was written."
             )
 
         # AND FAIL CLOSED WHEN NO IDENTITY RESOLVED AT ALL. A None id is not a
@@ -1048,11 +1268,19 @@ class PACTMemory:
         # be an over-block of a route the disclosure code treats as
         # first-class ("supplied"). The defaulting below runs after this
         # guard, so `memory` still holds the caller's raw value here.
-        if self._project_id is None and not memory.get("project_id"):
-            self._last_sync_status = SyncResult.REFUSED
-            raise ProjectIdentityUnresolvedError(
-                self._unresolved_identity_message()
-            )
+        if memory.get("project_id") is None:
+            # TYPED REFUSAL FOR AN UNUSABLE DETECTED VALUE, BEFORE THE
+            # UNRESOLVED ONE: this is the write ingress, so the binding rule
+            # applies here — ValueError, the CLI's exit-2 remedy channel —
+            # rather than letting the value die at the TEXT bind. A supplied
+            # payload project is a warrant, was validated above, and never
+            # consults the adopted value.
+            project_for_write = self._project_id_for_write()
+            if project_for_write is None:
+                self._last_sync_status = SyncResult.REFUSED
+                raise ProjectIdentityUnresolvedError(
+                    self._unresolved_identity_message()
+                )
 
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -1072,6 +1300,15 @@ class PACTMemory:
             memory["project_id"] = self._project_id
         if "session_id" not in memory or memory["session_id"] is None:
             memory["session_id"] = self._session_id
+
+        # ONE REPRESENTATION FOR AN ID. `_resolve_id_or_full` lowercases every
+        # lookup, while `create_memory` stores a caller-supplied id verbatim,
+        # so an uppercase id would be written and then unreachable by
+        # get/update/delete. Normalise at the write ingress so the stored form
+        # is the one every read path computes. Generated ids are already
+        # lowercase hex, so this only touches caller-supplied strings.
+        if isinstance(memory.get("id"), str):
+            memory["id"] = memory["id"].lower()
 
         # WARNING (secondary): the narrow, name-what-it-detects signal. It
         # WARNS and does not refuse — filing under another project is
@@ -1126,10 +1363,26 @@ class PACTMemory:
         # so we never reference a phantom memory in working memory)
         if memory_id is None:
             raise RuntimeError("Save failed — no memory_id returned")
-        verification = self.get(memory_id)
-        if verification is None:
+        # VERIFY BY EXACT ID, NOT THROUGH THE PREFIX RESOLVER. `self.get()`
+        # routes an id shorter than 32 characters through the project-scoped
+        # prefix resolver, so it judged a SUCCESSFUL save with a lookup scoped
+        # to the INSTANCE's identity: a payload project that differs from the
+        # detected one, or no usable detected identity at all, turned a
+        # committed row into "not found" — and a retry then collided on the
+        # primary key. The row just written is addressable by its exact id;
+        # read it that way and confirm it carries the project this call filed
+        # it under.
+        effective_project = memory.get("project_id")
+        with db_connection() as conn:
+            ensure_initialized(conn)
+            verification = get_memory(conn, memory_id)
+        if (
+            verification is None
+            or verification.get("project_id") != effective_project
+        ):
             raise RuntimeError(
-                f"Save verification failed — memory_id {memory_id} not found after save"
+                f"Save verification failed — memory_id {memory_id} not found "
+                f"under project {effective_project!r} after save"
             )
 
         # DISCLOSURE (primary): report, IN THIS CALL'S RETURN VALUE, how this
@@ -1485,9 +1738,12 @@ class PACTMemory:
         # NO IDENTITY MEANS NO PROJECT'S RECORDS, never all projects'. The
         # search layer drops its project filter on None, so an unguarded call
         # would return the whole store and, on a non-empty result, follow it
-        # with a Retrieved Context write. Return before _ensure_ready(): a
-        # call that returns nothing must not initialize the store either.
-        if self._project_id is None:
+        # with a Retrieved Context write. `_project_scope()` folds an
+        # UNUSABLE detected id into the same answer: unresolvable, not a
+        # binding, not an exception. Return before _ensure_ready(): a call
+        # that returns nothing must not initialize the store either.
+        project_scope = self._project_scope()
+        if project_scope is None:
             return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -1495,7 +1751,7 @@ class PACTMemory:
         results = graph_enhanced_search(
             query,
             current_file=current_file,
-            project_id=self._project_id,
+            project_id=project_scope,
             limit=limit
         )
 
@@ -1540,14 +1796,17 @@ class PACTMemory:
         """
         # NO IDENTITY MEANS NO RECORDS. A None id reaches graph's NULL-safe
         # filter as "match rows whose project_id IS NULL" — the shared
-        # unknown-scope bucket, not this project's records. Return before
-        # _ensure_ready(): a no-op call must not initialize the store.
-        if self._project_id is None:
+        # unknown-scope bucket, not this project's records.
+        # `_project_scope()` folds an UNUSABLE detected id into the same
+        # answer. Return before _ensure_ready(): a no-op call must not
+        # initialize the store.
+        project_scope = self._project_scope()
+        if project_scope is None:
             return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        return search_by_file(file_path, self._project_id, limit)
+        return search_by_file(file_path, project_scope, limit)
 
     def _resolve_id_or_full(
         self, conn, memory_id: str
@@ -1563,6 +1822,22 @@ class PACTMemory:
         storage-layer resolver: a unique prefix returns the full ID;
         ambiguity raises AmbiguousPrefixError; too-short raises
         PrefixTooShortError; no match returns None.
+
+        THE PREFIX RESOLUTION IS SCOPED TO THIS INSTANCE'S PROJECT, and
+        that scope changes what a prefix can DISCOVER, not what a full id
+        can REACH. A full 32-character id is returned before any query, so
+        the by-id capability stays project-blind; a prefix is resolved with
+        `_project_scope()` so a prefix matching only another project's row
+        resolves as no row at all.
+
+        AN UNRESOLVED OR UNUSABLE IDENTITY REFUSES THE PREFIX. `None` at the
+        resolver
+        means "unscoped", which is the right storage-layer contract but the
+        wrong caller behaviour here: it would let a process that could not
+        resolve its project enumerate every project's ids and context
+        snippets. The refusal uses the existing unresolved-identity
+        exception with a READ-shaped message (the shared write message says
+        "nothing was written", which is false for a lookup).
 
         Caller already owns an open `conn` (inside a `db_connection`
         context manager). This helper does not open or close connections.
@@ -1580,11 +1855,31 @@ class PACTMemory:
         Raises:
             PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
             AmbiguousPrefixError: prefix matches more than one memory.
+            ProjectIdentityUnresolvedError: a prefix was supplied while no
+                USABLE project identity could be resolved (absent, or a
+                detected value that cannot be bound). A full id still
+                resolves.
         """
         memory_id = memory_id.lower()
         if len(memory_id) >= MEMORY_ID_LENGTH:
             return memory_id
-        return resolve_memory_id_prefix(conn, memory_id)
+        # `_project_scope()` returns None for an UNUSABLE detected id as well
+        # as for an absent one, and the prefix refusal below then applies to
+        # both. The full-id return above happens FIRST, which is what keeps
+        # get/update/delete identity-independent under a malformed directory
+        # name (the Bugbot finding this closes).
+        project_scope = self._project_scope()
+        if project_scope is None:
+            raise ProjectIdentityUnresolvedError(
+                "no project identity could be resolved, so a memory-id "
+                "prefix was refused rather than listing matches from every "
+                "project. A full 32-character id still resolves. Run from "
+                "inside the project directory, or set CLAUDE_PROJECT_DIR to "
+                "an existing project root."
+            )
+        return resolve_memory_id_prefix(
+            conn, memory_id, project_id=project_scope
+        )
 
     @_with_store_scope
     def get(self, memory_id: str) -> Optional[MemoryObject]:
@@ -1605,6 +1900,10 @@ class PACTMemory:
         Raises:
             PrefixTooShortError: prefix is shorter than the minimum.
             AmbiguousPrefixError: prefix matches more than one memory.
+            ProjectIdentityUnresolvedError: a prefix was supplied while no
+                USABLE project identity could be resolved (absent, or a
+                detected value that cannot be bound). A full 32-character
+                id still resolves.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -1621,8 +1920,15 @@ class PACTMemory:
             if memory_dict is None:
                 return None
 
-            # Get associated files
-            files_data = get_files_for_memory(conn, memory_id)
+            # Get associated files, CONFIRMED AGAINST THE MEMORY'S OWN
+            # PROJECT. The link carries no project, so a stale link left by
+            # an interrupted re-key would attach another project's file path
+            # to this memory. A NULL value keeps the whole-store meaning: a
+            # NULL project cannot be expressed as a filter here without also
+            # meaning "no filter".
+            files_data = get_files_for_memory(
+                conn, memory_id, memory_dict.get("project_id")
+            )
             file_paths = [f["path"] for f in files_data]
 
             return memory_from_db_row(memory_dict, file_paths)
@@ -1657,13 +1963,24 @@ class PACTMemory:
             the storage form.
 
         Raises:
-            ValueError: If updates contains unknown field names, or if any
-                dict-list item contains unknown sub-object keys.
+            ValueError: If `updates` is not a dict (a non-mapping
+                payload cannot be indexed by field name), if updates
+                contains unknown field names, if any dict-list item
+                contains unknown sub-object keys, or if a supplied
+                `project_id` or `session_id` is not a non-empty string
+                without control characters or lone surrogates (explicit
+                null included — it would scalar-replace the row's key to
+                NULL; omit the field to leave it unchanged). Payload
+                validation precedes id resolution: such a payload is
+                refused before the memory id is resolved, so it reports
+                the payload, never the prefix.
             PrefixTooShortError: prefix is shorter than the minimum.
             AmbiguousPrefixError: prefix matches more than one memory.
             ProjectScopeDisagreementError: CLAUDE_PROJECT_DIR and the session
                 record name different project directories (fail-closed write
-                refusal; reads follow env).
+                refusal; reads follow env). Evaluated before payload
+                validation: a session that disagrees refuses on the
+                disagreement, whatever the payload carries.
         """
         # Clear the embedding status FIRST, for the reason given at save()'s
         # entry: it is assigned only after the store write, so any exit above
@@ -1681,6 +1998,58 @@ class PACTMemory:
             raise ProjectScopeDisagreementError(
                 format_project_dir_disagreement(*disagreement)
             )
+
+        # A PAYLOAD project_id OR session_id ON AN UPDATE MUST BE A USABLE
+        # IDENTIFIER, AND PRESENCE — NOT TRUTHINESS — DECIDES.
+        # `update_memory` scalar-replaces both fields, so an explicit null
+        # re-keys the row to NULL and an explicit "" re-keys it to the empty
+        # string: either is a key no reader can address and no instance can
+        # hold (the de-key hazard save()'s payload guard closes on the create
+        # path). `.get()` cannot make the needed
+        # distinction — on update, explicit null IS the hazard and omission is
+        # a no-op, the OPPOSITE boundary from save(), where null means
+        # "auto-detect" — so the guard keys on `"field" in updates` and
+        # validates the value it finds. Updates omitting the fields proceed
+        # with no identity requirement: the row is already keyed, and refusing
+        # identity-free edits would block honest updates in a session whose
+        # declared directory has died. session_id is validated by the same
+        # rule as project_id: it is the row's other scalar identifier, and the
+        # CLI passes it through verbatim on the same path.
+        #
+        # ValueError for the same reason as save()'s payload block: it is this
+        # module's bad-input channel and the CLI envelopes it as exit 2, so it
+        # cannot read as an env/record disagreement.
+        #
+        # FIRST, THE PAYLOAD MUST BE A MAPPING AT ALL. `update_memory` writes
+        # from `updates.items()` and the loop below indexes by field name, so
+        # a list, a string or a scalar reached one of two bare
+        # TypeErrors/AttributeErrors instead of this channel. `cmd_update`
+        # rejects a non-object JSON payload before calling here, but the
+        # method is public and the library route had no gate.
+        if not isinstance(updates, dict):
+            raise ValueError(
+                "update payload must be an object mapping field names to "
+                f"values, not {type(updates).__name__}; nothing was written."
+            )
+        for _identity_field in ("project_id", "session_id"):
+            if _identity_field in updates and _unusable_identifier(
+                updates[_identity_field]
+            ):
+                raise ValueError(
+                    f"{_identity_field}, when supplied to update, must be a "
+                    "non-empty string without control characters "
+                    "(U+0000-U+001F, U+007F-U+009F) or lone surrogates "
+                    "(U+D800-U+DFFF); omit it to leave the row's "
+                    f"{_identity_field} unchanged. Nothing was written."
+                )
+
+        # NO ADOPTED-SESSION GUARD BELONGS HERE. `update_memory` writes only
+        # the fields this payload carries, so update() never binds
+        # `self._session_id`: the only session id it can write is a SUPPLIED
+        # one, refused by the loop above. An instance-level guard would
+        # refuse honest updates that never touch the value. The constructor
+        # adopting an unusable DETECTED id (see __init__) is therefore safe
+        # on this path without any further check — do not add one.
 
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -1703,11 +2072,12 @@ class PACTMemory:
                 f for f in CONTENT_FIELDS if f in updates
             ]
             before_snapshot: Optional[Dict[str, Any]] = None
-            if content_keys_in_update:
+            if content_keys_in_update or "project_id" in updates:
                 before_snapshot = get_memory(conn, memory_id) or {}
 
             success = update_memory(conn, memory_id, updates, replace=replace)
 
+            vector_current = False
             if success and content_keys_in_update:
                 memory_dict = get_memory(conn, memory_id)
                 if memory_dict and _content_fields_changed(
@@ -1716,8 +2086,229 @@ class PACTMemory:
                     self._last_embedding_status = self._store_embedding(
                         conn, memory_id, memory_dict
                     )
+                    # The content re-store reads the re-keyed row, so on
+                    # SUCCESS it already lands in the NEW project's vec
+                    # partition and the cascade below must not embed a second
+                    # time for it. A FAULT is not success: the reason string
+                    # means nothing was written (the fault path rolls its own
+                    # vector-replace back and returns without raising), so
+                    # the vector is NOT current and the cascade still
+                    # re-stores. Only a None status means stored-or-correctly-
+                    # absent.
+                    vector_current = self._last_embedding_status is None
+
+            if success and "project_id" in updates:
+                # A RE-KEY CASCADES ON A CHANGE THIS CALL MADE, OR ON AN
+                # INVARIANT THE STORE STILL BREAKS. update_memory moved the
+                # memories row; two project-keyed surfaces still carry the old
+                # key: the linked files rows (and the memory_files links
+                # pointing at them) and the vec_memories partition row.
+                #
+                # The OBSERVED-INVARIANT half is what lets a RE-ISSUED update
+                # finish a cascade an earlier fault interrupted: by then the
+                # memories row already carries the target, so the snapshot
+                # comparison alone calls the update a no-op and leaves the
+                # links and the vector on the old project forever. Both
+                # observations are indexed lookups, so the satisfied case —
+                # the normal one — writes nothing.
+                # THE ROW'S OBSERVED PROJECT, NOT THE REQUESTED ONE. A
+                # concurrent writer can re-key the row between update_memory's
+                # commit and this cascade; driving the links and the vector at
+                # the REQUESTED target would then key them to a project the
+                # row no longer carries (measured: row projC, links
+                # [projC, projB]). Re-read AFTER the commit and treat the
+                # committed row as the truth. A row that vanished between the
+                # two reads has nothing left to cascade (`delete()` has
+                # already removed its vector and links), so stop rather than
+                # moving anything to a NULL target.
+                row_after_update = get_memory(conn, memory_id)
+                if row_after_update is None:
+                    return memory_id if success else None
+                target_project = row_after_update.get("project_id")
+                # The CHANGE half is kept as it was: a call that re-keyed the
+                # row cascades even when the content store faulted, which is
+                # what the faulted-re-embed arm pins.
+                project_changed = (
+                    before_snapshot.get("project_id") != target_project
+                )
+                files_stale = self._linked_file_partition_is_stale(
+                    conn, memory_id, target_project
+                )
+                vector_stale = self._vector_partition_is_stale(
+                    conn, memory_id, target_project
+                )
+                if project_changed or files_stale or vector_stale:
+                    # `and not vector_stale` is the failure direction: when the
+                    # partition is observed wrong the re-store must happen even
+                    # if the content path reported a successful store, because
+                    # an extra embed is cheaper than a wrong skip.
+                    self._cascade_rekey(
+                        conn, memory_id, target_project,
+                        vector_current=vector_current and not vector_stale,
+                    )
 
             return memory_id if success else None
+
+    @staticmethod
+    def _linked_file_partition_is_stale(
+        conn: sqlite3.Connection, memory_id: str, target_project: str,
+    ) -> bool:
+        """Report whether a linked file row sits outside the target project.
+
+        The cascade's invariant, OBSERVED rather than inferred from what this
+        call changed. `IS NOT` is null-safe, so a link to an unprojected file
+        row counts as stale for a projected target — correct, because that row
+        is keyed NULL and no project-scoped read of the target reaches it.
+        """
+        return conn.execute(
+            "SELECT 1 FROM files f JOIN memory_files mf ON mf.file_id = f.id "
+            "WHERE mf.memory_id = ? AND f.project_id IS NOT ? LIMIT 1",
+            (memory_id, target_project),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _vector_partition_is_stale(
+        conn: sqlite3.Connection, memory_id: str, target_project: str,
+    ) -> bool:
+        """Report whether this memory's vector row sits in another partition.
+
+        TWO STATES ARE NOT STALE, both deliberate:
+
+        - A MISSING row belongs to the embedding catch-up, not to the
+          cascade. Treating absence as stale would make every update on a
+          process that cannot embed re-attempt a store forever.
+        - An UNOBSERVABLE table (no extension support, or sqlite-vec absent)
+          is not evidence of a wrong partition. The trigger does not fire
+          there; the read-side confirmation in search.vector_search is what
+          keeps a stranded row from being served to another project.
+
+        Only an observed row under a different project makes this true.
+        """
+        try:
+            conn.enable_load_extension(True)
+            import sqlite_vec
+            sqlite_vec.load(conn)
+            row = conn.execute(
+                "SELECT project_id FROM vec_memories WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        return row is not None and row["project_id"] != target_project
+
+    def _cascade_rekey(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: str,
+        new_project: str,
+        *,
+        vector_current: bool,
+    ) -> None:
+        """Move what a re-key leaves behind: file LINKS and the vector row.
+
+        `new_project` IS THE ROW'S OBSERVED PROJECT, not the payload's
+        requested one: the caller re-reads the row after update_memory's
+        commit, so a concurrent re-key that won the race is the target the
+        links and the vector follow.
+
+        Files: each linked row is keyed (path, project_id) and
+        search_by_file filters by project, so the link is re-pointed to the
+        (path, new_project) row — created on demand by track_file, which
+        get-or-creates — and the old link removed. The OLD file ROW stays,
+        and what that costs is named here rather than waved away as inert:
+        `file_relations` recorded against the old row STAY THERE and become
+        invisible from the new project (`get_file_relations` and
+        `get_file_context` resolve relations from the (path, project) row),
+        so graph relations do not follow a re-key; and the old row still
+        counts in the OLD project's `get_status` graph_stats["files"], which
+        counts rows rather than links. Deleting the old row instead could
+        dangle `file_relations` references, so the residue is left, not
+        hidden.
+
+        Vector: vec0 partitions by project_id, so a vector left in the old
+        partition is invisible to the new project's semantic search — and,
+        because the partition is what a project-scoped query filters on,
+        still visible to the OLD one. Re-stored through _store_embedding,
+        which drops the old partition row and inserts under the new one.
+        `vector_current` skips the re-store when the content-change path
+        already stored the vector under the new key. If the re-store FAULTS,
+        the rollback restores the OLD partition's row and that row is LEFT IN
+        PLACE. Three things make that safe, and each is why the drop this
+        used to perform was removed: every vector read confirms the row's
+        stored project, so a stranded row cannot be served to the old
+        project; the partition-aware catch-up reports the memory unembedded
+        in its own project and repairs it; and the row is still observably
+        wrong, so RE-ISSUING the same update re-stores it. The drop removed
+        that last repair path, and because it is id-keyed and partition-blind
+        it could also delete a row another session had just stored correctly
+        under a third project.
+
+        RETRY: the caller invokes this when the update moved the key, or when
+        the OBSERVED invariant is still broken. The second half means
+        re-issuing the same update after an interrupted cascade finishes it
+        rather than reading as a no-op.
+
+        BOUND ON CONCURRENT RE-KEYS, stated here because it is the one
+        window the re-read cannot close: the target is read ONCE, after
+        update_memory's commit, and a writer that lands INSIDE this cascade
+        can still leave one link keyed to its own project while the row
+        carries another's (measured: row projC, links [projB, projC]). No
+        read serves that link — every memory and vector read confirms the
+        row's stored project — and `get_graph_stats` counts the file under
+        the scope that owns its row. Re-issuing the same update sees the
+        link as stale and clears it. Documentation rather than an unbounded
+        second pass: any further pass only narrows a window a later write
+        reopens, and the re-issue already repairs it.
+        """
+        linked = conn.execute(
+            "SELECT f.id AS file_id, f.path AS path, "
+            "mf.relationship AS relationship "
+            "FROM files f JOIN memory_files mf ON mf.file_id = f.id "
+            "WHERE mf.memory_id = ?",
+            (memory_id,),
+        ).fetchall()
+        for row in linked:
+            new_file_id = track_file(conn, row["path"], new_project)
+            # `new_file_id == row["file_id"]` IS THE "already in the target"
+            # TEST. track_file resolves (path, new_project), which is this
+            # very row iff it already carries the target, so a separate
+            # project comparison would duplicate this one.
+            if new_file_id == row["file_id"]:
+                continue
+            # OR IGNORE, BECAUSE TWO CONCURRENT CASCADES CAN COMPUTE THE SAME
+            # LINK. Both re-point this memory at the same (path, project)
+            # file row; the first commits, the second's INSERT then violates
+            # the (memory_id, file_id) primary key. A plain INSERT would
+            # raise IntegrityError and abort that update AFTER its row write
+            # committed; the ignored duplicate is already the link this loop
+            # wants, and the DELETE below still retires the old one.
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_files "
+                "(memory_id, file_id, relationship) VALUES (?, ?, ?)",
+                (memory_id, new_file_id, row["relationship"]),
+            )
+            conn.execute(
+                "DELETE FROM memory_files WHERE memory_id = ? AND file_id = ?",
+                (memory_id, row["file_id"]),
+            )
+        # COMMIT THE LINKS BEFORE THE EMBEDDING CALL, as save() commits its
+        # links before embedding: _store_embedding's fault path rolls the
+        # connection back, and link writes left in that transaction would be
+        # undone with it — the row would stay addressable only under its OLD
+        # key, the exact state the cascade exists to retire.
+        conn.commit()
+        if not vector_current:
+            memory_dict = get_memory(conn, memory_id)
+            if memory_dict:
+                # A FAULT LEAVES THE OLD PARTITION'S ROW IN PLACE, restored
+                # by the rollback inside _store_embedding. DO NOT DROP IT: a
+                # stranded row is not served (every vector read confirms the
+                # stored project), it is visible to the partition-aware
+                # catch-up, and it keeps this update's own re-issue a repair
+                # rather than a no-op. See this method's docstring.
+                self._last_embedding_status = self._store_embedding(
+                    conn, memory_id, memory_dict
+                )
 
     @_with_store_scope
     def delete(self, memory_id: str) -> Optional[str]:
@@ -1798,11 +2389,30 @@ class PACTMemory:
         Returns:
             List of MemoryObject instances ordered by creation time.
         """
-        # NO IDENTITY MEANS NO RECORDS. `list_memories` applies its
-        # `project_id = ?` condition only when the id is non-None, so a None
-        # id would return the newest records of EVERY project. Return before
-        # _ensure_ready(): a no-op call must not initialize the store.
-        if self._project_id is None:
+        # NO IDENTITY — absent OR an unusable detected value — MEANS NO
+        # RECORDS. `list_memories` applies its `project_id = ?` condition only
+        # when the id is non-None, so passing the raw unusable value would
+        # raise from the TEXT binding and passing None would return the
+        # newest records of EVERY project. Return before _ensure_ready(): a
+        # no-op call must not initialize the store.
+        project_scope = self._project_scope()
+        if project_scope is None:
+            return []
+        # THIS READ BINDS THE SESSION ID ONLY WHEN `session_only` IS ASKED
+        # FOR, and an unusable DETECTED id must not gate it (F10). No row can
+        # carry such a value — every write validates it before binding — so
+        # the empty answer is the correct one, and it is returned before
+        # _ensure_ready() so a no-op read does no store work.
+        #
+        # THE EMPTY RESULT MEANS "THE ADOPTED VALUE IS UNUSABLE", NOT "THIS
+        # SESSION HAS NO MEMORIES". A caller cannot tell the two apart, so
+        # say it here: the distinction is real, and this is the only place
+        # that can record it.
+        if (
+            session_only
+            and self._session_id is not None
+            and _unusable_identifier(self._session_id)
+        ):
             return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -1814,14 +2424,18 @@ class PACTMemory:
 
             memories_data = list_memories(
                 conn,
-                project_id=self._project_id,
+                project_id=project_scope,
                 session_id=session_id,
                 limit=limit
             )
 
             memories = []
             for memory_dict in memories_data:
-                files_data = get_files_for_memory(conn, memory_dict["id"])
+                # Same confirmation as get(): the memory row decides which
+                # project's file rows may appear in its file list.
+                files_data = get_files_for_memory(
+                    conn, memory_dict["id"], memory_dict.get("project_id")
+                )
                 file_paths = [f["path"] for f in files_data]
                 memories.append(memory_from_db_row(memory_dict, file_paths))
 
@@ -1845,14 +2459,16 @@ class PACTMemory:
         and the warranted call proceeds.
         """
         self._last_sync_status = None
-        if self._project_id is None:
+        if self._project_scope() is None:
             # REFUSE BEFORE THE QUERY, NOT AFTER IT. `list_memories` applies
             # its `project_id = ?` condition only when the id is non-None, so
             # passing None selects the newest records of EVERY project, and
             # this method would write those foreign records over this file's
-            # section. A project with no id has no records, so `empty` is the
-            # correct answer on its own terms. The envelope's `project_id`
-            # reports the None beside it, which is what makes it diagnosable.
+            # section. An UNUSABLE detected id is folded into the same
+            # answer: unresolvable, never a binding. A project with no usable
+            # id has no records, so `empty` is the correct answer on its own
+            # terms. The envelope's `project_id` reports the None beside it,
+            # which is what makes it diagnosable.
             self._last_sync_status = SyncResult.EMPTY
             return []
         # Same fail-closed rule as save(): on an env/record disagreement the
@@ -1900,6 +2516,16 @@ class PACTMemory:
         """
         Get status information about the memory system.
 
+        PAYLOAD CONTRACT: the identity fields (`project_id`, `session_id`)
+        and `db_path` are STRUCTURED PAYLOAD values. Each is folded to null
+        when no row or address can carry it, and otherwise returned RAW so a
+        caller can feed it back — the ids as a scope, the path to
+        `--db-path`. Escaping them made the reported id name no rows and the
+        reported path open no store. Display escaping belongs to messages,
+        warnings, log lines and the AMBIGUOUS_PREFIX diagnostic, not to
+        payloads. MEMORY CONTENT is raw for the same reason: the row payloads
+        from `search`, `list` and `get` are data.
+
         Returns:
             Dictionary with database stats and capabilities.
         """
@@ -1923,10 +2549,20 @@ class PACTMemory:
         # they are not project-scoped, are pre-existing, and are not part of
         # this fix. They read 0 here only because the guard performs no query —
         # an implementation choice, not a guarantee.
-        if self._project_id is None:
+        # `_project_scope()` folds an UNUSABLE detected id into the unresolved
+        # answer: zeroed, not an exception, and never a binding of the raw
+        # value. The ENVELOPE VALUES are computed once so BOTH arms report
+        # them the same way, and each accessor FOLDS ONLY: a value no row
+        # can carry becomes None, and everything else is returned RAW so the
+        # caller can use it as a scope or a store address. The counters
+        # below use the same raw `project_scope`.
+        project_scope = self._project_scope()
+        project_id = self._project_id_for_envelope()
+        session_id = self._session_id_for_envelope()
+        if project_scope is None:
             return {
-                "project_id": None,
-                "session_id": self._session_id,
+                "project_id": project_id,
+                "session_id": session_id,
                 "memory_count": 0,
                 "tracked_files_count": len(self._session_files),
                 "graph_stats": {
@@ -1949,14 +2585,14 @@ class PACTMemory:
         with db_connection() as conn:
             ensure_initialized(conn)
 
-            memory_count = get_memory_count(conn, self._project_id)
-            graph_stats = get_graph_stats(conn, self._project_id)
+            memory_count = get_memory_count(conn, project_scope)
+            graph_stats = get_graph_stats(conn, project_scope)
 
         capabilities = get_search_capabilities()
 
         return {
-            "project_id": self._project_id,
-            "session_id": self._session_id,
+            "project_id": project_id,
+            "session_id": session_id,
             "memory_count": memory_count,
             "tracked_files_count": len(self._session_files),
             "graph_stats": graph_stats,

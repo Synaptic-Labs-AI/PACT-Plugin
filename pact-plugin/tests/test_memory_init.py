@@ -3218,3 +3218,166 @@ class TestProcessMarkerDoesNotOutliveItsProcess:
         finally:
             marker.unlink(missing_ok=True)
             shutil.rmtree(home, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# The embedding-attempt marker path is slug-sanitised
+# ---------------------------------------------------------------------------
+
+class TestTheEmbeddingAttemptMarkerPathIsSanitised:
+    """The session id is READ FROM A FILE, then composed into a /tmp filename.
+
+    It is therefore not this module's own text: path traversal, a separator, a
+    NUL or a control character in it must not survive into the path. The same
+    session id reaches `_build_session_path` as a directory component, and the
+    two surfaces share one substitution rule; these arms pin the marker
+    surface's half of it.
+    """
+
+    def test_traversal_and_a_nul_do_not_reach_the_filename(self, monkeypatch):
+        import memory_init
+
+        hostile = "../../evil\x00id"
+        monkeypatch.setattr(
+            memory_init, "get_session_id_from_context_file", lambda: hostile
+        )
+        marker = memory_init._get_embedding_attempted_path()
+
+        assert marker.parent == Path("/tmp"), marker
+        assert "\x00" not in marker.name, marker.name
+        assert "/" not in marker.name, marker.name
+        assert ".." not in marker.name, marker.name
+        # The value REACHED the filename, sanitised rather than dropped: a
+        # function that returned the process token for everything would also
+        # satisfy the containment assertions above.
+        assert "evil" in marker.name, marker.name
+
+    def test_an_ordinary_session_id_is_kept_verbatim(self, monkeypatch):
+        import memory_init
+
+        monkeypatch.setattr(
+            memory_init, "get_session_id_from_context_file", lambda: "abc-123_XY"
+        )
+        assert memory_init._get_embedding_attempted_path() == Path(
+            "/tmp/pact_embedding_attempted_abc-123_XY"
+        )
+
+
+class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
+    """The sanitiser filters CHARACTERS; a filename also has a LENGTH limit.
+
+    A 300-character alphanumeric id survives the slug regex intact, so the
+    composed name exceeds NAME_MAX and the first filesystem call raises
+    ENAMETOOLONG. The marker is a best-effort suppression of the catch-up
+    sweep, so a marker fault must degrade to a reported skip ("could not
+    check" / "could not create session marker"), never to a failure of the
+    caller's memory operation.
+    """
+
+    _LONG_ID = "s" * 300
+
+    def test_ensure_memory_ready_survives_an_over_long_session_id(
+        self, monkeypatch
+    ):
+        import memory_init
+        from scripts import embedding_catchup
+
+        marker = None
+        try:
+            memory_init.reset_initialization()
+            monkeypatch.setattr(
+                memory_init, "get_session_id_from_context_file",
+                lambda: self._LONG_ID,
+            )
+            # The init steps either side of the marker are pinned so the arm
+            # measures the marker path, not the dependency installer or a
+            # store the test did not bind.
+            monkeypatch.setattr(
+                memory_init, "check_and_install_dependencies",
+                lambda: {"status": "ok", "installed": [], "failed": []},
+            )
+            monkeypatch.setattr(
+                memory_init, "maybe_migrate_embeddings",
+                lambda: {"status": "ok", "message": None},
+            )
+            monkeypatch.setattr(
+                embedding_catchup, "embed_pending_memories",
+                lambda limit=20: {"processed": 0},
+            )
+
+            marker = memory_init._get_embedding_attempted_path()
+            result = memory_init.ensure_memory_ready()  # must not raise OSError
+
+            assert len(marker.name) <= 255, marker.name
+            assert result["embedding"]["message"] not in (
+                "Could not check session marker",
+                "Could not create session marker",
+            ), result["embedding"]
+        finally:
+            if marker is not None:
+                try:
+                    marker.unlink(missing_ok=True)
+                except OSError:
+                    # A reverted length bound leaves a name too long to
+                    # unlink; the assertion above is the failure to report.
+                    pass
+            memory_init.reset_initialization()
+
+    def test_two_long_ids_sharing_a_prefix_get_different_markers(
+        self, monkeypatch
+    ):
+        """A hash suffix, not a bare truncation: a shared prefix is not an id."""
+        import memory_init
+
+        def marker_for(session_id):
+            monkeypatch.setattr(
+                memory_init, "get_session_id_from_context_file",
+                lambda: session_id,
+            )
+            return memory_init._get_embedding_attempted_path()
+
+        first = marker_for("a" * 300 + "1")
+        second = marker_for("a" * 300 + "2")
+        assert first != second, (first.name, second.name)
+
+    def test_a_probe_failure_is_reported_as_a_check_failure(
+        self, monkeypatch
+    ):
+        """`exists()` is a filesystem call too, and it can raise OSError.
+
+        The failing call is the PROBE, not the creation: the file may exist
+        and be unreadable, so reporting "could not create" names the wrong
+        remedy. The sweep is skipped either way.
+        """
+        import memory_init
+
+        marker = MagicMock()
+        marker.exists.side_effect = OSError(36, "File name too long")
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path", lambda: marker
+        )
+
+        result = memory_init.maybe_embed_pending()
+
+        assert result["message"] == "Could not check session marker", result
+        assert result["status"] == "skipped", result
+        marker.touch.assert_not_called()
+
+    def test_a_creation_failure_is_reported_as_a_creation_failure(
+        self, monkeypatch
+    ):
+        """The other branch: the probe succeeded and the write failed."""
+        import memory_init
+
+        marker = MagicMock()
+        marker.exists.return_value = False
+        marker.touch.side_effect = OSError(28, "No space left on device")
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path", lambda: marker
+        )
+
+        result = memory_init.maybe_embed_pending()
+
+        assert result["message"] == "Could not create session marker", result
+        assert result["status"] == "skipped", result
+        marker.touch.assert_called_once_with()

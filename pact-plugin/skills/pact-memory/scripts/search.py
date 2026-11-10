@@ -56,6 +56,32 @@ KEYWORD_POSITION_DECAY = 0.05  # Score reduction per position in keyword results
 GRAPH_BOOST_FACTOR = 0.3  # Boost factor for graph-related memories
 GRAPH_BASE_SCORE = 0.3  # Base relevance score for graph-connected memories
 
+# A stored-project confirmation can discard stale cross-project hits, so a
+# query that fetched exactly `limit` candidates can return fewer than the
+# caller asked for. Fetches widen until enough confirmed hits exist or the
+# store is exhausted; these caps bound the widening so a store full of stale
+# rows cannot turn one search into an unbounded series of queries.
+#
+# THE TWO CEILINGS DIFFER ON PURPOSE. The vector leg widens one local KNN
+# query, so 200 candidates is cheap. The graph leg re-runs
+# `graph_boosted_search` per widening step, and that generates an embedding
+# for the query each time — a ceiling of 200 there would mean up to eight
+# embedding calls for one search. 50 bounds it to a handful.
+CONFIRMATION_FETCH_CAP = 200
+GRAPH_CONFIRMATION_FETCH_CAP = 50
+
+
+def _scope_or_none(project_id: Optional[str]) -> Optional[str]:
+    """One scope predicate at every public entry: absent and "" both mean ALL.
+
+    The SQL legs read the scope by `is not None` (as do the stored-project
+    confirmations), so without this normalisation an empty string would be
+    bound as a filter that matches no row and a whole-store search would
+    answer empty. Normalise ONCE, at each public entry; every later test is
+    `is None`.
+    """
+    return project_id or None
+
 
 def vector_search(
     conn: sqlite3.Connection,
@@ -80,6 +106,8 @@ def vector_search(
         List of (memory_id, distance) tuples, sorted by similarity.
         Returns empty list if vector search unavailable (falls back to keyword).
     """
+    project_id = _scope_or_none(project_id)
+
     # Check if SQLite extension loading is available
     if not SQLITE_EXTENSIONS_ENABLED:
         logger.debug("Vector search unavailable - SQLite extensions not enabled")
@@ -105,7 +133,7 @@ def vector_search(
         embedding_blob = struct.pack(f'{len(query_embedding)}f', *query_embedding)
 
         # Build query with optional project filter
-        if project_id:
+        if project_id is not None:
             sql = """
                 SELECT memory_id, distance
                 FROM vec_memories
@@ -114,7 +142,7 @@ def vector_search(
                 ORDER BY distance
                 LIMIT ?
             """
-            cursor = conn.execute(sql, (embedding_blob, project_id, limit))
+            sql_params: Tuple[Any, ...] = (embedding_blob, project_id)
         else:
             sql = """
                 SELECT memory_id, distance
@@ -123,9 +151,63 @@ def vector_search(
                 ORDER BY distance
                 LIMIT ?
             """
-            cursor = conn.execute(sql, (embedding_blob, limit))
+            sql_params = (embedding_blob,)
 
-        return [(row[0], row[1]) for row in cursor.fetchall()]
+        def _fetch(fetch_limit: int) -> List[Tuple[str, float]]:
+            return [
+                (row[0], row[1])
+                for row in conn.execute(
+                    sql, (*sql_params, fetch_limit)
+                ).fetchall()
+            ]
+
+        rows = _fetch(limit)
+
+        # THE PARTITION IS A HINT; THE ROW'S STORED SCOPE IS THE FACT.
+        # A partition row is written by whichever process stored the vector,
+        # and a re-key that could not move it — an embedding fault, or a
+        # process that cannot open the vector table — leaves the OLD project's
+        # partition populated. Returning such a hit hands another project's
+        # memory to this project's caller, and nothing downstream re-checks it.
+        # Confirm every hit against memories before returning it here, so both
+        # callers inherit the guarantee.
+        #
+        # `project_id is None` KEEPS ITS WHOLE-STORE MEANING: an unscoped
+        # search asks for every partition, and filtering there would silently
+        # narrow a documented scope.
+        if project_id is None or not rows:
+            return rows
+
+        # A DISCARDED HIT MUST NOT COST A SLOT. The SQL LIMIT runs before this
+        # confirmation, so a stale row inside the top `limit` would otherwise
+        # leave the caller short of results the store can supply. Widen the
+        # fetch until enough confirmed hits exist, the store is exhausted, or
+        # the cap is reached.
+        fetch = limit
+        while True:
+            ids = [memory_id for memory_id, _ in rows]
+            placeholders = ",".join("?" * len(ids))
+            scoped = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT id FROM memories WHERE id IN ({placeholders}) "
+                    "AND project_id = ?",
+                    (*ids, project_id),
+                )
+            }
+            confirmed = [
+                (memory_id, distance)
+                for memory_id, distance in rows
+                if memory_id in scoped
+            ]
+            if (
+                len(confirmed) >= limit
+                or len(rows) < fetch
+                or fetch >= CONFIRMATION_FETCH_CAP
+            ):
+                return confirmed[:limit]
+            fetch = min(fetch * 2, CONFIRMATION_FETCH_CAP)
+            rows = _fetch(fetch)
 
     except Exception as e:
         error_str = str(e).lower()
@@ -181,6 +263,8 @@ def semantic_search(
     Returns:
         List of memory IDs sorted by relevance.
     """
+    project_id = _scope_or_none(project_id)
+
     with db_connection() as conn:
         ensure_initialized(conn)
 
@@ -218,6 +302,8 @@ def graph_boosted_search(
     Returns:
         List of (memory_id, score) tuples, higher is better.
     """
+    project_id = _scope_or_none(project_id)
+
     ensure_initialized(conn)
 
     # Get base semantic results
@@ -288,7 +374,7 @@ def _get_graph_related_memories(
     # Get memories directly linked to this file
     file_id = get_file_id(conn, file_path, project_id)
     if file_id:
-        direct_memories = get_memories_for_file(conn, file_id)
+        direct_memories = get_memories_for_file(conn, file_id, project_id)
         memory_ids.update(direct_memories)
 
     # Get memories linked through file relationships
@@ -326,28 +412,56 @@ def graph_enhanced_search(
     Returns:
         List of MemoryObject instances sorted by relevance.
     """
+    project_id = _scope_or_none(project_id)
+
     with db_connection() as conn:
         ensure_initialized(conn)
 
-        # Get ranked memory IDs
-        ranked_results = graph_boosted_search(
-            conn, query, current_file, project_id, limit
-        )
+        # Fetch full memory objects, widening the ranking when the
+        # stored-project belt discards stale ids. `graph_boosted_search`
+        # truncates to the limit it is given BEFORE this loop can filter, so
+        # the widening has to reach back into that call, not only into the
+        # slice below.
+        fetch = limit
+        while True:
+            ranked_results = graph_boosted_search(
+                conn, query, current_file, project_id, fetch
+            )
 
-        # Fetch full memory objects
-        memories = []
-        for memory_id, score in ranked_results:
-            memory_dict = get_memory(conn, memory_id)
-            if memory_dict:
-                # Get associated files
-                from .graph import get_files_for_memory
-                files_data = get_files_for_memory(conn, memory_id)
-                file_paths = [f["path"] for f in files_data]
+            memories = []
+            for memory_id, score in ranked_results:
+                memory_dict = get_memory(conn, memory_id)
+                if memory_dict:
+                    # BELT, BESIDE THE CHOKE POINT. vector_search already
+                    # confirms every hit and the keyword leg filters in SQL,
+                    # but the graph-boosted leg adds ids from file links
+                    # WITHOUT a project check, and this loop is the last
+                    # place an id becomes a returned memory. Confirming here
+                    # means no id source can leak a row from another project.
+                    # `project_id is None` unscoped.
+                    if (
+                        project_id is not None
+                        and memory_dict.get("project_id") != project_id
+                    ):
+                        continue
+                    # Get associated files
+                    from .graph import get_files_for_memory
+                    files_data = get_files_for_memory(
+                        conn, memory_id, memory_dict.get("project_id")
+                    )
+                    file_paths = [f["path"] for f in files_data]
 
-                memory_obj = memory_from_db_row(memory_dict, file_paths)
-                memories.append(memory_obj)
+                    memory_obj = memory_from_db_row(memory_dict, file_paths)
+                    memories.append(memory_obj)
 
-        return memories
+            if (
+                project_id is None
+                or len(memories) >= limit
+                or len(ranked_results) < fetch
+                or fetch >= GRAPH_CONFIRMATION_FETCH_CAP
+            ):
+                return memories[:limit]
+            fetch = min(fetch * 2, GRAPH_CONFIRMATION_FETCH_CAP)
 
 
 def find_similar_memories(
@@ -412,25 +526,55 @@ def search_by_file(
     Returns:
         List of related MemoryObject instances.
     """
+    project_id = _scope_or_none(project_id)
+
     with db_connection() as conn:
         ensure_initialized(conn)
 
         # Get all related memory IDs
         memory_ids = _get_graph_related_memories(conn, file_path, project_id)
 
-        # Fetch and return memory objects
+        # Fetch memory objects through a widening window. The old
+        # `list(memory_ids)[:limit]` truncated BEFORE the stored-project
+        # confirmation, so a stale link cost a slot the store could fill; the
+        # window grows until enough confirmed memories exist, the relation set
+        # is exhausted, or the scope is unscoped. Its natural cap is the size
+        # of the set, so a pathological store cannot spin.
+        ordered = list(memory_ids)
         memories = []
-        for memory_id in list(memory_ids)[:limit]:
-            memory_dict = get_memory(conn, memory_id)
-            if memory_dict:
-                from .graph import get_files_for_memory
-                files_data = get_files_for_memory(conn, memory_id)
-                file_paths = [f["path"] for f in files_data]
+        window = limit
+        index = 0
+        while True:
+            for memory_id in ordered[index:window]:
+                memory_dict = get_memory(conn, memory_id)
+                if memory_dict:
+                    # THE GRAPH LOOKUP SCOPES THE FILE, NOT THE MEMORY, and
+                    # get_memories_for_file now also confirms the memory's
+                    # stored project. This is still the last place an id
+                    # becomes a returned memory, so a re-keyed row cannot be
+                    # served to its old project by any id source.
+                    if (
+                        project_id is not None
+                        and memory_dict.get("project_id") != project_id
+                    ):
+                        continue
+                    from .graph import get_files_for_memory
+                    files_data = get_files_for_memory(
+                        conn, memory_id, memory_dict.get("project_id")
+                    )
+                    file_paths = [f["path"] for f in files_data]
 
-                memory_obj = memory_from_db_row(memory_dict, file_paths)
-                memories.append(memory_obj)
+                    memory_obj = memory_from_db_row(memory_dict, file_paths)
+                    memories.append(memory_obj)
 
-        return memories
+            index = window
+            if (
+                project_id is None
+                or len(memories) >= limit
+                or index >= len(ordered)
+            ):
+                return memories[:limit]
+            window = min(window * 2, len(ordered))
 
 
 def _sqlite_vec_available() -> bool:

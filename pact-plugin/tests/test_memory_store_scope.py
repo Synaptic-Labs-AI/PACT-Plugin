@@ -57,7 +57,20 @@ from scripts.config import (  # noqa: E402
     resolve_db_path,
     store_scope,
 )
+from scripts import search as memory_search  # noqa: E402
 from scripts.database import db_connection  # noqa: E402
+from scripts.database import (  # noqa: E402
+    ensure_initialized,
+    list_memories,
+    search_memories_by_text,
+)
+from scripts.graph import add_file_relation, get_file_id  # noqa: E402
+from scripts.graph import track_file  # noqa: E402
+from scripts.memory_api import PACTMemory  # noqa: E402
+from scripts.working_memory import SyncResult  # noqa: E402
+
+_TOKEN = "REMOVED-WORKTREE-ROW-TOKEN"
+_REKEY_TOKEN = "REKEY-CROSS-PROJECT-TOKEN"
 
 _SCRIPTS_DIR = SCRIPTS_PARENT / "scripts"
 
@@ -589,3 +602,192 @@ class TestTheConnectionFactoryContract:
             "the factory sets isolation_level, which changes when a statement "
             "commits and breaks the drop-then-insert pairing"
         )
+
+
+# ---------------------------------------------------------------------------
+# An unresolved identity scopes every store read to nothing, never to all
+# (relocated from the worktree-record module).
+# ---------------------------------------------------------------------------
+
+class TestUnresolvedIdentityScopesReads:
+    """R1: None means NO records, never every project's records."""
+
+    def _seed(self, db_path: Path):
+        memory = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        linked = db_path.parent / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        target = db_path.parent / "target.py"
+        target.write_text("y = 2\n", encoding="utf-8")
+        memory_id = memory.save(
+            {"context": _TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
+        with db_connection(db_path) as conn:
+            add_file_relation(
+                conn, str(linked), str(target), "imports", project_id="other-proj-a"
+            )
+        return memory_id, linked
+
+    def _unresolved(self, monkeypatch, db_path: Path) -> PACTMemory:
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_id_with_source",
+            staticmethod(lambda: (None, "unresolved")),
+        )
+        memory = PACTMemory(session_id="s", db_path=db_path)
+        assert memory.project_id is None
+        return memory
+
+    def test_r1_control_a_scoped_instance_finds_the_seeded_rows(self, tmp_path):
+        """The positive control the other R1 arms rest on.
+
+        Without it an arm can pass because the fixture has nothing findable —
+        the same vacuous-pass class as I2.
+        """
+        db_path = tmp_path / "store.db"
+        memory_id, linked = self._seed(db_path)
+
+        scoped = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        assert [m.id for m in scoped.list()] == [memory_id]
+        assert [m.id for m in scoped.search(_TOKEN, sync_to_claude=False)] == [memory_id]
+        assert [m.id for m in scoped.search_by_file(str(linked))] == [memory_id]
+        status = scoped.get_status()
+        assert status["memory_count"] == 1
+        assert all(
+            status["graph_stats"][key] > 0
+            for key in ("files", "memories", "memory_file_links", "file_relations")
+        ), status["graph_stats"]
+
+    def test_r1_an_unresolved_identity_returns_no_records_from_any_surface(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "store.db"
+        self._seed(db_path)
+        empty = self._unresolved(monkeypatch, db_path)
+
+        assert empty.list() == []
+        assert empty.search(_TOKEN, sync_to_claude=False) == []
+        assert empty.search_by_file(str(db_path.parent / "linked.py")) == []
+
+        status = empty.get_status()
+        assert status["project_id"] is None
+        assert status["memory_count"] == 0
+        assert status["graph_stats"] == {
+            "files": 0,
+            "memories": 0,
+            "memory_file_links": 0,
+            "file_relations": 0,
+        }, status["graph_stats"]
+
+        scoped = PACTMemory(project_id="other-proj-a", session_id="s", db_path=db_path)
+        assert set(status) == set(scoped.get_status()), (
+            "the zeroed envelope hides a key the populated one carries"
+        )
+
+        # The store really holds another project's rows, so [] above is the
+        # guard's doing rather than an empty store.
+        with db_connection(db_path) as conn:
+            assert list_memories(conn, project_id=None)
+            assert search_memories_by_text(conn, _TOKEN, project_id=None)
+
+    def test_r1c_the_file_search_would_surface_a_NULL_keyed_row_unguarded(
+        self, tmp_path, monkeypatch
+    ):
+        """`search_by_file` has a different causal shape: NULL, not all."""
+        db_path = tmp_path / "store.db"
+        linked = db_path.parent / "linked.py"
+        self._seed(db_path)
+        with db_connection(db_path) as conn:
+            file_id = get_file_id(conn, str(linked), "other-proj-a")
+            assert file_id
+            conn.execute("UPDATE files SET project_id = NULL WHERE id = ?", (file_id,))
+            conn.commit()
+        with db_connection(db_path) as conn:
+            assert get_file_id(conn, str(linked), None) == file_id, (
+                "the fixture does not exercise the NULL-keyed shape"
+            )
+
+        empty = self._unresolved(monkeypatch, db_path)
+        assert empty.search_by_file(str(linked)) == []
+
+    def test_unresolved_search_clears_the_previous_sync_status(
+        self, tmp_path, monkeypatch
+    ):
+        """The identity early return must not inherit a save's `wrote`."""
+        empty = self._unresolved(monkeypatch, tmp_path / "store.db")
+        with patch(
+            "scripts.memory_api.sync_to_claude_md",
+            return_value=SyncResult(SyncResult.WROTE),
+        ):
+            empty.save({"context": "PREVIOUS", "project_id": "chosen"})
+        assert empty.last_sync_status == SyncResult.WROTE
+
+        assert empty.search("NO-RECORDS") == []
+        assert empty.last_sync_status is None
+
+    def test_empty_result_search_clears_the_previous_sync_status(self, tmp_path):
+        """An ordinary no-result search also attempts no sync."""
+        memory = PACTMemory(
+            project_id="detected-b", session_id="s", db_path=tmp_path / "store.db"
+        )
+        with patch(
+            "scripts.memory_api.sync_to_claude_md",
+            return_value=SyncResult(SyncResult.WROTE),
+        ):
+            memory.save({"context": "PREVIOUS"})
+        assert memory.last_sync_status == SyncResult.WROTE
+
+        with patch("scripts.memory_api.graph_enhanced_search", return_value=[]):
+            assert memory.search("NO-MATCH") == []
+        assert memory.last_sync_status is None
+
+
+# ---------------------------------------------------------------------------
+# The graph-boosted leg must confirm a memory's stored project before it
+# becomes a result (relocated by placement rule; see F16).
+# ---------------------------------------------------------------------------
+
+class TestTheGraphLegConfirmsTheStoredProject:
+    def test_a_stale_link_does_not_serve_another_projects_memory(self, tmp_path):
+        """The graph-boosted leg adds ids from file links with no project
+        check, so the loop's stored-project confirmation is the only filter
+        between such an id and a returned memory."""
+        db_path = tmp_path / "graph-leg.db"
+        linked = tmp_path / "linked.py"
+        linked.write_text("x = 1\n", encoding="utf-8")
+        memory = PACTMemory(project_id="projB", session_id="s", db_path=db_path)
+        memory_id = memory.save(
+            {"context": _REKEY_TOKEN}, files=[str(linked)], sync_to_claude=False
+        )
+        assert [m.id for m in memory.search_by_file(str(linked))] == [memory_id], (
+            "the live fixture is not addressable; the arms below prove nothing"
+        )
+
+        # A stale link on the OLD project's file row.
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            file_id = track_file(conn, str(linked), "projA")
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_files "
+                "(memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+                (memory_id, file_id),
+            )
+            conn.commit()
+
+        with store_scope(db_path):
+            leaked = memory_search.graph_enhanced_search(
+                _REKEY_TOKEN, current_file=str(linked), project_id="projA"
+            )
+            owned = memory_search.graph_enhanced_search(
+                _REKEY_TOKEN, current_file=str(linked), project_id="projB"
+            )
+            whole = memory_search.graph_enhanced_search(
+                _REKEY_TOKEN, current_file=str(linked), project_id=None
+            )
+
+        assert [m.id for m in leaked] == [], (
+            "the graph leg served a projB memory to projA"
+        )
+        # CONTROLS on the same fixture: the memory IS reachable from its own
+        # project and unscoped, so [] above is the confirmation's doing.
+        assert [m.id for m in owned] == [memory_id]
+        assert [m.id for m in whole] == [memory_id]
