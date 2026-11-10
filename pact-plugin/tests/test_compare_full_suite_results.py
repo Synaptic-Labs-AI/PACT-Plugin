@@ -80,25 +80,36 @@ def environment_steps():
 
 
 def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
-             record_updates=None, collection_updates=None, metadata_updates=None):
+             record_updates=None, collection_updates=None, metadata_updates=None,
+             teardown_after_pass=(), collection_skips=()):
     directory = root / name
     artifact = directory / "artifact"
     artifact.mkdir(parents=True)
     nodes = list(nodes or [ALPHA, BETA])
     cases = cases or [case(node_id) for node_id in nodes]
+    teardown_after_pass = tuple(teardown_after_pass)
+    collection_skips = tuple(collection_skips)
     counts = Counter(item["outcome"] for item in cases)
-    totals = {"passed": counts["pass"], "failed": counts["failure"],
-              "errors": counts["error"], "skipped": counts["skip"],
+    # A teardown error after a passing call is counted as BOTH a pass and an
+    # error by pytest, while its JUnit element carries only the error; the
+    # case list already counts that node once as a pass.
+    totals = {"passed": counts["pass"],
+              "failed": counts["failure"],
+              "errors": counts["error"] + len(teardown_after_pass),
+              "skipped": counts["skip"] + len(collection_skips),
               "xfailed": counts["xfail"], "xpassed": counts["xpass"]}
     summary = summary_for(totals)
     red = totals["failed"] or totals["errors"]
     skip_counts = Counter((item["node_id"].split("::", 1)[0], item["reason"] or "")
                           for item in cases if item["outcome"] == "skip")
+    for file, reason in collection_skips:
+        skip_counts[(file, reason)] += 1
     record = {"schema_version": 3, "collected": len(nodes), **totals,
               "deselected": 0, "exitstatus": int(bool(red)), "summary_line": summary,
               "terminal_node_ids": nodes, "items_before_modifyitems": len(nodes),
               "items_after_modifyitems": len(nodes), "run_id": str(run_id),
-              "run_attempt": "1", "owner_pid": 123, "skipped_at_collection": 0,
+              "run_attempt": "1", "owner_pid": 123,
+              "skipped_at_collection": len(collection_skips),
               "skip_sites": [{"file": file, "reason": reason, "count": count}
                              for (file, reason), count in sorted(skip_counts.items())]}
     record.update(record_updates or {})
@@ -127,6 +138,10 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
         outcome = item["outcome"]
         if outcome == "xpass":
             continue
+        if outcome == "pass" and item["node_id"] in teardown_after_pass:
+            child = ET.SubElement(element, "error")
+            child.set("message", 'failed on teardown with "RuntimeError: boom"')
+            continue
         if outcome in ("failure", "error"):
             child = ET.SubElement(element, outcome)
             child.set("message", item["reason"] or outcome)
@@ -134,6 +149,11 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
             child = ET.SubElement(element, "skipped")
             child.set("type", "pytest.skip" if outcome == "skip" else "pytest.xfail")
             child.set("message", item["reason"] or "")
+    for file, _reason in collection_skips:
+        element = ET.SubElement(suite, "testcase", classname="",
+                                name=Path(file).stem, time="0.000")
+        child = ET.SubElement(element, "skipped")
+        child.set("message", "collection skipped")
     root_element = ET.Element("testsuites", name="pytest tests")
     root_element.append(suite)
     ET.ElementTree(root_element).write(artifact / ".full-suite-results.xml",
@@ -335,15 +355,13 @@ def test_skip_site_suffix_mapping_must_be_unambiguous(tmp_path):
 def test_collection_skip_reason_change_is_a_skip_sites_delta(tmp_path):
     directories = []
     for name, run_id, reason in (("one", 100, "module one"), ("two", 101, "module two")):
-        sites = [{"file": "tests/test_example.py", "reason": "test skip", "count": 1},
-                 {"file": "tests/test_example.py", "reason": reason, "count": 1}]
+        # Real pytest emits one collection-skip <testcase> per module-level
+        # skip; modelling skipped_at_collection with no such case was the
+        # unreachable shape.
         directory = make_run(
-            tmp_path, name, run_id, cases=[case(ALPHA), case(BETA, "skip", "test skip")],
-            record_updates={"skipped": 2, "skipped_at_collection": 1,
-                            "skip_sites": sites, "summary_line": "1 passed, 2 skipped in 0.10s"})
-        log = directory / "run.log"
-        log.write_text(log.read_text().replace("1 passed, 1 skipped", "1 passed, 2 skipped")
-                       .replace("skipped=1", "skipped=2"), encoding="utf-8")
+            tmp_path, name, run_id,
+            cases=[case(ALPHA), case(BETA, "skip", "test skip")],
+            collection_skips=[("tests/test_example.py", reason)])
         directories.append(directory)
     completed, comparison, _ = invoke(tmp_path, *directories)
     assert completed.returncode == 1
@@ -763,3 +781,170 @@ def test_subthreshold_duration_noise_is_not_an_observation(tmp_path):
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
     assert comparison["observations"] == []
+
+
+def test_teardown_error_after_a_pass_reconciles(tmp_path):
+    """Measured shape: record passes+1 and errors+1, JUnit emits only the error."""
+    cases = [case(ALPHA), case(BETA)]
+    first = make_run(tmp_path, "one", cases=cases, teardown_after_pass=[BETA])
+    second = make_run(tmp_path, "two", 101, cases=cases,
+                      teardown_after_pass=[BETA])
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
+    assert run["validity"] == "test_outcome"
+
+
+def test_collection_skip_cases_reconcile_with_the_record(tmp_path):
+    skips = [("tests/test_modskip.py", "module skip")]
+    first = make_run(tmp_path, "one", collection_skips=skips)
+    second = make_run(tmp_path, "two", 101, collection_skips=skips)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+
+
+def test_collection_skip_count_mismatch_is_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    xml_path = first / "artifact" / ".full-suite-results.xml"
+    tree = ET.parse(xml_path)
+    element = ET.SubElement(tree.getroot().find("testsuite"), "testcase",
+                            classname="", name="test_modskip", time="0.000")
+    ET.SubElement(element, "skipped", message="collection skipped")
+    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "skipped_at_collection=0" in comparison["evidence_errors"][0]["error"]
+
+
+def test_collection_error_case_is_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    xml_path = first / "artifact" / ".full-suite-results.xml"
+    tree = ET.parse(xml_path)
+    element = ET.SubElement(tree.getroot().find("testsuite"), "testcase",
+                            classname="", name="test_broken", time="0.000")
+    ET.SubElement(element, "error", message="collection failure")
+    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "collection failure" in comparison["evidence_errors"][0]["error"]
+
+
+def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
+    """Both shapes a synthetic fixture cannot model, pinned by real pytest.
+
+    Measured: a pass whose teardown errors emits ONE <testcase> carrying only
+    the error, and a module-level skip emits a <testcase> with an EMPTY
+    classname. The record comes from the real in-band plugin, so no part of
+    the shape model is reconstructed here.
+    """
+    child = tmp_path / "child"
+    child.mkdir()
+    tests_dir = Path(__file__).resolve().parent
+    (child / "conftest.py").write_text(
+        "import sys\n\n"
+        f"TESTS = {str(tests_dir)!r}\n\n\n"
+        "def pytest_configure(config):\n"
+        "    if TESTS not in sys.path:\n"
+        "        sys.path.insert(0, TESTS)\n"
+        "    from ci_full_run_record import FullRunRecord\n"
+        '    config.pluginmanager.register(FullRunRecord(), "full-run-record")\n',
+        encoding="utf-8")
+    (child / "test_shapes.py").write_text(
+        "import pytest\n\n\n"
+        "@pytest.fixture\n"
+        "def boom():\n"
+        "    yield\n"
+        '    raise RuntimeError("teardown boom")\n\n\n'
+        "def test_pass():\n    assert True\n\n\n"
+        "def test_pass_then_teardown_error(boom):\n    assert True\n\n\n"
+        "def test_fail_then_teardown_error(boom):\n    assert False\n\n\n"
+        "@pytest.fixture\n"
+        "def broken():\n"
+        '    raise RuntimeError("setup boom")\n\n\n'
+        "def test_setup_error(broken):\n    assert True\n",
+        encoding="utf-8")
+    (child / "test_modskip.py").write_text(
+        'import pytest\n\npytest.skip("module skip", allow_module_level=True)\n\n\n'
+        "def test_never():\n    assert True\n",
+        encoding="utf-8")
+    workspace = tmp_path / "rig"
+    workspace.mkdir()
+    xml = workspace / ".full-suite-results.xml"
+    env = {**os.environ, "GITHUB_ACTIONS": "true",
+           "GITHUB_WORKSPACE": str(workspace), "GITHUB_RUN_ID": "200",
+           "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": SHA}
+    env.pop("PACT_FULL_RUN_RECORD_OWNER", None)
+    env.pop("PYTEST_ADDOPTS", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         f"--junitxml={xml}"],
+        cwd=child, env=env, capture_output=True, text=True, check=False)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
+    assert (record["collected"], record["passed"], record["failed"],
+            record["errors"], record["skipped"],
+            record["skipped_at_collection"]) == (4, 2, 1, 3, 1, 1)
+
+    shapes = {}
+    for element in ET.parse(xml).getroot().iter("testcase"):
+        shapes.setdefault((element.get("classname"), element.get("name")), []).append(
+            [(child.tag, child.get("message") or "") for child in element])
+    teardown_after_pass = shapes[("test_shapes", "test_pass_then_teardown_error")]
+    assert len(teardown_after_pass) == 1
+    assert [item[0][0] for item in teardown_after_pass] == ["error"]
+    assert teardown_after_pass[0][0][1].startswith("failed on teardown with")
+    call_and_teardown = shapes[("test_shapes", "test_fail_then_teardown_error")]
+    assert [item[0][0] for item in call_and_teardown] == ["failure", "error"]
+    assert call_and_teardown[1][0][1].startswith("failed on teardown with")
+    setup_error = shapes[("test_shapes", "test_setup_error")]
+    assert [item[0][0] for item in setup_error] == ["error"]
+    assert setup_error[0][0][1].startswith("failed on setup with")
+    assert [item[0][0] for item in shapes[("", "test_modskip")]] == ["skipped"]
+    assert shapes[("", "test_modskip")][0][0][1] == "collection skipped"
+
+    def build(logical, run_id):
+        directory = tmp_path / logical
+        (directory / "artifact").mkdir(parents=True)
+        (directory / "artifact" / ".full-suite-results.xml").write_bytes(
+            xml.read_bytes())
+        run_record = json.loads(
+            (workspace / ".full-run-record.json").read_text(encoding="utf-8"))
+        run_record.update(run_id=str(run_id), run_attempt="1")
+        write_json(directory / "artifact" / ".full-run-record.json", run_record)
+        write_json(directory / "artifact" / ".full-collection-record.json", {
+            "schema_version": 1, "collected_items": run_record["collected"],
+            "collected_files": 2, "discovered_files": 2, "subject": SHA,
+            "run_id": str(run_id), "run_attempt": "1"})
+        write_json(directory / "metadata.json", {
+            "attempt": 1, "databaseId": run_id,
+            "workflowDatabaseId": comparator.WORKFLOW_DATABASE_ID,
+            "displayTitle": logical, "event": "workflow_dispatch",
+            "headSha": SHA, "headBranch": "issue-1714", "status": "completed",
+            "conclusion": "failure", "url": f"https://example.invalid/{run_id}",
+            "jobs": [{"name": "full-suite", "runnerName": "r1",
+                      "conclusion": "failure", "steps": environment_steps()}]})
+        (directory / "run.log").write_text("\n".join([
+            actions_line('python -m pytest -ra -n 4 --dist "loadfile" '
+                         '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"'),
+            actions_line("platform linux -- Python 3.12.3"),
+            actions_line("CI environment matches constraints-ci.txt."),
+            actions_line(f"FULL-COLLECTION-OK 2 test files and "
+                         f"{run_record['collected']} items match discovery; subject={SHA}"),
+            actions_line(f"===== {run_record['summary_line']} ====="),
+            actions_line("RUN-VERIFY-FAILURE FAILED: real-shape rig is red"),
+            actions_line("CI environment matches constraints-ci.txt."),
+        ]) + "\n", encoding="utf-8")
+        return directory
+
+    first = build("one", 100)
+    second = build("two", 101)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    assert comparison["evidence_errors"] == []
+    run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
+    assert run["validity"] == "test_outcome"

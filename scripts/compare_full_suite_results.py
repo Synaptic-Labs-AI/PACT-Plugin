@@ -163,16 +163,27 @@ def _parse_junit(path: Path) -> list[dict]:
     cases = []
     for element in root.iter("testcase"):
         classname, name = element.get("classname"), element.get("name")
-        if not classname or not name:
+        if classname is None or not name:
             raise EvidenceError("every JUnit testcase needs classname and name")
         children = [child for child in element
                     if child.tag in ("failure", "error", "skipped")]
         if len(children) > 1:
-            raise EvidenceError(f"{classname}.{name}: multiple outcome children")
-        outcome, reason = "pass", None
+            raise EvidenceError(f"{classname or name}: multiple outcome children")
+        outcome, reason, message = "pass", None, None
         if children:
             child = children[0]
-            if child.tag in ("failure", "error"):
+            message = child.get("message")
+            if not classname:
+                # Collection-phase case: pytest names the MODULE in `name` and
+                # leaves classname empty (measured on 9.2.0, serial and xdist).
+                if child.tag == "skipped":
+                    outcome = "collection_skip"
+                elif child.tag == "error":
+                    outcome = "collection_error"
+                else:
+                    raise EvidenceError(
+                        f"{name}: unknown collection-phase outcome {child.tag!r}")
+            elif child.tag in ("failure", "error"):
                 outcome = child.tag
             elif child.get("type") == "pytest.skip":
                 outcome = "skip"
@@ -180,16 +191,16 @@ def _parse_junit(path: Path) -> list[dict]:
                 outcome = "xfail"
             else:
                 raise EvidenceError(f"{classname}.{name}: unknown skip type")
-            if child.tag == "skipped":
-                reason = child.get("message")
+            if child.tag == "skipped" and classname:
+                reason = message
         try:
             duration = float(element.get("time", ""))
         except ValueError as exc:
-            raise EvidenceError(f"{classname}.{name}: invalid duration") from exc
+            raise EvidenceError(f"{classname or name}: invalid duration") from exc
         if not math.isfinite(duration) or duration < 0:
-            raise EvidenceError(f"{classname}.{name}: invalid duration")
+            raise EvidenceError(f"{classname or name}: invalid duration")
         cases.append({"classname": classname, "name": name, "outcome": outcome,
-                      "reason": reason, "duration": duration,
+                      "reason": reason, "message": message, "duration": duration,
                       "file": element.get("file")})
     if not cases:
         raise EvidenceError("JUnit contains no testcase elements")
@@ -441,10 +452,52 @@ def _require_one_outcome_kind_per_node(cases: list[dict]) -> None:
         kinds.add(case["outcome"])
 
 
+def _teardown_after_pass_count(cases: list[dict]) -> int:
+    """Items whose call passed and whose teardown errored.
+
+    pytest emits ONE <testcase> carrying the <error> for that shape and does
+    not write the pass, so the record counts one more pass than the JUnit
+    does. A call failure plus a teardown error emits TWO elements and is
+    excluded by the failing-key set; a setup error's message says setup.
+    """
+    failing = {(case["classname"], case["name"])
+               for case in cases if case["outcome"] == "failure"}
+    return sum(1 for case in cases
+               if case["outcome"] == "error"
+               and (case["message"] or "").startswith("failed on teardown")
+               and (case["classname"], case["name"]) not in failing)
+
+
+def _terminal_cases(cases: list[dict], record: dict) -> list[dict]:
+    """Refuse collection failures, reconcile collection skips, drop both.
+
+    A collection-phase <testcase> has an empty classname and the module in
+    `name`; it is not one of the run's terminal outcomes, so it must leave
+    the population before the node mapping and the aggregate reconciliation.
+    """
+    collection_errors = [case for case in cases
+                         if case["outcome"] == "collection_error"]
+    if collection_errors:
+        raise EvidenceError(
+            f"JUnit reports {len(collection_errors)} collection failure(s) "
+            f"({', '.join(sorted(case['name'] for case in collection_errors))}); "
+            "a run that cannot collect its corpus cannot support an "
+            "unrestricted comparison")
+    collection_skips = [case for case in cases
+                        if case["outcome"] == "collection_skip"]
+    if len(collection_skips) != record["skipped_at_collection"]:
+        raise EvidenceError(
+            f"JUnit reports {len(collection_skips)} collection skip(s), record "
+            f"skipped_at_collection={record['skipped_at_collection']}")
+    return [case for case in cases
+            if case["outcome"] not in ("collection_skip", "collection_error")]
+
+
 def _validate_junit(record: dict, lines: list[str], terminal: list[str],
                     artifact: Path) -> tuple[list[dict], list, list]:
     """Map every JUnit case to a terminal node and reconcile the aggregates."""
-    cases = _parse_junit(artifact / ".full-suite-results.xml")
+    cases = _terminal_cases(
+        _parse_junit(artifact / ".full-suite-results.xml"), record)
     node_for_key = {}
     for node_id in terminal:
         key = _junit_key(node_id)
@@ -469,15 +522,18 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
     _apply_xpass(cases, lines, terminal, record["xpassed"])
     _require_one_outcome_kind_per_node(cases)
     outcome_counts = Counter(case["outcome"] for case in cases)
+    teardown_after_pass = _teardown_after_pass_count(cases)
     expected_counts = {
-        "pass": record["passed"], "failure": record["failed"],
-        "error": record["errors"],
+        "pass": record["passed"] - teardown_after_pass,
+        "failure": record["failed"], "error": record["errors"],
         "skip": record["skipped"] - record["skipped_at_collection"],
         "xfail": record["xfailed"], "xpass": record["xpassed"]}
-    if any(outcome_counts[outcome] != count
-           for outcome, count in expected_counts.items()):
+    if expected_counts["pass"] < 0 or any(
+            outcome_counts[outcome] != count
+            for outcome, count in expected_counts.items()):
         raise EvidenceError(
-            f"JUnit aggregates {dict(outcome_counts)} != record {expected_counts}")
+            f"JUnit aggregates {dict(outcome_counts)} != record {expected_counts} "
+            f"(teardown-after-pass items: {teardown_after_pass})")
     skip_sites, collection_skip_sites = _validate_skip_sites(record, cases, node_for_key)
     return cases, skip_sites, collection_skip_sites
 
