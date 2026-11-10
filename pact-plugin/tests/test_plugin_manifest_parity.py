@@ -57,6 +57,13 @@ def _tracked_markdown(dir_path: Path) -> list[Path]:
                   if path.parent == dir_path and path.suffix == ".md")
 
 
+def _tracked_skill_dirs() -> list[Path]:
+    """Every shipped skill directory, including one whose SKILL.md is missing."""
+    relative = SKILLS_DIR.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted({path.parent for path in _tracked_files(PLUGIN_ROOT.parent, relative)
+                   if path.parent.parent == SKILLS_DIR})
+
+
 def _on_disk(rel_dir: str, dir_path: Path) -> set[str]:
     return {f"./{rel_dir}/{p.name}" for p in _tracked_markdown(dir_path)}
 
@@ -108,10 +115,12 @@ def test_every_skill_subdir_has_skill_md():
     plugin.json), so a subdirectory without a `SKILL.md` is silently
     non-discoverable rather than caught by manifest-array parity.
     """
+    directories = _tracked_skill_dirs()
+    assert directories, "the tracked skill population is empty; this oracle would pass vacuously"
     missing = sorted(
         f"./skills/{d.name}/"
-        for d in SKILLS_DIR.iterdir()
-        if d.is_dir() and not (d / "SKILL.md").is_file()
+        for d in directories
+        if not (d / "SKILL.md").is_file()
     )
     assert not missing, (
         f"Skill subdirectories without a SKILL.md: {missing}"
@@ -204,3 +213,23 @@ def test_tracked_manifest_population_omits_a_deleted_member(monkeypatch):
     monkeypatch.setattr(
         Path, "is_file", lambda path: False if path == known else is_file(path))
     assert known not in _tracked_markdown(AGENTS_DIR)
+
+
+def test_skill_directory_oracle_ignores_an_untracked_incomplete_directory(
+        tmp_path, monkeypatch):
+    """The probe is an incomplete skill dir: it reddens the old iterdir walk."""
+    plugin = _synthetic_plugin(tmp_path, {"skills/complete/SKILL.md": ""})
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", plugin / "skills")
+    assert plugin / "skills" / "complete" in _tracked_skill_dirs()
+    test_every_skill_subdir_has_skill_md()
+
+    stray = plugin / "skills" / "000_issue1714_probe"
+    stray.mkdir()
+    try:
+        # The oracle must be unchanged by the untracked directory, and the
+        # directory must not enter the tracked population.
+        test_every_skill_subdir_has_skill_md()
+        assert stray not in _tracked_skill_dirs()
+    finally:
+        stray.rmdir()

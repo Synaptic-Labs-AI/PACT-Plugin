@@ -558,6 +558,21 @@ def is_source_file(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _derived_population(root: Path) -> list[Path]:
+    """Shipped artifacts read the index; a synthetic model root keeps its walk.
+
+    The same split as ``_repair_package_paths``: the model tree is built on
+    disk and is deliberately its own population, while the shipped root must
+    not gain an untracked carrier from whoever's scratch file is present.
+    """
+    if root != PLUGIN_DIR:
+        return sorted(root.rglob("*"))
+    prefix = root.name
+    return _tracked_glob(
+        root.parent, f"{prefix}/**/*", f"{prefix}/{SOURCE_HOME}",
+    )
+
+
 def derived_carriers(root: Path) -> list[str]:
     """Each file below `root` that holds the begin marker, by any extension.
 
@@ -565,7 +580,7 @@ def derived_carriers(root: Path) -> list[str]:
     with no edit to this file, and no count in a document can go stale.
     """
     found = []
-    for path in sorted(root.rglob("*")):
+    for path in _derived_population(root):
         if not path.is_file() or not is_source_file(path):
             continue
         name = relative_name(path, root)
@@ -1005,6 +1020,47 @@ class TestTrackedPopulation:
             )
         finally:
             stray.unlink()
+
+    def test_derived_carriers_reads_the_index_for_the_shipped_root(
+            self, tmp_path, monkeypatch):
+        """The SHIPPED branch of ``derived_carriers`` must exclude untracked files.
+
+        Reverting ``_derived_population`` to ``root.rglob("*")`` for the
+        shipped root keeps every synthetic-model arm green — the model builds
+        its tree on disk and is unaffected. This arm drives the shipped branch
+        and reddens, because the untracked carrier then joins the derived
+        population. The tracked carrier is the positive control: without it the
+        arm would pass on an empty population.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        carriers = plugin / "agents"
+        carriers.mkdir(parents=True)
+        known = carriers / "pact-preparer.md"
+        known.write_text(f"New surface.\n\n{_region()}", encoding="utf-8")
+        source = plugin / SOURCE_HOME
+        source.parent.mkdir(parents=True)
+        source.write_text("The CLI lives at cli.py.\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin/agents/pact-preparer.md",
+             f"pact-plugin/{SOURCE_HOME}"],
+            cwd=repo, check=True,
+        )
+        probe = carriers / "000_untracked_carrier.md"
+        probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        derived = derived_carriers(plugin)
+
+        assert "agents/pact-preparer.md" in derived, (
+            "positive control: the tracked carrier is missing from the derived "
+            "population, so the exclusion below would prove nothing"
+        )
+        assert "agents/000_untracked_carrier.md" not in derived, (
+            "an untracked carrier joined the derived population; "
+            "derived_carriers is not reading the git index for the shipped root"
+        )
 
 
 class TestEveryDeclaredCarrierIsPlaced:

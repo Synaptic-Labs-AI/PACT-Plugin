@@ -440,7 +440,7 @@ def _code_bearing_dirs(plugin):
     """Top-level plugin dirs, other than tests/, holding tracked Python or an executable."""
     dirs = set()
     tracked = _tracked_glob(
-        plugin.parent, f"{plugin.name}/**", f"{plugin.name}/hooks/session_init.py",
+        plugin.parent, f"{plugin.name}/**/*", f"{plugin.name}/hooks/session_init.py",
     )
     for path in tracked:
         parts = path.relative_to(plugin).parts
@@ -671,6 +671,14 @@ class TestCensus:
         subprocess.run(["git", "add", "hooks/tracked.py", "hooks/tracked.sh"], cwd=plugin, check=True)
         before_python = _python_census(plugin)
         before_text = _text_census(plugin)
+        # THE ARM'S OWN PRECONDITION. With an empty population both equality
+        # assertions below hold while proving nothing, so the sibling control
+        # was the only thing keeping this arm honest. Assert the seeded files
+        # were enumerated before the untracked ones exist.
+        assert before_python["scanned"]["hooks"] == 1, before_python["scanned"]
+        assert before_python["name_sites"] == Counter(
+            {("hooks/tracked.py", "tracked"): 1}), before_python["name_sites"]
+        assert before_text[0]["hooks"] == 1, before_text[0]
         (hooks / "untracked.py").write_text(
             "def untracked(session_dir):\n"
             "    return session_dir + '/pact-session-context.json'\n",

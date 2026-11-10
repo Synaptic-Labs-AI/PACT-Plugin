@@ -328,19 +328,20 @@ SPELLING_EXCLUSIONS: dict = {
 
 
 def files_scanned_for_refuted_spellings() -> list[Path]:
-    """Return the plugin-tree files the refuted-spelling arms read.
+    """Return the tracked plugin-tree files the refuted-spelling arms read.
 
-    THIS WALK RETURNS EVERY FILE AND FILTERS NOTHING. The per-spelling
-    exclusion runs at the arm instead. `test_each_exclusion_is_still_necessary`
-    DEPENDS ON THAT PLACEMENT: it asks whether an exclusion key is in this
-    population, and a key excluded HERE would fail that test while doing its
-    job correctly. Move the filter into this walk and that arm breaks without
-    anybody editing it.
+    THIS WALK RETURNS EVERY TRACKED FILE AND FILTERS NOTHING BY SPELLING. The
+    per-spelling exclusion runs at the arm instead.
+    `test_each_exclusion_is_still_necessary` DEPENDS ON THAT PLACEMENT: it asks
+    whether an exclusion key is in this population, and a key excluded HERE
+    would fail that test while doing its job correctly. Move the filter into
+    this walk and that arm breaks without anybody editing it.
     """
-    found: list[Path] = []
-    for suffix in SCANNED_SUFFIXES:
-        found.extend(PLUGIN_DIR.rglob(f"*{suffix}"))
-    return sorted(found)
+    repo_root = PLUGIN_DIR.parent
+    relative = PLUGIN_DIR.relative_to(repo_root).as_posix()
+    return sorted(
+        path for path in _tracked_files(repo_root, relative)
+        if path.suffix in SCANNED_SUFFIXES)
 
 
 def spelling_is_excluded_for(path: Path, spelling: str) -> bool:
@@ -921,3 +922,32 @@ class TestTheRefutedCauseStaysOut:
                     f"REFUTED_SPELLINGS, and do not add an entry to "
                     f"SPELLING_EXCLUSIONS to quiet it."
                 )
+
+    def test_untracked_carrier_is_outside_the_scanned_population(
+            self, tmp_path, monkeypatch):
+        """The probe carries a refuted spelling, so the old walk would redden."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        tracked = plugin / "scripts" / "known.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("clean\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        scanned = files_scanned_for_refuted_spellings()
+        assert tracked in scanned
+        self.test_a_refuted_spelling_does_not_return("an import is a write")
+
+        stray = plugin / "scripts" / "000_issue1714_probe.py"
+        stray.write_text("an import is a write\n", encoding="utf-8")
+        try:
+            # The oracle must be unchanged by the untracked carrier, and the
+            # carrier must not enter the scanned population.
+            self.test_a_refuted_spelling_does_not_return("an import is a write")
+            assert stray not in files_scanned_for_refuted_spellings()
+        finally:
+            stray.unlink()

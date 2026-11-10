@@ -27,8 +27,12 @@ def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
 
 
 def _command_files() -> list[Path]:
+    # The plugin directory name is READ, not hardcoded: an installed cache
+    # layout puts it under a version directory (.../PACT/4.8.34), where a
+    # literal ``pact-plugin/`` prefix matches nothing.
     return _tracked_glob(
-        REPO_ROOT, "pact-plugin/commands/*.md", "pact-plugin/commands/refresh.md",
+        REPO_ROOT, f"{PLUGIN.name}/commands/*.md",
+        f"{PLUGIN.name}/commands/refresh.md",
     )
 
 
@@ -136,6 +140,46 @@ class TestTrackedPopulation:
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
+
+    def test_the_command_census_reads_the_index_not_a_glob(self, tmp_path, monkeypatch):
+        """The CONSUMER, not only the helper, must exclude untracked commands.
+
+        Reverting ``_command_files`` to ``sorted(COMMANDS_DIR.glob("*.md"))``
+        keeps every helper arm green; this arm drives ``_command_files`` itself
+        and reddens, because the untracked command then joins the population.
+        ``known in files`` is the positive control: without it the arm would
+        pass on an empty population, which proves only that nothing is there.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        commands = plugin / "commands"
+        commands.mkdir(parents=True)
+        known = commands / "refresh.md"
+        known.write_text("---\ndescription: known\n---\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin/commands/refresh.md"],
+            cwd=repo, check=True,
+        )
+        probe = commands / "000_untracked_probe.md"
+        probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+        monkeypatch.setitem(globals(), "PLUGIN", plugin)
+        # COMMANDS_DIR is derived from PLUGIN at import, so a reverted
+        # ``COMMANDS_DIR.glob`` would read the REAL tree and the mutual
+        # assertion below would fail for the wrong reason.
+        monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+        files = _command_files()
+
+        assert known in files, (
+            "the tracked command is missing from the population; the control "
+            "failed, so the exclusion below would prove nothing"
+        )
+        assert probe not in files, (
+            "an untracked command joined the shipped population; "
+            "_command_files is not reading the git index"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +472,8 @@ def _llm_loaded_files() -> list[Path]:
         path
         for pattern in _LLM_LOADED_GLOBS
         for path in _tracked_glob(
-            REPO_ROOT, f"pact-plugin/{pattern}", f"pact-plugin/{_LLM_KNOWN_MEMBERS[pattern]}",
+            REPO_ROOT, f"{PLUGIN.name}/{pattern}",
+            f"{PLUGIN.name}/{_LLM_KNOWN_MEMBERS[pattern]}",
         )
     ]
 
@@ -584,6 +629,15 @@ class TestWorkflowChain:
         """Reddens when a command invokes `/PACT:x` and x is neither a command
         nor a skill. Mutation: rename a target to `/PACT:wrapup`."""
         stems = {p.stem for p in _command_files()}
+        # THE POPULATION HERE IS DELIBERATELY THE WORKING TREE, not the git
+        # index. The class closed in this file is SPURIOUS REDDENING: this
+        # walk feeds a UNION, so an extra untracked member can only make the
+        # assertion more permissive and can never turn it red from ambient
+        # content. That is also its limit, and it is not the same property:
+        # a permissive union can MASK a missing tracked successor (a
+        # false-green), and masking is a separate concern this arm does not
+        # claim. Do not "fix" it to tracked enumeration for the reddening
+        # class; if masking is the concern, that needs its own arm.
         skills = {p.name for p in (PLUGIN / "skills").iterdir() if p.is_dir()}
         missing = []
         for path in _command_files():
