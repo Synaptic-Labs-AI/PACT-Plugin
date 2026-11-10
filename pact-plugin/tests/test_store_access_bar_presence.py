@@ -976,6 +976,36 @@ class TestTrackedPopulation:
         with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_glob(repo, pattern, known)
 
+    def test_consumer_reads_the_index_not_a_glob(self, tmp_path, monkeypatch):
+        """The CONSUMER, not only the helper, must exclude untracked modules.
+
+        Reverting ``_repair_package_paths`` to ``package.glob("*.py")`` keeps
+        the helper arms green; this arm drives ``repair_modules_without_the_bar``
+        and reddens, because the untracked module then joins the reported set.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        package = plugin / REPAIR_PACKAGE_DIR
+        package.mkdir(parents=True)
+        tracked = package / "__init__.py"
+        tracked.write_text("", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        tracked_rel = f"pact-plugin/{REPAIR_PACKAGE_DIR}/__init__.py"
+        subprocess.run(["git", "add", "--", tracked_rel], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        before = repair_modules_without_the_bar(plugin, {})
+        assert before == [f"{REPAIR_PACKAGE_DIR}/__init__.py"]
+        stray = package / "000_untracked_probe.py"
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert repair_modules_without_the_bar(plugin, {}) == before, (
+                "an untracked module joined the shipped repair population; "
+                "_repair_package_paths is not reading the git index"
+            )
+        finally:
+            stray.unlink()
+
 
 class TestEveryDeclaredCarrierIsPlaced:
     """The anti-shrinkage floor.

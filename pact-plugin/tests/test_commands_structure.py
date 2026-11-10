@@ -151,6 +151,35 @@ class TestTrackedCommandPopulation:
             _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
 
 
+def test_command_files_fixture_excludes_untracked_commands(tmp_path, monkeypatch, request):
+    """The FIXTURE, not only the helper, must read the git index.
+
+    Reverting ``command_files`` to ``COMMANDS_DIR.glob("*.md")`` keeps every
+    helper arm green; this arm resolves the fixture itself and reddens, because
+    a valid-shaped untracked command then joins the population.
+    """
+    repo = tmp_path / "repo"
+    commands = repo / "pact-plugin" / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("---\ndescription: known\n---\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", "--", "pact-plugin/commands/refresh.md"], cwd=repo, check=True)
+    probe = commands / "000_untracked_probe.md"
+    probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+    files = request.getfixturevalue("command_files")
+
+    assert known in files
+    assert probe not in files, (
+        "an untracked command joined the shipped population; command_files is "
+        "not reading the git index"
+    )
+
+
 class TestCommandFilesExist:
     def test_commands_directory_exists(self):
         assert COMMANDS_DIR.is_dir()

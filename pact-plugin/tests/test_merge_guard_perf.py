@@ -139,6 +139,39 @@ def _measure_paired_scaling(fn, build, sizes):
     return tuple(_best_paired_times(fn, build(n), target_aggregate=median) for n in sizes)
 
 
+def test_measure_paired_scaling_uses_paired_median_samples(monkeypatch):
+    """The PRODUCTION sampler, not only the helper, must pair and take the median.
+
+    Reverting ``_measure_paired_scaling`` to separate target/reference blocks,
+    or its median aggregate to the minimum, changes the returned tuple and
+    reddens this arm. The clock is synthetic, so the result does not depend on
+    machine load: every ``process_time`` call advances by ``1 + tick % 5``
+    milliseconds, and only the call sequence decides the measured durations.
+    It pins the call sequence on purpose; a refactor that changes how many
+    times the clock is read must re-derive these three numbers.
+    """
+    now = 0.0
+    tick = 0
+
+    def process_time():
+        nonlocal now, tick
+        tick += 1
+        now += 0.001 * (1 + tick % 5)
+        return now
+
+    def target(_arg):
+        return None
+
+    monkeypatch.setattr(time, "process_time", process_time)
+
+    (target_cost, reference_cost, normalized), = _measure_paired_scaling(
+        target, lambda n: "x " * n, sizes=(1,))
+
+    assert target_cost == pytest.approx(0.003)
+    assert reference_cost == pytest.approx(0.001)
+    assert normalized == pytest.approx(1 / 3)
+
+
 # Push-flag-walk is a single-anchor linear witness. Keep its absolute CPU-time
 # ceiling; restoring an unbounded global prefix does not make this case
 # quadratic, so its non-vacuity lives in TestFlagTokenBoundary instead.

@@ -324,6 +324,42 @@ class TestTrackedSkillPopulation:
             _tracked_files(tmp_path, "pact-plugin/agents", "pact-*.md")
 
 
+def test_skill_dirs_fixture_excludes_untracked_skill_directories(
+        tmp_path, monkeypatch, request):
+    """The FIXTURE, not only the helper, must read the git index.
+
+    Reverting ``skill_dirs`` to ``[d for d in SKILLS_DIR.iterdir() if d.is_dir()]``
+    keeps every helper arm green; this arm resolves the fixture itself and
+    reddens, because a valid-shaped untracked skill directory then joins it.
+    """
+    repo = tmp_path / "repo"
+    skills = repo / "pact-plugin" / "skills"
+    known = skills / "pact-team-registration" / "SKILL.md"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "---\nname: pact-team-registration\ndescription: known\n---\n",
+        encoding="utf-8",
+    )
+    probe = skills / "000-untracked-probe"
+    probe.mkdir()
+    (probe / "SKILL.md").write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", "--", "pact-plugin/skills/pact-team-registration/SKILL.md"],
+        cwd=repo, check=True,
+    )
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", skills)
+
+    directories = request.getfixturevalue("skill_dirs")
+
+    assert known.parent in directories
+    assert probe not in directories, (
+        "an untracked skill directory joined the shipped population; "
+        "skill_dirs is not reading the git index"
+    )
+
+
 @pytest.mark.parametrize(
     "agent_path",
     _PACT_AGENT_FILES,
