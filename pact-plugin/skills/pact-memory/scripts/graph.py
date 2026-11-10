@@ -577,6 +577,14 @@ def get_related_files(
 
     Performs breadth-first traversal up to max_depth hops.
 
+    THE START FILE IS SCOPED; A NEIGHBOUR IS NOT, UNLESS CHECKED.
+    `file_relations` has no project column, so a legacy or backfilled edge can
+    join two projects. Each neighbour's own stored project is confirmed with
+    the same null-safe rule as `get_file_relations`, so a scoped walk neither
+    returns nor traverses into another project's file row. `project_id=None`
+    applies NO FILTER to the neighbour rows; the START is resolved by
+    `get_file_id`, which already treats None as the NULL-project row.
+
     Args:
         conn: Active database connection.
         file_path: Starting file path.
@@ -600,14 +608,25 @@ def get_related_files(
         next_level: Set[str] = set()
 
         for current_id in current_level:
-            # Get directly connected files
+            # CONFIRM THE NEIGHBOUR'S STORED PROJECT BEFORE USING ITS ID OR
+            # PATH: the id is what the next hop traverses from, so an
+            # unconfirmed neighbour would also expose the rest of its own
+            # graph. `(? IS NULL OR ...)` keeps the unscoped whole-store
+            # meaning.
             cursor = conn.execute(
                 """
-                SELECT target_file as file_id FROM file_relations WHERE source_file = ?
-                UNION
-                SELECT source_file as file_id FROM file_relations WHERE target_file = ?
+                SELECT f.id AS file_id, f.path AS path
+                FROM files f
+                JOIN (
+                    SELECT target_file AS file_id
+                    FROM file_relations WHERE source_file = ?
+                    UNION
+                    SELECT source_file AS file_id
+                    FROM file_relations WHERE target_file = ?
+                ) rel ON rel.file_id = f.id
+                WHERE (? IS NULL OR f.project_id IS ?)
                 """,
-                (current_id, current_id)
+                (current_id, current_id, project_id, project_id)
             )
 
             for row in cursor.fetchall():
@@ -615,11 +634,7 @@ def get_related_files(
                 if neighbor_id not in visited:
                     visited.add(neighbor_id)
                     next_level.add(neighbor_id)
-
-                    # Get the path for this file
-                    file_info = get_file_by_id(conn, neighbor_id)
-                    if file_info:
-                        related_paths.append(file_info["path"])
+                    related_paths.append(row["path"])
 
         current_level = next_level
 
