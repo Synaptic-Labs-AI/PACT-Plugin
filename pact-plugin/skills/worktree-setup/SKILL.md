@@ -226,7 +226,7 @@ else
     [ "$EXCLUDE_RESOLVED" = 0 ] || CAUSE="could not write $EXCLUDE"
     if [ ! -e "$WORKTREE/.venv" ] && [ ! -L "$WORKTREE/.venv" ]; then
       echo "WARNING: $CAUSE — .venv link skipped so an unignored link cannot be committed"
-    elif git -C "$WORKTREE" check-ignore -q .venv; then
+    elif git -C "$WORKTREE" check-ignore -q .venv 2>/dev/null; then
       echo "WARNING: $CAUSE — $WORKTREE/.venv stays in place and is still ignored by another rule; re-run setup to retry the exclude write"
     else
       echo "WARNING: $CAUSE — $WORKTREE/.venv exists and is NOT ignored; git add -A could commit it, and an untracked unignored path makes git worktree remove refuse without --force"
