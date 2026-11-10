@@ -58,7 +58,8 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
-def _run(declared: str, capture: Path, cwd: Path) -> subprocess.CompletedProcess:
+def _run(declared: str, capture: str | Path,
+         cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(_SCRIPT), declared, str(capture), "--collect-only", "-q"],
         cwd=str(cwd),
