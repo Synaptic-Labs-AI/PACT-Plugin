@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -57,6 +58,20 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
+def _child_env() -> dict[str, str]:
+    """The caller's environment with this interpreter's directory first.
+
+    The script starts its child as `python3`, so PATH decides which
+    interpreter runs pytest. Resolving that from the test process's own
+    interpreter keeps the arms runnable under a venv that is not activated,
+    where a bare `python3` has no pytest.
+    """
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join(
+        [os.path.dirname(sys.executable), env.get("PATH", "")])
+    return env
+
+
 def _run(declared: str, capture: str | Path,
          cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -64,6 +79,7 @@ def _run(declared: str, capture: str | Path,
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        env=_child_env(),
     )
 
 
@@ -113,7 +129,7 @@ def _run_with_mutation(repo: Path, tmp_path: Path, mutate,
     ready = tmp_path / "child-ready"
     release = tmp_path / "child-release"
     capture = tmp_path / "capture.txt"
-    env = os.environ.copy()
+    env = _child_env()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PACT_GATE_READY"] = str(ready)
     env["PACT_GATE_RELEASE"] = str(release)
@@ -448,6 +464,29 @@ class TestCapturePathContainment:
         assert result.returncode != _REFUSED, result.stderr
         assert capture.is_file()
         assert _stamps(capture)["GATE-TREE-ATTRIBUTION"] == "stable"
+
+
+class TestTempFileAllocationFailureIsARefusal:
+    """A `mktemp` failure happens before pytest and writes no capture.
+
+    The canary states that a refusal exits 2; the temporary-file arms used to
+    print `GATE REFUSED` and exit 1, which is also the code for a red pytest
+    and for a green-but-unattributable run. The exit code is the contract.
+    """
+
+    def test_unwritable_tempdir_refuses_with_exit_2_and_no_capture(self, tmp_path):
+        repo = _make_repo(tmp_path / "repo")
+        capture = tmp_path / "capture.txt"
+        env = _child_env()
+        env["TMPDIR"] = str(tmp_path / "missing-tmpdir")
+
+        result = subprocess.run(
+            ["bash", str(_SCRIPT), str(repo), str(capture), "-q"],
+            cwd=str(repo), env=env, capture_output=True, text=True)
+
+        assert result.returncode == _REFUSED, result.stderr
+        assert "cannot allocate the before-run porcelain capture" in result.stderr
+        assert not capture.exists()
 
 
 class TestWrongTreeIsRefused:

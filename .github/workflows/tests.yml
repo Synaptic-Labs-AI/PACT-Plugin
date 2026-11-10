@@ -244,6 +244,16 @@ jobs:
     if: github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    # THE DIAGNOSTIC DISTRIBUTION, NEVER INTERPOLATED INTO SHELL TEXT. The
+    # dispatch input is untrusted text, so it reaches pytest only through this
+    # environment key; a `run:` line that embedded it could execute a value
+    # outside the two declared options as shell. The key sits on the JOB, not
+    # on the test step: the verify/test bracketing rule forbids `env:` on a
+    # verify or pytest step so the before-check sees the environment the tests
+    # run in, and a job-level key is visible to every step, both checks
+    # included. The default outside a dispatch is the historical `loadfile`.
+    env:
+      DIST: ${{ inputs.dist || 'loadfile' }}
     # THE TESTED SET. IT IS NOT THE SUPPORTED FLOOR, AND THE TWO ARE
     # DIFFERENT QUESTIONS THAT LIVE IN DIFFERENT FILES.
     #   THE TESTED SET is the interpreter this job runs: 3.12, set below.
@@ -505,7 +515,7 @@ jobs:
 
       - name: Run test suite
         working-directory: pact-plugin
-        run: python -m pytest -ra -n 4 --dist "${{ inputs.dist || 'loadfile' }}" --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
+        run: python -m pytest -ra -n 4 --dist "$DIST" --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
 
       # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
       # inspects a separate --collect-only run; this reads the in-band record
@@ -528,6 +538,12 @@ jobs:
       # push run uploads nothing, so the merge gate pays no artifact cost. The
       # name carries the dispatch `dist`, so `load` and `loadfile` evidence is
       # self-describing.
+      # A HARD TIMEOUT IS THIS STEP'S LIMIT, in two parts, and neither is
+      # remedied here: pytest writes the JUnit file and the run record at
+      # session finish, so a kill at the 50-minute cap leaves only the
+      # collection record written before the tests ran; and whether GitHub
+      # executes an `always()` step at all after a `timeout-minutes` kill is
+      # GitHub's behaviour, not something this expression can demonstrate.
       - name: Upload full-suite diagnostic evidence
         if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

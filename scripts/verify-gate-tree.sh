@@ -36,9 +36,10 @@
 #
 # EXIT CODES
 #   0    pytest passed and the tree stayed stable
-#   2    refused before pytest started; a refusal writes no capture
-#   1    a usage error, a failed temporary-file allocation, pytest exited 1
-#        (test failures), or pytest was green but the tree became unattributable
+#   2    refused before pytest started, including a temporary-file allocation
+#        failure; a refusal writes no capture
+#   1    a usage error, pytest exited 1 (test failures), or pytest was green
+#        but the tree became unattributable
 #   any other nonzero pytest status is preserved verbatim
 
 set -u
@@ -127,12 +128,12 @@ esac
 head_sha="$(git -C "$actual_real" rev-parse HEAD)"
 porcelain_before="$(mktemp)" || {
     printf 'GATE REFUSED: cannot allocate the before-run porcelain capture.\n' >&2
-    exit 1
+    exit 2
 }
 porcelain_after="$(mktemp)" || {
     rm -f "$porcelain_before"
     printf 'GATE REFUSED: cannot allocate the after-run porcelain capture.\n' >&2
-    exit 1
+    exit 2
 }
 trap 'rm -f "$porcelain_before" "$porcelain_after"' EXIT
 # --untracked-files=all overrides status.showUntrackedFiles from git config;

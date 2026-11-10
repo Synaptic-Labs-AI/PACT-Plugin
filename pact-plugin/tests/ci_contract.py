@@ -29,22 +29,25 @@ FAST_WORKFLOW = Path(".github") / "workflows" / "fast-tests.yml"
 VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
 WORKFLOW_TEST_CMD = (
-    "python -m pytest -ra -n 4 --dist \"${{ inputs.dist || 'loadfile' }}\" "
+    "python -m pytest -ra -n 4 --dist \"$DIST\" "
     "--junitxml=\"$GITHUB_WORKSPACE/.full-suite-results.xml\""
 )
 UPLOAD_ARTIFACT_ACTION = (
     "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 )
-_DIST_EXPRESSION = "${{ inputs.dist || 'loadfile' }}"
+_DIST_VARIABLE = "$DIST"
 _JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
 
 
 def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
     """Resolve the exact diagnostic command to its static default argv.
 
-    The GitHub expression contains spaces, so only shlex can preserve it as one
-    token. Any spelling or argument drift is a parse failure: a normalizer that
-    accepted more than the reviewed command could hide a scope regression.
+    The workflow passes the dispatch value through the job-level `DIST`
+    environment key and never embeds an expression in the `run:` text, so
+    shlex sees a shell variable, not a space-bearing expression. Any spelling
+    or argument drift is a parse failure: a normalizer that accepted more than
+    the reviewed command could hide a scope regression, and an expression
+    reintroduced into the run text is drift too.
     """
     try:
         words = shlex.split(command)
@@ -56,7 +59,7 @@ def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
         "or unreviewed arguments to local pytest."
     )
     normalized = [
-        "loadfile" if word == _DIST_EXPRESSION else word
+        "loadfile" if word == _DIST_VARIABLE else word
         for word in words
         if word != _JUNIT_ARGUMENT
     ]

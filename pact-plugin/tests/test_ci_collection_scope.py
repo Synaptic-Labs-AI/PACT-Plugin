@@ -365,9 +365,11 @@ class TestCiInvocationCollectsTheWholeCorpus:
     def test_dynamic_command_rejects_expression_and_argument_drift(self):
         junit = '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"'
         for command in (
+            # An expression reintroduced into the run text is drift: the
+            # workflow must pass the dispatch value through `DIST`, never
+            # inline as shell text.
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                "${{ inputs.dist || 'loadfile' }}",
-                "${{ inputs.dist || 'load' }}", 1),
+                '"$DIST"', '"${{ inputs.dist || \'load\' }}"', 1),
             ci_contract.WORKFLOW_TEST_CMD + " tests",
             ci_contract.WORKFLOW_TEST_CMD.replace(" " + junit, "", 1),
             ci_contract.WORKFLOW_TEST_CMD + " --deselect tests/test_smoke.py",
