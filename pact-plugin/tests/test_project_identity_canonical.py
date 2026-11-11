@@ -55,6 +55,13 @@ class TestNormalizationEquivalence:
             "https://user@github.com/owner/repo.git",
         ]
         outputs = {pi.normalize_remote_url(url) for url in urls}
+        # N4: a set-of-one arm also passes when EVERY spelling returns None,
+        # which is the shape of a canonicaliser that stopped working. Assert
+        # the value is real before asserting the spellings agree.
+        assert None not in outputs, (
+            "at least one spelling failed to normalize, so the equality below "
+            "would be measuring a dead canonicaliser"
+        )
         assert len(outputs) == 1, f"spellings diverged: {outputs}"
 
     def test_the_literal_format_is_pinned_in_exactly_one_place(self):
@@ -175,6 +182,24 @@ class TestClassifierOutcomes:
         basename fallback applies.
         """
         assert pi.classify_remote_origin(url) == (NO_PORTABLE, None)
+
+    def test_a_user_less_scp_form_is_no_portable_origin(self):
+        """S1: a DOCUMENTED NARROWING, not an accident.
+
+        `github.com:owner/repo` has no userinfo, so it is lexically
+        indistinguishable from a Windows drive path (`C:work\\repo`): both
+        are `<single-token>:<rest>`. The classifier resolves the ambiguity
+        toward a LOCAL PATH, so this spelling falls back to the basename.
+        Git itself treats a slash-containing `host:path` as scp, so the same
+        repository cloned in this spelling and in HTTPS can split by clone
+        form; the narrowing is accepted and pinned here rather than silently
+        changing. The drive-letter reading is the reason a user-less scp
+        cannot be accepted without a Windows-only misclassification.
+        """
+        assert pi.classify_remote_origin("github.com:owner/repo") == (
+            NO_PORTABLE,
+            None,
+        )
 
     def test_an_unsupported_network_scheme_declines(self):
         """U58, superseded to DECLINE. Catches a basename fallback for a real
@@ -391,13 +416,30 @@ class TestDetectIdForRoot:
         assert identity.project_id is None
         assert identity.source == "declined"
 
-    def test_the_override_is_not_read_here(self, tmp_path):
-        """Rung 0 owns the override; reading it twice would let two reads
-        disagree. Catches a second override read inside root detection."""
-        repo = make_repo(tmp_path / "checkout", remote="https://github.com/o/r.git")
-        write_common_dir_override(repo, "override.example.com/pinned/id")
-        identity = pi.detect_id_for_root(repo, common_dir(repo))
-        assert identity.project_id == "github.com/o/r"
+    def test_the_override_follows_the_identity_root(self, tmp_path, monkeypatch):
+        """A4/S1: the override is read at the ROOT's common dir, not the
+        process cwd's.
+
+        The review corrected the original "rung 0 owns it" split: reading
+        only the process repository silently ignored an operator pin in a
+        DECLARED repository, and let a cwd pin retarget a declared session.
+        This arm pins both halves: the root's own override wins, and a
+        DIFFERENT repo's override (the cwd's) is not consulted.
+        """
+        root = make_repo(tmp_path / "checkout", remote="https://github.com/o/r.git")
+        other = make_repo(tmp_path / "other", remote="https://github.com/o/other.git")
+        write_common_dir_override(root, "override.example.com/pinned/id")
+        write_common_dir_override(other, "override.example.com/cwd/id")
+        monkeypatch.chdir(other)
+
+        identity = pi.detect_id_for_root(root, common_dir(root))
+        assert identity.project_id == "override.example.com/pinned/id"
+        assert identity.source == "override file"
+
+        # The cwd repo's pin does not reach a different root.
+        plain = make_repo(tmp_path / "plain", remote="https://github.com/o/plain.git")
+        identity = pi.detect_id_for_root(plain, common_dir(plain))
+        assert identity.project_id == "github.com/o/plain"
 
     def test_a_worktree_resolves_the_main_repo_identity(self, tmp_path):
         """Catches a worktree splitting from its main checkout."""

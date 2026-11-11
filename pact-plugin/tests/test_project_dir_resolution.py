@@ -1717,7 +1717,9 @@ class TestDeclinedDeclaration:
         """Criterion (b), swept across every resolution entry point."""
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
 
-        name, label = PACTMemory._project_name_for_declared_dir(str(worktree), "probe")
+        name, label, _legacy, _root, _ignored = PACTMemory._declared_dir_identity(
+            str(worktree), "probe"
+        )
         assert name is None, f"the helper derived {name!r} from a removed path"
         assert label == "probe"
 
@@ -1844,8 +1846,8 @@ class TestDeclinedDeclaration:
         """
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
         with caplog.at_level(logging.WARNING):
-            name, label = PACTMemory._project_name_for_declared_dir(
-                str(worktree), "probe"
+            name, label, _legacy, _root, _ignored = (
+                PACTMemory._declared_dir_identity(str(worktree), "probe")
             )
 
         assert name is None and label == "probe"

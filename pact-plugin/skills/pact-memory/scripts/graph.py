@@ -912,7 +912,9 @@ def get_graph_stats(
         project_id: Optional project scope: one id or a union.
 
     Returns:
-        Dict with counts for files, memories, and relationships.
+        Dict with counts for files (ROWS), file_paths (DISTINCT paths),
+        memories, and relationships. The two file numbers differ when a path
+        carries a row in each bucket of the union.
     """
     ensure_initialized(conn)
 
@@ -920,6 +922,7 @@ def get_graph_stats(
     if scopes is not None and not scopes:
         return {
             "files": 0,
+            "file_paths": 0,
             "memories": 0,
             "memory_file_links": 0,
             "file_relations": 0,
@@ -932,6 +935,9 @@ def get_graph_stats(
         stats["memories"] = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         stats["memory_file_links"] = conn.execute("SELECT COUNT(*) FROM memory_files").fetchone()[0]
         stats["file_relations"] = conn.execute("SELECT COUNT(*) FROM file_relations").fetchone()[0]
+        # `files` counts ROWS; a path can carry one row per scope, so on a
+        # union the two numbers differ. Report both, labelled.
+        stats["file_paths"] = count_project_file_paths(conn, project_id)
         return stats
 
     file_pred, file_params = project_scope_predicate("project_id", scopes)
@@ -968,6 +974,10 @@ def get_graph_stats(
         (*sf_params, *tf_params)
     ).fetchone()[0]
 
+    # `files` counts ROWS; a path can carry one row per scope, so on a union
+    # the two numbers differ. Report both, labelled.
+    stats["file_paths"] = count_project_file_paths(conn, project_id)
+
     return stats
 
 
@@ -978,9 +988,10 @@ def count_project_file_paths(
     """Distinct tracked-file PATHS in the scope.
 
     `get_graph_stats()["files"]` counts ROWS, and one path can carry a row in
-    each bucket of the union; this counts the paths those rows name. The
-    disclosure reports both, so a union is never presented as if the two
-    buckets shared no files.
+    each bucket of the union; this counts the paths those rows name.
+    `get_graph_stats` reports BOTH (`files` and `file_paths`), and the
+    disclosure uses this directly, so a union is never presented as if the
+    two buckets shared no files.
 
     `None` is the whole store; an empty scope is zero.
     """

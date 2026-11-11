@@ -330,8 +330,13 @@ class TestSourceEquivalence:
         # Strategy 1.5: the session-record rung between env and git.
         assert "get_project_dir_from_session_record()" in real_source
         assert 'record_dir, "session record"' in real_source
-        # Strategy 0 is the repository override, read from the git common dir.
-        assert "read_override(cwd_common_dir)" in real_source
+        # The repository override is NOT a rung of its own any more: it
+        # follows the identity root, so `detect_id_for_root` reads it at the
+        # root each rung resolved. The resolver must not pre-read the cwd
+        # repo's override, because that is what let a cwd pin retarget a
+        # declared session.
+        assert "read_override(cwd_common_dir)" not in real_source
+        assert "detect_id_for_root(" in real_source
         # Strategy 2 reaches git through the module-level common-dir helper
         # rather than spawning its own subprocess. The subprocess markers this
         # assertion used to carry moved with it and are pinned on the helper by
@@ -342,16 +347,11 @@ class TestSourceEquivalence:
 
         # Verify strategy ordering in the CODE (not docstring).
         # Use code-specific markers that won't appear in the docstring.
-        pos_override = real_source.index("read_override(cwd_common_dir)")
         pos_env = real_source.index('os.environ.get("CLAUDE_PROJECT_DIR")')
         pos_record = real_source.index("get_project_dir_from_session_record()")
         pos_git = real_source.index("repo_root = main_repo_root(common=cwd_common_dir)")
         pos_cwd = real_source.index("_find_project_root(Path.cwd())")
 
-        assert pos_override < pos_env, (
-            f"Strategy ordering violation: repository override (pos "
-            f"{pos_override}) should appear before env var (pos {pos_env})"
-        )
 
         assert pos_env < pos_record, (
             f"Strategy ordering violation: env var (pos {pos_env}) should appear "

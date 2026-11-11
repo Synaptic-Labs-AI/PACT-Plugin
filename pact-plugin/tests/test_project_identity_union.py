@@ -12,6 +12,9 @@ query), which returns the whole store instead of one project.
 from __future__ import annotations
 
 import logging
+import re
+import shlex
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -28,15 +31,62 @@ from scripts.database import (
     search_memories_by_text,
 )
 from scripts.database import sqlite3 as db_sqlite3
-from scripts.graph import get_file_ids
+from scripts.graph import (
+    get_file_ids,
+    get_files_for_memory,
+    get_graph_stats,
+    get_memories_for_file,
+)
 from scripts.memory_api import PACTMemory
+from scripts.search import _scope_or_none, vector_search
 
 from scripts import database as db
 from scripts import memory_api
+from scripts import search as search_mod
 
 CANONICAL = "github.com/syn-labs/pact-plugin"
 LEGACY = "PACT-prompt"
 FOREIGN = "someone-elses-checkout"
+
+
+class _WriteSpy:
+    """A connection wrapper that records WRITE statements through every
+    write-capable method, so a read path cannot write unseen.
+
+    `executemany` is recorded as well as `execute`: a read path that writes
+    through the batch channel is the same defect, and a spy that only wraps
+    `execute` would report a clean sweep while it happened.
+
+    ALTER is deliberately NOT recorded: `_migrate_ct_fields` issues three
+    swallowed ADD COLUMN attempts per connection, pre-existing behaviour
+    outside this change. They are no-ops on an initialised store; the
+    contract under test is no DATA write and no unconditional CREATE/DROP
+    on a read.
+    """
+
+    _WRITE_HEADS = frozenset({"INSERT", "UPDATE", "DELETE", "DROP", "REPLACE"})
+
+    def __init__(self, inner, writes):
+        self._inner = inner
+        self._writes = writes
+
+    def _record(self, sql):
+        head = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
+        if head in self._WRITE_HEADS or (
+            head == "CREATE" and "IF NOT EXISTS" not in sql.upper()
+        ):
+            self._writes.append(sql)
+
+    def execute(self, sql, *args, **kwargs):
+        self._record(sql)
+        return self._inner.execute(sql, *args, **kwargs)
+
+    def executemany(self, sql, seq):
+        self._record(sql)
+        return self._inner.executemany(sql, seq)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +365,11 @@ class TestDisclosure:
         assert state["canonical_count"] == 1
         assert LEGACY in caplog.text
         assert "project-id rekey" in caplog.text
+        # B5: the warning carries the file count §5 requires, so the operator
+        # can judge the loss (2 memories and 1 file row in this fixture).
+        assert re.search(r"holds 2 memories and 1 file path", caplog.text), (
+            f"the exclusion warning omitted the file count: {caplog.text!r}"
+        )
 
     def test_a_relative_only_bucket_is_included_as_unverified(
         self, union_env, caplog
@@ -409,25 +464,6 @@ class TestReadsNeverWrite:
             [("c1", "canonical", CANONICAL, "2026-01-01T00:00:00+00:00")],
         )
         writes = []
-
-        class SpyConnection:
-            def __init__(self, inner):
-                self._inner = inner
-
-            def execute(self, sql, *args, **kwargs):
-                head = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
-                if head in {"INSERT", "UPDATE", "DELETE", "DROP", "REPLACE"} or head == "CREATE" and "IF NOT EXISTS" not in sql.upper():
-                    writes.append(sql)
-                # ALTER is deliberately NOT recorded: `_migrate_ct_fields`
-                # issues three swallowed ADD COLUMN attempts per connection,
-                # pre-existing behaviour outside this change. They are no-ops
-                # on an initialised store; the contract under test is no DATA
-                # write and no unconditional CREATE/DROP on a read.
-                return self._inner.execute(sql, *args, **kwargs)
-
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
-
         real_get_connection = db.get_connection
         memory = _memory(union_env)
         with pytest.MonkeyPatch.context() as patcher:
@@ -435,7 +471,7 @@ class TestReadsNeverWrite:
             patcher.setattr(
                 db,
                 "get_connection",
-                lambda *a, **k: SpyConnection(real_get_connection(*a, **k)),
+                lambda *a, **k: _WriteSpy(real_get_connection(*a, **k), writes),
             )
             memory.list(limit=5)
             memory.get_status()
@@ -444,6 +480,28 @@ class TestReadsNeverWrite:
             memory.get("c" * 8)
             memory.sync()
         assert writes == [], f"a read path wrote: {writes}"
+
+    def test_the_write_spy_observes_executemany(self, union_env):
+        """The INSTRUMENT pin. A spy that only wraps `execute` cannot see a
+        read path that writes through `executemany`; this arm asserts the
+        spy records that channel, so the sweep above is not blind to it.
+
+        RED WHEN: `_WriteSpy.executemany` is removed or stops recording —
+        the exact mutant this arm exists for.
+        """
+        writes = []
+        conn = db_sqlite3.connect(str(union_env.store))
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS spy_probe (x TEXT)")
+            _WriteSpy(conn, writes).executemany(
+                "INSERT INTO spy_probe (x) VALUES (?)", [("a",), ("b",)]
+            )
+        finally:
+            conn.close()
+        assert any("INSERT" in sql.upper() for sql in writes), (
+            "the spy did not observe executemany, so a read path could write "
+            "through that channel unseen"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -539,3 +597,296 @@ class TestPerSeamUnion:
             patcher.setattr(memory_api, "_ensure_ready", lambda: None)
             projected = memory.sync(claude_md_root=union_env.repo)
         assert projected == ["l1"]
+
+# ---------------------------------------------------------------------------
+# Review findings: the arms the review proved were missing
+# ---------------------------------------------------------------------------
+
+class TestReviewB1GateVerified:
+    def test_the_gate_verifies_against_the_declared_identity_root(
+        self, tmp_path, monkeypatch
+    ):
+        """B1-T: the `verified` branch of the plausibility gate.
+
+        The identity root is the DECLARED repo (A), while the process cwd is
+        a different repo (B). A bucket with an absolute file row under A must
+        be `verified`, not excluded; comparing against B's root (the
+        pre-fix behaviour) excludes A's own bucket and tells the operator to
+        rekey rows that are already theirs.
+
+        RED WHEN: the gate compares against the process cwd's repo root, or
+        the gate excludes every absolute-path bucket.
+        """
+        assert_outside_repository(tmp_path)
+        declared = make_repo(
+            tmp_path / "A-checkout", remote="https://github.com/o/a.git"
+        )
+        cwd_repo = make_repo(
+            tmp_path / "B-checkout", remote="https://github.com/o/b.git"
+        )
+        store = tmp_path / "gate.db"
+        monkeypatch.chdir(cwd_repo)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+
+        with db_connection(store) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES ('m1', 'declared', 'A-checkout', 's', "
+                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+            )
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES ('f1', ?, ?)",
+                (str(declared / "src" / "x.py"), "A-checkout"),
+            )
+            conn.commit()
+
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._project_id == "github.com/o/a"
+        scopes = memory._read_project_scopes()
+        state = memory._legacy_scope_state
+        assert state["verified"] is True, (
+            "the declared repo's own absolute-path bucket was not verified: "
+            "the gate used a root other than the winning rung's"
+        )
+        assert state["excluded"] is False
+        assert state["included"] is True
+        assert "A-checkout" in scopes
+
+
+class TestReviewB3EmptyScope:
+    def test_scope_or_none_keeps_the_empty_sequence_empty(self):
+        """B3-T: `_scope_or_none` must not fold `()` to None.
+
+        A truthiness implementation (`tuple(project_id) or None`) turns an
+        empty scope into the whole store, which is the empty-set trap the
+        plan names. The `""` arm is the documented ALL spelling and must
+        stay None.
+        """
+        assert _scope_or_none(()) == ()
+        assert _scope_or_none([]) == ()
+        assert _scope_or_none(None) is None
+        assert _scope_or_none("") is None
+        assert _scope_or_none((CANONICAL, LEGACY)) == (CANONICAL, LEGACY)
+
+    def test_get_graph_stats_empty_scope_is_all_zeros_not_the_store(self, union_env):
+        """B3-T: `get_graph_stats(conn, [])` must not fall through to the
+        whole store. The populated `None` call is the positive control."""
+        _seed(
+            union_env,
+            [("c1", "canonical", CANONICAL, "2026-01-01T00:00:00+00:00")],
+            files=[("f1", "src/x.py", CANONICAL)],
+        )
+        with db_connection(union_env.store) as conn:
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) VALUES ('c1', 'f1')"
+            )
+            conn.commit()
+            assert get_graph_stats(conn, []) == {
+                "files": 0,
+                "memories": 0,
+                "memory_file_links": 0,
+                "file_relations": 0,
+                # G11's distinct-path total joined the envelope with the
+                # store fix; it is part of the zeros contract too.
+                "file_paths": 0,
+            }, "an empty graph scope returned the store"
+            assert get_graph_stats(conn, None)["memories"] == 1
+
+
+class TestReviewB4FoldedCandidate:
+    def test_a_unique_case_folded_candidate_is_the_raw_stored_spelling(self):
+        """B4-T: the unique folded fallback, as a PURE-STRING surrogate.
+
+        The real filesystem shape is macOS-APFS-only and unreproducible
+        locally; this arm reddens on any OS if the fold starts guessing or
+        returns the input casing instead of the stored spelling.
+        """
+        candidate, ambiguous = memory_api._match_legacy_candidate(
+            "Pact-Prompt", {"PACT-PROMPT": 3, "other": 1}
+        )
+        assert candidate == "PACT-PROMPT", (
+            "the fold did not return the RAW stored spelling"
+        )
+        assert ambiguous == []
+
+
+class TestReviewB2Seams:
+    def _vec_store(self, env):
+        from helpers import create_test_schema
+
+        conn = db_sqlite3.connect(str(env.store))
+        conn.row_factory = db_sqlite3.Row
+        create_test_schema(conn)
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_memories USING vec0("
+            "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
+            "embedding float[3])"
+        )
+        for memory_id, project in (
+            ("m-legacy", LEGACY),
+            ("m-canon", CANONICAL),
+            ("m-foreign", FOREIGN),
+        ):
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, 'ctx', ?, 's', "
+                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (memory_id, project),
+            )
+            conn.execute(
+                "INSERT INTO vec_memories (memory_id, project_id, embedding) "
+                "VALUES (?, ?, ?)",
+                (memory_id, project, struct.pack("3f", 0.1, 0.2, 0.3)),
+            )
+        conn.commit()
+        return conn
+
+    def test_the_vector_seam_resolves_the_union_and_rejects_a_foreign_bucket(
+        self, union_env, monkeypatch
+    ):
+        """B2-T (S1): one KNN per scope across the union.
+
+        RED WHEN: the vector seam uses only the first/canonical id, drops a
+        scope, or serves a foreign partition's hit.
+        """
+        conn = self._vec_store(union_env)
+        monkeypatch.setattr(
+            search_mod, "generate_embedding", lambda query: [0.1, 0.2, 0.3]
+        )
+        try:
+            union = {
+                memory_id
+                for memory_id, _ in vector_search(
+                    conn, "q", project_id=(CANONICAL, LEGACY), limit=10
+                )
+            }
+            assert union == {"m-legacy", "m-canon"}, (
+                f"the vector seam did not resolve the union: {union}"
+            )
+            assert "m-foreign" not in union
+            canonical_only = {
+                memory_id
+                for memory_id, _ in vector_search(
+                    conn, "q", project_id=(CANONICAL,), limit=10
+                )
+            }
+            assert canonical_only == {"m-canon"}, (
+                "the legacy hit survived a canonical-only scope; the arm is "
+                "not sensitive to the scope it claims to test"
+            )
+        finally:
+            conn.close()
+
+    def test_two_graph_seams_resolve_the_union_and_reject_a_foreign_bucket(
+        self, union_env
+    ):
+        """B2-T (G4/G5): two graph seams across the union, with a foreign
+        negative. RED WHEN either seam ignores the sequence and binds one id.
+        """
+        _seed(
+            union_env,
+            [
+                ("m-legacy", "legacy", LEGACY, "2026-01-01T00:00:00+00:00"),
+                ("m-foreign", "foreign", FOREIGN, "2026-01-02T00:00:00+00:00"),
+            ],
+            files=[
+                ("f-legacy", "src/x.py", LEGACY),
+                ("f-foreign", "src/x.py", FOREIGN),
+            ],
+        )
+        with db_connection(union_env.store) as conn:
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) "
+                "VALUES ('m-legacy', 'f-legacy')"
+            )
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) "
+                "VALUES ('m-foreign', 'f-foreign')"
+            )
+            conn.commit()
+
+            union_files = get_files_for_memory(
+                conn, "m-legacy", project_id=(CANONICAL, LEGACY)
+            )
+            assert [row["id"] for row in union_files] == ["f-legacy"]
+            assert (
+                get_files_for_memory(conn, "m-legacy", project_id=(CANONICAL,))
+                == []
+            ), "G4 did not apply the scope to the legacy file row"
+
+            assert get_memories_for_file(
+                conn, "f-legacy", project_id=(CANONICAL, LEGACY)
+            ) == ["m-legacy"]
+            assert (
+                get_memories_for_file(conn, "f-legacy", project_id=(CANONICAL,))
+                == []
+            ), "G5 did not apply the scope to the legacy memory row"
+
+            assert (
+                get_memories_for_file(
+                    conn, "f-foreign", project_id=(CANONICAL, LEGACY)
+                )
+                == []
+            ), "G5 served a foreign bucket's memory"
+
+
+class TestReviewQuoting:
+    def test_the_exclusion_command_round_trips_a_hostile_bucket_id(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """S2-sec: the exclusion surface must render the rekey command with
+        `shlex.join`, so a hostile bucket id is ONE `--from` argument.
+
+        The pre-fix `%s` form splits `Legacy;echo PWNED` into two tokens and
+        the pasted command runs `echo PWNED`. RED WHEN the renderer is
+        unquoted or the id is split across arguments.
+        """
+        assert_outside_repository(tmp_path)
+        hostile = "Legacy;echo PWNED"
+        repo = make_repo(
+            tmp_path / hostile,
+            remote="https://github.com/syn-labs/pact-plugin.git",
+        )
+        store = tmp_path / "quoting.db"
+        monkeypatch.chdir(repo)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+
+        with db_connection(store) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES ('m1', 'hostile', ?, 's', "
+                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (hostile,),
+            )
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES ('f1', ?, ?)",
+                (str(tmp_path / "elsewhere" / "x.py"), hostile),
+            )
+            conn.commit()
+
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._legacy_project_basename == hostile
+        with caplog.at_level(logging.WARNING):
+            memory._read_project_scopes()
+
+        match = re.search(r"pact-memory project-id rekey --from .*", caplog.text)
+        assert match is not None, (
+            f"the exclusion warning did not render a rekey command: {caplog.text!r}"
+        )
+        argv = shlex.split(match.group(0))
+        from_index = argv.index("--from")
+        assert argv[from_index + 1] == hostile, (
+            f"the bucket id did not round-trip as ONE --from argument: {argv!r}"
+        )

@@ -86,7 +86,7 @@ class TestRekeyTargetMustBeCanonical:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: _DetectedIdentity(_LEGACY, "basename", _LEGACY, None)
+                lambda: _DetectedIdentity(_LEGACY, "basename", _LEGACY, None, None)
             ),
         )
         with pytest.raises(SystemExit) as refused:
@@ -137,7 +137,7 @@ class TestSaveEnvelopeDisclosesTheCandidate:
             "_detect_project_identity_with_legacy",
             staticmethod(
                 lambda: _DetectedIdentity(
-                    "host/owner/repo", "canonical", _LEGACY, None
+                    "host/owner/repo", "canonical", _LEGACY, None, tmp_path / "repo"
                 )
             ),
         )
@@ -179,3 +179,64 @@ class TestOverrideReadIsBounded:
         read = project_identity.read_override(common)
         assert read.value == "host/Owner/Repo"
         assert read.reason is None
+
+class TestExclusionDisclosureIsQuoted:
+    """S2-sec: the exclusion warning is a render surface like the others.
+
+    A bucket id is store-influenced, and this warning hands the reader a
+    command to paste. An unquoted `--from <id>` there is a command-injection
+    surface even though every sibling renderer quotes.
+    """
+
+    def test_the_exclusion_warning_renders_a_quoted_command(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        from scripts import memory_api as memory_api_module
+
+        hostile = "Legacy; echo PWNED"
+        store = tmp_path / "excluded.db"
+        _make_store(store)
+        # An ABSOLUTE file row that lies OUTSIDE the identity root: the gate
+        # excludes the bucket, which is what emits the warning.
+        _seed(store, hostile, "c" * 32, path=str(tmp_path / "elsewhere" / "f.py"))
+
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(
+                    "host/owner/repo", "canonical", hostile, None, tmp_path / "repo"
+                )
+            ),
+        )
+        memory_api_module._EXCLUSION_WARNED.clear()
+        memory = PACTMemory(session_id="s", db_path=store)
+        with caplog.at_level(logging.WARNING):
+            memory._read_project_scopes()
+
+        text = caplog.text
+        expected = memory_api_module.render_rekey_command(hostile)
+        assert expected in text, f"the warning did not carry the quoted command: {text!r}"
+        argv = shlex.split(expected)
+        assert argv[:4] == ["pact-memory", "project-id", "rekey", "--from"]
+        assert argv[4] == hostile
+        assert f"--from {hostile}" not in text, (
+            "the warning rendered the store-influenced id unquoted"
+        )
+
+
+class TestSuppliedIdentityDoesNotWiden:
+    """A supplied id has no legacy candidate, so there is no gate root.
+
+    PINNED, not coded around: the accessor returns the one-element scope and
+    leaves the disclosure state unset.
+    """
+
+    def test_a_supplied_id_is_a_one_element_scope(self, tmp_path):
+        store = tmp_path / "supplied.db"
+        _make_store(store)
+        memory = PACTMemory(project_id="supplied.example.com/me/x", db_path=store)
+        assert memory._read_project_scopes() == ("supplied.example.com/me/x",)
+        assert memory._legacy_scope_state is None

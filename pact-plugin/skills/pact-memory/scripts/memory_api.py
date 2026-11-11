@@ -62,6 +62,7 @@ from .graph import (
 )
 from .models import MemoryObject, memory_from_db_row
 from .project_identity import (
+    RootIdentity,
     detect_id_for_root,
     is_canonical,
     read_override,
@@ -132,12 +133,34 @@ class _DetectedIdentity(NamedTuple):
     source: str
     legacy_basename: Optional[str]
     override_ignored: Optional[dict]
+    # THE ROOT THE WINNING RUNG RESOLVED. The plausibility gate compares a
+    # legacy bucket's absolute file rows against THIS, not against the
+    # process's cwd repository: in a declared-repo session the two differ, and
+    # gating on the cwd would exclude the declared repo's own legacy bucket.
+    identity_root: Optional[Path]
 
 
 # `_read_project_scopes` result cache: (store, mtime_ns, size, canonical,
 # legacy) -> scope tuple. Keying on the store's stat is what makes a rekey
 # performed by ANOTHER process observable instead of cached forever.
 _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
+
+# Exclusion notices already emitted, keyed by (store, candidate). A warning
+# repeated on every read is a warning readers learn to ignore.
+_EXCLUSION_WARNED: set = set()
+
+
+def render_rekey_command(project_id: str) -> str:
+    """The literal, SHELL-QUOTED rekey command for one bucket id.
+
+    ONE HELPER FOR EVERY RENDER SURFACE — the candidate list, the exclusion
+    warning, the save-envelope state and the CLI examples — because a bucket
+    id is STORE-INFLUENCED and this string is presented as something a user
+    pastes into a shell. An unquoted id containing a space, `;`, `$` or a
+    quote is a copy-paste command-injection surface, and four renderers with
+    four spellings is how one of them loses the quoting.
+    """
+    return shlex.join(["pact-memory", "project-id", "rekey", "--from", project_id])
 
 
 def _store_stat_key(store: str):
@@ -558,6 +581,9 @@ class PACTMemory:
             self._project_id_shape = "caller"
             self._legacy_project_basename = None
             self._override_ignored = None
+            # A SUPPLIED id does not widen: there is no legacy candidate and
+            # therefore no gate root to carry. PINNED, not coded around.
+            self._project_identity_root = None
         else:
             detected = self._detect_project_identity_with_legacy()
             self._project_id = detected.project_id
@@ -567,6 +593,11 @@ class PACTMemory:
             # key; it is carried from the detection pass, never re-derived.
             self._legacy_project_basename = detected.legacy_basename
             self._override_ignored = detected.override_ignored
+            # THE ROOT THE WINNING RUNG RESOLVED. The plausibility gate and
+            # the override read use this, not the process's cwd repository:
+            # in a declared-repo session those differ, and gating on the cwd
+            # would exclude the declared repo's own legacy bucket.
+            self._project_identity_root = detected.identity_root
             self._project_id_shape = (
                 "canonical"
                 if self._project_id is not None and is_canonical(self._project_id)
@@ -715,97 +746,101 @@ class PACTMemory:
         return start  # fallback: use original
 
     @staticmethod
+    def _legacy_project_name(
+        common_dir: Optional[Path], root: Optional[Path]
+    ) -> Optional[str]:
+        """The PRE-change resolver's output for this location.
+
+        It is `common_dir.resolve().parent.name`, which is what the old
+        resolver returned, NOT the new identity root's name. The two differ
+        exactly where this matters: a submodule's common dir is
+        `<super>/.git/modules/vendor/sub`, so the old bucket is `vendor` while
+        the new identity root is `sub`; an external `--separate-git-dir` puts
+        the common dir outside the working tree. Unioning on the NEW name
+        would look for a bucket that never existed and report no candidate at
+        all — silent loss of every pre-upgrade row.
+        """
+        if common_dir is not None:
+            try:
+                return common_dir.resolve().parent.name
+            except (OSError, RuntimeError, ValueError):
+                return common_dir.parent.name
+        if root is not None:
+            return Path(root).name
+        return None
+
+    @staticmethod
+    def _warn_override_ignored(identity: "RootIdentity") -> None:
+        """Report an unusable override once, at the rung that read it."""
+        ignored = identity.override_ignored
+        if not ignored:
+            return
+        logger.warning(
+            "ignoring the project override at %r (%s); resolution continues "
+            "without it.",
+            ignored.get("path"),
+            ignored.get("reason"),
+        )
+
+    @staticmethod
     def _declared_dir_identity(
         declared_dir: str, source: str
-    ) -> "tuple[Optional[str], str, Optional[str]]":
-        """The project id a DECLARED directory belongs to, its label, and the
-        legacy basename the PRE-change resolver produced for it.
+    ) -> "tuple[Optional[str], str, Optional[str], Optional[Path], Optional[dict]]":
+        """The project id a DECLARED directory belongs to, its label, the
+        legacy basename, the identity root, and any unusable override.
 
         Shared by Strategy 1 (CLAUDE_PROJECT_DIR) and Strategy 1.5 (the
-        session record): both carry one directory naming the session's scope,
-        and both must derive the project name from it identically.
+        session record). The identity root is the repository root of the
+        declared directory — a worktree main root, a recorded checkout, or the
+        declared path itself — and it is carried so the plausibility gate and
+        the override read use the SAME root the identity came from.
 
-        When the directory points below a repo's root (a worktree OR an
-        in-repo subdirectory), its basename is not the project name and would
-        fragment the project_id across sessions. Prefer the MAIN repo's
-        basename so every session of a project shares one key, aligning these
-        branches with the git-root and cwd-marker branches (Strategies 2/3),
-        which already resolve to the repo root. The rewrite fires when git
-        resolves a main repo whose root differs from the declared path; only
-        a repo-root declared path or a non-git path (where the main anchor
-        equals, or cannot be resolved from, the declared path) keeps the
-        declared basename — RESOLVED, so a symlinked project dir names its
-        target, which is the path the git branch above and the backlog writer
-        already record. A path that will not resolve keeps its unresolved
-        basename.
+        The legacy basename is `common_dir.resolve().parent.name` whenever a
+        common dir exists, because that is what the PRE-change resolver
+        produced; see `_legacy_project_name`.
 
-        WHEN THE DECLARED PATH IS GONE, none of the live derivations above can
-        answer: git cannot resolve a directory that no longer exists. The
-        session's own worktree identity record can, because session_init wrote
-        it while the relationship was still provable, and it names the main
-        checkout the declaration belonged to. That record is trusted only
-        through `recorded_main_root`, which requires it to name THIS
-        declaration exactly and re-verifies the recorded checkout (see
-        `record_resolution`); a record that proves nothing is not followed.
-        When no verified record answers, the function DECLINES rather than
-        deriving a basename from a dead path: a worktree folder name would key
-        a second project, and the reads that followed would silently miss
-        every row saved while the worktree was live.
-
-        Args:
-            declared_dir: The directory value (env var or session record).
-            source: Label for the debug log naming where the value came from.
-
-        Returns:
-            ``(name, label, legacy)``. ``name`` is the canonical id when the
-            repository has a representable origin, otherwise the basename, or
-            None on the declined arm — never ``""``, because an empty name is
-            not a project. ``label`` is what a caller discloses as the
-            resolution source when this call wins: the declaring strategy on
-            the live arms, and ``worktree identity record`` when the record
-            answered. ``legacy`` is the name the PRE-change resolver produced
-            for the same directory; it is carried from this pass because the
-            read-scope union needs it to find rows filed under the old key,
-            and re-deriving it from the canonical id would yield the remote's
-            repo name instead of the folder name.
+        A declared directory that no longer exists declines. A declaration
+        whose repository has a remote that cannot be represented also
+        declines: never a basename for a real but unrepresentable remote,
+        because a basename there is a silently different bucket.
         """
         try:
             declared_root = Path(declared_dir).resolve()
         except (OSError, RuntimeError, ValueError):
             # ValueError: a NUL byte (or another embedded invalid value) in a
             # session record must read as "cannot resolve", not crash the
-            # resolver. Same tuple `main_repo_root` already catches.
+            # resolver.
             declared_root = None
-        # ONE git call answers both questions this method needs: the main root
-        # is the common dir's parent, and the common dir is where the
-        # repository override file would live. The local name is
-        # declared_common_dir, NOT the module helper's own name.
         declared_common_dir = main_repo_common_dir(declared_dir)
-        # THE IDENTITY ROOT, NOT `common.parent`: a submodule's common dir is
-        # `<super>/.git/modules/vendor/sub`, whose parent has no origin, and an
-        # external `--separate-git-dir` puts the common dir outside the tree.
         declared_main_root = main_repo_root(declared_dir, declared_common_dir)
-        # Compare via normcase so a case-insensitive filesystem does not
-        # fire the rewrite for paths that differ only in case (a no-op on
-        # case-sensitive systems, where normcase is identity).
+        # Compare via normcase so a case-insensitive filesystem does not fire
+        # the rewrite for paths that differ only in case.
         if (
             declared_main_root is not None
             and declared_root is not None
-            and os.path.normcase(str(declared_main_root)) != os.path.normcase(str(declared_root))
+            and os.path.normcase(str(declared_main_root))
+            != os.path.normcase(str(declared_root))
         ):
-            legacy_name = declared_main_root.name
-            # `declared_common_dir` is not None here, so this root IS a
-            # repository and the origin is read as a tri-state.
+            legacy_name = PACTMemory._legacy_project_name(
+                declared_common_dir, declared_main_root
+            )
             identity = detect_id_for_root(declared_main_root, declared_common_dir)
+            PACTMemory._warn_override_ignored(identity)
             if identity.project_id is not None:
                 logger.debug(
                     "project_id detected from %s worktree main repo: %s",
                     source,
                     identity.project_id,
                 )
-                return identity.project_id, source, legacy_name
+                return (
+                    identity.project_id,
+                    source,
+                    legacy_name,
+                    declared_main_root,
+                    identity.override_ignored,
+                )
             logger.warning(
-                "the repository at %s (declared via %s) has a remote that "
+                "the repository at %r (declared via %s) has a remote that "
                 "cannot be represented as a project id, so no id was derived. "
                 "Run `pact-memory project-id show` to inspect the detected "
                 "identity, or write an operator-chosen canonical id to %s.",
@@ -813,11 +848,15 @@ class PACTMemory:
                 source,
                 declared_common_dir / "pact-project-id",
             )
-            return None, source, legacy_name
+            return (
+                None,
+                source,
+                legacy_name,
+                declared_main_root,
+                identity.override_ignored,
+            )
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
-        # fire AND the declared path does not resolve to an existing target —
-        # absent, unreadable, or a broken symlink. A path that exists never
-        # enters here, so live behaviour stays byte-identical.
+        # fire AND the declared path does not resolve to an existing target.
         if not _declared_path_exists(declared_dir):
             # Function-level: the shared package is importable only after
             # pact_session's sys.path bootstrap has run at module import.
@@ -825,11 +864,8 @@ class PACTMemory:
 
             # AN INVALID DECLARATION MUST NOT CRASH THE RESOLVER. A corrupt
             # session record can carry a NUL byte, which `os.path.realpath`
-            # (reached inside `record_resolution`) rejects with ValueError.
-            # Catch it HERE, at the boundary this module owns, so the
-            # never-raises contract holds for the whole method rather than
-            # only for the `resolve()` call above. The outcome is the same as
-            # any other unverifiable record: no recorded root, then decline.
+            # rejects with ValueError. Catch it HERE, at the boundary this
+            # module owns.
             try:
                 recorded_root = recorded_main_root(
                     Path(declared_dir),
@@ -838,23 +874,29 @@ class PACTMemory:
             except (OSError, RuntimeError, ValueError):
                 recorded_root = None
             if recorded_root is not None:
-                legacy_name = recorded_root.name
-                # The recorded checkout is re-verified by `recorded_main_root`;
-                # ask git for its common dir so the origin read is the
-                # tri-state one rather than a non-repository fallback.
                 recorded_common_dir = main_repo_common_dir(str(recorded_root))
+                legacy_name = PACTMemory._legacy_project_name(
+                    recorded_common_dir, recorded_root
+                )
                 identity = detect_id_for_root(recorded_root, recorded_common_dir)
+                PACTMemory._warn_override_ignored(identity)
                 if identity.project_id is not None:
                     logger.debug(
                         "project_id resolved from the worktree identity record "
-                        "for %s via %s: %s",
+                        "for %r via %s: %s",
                         declared_dir,
                         source,
                         identity.project_id,
                     )
-                    return identity.project_id, "worktree identity record", legacy_name
+                    return (
+                        identity.project_id,
+                        "worktree identity record",
+                        legacy_name,
+                        recorded_root,
+                        identity.override_ignored,
+                    )
                 logger.warning(
-                    "the recorded main checkout %s for the directory declared "
+                    "the recorded main checkout %r for the directory declared "
                     "via %s has a remote that cannot be represented as a "
                     "project id; no id was derived. Run `pact-memory "
                     "project-id show` to inspect the detected identity, or "
@@ -867,50 +909,224 @@ class PACTMemory:
                         else "<git-common-dir>/pact-project-id"
                     ),
                 )
-                return None, "worktree identity record", legacy_name
+                return (
+                    None,
+                    "worktree identity record",
+                    legacy_name,
+                    recorded_root,
+                    identity.override_ignored,
+                )
             logger.warning(
-                "the directory declared via %s could not be resolved: %s "
+                "the directory declared via %s could not be resolved: %r "
                 "does not exist and no verified worktree identity record "
                 "names it. No name was derived from the path.",
                 source,
                 declared_dir,
             )
-            return None, source, None
+            return None, source, None, None, None
         live_root = declared_main_root or declared_root or Path(declared_dir)
-        legacy_name = live_root.name
+        legacy_name = PACTMemory._legacy_project_name(declared_common_dir, live_root)
         # A non-git declared path has no common dir, so `detect_id_for_root`
         # returns the designed basename without shelling to git.
         identity = detect_id_for_root(live_root, declared_common_dir)
+        PACTMemory._warn_override_ignored(identity)
         if identity.project_id is not None:
             logger.debug(
                 "project_id detected from %s: %s", source, identity.project_id
             )
-            return identity.project_id, source, legacy_name
+            return (
+                identity.project_id,
+                source,
+                legacy_name,
+                live_root,
+                identity.override_ignored,
+            )
         logger.warning(
-            "the repository at %s (declared via %s) has a remote that cannot "
+            "the repository at %r (declared via %s) has a remote that cannot "
             "be represented as a project id, so no id was derived. Run "
             "`pact-memory project-id show` to inspect the detected identity, "
             "or write an operator-chosen canonical id to %s.",
             live_root,
             source,
-            declared_common_dir / "pact-project-id" if declared_common_dir is not None
+            declared_common_dir / "pact-project-id"
+            if declared_common_dir is not None
             else "<git-common-dir>/pact-project-id",
         )
-        return None, source, legacy_name
+        return (
+            None,
+            source,
+            legacy_name,
+            live_root,
+            identity.override_ignored,
+        )
 
     @staticmethod
-    def _project_name_for_declared_dir(
-        declared_dir: str, source: str
-    ) -> "tuple[Optional[str], str]":
-        """The long-standing `(name, label)` signature, kept verbatim.
+    def _detect_project_identity_with_legacy() -> "_DetectedIdentity":
+        """Detect the project identity, its provenance, and the legacy name.
 
-        A thin façade over `_declared_dir_identity`, which also carries the
-        legacy basename the read-scope union needs. Callers that only name a
-        project keep this shape; nothing outside this module constructs the
-        three-element form.
+        The precedence is `supplied` (handled by the constructor, never here)
+        -> CLAUDE_PROJECT_DIR -> session record -> git root -> user setting ->
+        cwd marker. The repository override is NOT a rung of its own: it
+        follows the identity root, so each root rung reads its own
+        `<git-common-dir>/pact-project-id`. That is what stops a cwd pin from
+        retargeting a declared session, and what stops a declared repo's pin
+        from being silently ignored.
+
+        A declaration that is PRESENT but cannot be honoured DECLINES before
+        the user-scope setting is consulted: a stale declaration must not be
+        silently absorbed by a user setting. The setting answers only when no
+        declaration was present at all.
         """
-        name, label, _legacy = PACTMemory._declared_dir_identity(declared_dir, source)
-        return name, label
+        # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
+        # instance, module or thread state.
+        declined_declaration = False
+
+        # Strategy 1: Environment variable (original behavior)
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        if project_dir:
+            name, label, legacy, root, ignored = PACTMemory._declared_dir_identity(
+                project_dir, "CLAUDE_PROJECT_DIR"
+            )
+            if name:
+                return _DetectedIdentity(name, label, legacy, ignored, root)
+            declined_declaration = True
+
+        # Strategy 1.5: session record (inert under pytest — the discovery
+        # refuses test processes — so the replica in test_project_id.py needs
+        # no record leg to stay equivalent here).
+        record_dir = get_project_dir_from_session_record()
+        if record_dir:
+            name, label, legacy, root, ignored = PACTMemory._declared_dir_identity(
+                record_dir, "session record"
+            )
+            if name:
+                return _DetectedIdentity(name, label, legacy, ignored, root)
+            declined_declaration = True
+
+        # Strategy 2: Git repository root (worktree-safe)
+        cwd_common_dir = main_repo_common_dir()
+        if cwd_common_dir is not None:
+            repo_root = main_repo_root(common=cwd_common_dir)
+            if repo_root is None:
+                # A bare repository has no working tree, so it has no root to
+                # name. Decline rather than inventing a directory.
+                logger.warning(
+                    "the process's repository has no working tree (a bare "
+                    "repository, or git cannot describe one), so no project "
+                    "id was derived from it."
+                )
+                return _DetectedIdentity(None, "unresolved", None, None, None)
+            legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, repo_root)
+            identity = detect_id_for_root(repo_root, cwd_common_dir)
+            PACTMemory._warn_override_ignored(identity)
+            if identity.project_id is not None:
+                if identity.source == "override file":
+                    source = "override file"
+                elif identity.id_shape == "canonical":
+                    source = "origin remote"
+                else:
+                    source = "git root"
+                logger.debug(
+                    "project_id detected from git root (%s): %s",
+                    source,
+                    identity.project_id,
+                )
+                return _DetectedIdentity(
+                    identity.project_id,
+                    source,
+                    legacy_name,
+                    identity.override_ignored,
+                    repo_root,
+                )
+            if identity.source == "declined":
+                # A REAL remote that cannot be represented. Falling through to
+                # a basename would file this project under a different bucket
+                # from the one its remote names, which is the defect this
+                # change exists to remove.
+                logger.warning(
+                    "the repository at %r has an origin remote that cannot be "
+                    "represented as a project id, so no id was derived. Run "
+                    "`pact-memory project-id show` to inspect the detected "
+                    "identity, or write an operator-chosen canonical id to %s.",
+                    repo_root,
+                    cwd_common_dir / "pact-project-id",
+                )
+                return _DetectedIdentity(
+                    None,
+                    "unresolved",
+                    legacy_name,
+                    identity.override_ignored,
+                    repo_root,
+                )
+        # git not installed, not a repo, or command timed out
+        logger.debug("Git detection failed, falling back to cwd")
+
+        # A PRESENT DECLARATION THAT COULD NOT BE HONOURED DECLINES HERE, and
+        # BEFORE the user setting: absorbing a stale declaration into a
+        # user-scope pin hides the failure instead of reporting it. Strategy 3
+        # is skipped for the same reason it always was — it names the PROCESS,
+        # not the session.
+        if declined_declaration:
+            logger.warning(
+                "project_id unresolved: the git root did not answer either, "
+                "so Strategy 3 is skipped and no project scope was derived."
+            )
+            return _DetectedIdentity(None, "unresolved", None, None, None)
+
+        # Strategy 2.5: the USER-SCOPE setting. Reached only when NO
+        # declaration was present and no repository answered. A repo-scoped
+        # override and this setting can therefore never disagree within one
+        # resolution — that is why there is no disagreement warning to emit.
+        user_setting = read_user_setting(get_memory_dir() / "config.json")
+        if user_setting is not None:
+            return _DetectedIdentity(user_setting, "user setting", None, None, None)
+
+        # Strategy 3: Current working directory — walk UP to nearest project
+        # marker. A walk that lands on HOME WARNS and never canonicalises.
+        try:
+            cwd_root = PACTMemory._find_project_root(Path.cwd())
+            cwd_name = cwd_root.name
+            if cwd_name:
+                try:
+                    home = Path.home().resolve()
+                except (OSError, RuntimeError):
+                    home = None
+                if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):
+                    logger.warning(
+                        "project_id resolved to the HOME directory (%s); memories "
+                        "will be scoped to user scope %r, not a project. Run from "
+                        "the project directory or set CLAUDE_PROJECT_DIR.",
+                        cwd_root,
+                        cwd_name,
+                    )
+                    return _DetectedIdentity(cwd_name, "cwd", cwd_name, None, cwd_root)
+                cwd_common_dir = main_repo_common_dir(str(cwd_root))
+                legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, cwd_root)
+                identity = detect_id_for_root(cwd_root, cwd_common_dir)
+                PACTMemory._warn_override_ignored(identity)
+                if identity.project_id is not None:
+                    logger.debug(
+                        "project_id detected from cwd: %s", identity.project_id
+                    )
+                    return _DetectedIdentity(
+                        identity.project_id,
+                        "cwd",
+                        legacy_name,
+                        identity.override_ignored,
+                        cwd_root,
+                    )
+                logger.warning(
+                    "the repository at %r has an origin remote that cannot be "
+                    "represented as a project id, so no id was derived.",
+                    cwd_root,
+                )
+                return _DetectedIdentity(
+                    None, "unresolved", legacy_name, identity.override_ignored, cwd_root
+                )
+        except OSError:
+            logger.debug("Failed to detect project_id from cwd")
+
+        return _DetectedIdentity(None, "unresolved", None, None, None)
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:
@@ -929,292 +1145,31 @@ class PACTMemory:
         For callers that use the id as a FILE NAME. A canonical id contains
         `/`, so using one as a path component silently nests the file and
         orphans every existing `<basename>.json` — the backlog does exactly
-        that, so it asks for this shape explicitly rather than taking the
-        canonical detector's answer.
+        that, so it asks for this shape explicitly.
         """
         return PACTMemory._detect_project_identity_with_legacy().legacy_basename
 
     @staticmethod
     def _detect_project_id_with_source() -> "tuple[Optional[str], str]":
-        """
-        Detect project ID with multiple fallback strategies, naming the winner.
-
-        Returns (project_id, source) where source is the strategy that decided
-        it. The source exists so a save can DISCLOSE how its project was
-        resolved: the resolution is otherwise invisible, and an invisible
-        resolution is what makes a mis-scope unrecoverable after the fact.
+        """Detect the identity and name the rung that decided it.
 
         Detection order:
-        0. The repository override, `<git-common-dir>/pact-project-id`.
         1. CLAUDE_PROJECT_DIR environment variable (original behavior)
         1.5. Session record — the project_dir session_init persisted at
-           SessionStart, discovered via the CLAUDE_CODE_SESSION_ID glob in
-           pact_session. BELOW env (a present declaration wins) and ABOVE git:
+           SessionStart. BELOW env (a present declaration wins) and ABOVE git:
            in a multi-repo workspace the cwd's git root can be the WRONG
            scope, so the session's own recorded identity outranks it.
-        2. Git repository root via 'git rev-parse --git-common-dir' (worktree-safe)
-        3. Current working directory — walked UP to the nearest project marker
-           (.git, .claude/, or CLAUDE.md at either location). This handles the
-           case where the user runs the CLI from a subdirectory. A walk that
-           lands on the HOME directory WARNS: home scope means every project
-           shares one memory space, and silent home scope is a mis-scope
-           vector.
+        2. Git repository root (worktree-safe)
+        3. The user-scope setting, then the cwd marker.
 
-        A DECLARED DIRECTORY THAT NO LONGER EXISTS declines. Either declared
-        rung may answer from the session's worktree identity record (label
-        `worktree identity record`); when a rung was PRESENT and named no
-        project, `declined_declaration` is set. Strategy 2 still runs, because
-        a live git root is a real answer about this process. If it fails too,
-        Strategy 3 is SKIPPED and the result is `(None, "unresolved")` with a
-        warning: Strategy 3 describes the PROCESS, not the session, and is the
-        only rung that can return HOME or an unrelated directory. The ordinary
-        path with NO declaration keeps Strategy 3 and its HOME warning
-        unchanged.
-
-        Returns:
-            (project_id, source). `project_id` is the detected id: a
-            canonical `host/owner/repo` when the repository has a
-            representable origin, otherwise a directory basename (or an
-            explicit override value). None when nothing resolved. `source`
-            names the rung that won; it is disclosed by a save so an
-            otherwise-invisible resolution is diagnosable.
+        A declaration that is present but cannot be honoured declines. `source`
+        is one of `supplied`, `override file`, `CLAUDE_PROJECT_DIR`,
+        `session record`, `worktree identity record`, `origin remote`,
+        `git root`, `user setting`, `cwd`, `unresolved`.
         """
-        # THE ONE PASS: `_detect_project_identity_with_legacy` carries the
-        # legacy basename and the structured override-ignore as well, which
-        # the read-scope union and the disclosure surfaces need. This façade
-        # keeps the long-standing two-element shape for callers that only
-        # name a project.
         detected = PACTMemory._detect_project_identity_with_legacy()
         return detected.project_id, detected.source
 
-    @staticmethod
-    def _detect_project_identity_with_legacy() -> "_DetectedIdentity":
-        """Detect the project identity, its provenance, and the legacy name.
-
-        The precedence is `supplied` (handled by the constructor, never here)
-        -> repository override -> CLAUDE_PROJECT_DIR -> session record ->
-        worktree identity record -> git root -> cwd marker. The first rung is
-        omitted because a supplied id short-circuits detection entirely.
-
-        WHY THE DECLARED RUNGS ARE THE PRIMARY CHANGE SITE. Rungs 2 and 3
-        share `_declared_dir_identity`, and Claude Code sets
-        CLAUDE_PROJECT_DIR in ordinary sessions — so canonicalising only the
-        git rung would ship a feature almost no session reaches.
-
-        `legacy_basename` is what the PRE-change resolver produced for the
-        winning location. It is carried, never re-derived: the read-scope
-        union keys on it, and the canonical id's last segment is the REMOTE's
-        repository name, which differs from the checkout folder name whenever
-        the two were named differently.
-
-        A declared directory that no longer exists declines, as before. A
-        declaration whose repository has a remote that cannot be represented
-        also declines: never a basename for a real but unrepresentable remote,
-        because a basename there is a silently different bucket. The override
-        is the stated remedy.
-        """
-        # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
-        # instance, module or thread state. This flag is what separates the
-        # decline arm from the ordinary no-declaration path, which keeps
-        # Strategy 3 and its HOME warning.
-        declined_declaration = False
-
-        # Strategy 0: the repository override. Discovered from the PROCESS's
-        # repository via the git common dir, so every worktree of a repo sees
-        # one file. An in-tree `.pact/project-id` is deliberately NOT read: it
-        # can arrive through a clone, a tarball or a vendored copy, so it
-        # would let a repository redirect the memory scope of whoever checks
-        # it out.
-        override_ignored = None
-        cwd_common_dir = main_repo_common_dir()
-        if cwd_common_dir is not None:
-            override = read_override(cwd_common_dir)
-            if override.value is not None:
-                return _DetectedIdentity(
-                    override.value,
-                    "override file",
-                    cwd_common_dir.parent.name,
-                    None,
-                )
-            if override.reason is not None and override.path is not None:
-                # STRUCTURED, not only a warning: a caller that parses the
-                # envelope never sees stderr.
-                override_ignored = {
-                    "path": str(override.path),
-                    "reason": override.reason,
-                }
-                logger.warning(
-                    "ignoring the project override at %s (%s); resolution "
-                    "continues without it.",
-                    override.path,
-                    override.reason,
-                )
-
-        # Strategy 1: Environment variable (original behavior)
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-        if project_dir:
-            name, label, legacy = PACTMemory._declared_dir_identity(
-                project_dir, "CLAUDE_PROJECT_DIR"
-            )
-            if name:
-                return _DetectedIdentity(name, label, legacy, override_ignored)
-            declined_declaration = True
-
-        # Strategy 1.5: session record (inert under pytest — the discovery
-        # refuses test processes — so the replica in test_project_id.py needs
-        # no record leg to stay equivalent here).
-        record_dir = get_project_dir_from_session_record()
-        if record_dir:
-            name, label, legacy = PACTMemory._declared_dir_identity(
-                record_dir, "session record"
-            )
-            if name:
-                return _DetectedIdentity(name, label, legacy, override_ignored)
-            declined_declaration = True
-
-        # Strategy 2: Git repository root (worktree-safe)
-        # `cwd_common_dir` carries the --git-common-dir resolution and the
-        # relative-result guard for both this strategy and Strategy 1, so the
-        # two share one derivation of the path exactly as they already share
-        # one derivation of the name. Passing no `start` runs git in the cwd,
-        # which is this strategy's base.
-        # The project CLAUDE.md is NOT located this way: its resolver
-        # classifies the session's root through project_scope.memory_root_of,
-        # which verifies the main checkout rather than trusting the common
-        # dir's parent. This derivation names the project for its id only.
-        if cwd_common_dir is not None:
-            repo_root = main_repo_root(common=cwd_common_dir)
-            if repo_root is None:
-                # A bare repository has no working tree, so it has no root to
-                # name. Decline rather than inventing a directory.
-                logger.warning(
-                    "the process's repository has no working tree (a bare "
-                    "repository, or git cannot describe one), so no project "
-                    "id was derived from it."
-                )
-                return _DetectedIdentity(
-                    None, "unresolved", None, override_ignored
-                )
-            identity = detect_id_for_root(repo_root, cwd_common_dir)
-            if identity.project_id is not None:
-                source = (
-                    "origin remote"
-                    if identity.id_shape == "canonical"
-                    else "git root"
-                )
-                logger.debug(
-                    "project_id detected from git root (%s): %s",
-                    source,
-                    identity.project_id,
-                )
-                return _DetectedIdentity(
-                    identity.project_id, source, repo_root.name, override_ignored
-                )
-            if identity.source == "declined":
-                # A REAL remote that cannot be represented. Falling through to
-                # a basename would file this project under a different bucket
-                # from the one its remote names, which is the defect this
-                # change exists to remove.
-                logger.warning(
-                    "the repository at %s has an origin remote that cannot be "
-                    "represented as a project id, so no id was derived. Run "
-                    "`pact-memory project-id show` to inspect the detected "
-                    "identity, or write an operator-chosen canonical id to %s.",
-                    repo_root,
-                    cwd_common_dir / "pact-project-id",
-                )
-                return _DetectedIdentity(
-                    None, "unresolved", repo_root.name, override_ignored
-                )
-        # git not installed, not a repo, or command timed out
-        logger.debug("Git detection failed, falling back to cwd")
-
-        # Strategy 2.5: the USER-SCOPE setting. Reached only when NO repository
-        # answered — the ruled design makes it a fallback for work with no
-        # repository at all, never an override that outranks one. It reports
-        # its OWN token: when it disagrees with the repo-scoped file, the
-        # warning must be able to say WHICH two sources disagreed, and two
-        # `override file` labels would make that surface unreadable.
-        user_setting = read_user_setting(get_memory_dir() / "config.json")
-        if user_setting is not None:
-            return _DetectedIdentity(
-                user_setting, "user setting", None, override_ignored
-            )
-
-        # THE DECLINE ARM (D10, and it subsumes D11's outcome). A declaration
-        # was made and could not be honoured, and the process's own git root
-        # did not answer either. Strategy 3 is SKIPPED rather than consulted:
-        # it names the PROCESS, not the session, and it is the only rung that
-        # can return the HOME directory or an unrelated checkout. Returning
-        # None here is what makes the miss loud downstream (a refused write,
-        # an empty read) instead of a basename-derived bucket nobody looks in.
-        if declined_declaration:
-            # The per-declaration warning (naming the path) is emitted by
-            # `_declared_dir_identity`; repeating it here would report
-            # one event twice. This line adds what the helper cannot know: the
-            # git-root rung also failed and the cwd rung was skipped.
-            logger.warning(
-                "project_id unresolved: the git root did not answer either, "
-                "so Strategy 3 is skipped and no project scope was derived."
-            )
-            return _DetectedIdentity(
-                None, "unresolved", None, override_ignored
-            )
-
-        # Strategy 3: Current working directory — walk UP to nearest project marker.
-        # Fixes subdirectory invocation (e.g., running CLI from .claude/ or src/
-        # would previously return the subdirectory basename as the project_id).
-        try:
-            cwd_root = PACTMemory._find_project_root(Path.cwd())
-            cwd_name = cwd_root.name
-            if cwd_name:
-                # Home scope is the last resort, and it must not be silent: a
-                # walk that lands on the home directory (typically via the
-                # .claude marker there) scopes every save to the USER, and
-                # searches under a project then silently miss. Warn so the
-                # mis-scope is visible.
-                try:
-                    home = Path.home().resolve()
-                except (OSError, RuntimeError):
-                    home = None
-                if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):
-                    logger.warning(
-                        "project_id resolved to the HOME directory (%s); memories "
-                        "will be scoped to user scope %r, not a project. Run from "
-                        "the project directory or set CLAUDE_PROJECT_DIR.",
-                        cwd_root,
-                        cwd_name,
-                    )
-                    # NEVER canonicalise a HOME landing: if the home directory
-                    # happens to be a repository, its remote would widen user
-                    # scope from one folder name to an entire project.
-                    return _DetectedIdentity(
-                        cwd_name, "cwd", cwd_name, override_ignored
-                    )
-                # The marker may be `.claude/` or `CLAUDE.md` rather than a
-                # repository, so establish repo-ness FIRST: a None common dir
-                # is the designed basename path, not an unavailable origin.
-                cwd_common_dir = main_repo_common_dir(str(cwd_root))
-                identity = detect_id_for_root(cwd_root, cwd_common_dir)
-                if identity.project_id is not None:
-                    logger.debug(
-                        "project_id detected from cwd: %s", identity.project_id
-                    )
-                    return _DetectedIdentity(
-                        identity.project_id, "cwd", cwd_name, override_ignored
-                    )
-                logger.warning(
-                    "the repository at %s has an origin remote that cannot be "
-                    "represented as a project id, so no id was derived.",
-                    cwd_root,
-                )
-                return _DetectedIdentity(
-                    None, "unresolved", cwd_name, override_ignored
-                )
-        except OSError:
-            logger.debug("Failed to detect project_id from cwd")
-
-        return _DetectedIdentity(None, "unresolved", None, override_ignored)
 
     @staticmethod
     def _detect_session_id() -> Optional[str]:
@@ -1294,6 +1249,7 @@ class PACTMemory:
         recomputes. An in-process write clears the cache as well, so a save
         that changes the bucket set is observed immediately.
         """
+        self._legacy_scope_state = None
         scope = self._project_scope()
         if scope is None:
             return None
@@ -1322,7 +1278,11 @@ class PACTMemory:
             project_bucket_counts,
         )
 
-        repo_root = main_repo_root()
+        # THE IDENTITY ROOT OF THE WINNING RUNG, not the process's cwd
+        # repository. In a declared-repo session those differ, and gating on
+        # the cwd would exclude the declared repo's OWN legacy bucket while
+        # advising a rekey the operator does not need.
+        repo_root = self._project_identity_root
         # BIND THE RESOLVED STORE EXPLICITLY. A pathless `db_connection()` only
         # inherits an enclosing scope; a direct call outside one (the CLI verb
         # is scoped, but a library caller is not) would read the DEFAULT store
@@ -1357,6 +1317,7 @@ class PACTMemory:
                     "rekey": None,
                     "included": False,
                     "verified": False,
+                    "included_unverified": False,
                     "excluded": False,
                     "ambiguous": ambiguous,
                     "canonical_count": canonical_count,
@@ -1378,11 +1339,14 @@ class PACTMemory:
                     # each bucket of a union, and `graph_stats` reports rows
                     # and paths separately for the same reason.
                     "file_paths": file_paths,
-                    "rekey": shlex.join(
-                        ["pact-memory", "project-id", "rekey", "--from", candidate]
-                    ),
+                    "rekey": render_rekey_command(candidate),
                     "included": included,
                     "verified": outcome == "verified",
+                    # A3: the gate cannot discriminate in practice — the live
+                    # legacy bucket's file rows are all relative — so the
+                    # inclusion is a first-class field rather than something a
+                    # consumer must infer from `verified`.
+                    "included_unverified": included and outcome != "verified",
                     # LOAD-BEARING: the exclusion disclosure fires on this
                     # field. Without it a populated legacy bucket can be
                     # dropped with no notice at all.
@@ -1392,18 +1356,42 @@ class PACTMemory:
                     "detail": detail,
                 }
                 if outcome == "excluded":
-                    logger.warning(
-                        "legacy project bucket %r holds %d memories, but none "
-                        "of its absolute file rows lies under %s, so it is NOT "
-                        "in this read scope. Move it explicitly with: "
-                        "pact-memory project-id rekey --from %s",
-                        candidate,
-                        buckets.get(candidate, 0),
-                        repo_root,
-                        candidate,
-                    )
+                    # ONCE PER PROCESS: a warning emitted on every read is a
+                    # warning readers learn to skip. The file count is what
+                    # lets the operator judge the loss.
+                    warn_key = (store, candidate)
+                    if warn_key not in _EXCLUSION_WARNED:
+                        _EXCLUSION_WARNED.add(warn_key)
+                        # THE WARNING ALWAYS REPORTS A FILE COUNT, even when
+                        # the surface-4 query was skipped: the count is how
+                        # the operator judges the loss, and this branch runs
+                        # at most once per bucket per process.
+                        excluded_file_paths = (
+                            file_paths
+                            if file_paths is not None
+                            else count_project_file_paths(connection, candidate)
+                        )
+                        logger.warning(
+                            "legacy project bucket %r holds %d memories and %d "
+                            "file paths, but none of its absolute file rows "
+                            "lies under %s, so it is NOT in this read scope. "
+                            "Move it explicitly with: %s",
+                            candidate,
+                            buckets.get(candidate, 0),
+                            excluded_file_paths,
+                            repo_root,
+                            render_rekey_command(candidate),
+                        )
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
+        # PRUNE superseded stamps for this same store/scope/legacy pair: the
+        # key carries the store's stat, so every write leaves the old entry
+        # behind and the dict would grow for the process's lifetime.
+        for stale in [
+            key for key in _LEGACY_SCOPE_CACHE
+            if key != cache_key and key[:1] == (store,) and key[2:] == (scope, legacy)
+        ]:
+            _LEGACY_SCOPE_CACHE.pop(stale, None)
         _LEGACY_SCOPE_CACHE[cache_key] = (result, state)
         return result
 
@@ -1624,13 +1612,17 @@ class PACTMemory:
         if root is None:
             self._cwd_repo_id = None
             return None
-        common_dir = main_repo_common_dir()
-        override = read_override(common_dir) if common_dir is not None else None
-        if override is not None and override.value is not None:
-            self._cwd_repo_id = override.value
-        else:
-            identity = detect_id_for_root(root, common_dir)
-            self._cwd_repo_id = identity.project_id or root.name
+        # ASK FOR THIS ROOT'S common dir, not the process cwd's: `main_repo_root`
+        # may have been resolved for a different start, and pairing a root with
+        # another repository's common dir reads the wrong config. A path that
+        # is not a repository answers None, which is the designed basename arm.
+        common_dir = main_repo_common_dir(str(root))
+        identity = detect_id_for_root(root, common_dir)
+        # NO FOLDER PSEUDO-ID ON A DECLINE. `identity.project_id or root.name`
+        # invented an id the resolver had just refused, and the warning then
+        # advised a save that would itself be refused. None means "unknown
+        # here"; the divergence warning skips on it.
+        self._cwd_repo_id = identity.project_id
         return self._cwd_repo_id
 
     def _location_divergence_warning(self, project_id: Optional[str]) -> Optional[str]:
@@ -3268,6 +3260,10 @@ class PACTMemory:
                 "id_shape": self._project_id_shape,
                 "override_ignored": self._override_ignored,
                 "project_candidates": [],
+                # A2: ALWAYS PRESENT, null when no candidate exists. An
+                # envelope consumer must be able to tell that a bucket was
+                # dropped without reading a warning it may never see.
+                "legacy_scope": self._legacy_scope_state,
                 "memory_count": 0,
                 "tracked_files_count": len(self._session_files),
                 "graph_stats": {
@@ -3325,6 +3321,7 @@ class PACTMemory:
             "id_shape": self._project_id_shape,
             "override_ignored": self._override_ignored,
             "project_candidates": project_candidates,
+            "legacy_scope": self._legacy_scope_state,
             "memory_count": memory_count,
             "tracked_files_count": len(self._session_files),
             "graph_stats": graph_stats,

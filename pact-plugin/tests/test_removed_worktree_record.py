@@ -1125,7 +1125,7 @@ class TestUnresolvedIdentityRefusesWrites:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
@@ -1151,7 +1151,7 @@ class TestUnresolvedIdentityRefusesWrites:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
@@ -1197,7 +1197,7 @@ class TestUnresolvedIdentityRefusesWrites:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
@@ -1244,7 +1244,7 @@ class TestUnresolvedIdentityRefusesWrites:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)

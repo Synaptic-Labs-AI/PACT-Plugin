@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -63,6 +62,7 @@ from scripts.memory_api import (
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
     main_repo_root,
+    render_rekey_command,
 )
 from scripts.project_identity import is_canonical
 from scripts.setup_memory import ensure_initialized, get_setup_status
@@ -1007,9 +1007,7 @@ def _project_candidates(db_path) -> list:
             # space, a semicolon, a dollar sign or a quote. This string is
             # presented as a runnable command, so an unquoted id is a
             # copy-paste command-injection surface.
-            "rekey": shlex.join(
-                ["pact-memory", "project-id", "rekey", "--from", bucket_id]
-            ),
+            "rekey": render_rekey_command(bucket_id),
         }
         for bucket_id, count in sorted(
             buckets.items(), key=lambda item: (-item[1], item[0])
@@ -1240,7 +1238,9 @@ def build_parser():
         "project-file": f'python3 "{prog}" project-file',
         "project-id": f'python3 "{prog}" project-id show',
         "project-id-rekey": (
-            f'python3 "{prog}" project-id rekey --from <id> --dry-run'
+            f'python3 "{prog}" '
+            + render_rekey_command("<id>")
+            + " --dry-run"
         ),
     }
 

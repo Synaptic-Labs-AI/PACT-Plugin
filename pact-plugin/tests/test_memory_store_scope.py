@@ -633,7 +633,7 @@ class TestUnresolvedIdentityScopesReads:
             "_detect_project_identity_with_legacy",
             staticmethod(
                 lambda: memory_api_module._DetectedIdentity(
-                    None, "unresolved", None, None
+                    None, "unresolved", None, None, None
                 )
             ),
         )

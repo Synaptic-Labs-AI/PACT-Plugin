@@ -23,8 +23,9 @@ from scripts.database import (
 from scripts.database import (
     sqlite3 as db_sqlite3,
 )
+from scripts.memory_api import PACTMemory
 
-from scripts import cli
+from scripts import cli, memory_api
 from scripts import database as db
 
 CANONICAL = "github.com/syn-labs/pact-plugin"
@@ -533,3 +534,77 @@ class TestCliSurface:
             capfd,
         )
         assert code == 2
+
+# ---------------------------------------------------------------------------
+# Review finding B6-T: the incident flow, end to end
+# ---------------------------------------------------------------------------
+
+class TestReviewB6IncidentFlow:
+    def test_show_candidates_then_rekey_makes_the_old_name_rows_reachable(
+        self, tmp_path, monkeypatch, capfd
+    ):
+        """B6-T: the reported incident as an end-to-end flow.
+
+        Rows live under the OLD folder name (`PACT-prompt`) while the current
+        checkout is `PACT-Plugin`, so the derived read union cannot reach
+        them. `show --candidates` must name the bucket, `rekey --apply` must
+        move it, and the canonical read must then return the rows with the
+        scope collapsed.
+
+        RED WHEN: `show` omits the bucket, the rekey is a no-op, or the
+        post-rekey read still needs the union (the last would mean the rows
+        did not move).
+        """
+        assert_outside_repository(tmp_path)
+        repo = make_repo(
+            tmp_path / "PACT-Plugin",
+            remote="https://github.com/syn-labs/pact-plugin.git",
+        )
+        monkeypatch.chdir(repo)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        env = SimpleNamespace(
+            repo=repo, store=tmp_path / "incident.db", tmp_path=tmp_path
+        )
+        _seed(env, [("old1", "PACT-prompt"), ("old2", "PACT-prompt")])
+
+        memory = PACTMemory(session_id="s", db_path=env.store)
+        assert memory.list(limit=10) == [], (
+            "the pre-rekey read reached the old-name bucket; this fixture is "
+            "not the incident shape"
+        )
+
+        code, payload = _cli(
+            ["project-id", "show", "--db-path", str(env.store)], capfd
+        )
+        assert code == 0
+        candidates = {item["id"]: item for item in payload["result"]["candidates"]}
+        assert "PACT-prompt" in candidates, (
+            f"show --candidates did not name the old bucket: {candidates}"
+        )
+        assert candidates["PACT-prompt"]["memory_count"] == 2
+
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                "PACT-prompt",
+                "--apply",
+                "--db-path",
+                str(env.store),
+            ],
+            capfd,
+        )
+        assert code == 0
+        assert payload["result"]["memories"] == 2
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory = PACTMemory(session_id="s", db_path=env.store)
+        assert sorted(item.id for item in memory.list(limit=10)) == [
+            "old1",
+            "old2",
+        ], "the canonical read did not return the moved rows"
+        assert memory._read_project_scopes() == (CANONICAL,), (
+            "the scope did not collapse after the rekey"
+        )

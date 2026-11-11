@@ -2259,7 +2259,7 @@ class TestTheDetectedProjectIdIsValidated:
         monkeypatch.setattr(
             PACTMemory,
             "_detect_project_identity_with_legacy",
-            staticmethod(lambda: memory_api._DetectedIdentity(value, source, None, None)),
+            staticmethod(lambda: memory_api._DetectedIdentity(value, source, None, None, None)),
         )
         return PACTMemory(
             project_id=None,
@@ -3217,7 +3217,7 @@ class TestUpdatePayloadProjectIdGuard:
         monkeypatch.setattr(
             PACTMemory,
             "_detect_project_identity_with_legacy",
-            staticmethod(lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)),
+            staticmethod(lambda: memory_api._DetectedIdentity(None, "unresolved", None, None, None)),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None, (
@@ -3871,7 +3871,7 @@ class TestConstructorValidatesSuppliedIdentifiers:
         """The guard sits INSIDE the truthy branch, and this is its boundary."""
         monkeypatch.setattr(
             PACTMemory, "_detect_project_identity_with_legacy",
-            staticmethod(lambda: memory_api._DetectedIdentity("detected-proj", "cwd", None, None)),
+            staticmethod(lambda: memory_api._DetectedIdentity("detected-proj", "cwd", None, None, None)),
         )
         monkeypatch.setattr(
             PACTMemory, "_detect_session_id",
@@ -3966,7 +3966,7 @@ class TestGetStatusFoldsAnUnusableDetectedSessionId:
             monkeypatch.setattr(
                 PACTMemory,
                 "_detect_project_identity_with_legacy",
-                staticmethod(lambda: memory_api._DetectedIdentity(project, "CLAUDE_PROJECT_DIR", None, None)),
+                staticmethod(lambda: memory_api._DetectedIdentity(project, "CLAUDE_PROJECT_DIR", None, None, None)),
             )
         return PACTMemory(
             project_id=None if project is not None else "P",
@@ -4099,7 +4099,7 @@ class TestTheStatusCountersBindTheRawProjectScope:
         monkeypatch.setattr(
             PACTMemory,
             "_detect_project_identity_with_legacy",
-            staticmethod(lambda: memory_api._DetectedIdentity(project, "cwd", None, None)),
+            staticmethod(lambda: memory_api._DetectedIdentity(project, "cwd", None, None, None)),
         )
         memory = PACTMemory(
             project_id=None, session_id="s", db_path=db_path
@@ -4133,7 +4133,7 @@ class TestTheStatusEnvelopeCarriesTheDbPathRaw:
             monkeypatch.setattr(
                 PACTMemory,
                 "_detect_project_identity_with_legacy",
-                staticmethod(lambda: memory_api._DetectedIdentity(detected, "cwd", None, None)),
+                staticmethod(lambda: memory_api._DetectedIdentity(detected, "cwd", None, None, None)),
             )
             return PACTMemory(
                 project_id=None,
@@ -4188,6 +4188,13 @@ class TestTheSaveDisclosureStaysRawOnTheInstance:
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_root",
             lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        # The patched root is NOT a repository here, so the resolver takes its
+        # designed basename branch and the raw spelling flows through. A
+        # DECLINE path yields None instead (S2-bk: no folder pseudo-id).
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir",
+            lambda *args, **kwargs: None,
         )
         memory = PACTMemory(
             project_id="P", session_id="s", db_path=tmp_path / "raw.db"

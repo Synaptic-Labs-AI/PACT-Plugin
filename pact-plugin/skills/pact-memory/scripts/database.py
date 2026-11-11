@@ -1334,9 +1334,9 @@ def rekey_project(
     CONFLICTING path keeps the target row: its memory links and its file
     relations are re-pointed with `INSERT OR IGNORE` (the relation PK is
     `(source_file, target_file, relationship)`, so a duplicate edge collapses)
-    and the old row is then deleted. `residue_files` counts rows that could
-    not be retired; it is 0 unless a reference outside this operation's
-    knowledge remains.
+    and the old row is then deleted. `relations_repointed` counts the row's
+    own incident edges before and after the move, so a SELF-relation is one
+    edge, not the two INSERT rowcounts it produces.
 
     VECTORS. A vec0 partition key cannot be UPDATEd in place, so each moved
     memory's row is read, deleted and re-inserted under the target with the
@@ -1374,7 +1374,6 @@ def rekey_project(
         "relations_repointed": 0,
         "vectors_moved": 0,
         "vectors_pending": 0,
-        "residue_files": 0,
         "null_project_rows": 0,
     }
 
@@ -1442,41 +1441,58 @@ def rekey_project(
                 "DELETE FROM memory_files WHERE file_id = ?", (old_id,)
             )
 
-            outgoing = conn.execute(
+            # COUNT THE EDGES THE ROW ACTUALLY HAD, not the two INSERT
+            # rowcounts. A SELF-RELATION is why: the outgoing statement
+            # inserts `target -> old`, and the incoming scan then sees that
+            # new row and inserts `target -> target`, so summing both
+            # rowcounts reports 2 for one edge. Measuring the row's own
+            # incident edges before and after is the true count and still
+            # keeps the resulting edge set (a self-relation becomes a
+            # self-loop on the target).
+            relations_before = conn.execute(
+                "SELECT COUNT(*) FROM file_relations "
+                "WHERE source_file = ? OR target_file = ?",
+                (old_id, old_id),
+            ).fetchone()[0]
+
+            conn.execute(
                 "INSERT OR IGNORE INTO file_relations "
                 "(source_file, target_file, relationship) "
                 "SELECT ?, target_file, relationship FROM file_relations "
                 "WHERE source_file = ?",
                 (target_id, old_id),
             )
-            counters["relations_repointed"] += outgoing.rowcount
             conn.execute(
                 "DELETE FROM file_relations WHERE source_file = ?", (old_id,)
             )
 
-            incoming = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO file_relations "
                 "(source_file, target_file, relationship) "
                 "SELECT source_file, ?, relationship FROM file_relations "
                 "WHERE target_file = ?",
                 (target_id, old_id),
             )
-            counters["relations_repointed"] += incoming.rowcount
             conn.execute(
                 "DELETE FROM file_relations WHERE target_file = ?", (old_id,)
             )
 
-            still_referenced = conn.execute(
-                "SELECT 1 FROM memory_files WHERE file_id = ? "
-                "UNION ALL "
-                "SELECT 1 FROM file_relations WHERE source_file = ? "
-                "OR target_file = ? LIMIT 1",
-                (old_id, old_id, old_id),
-            ).fetchone()
-            if still_referenced:
-                counters["residue_files"] += 1
-            else:
-                conn.execute("DELETE FROM files WHERE id = ?", (old_id,))
+            relations_after = conn.execute(
+                "SELECT COUNT(*) FROM file_relations "
+                "WHERE source_file = ? OR target_file = ?",
+                (old_id, old_id),
+            ).fetchone()[0]
+            counters["relations_repointed"] += relations_before - relations_after
+
+            # Every reference to the old row was re-pointed and deleted
+            # above, so the row is retired unconditionally. A
+            # `residue_files` counter used to sit here; it could never be
+            # non-zero because `files.id` is referenced only by
+            # `memory_files.file_id` and the two `file_relations` endpoints,
+            # all of which this block clears. A counter that is structurally
+            # always 0 reads as evidence it is not, so it is REMOVED rather
+            # than reported.
+            conn.execute("DELETE FROM files WHERE id = ?", (old_id,))
 
         # Vectors: delete+insert with the SAME blob, inside this transaction.
         # THE TABLE MAY NOT EXIST when the extension or its init failed; a
@@ -1584,6 +1600,15 @@ def create_memory(
     Returns:
         The ID of the created memory.
     """
+    # R2 IS THE SHARED WRITE-INGRESS RULE AND INCLUDES THE 255 CAP. A
+    # payload-supplied project id reaches the TEXT binding below, so the cap
+    # is applied HERE, before any store work. Only a supplied VALUE is
+    # validated: an absent id keeps its existing meaning (the NULL bucket)
+    # for callers that fill it in upstream.
+    supplied_project = memory.get("project_id")
+    if supplied_project is not None:
+        validate_identifier_for_write(supplied_project)
+
     ensure_initialized(conn)
 
     # Generate ID if not provided
@@ -1883,6 +1908,16 @@ def update_memory(
             unknown keys. Validation happens BEFORE any DB write, so a
             rejected update leaves the row unchanged.
     """
+    # SAME R2 INGRESS AS create_memory, FOR THE SAME REASON: a supplied
+    # project id replaces the stored TEXT and must obey the 255 cap and the
+    # control/surrogate rule. An explicit None keeps its de-key meaning at
+    # THIS layer; the API layer refuses it upstream (#1719), so a library
+    # caller that reaches here with None has asked for a change the layer
+    # below is allowed to make.
+    supplied_project = updates.get("project_id")
+    if supplied_project is not None:
+        validate_identifier_for_write(supplied_project)
+
     ensure_initialized(conn)
 
     # Check if memory exists

@@ -4419,7 +4419,7 @@ class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: _DetectedIdentity(value, "cwd", None, None)
+                lambda: _DetectedIdentity(value, "cwd", None, None, None)
             ),
         )
 
@@ -4491,7 +4491,7 @@ class TestTheSyncAndStatusEnvelopesCarryDisplayUnsafeIdsRaw:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: _DetectedIdentity(detected, "cwd", None, None)
+                lambda: _DetectedIdentity(detected, "cwd", None, None, None)
             ),
         )
 
@@ -4557,6 +4557,13 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_root",
             lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        # The patched root is NOT a repository here, so the resolver takes its
+        # designed basename branch and the raw spelling flows through. A
+        # DECLINE path yields None instead (S2-bk: no folder pseudo-id).
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir",
+            lambda *args, **kwargs: None,
         )
         with patch("scripts.memory_api._ensure_ready"), patch(
             "scripts.memory_api.sync_to_claude_md"
@@ -4638,7 +4645,7 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: _DetectedIdentity(None, "unresolved", None, None)
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         with pytest.raises(SystemExit) as exit_info:
@@ -5137,7 +5144,7 @@ class TestThePrefixCallSiteIsScopedAndRefusesWithoutIdentity:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: _DetectedIdentity(None, "unresolved", None, None)
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         memory = PACTMemory(db_path=cli_db)
@@ -5230,7 +5237,7 @@ class TestTheUnresolvedPrefixRefusalHasItsOwnEnvelope:
             PACTMemory,
             "_detect_project_identity_with_legacy",
             staticmethod(
-                lambda: _DetectedIdentity(None, "unresolved", None, None)
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
             ),
         )
         capfd.readouterr()

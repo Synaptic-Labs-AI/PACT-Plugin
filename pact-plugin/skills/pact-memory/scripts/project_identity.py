@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -457,16 +458,32 @@ def read_override(common_dir: Path) -> OverrideRead:
     would let a repository redirect the memory scope of whoever checks it
     out.
 
-    THE COMMON-DIR PLACEMENT IS NARROWER, NOT UNREACHABLE. An archive that
-    ships a `.git/` directory can carry this file, exactly as it can already
-    carry `.git/config`. The trust requirement is the one `.git/config`
-    already has: an untrusted checkout can influence the identity this
-    process binds, and the impact is confined to the caller's own rows.
-    Never claim the file cannot travel.
+    THE COMMON-DIR PLACEMENT IS NARROWER, NOT UNREACHABLE, AND THE INFLUENCE
+    IS NOT CONFINED TO THIS PROJECT. An archive that ships a `.git/`
+    directory can carry this file, exactly as it can already carry
+    `.git/config`. What it can name is ANY bucket in the same user's store:
+    another project's canonical id, another project's legacy basename, or
+    this project's own. A plain `.git` FILE in a checkout can likewise carry
+    `gitdir:` and point at any repository, binding that repository's id with
+    no override file at all. The trust requirement is therefore the one
+    `.git` already has — an untrusted checkout can choose which bucket this
+    process reads and writes, across the whole store. Never claim the file
+    cannot travel, and never claim the impact is confined to the caller's
+    own rows.
 
     Never raises; every failure is a fixed reason token.
     """
     path = Path(common_dir) / _OVERRIDE_FILENAME
+    try:
+        # lstat, NOT open(), BEFORE the read: a FIFO in this position would
+        # block forever and hang every memory operation that resolves an
+        # identity. Refuse anything that is not a regular file.
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return OverrideRead(None, path, "not_regular")
+    except FileNotFoundError:
+        return OverrideRead(None, None, None)
+    except OSError:
+        return OverrideRead(None, path, "unreadable")
     try:
         with path.open("rb") as handle:
             # BOUNDED READ: one byte past the cap is enough to classify the
@@ -535,7 +552,11 @@ def detect_id_for_root(
     not an established repository — a non-git marker or an umbrella folder —
     and the designed behaviour is the folder basename.
 
-    For an established repository:
+    For an established repository the order is:
+    - a USABLE override at `<common_dir>/pact-project-id` -> that value. The
+      override FOLLOWS THE IDENTITY ROOT: reading it at the process's
+      repository instead would let a cwd pin retarget a declared session and
+      would silently ignore a pin in the repository that actually won;
     - the origin is PRESENT and canonicalises -> the canonical id;
     - the origin is PRESENT and cannot be represented -> DECLINE;
     - the origin is ABSENT (none configured, `file://`, a local path) ->
@@ -544,9 +565,8 @@ def detect_id_for_root(
       DECLINE. This is the #1699 rule: a broken repository must not fall back
       to a folder name, because that files it in a silently different bucket.
 
-    The repository override is NOT read here: the process-level override is
-    rung 0 and owns it, and reading it twice would let two reads disagree.
-    Never raises.
+    An UNUSABLE override is carried in `override_ignored` and resolution
+    CONTINUES: a bad file must not disable memory. Never raises.
     """
     if root is None:
         return RootIdentity(None, None, "declined", None)
@@ -554,15 +574,27 @@ def detect_id_for_root(
     if common_dir is None:
         return RootIdentity(name, "basename", "basename", None)
 
+    override = read_override(common_dir)
+    override_ignored = None
+    if override.value is not None:
+        return RootIdentity(
+            override.value,
+            "canonical" if is_canonical(override.value) else "basename",
+            "override file",
+            None,
+        )
+    if override.reason is not None and override.path is not None:
+        override_ignored = {"path": str(override.path), "reason": override.reason}
+
     origin = read_origin(root)
     if origin.state == ORIGIN_UNAVAILABLE:
-        return RootIdentity(None, None, "declined", None)
+        return RootIdentity(None, None, "declined", override_ignored)
     if origin.state == ORIGIN_ABSENT:
-        return RootIdentity(name, "basename", "basename", None)
+        return RootIdentity(name, "basename", "basename", override_ignored)
 
     outcome, identifier = classify_remote_origin(origin.value)
     if outcome == OUTCOME_CANONICAL:
-        return RootIdentity(identifier, "canonical", "origin remote", None)
+        return RootIdentity(identifier, "canonical", "origin remote", override_ignored)
     if outcome == OUTCOME_DECLINE:
-        return RootIdentity(None, None, "declined", None)
-    return RootIdentity(name, "basename", "basename", None)
+        return RootIdentity(None, None, "declined", override_ignored)
+    return RootIdentity(name, "basename", "basename", override_ignored)
