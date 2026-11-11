@@ -455,6 +455,7 @@ class TestCapturePathContainment:
         result = _run(str(repo), capture, repo)
 
         assert result.returncode == _REFUSED
+        assert "capture path must be outside the declared tree" in result.stderr
         assert not (repo / "capture.txt").exists()
 
     def test_in_tree_symlink_to_outside_capture_proceeds(self, tmp_path):
