@@ -611,6 +611,10 @@ class TestRemovability:
             Path("pact-plugin") / "tests" / "test_ci_collection_scope.py",
             Path("pact-plugin") / "tests" / "test_memory_init.py",
             Path("pact-plugin") / "tests" / "ci_contract.py",
+            # The converted modules import this fixture at module scope, so a
+            # rig that collects them without it fails collection instead of
+            # exercising the arm.
+            Path("pact-plugin") / "tests" / "fixtures" / "tracked_files.py",
         ):
             target = rig / relative
             target.parent.mkdir(parents=True, exist_ok=True)
