@@ -362,7 +362,7 @@ def _is_network_shaped(url: object) -> bool:
     # A leading BOM is a present network remote that cannot be represented.
     # Strip it for CLASSIFICATION only: the canonicaliser still refuses the
     # value, so this decides decline-versus-basename, never acceptance.
-    value = _strip_one_terminator(url).lstrip("﻿")
+    value = _strip_one_terminator(url).lstrip("\ufeff")
     if "\\" in value or value.count("@") > 1:
         return "://" in value or _SCP_FORM_RE.match(value) is not None
     scheme_match = _SCHEME_PREFIX_RE.match(value)
