@@ -13,6 +13,12 @@ a tracked repository when that repository has no entry anywhere under the
 directory, so such a directory also takes the filesystem fallback. Do not
 narrow the test to the work-tree top: a tracked subdirectory must keep its
 index answer.
+
+The boundary's cost is a PARTIAL overlap: an enclosing repository that tracks a
+strict subset under the copy (a dotfiles repo pinning one plugin file) makes
+ls-files non-empty, so the population IS that subset — a wrong answer rather
+than a refusal. The known-member control and the consumers' expected-count
+oracles are what catch it downstream.
 """
 
 import os
@@ -133,11 +139,11 @@ def _filesystem_population(repo_root, root, pattern):
     return files
 
 
-def _tracked_population(repo_root, root, relative, pathspec, pattern,
+def _tracked_population(repo_root, root, relative, pattern,
                         keep_deleted):
     """The git-index population, or the gitless export fallback."""
-    result = _git(repo_root, "ls-files", "-z", "--",
-                  _pathspec(relative, pattern))
+    pathspec = _pathspec(relative, pattern)
+    result = _git(repo_root, "ls-files", "-z", "--", pathspec)
     if result is not None and result.returncode == 0:
         files = [
             root / PurePosixPath(entry).relative_to(relative)
@@ -190,7 +196,7 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
     if not repo_root.is_dir():
         raise AssertionError(f"repository root is not a directory: {repo_root}")
     files, source = _tracked_population(
-        repo_root, repo_root / Path(relative), relative, pathspec, pattern,
+        repo_root, repo_root / Path(relative), relative, pattern,
         keep_deleted)
     if not files and not allow_empty:
         raise AssertionError(f"empty tracked population for {pathspec!r} from {source}")
