@@ -762,6 +762,18 @@ class TestReviewB3EmptyScope:
                 "file_paths": 0,
             }, "an empty graph scope returned the store"
             assert get_graph_stats(conn, None)["memories"] == 1
+            # THE CLASS GUARD for exact `graph_stats` literals elsewhere: the
+            # zeroed and populated envelopes must expose the SAME key set. A
+            # key added to one branch only leaves an exact-literal assertion
+            # in another file stale (the `file_paths` CI break), and this arm
+            # reddens the moment that drift returns.
+            assert set(get_graph_stats(conn, [])) == set(
+                get_graph_stats(conn, None)
+            ), (
+                "the zero-scope graph_stats envelope dropped a key the "
+                "populated envelope carries; exact-literal pins elsewhere "
+                "will drift"
+            )
 
 
 class TestReviewB4FoldedCandidate:

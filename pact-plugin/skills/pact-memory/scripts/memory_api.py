@@ -28,7 +28,7 @@ import struct
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 # Use the same sqlite3 module as database.py for type consistency
 try:
@@ -62,12 +62,18 @@ from .graph import (
 )
 from .models import MemoryObject, memory_from_db_row
 from .project_identity import (
-    RootIdentity,
     detect_id_for_root,
     is_canonical,
     read_override,
     read_user_setting,
 )
+if TYPE_CHECKING:
+    # ANNOTATION-ONLY. `RootIdentity` appears solely in the string
+    # annotations of `_disclosed_source` and `_warn_override_ignored`, which
+    # an AST usage walk cannot see; the repo's import-hygiene sweep has an
+    # explicit carve-out for this block, so this is the intended shape rather
+    # than a noqa.
+    from .project_identity import RootIdentity
 from .search import (
     graph_enhanced_search,
     search_by_file,

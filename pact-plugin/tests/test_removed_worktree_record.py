@@ -1619,6 +1619,7 @@ class TestIssueCriterionALiteralShape:
         assert status["memory_count"] == 0
         assert status["graph_stats"] == {
             "files": 0,
+            "file_paths": 0,
             "memories": 0,
             "memory_file_links": 0,
             "file_relations": 0,
