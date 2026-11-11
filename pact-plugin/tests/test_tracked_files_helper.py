@@ -75,6 +75,29 @@ def test_relative_root_below_a_checkout_still_refuses(tmp_path, monkeypatch):
         tracked_files(Path("."), ".", "*.md")
 
 
+def test_broken_git_dir_with_git_present_refuses(tmp_path):
+    """git spawns but cannot answer for a broken .git directory: the marker
+    still gates the fallback, so the population refuses rather than widening
+    to untracked files."""
+    root = tmp_path / "broken"
+    (root / "agents").mkdir(parents=True)
+    (root / "agents" / "a.md").write_text("x\n", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="refusing the filesystem fallback"):
+        tracked_files(root, "agents", "*.md")
+
+
+def test_unreadable_index_refuses_to_widen(tmp_path):
+    """rev-parse succeeds but ls-files errors on a corrupt index: the
+    population is refused, never widened to the filesystem."""
+    root = _repo(tmp_path / "repo")
+    (root / "untracked.md").write_text("u\n", encoding="utf-8")
+    (root / ".git" / "index").write_bytes(b"\x00corrupt")
+    with pytest.raises(AssertionError, match="Refusing to widen"):
+        tracked_files(root, ".", "*.md")
+
+
 def test_copy_inside_an_unrelated_repository_uses_the_fallback(tmp_path):
     """The supported install shape: a checkout-free copy with no .git inside a
     dotfiles-style repo. git ls-files succeeds against the OUTER index and
