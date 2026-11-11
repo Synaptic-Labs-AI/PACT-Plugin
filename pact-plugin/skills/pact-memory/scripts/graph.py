@@ -72,35 +72,22 @@ def _scope_sql(
 def track_file(
     conn: sqlite3.Connection,
     path: str,
-    project_id: Optional[str] = None,
-    scope: Optional[Union[str, Sequence[str]]] = None
+    project_id: Optional[str] = None
 ) -> str:
     """
     Track a file in the graph, creating a node if it doesn't exist.
 
-    SCOPE IS THE UNION GET-OR-CREATE, AND IT EXISTS TO STOP A SECOND ROW PER
-    PATH. `files` is keyed `UNIQUE(path, project_id)`, so a save whose read
-    scope is `(canonical, legacy)` would otherwise create a canonical row
-    while the legacy row for the same path survives — one path, two rows, a
-    duplicated graph, and a future rekey colliding on the unique pair. With
-    `scope` given, the lookup resolves ACROSS it: it prefers the row whose
-    `project_id` is `project_id` (the canonical write binding), falls back to
-    any other scoped row, and creates under `project_id` only when NO scoped
-    row exists for the path. The adopted row keeps its own stored project —
-    a file row's project_id is whatever bucket wrote it.
-
-    `scope=None` is the SINGLE-SCOPE form: an exact `(path, project_id)`
-    get-or-create, unchanged. `_cascade_rekey` uses `track_file_single_scope`
-    below because there it is deliberately creating the target row.
-
-    An EMPTY scope cannot own a file row, so it raises rather than creating
-    a row no scoped read could ever reach.
+    SINGLE-SCOPE BY RULING — do NOT make this union-aware. A canonical
+    memory links a canonical FILE ROW; a path may hold one row per scope
+    (`UNIQUE(path, project_id)`), and the rekey merges them. Resolving across
+    the read union here would adopt a legacy-owned row and create a
+    cross-scope link (canonical memory -> legacy file row), which the
+    ownership rule forbids.
 
     Args:
         conn: Active database connection.
         path: File path (absolute or relative).
-        project_id: Project identifier; the row created when none exists.
-        scope: Optional read scope to resolve across. None = exact lookup.
+        project_id: Optional project identifier for scoping.
 
     Returns:
         The file ID (existing or newly created).
@@ -110,35 +97,15 @@ def track_file(
     # Normalize path
     normalized_path = _normalize_path(path)
 
-    scopes = normalise_project_scopes(scope) if scope is not None else None
-    if scopes is not None and not scopes:
-        raise ValueError(
-            "track_file: an empty scope cannot own a file row; "
-            "nothing was written."
-        )
-
-    def _find() -> Optional[Any]:
-        if scopes is None:
-            return conn.execute(
-                """
-                SELECT id FROM files
-                WHERE path = ?
-                  AND (project_id = ? OR (project_id IS NULL AND ? IS NULL))
-                """,
-                (normalized_path, project_id, project_id)
-            ).fetchone()
-        predicate, scope_params = project_scope_predicate("project_id", scopes)
-        return conn.execute(
-            f"""
-            SELECT id FROM files
-            WHERE path = ? AND {predicate}
-            ORDER BY CASE WHEN project_id = ? THEN 0 ELSE 1 END, id
-            LIMIT 1
-            """,
-            (normalized_path, *scope_params, project_id)
-        ).fetchone()
-
-    row = _find()
+    # Check if file already exists
+    cursor = conn.execute(
+        """
+        SELECT id FROM files
+        WHERE path = ? AND (project_id = ? OR (project_id IS NULL AND ? IS NULL))
+        """,
+        (normalized_path, project_id, project_id)
+    )
+    row = cursor.fetchone()
 
     if row:
         # Update last_modified timestamp
@@ -180,11 +147,16 @@ def track_file(
 
     # LOST THE RACE: another writer created (path, project_id) between our
     # SELECT and this INSERT. Read the winner on THIS connection, which sees
-    # the committed row, using the SAME lookup that missed — scoped when a
-    # scope was given. A conflict that leaves no row to adopt would mean an
+    # the committed row. A conflict that leaves no row to adopt would mean an
     # ignored constraint other than the one this branch is for, so it raises
     # rather than returning an id that was never stored.
-    row = _find()
+    row = conn.execute(
+        """
+        SELECT id FROM files
+        WHERE path = ? AND (project_id = ? OR (project_id IS NULL AND ? IS NULL))
+        """,
+        (normalized_path, project_id, project_id)
+    ).fetchone()
     if row is None:
         raise RuntimeError(
             f"track_file: INSERT was ignored but no row exists for "
@@ -195,20 +167,6 @@ def track_file(
         f"(ID: {row['id']})"
     )
     return row["id"]
-
-
-def track_file_single_scope(
-    conn: sqlite3.Connection,
-    path: str,
-    project_id: Optional[str] = None
-) -> str:
-    """The single-scope get-or-create, for `_cascade_rekey`.
-
-    Deliberately separate from the union form: the cascade is CREATING the
-    re-key target row, so resolving across a scope would adopt the old row
-    and silently skip the move it exists to perform.
-    """
-    return track_file(conn, path, project_id)
 
 
 def get_file_ids(
