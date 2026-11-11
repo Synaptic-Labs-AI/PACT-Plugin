@@ -538,5 +538,5 @@ class TestCanaryTreeAttributionContract:
         text = self._text()
         assert "`GATE-PYTEST-EXIT`** is `0` and is the last stamp" in text
         assert "after all three after-run stamps" in text
-        assert "A green pytest run whose tree moved returns 1" in text
+        assert "A green pytest run whose tree moved returns 6" in text
         assert "detached clean worktree at the named SHA" in text

@@ -497,6 +497,37 @@ def _assert_full_workflow_contract(root):
         "the unrestricted run"
     )
 
+    # The dispatch value is one argv element, so it is case-guarded before
+    # anything expensive runs. A guard that can be skipped or silenced
+    # certifies nothing, and one with its own env/shell view would check a
+    # different DIST than the test step sees.
+    guard_runs = [run for run in runs if "DIST GUARD" in run]
+    assert len(guard_runs) == 1, (
+        f"expected exactly one DIST guard run step; found {guard_runs!r}")
+    guard = next(step for step in steps
+                 if isinstance(step.get("run"), str)
+                 and "DIST GUARD" in step["run"])
+    for key in ("if", "continue-on-error", "env", "shell"):
+        assert key not in guard, (
+            f"the DIST guard carries `{key}:` ({guard[key]!r}); it must run "
+            "unconditionally in the default shell with the job-level DIST"
+        )
+    assert "loadfile|load)" in guard_runs[0], guard_runs[0]
+    assert "$DIST" in guard_runs[0], guard_runs[0]
+    assert not re.search(r"\bpytest\b", guard_runs[0]), (
+        "the DIST guard's run text names pytest; test_ci_collection_scope "
+        "permits exactly one pytest invocation in this file"
+    )
+    guard_position = runs.index(guard_runs[0])
+    verify_positions = [
+        index for index, run in enumerate(runs)
+        if run == ci_contract.VERIFY_CMD
+    ]
+    assert verify_positions and guard_position < verify_positions[0], (
+        "the DIST guard must run before the before-tests environment check, "
+        "so an out-of-enum value refuses before setup work"
+    )
+
     lint_lines = [
         line.strip() for run in runs for line in run.splitlines()
         if line.strip().startswith("ruff check")

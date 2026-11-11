@@ -33,6 +33,10 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "verify-gate-tree.sh"
 
 _REFUSED = 2
+# A green-but-unattributable run has its own code, distinct from the usage
+# error and the red-pytest exit 1, and above pytest's own 0-5 range so no
+# preserved pytest status can collide with it.
+_UNATTRIBUTABLE = 6
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -324,7 +328,7 @@ class TestAfterRunTreeAttribution:
 
         result, capture = _run_with_mutation(repo, tmp_path, mutate)
 
-        assert result.returncode == 1, result.stderr
+        assert result.returncode == _UNATTRIBUTABLE, result.stderr
         stamps = _stamps(capture)
         assert stamps["GATE-PYTEST-EXIT"] == "0"
         assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
@@ -343,7 +347,7 @@ class TestAfterRunTreeAttribution:
 
         result, capture = _run_with_mutation(repo, tmp_path, swap_paths)
 
-        assert result.returncode == 1
+        assert result.returncode == _UNATTRIBUTABLE
         stamps = _stamps(capture)
         assert stamps["GATE-DIRTY-PATHS"] == "1"
         assert stamps["GATE-DIRTY-PATHS-AFTER"] == "1"
@@ -372,7 +376,7 @@ class TestAfterRunTreeAttribution:
 
         result, capture = _run_with_mutation(repo, tmp_path, create_untracked)
 
-        assert result.returncode == 1, result.stderr
+        assert result.returncode == _UNATTRIBUTABLE, result.stderr
         stamps = _stamps(capture)
         assert stamps["GATE-PYTEST-EXIT"] == "0"
         assert stamps["GATE-DIRTY-PATHS-AFTER"] == "1"
@@ -387,7 +391,7 @@ class TestAfterRunTreeAttribution:
 
         result, capture = _run_with_mutation(repo, tmp_path, corrupt_index)
 
-        assert result.returncode == 1, result.stderr
+        assert result.returncode == _UNATTRIBUTABLE, result.stderr
         stamps = _stamps(capture)
         assert stamps["GATE-PYTEST-EXIT"] == "0"
         assert stamps["GATE-TREE-ATTRIBUTION"] == "unattributable"
@@ -470,8 +474,8 @@ class TestTempFileAllocationFailureIsARefusal:
     """A `mktemp` failure happens before pytest and writes no capture.
 
     The canary states that a refusal exits 2; the temporary-file arms used to
-    print `GATE REFUSED` and exit 1, which is also the code for a red pytest
-    and for a green-but-unattributable run. The exit code is the contract.
+    print `GATE REFUSED` and exit 1, which is also the code for a red pytest.
+    The exit code is the contract.
     """
 
     def test_unwritable_tempdir_refuses_with_exit_2_and_no_capture(self, tmp_path):
@@ -567,6 +571,27 @@ class TestWrongTreeIsRefused:
 
         assert result.returncode == _REFUSED, result.stdout
         assert not capture.exists()
+
+    def test_a_tree_with_no_commit_is_refused_with_a_named_message(
+            self, tmp_path):
+        """An unborn branch names no commit, so there is nothing to stamp.
+
+        Without the refusal the run proceeded, stamped an empty `GATE-HEAD`,
+        and reported a full green run as unattributable after the fact — a
+        late, confusing stand-in for a plain "this tree has no commit".
+        """
+        repo = tmp_path / "unborn"
+        repo.mkdir()
+        _git(repo, "init", "--quiet")
+        _git(repo, "config", "user.email", "arm@example.invalid")
+        _git(repo, "config", "user.name", "arm")
+        capture = tmp_path / "capture.txt"
+
+        result = _run(str(repo), capture, repo)
+
+        assert result.returncode == _REFUSED, result.stderr
+        assert "no commit at HEAD" in result.stderr, result.stderr
+        assert not capture.exists(), "a refusal must not leave a capture behind"
 
 
 class TestUsage:

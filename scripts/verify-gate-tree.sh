@@ -14,7 +14,7 @@
 #      so a later reader can tell what was measured without a re-run.
 #   3. READS HEAD and the complete porcelain state again after pytest, and marks
 #      the run stable only when both are unchanged. A green run whose tree moved
-#      is unattributable and returns 1; a red pytest status is preserved.
+#      is unattributable and returns 6; a red pytest status is preserved.
 #
 #   The STAMP is the load-bearing part. The REFUSAL is the enhancement. If the
 #   two are ever in tension, keep the stamp.
@@ -37,9 +37,12 @@
 # EXIT CODES
 #   0    pytest passed and the tree stayed stable
 #   2    refused before pytest started, including a temporary-file allocation
-#        failure; a refusal writes no capture
-#   1    a usage error, pytest exited 1 (test failures), or pytest was green
-#        but the tree became unattributable
+#        failure and a tree whose HEAD names no commit; a refusal writes no
+#        capture
+#   6    pytest was green but the tree became unattributable. 6 sits above
+#        pytest's own 0-5 exit range, so it can never be a preserved pytest
+#        status
+#   1    a usage error, or the pytest exit code (test failures)
 #   any other nonzero pytest status is preserved verbatim
 
 set -u
@@ -133,7 +136,15 @@ case "$capture_real" in
         ;;
 esac
 
-head_sha="$(git -C "$actual_real" rev-parse HEAD)"
+# An unborn branch names no commit: rev-parse fails (or echoes a literal
+# `HEAD`), and a stamp without a commit certifies nothing. Refuse here,
+# before any snapshot work, rather than exit unattributable after a full run.
+if ! head_sha="$(git -C "$actual_real" rev-parse HEAD 2>/dev/null)" \
+        || [ -z "$head_sha" ] || [ "$head_sha" = "HEAD" ]; then
+    printf 'GATE REFUSED: the tree has no commit at HEAD, so there is nothing to certify.\n' >&2
+    printf '  Commit (or check out a commit) in %s, or call pytest directly.\n' "$actual_real" >&2
+    exit 2
+fi
 porcelain_before="$(mktemp)" || {
     printf 'GATE REFUSED: cannot allocate the before-run porcelain capture.\n' >&2
     exit 2
@@ -204,6 +215,6 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 if [ "$attribution" != "stable" ]; then
-    exit 1
+    exit 6
 fi
 exit 0

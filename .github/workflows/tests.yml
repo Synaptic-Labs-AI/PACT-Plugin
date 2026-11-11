@@ -312,6 +312,26 @@ jobs:
           test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
           echo "CERTIFIED-MERGE-GROUP-HEAD $GITHUB_SHA"
 
+      # THE DIST VALUE IS AN ARGV ELEMENT, SO IT IS CASE-GUARDED BEFORE
+      # ANYTHING EXPENSIVE RUNS. The dispatch UI and the artifact-name
+      # expression both constrain `dist`, but a dispatch through the REST API
+      # is not provably enum-checked server-side, and the job-level DIST key
+      # would hand such a value to pytest as one argv word — failing only
+      # after minutes of setup, with argparse's message instead of a named
+      # refusal. This step refuses early and by name. The value is never
+      # echoed: an untrusted string does not go into the log either.
+      # No `env:` or `shell:` keys: the job-level DIST key is the same value
+      # the test step sees, in the default shell every other plain step uses.
+      - name: Guard the diagnostic distribution value
+        run: |
+          case "$DIST" in
+            loadfile|load) ;;
+            *)
+              printf '%s\n' "DIST GUARD: DIST must be loadfile or load; refusing before setup." >&2
+              exit 1
+              ;;
+          esac
+
       # HuggingFace model cache. THE ONE PATH THE IN-TEST REMEDIES CANNOT REACH.
       #
       # The suite's child processes now pin the model cache and refuse network
@@ -547,6 +567,13 @@ jobs:
       # self-describing. The name expression admits ONLY those two values, so
       # a dispatch value outside the enum cannot reach a filename either; the
       # shell sink is closed separately by the job-level `DIST` key.
+      # THE EMPTY-EVIDENCE CANCELLATION IS DELIBERATE: a run cancelled before
+      # the collection step (during checkout or the model warm) has written
+      # none of the three files, and this step then ERRS by
+      # `if-no-files-found: error` — reddening an already-cancelled job. That
+      # red is the loud "no evidence exists" signal, not an upload defect:
+      # softening it would turn a genuinely missing evidence set into a
+      # green-looking empty upload.
       # A HARD TIMEOUT IS THIS STEP'S LIMIT, in two parts, and neither is
       # remedied here: pytest writes the JUnit file and the run record at
       # session finish, so a kill at the 50-minute cap leaves only the
