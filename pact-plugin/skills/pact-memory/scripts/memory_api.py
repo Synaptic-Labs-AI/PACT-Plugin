@@ -807,7 +807,8 @@ class PACTMemory:
             logger.warning(
                 "the repository at %s (declared via %s) has a remote that "
                 "cannot be represented as a project id, so no id was derived. "
-                "Write an explicit id to %s.",
+                "Run `pact-memory project-id show` to inspect the detected "
+                "identity, or write an operator-chosen canonical id to %s.",
                 declared_main_root,
                 source,
                 declared_common_dir / "pact-project-id",
@@ -855,9 +856,16 @@ class PACTMemory:
                 logger.warning(
                     "the recorded main checkout %s for the directory declared "
                     "via %s has a remote that cannot be represented as a "
-                    "project id; no id was derived.",
+                    "project id; no id was derived. Run `pact-memory "
+                    "project-id show` to inspect the detected identity, or "
+                    "write an operator-chosen canonical id to %s.",
                     recorded_root,
                     source,
+                    (
+                        recorded_common_dir / "pact-project-id"
+                        if recorded_common_dir is not None
+                        else "<git-common-dir>/pact-project-id"
+                    ),
                 )
                 return None, "worktree identity record", legacy_name
             logger.warning(
@@ -880,8 +888,9 @@ class PACTMemory:
             return identity.project_id, source, legacy_name
         logger.warning(
             "the repository at %s (declared via %s) has a remote that cannot "
-            "be represented as a project id, so no id was derived. Write an "
-            "explicit id to %s.",
+            "be represented as a project id, so no id was derived. Run "
+            "`pact-memory project-id show` to inspect the detected identity, "
+            "or write an operator-chosen canonical id to %s.",
             live_root,
             source,
             declared_common_dir / "pact-project-id" if declared_common_dir is not None
@@ -1108,8 +1117,9 @@ class PACTMemory:
                 # change exists to remove.
                 logger.warning(
                     "the repository at %s has an origin remote that cannot be "
-                    "represented as a project id, so no id was derived. Write "
-                    "an explicit id to %s.",
+                    "represented as a project id, so no id was derived. Run "
+                    "`pact-memory project-id show` to inspect the detected "
+                    "identity, or write an operator-chosen canonical id to %s.",
                     repo_root,
                     cwd_common_dir / "pact-project-id",
                 )
@@ -1739,8 +1749,9 @@ class PACTMemory:
             "rather than filed under an unknown project. Nothing was written. "
             f"{cause}{override_note}"
             "Run from inside the project directory, set CLAUDE_PROJECT_DIR "
-            "to an existing project root, or write an explicit id to "
-            "<git-common-dir>/pact-project-id."
+            "to an existing project root, or write an operator-chosen "
+            "canonical id to <git-common-dir>/pact-project-id. Run "
+            "`pact-memory project-id show` to inspect the detected identity."
         )
 
     @_with_store_scope
