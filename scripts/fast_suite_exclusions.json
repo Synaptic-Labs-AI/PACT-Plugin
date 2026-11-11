@@ -51,7 +51,7 @@
       "extra_reads": []
     },
     "tests/fixtures/tracked_files.py": {
-      "sha256": "ce1e393fa9da880ad59fe890920f98d00d2fdce513d39b9964d0374e6d03ee70",
+      "sha256": "b24094735d16b8ddedaffd3031f30904c898fdbfb8f1944734f526cc606105df",
       "reason": "All flagged sites operate on the caller's repository directory: subprocess.run executes git with an argv list and no shell; os.path.lexists and the os.path.abspath calls are path arithmetic, and the '.git' literal is the checkout marker the fallback refuses on; every .is_file/.rglob/.glob/.is_dir receiver is a path the caller supplied. Path.resolve and .is_relative_to are containment checks on that caller root: a scan start point or an enumerated file that resolves outside it is refused, while an in-root symlink still enumerates. The two directory scans are the documented gitless-export fallback, which refuses when a .git entry exists at or above the root and also serves a checkout-free copy nested in a repository that tracks nothing under it (git rev-parse --show-toplevel plus a whole-root ls-files query, both argv lists with no shell). It reads no fixed path, so extra_reads is empty.",
       "extra_reads": []
     },
