@@ -18,12 +18,13 @@ The sync-help arm lives beside its existing pin in
 
 import json
 import shlex
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from scripts import project_identity
+from scripts import memory_api, project_identity
 from scripts.cli import _project_candidates, main
 from scripts.database import db_connection, ensure_initialized
 from scripts.memory_api import PACTMemory, _DetectedIdentity
@@ -409,4 +410,72 @@ class TestDeclaredRungDisclosesAnOperatorPin:
         assert detected.project_id == "operator/pinned-id"
         assert detected.source == "override file", (
             f"the declaration label leaked instead of the pin: {detected.source!r}"
+        )
+
+
+class TestCwdRungDisclosesAnOperatorPin:
+    """A pin that decides the CWD rung must disclose as `override file`.
+
+    The declared-rung arm above binds the disclosure at one of the two sites
+    the review named; this one binds the OTHER. Without it, reverting the
+    cwd-rung call to the literal `"cwd"` leaves the suite green — the
+    unbound-helper class that failed the earlier cycle.
+    """
+
+    def test_a_cwd_repo_pinned_by_override_reports_override_file(
+        self, tmp_path, monkeypatch
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        # A REAL repository with a REAL override file, per the lead's ruling:
+        # the arm's value is that a reviewer can read why the cwd rung won.
+        subprocess.run(
+            ["git", "init", "-q", "."],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        common = repo / ".git"
+        (common / "pact-project-id").write_text(
+            "operator/cwd-pinned\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(repo)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        # NEUTRALISE THE HIGHER RUNGS so the cwd walk is the one that answers:
+        # no session record and no user-scope setting. The PROCESS-repo
+        # (Strategy 0) lookup must also fail, because a real repo at the
+        # process cwd would otherwise read this pin FIRST and the cwd rung
+        # would be unreachable by construction. Only the no-start call is
+        # neutralised; the explicit cwd-root lookup below runs git for real.
+        monkeypatch.setattr(
+            "scripts.memory_api.get_project_dir_from_session_record", lambda: ""
+        )
+        monkeypatch.setattr(
+            "scripts.memory_api.read_user_setting", lambda *a, **k: None
+        )
+
+        real_common_dir = memory_api.main_repo_common_dir
+
+        def _process_repo_must_not_answer(start=None):
+            return None if start is None else real_common_dir(start)
+
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir",
+            _process_repo_must_not_answer,
+        )
+
+        # POSITIVE PROOF OF THE RUNG: (a) the walk lands on this repo, and
+        # (b) the explicit cwd-root lookup resolves the REAL `.git`, so the
+        # source assertion cannot be satisfied by a higher rung or by a
+        # mocked common dir.
+        assert PACTMemory._find_project_root(Path.cwd()) == repo.resolve()
+        assert memory_api.main_repo_common_dir(str(repo)) == common.resolve()
+
+        detected = PACTMemory._detect_project_identity_with_legacy()
+
+        assert detected.project_id == "operator/cwd-pinned"
+        assert detected.source == "override file", (
+            f"the cwd label leaked instead of the pin: {detected.source!r}"
         )

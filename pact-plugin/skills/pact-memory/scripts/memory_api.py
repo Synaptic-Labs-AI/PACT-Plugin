@@ -1037,12 +1037,15 @@ class PACTMemory:
             identity = detect_id_for_root(repo_root, cwd_common_dir)
             PACTMemory._warn_override_ignored(identity)
             if identity.project_id is not None:
-                if identity.source == "override file":
-                    source = "override file"
-                elif identity.id_shape == "canonical":
-                    source = "origin remote"
-                else:
-                    source = "git root"
+                # THE DISCLOSURE DECISION LIVES IN ONE PLACE. This rung used
+                # to hand-roll the same "a pin decided it, so say so" test as
+                # `_disclosed_source`, which is the shape that let a fifth
+                # render surface survive a review cycle while its four
+                # siblings stayed green.
+                source = _disclosed_source(
+                    identity,
+                    "origin remote" if identity.id_shape == "canonical" else "git root",
+                )
                 logger.debug(
                     "project_id detected from git root (%s): %s",
                     source,
