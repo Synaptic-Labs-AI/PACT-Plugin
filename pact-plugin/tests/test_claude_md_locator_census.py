@@ -77,8 +77,11 @@ import collections
 import functools
 import pathlib
 import re
+import subprocess
 
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 PLUGIN = pathlib.Path(__file__).resolve().parent.parent
 FINDER = "hooks/shared/claude_md_markers.py"
@@ -557,9 +560,12 @@ def census_sources(sources, exempt=NAMED_EXEMPT):
 
 
 def _shipped_sources():
+    """The shipped Python, from the git index: a working-tree walk reads an
+    untracked scratch file as shipped. bin has no tracked Python, so its
+    population is empty on purpose."""
     out = {}
     for top in TOPS:
-        for f in sorted((PLUGIN / top).rglob("*.py")):
+        for f in _tracked_glob(PLUGIN / top, "**/*.py", allow_empty=True):
             rel = f.relative_to(PLUGIN).as_posix()
             if "/tests/" in "/" + rel or f.name.startswith("test_") or rel == FINDER:
                 continue
@@ -602,11 +608,48 @@ def test_the_scan_reads_the_shipped_tree_and_skips_the_finder():
     assert not any(rel == FINDER for rel, *_ in shipped_census())
 
 
+def _shipped_shell_scripts(plugin):
+    """Tracked .sh files under the plugin, excluding tests/.
+
+    A working-tree walk reads an untracked scratch script as shipped.
+    """
+    return [path for path in _tracked_glob(plugin, "**/*.sh", allow_empty=True)
+            if "tests" not in path.relative_to(plugin).parts]
+
+
 def test_shipped_shell_scripts_carry_no_marker_literal():
     sources = {f.relative_to(PLUGIN).as_posix(): f.read_text(encoding="utf-8", errors="replace")
-               for f in sorted(PLUGIN.rglob("*.sh")) if "tests" not in f.relative_to(PLUGIN).parts}
+               for f in sorted(_shipped_shell_scripts(PLUGIN))}
     assert sources, "no shipped shell script found; the scan is not reading the tree"
     assert not shell_marker_lines(sources)
+
+
+def test_an_untracked_shell_needle_is_not_a_shipped_site(tmp_path):
+    """An untracked scratch script must not join the marker scan.
+
+    Positive control: the tracked script IS in the population, so an empty
+    population cannot pass this arm.
+    """
+    root = tmp_path / "plugin"
+    (root / "scripts").mkdir(parents=True)
+    tracked = root / "scripts" / "shipped.sh"
+    tracked.write_text("#!/bin/sh\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "scripts" / "zzprobe.sh"
+    needle.write_text("<!-- PACT_MANAGED -->\n", encoding="utf-8")
+
+    population = _shipped_shell_scripts(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the shipped population: {needle}")
+    sources = {path.relative_to(root).as_posix():
+               path.read_text(encoding="utf-8", errors="replace")
+               for path in population}
+    assert not shell_marker_lines(sources), (
+        "an untracked needle was scanned as a shipped site")
 
 
 # --- whole-text parsing -------------------------------------------------------------
@@ -1127,4 +1170,3 @@ def test_finder_routed_calls_writers_and_unrelated_searches_are_not_sites(body):
 def test_a_marker_literal_in_a_shell_script_is_caught():
     assert shell_marker_lines({"x.sh": "grep -n '<!-- SESSION_START -->' CLAUDE.md\necho ok\n"}) == \
         collections.Counter({("x.sh", "grep -n '<!-- SESSION_START -->' CLAUDE.md"): 1})
-

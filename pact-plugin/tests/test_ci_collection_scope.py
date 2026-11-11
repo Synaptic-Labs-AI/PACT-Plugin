@@ -1574,6 +1574,55 @@ class TestClosedByDefaultReach:
         assert manifest.reach_reviews, "no reviews: the check read nothing"
         assert not idle, f"reviews that clear no exclusion: {idle}"
 
+    def test_a_review_covers_only_the_bytes_it_hashed(self, tmp_path):
+        """A genuinely new unproven site still turns its exclusion broad.
+
+        The reviews are safe only because `current_reviews` hashes the bytes:
+        a review whose module changed is ignored, so the module is unproven
+        again. This arm pins both halves — the hash binding, and that the
+        confinement rules still FLAG a new unproven site rather than having
+        been swallowed by the review.
+        """
+        _, core, manifest, index = _shipped_manifest()
+        plugin = index.plugin_root
+        module = "tests/test_claude_md_locator_census.py"
+
+        # 1. A new unproven site is still flagged by the rules.
+        source = (plugin / module).read_text(encoding="utf-8")
+        original = tmp_path / "original" / module
+        mutated = tmp_path / "mutated" / module
+        for path, text in (
+                (original, source),
+                (mutated, source + "\n\ndef test_zz_new_unproven_site():\n"
+                                   "    subprocess.run(['true'])\n")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        before = set(core._scan_file(
+            original, index.plugin_root, index.roots,
+            index.is_tracked_dir).unproven)
+        after = set(core._scan_file(
+            mutated, index.plugin_root, index.roots,
+            index.is_tracked_dir).unproven)
+        new_sites = sorted(after - before)
+        assert any("subprocess.run" in site for site in new_sites), new_sites
+
+        # 2. That same review entry no longer matches those bytes, so the
+        # exclusion is broad instead of reachable as `scanned_tree`.
+        stale = dataclasses.replace(
+            manifest,
+            reach_reviews=tuple(
+                (key, "0" * 64 if key == module else sha, reason, extra)
+                for key, sha, reason, extra in manifest.reach_reviews))
+        reviewed_stale, reads_stale = core.current_reviews(plugin, stale)
+        assert module not in reviewed_stale, "a stale hash still reviewed the module"
+        facts = core.ChangeFacts(
+            views={}, value_inert=frozenset(), conftest_verdicts={},
+            conftest_imported=frozenset(),
+            reviewed=frozenset(reviewed_stale),
+            review_reads=reads_stale)
+        assert core.broad_reasons(index.view(module), facts), (
+            "an unreviewed unproven module did not turn the exclusion broad")
+
     PINNED_ISOLATION = (
         "_isolate_config_root_to_tmp", "_scrub_claude_project_dir_env",
         "_scrub_claude_code_remote_env", "_scrub_claude_plugin_root_env",

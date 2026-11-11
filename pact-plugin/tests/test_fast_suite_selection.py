@@ -1248,6 +1248,43 @@ class TestScanIndex:
                           '        list((PLUGIN / top).rglob("*.py"))\n')
         assert scan.scanner_roots == frozenset({"hooks", "skills"})
 
+    def test_a_tracked_glob_receiver_keeps_the_loop_literals(
+            self, core, tmp_path):
+        """The tracked-enumeration call shape: its first argument is the
+        receiver, so a census passing PLUGIN / top keeps per-top roots."""
+        (tmp_path / "pact-plugin" / "hooks").mkdir(parents=True)
+        (tmp_path / "pact-plugin" / "skills").mkdir(parents=True)
+        scan = self._scan(core, tmp_path, "tests/test_f.py",
+                          'from pathlib import Path\n'
+                          'PLUGIN = Path(__file__).parents[1]\n'
+                          'TOPS = ("hooks", "skills")\n'
+                          'def test_x():\n'
+                          '    for top in TOPS:\n'
+                          '        list(_tracked_glob(PLUGIN / top, "**/*.py",\n'
+                          '                           allow_empty=True))\n')
+        assert scan.scanner_roots == frozenset({"hooks", "skills"})
+
+    def test_an_unrelated_loop_adds_no_roots(self, core, tmp_path):
+        """Over-expansion arm: a non-literal loop and a name reused outside
+        the loop neither widen nor invent roots for the tracked scan."""
+        (tmp_path / "pact-plugin" / "hooks").mkdir(parents=True)
+        (tmp_path / "pact-plugin" / "skills").mkdir(parents=True)
+        narrowed = ('from pathlib import Path\n'
+                    'PLUGIN = Path(__file__).parents[1]\n'
+                    'TOPS = ("hooks", "skills")\n'
+                    'def test_x():\n'
+                    '    for top in TOPS:\n'
+                    '        list(_tracked_glob(PLUGIN / top, "**/*.py"))\n')
+        control = self._scan(core, tmp_path, "tests/test_g.py", narrowed)
+        unrelated = self._scan(core, tmp_path, "tests/test_h.py", narrowed
+                               + 'def g(rows):\n'
+                               '    for row in rows:\n'
+                               '        print(row)\n'
+                               '    top = rows[0]\n'
+                               '    print(top)\n')
+        assert control.scanner_roots == frozenset({"hooks", "skills"})
+        assert unrelated.scanner_roots == control.scanner_roots
+
     def test_a_tmp_path_scan_is_not_a_scanner(self, core, tmp_path):
         scan = self._scan(core, tmp_path, "tests/test_e.py",
                           'def test_x(tmp_path):\n'

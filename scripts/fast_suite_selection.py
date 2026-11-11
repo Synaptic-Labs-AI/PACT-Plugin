@@ -969,8 +969,19 @@ def _uses_file(node: ast.AST) -> bool:
                for inner in ast.walk(node))
 
 
+# The shared tracked-enumeration fixture scans the directory it is given, but
+# module-local wrappers are named freely (`_tracked_glob`, `_tracked_files`,
+# `_tracked_agent_files`, ...), so a closed name list cannot recognise them.
+# The convention is the contract: `tracked_*` / `_tracked_*`.
+_TRACKED_SCAN_NAME = re.compile(r"^_?tracked_[a-z0-9_]+$")
+
+
+def _is_scan_name(name: str) -> bool:
+    return name in _SCAN_CALLS or bool(_TRACKED_SCAN_NAME.match(name))
+
+
 def _is_scan_call(node: ast.AST) -> bool:
-    return isinstance(node, ast.Call) and _call_name(node) in _SCAN_CALLS
+    return isinstance(node, ast.Call) and _is_scan_name(_call_name(node))
 
 
 def _anchor_of(node: ast.AST,
@@ -2712,7 +2723,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         if not isinstance(node, ast.Call):
             continue
         call = _call_name(node)
-        if call in _SCAN_CALLS:
+        if _is_scan_name(call):
             scans = True
         if call in _PATH_CALLS:
             for argument in node.args:
