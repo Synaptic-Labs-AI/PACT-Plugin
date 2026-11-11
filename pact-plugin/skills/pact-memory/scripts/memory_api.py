@@ -150,6 +150,17 @@ _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 _EXCLUSION_WARNED: set = set()
 
 
+def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
+    """The source token to disclose when a declared rung won.
+
+    When an operator pin decided the value, the disclosure must say
+    `override file`, not the declaration label: a reader who sees
+    `CLAUDE_PROJECT_DIR` believes the environment chose the id, and the
+    whole point of the pin is that a human chose it.
+    """
+    return "override file" if identity.source == "override file" else rung_label
+
+
 def render_rekey_command(project_id: str) -> str:
     """The literal, SHELL-QUOTED rekey command for one bucket id.
 
@@ -834,7 +845,7 @@ class PACTMemory:
                 )
                 return (
                     identity.project_id,
-                    source,
+                    _disclosed_source(identity, source),
                     legacy_name,
                     declared_main_root,
                     identity.override_ignored,
@@ -844,7 +855,7 @@ class PACTMemory:
                 "cannot be represented as a project id, so no id was derived. "
                 "Run `pact-memory project-id show` to inspect the detected "
                 "identity, or write an operator-chosen canonical id to %s.",
-                declared_main_root,
+                str(declared_main_root),
                 source,
                 declared_common_dir / "pact-project-id",
             )
@@ -890,7 +901,7 @@ class PACTMemory:
                     )
                     return (
                         identity.project_id,
-                        "worktree identity record",
+                        _disclosed_source(identity, "worktree identity record"),
                         legacy_name,
                         recorded_root,
                         identity.override_ignored,
@@ -901,7 +912,7 @@ class PACTMemory:
                     "project id; no id was derived. Run `pact-memory "
                     "project-id show` to inspect the detected identity, or "
                     "write an operator-chosen canonical id to %s.",
-                    recorded_root,
+                    str(recorded_root),
                     source,
                     (
                         recorded_common_dir / "pact-project-id"
@@ -936,7 +947,7 @@ class PACTMemory:
             )
             return (
                 identity.project_id,
-                source,
+                _disclosed_source(identity, source),
                 legacy_name,
                 live_root,
                 identity.override_ignored,
@@ -946,7 +957,7 @@ class PACTMemory:
             "be represented as a project id, so no id was derived. Run "
             "`pact-memory project-id show` to inspect the detected identity, "
             "or write an operator-chosen canonical id to %s.",
-            live_root,
+            str(live_root),
             source,
             declared_common_dir / "pact-project-id"
             if declared_common_dir is not None
@@ -1048,7 +1059,7 @@ class PACTMemory:
                     "represented as a project id, so no id was derived. Run "
                     "`pact-memory project-id show` to inspect the detected "
                     "identity, or write an operator-chosen canonical id to %s.",
-                    repo_root,
+                    str(repo_root),
                     cwd_common_dir / "pact-project-id",
                 )
                 return _DetectedIdentity(
@@ -1110,7 +1121,7 @@ class PACTMemory:
                     )
                     return _DetectedIdentity(
                         identity.project_id,
-                        "cwd",
+                        _disclosed_source(identity, "cwd"),
                         legacy_name,
                         identity.override_ignored,
                         cwd_root,
@@ -1118,7 +1129,7 @@ class PACTMemory:
                 logger.warning(
                     "the repository at %r has an origin remote that cannot be "
                     "represented as a project id, so no id was derived.",
-                    cwd_root,
+                    str(cwd_root),
                 )
                 return _DetectedIdentity(
                     None, "unresolved", legacy_name, identity.override_ignored, cwd_root
@@ -3302,12 +3313,11 @@ class PACTMemory:
                 {
                     "id": bucket_id,
                     "memory_count": count,
-                    # SHELL-QUOTED: a bucket id is STORE-INFLUENCED and this string is
-                    # presented as a runnable command, so an unquoted id is a
-                    # copy-paste command-injection surface.
-                    "rekey": shlex.join(
-                        ["pact-memory", "project-id", "rekey", "--from", bucket_id]
-                    ),
+                    # SHELL-QUOTED THROUGH THE SHARED HELPER. This surface
+                    # was the fifth renderer and the one that made "one
+                    # helper" false: a mutation of the helper left it green
+                    # because it hand-rolled the join.
+                    "rekey": render_rekey_command(bucket_id),
                 }
                 for bucket_id, count in sorted(
                     project_bucket_counts(conn).items(),

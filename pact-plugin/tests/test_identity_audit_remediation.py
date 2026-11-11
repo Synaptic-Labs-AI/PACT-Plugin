@@ -240,3 +240,173 @@ class TestSuppliedIdentityDoesNotWiden:
         memory = PACTMemory(project_id="supplied.example.com/me/x", db_path=store)
         assert memory._read_project_scopes() == ("supplied.example.com/me/x",)
         assert memory._legacy_scope_state is None
+
+
+class TestEveryRenderSurfaceUsesTheHelper:
+    """STRUCTURAL PIN: a sentinel in, the sentinel out, on EVERY surface.
+
+    A hostile-id round-trip per surface cannot catch a future bypass: four
+    spellings of a correct string all pass. Replacing the helper with a
+    sentinel can, because a surface that hand-rolls the join renders the real
+    command and the assertion reddens.
+    """
+
+    def test_a_sentinel_reaches_every_render_surface(
+        self, tmp_path, monkeypatch, caplog, capfd
+    ):
+        import logging
+
+        from scripts import cli as cli_module
+        from scripts import memory_api as memory_api_module
+
+        sentinel = "SENTINEL-REKEY-COMMAND"
+        monkeypatch.setattr(
+            memory_api_module, "render_rekey_command", lambda _id: sentinel
+        )
+        # `cli` imported the name into its own namespace, so the CLI surfaces
+        # need their reference patched too.
+        monkeypatch.setattr(
+            cli_module, "render_rekey_command", lambda _id: sentinel
+        )
+
+        hostile = "Legacy; echo PWNED"
+        store = tmp_path / "surfaces.db"
+        _make_store(store)
+        _seed(store, hostile, "d" * 32, path=str(tmp_path / "elsewhere" / "f.py"))
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(
+                    "host/owner/repo", "canonical", hostile, None, tmp_path / "repo"
+                )
+            ),
+        )
+
+        def _run(argv):
+            with pytest.raises(SystemExit) as excinfo:
+                main(argv)
+            captured = capfd.readouterr()
+            text = captured.out.strip() or captured.err.strip()
+            return excinfo.value.code, json.loads(text)
+
+        memory_api_module._EXCLUSION_WARNED.clear()
+        memory = PACTMemory(session_id="s", db_path=store)
+
+        # SITE 3 — the exclusion warning (memory_api.py's state render).
+        with caplog.at_level(logging.WARNING):
+            memory._read_project_scopes()
+        assert sentinel in caplog.text, (
+            "the exclusion warning bypassed the shared render helper"
+        )
+
+        # SITE 1 — the candidate list, driven through BOTH commands that
+        # render it rather than by calling the helper's consumer directly.
+        # A regression that hand-rolls the list inside `show` or inside
+        # `rekey --candidates` would pass a direct `_project_candidates()`
+        # assertion and reddens here.
+        code, payload = _run(["project-id", "show", "--db-path", str(store)])
+        assert code == 0
+        assert [entry["rekey"] for entry in payload["result"]["candidates"]] == [
+            sentinel
+        ], "the show surface bypassed the shared render helper"
+        code, payload = _run(
+            ["project-id", "rekey", "--candidates", "--db-path", str(store)]
+        )
+        assert code == 0
+        assert [entry["rekey"] for entry in payload["result"]["candidates"]] == [
+            sentinel
+        ], "the rekey --candidates surface bypassed the shared render helper"
+
+        # SITE 4 — the save envelope.
+        with patch("scripts.memory_api._ensure_ready"):
+            memory.save({"context": "surface"}, sync_to_claude=False)
+        legacy = memory.last_project_scope["legacy_scope"]
+        assert legacy["rekey"] == sentinel, (
+            "the save envelope bypassed the shared render helper"
+        )
+
+        # SITE 2 — the status envelope.
+        with patch("scripts.memory_api._ensure_ready"):
+            status = memory.get_status()
+        rekeys = [entry["rekey"] for entry in status["project_candidates"]]
+        assert rekeys and all(rekey == sentinel for rekey in rekeys), (
+            f"the status envelope bypassed the shared render helper: {rekeys!r}"
+        )
+
+        # SITE 5 — the CLI examples, a separate render call in build_parser.
+        assert sentinel in cli_module.build_parser().format_help(), (
+            "the CLI examples bypassed the shared render helper"
+        )
+
+    def test_the_save_envelope_quotes_a_hostile_bucket_id(
+        self, tmp_path, monkeypatch
+    ):
+        """The RENDERING arm beside the sentinel's MECHANISM arm.
+
+        The sentinel above proves every surface calls the helper; it is
+        identity under quoting, so it cannot catch the helper itself losing
+        the quotes. This arm seeds a hostile bucket id and requires the save
+        envelope's command to survive `shlex.split` as ONE `--from`
+        argument.
+        """
+        hostile = "Legacy; echo PWNED"
+        store = tmp_path / "hostile-save.db"
+        _make_store(store)
+        _seed(store, hostile, "e" * 32, path="relative/linked.py")
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(
+                    "host/owner/repo", "canonical", hostile, None, tmp_path / "repo"
+                )
+            ),
+        )
+
+        with patch("scripts.memory_api._ensure_ready"):
+            memory = PACTMemory(session_id="s", db_path=store)
+            memory.save({"context": "hostile envelope"}, sync_to_claude=False)
+
+        legacy = memory.last_project_scope["legacy_scope"]
+        assert legacy["candidate"] == hostile
+        argv = shlex.split(legacy["rekey"])
+        assert argv[:4] == ["pact-memory", "project-id", "rekey", "--from"], argv
+        assert argv[4] == hostile, (
+            f"the save envelope did not quote the bucket id as ONE argument: {argv!r}"
+        )
+        assert f"--from {hostile}" not in legacy["rekey"], (
+            "the save envelope rendered the store-influenced id unquoted"
+        )
+
+
+class TestDeclaredRungDisclosesAnOperatorPin:
+    """A pin that decides a DECLARED rung must disclose as `override file`.
+
+    Reporting the declaration label tells a reader the environment chose the
+    id, when in fact a human did.
+    """
+
+    def test_a_declared_repo_pinned_by_override_reports_override_file(
+        self, tmp_path, monkeypatch
+    ):
+        repo = tmp_path / "repo"
+        common = repo / ".git"
+        common.mkdir(parents=True)
+        (common / "pact-project-id").write_text(
+            "operator/pinned-id\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir", lambda *a, **k: common
+        )
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_root", lambda *a, **k: repo
+        )
+
+        detected = PACTMemory._detect_project_identity_with_legacy()
+
+        assert detected.project_id == "operator/pinned-id"
+        assert detected.source == "override file", (
+            f"the declaration label leaked instead of the pin: {detected.source!r}"
+        )

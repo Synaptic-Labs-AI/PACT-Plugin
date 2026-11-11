@@ -59,9 +59,11 @@ _DEFAULT_PORTS = {
 # silently treated as a local path.
 _SCHEME_PREFIX_RE = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
 
-# scp-style `[user@]host:path`. The user must be non-empty, as in
-# `backlog.py`. The colon is the PATH SEPARATOR in this form and is never a
-# port, so `git@host:2222/owner/repo` has path `2222/owner/repo`.
+# scp-style `user@host:path`. The user is REQUIRED and non-empty, matching
+# `backlog.py`'s regex; a bare `host:path` is a Windows drive-letter form, not
+# scp, and is deliberately not parsed here. The colon is the PATH SEPARATOR in
+# this form and is never a port, so `git@host:2222/owner/repo` has path
+# `2222/owner/repo`.
 _SCP_FORM_RE = re.compile(r"^[^@\s/:\\]+@(?P<host>[^:/\s\\]+):(?P<path>.+)$")
 
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-")
@@ -114,8 +116,9 @@ class RootIdentity(NamedTuple):
 
     `project_id` is the id to bind, or None when the root DECLINED.
     `id_shape` is "canonical", "basename" or None. `source` is the rung that
-    decided it. `override_ignored` is carried by the caller that owns the
-    override read; this module's root detection leaves it None.
+    decided it. `override_ignored` is a structured {path, reason} when a
+    PRESENT override file was unusable and resolution continued without it;
+    `detect_id_for_root` sets it, and the caller discloses it.
     """
 
     project_id: Optional[str]

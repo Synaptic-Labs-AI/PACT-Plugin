@@ -375,8 +375,9 @@ class TestSourceEquivalence:
         here rather than dropped — the same migration pattern as
         test_main_repo_root_carries_the_git_derivation.
 
-        The helper is `_declared_dir_identity`; `_project_name_for_declared_dir`
-        remains as the two-element façade the outside callers use.
+        The helper is `_declared_dir_identity`; the old
+        `_project_name_for_declared_dir` façade was removed in this batch, so
+        the markers are pinned on the helper that now carries them.
         """
         helper_body = _extract_method_body(_MEMORY_API_PATH, "_declared_dir_identity")
         assert helper_body is not None, "_declared_dir_identity must exist in memory_api.py"
