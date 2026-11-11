@@ -24,7 +24,7 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 # Try to import pysqlite3 which has extension loading enabled.
 # Standard library sqlite3 has enable_load_extension disabled for security.
@@ -1145,6 +1145,167 @@ def validate_identifier_for_write(value: object) -> None:
         )
 
 
+# =============================================================================
+# Union read scope: one normalisation and one predicate for every seam
+# =============================================================================
+
+def normalise_project_scopes(
+    project_ids: Optional[Union[str, Sequence[str]]],
+) -> Optional[Tuple[str, ...]]:
+    """Normalise a union read scope for every seam.
+
+    `None` keeps its whole-store meaning (no filter). A single string is a
+    ONE-ELEMENT scope, not a sequence of characters. An empty sequence — and
+    an empty string, which is the same thing to this rule — normalises to
+    `()`, which every caller MUST treat as NO ROWS, never as unscoped.
+
+    THAT EMPTINESS IS THE TRAP: the seams below used to decide "apply a
+    filter?" with a truthiness test, so a falsy scope silently dropped the
+    predicate and turned a single-project read into a whole-store read. This
+    function is the one place the distinction is made; callers test
+    `is None`, never truthiness.
+
+    Elements that are not non-empty strings are dropped: no row can carry
+    them, and `IN (NULL)` never matches.
+    """
+    if project_ids is None:
+        return None
+    if isinstance(project_ids, str):
+        return (project_ids,) if project_ids else ()
+    return tuple(
+        scope for scope in project_ids
+        if isinstance(scope, str) and scope
+    )
+
+
+def project_scope_predicate(
+    column: str, scopes: Sequence[str]
+) -> Tuple[str, Tuple[str, ...]]:
+    """The SQL predicate for a NON-EMPTY scope, with its bound parameters.
+
+    An empty scope returns `("0", ())` — a predicate that matches no row.
+    Never render `IN ()` (SQLite rejects it) and never drop the clause (that
+    would return the whole store).
+
+    `column` is a SQL identifier chosen by our own code, never caller input;
+    only the values are parameterised.
+    """
+    if not scopes:
+        return "0", ()
+    placeholders = ",".join("?" for _ in scopes)
+    return f"{column} IN ({placeholders})", tuple(scopes)
+
+
+# =============================================================================
+# Store primitives for the identity resolver
+# =============================================================================
+
+def count_project_memories(conn: sqlite3.Connection, project_id: str) -> int:
+    """Count memories stored under one project id.
+
+    One indexed COUNT (`idx_memories_project`), used by the resolver's
+    two-count decision. A NULL-project row is not this project's row and is
+    not counted, exactly as a scoped read excludes it.
+    """
+    ensure_initialized(conn)
+    cursor = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project_id = ?",
+        (project_id,),
+    )
+    return cursor.fetchone()[0]
+
+
+def project_bucket_counts(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Every NON-NULL project id with its memory count, in one query.
+
+    Feeds three callers: the resolver's exact-case candidate lookup against
+    the stored bucket set, the per-bucket disclosure split, and the
+    `project-id show/status` counts.
+
+    NULL is excluded by construction: it is a real bucket in the store but
+    never a project scope, and `IN (NULL)` never matches, so surfacing it as
+    a candidate would produce a filter that silently selects nothing.
+    """
+    ensure_initialized(conn)
+    cursor = conn.execute(
+        "SELECT project_id, COUNT(*) AS n FROM memories "
+        "WHERE project_id IS NOT NULL GROUP BY project_id"
+    )
+    return {row["project_id"]: row["n"] for row in cursor.fetchall()}
+
+
+LEGACY_PLAUSIBLE_VERIFIED = "verified"
+LEGACY_PLAUSIBLE_UNVERIFIED = "unverified"
+LEGACY_PLAUSIBLE_EXCLUDED = "excluded"
+
+
+def legacy_candidate_plausibility(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    repo_root: Optional[Path],
+) -> Tuple[str, Dict[str, int]]:
+    """Whether a legacy basename bucket plausibly belongs to `repo_root`.
+
+    The gate decides whether a populated legacy bucket joins the read scope.
+    Evidence is the bucket's own absolute `files.path` rows: `_normalize_path`
+    stores an absolute path as given, so such a row records where the bucket
+    was actually used. A RELATIVE path carries no location and is not
+    evidence — it is counted but never used to decide.
+
+    Returns `(outcome, detail)` where outcome is one of:
+      - `verified`   — at least one absolute row lies under `repo_root`;
+      - `unverified` — no absolute rows exist at all, so the store cannot
+                       judge; the caller INCLUDES the bucket but must disclose
+                       the inclusion as unverified, never as proved;
+      - `excluded`   — absolute rows exist and none lies under `repo_root`.
+
+    Containment is a LITERAL prefix comparison on the normalised path, with
+    no case folding: folding a path here would pass on a case-insensitive
+    filesystem and fail on a case-sensitive one, and the store's rows are
+    spelled for the machine that wrote them. `normpath` is used because a
+    path carrying `..` must not be counted as inside a root it escapes.
+
+    `repo_root` None cannot refute anything, so it reports `unverified`.
+    """
+    ensure_initialized(conn)
+    cursor = conn.execute(
+        "SELECT path FROM files WHERE project_id = ?",
+        (candidate_id,),
+    )
+    file_rows = 0
+    absolute_rows = 0
+    contained_rows = 0
+    root = None
+    if repo_root is not None:
+        root = os.path.normpath(str(repo_root))
+    for row in cursor.fetchall():
+        file_rows += 1
+        path = row["path"]
+        if not path or not os.path.isabs(path):
+            continue
+        absolute_rows += 1
+        if root is None:
+            continue
+        normalised = os.path.normpath(path)
+        if normalised == root or normalised.startswith(root + os.sep):
+            contained_rows += 1
+
+    detail = {
+        "file_rows": file_rows,
+        "absolute_rows": absolute_rows,
+        "contained_rows": contained_rows,
+    }
+    if root is None or absolute_rows == 0:
+        # Nothing to test against, or no absolute row to test: not proof
+        # either way. A bucket holding ONLY relative paths is the measured
+        # case for this repo's own legacy bucket, and it must never be
+        # reported as verified OR excluded.
+        return LEGACY_PLAUSIBLE_UNVERIFIED, detail
+    if contained_rows > 0:
+        return LEGACY_PLAUSIBLE_VERIFIED, detail
+    return LEGACY_PLAUSIBLE_EXCLUDED, detail
+
+
 def create_memory(
     conn: sqlite3.Connection,
     memory: Dict[str, Any]
@@ -1278,7 +1439,7 @@ def resolve_memory_id_prefix(
     conn: sqlite3.Connection,
     prefix: str,
     *,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     descriptor_chars: int = 60,
 ) -> Optional[str]:
     """
@@ -1303,9 +1464,11 @@ def resolve_memory_id_prefix(
     Args:
         conn: Active database connection.
         prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
-        project_id: Optional project scope. When not None, every query is
-            restricted to rows stored under that project; a NULL-project row
-            is NOT another project's row and is excluded from a scoped read.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. When not None, every query is restricted
+            to rows stored under one of those projects; a NULL-project row is
+            NOT another project's row and is excluded. An empty sequence
+            matches no row (never the whole store).
         descriptor_chars: Length of the context snippet attached to each match
             on ambiguity (for terse disambiguation output). Security-relevant
             knob if multi-tenant access is ever introduced — context may carry
@@ -1337,15 +1500,20 @@ def resolve_memory_id_prefix(
     lo = prefix
     hi = prefix + _PREFIX_UPPER_BOUND_CHAR
 
-    # ONE SCOPE CLAUSE, APPLIED TO EVERY QUERY BELOW. `project_id = ?`
-    # rather than the null-safe `IS` form is deliberate: a scoped caller's
-    # project is a non-empty string (the write guards refuse anything else),
-    # so a NULL-keyed row is not this project's row and must not match.
+    # ONE SCOPE CLAUSE, APPLIED TO EVERY QUERY BELOW. `IN (?,...)` rather than
+    # the null-safe `IS` form is deliberate: a scoped caller's projects are
+    # non-empty strings (the write guards refuse anything else), so a
+    # NULL-keyed row is not any of their rows and must not match.
+    # AN EMPTY SCOPE IS NO ROWS, never unscoped: it resolves as no row at all
+    # rather than dropping the clause and matching the whole store.
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return None
     scope_sql = ""
-    scope_params: tuple = ()
-    if project_id is not None:
-        scope_sql = " AND project_id = ?"
-        scope_params = (project_id,)
+    scope_params: Tuple[str, ...] = ()
+    if scopes is not None:
+        predicate, scope_params = project_scope_predicate("project_id", scopes)
+        scope_sql = " AND " + predicate
 
     # LIMIT 2 short-circuits the common case (unique match): we only need to
     # know whether more than one row matches before issuing a wider query.
@@ -1644,7 +1812,7 @@ def delete_memory(
 
 def list_memories(
     conn: sqlite3.Connection,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     session_id: Optional[str] = None,
     limit: int = 20,
     offset: int = 0
@@ -1652,26 +1820,37 @@ def list_memories(
     """
     List memories with optional filtering.
 
+    THE SCOPE MAY BE A UNION, AND THE LIMIT APPLIES TO THE MERGED RESULT:
+    this is ONE statement, so `LIMIT ? OFFSET ?` selects from the union rather
+    than from each bucket. An empty scope returns no rows, never the store.
+
     Args:
         conn: Active database connection.
-        project_id: Optional project filter.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. `None` means no filter.
         session_id: Optional session filter.
         limit: Maximum number of results (default 20).
         offset: Number of results to skip (default 0).
 
     Returns:
         List of memory dictionaries, ordered by created_at DESC. Two records
-        sharing a created_at come newest-inserted first.
+        sharing a created_at come newest-inserted first; `rowid` is
+        table-global, so that order is deterministic across the union.
     """
     ensure_initialized(conn)
+
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return []
 
     query = "SELECT * FROM memories"
     params: List[Any] = []
     conditions = []
 
-    if project_id is not None:
-        conditions.append("project_id = ?")
-        params.append(project_id)
+    if scopes is not None:
+        predicate, scope_params = project_scope_predicate("project_id", scopes)
+        conditions.append(predicate)
+        params.extend(scope_params)
 
     if session_id is not None:
         conditions.append("session_id = ?")
@@ -1699,7 +1878,7 @@ def list_memories(
 def search_memories_by_text(
     conn: sqlite3.Connection,
     search_term: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[Dict[str, Any]]:
     """
@@ -1709,16 +1888,25 @@ def search_memories_by_text(
     reasoning_chains, agreements_reached, and disagreements_resolved fields.
     For semantic search, use the search module with embeddings.
 
+    THE SCOPE MAY BE A UNION, AND THE LIMIT APPLIES TO THE MERGED RESULT:
+    one statement, so the recency ORDER BY and its LIMIT select from the
+    union, not per bucket. An empty scope returns no rows, never the store.
+
     Args:
         conn: Active database connection.
         search_term: Text to search for.
-        project_id: Optional project filter.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. `None` means no filter.
         limit: Maximum number of results.
 
     Returns:
         List of matching memory dictionaries.
     """
     ensure_initialized(conn)
+
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return []
 
     # Escape SQL LIKE wildcards in the search term so literal % and _ are matched.
     # NOTE: ESCAPE '\\' is SQLite-specific syntax; update if migrating to another DB dialect.
@@ -1739,9 +1927,10 @@ def search_memories_by_text(
     """
     params = [search_pattern] * 7
 
-    if project_id is not None:
-        query += " AND project_id = ?"
-        params.append(project_id)
+    if scopes is not None:
+        predicate, scope_params = project_scope_predicate("project_id", scopes)
+        query += " AND " + predicate
+        params.extend(scope_params)
 
     # SAFE BECAUSE THIS ORDER CARRIES NO RELEVANCE, NOT BECAUSE NOTHING READS
     # IT. Something does: the hybrid scorer's keyword-fallback branch turns a
@@ -1765,28 +1954,38 @@ def search_memories_by_text(
 
 def get_memory_count(
     conn: sqlite3.Connection,
-    project_id: Optional[str] = None
+    project_id: Optional[Union[str, Sequence[str]]] = None
 ) -> int:
     """
     Get the total count of memories.
 
+    THE UNION TOTAL IS EXACT, not an approximation: a memory row carries
+    exactly one `project_id`, so a union of ids counts each row once and the
+    sum equals a single `COUNT(*)` over the same predicate. The per-bucket
+    split for disclosure comes from `project_bucket_counts`.
+
     Args:
         conn: Active database connection.
-        project_id: Optional project filter.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. `None` counts the whole store (including
+            NULL-keyed rows, which no scoped read can see).
 
     Returns:
-        Number of memories matching the criteria.
+        Number of memories matching the criteria. An empty scope is zero.
     """
     ensure_initialized(conn)
 
-    if project_id is not None:
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE project_id = ?",
-            (project_id,)
-        )
-    else:
+    scopes = normalise_project_scopes(project_id)
+    if scopes is None:
         cursor = conn.execute("SELECT COUNT(*) FROM memories")
-
+        return cursor.fetchone()[0]
+    if not scopes:
+        return 0
+    predicate, params = project_scope_predicate("project_id", scopes)
+    cursor = conn.execute(
+        f"SELECT COUNT(*) FROM memories WHERE {predicate}",
+        params,
+    )
     return cursor.fetchone()[0]
 
 
