@@ -134,9 +134,27 @@ Library module init() contract:
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
+
+
+def _tracked_python_files(directory: Path) -> list[Path]:
+    repo_root = directory.parent.parent
+    relative = directory.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
+def _hooks_dir() -> Path:
+    return Path(__file__).parent.parent / "hooks"
+
+
+def _skills_dir() -> Path:
+    return Path(__file__).parent.parent / "skills"
 
 
 class TestGetPactContext:
@@ -1981,10 +1999,10 @@ class TestMigrationCompleteness:
     @pytest.mark.parametrize("env_var", PHANTOM_ENV_VARS, ids=PHANTOM_ENV_VARS)
     def test_no_phantom_env_var_in_hooks(self, env_var):
         """No hook should read phantom env vars at runtime (AST-verified)."""
-        hooks_dir = Path(__file__).parent.parent / "hooks"
+        hooks_dir = _hooks_dir()
         violations = []
 
-        for py_file in sorted(hooks_dir.rglob("*.py")):
+        for py_file in _tracked_python_files(hooks_dir):
             source = py_file.read_text(encoding="utf-8")
             lines = self._find_env_var_references(source, env_var)
             for line in lines:
@@ -1995,16 +2013,74 @@ class TestMigrationCompleteness:
     @pytest.mark.parametrize("env_var", PHANTOM_ENV_VARS, ids=PHANTOM_ENV_VARS)
     def test_no_phantom_env_var_in_skills(self, env_var):
         """No skill script should read phantom env vars at runtime (AST-verified)."""
-        skills_dir = Path(__file__).parent.parent / "skills"
+        skills_dir = _skills_dir()
         violations = []
 
-        for py_file in sorted(skills_dir.rglob("*.py")):
+        for py_file in _tracked_python_files(skills_dir):
             source = py_file.read_text(encoding="utf-8")
             lines = self._find_env_var_references(source, env_var)
             for line in lines:
                 violations.append(f"{py_file.relative_to(skills_dir)}:{line}")
 
         assert violations == [], f"Skill scripts reading {env_var}: {violations}"
+
+    def test_tracked_skill_population_ignores_an_untracked_env_reader(
+            self, tmp_path, monkeypatch):
+        """The needle reads a phantom env var; the old rglob would report it."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        skills = plugin / "skills"
+        known = skills / "known" / "scripts" / "clean.py"
+        known.parent.mkdir(parents=True)
+        known.write_text("VALUE = 1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setitem(globals(), "_skills_dir", lambda: skills)
+
+        assert known in _tracked_python_files(skills)
+        self.test_no_phantom_env_var_in_skills("CLAUDE_CODE_TEAM_NAME")
+
+        stray = skills / "zzprobe" / "scripts" / "zzprobe.py"
+        stray.parent.mkdir(parents=True)
+        stray.write_text(
+            "import os\nVALUE = os.environ.get('CLAUDE_CODE_TEAM_NAME')\n",
+            encoding="utf-8")
+        try:
+            self.test_no_phantom_env_var_in_skills("CLAUDE_CODE_TEAM_NAME")
+            assert stray not in _tracked_python_files(skills)
+        finally:
+            stray.unlink()
+
+    def test_tracked_hook_population_ignores_an_untracked_env_reader(
+            self, tmp_path, monkeypatch):
+        """The needle reads a phantom env var; under the old rglob it is a violation."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        tracked = plugin / "hooks" / "clean.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("VALUE = 1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setitem(globals(), "_hooks_dir", lambda: plugin / "hooks")
+
+        assert tracked in _tracked_python_files(plugin / "hooks")
+        self.test_no_phantom_env_var_in_hooks("CLAUDE_CODE_TEAM_NAME")
+
+        stray = plugin / "hooks" / "zzprobe.py"
+        stray.write_text(
+            "import os\nVALUE = os.environ.get('CLAUDE_CODE_TEAM_NAME')\n",
+            encoding="utf-8")
+        try:
+            self.test_no_phantom_env_var_in_hooks("CLAUDE_CODE_TEAM_NAME")
+            assert stray not in _tracked_python_files(plugin / "hooks")
+        finally:
+            stray.unlink()
 
 
 class TestInitBeforeReaderOrdering:

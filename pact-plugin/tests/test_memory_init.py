@@ -26,6 +26,7 @@ import pytest
 import yaml
 
 import ci_contract
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 
 class TestEnsureMemoryReady:
@@ -561,21 +562,34 @@ class TestDependencyDriftIsDetectable:
 
     @staticmethod
     def _workflow_files(root):
-        """Every `.yml`/`.yaml` under `.github/workflows/`."""
+        """Every TRACKED `.yml`/`.yaml` under `.github/workflows/`.
+
+        The placement oracle claims to judge the shipped workflows. A
+        working-tree walk lets an untracked workflow enter the judged
+        population and redden a green checkout; the tracked member is the
+        positive control that the index walk still reaches the tree.
+        """
         workflows = root / ".github" / "workflows"
         if not workflows.is_dir():
             return []
-        return sorted(p for p in workflows.iterdir()
-                      if p.is_file() and p.suffix in (".yml", ".yaml"))
+        return [p for p in _tracked_files(
+                    root, ".github/workflows",
+                    known_member=".github/workflows/tests.yml")
+                if p.suffix in (".yml", ".yaml")]
 
     @staticmethod
     def _action_files(root):
-        """Every `action.yml`/`action.yaml` under `.github/actions/`."""
+        """Every TRACKED `action.yml`/`action.yaml` under `.github/actions/`.
+
+        An absent or wholly untracked actions directory is a legitimate empty
+        population, so this walk allows it; an untracked action must not enter
+        the allowlist oracle.
+        """
         actions = root / ".github" / "actions"
         if not actions.is_dir():
             return []
-        return sorted(p for p in actions.rglob("*")
-                      if p.is_file() and p.name in ("action.yml", "action.yaml"))
+        return [p for p in _tracked_files(root, ".github/actions", allow_empty=True)
+                if p.name in ("action.yml", "action.yaml")]
 
     @staticmethod
     def _verify_script(root=None):
@@ -1056,6 +1070,52 @@ class TestDependencyDriftIsDetectable:
             f"action.yml and what it runs), then add `owner/repo[/path]` to "
             f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change."
         )
+
+    def test_control_untracked_ci_surfaces_stay_out_of_the_judged_population(self):
+        """Untracked CI surfaces must not enter the placement or allowlist oracles.
+
+        The workflow probe carries a pytest step outside the verify bracket and
+        the action probe an unvetted `uses:`, so a reverted working-tree walk
+        reddens HERE with each probe named rather than passing quietly. The
+        tracked-member assertion is the positive control.
+        """
+        root = self._require_root("the tracked CI surface")
+        workflow_probe = root / ".github" / "workflows" / "zzprobe1714.yml"
+        actions_root = root / ".github" / "actions"
+        created_actions_root = not actions_root.exists()
+        action_dir = actions_root / "zzprobe1714"
+        action_probe = action_dir / "action.yml"
+        workflow_probe.write_text(
+            "name: zzprobe1714\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  zzprobe:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Run tests\n"
+            "        run: python -m pytest -q\n",
+            encoding="utf-8")
+        action_dir.mkdir(parents=True, exist_ok=True)
+        action_probe.write_text(
+            "name: zzprobe1714\n"
+            "runs:\n"
+            "  using: composite\n"
+            "  steps:\n"
+            "    - uses: evil/repo@v1\n",
+            encoding="utf-8")
+        try:
+            assert root / ".github" / "workflows" / "tests.yml" in \
+                self._workflow_files(root)
+            assert workflow_probe not in self._workflow_files(root)
+            assert action_probe not in self._action_files(root)
+            self.test_ci_environment_is_verified_around_every_test_run()
+            self.test_every_third_party_action_is_allowlisted()
+        finally:
+            workflow_probe.unlink()
+            action_probe.unlink()
+            action_dir.rmdir()
+            if created_actions_root:
+                actions_root.rmdir()
 
     def _repo_copy_carrying(self, tmp_path, workflow_text=None,
                             script_text=None, extra_files=None):

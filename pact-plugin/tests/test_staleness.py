@@ -17,6 +17,7 @@ import ast
 import inspect
 import os
 import re
+import subprocess
 import tempfile
 import textwrap
 from datetime import datetime, timedelta
@@ -24,6 +25,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 # THE ONE SPELLING OF THE WARNING MARKER, imported rather than repeated. Every
 # assertion and fixture below is built from this, so a rename in the source
@@ -2669,11 +2674,16 @@ class TestRestoreHasOneOwnerPerTwin:
         A guard whose target list is written by hand passes green for anything
         it forgot to name, which is the failure this walk exists to avoid.
         """
-        plugin_root = Path(__file__).parent.parent
+        plugin_root = PLUGIN_ROOT
         sites = {}
         scanned = 0
         for root in self._SEARCH_ROOTS:
-            for path in sorted((plugin_root / root).rglob("*.py")):
+            # The index, not the working tree: an untracked scratch module
+            # must not become a second owner of the restore.
+            for path in _shared_tracked_files(
+                    plugin_root.parent, f"{plugin_root.name}/{root}"):
+                if path.suffix != ".py":
+                    continue
                 scanned += 1
                 tree = ast.parse(path.read_text(encoding="utf-8"))
                 enclosing = self._calls_with_enclosing_function(
@@ -2706,6 +2716,41 @@ class TestRestoreHasOneOwnerPerTwin:
             f"call-site restore, or state in this commit why this caller must "
             f"own the ending itself"
         )
+
+    def test_untracked_module_cannot_join_the_restore_walk(
+            self, tmp_path, monkeypatch):
+        """The ownership walk reads the index; an untracked module is invisible.
+
+        Reverting ``_sites`` to ``(plugin_root / root).rglob("*.py")`` keeps
+        the shipped tree green; this arm drives the owner assertion and
+        reddens naming the untracked module. The seeded seam file is the
+        positive control: the walk must find at least one restore call.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        hooks = plugin / "hooks"
+        hooks.mkdir(parents=True)
+        seam = hooks / "claude_md_manager.py"
+        seam.write_text(
+            "def _restore_line_ending(text):\n    return text\n\n\n"
+            "def _atomic_write_text(path, text):\n"
+            "    return _restore_line_ending(text)\n", encoding="utf-8")
+        skills = plugin / "skills" / "pact-memory" / "scripts"
+        skills.mkdir(parents=True)
+        (skills / "working_memory.py").write_text(
+            seam.read_text(encoding="utf-8"), encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        sites, scanned = self._sites()
+        assert scanned == 2 and sites, (
+            f"positive control: the seeded seam files are missing: {sites!r}")
+        (hooks / "zzprobe.py").write_text(
+            "def f(text):\n    return _restore_line_ending(text)\n",
+            encoding="utf-8")
+
+        self.test_the_only_owner_of_the_restore_is_the_write_seam()
 
     def test_each_twin_carries_exactly_one_restore(self):
         """ONE owner for each twin, not one owner across the two.

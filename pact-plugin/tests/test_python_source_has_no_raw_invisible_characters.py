@@ -21,10 +21,13 @@ Python source, so a scan rooted in the wrong directory, one that skips a
 directory, or one that finds no files at all, fails instead of passing.
 """
 
+import subprocess
 import unicodedata
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 
 PLUGIN = Path(__file__).resolve().parent.parent
 MUST_SCAN = PLUGIN / "hooks" / "shared" / "claude_md_markers.py"
@@ -38,7 +41,17 @@ def is_invisible(char):
 
 
 def python_files(root):
-    """Each .py file under `root`, sorted. __pycache__ is skipped."""
+    """Each .py file under `root`, sorted. __pycache__ is skipped.
+
+    The shipped root reads the git index so an untracked scratch file cannot
+    join the scan (and __pycache__ never does); a synthetic root keeps its
+    filesystem population, which is how the character fixtures are built.
+    """
+    if root == PLUGIN:
+        return _shared_tracked_glob(
+            root.parent, f"{root.name}/**/*.py",
+            f"{root.name}/hooks/shared/claude_md_markers.py",
+        )
     return [path for path in sorted(root.rglob("*.py")) if "__pycache__" not in path.parts]
 
 
@@ -65,6 +78,36 @@ def test_no_python_file_under_the_plugin_holds_a_raw_invisible_character():
     assert not lines, (
         "Write each of these characters in Python source as an escape, such as \\u2028:\n"
         + "\n".join(f"{path}:{number} {char}" for path, number, char in lines))
+
+
+def test_untracked_python_file_cannot_join_the_shipped_scan(tmp_path, monkeypatch):
+    """The scan reads the index, not the working tree.
+
+    Reverting ``python_files`` to ``root.rglob("*.py")`` keeps the character
+    fixtures green; this arm drives the enclosing assertion and reddens,
+    naming the untracked file. The seeded tracked file in every SOURCE_DIRS
+    directory is the positive control: without it the scan could be empty and
+    both sides would pass.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "plugin"
+    for relative in ("hooks/shared/claude_md_markers.py", "scripts/known.py",
+                     "skills/known/SKILL.py", "telegram/known.py", "tests/known.py"):
+        path = plugin / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "MUST_SCAN", plugin / "hooks" / "shared"
+                        / "claude_md_markers.py")
+
+    assert MUST_SCAN in python_files(PLUGIN), (
+        "positive control: the tracked marker module is missing from the scan")
+    probe = plugin / "scripts" / "zzprobe.py"
+    probe.write_bytes('S = "a\u200bb"\n'.encode("utf-8"))
+
+    test_no_python_file_under_the_plugin_holds_a_raw_invisible_character()
 
 
 PLANTED = {

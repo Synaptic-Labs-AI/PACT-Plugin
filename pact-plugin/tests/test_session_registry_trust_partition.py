@@ -31,11 +31,21 @@ synthetic import so the negative leg is not a vacuous always-pass.
 
 import ast
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
+
+
+def _tracked_hook_python_files() -> list[Path]:
+    repo_root = HOOKS_DIR.parent.parent
+    relative = HOOKS_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
 
 # The authority surfaces that MUST NOT consume the registry resolver. Keyed by
 # the file (relative to hooks/) whose import graph is scanned.
@@ -446,7 +456,7 @@ class TestRegistryImporterAllowlist:
 
     def test_only_known_consumers_import_registry(self):
         actual: set[str] = set()
-        for path in sorted(HOOKS_DIR.rglob("*.py")):
+        for path in _tracked_hook_python_files():
             if "__pycache__" in path.parts:
                 continue
             if _registry_imports(_parse(path)):
@@ -469,6 +479,35 @@ class TestRegistryImporterAllowlist:
             f"it is an AUTHORITY surface, it must NOT import the registry at all "
             f"(see the no-import / no-call tests above)."
         )
+
+
+def test_tracked_hook_population_ignores_an_untracked_importer(tmp_path, monkeypatch):
+    """The needle imports the registry; under the old rglob it joins the allowlist."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    tracked = plugin / "hooks" / "shared" / "background_work.py"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("from shared import session_registry\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "HOOKS_DIR", plugin / "hooks")
+    monkeypatch.setitem(
+        globals(), "_ALLOWED_REGISTRY_IMPORTERS",
+        frozenset({"shared/background_work.py"}))
+
+    assert tracked in _tracked_hook_python_files()
+    TestRegistryImporterAllowlist().test_only_known_consumers_import_registry()
+
+    stray = plugin / "hooks" / "zzprobe.py"
+    stray.write_text("from shared import session_registry\n", encoding="utf-8")
+    try:
+        TestRegistryImporterAllowlist().test_only_known_consumers_import_registry()
+        assert stray not in _tracked_hook_python_files()
+    finally:
+        stray.unlink()
 
 
 # ===========================================================================
@@ -913,7 +952,7 @@ class TestCloudRosterWriterSet:
 
     def test_only_sanctioned_modules_call_cloud_roster_append(self):
         callers = set()
-        for path in HOOKS_DIR.rglob("*.py"):
+        for path in _tracked_hook_python_files():
             if "__pycache__" in path.parts:
                 continue
             rel = path.relative_to(HOOKS_DIR).as_posix()
@@ -925,6 +964,44 @@ class TestCloudRosterWriterSet:
             f"cloud_roster.append_record callers changed: {sorted(callers)}. Readers trust "
             "roster records as lead-side; add a writer only with a security review."
         )
+
+    def test_tracked_hook_population_ignores_an_untracked_roster_writer(
+            self, tmp_path, monkeypatch):
+        """The needle calls append_record; the old rglob would add it as a writer."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        hooks = plugin / "hooks"
+        known = hooks / "known.py"
+        known.parent.mkdir(parents=True)
+        known.write_text(
+            "from shared.cloud_roster import append_record\n"
+            "def f():\n    append_record({})\n",
+            encoding="utf-8")
+        shared = hooks / "shared"
+        shared.mkdir(parents=True)
+        (shared / "cloud_roster.py").write_text(
+            "def append_record(t, r):\n    return r\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setitem(globals(), "HOOKS_DIR", hooks)
+        monkeypatch.setitem(
+            globals(), "_ROSTER_APPEND_CALLERS", frozenset({"known.py"}))
+
+        self.test_only_sanctioned_modules_call_cloud_roster_append()
+
+        stray = hooks / "zzprobe.py"
+        stray.write_text(
+            "from shared.cloud_roster import append_record\n"
+            "def g():\n    append_record({})\n",
+            encoding="utf-8")
+        try:
+            self.test_only_sanctioned_modules_call_cloud_roster_append()
+            assert stray not in _tracked_hook_python_files()
+        finally:
+            stray.unlink()
 
     @pytest.mark.parametrize("src", [
         "from shared import cloud_roster\ncloud_roster.append_record('t', {})\n",

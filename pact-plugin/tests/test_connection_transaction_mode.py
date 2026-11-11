@@ -35,9 +35,12 @@ from __future__ import annotations
 import ast
 import pathlib
 import sqlite3 as _stdlib_sqlite3
+import subprocess
 import sys
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 from scripts.database import get_connection  # noqa: E402
 # THE MODULE THE FACTORY BOUND, NOT THE ONE THIS TEST CAN IMPORT. The factory
@@ -64,8 +67,40 @@ _PACKAGE_DIR = (
 )
 
 
+def _tracked_package_sources(package_dir: pathlib.Path) -> list[pathlib.Path]:
+    repo_root = package_dir.parents[3]
+    relative = package_dir.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
 def _package_sources():
-    return sorted(_PACKAGE_DIR.glob("*.py"))
+    return _tracked_package_sources(_PACKAGE_DIR)
+
+
+def test_tracked_package_population_ignores_an_untracked_choice(tmp_path, monkeypatch):
+    """The needle states a transaction choice; the old glob would include it."""
+    package = tmp_path / "repo" / "pact-plugin" / "skills" / "pact-memory" / "scripts"
+    known = package / "known.py"
+    known.parent.mkdir(parents=True)
+    known.write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(tmp_path / "repo")], check=True,
+        capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "repo"), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_PACKAGE_DIR", package)
+
+    assert _package_sources() == [known]
+
+    stray = package / "zzprobe.py"
+    stray.write_text("def f(db):\n    return db.connect(autocommit=True)\n",
+                     encoding="utf-8")
+    try:
+        assert _package_sources() == [known]
+    finally:
+        stray.unlink()
 
 
 def _assignment_targets(node):

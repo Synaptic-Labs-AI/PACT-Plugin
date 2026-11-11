@@ -19,7 +19,34 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _tracked_plugin_python_files(plugin_root: Path) -> list[Path]:
+    repo_root = plugin_root.parent
+    relative = plugin_root.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
+def _exempt_users(plugin_root: Path) -> set[str]:
+    users = set()
+    for path in _tracked_plugin_python_files(plugin_root):
+        data = path.read_bytes()
+        if CENSUS_EXEMPT.encode() not in data and b"EXEMPT_ENV" not in data:
+            continue
+        for node in ast.walk(ast.parse(data)):
+            named = (
+                isinstance(node, ast.Constant) and isinstance(node.value, str) and CENSUS_EXEMPT in node.value
+            ) or (isinstance(node, ast.Name) and node.id == "EXEMPT_ENV") or (
+                isinstance(node, ast.Attribute) and node.attr == "EXEMPT_ENV"
+            )
+            if named:
+                users.add(path.relative_to(plugin_root).as_posix())
+                break
+    return users
 SHIM_DIR = Path(__file__).resolve().parent / "clock_shift"
 # Set on a launch that runs unshifted or without the shim on purpose, so a real
 # sweep's census does not count it as a miss.
@@ -339,21 +366,31 @@ def test_a_chained_sitecustomize_still_gets_the_shifted_clock(tmp_path):
 def test_the_census_exemption_is_used_only_by_the_instrument_arms():
     """GUARD. An exemption set anywhere else would hide a real miss from the census.
     MUTANT: any other file naming the variable, or the census renaming it."""
-    users = set()
-    for path in sorted(PLUGIN_ROOT.rglob("*.py")):
-        data = path.read_bytes()
-        if CENSUS_EXEMPT.encode() not in data and b"EXEMPT_ENV" not in data:
-            continue
-        for node in ast.walk(ast.parse(data)):
-            named = (
-                isinstance(node, ast.Constant) and isinstance(node.value, str) and CENSUS_EXEMPT in node.value
-            ) or (isinstance(node, ast.Name) and node.id == "EXEMPT_ENV") or (
-                isinstance(node, ast.Attribute) and node.attr == "EXEMPT_ENV"
-            )
-            if named:
-                users.add(path.relative_to(PLUGIN_ROOT).as_posix())
-                break
+    users = _exempt_users(PLUGIN_ROOT)
     assert users == {"tests/test_clock_shift_instrument.py", "tests/clock_shift/clock_shift_census.py"}, users
+
+
+def test_tracked_plugin_population_ignores_an_untracked_exempt_user(tmp_path):
+    """The needle names the exemption; under the old rglob it joins the users."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known = plugin / "scripts" / "known.py"
+    known.parent.mkdir(parents=True)
+    known.write_text('EXEMPT_ENV = "x"\n', encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+
+    assert _exempt_users(plugin) == {"scripts/known.py"}
+
+    stray = plugin / "scripts" / "zzprobe.py"
+    stray.write_text('EXEMPT_ENV = "y"\n', encoding="utf-8")
+    try:
+        assert _exempt_users(plugin) == {"scripts/known.py"}
+    finally:
+        stray.unlink()
 
 
 def test_a_fresh_file_reads_as_shifted_now_through_every_stat_route(tmp_path):

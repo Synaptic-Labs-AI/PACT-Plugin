@@ -29,7 +29,20 @@ import ast
 import pathlib
 import textwrap
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 HOOKS_DIR = pathlib.Path(__file__).parent.parent / "hooks"
+
+
+def _tracked_hook_files():
+    """The SHIPPED hook modules, from the git index rather than the tree.
+
+    The gate claims to judge what ships. A working-tree walk lets an untracked
+    hook enter the population; `known_member` is the positive control.
+    """
+    return _tracked_files(
+        HOOKS_DIR.parent, "hooks", "*.py",
+        known_member="hooks/bootstrap_gate.py")
 
 
 def _find_hook_specific_output_dicts(tree: ast.AST):
@@ -65,12 +78,32 @@ def test_every_hookSpecificOutput_dict_includes_hookEventName():
     to silently reject the JSON and fail open on permission gates.
     """
     violations = []
-    for hook_file in sorted(HOOKS_DIR.glob("*.py")):
+    for hook_file in _tracked_hook_files():
         tree = ast.parse(hook_file.read_text())
         violations.extend(_inner_dict_violations(tree, hook_file.name))
     assert not violations, (
         "hookEventName missing at:\n" + "\n".join(violations)
     )
+
+
+def test_control_untracked_hook_stays_out_of_the_judged_population():
+    """An untracked hook must not enter the judged population.
+
+    The probe carries a hookSpecificOutput dict without hookEventName, so a
+    reverted working-tree walk reddens HERE with the probe named. The
+    tracked-member assertion is the positive control.
+    """
+    probe = HOOKS_DIR / "zzprobe1714_schema.py"
+    probe.write_text(
+        'OUT = {"hookSpecificOutput": {"permissionDecision": "deny"}}\n',
+        encoding="utf-8",
+    )
+    try:
+        assert HOOKS_DIR / "bootstrap_gate.py" in _tracked_hook_files()
+        assert probe not in _tracked_hook_files()
+        test_every_hookSpecificOutput_dict_includes_hookEventName()
+    finally:
+        probe.unlink()
 
 
 def test_ast_walk_detects_missing_hookEventName_in_synthesized_source():

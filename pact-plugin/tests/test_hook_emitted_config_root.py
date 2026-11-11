@@ -36,6 +36,8 @@ from unittest.mock import patch
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 HOOKS = Path(__file__).parent.parent / "hooks"
 LITERAL = re.compile(r"(?:~|\$HOME|\$\{HOME\})/\.claude")
 
@@ -56,11 +58,22 @@ GUARDED_FILES = (
 )
 
 
+def _tracked_hook_files():
+    """The SHIPPED hook modules, from the git index rather than the tree.
+
+    The gate claims to judge what ships. A working-tree walk lets an untracked
+    file carrying an emitted literal enter the population and redden a green
+    checkout; `known_member` is the positive control that this walk still
+    reaches the tree.
+    """
+    return _tracked_files(
+        HOOKS.parent, "hooks", "**/*.py",
+        known_member="hooks/bootstrap_gate.py")
+
+
 def _emitted_literals():
     """Yield (relpath, lineno, rendered) for every EMITTED config-root literal."""
-    for path in sorted(HOOKS.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in _tracked_hook_files():
         rel = path.relative_to(HOOKS.parent).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         docstrings = set()
@@ -89,6 +102,26 @@ def test_no_hook_emits_a_hardcoded_config_root():
         "get_claude_config_dir() (or, on a degraded path that must not import "
         f"it, os.environ). Sites: {found}"
     )
+
+
+def test_control_the_gate_ignores_an_untracked_hook_file():
+    """An untracked hook must not enter the judged population.
+
+    The probe carries the exact literal the gate matches, so a reverted
+    working-tree walk reddens HERE with the probe named rather than passing
+    quietly. The tracked-member assertion is the positive control.
+    """
+    probe = HOOKS / "zzprobe1714_emit.py"
+    probe.write_text('X = "~/.claude"\n', encoding="utf-8")
+    try:
+        assert HOOKS / "bootstrap_gate.py" in _tracked_hook_files()
+        # The walk is RECURSIVE, as the rglob it replaced was: the shared
+        # subpackage is part of the judged population too.
+        assert HOOKS / "shared" / "claude_md_manager.py" in _tracked_hook_files()
+        assert probe not in _tracked_hook_files()
+        test_no_hook_emits_a_hardcoded_config_root()
+    finally:
+        probe.unlink()
 
 
 def test_control_the_classifier_can_see_an_emitted_literal():

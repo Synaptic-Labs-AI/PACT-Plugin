@@ -23,7 +23,10 @@ import json
 import re
 from pathlib import Path
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 from shared import intentional_wait  # noqa: E402
 from shared.intentional_wait import (  # noqa: E402
@@ -342,7 +345,12 @@ _WRAP_UP_BRANCHES = (
 )
 
 
-def _propagating_sites():
+def _command_markdown(root=COMMANDS_DIR):
+    """Tracked command files; a working-tree glob reads a scratch file."""
+    return sorted(_tracked_glob(root, "*.md", allow_empty=True))
+
+
+def _propagating_sites(root=COMMANDS_DIR):
     """Command stems that instruct a propagation, one entry per instructing
     site (a list, so the count is visible to the caller).
 
@@ -363,7 +371,7 @@ def _propagating_sites():
     is not known until long after the harvest is dispatched.
     """
     stems = []
-    for path in sorted(COMMANDS_DIR.glob("*.md")):
+    for path in _command_markdown(root):
         for literal in _CARRIER_RE.findall(path.read_text(encoding="utf-8")):
             if PROPAGATE_SENTENCE in literal:
                 stems.append(path.stem)
@@ -549,7 +557,7 @@ class TestOnlyTheSafeBoundariesPropagateTheWorkingMemoryBlock:
         Keys are read by `_metadata_keys` rather than parsed, which IS
         prospective -- both literals in the tree today are valid JSON.
         """
-        sites = sorted(COMMANDS_DIR.glob("*.md"))
+        sites = _command_markdown()
         assert sites and all(
             q.parent == COMMANDS_DIR and q.suffix == ".md" for q in sites
         ), (
@@ -622,3 +630,27 @@ class TestOnlyTheSafeBoundariesPropagateTheWorkingMemoryBlock:
             "level",
         }
         assert _metadata_keys('{"note": "see type: below"}') == {"note"}
+
+
+def test_an_untracked_command_file_is_not_a_propagating_site(tmp_path):
+    """A scratch command file must not join the propagate-stem derivation."""
+    root = tmp_path / "commands"
+    root.mkdir(parents=True)
+    tracked = root / "tracked.md"
+    tracked.write_text(
+        'Then propagate the store into the Working Memory block.\n',
+        encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+
+    needle = root / "zzprobe.md"
+    needle.write_text(
+        'Then propagate the store into the Working Memory block.\n',
+        encoding="utf-8")
+
+    population = _command_markdown(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the command population: {needle}")

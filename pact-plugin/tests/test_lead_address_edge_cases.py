@@ -29,10 +29,13 @@ from __future__ import annotations
 import io
 import json
 import re
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 import shared.pact_context as pact_context
 from shared.session_resume import format_session_substitutions
@@ -647,32 +650,102 @@ def test_spawn_literal_fits_with_every_placeholder_substituted(stem, literal):
     assert len(text) <= PROMPT_MAX_LENGTH, (stem, len(text))
 
 
-def test_spawn_sentence_census_by_raw_text():
-    """Independent of the extractor: every raw occurrence of the team
-    sentence in agents/ and commands/ is followed by the address sentence."""
+def _tracked_markdown_in(plugin_root: Path, sub: str) -> list[Path]:
+    directory = plugin_root / sub
+    if not directory.is_dir():
+        return []  # matches the old rglob on an absent directory
+    repo_root = plugin_root.parent
+    relative = directory.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".md")
+
+
+def _spawn_sentence_hits(plugin_root: Path) -> int:
     hits = 0
     for sub in ("agents", "commands"):
-        for path in (_PLUGIN_ROOT / sub).glob("*.md"):
+        for path in _tracked_markdown_in(plugin_root, sub):
             text = path.read_text(encoding="utf-8")
             for m in re.finditer(r"You are joining team \{team_name\}\.", text):
                 hits += 1
                 assert text[m.end():].startswith(
                     " Send messages for your lead to `{lead_address}`."), (
                     path.name, m.start())
+    return hits
+
+
+def _placeholder_carriers(plugin_root: Path) -> list[str]:
+    carriers = []
+    for sub in ("agents", "commands", "skills", "protocols"):
+        for path in _tracked_markdown_in(plugin_root, sub):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "`{team_name}`" in line and "`{session_dir}`" in line:
+                    carriers.append(path.name)
+                    assert "`{lead_address}`" in line, path
+    return carriers
+
+
+def test_spawn_sentence_census_by_raw_text():
+    """Independent of the extractor: every raw occurrence of the team
+    sentence in agents/ and commands/ is followed by the address sentence."""
+    hits = _spawn_sentence_hits(_PLUGIN_ROOT)
     assert hits == sum(EXPECTED_SPAWN_LITERAL_COUNTS.values())
 
 
 def test_every_placeholder_declaration_line_names_lead_address():
     """Wherever a line declares {team_name} together with {session_dir}
     (the placeholder-declaration carriers), it also declares {lead_address}."""
-    carriers = []
-    for sub in ("agents", "commands", "skills", "protocols"):
-        for path in (_PLUGIN_ROOT / sub).rglob("*.md"):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if "`{team_name}`" in line and "`{session_dir}`" in line:
-                    carriers.append(path.name)
-                    assert "`{lead_address}`" in line, path
+    carriers = _placeholder_carriers(_PLUGIN_ROOT)
     assert sorted(carriers) == ["bootstrap.md", "pact-orchestrator.md"]
+
+
+def test_tracked_spawn_census_ignores_untracked_markdown(tmp_path):
+    """The needle is a team sentence with no address sentence."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known = plugin / "commands" / "known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "You are joining team {team_name}. Send messages for your lead to "
+        "`{lead_address}`.\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+
+    assert _spawn_sentence_hits(plugin) == 1
+
+    stray = plugin / "commands" / "zzprobe.md"
+    stray.write_text("You are joining team {team_name}.\n", encoding="utf-8")
+    try:
+        assert _spawn_sentence_hits(plugin) == 1
+    finally:
+        stray.unlink()
+
+
+def test_tracked_placeholder_census_ignores_untracked_markdown(tmp_path):
+    """The needle declares two placeholders but not the lead address."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known = plugin / "commands" / "known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "| `{team_name}` | `{session_dir}` | `{lead_address}` |\n",
+        encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+
+    assert _placeholder_carriers(plugin) == ["known.md"]
+
+    stray = plugin / "commands" / "zzprobe.md"
+    stray.write_text("| `{team_name}` | `{session_dir}` |\n", encoding="utf-8")
+    try:
+        assert _placeholder_carriers(plugin) == ["known.md"]
+    finally:
+        stray.unlink()
 
 
 def test_rule_says_spawn_prompt_or_task_address_beats_inbox_from():

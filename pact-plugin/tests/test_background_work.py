@@ -19,11 +19,13 @@ carrying none produces nothing.
 from __future__ import annotations
 
 import ast
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
 from shared.background_work import (
     LEAD_STALE_MINUTES,
     LEAD_UNIDLED_STALE_MINUTES,
@@ -788,6 +790,27 @@ class TestBindLauncherIdentity:
         assert agent_type_names_a_member("pact-architect", TEAM) is False
 
 
+def _tracked_hook_python_files(hooks: Path) -> list[Path]:
+    repo_root = hooks.parent.parent
+    relative = hooks.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
+def _agent_id_sites(hooks: Path) -> list[tuple[str, str | None]]:
+    sites = []
+    for path in _tracked_hook_python_files(hooks):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", None))
+            if name == "agent_type_names_a_member":
+                passed = next((k.value for k in node.keywords if k.arg == "agent_id"), None)
+                sites.append((path.relative_to(hooks).as_posix(),
+                              ast.unparse(passed) if passed is not None else None))
+    return sites
+
+
 class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
     """`agent_type_names_a_member(..., agent_id=)` reads the frame's id shape first.
 
@@ -901,21 +924,40 @@ class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
     def test_every_caller_passes_the_frames_agent_id(self):
         """Each call site in the hooks tree hands the predicate the frame's id."""
         hooks = Path(__file__).resolve().parents[1] / "hooks"
-        sites = []
-        for path in sorted(hooks.rglob("*.py")):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if not isinstance(node, ast.Call):
-                    continue
-                name = getattr(node.func, "attr", getattr(node.func, "id", None))
-                if name == "agent_type_names_a_member":
-                    passed = next((k.value for k in node.keywords if k.arg == "agent_id"), None)
-                    sites.append((path.relative_to(hooks).as_posix(),
-                                  ast.unparse(passed) if passed is not None else None))
+        sites = _agent_id_sites(hooks)
         assert sorted(p for p, _ in sites) == [
             "peer_inject.py", "shared/actor_identity.py", "shared/background_work.py",
             "shared/background_work.py", "shared/turn_end_gate.py",
         ], sites
         assert all(v == "input_data.get('agent_id')" for _, v in sites), sites
+
+    def test_tracked_hook_population_ignores_an_untracked_member_call(
+            self, tmp_path):
+        """The needle calls the predicate; under the old rglob it joins the sites."""
+        repo = tmp_path / "repo"
+        hooks = repo / "pact-plugin" / "hooks"
+        known = hooks / "shared" / "known.py"
+        known.parent.mkdir(parents=True)
+        known.write_text(
+            "def f():\n    return agent_type_names_a_member(agent_id='x')\n",
+            encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+
+        before = _agent_id_sites(hooks)
+        assert [p for p, _ in before] == ["shared/known.py"]
+
+        stray = hooks / "zzprobe.py"
+        stray.write_text(
+            "def g():\n    return agent_type_names_a_member(agent_id='y')\n",
+            encoding="utf-8")
+        try:
+            assert _agent_id_sites(hooks) == before
+        finally:
+            stray.unlink()
 
     def test_the_launch_name_refuses_a_subagent_named_like_a_member(self):
         """REVERT PROOF. `teammate_launch_name` step 2 took the member's name

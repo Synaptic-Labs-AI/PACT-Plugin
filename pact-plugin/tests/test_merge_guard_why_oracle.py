@@ -27,7 +27,10 @@ Used by: pytest suite.
 import importlib
 from pathlib import Path
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 # Loader names seen so far. A module defining `_WHY` whose loader is not one of
 # these fails loudly below rather than being skipped -- a silent skip is the
@@ -38,6 +41,14 @@ import pytest
 # green: a filtered summary that drops the errors count reports this loudest
 # signal as silence. Read the summary line, not a token scan.
 _KNOWN_LOADERS = ("_load_classifier", "_load_module_at")
+
+
+def _candidate_modules(root=None):
+    """Tracked merge-guard modules; a working-tree glob reads a
+    scratch file written beside the suite."""
+    root = Path(__file__).parent if root is None else root
+    return sorted(_tracked_glob(root, "test_merge_guard_*.py",
+                                allow_empty=True))
 
 
 def _loader_modules():
@@ -53,7 +64,7 @@ def _loader_modules():
     under-count silently -- the same blindness as the handwritten list this
     replaces, arriving through the instrument instead of the code.
     """
-    for path in sorted(Path(__file__).parent.glob("test_merge_guard_*.py")):
+    for path in _candidate_modules():
         module = importlib.import_module(path.stem)
         if not hasattr(module, "_WHY"):
             continue
@@ -116,3 +127,22 @@ def test_a_failed_baked_base_load_records_gits_own_reason(module_name, loader_na
         )
     finally:
         module._WHY.pop(_UNRESOLVABLE, None)
+
+
+def test_an_untracked_merge_guard_module_is_not_a_candidate(tmp_path):
+    """A scratch module beside the suite must not join the derivation."""
+    root = tmp_path / "tests"
+    root.mkdir(parents=True)
+    tracked = root / "test_merge_guard_tracked.py"
+    tracked.write_text("_WHY = {}\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "test_merge_guard_zzprobe.py"
+    needle.write_text("_WHY = {}\n", encoding="utf-8")
+
+    population = _candidate_modules(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the loader derivation: {needle}")

@@ -28,9 +28,13 @@ SITES THIS FILE DOES NOT DRIVE ARE NAMED WITH THEIR REASON, in
 that names its misses is worth more than a higher count that does not.
 """
 import ast
+import subprocess
 from collections import Counter
 from pathlib import Path
+from fixtures.tracked_files import tracked_files as _shared_tracked_files  # noqa: E402
 from helpers import doc_at  # noqa: E402
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 _MANAGED_START = (
     "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
@@ -357,7 +361,7 @@ class TestTheCoverageReportNamesItsMisses:
         under-report would read as a small clean number. The caller asserts on
         the breakdown, so a narrow walk is visible rather than silent.
         """
-        plugin_root = Path(__file__).parent.parent
+        plugin_root = PLUGIN_ROOT
         found = Counter()
         spellings = Counter()
         parsed = 0
@@ -381,7 +385,12 @@ class TestTheCoverageReportNamesItsMisses:
                 visit(child, enclosing, rel)
 
         for root in cls._SEARCH_ROOTS:
-            for path in sorted((plugin_root / root).rglob("*.py")):
+            # The index, not the working tree: an untracked scratch hook must
+            # not appear as an unaccounted seam caller.
+            for path in _shared_tracked_files(
+                    plugin_root.parent, f"{plugin_root.name}/{root}"):
+                if path.suffix != ".py":
+                    continue
                 parsed += 1
                 rel = path.relative_to(plugin_root).as_posix()
                 visit(ast.parse(path.read_text(encoding="utf-8")), None, rel)
@@ -404,6 +413,38 @@ class TestTheCoverageReportNamesItsMisses:
             f"way the coverage claim in this file is measuring nothing"
         )
         assert spellings["Name"] + spellings["Attribute"] == sum(found.values())
+
+    def test_untracked_hook_cannot_join_the_seam_walk(self, tmp_path, monkeypatch):
+        """The call-site walk reads the index; an untracked hook is invisible.
+
+        Reverting ``_walk_the_tree`` to the filesystem rglob keeps the shipped
+        tree green; this arm drives the population the coverage comparison
+        consumes and reddens naming the untracked caller. The seeded tracked
+        hook is the positive control.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        hooks = plugin / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "known.py").write_text(
+            "def f(x):\n    x._atomic_write_text('a')\n", encoding="utf-8")
+        skills = plugin / "skills" / "pact-memory" / "scripts"
+        skills.mkdir(parents=True)
+        (skills / "known.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        found, parsed, _ = self._walk_the_tree()
+        assert parsed > 0 and found, (
+            f"positive control: the walk found no seam call: {found!r}")
+        (hooks / "zzprobe.py").write_text(
+            "def g(x):\n    x._atomic_write_text('b')\n", encoding="utf-8")
+
+        found_after, _, _ = self._walk_the_tree()
+        missing = {k: v for k, v in found_after.items() if found.get(k) != v}
+        assert not missing, (
+            f"in the tree, not accounted for: {sorted(missing.items())}")
 
     def test_every_seam_call_site_is_driven_or_named(self):
         """THE DENOMINATOR, DERIVED FROM THE TREE AND NOT FROM TYPED LITERALS.

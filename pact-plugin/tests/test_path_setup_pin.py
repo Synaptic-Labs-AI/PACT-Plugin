@@ -50,7 +50,11 @@ conftest-owned, so they do not appear here.
 """
 
 import ast
+import subprocess
 from pathlib import Path
+
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
@@ -116,7 +120,13 @@ def _sanctioned_roots():
         PLUGIN_ROOT / "scripts",
         PLUGIN_ROOT,  # telegram package family
     ]
-    roots.extend(sorted(PLUGIN_ROOT.glob("skills/*/scripts")))
+    # Derived from the index: an untracked skills/<x>/scripts directory must
+    # not become a sanctioned root.
+    roots.extend(sorted({
+        path.parent for path in _shared_tracked_glob(
+            PLUGIN_ROOT.parent, f"{PLUGIN_ROOT.name}/skills/*/scripts/*.py",
+            f"{PLUGIN_ROOT.name}/skills/pact-memory/scripts/memory_init.py")
+    }))
     # resolve() so equivalent spellings dedupe
     seen, out = set(), []
     for r in roots:
@@ -128,9 +138,30 @@ def _sanctioned_roots():
 
 
 def _population():
-    files = sorted(PLUGIN_ROOT.glob("tests/**/*.py"))
-    files += sorted(PLUGIN_ROOT.glob("skills/*/test_*.py"))
+    """Test sources from the git index, one glob per population.
+
+    An untracked scratch test file must not be judged by the path-setup pins;
+    the seeded known members keep an empty or misnamed root loud.
+    """
+    name = PLUGIN_ROOT.name
+    files = _shared_tracked_glob(
+        PLUGIN_ROOT.parent, f"{name}/tests/**/*.py",
+        f"{name}/tests/{Path(__file__).name}")
+    files += _shared_tracked_glob(
+        PLUGIN_ROOT.parent, f"{name}/skills/*/test_*.py",
+        f"{name}/skills/pact-handoff-harvest/test_skill_loading_harvest.py")
     return [f for f in files if f.name != "conftest.py"]
+
+
+def _tracked_python_in(root):
+    """Tracked top-level .py files in one sanctioned root."""
+    relative = root.relative_to(PLUGIN_ROOT).as_posix()
+    prefix = PLUGIN_ROOT.name if relative == "." else f"{PLUGIN_ROOT.name}/{relative}"
+    return [
+        path for path in _shared_tracked_files(
+            PLUGIN_ROOT.parent, prefix, allow_empty=True)
+        if path.suffix == ".py" and path.parent == root
+    ]
 
 
 # (names bound to the sys module, names bound to sys.path)
@@ -329,6 +360,73 @@ def test_negative_fixture_flags_every_matcher_leg():
     assert _NEGATIVE_FIXTURE not in _KEEP_SET
 
 
+def test_untracked_test_file_cannot_join_the_path_setup_population(
+        tmp_path, monkeypatch):
+    """The population read is the index, so an untracked test file is invisible.
+
+    Reverting ``_population`` to the two working-tree globs keeps the shipped
+    tree green; this arm drives the module-level-insert pin and reddens naming
+    the untracked file. The seeded tracked test is the positive control.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    tests_dir = plugin / "tests"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / Path(__file__).name).write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    skills = plugin / "skills" / "pact-handoff-harvest"
+    skills.mkdir(parents=True)
+    (skills / "test_skill_loading_harvest.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    assert {p.name for p in _population()} == {
+        Path(__file__).name, "test_skill_loading_harvest.py"}, (
+        f"positive control: the seeded sources are missing: "
+        f"{[p.name for p in _population()]}")
+    # Split so this file's own source holds no contiguous needle: the
+    # any-form arm scans string constants and must not see its own fixture.
+    (tests_dir / "zzprobe.py").write_text(
+        "import sys\nsys.path." + "insert(0, 'x')\n", encoding="utf-8")
+
+    test_no_module_level_insert_outside_allowlist()
+
+
+def test_untracked_skill_scripts_dir_cannot_join_the_sanctioned_roots(
+        tmp_path, monkeypatch):
+    """A new sanctioned root comes from the index, not from the working tree.
+
+    Reverting ``_sanctioned_roots`` to ``glob("skills/*/scripts")`` keeps the
+    shipped tree green; this arm plants an untracked root whose module stem
+    collides with a tracked one and reddens on the collision. The tracked
+    scripts package is the positive control.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    tests_dir = plugin / "tests"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "test_audit_protocol.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    scripts = plugin / "skills" / "pact-memory" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "memory_init.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    assert scripts.resolve() in _sanctioned_roots(), (
+        f"positive control: the tracked scripts root is missing: "
+        f"{[str(r) for r in _sanctioned_roots()]}")
+    probe_dir = plugin / "skills" / "zzprobe" / "scripts"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_audit_protocol.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+
+    test_no_basename_collision_across_sanctioned_roots()
+
+
 def test_no_basename_collision_across_sanctioned_roots():
     """No two sanctioned roots may expose the same module stem. A collision
     makes resolution order decide which module an import gets — the silent
@@ -339,7 +437,7 @@ def test_no_basename_collision_across_sanctioned_roots():
     stems = {}  # stem -> root that first exposed it
     collisions = []
     for root in _sanctioned_roots():
-        for py in sorted(root.glob("*.py")):
+        for py in _tracked_python_in(root):
             if py.name in ("__init__.py", "conftest.py"):
                 continue
             stem = py.stem

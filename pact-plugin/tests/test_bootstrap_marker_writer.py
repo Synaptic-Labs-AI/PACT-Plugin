@@ -55,6 +55,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -64,6 +65,14 @@ import pytest
 from shared import BOOTSTRAP_MARKER_NAME
 from shared.marker_schema import MARKER_SCHEMA_VERSION
 from helpers import doc_at  # noqa: E402
+from fixtures.tracked_files import tracked_files as _tracked_files
+
+
+def _tracked_hook_python_files(root: Path) -> list[Path]:
+    repo_root = root.parent.parent
+    relative = root.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
 
 _SUPPRESS_EXPECTED = {
     "suppressOutput": True,
@@ -1274,7 +1283,7 @@ class TestConstantsRelocationRegression:
         import re
         pat = re.compile(r"^MARKER_SCHEMA_VERSION\s*=\s*\d+", re.MULTILINE)
         offenders = []
-        for py in self.HOOKS_ROOT.rglob("*.py"):
+        for py in _tracked_hook_python_files(self.HOOKS_ROOT):
             text = py.read_text(encoding="utf-8")
             if pat.search(text):
                 offenders.append(str(py.relative_to(self.HOOKS_ROOT)))
@@ -1287,11 +1296,73 @@ class TestConstantsRelocationRegression:
             f"the #673 cleanup) is a regression."
         )
 
+    def test_tracked_hook_population_ignores_an_untracked_definition(
+            self, tmp_path, monkeypatch):
+        """The needle defines the constant; under the old rglob it is an offender."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        tracked = plugin / "hooks" / "shared" / "marker_schema.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("MARKER_SCHEMA_VERSION = 1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setattr(
+            TestConstantsRelocationRegression, "HOOKS_ROOT", plugin / "hooks")
+
+        assert tracked in _tracked_hook_python_files(plugin / "hooks")
+        self.test_marker_schema_version_defined_only_in_marker_schema()
+
+        stray = plugin / "hooks" / "zzprobe.py"
+        stray.write_text("MARKER_SCHEMA_VERSION = 3\n", encoding="utf-8")
+        try:
+            self.test_marker_schema_version_defined_only_in_marker_schema()
+            assert stray not in _tracked_hook_python_files(plugin / "hooks")
+        finally:
+            stray.unlink()
+
+    def test_tracked_hook_population_ignores_untracked_marker_constants(
+            self, tmp_path, monkeypatch):
+        """The needles define the two remaining relocated names."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        tracked = plugin / "hooks" / "shared" / "marker_schema.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text(
+            "MARKER_MAX_BYTES = 256\n"
+            "def expected_marker_signature(x):\n    return x\n",
+            encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setattr(
+            TestConstantsRelocationRegression, "HOOKS_ROOT", plugin / "hooks")
+
+        assert tracked in _tracked_hook_python_files(plugin / "hooks")
+        self.test_marker_max_bytes_defined_only_in_marker_schema()
+        self.test_expected_marker_signature_defined_only_in_marker_schema()
+
+        stray = plugin / "hooks" / "zzprobe.py"
+        stray.write_text(
+            "MARKER_MAX_BYTES = 1\n"
+            "def expected_marker_signature(x):\n    return x\n",
+            encoding="utf-8")
+        try:
+            self.test_marker_max_bytes_defined_only_in_marker_schema()
+            self.test_expected_marker_signature_defined_only_in_marker_schema()
+            assert stray not in _tracked_hook_python_files(plugin / "hooks")
+        finally:
+            stray.unlink()
+
     def test_marker_max_bytes_defined_only_in_marker_schema(self):
         import re
         pat = re.compile(r"^MARKER_MAX_BYTES\s*=\s*\d+", re.MULTILINE)
         offenders = []
-        for py in self.HOOKS_ROOT.rglob("*.py"):
+        for py in _tracked_hook_python_files(self.HOOKS_ROOT):
             text = py.read_text(encoding="utf-8")
             if pat.search(text):
                 offenders.append(str(py.relative_to(self.HOOKS_ROOT)))
@@ -1305,7 +1376,7 @@ class TestConstantsRelocationRegression:
         import re
         pat = re.compile(r"^def\s+expected_marker_signature\s*\(", re.MULTILINE)
         offenders = []
-        for py in self.HOOKS_ROOT.rglob("*.py"):
+        for py in _tracked_hook_python_files(self.HOOKS_ROOT):
             text = py.read_text(encoding="utf-8")
             if pat.search(text):
                 offenders.append(str(py.relative_to(self.HOOKS_ROOT)))

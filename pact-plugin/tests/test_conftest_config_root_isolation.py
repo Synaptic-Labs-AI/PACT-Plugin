@@ -15,9 +15,12 @@ Used by: pytest.
 """
 import ast
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 import merge_guard_post
 import merge_guard_pre
@@ -82,6 +85,51 @@ def _pytestmark_carries_ambient(tree):
             ):
                 return True
     return False
+
+
+def _tracked_test_modules(tests_dir: Path) -> list[Path]:
+    repo_root = tests_dir.parent.parent
+    relative = tests_dir.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py" and path.name.startswith("test_"))
+
+
+def _module_wide_ambient_modules(tests_dir: Path) -> set[str]:
+    return {
+        path.stem
+        for path in _tracked_test_modules(tests_dir)
+        if _pytestmark_carries_ambient(
+            ast.parse(path.read_text(encoding="utf-8"))
+        )
+    }
+
+
+def test_tracked_test_population_ignores_an_untracked_ambient_module(
+        tmp_path, monkeypatch):
+    """The needle carries the module-wide mark; the old rglob would add it."""
+    repo = tmp_path / "repo"
+    tests_dir = repo / "pact-plugin" / "tests"
+    known = tests_dir / "test_known.py"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "import pytest\npytestmark = pytest.mark.claude_md_ambient\n",
+        encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+
+    assert _module_wide_ambient_modules(tests_dir) == {"test_known"}
+
+    stray = tests_dir / "test_zzprobe.py"
+    stray.write_text(
+        "import pytest\npytestmark = pytest.mark.claude_md_ambient\n",
+        encoding="utf-8")
+    try:
+        assert _module_wide_ambient_modules(tests_dir) == {"test_known"}
+    finally:
+        stray.unlink()
 
 
 class TestAutouseConfigRootIsolationPinned:
@@ -333,13 +381,7 @@ class TestAutouseProjectDirScrubPinned:
         while a collection-derived set would need session-wide item
         plumbing to see the same population."""
         tests_dir = Path(__file__).resolve().parent
-        found = {
-            path.stem
-            for path in sorted(tests_dir.rglob("test_*.py"))
-            if _pytestmark_carries_ambient(
-                ast.parse(path.read_text(encoding="utf-8"))
-            )
-        }
+        found = _module_wide_ambient_modules(tests_dir)
         assert found == _MODULE_WIDE_AMBIENT, (
             f"module-wide claude_md_ambient population drifted — "
             f"added: {sorted(found - _MODULE_WIDE_AMBIENT)}, "

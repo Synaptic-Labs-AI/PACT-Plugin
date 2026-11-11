@@ -64,9 +64,12 @@ arms redden with it. The shape no arm here catches is a skill-body reword that
 KEEPS the same route class and changes the meaning some other way.
 """
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 AGENT_TEAMS_SKILL = PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md"
@@ -433,6 +436,11 @@ class TestW4TheDispatchTemplatesCarryTheSameRule:
         )
 
 
+def _command_files(root):
+    """Tracked command templates; a working-tree walk reads scratch files."""
+    return sorted(_tracked_glob(root, "commands/*.md", allow_empty=True))
+
+
 class TestW5NoCommandFileNarrowsTheRule:
     """ARM W5. THE ARM THAT REACHES A SIXTH SITE.
 
@@ -443,7 +451,7 @@ class TestW5NoCommandFileNarrowsTheRule:
 
     def test_the_command_walk_finds_files(self):
         """A control. An empty walk agrees with the arm below."""
-        found = sorted((PLUGIN_ROOT / "commands").glob("*.md"))
+        found = _command_files(PLUGIN_ROOT)
         assert found, (
             f"the walk over {PLUGIN_ROOT / 'commands'}/*.md returned nothing, "
             f"so the arm below passes over an empty set."
@@ -451,7 +459,7 @@ class TestW5NoCommandFileNarrowsTheRule:
 
     def test_no_command_file_names_an_editing_act_alone(self):
         narrow = []
-        for path in sorted((PLUGIN_ROOT / "commands").glob("*.md")):
+        for path in _command_files(PLUGIN_ROOT):
             narrow.extend(narrow_act_lines(path))
         assert not narrow, (
             f"these command-file lines forbid EDITING `CLAUDE.md` and carry no "
@@ -461,3 +469,31 @@ class TestW5NoCommandFileNarrowsTheRule:
             f"scope. Widen the sentence to cover a write by any route, as the "
             f"declared template sites do."
         )
+
+
+def test_an_untracked_command_needle_is_not_read(tmp_path):
+    """An untracked scratch command must not join the read population.
+
+    Positive control: a TRACKED file carrying the narrow act IS read and
+    reported, so an empty population cannot pass this arm.
+    """
+    root = tmp_path / "plugin"
+    (root / "commands").mkdir(parents=True)
+    tracked = root / "commands" / "tracked.md"
+    tracked.write_text("Do not edit CLAUDE.md\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "commands" / "zzprobe.md"
+    needle.write_text("Do not edit CLAUDE.md\n", encoding="utf-8")
+
+    population = _command_files(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the command population: {needle}")
+    assert narrow_act_lines(needle) == ["zzprobe.md:1"], (
+        "the needle would be flagged, so only the population excludes it")
+    assert [hit for path in population for hit in narrow_act_lines(path)] == [
+        "tracked.md:1"], "the oracle over the population changed"

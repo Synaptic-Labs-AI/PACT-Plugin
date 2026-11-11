@@ -25,9 +25,12 @@ secretary exception to the spawn rule, the two step-1 sentences the
 refused-spawn route replaced, and the newest-store lookup the token replaced.
 """
 
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 
 PLUGIN = Path(__file__).resolve().parents[1]
 RECOVERY = "protocols/pact-state-recovery.md"
@@ -186,11 +189,23 @@ def test_the_clause_is_at_each_of_its_sites(rel, phrase, expected):
 
 
 def _instruction_surfaces():
-    surfaces = list((PLUGIN / "agents").glob("*.md"))
-    surfaces += list((PLUGIN / "commands").glob("*.md"))
-    surfaces += list((PLUGIN / "protocols").glob("*.md"))
-    surfaces += list((PLUGIN / "skills").glob("*/SKILL.md"))
-    return surfaces
+    """The instruction population from the git index, one glob per surface kind.
+
+    An untracked note under any of these directories cannot enter an absence
+    pin. Each glob carries the surface its own arm already requires, so an
+    empty or misnamed root raises instead of passing silently.
+    """
+    name = PLUGIN.name
+    return (
+        _shared_tracked_glob(PLUGIN.parent, f"{name}/agents/*.md",
+                             f"{name}/{PERSONA}")
+        + _shared_tracked_glob(PLUGIN.parent, f"{name}/commands/*.md",
+                               f"{name}/{BOOTSTRAP}")
+        + _shared_tracked_glob(PLUGIN.parent, f"{name}/protocols/*.md",
+                               f"{name}/{PROTOCOLS}")
+        + _shared_tracked_glob(PLUGIN.parent, f"{name}/skills/*/SKILL.md",
+                               f"{name}/{HARVEST}")
+    )
 
 
 def test_the_instruction_surfaces_are_found():
@@ -217,3 +232,35 @@ def test_a_retired_phrase_is_in_no_instruction_surface(phrase):
     hits = [p.relative_to(PLUGIN).as_posix() for p in _instruction_surfaces()
             if _norm(phrase) in _norm(p.read_text(encoding="utf-8"))]
     assert hits == []
+
+
+@pytest.mark.parametrize("relative", [
+    "agents/zzprobe.md", "commands/zzprobe.md",
+    "protocols/zzprobe.md", "skills/zzprobe/SKILL.md",
+], ids=["agent", "command", "protocol", "skill"])
+def test_untracked_surface_cannot_join_the_absence_pin(
+        tmp_path, monkeypatch, relative):
+    """Each surface kind reads the index; an untracked note cannot redden it.
+
+    Reverting ``_instruction_surfaces`` to the four filesystem globs keeps the
+    sweep control green; this arm drives the absence pin and reddens naming
+    the untracked file. The seeded tracked surfaces are the positive control.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    for known in (PERSONA, BOOTSTRAP, PROTOCOLS, HARVEST):
+        path = plugin / known
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("clean surface\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+
+    assert {PERSONA, BOOTSTRAP, PROTOCOLS, HARVEST} <= {
+        p.relative_to(PLUGIN).as_posix() for p in _instruction_surfaces()
+    }, "positive control: the seeded surfaces are missing from the sweep"
+    probe = plugin / relative
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("the one-hop bound\n", encoding="utf-8")
+
+    test_a_retired_phrase_is_in_no_instruction_surface("the one-hop bound")
