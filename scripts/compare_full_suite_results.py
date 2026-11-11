@@ -9,7 +9,10 @@ writes runs.jsonl and comparison.json under --output-dir.
 A --run directory is one downloaded workflow run, assembled by hand:
   metadata.json   the ``/actions/runs/<id>`` object with a ``jobs`` array
                   merged in from the separate ``/actions/runs/<id>/jobs``
-                  call (the run object does not carry its jobs)
+                  call (the run object does not carry its jobs), and the
+                  identity keys attempt, databaseId, workflowDatabaseId and
+                  headSha normalized onto the top level (the raw response
+                  carries none of the four names)
   run.log         the merged job log, stderr included: verify_full_run.py
                   writes RUN-VERIFY-FAILURE to stderr
   artifact/.full-suite-results.xml, artifact/.full-run-record.json,
@@ -997,7 +1000,15 @@ _RUN_LAYOUT_EPILOG = """\
 A --run directory is one downloaded workflow run:
   metadata.json                          the /actions/runs/<id> object with a
                                          "jobs" array merged in from the
-                                         separate /actions/runs/<id>/jobs call
+                                         separate /actions/runs/<id>/jobs call,
+                                         and the identity keys normalized onto
+                                         the top level: attempt, databaseId,
+                                         workflowDatabaseId and headSha, added
+                                         beside the response's own run_attempt /
+                                         id / workflow_id / head_sha spellings.
+                                         An un-normalized object is refused
+                                         (the raw response carries none of the
+                                         four names)
   run.log                                the merged job log, stderr included
                                          (verify_full_run.py writes
                                          RUN-VERIFY-FAILURE there)

@@ -737,6 +737,72 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
                        "failure": 1, "error": 1, "xpass": 1}
 
 
+def test_real_pytest_xfail_teardown_shape_needs_no_pass_accounting(tmp_path):
+    """Real pytest 9.2, xfail item with a broken fixture teardown: the
+    teardown failure never reaches the XML as an <error>. The expected
+    failure emits TWO pytest.xfail children on one element (call + teardown
+    reports), the unexpected pass emits one plus the raw XPASS line, and the
+    run counts them xfailed — so the aggregates reconcile with NO missing-
+    pass accounting and no teardown <error> exists to account."""
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "test_xfail_teardown.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def broken_teardown():\n"
+        "    yield\n"
+        "    raise RuntimeError('teardown exploded')\n"
+        "@pytest.mark.xfail(reason='expected to fail')\n"
+        "def test_xfail_unexpected_pass(broken_teardown):\n"
+        "    pass\n"
+        "@pytest.mark.xfail(reason='expected to fail')\n"
+        "def test_xfail_expected_fail(broken_teardown):\n"
+        "    raise AssertionError('xfail body')\n"
+        "def test_plain_pass():\n"
+        "    assert True\n", encoding="utf-8")
+    xml_path = child / "results.xml"
+    env = os.environ.copy()
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    for key in ("GITHUB_ACTIONS", "GITHUB_WORKSPACE", "PACT_FULL_RUN_RECORD_OWNER",
+                "PYTEST_ADDOPTS"):
+        env.pop(key, None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", f"--junitxml={xml_path}"],
+        cwd=child, env=env, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    root = ET.parse(xml_path).getroot()
+    emitted = list(root.iter("testcase"))
+    assert [element.get("name") for element in emitted] == [
+        "test_xfail_unexpected_pass", "test_xfail_expected_fail",
+        "test_plain_pass"]
+    children = [child for element in emitted for child in element]
+    assert [child.tag for child in children] == ["skipped"] * 3
+    assert all(child.get("type") == "pytest.xfail" for child in children)
+    xpass_line = next(line for line in (completed.stdout + completed.stderr)
+                      .splitlines() if line.startswith("XPASS "))
+    assert xpass_line == ("XPASS test_xfail_teardown.py::"
+                          "test_xfail_unexpected_pass - expected to fail")
+    nodes = ["test_xfail_teardown.py::test_xfail_unexpected_pass",
+             "test_xfail_teardown.py::test_xfail_expected_fail",
+             "test_xfail_teardown.py::test_plain_pass"]
+    cases = [case(nodes[0], "xfail", "expected to fail"),
+             case(nodes[1], "xfail", "expected to fail"),
+             case(nodes[1], "xfail", "expected to fail"),
+             case(nodes[0], "xpass", "expected to fail"),
+             case(nodes[2])]
+    first = make_run(tmp_path, "one", nodes=nodes, cases=cases)
+    second = make_run(tmp_path, "two", 101, nodes=nodes, cases=cases)
+    for directory in (first, second):
+        (directory / "artifact" / ".full-suite-results.xml").write_bytes(
+            xml_path.read_bytes())
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
+    assert Counter(outcome["outcome"] for entry in run["cases"]
+                   for outcome in entry["outcomes"]) == {
+                       "xfail": 3, "xpass": 1, "pass": 1}
+
+
 def test_environment_difference_beside_a_delta_is_refused(tmp_path):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101,
