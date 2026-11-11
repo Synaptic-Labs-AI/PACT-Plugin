@@ -1,0 +1,535 @@
+"""The one-shot rekey: atomicity, collisions, vectors and CLI (P0 C1-C12).
+
+The rekey is the ONLY row-rewriting surface. Its dangerous states are a
+PARTIAL move (k rows moved, N-k left) and a committed move whose auxiliary
+rows (files, links, relations, vectors) did not follow.
+
+Each arm names the defect it would catch.
+"""
+
+from __future__ import annotations
+
+import json
+import struct
+from types import SimpleNamespace
+
+import pytest
+from fixtures.identity_git import assert_outside_repository, make_repo
+from scripts.database import (
+    db_connection,
+    ensure_initialized,
+    rekey_project,
+)
+from scripts.database import (
+    sqlite3 as db_sqlite3,
+)
+
+from scripts import cli
+from scripts import database as db
+
+CANONICAL = "github.com/syn-labs/pact-plugin"
+LEGACY = "PACT-prompt"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures and seeding
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def rekey_env(tmp_path, monkeypatch):
+    assert_outside_repository(tmp_path)
+    repo = make_repo(
+        tmp_path / LEGACY, remote="https://github.com/syn-labs/pact-plugin.git"
+    )
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    yield SimpleNamespace(repo=repo, store=tmp_path / "rekey.db", tmp_path=tmp_path)
+
+
+def _seed(env, memories, files=(), links=(), relations=()):
+    with db_connection(env.store) as conn:
+        ensure_initialized(conn)
+        for memory_id, project in memories:
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    memory_id,
+                    f"context {memory_id}",
+                    project,
+                    "s",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+        for file_id, path, project in files:
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+        for memory_id, file_id in links:
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) VALUES (?, ?)",
+                (memory_id, file_id),
+            )
+        for source, target in relations:
+            conn.execute(
+                "INSERT INTO file_relations (source_file, target_file, relationship) "
+                "VALUES (?, ?, 'imports')",
+                (source, target),
+            )
+        conn.commit()
+
+
+def _rows(store):
+    """A comparable snapshot of the row sets the rekey touches."""
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        return {
+            "memories": sorted(
+                (row["id"], row["project_id"])
+                for row in conn.execute("SELECT id, project_id FROM memories")
+            ),
+            "files": sorted(
+                (row["id"], row["path"], row["project_id"])
+                for row in conn.execute("SELECT id, path, project_id FROM files")
+            ),
+            "links": sorted(
+                (row["memory_id"], row["file_id"])
+                for row in conn.execute("SELECT memory_id, file_id FROM memory_files")
+            ),
+        }
+
+
+# ---------------------------------------------------------------------------
+# C1-C3: dry-run, apply, no-op
+# ---------------------------------------------------------------------------
+
+class TestRekeyLifecycle:
+    def test_dry_run_changes_no_row_and_reports_the_apply_counters(self, rekey_env):
+        """Catches a dry run that either writes or estimates differently from
+        the apply it claims to preview."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("m2", LEGACY)],
+            files=[("f1", "src/a.py", LEGACY)],
+        )
+        before = _rows(rekey_env.store)
+        with db_connection(rekey_env.store) as conn:
+            planned = rekey_project(conn, LEGACY, CANONICAL, dry_run=True)
+        assert _rows(rekey_env.store) == before, "the dry run wrote rows"
+        assert planned["memories"] == 2
+        assert planned["dry_run"] is True
+
+        with db_connection(rekey_env.store) as conn:
+            applied = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+        assert {k: v for k, v in applied.items() if k != "dry_run"} == {
+            k: v for k, v in planned.items() if k != "dry_run"
+        }, "the dry-run counters differ from the apply"
+
+    def test_apply_moves_the_whole_partition_and_a_second_apply_is_a_noop(
+        self, rekey_env
+    ):
+        """Catches a partially-moving rekey and a non-idempotent one."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("m2", LEGACY)],
+            files=[("f1", "src/a.py", LEGACY)],
+        )
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+        assert counters["memories"] == 2
+        with db_connection(rekey_env.store) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (LEGACY,)
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (CANONICAL,)
+            ).fetchone()[0] == 2
+
+        with db_connection(rekey_env.store) as conn:
+            second = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+        assert second["memories"] == 0
+        assert second["files_in_place"] == 0
+        assert second["files_conflicted"] == 0
+
+    def test_from_equals_to_is_a_zero_noop(self, rekey_env):
+        _seed(rekey_env, [("m1", LEGACY)])
+        before = _rows(rekey_env.store)
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, LEGACY, dry_run=False)
+        assert counters["memories"] == 0
+        assert _rows(rekey_env.store) == before
+
+    def test_null_project_rows_are_never_moved_and_are_reported(self, rekey_env):
+        """Catches a rekey that sweeps the NULL bucket into a project."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("n1", None)],
+            files=[("f-null", "src/x.py", None)],
+        )
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["null_project_rows"] == 2
+            assert conn.execute(
+                "SELECT project_id FROM memories WHERE id = 'n1'"
+            ).fetchone()[0] is None
+
+
+# ---------------------------------------------------------------------------
+# C12: one transaction, never a partial move
+# ---------------------------------------------------------------------------
+
+class TestRekeyAtomicity:
+    def test_a_failure_mid_move_leaves_the_old_partition_intact(self, rekey_env):
+        """THE EITHER/OR ARM. A trigger aborts the files UPDATE after the
+        memories UPDATE has run; the transaction must roll BOTH back.
+
+        A test that only asserts 'an exception was raised' passes while the
+        memories update stays committed — the partial move this guards.
+        """
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("m2", LEGACY)],
+            files=[("f1", "src/a.py", LEGACY)],
+        )
+        with db_connection(rekey_env.store) as conn:
+            conn.execute(
+                "CREATE TRIGGER abort_file_update BEFORE UPDATE ON files "
+                "BEGIN SELECT RAISE(ABORT, 'injected-mid-rekey'); END"
+            )
+            conn.commit()
+
+        with db_connection(rekey_env.store) as conn, pytest.raises(
+            db_sqlite3.IntegrityError
+        ):
+            rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+
+        with db_connection(rekey_env.store) as conn:
+            legacy = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (LEGACY,)
+            ).fetchone()[0]
+            canonical = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (CANONICAL,)
+            ).fetchone()[0]
+        assert (legacy, canonical) == (2, 0), (
+            f"partial move: legacy={legacy}, canonical={canonical}; the crash "
+            "must leave the old partition intact OR the new one complete"
+        )
+
+    def test_a_failure_in_apply_can_be_retried_to_a_complete_move(self, rekey_env):
+        """The other half of the either/or: after removing the fault the same
+        call completes, so the failed run left no poisoned state."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY)],
+            files=[("f1", "src/a.py", LEGACY)],
+        )
+        with db_connection(rekey_env.store) as conn:
+            conn.execute(
+                "CREATE TRIGGER abort_file_update BEFORE UPDATE ON files "
+                "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+            )
+            conn.commit()
+        with db_connection(rekey_env.store) as conn, pytest.raises(
+            db_sqlite3.IntegrityError
+        ):
+            rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+        with db_connection(rekey_env.store) as conn:
+            conn.execute("DROP TRIGGER abort_file_update")
+            conn.commit()
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["memories"] == 1
+
+
+# ---------------------------------------------------------------------------
+# C7: the UNIQUE(path, project_id) collision
+# ---------------------------------------------------------------------------
+
+class TestFilesCollision:
+    def test_a_path_on_both_sides_is_merged_and_links_are_repointed(self, rekey_env):
+        """Catches the naive UPDATE that violates UNIQUE(path, project_id), and
+        a merge that deletes the old row before moving its links."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY)],
+            files=[
+                ("f-old", "src/x.py", LEGACY),
+                ("f-new", "src/x.py", CANONICAL),
+                ("f-other", "src/other.py", CANONICAL),
+            ],
+            links=[("m1", "f-old")],
+            relations=[("f-old", "f-other")],
+        )
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["files_conflicted"] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM files WHERE path = 'src/x.py'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT file_id FROM memory_files WHERE memory_id = 'm1'"
+            ).fetchone()[0] == "f-new"
+            assert conn.execute(
+                "SELECT target_file FROM file_relations WHERE source_file = 'f-new'"
+            ).fetchone()[0] == "f-other"
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+# ---------------------------------------------------------------------------
+# C8: vectors follow the rekey, or are reported pending
+# ---------------------------------------------------------------------------
+
+def _vec_store(env, monkeypatch_query_only=False):
+    """A store with a REAL vec0 table (dimension 3, no embedding model needed).
+
+    `_init_vector_table` is neutralised so `ensure_initialized` cannot size the
+    table from the embedding service and drop this fixture's table. The code
+    under test is the rekey's delete+insert, not schema sizing.
+    """
+    conn = db_sqlite3.connect(str(env.store))
+    conn.row_factory = db_sqlite3.Row
+    from helpers import create_test_schema
+
+    create_test_schema(conn)
+    conn.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute(
+        "CREATE VIRTUAL TABLE vec_memories USING vec0("
+        "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
+        "embedding float[3])"
+    )
+    conn.execute(
+        "INSERT INTO memories "
+        "(id, context, project_id, session_id, created_at, updated_at) "
+        "VALUES ('m1', 'ctx', ?, 's', '2026-01-01T00:00:00+00:00', "
+        "'2026-01-01T00:00:00+00:00')",
+        (LEGACY,),
+    )
+    blob = struct.pack("3f", 0.1, 0.2, 0.3)
+    conn.execute(
+        "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+        ("m1", LEGACY, blob),
+    )
+    conn.commit()
+    return conn, blob
+
+
+class TestVectorMove:
+    def test_the_embedding_blob_moves_to_the_target_partition(
+        self, rekey_env, monkeypatch
+    ):
+        """Catches a rekey that drops vectors (semantic search silently loses
+        the memory) or re-embeds them (wasted work and possible drift)."""
+        conn, blob = _vec_store(rekey_env)
+        monkeypatch.setattr(db, "_init_vector_table", lambda connection: True)
+        try:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            row = conn.execute(
+                "SELECT project_id, embedding FROM vec_memories WHERE memory_id = 'm1'"
+            ).fetchone()
+            assert counters["vectors_moved"] == 1
+            assert row["project_id"] == CANONICAL
+            assert bytes(row["embedding"]) == blob
+        finally:
+            conn.close()
+
+    def test_an_unopenable_vector_table_reports_pending_not_success(
+        self, rekey_env, monkeypatch
+    ):
+        """Catches a silent claim that vectors followed when the extension
+        could not be loaded; catch-up repairs pending rows."""
+        conn, _ = _vec_store(rekey_env)
+        monkeypatch.setattr(db, "_init_vector_table", lambda connection: True)
+        monkeypatch.setattr(db, "SQLITE_EXTENSIONS_ENABLED", False)
+        try:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["vectors_moved"] == 0
+            assert counters["vectors_pending"] == 1
+            assert conn.execute(
+                "SELECT project_id FROM vec_memories WHERE memory_id = 'm1'"
+            ).fetchone()[0] == LEGACY
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# CLI: show, candidates, dry-run, apply, exit codes
+# ---------------------------------------------------------------------------
+
+def _cli(argv, capfd):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    captured = capfd.readouterr()
+    # Success envelopes go to stdout; error envelopes go to stderr (the
+    # envelope discipline keeps diagnostics off the channel a caller parses).
+    text = captured.out.strip() or captured.err.strip()
+    payload = json.loads(text) if text else None
+    return excinfo.value.code, payload
+
+
+class TestCliSurface:
+    def test_show_reports_identity_shape_source_scope_and_counts(
+        self, rekey_env, capfd
+    ):
+        """Catches a show that reports only the canonical count or omits the
+        provenance fields a mis-scope diagnosis needs."""
+        _seed(
+            rekey_env,
+            [("l1", LEGACY), ("c1", CANONICAL)],
+        )
+        code, payload = _cli(
+            ["project-id", "show", "--db-path", str(rekey_env.store)], capfd
+        )
+        assert code == 0
+        result = payload["result"]
+        assert result["project_id"] == CANONICAL
+        assert result["id_shape"] == "canonical"
+        assert result["source"] == "origin remote"
+        assert result["read_scope"] == [CANONICAL, LEGACY]
+        # The disclosure shape must carry BOTH ambiguity and exclusion: the
+        # operator deciding whether to move a bucket needs to see that the
+        # gate did not merge two case-variant ids and that nothing was silently
+        # excluded.
+        assert {"ambiguous", "excluded", "included", "verified"} <= set(
+            result["legacy_scope"]
+        )
+        assert result["legacy_scope"]["ambiguous"] == []
+        assert result["legacy_scope"]["excluded"] is False
+        counts = {item["id"]: item["memory_count"] for item in result["candidates"]}
+        assert counts == {CANONICAL: 1, LEGACY: 1}
+
+    def test_candidates_lists_every_bucket_with_the_literal_command(
+        self, rekey_env, capfd
+    ):
+        _seed(rekey_env, [("l1", LEGACY), ("f1", "foreign")])
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--candidates",
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 0
+        candidates = {item["id"]: item for item in payload["result"]["candidates"]}
+        assert set(candidates) == {LEGACY, "foreign"}
+        assert candidates[LEGACY]["rekey"] == (
+            "pact-memory project-id rekey --from PACT-prompt"
+        )
+
+    def test_rekey_dry_run_then_apply_then_noop(self, rekey_env, capfd):
+        _seed(rekey_env, [("l1", LEGACY)])
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                LEGACY,
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 0 and payload["result"]["dry_run"] is True
+        assert payload["result"]["memories"] == 1
+        with db_connection(rekey_env.store) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (LEGACY,)
+            ).fetchone()[0] == 1
+
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                LEGACY,
+                "--apply",
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 0 and payload["result"]["memories"] == 1
+        with db_connection(rekey_env.store) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (LEGACY,)
+            ).fetchone()[0] == 0
+
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                LEGACY,
+                "--apply",
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 0 and payload["result"]["memories"] == 0
+
+    def test_a_non_canonical_target_is_bad_input(self, rekey_env, capfd):
+        """Catches a rekey that moves rows into a basename bucket."""
+        _seed(rekey_env, [("l1", LEGACY)])
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                LEGACY,
+                "--to",
+                "just-a-folder",
+                "--apply",
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 2
+        assert payload["ok"] is False
+
+    def test_no_canonical_target_refuses_with_exit_1(self, rekey_env, capfd, monkeypatch):
+        """A detected BASENAME is the bucket to leave, never a target."""
+        _seed(rekey_env, [("l1", LEGACY)])
+        umbrella = rekey_env.tmp_path / "umbrella"
+        umbrella.mkdir()
+        monkeypatch.chdir(umbrella)
+        code, payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                LEGACY,
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 1
+        assert payload["ok"] is False
+
+    def test_dry_run_and_apply_are_mutually_exclusive(self, rekey_env, capfd):
+        _seed(rekey_env, [("l1", LEGACY)])
+        code, _payload = _cli(
+            [
+                "project-id",
+                "rekey",
+                "--from",
+                LEGACY,
+                "--dry-run",
+                "--apply",
+                "--db-path",
+                str(rekey_env.store),
+            ],
+            capfd,
+        )
+        assert code == 2

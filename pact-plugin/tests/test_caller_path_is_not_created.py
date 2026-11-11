@@ -74,6 +74,9 @@ _MINIMAL_ARGS = {
     "update": ("a" * 32, '{"context": "x"}'),
     "delete": ("a" * 32,),
     "sync": (),
+    # `show` is the read-only verb; the absent-path guard sits before the
+    # handler, so the subcommand never reaches detection.
+    "project-id": ("show",),
 }
 
 # A command that opens no store takes no `--db-path`, so it has no caller path

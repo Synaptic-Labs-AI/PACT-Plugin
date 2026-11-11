@@ -143,7 +143,13 @@ def test_main_repo_root_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, unre
 # (file, function) -> the number of git subprocess calls it holds. A scan that
 # finds fewer is not reading the function it names.
 _RESOLVER_GIT_CALLS = {
-    ("skills/pact-memory/scripts/memory_api.py", "main_repo_root"): 1,
+    # `main_repo_root` now delegates its git calls to this helper, so the
+    # guard follows the call to the helper rather than pinning a body that no
+    # longer contains a subprocess.
+    ("skills/pact-memory/scripts/memory_api.py", "_git_rev_parse"): 1,
+    # The origin reader is a resolver git call too; it must strip the git
+    # location variables or an exported GIT_DIR names another repository.
+    ("skills/pact-memory/scripts/project_identity.py", "read_origin"): 1,
 }
 
 
