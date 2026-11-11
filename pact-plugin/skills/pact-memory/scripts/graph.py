@@ -233,6 +233,10 @@ def get_file_ids(
     normalized_path = _normalize_path(path)
     scopes = normalise_project_scopes(project_id)
     if scopes is None:
+        # DELIBERATELY NOT `_scope_sql`: in this resolver None means the
+        # NULL-PROJECT row, not "no clause". Routing it through the builder
+        # would return every project's row for the path — the cross-project
+        # read this PR exists to close. Four MUST-KEEP arms pin this.
         cursor = conn.execute(
             "SELECT id FROM files WHERE path = ? AND project_id IS NULL "
             "ORDER BY id",
