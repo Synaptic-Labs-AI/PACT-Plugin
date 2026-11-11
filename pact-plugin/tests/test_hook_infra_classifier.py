@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -666,6 +667,27 @@ def _is_refresh_edge_line(line: str) -> bool:
     return bool(_re.search(r"\b(?:from|import)\s+\.?refresh\b", s))
 
 
+def _synthetic_hook_repo(tmp_path):
+    """A git repo holding the tracked hooks the scan judges.
+
+    The arm plants its needle HERE, never in the live checkout: under
+    `--dist load` another worker still walks the real hooks tree, and a probe
+    visible there for even a moment can redden its hygienic or schema scan.
+    """
+    repo = tmp_path / "repo"
+    hooks = repo / "pact-plugin" / "hooks"
+    (hooks / "shared").mkdir(parents=True)
+    (hooks / "bootstrap_gate.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (hooks / "shared" / "hook_infra_classifier.py").write_text(
+        "VALUE = 2\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=arm@example.invalid", "-c", "user.name=arm",
+         "commit", "-qm", "seed"], cwd=repo, check=True)
+    return hooks
+
+
 def _tracked_hook_modules() -> tuple[list[Path], list[Path]]:
     """The SHIPPED hook modules, from the git index, top level and shared.
 
@@ -732,22 +754,24 @@ class TestOracleStaticImportBoundBackstop:
             f"oracle. Offending: {hits}"
         )
 
-    def test_control_untracked_hook_module_stays_out_of_the_scan(self):
+    def test_control_untracked_hook_module_stays_out_of_the_scan(
+            self, tmp_path, monkeypatch):
         """An untracked hook must not enter the scanned population.
 
         The probe carries the dynamic-import idiom the scan matches, so a
         reverted working-tree walk reddens HERE with the probe named. The
-        tracked-member assertion is the positive control.
+        tracked-member assertion is the positive control, and the needle lives
+        in a synthetic repo so no parallel worker's walk of the live hooks
+        tree can see it.
         """
-        probe = HOOKS / "shared" / "zzprobe1714_dyn.py"
+        hooks = _synthetic_hook_repo(tmp_path)
+        monkeypatch.setitem(globals(), "HOOKS", hooks)
+        probe = hooks / "shared" / "zzprobe1714_dyn.py"
         probe.write_text("import importlib.util\n", encoding="utf-8")
-        try:
-            _, shared = _tracked_hook_modules()
-            assert HOOKS / "shared" / "hook_infra_classifier.py" in shared
-            assert probe not in shared
-            self.test_no_dynamic_import_of_hook_modules()
-        finally:
-            probe.unlink()
+        _, shared = _tracked_hook_modules()
+        assert hooks / "shared" / "hook_infra_classifier.py" in shared
+        assert probe not in shared
+        self.test_no_dynamic_import_of_hook_modules()
 
     @pytest.mark.parametrize(
         "helper",

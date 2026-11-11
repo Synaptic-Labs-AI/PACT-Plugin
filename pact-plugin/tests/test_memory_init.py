@@ -412,6 +412,38 @@ class TestCheckAndInstallDependencies:
             assert result['failed'] == []
 
 
+_SYNTHETIC_CI_WORKFLOW = """\
+name: tests
+on: [push]
+permissions:
+  contents: read
+jobs:
+  full-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the CI environment (before tests)
+        run: python scripts/verify_ci_environment.py
+      - name: Run test suite
+        run: {test_cmd}
+      - name: Verify the certifying run
+        run: python scripts/verify_full_run.py
+      - name: Upload full-suite diagnostic evidence
+        if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist || 'loadfile' }}
+          path: |
+            .full-suite-results.xml
+            .full-run-record.json
+            .full-collection-record.json
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Verify the CI environment (after tests)
+        if: always()
+        run: python scripts/verify_ci_environment.py
+"""
+
+
 class TestDependencyDriftIsDetectable:
     """The `skipped_ci` branch is SILENT. This class is why that is safe.
 
@@ -576,6 +608,33 @@ class TestDependencyDriftIsDetectable:
                     root, ".github/workflows",
                     known_member=".github/workflows/tests.yml")
                 if p.suffix in (".yml", ".yaml")]
+
+    @staticmethod
+    def _synthetic_ci_repo(tmp_path):
+        """A git repo whose only CI surfaces are the tracked contract files.
+
+        The isolation arm plants its needles HERE, never in the live checkout:
+        under `--dist load` another worker still walks the real `.github/`
+        tree, and an untracked probe visible there can redden its workflow or
+        action scan.
+        """
+        root = tmp_path / "repo"
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "marketplace.json").write_text(
+            "{}", encoding="utf-8")
+        workflows = root / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "tests.yml").write_text(
+            _SYNTHETIC_CI_WORKFLOW.replace(
+                "{test_cmd}", ci_contract.WORKFLOW_TEST_CMD),
+            encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=arm@example.invalid",
+             "-c", "user.name=arm", "commit", "-qm", "seed"],
+            cwd=root, check=True)
+        return root
 
     @staticmethod
     def _action_files(root):
@@ -1071,20 +1130,21 @@ class TestDependencyDriftIsDetectable:
             f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change."
         )
 
-    def test_control_untracked_ci_surfaces_stay_out_of_the_judged_population(self):
+    def test_control_untracked_ci_surfaces_stay_out_of_the_judged_population(
+            self, tmp_path, monkeypatch):
         """Untracked CI surfaces must not enter the placement or allowlist oracles.
 
         The workflow probe carries a pytest step outside the verify bracket and
         the action probe an unvetted `uses:`, so a reverted working-tree walk
         reddens HERE with each probe named rather than passing quietly. The
-        tracked-member assertion is the positive control.
+        needles live in a synthetic repo, never the live checkout, so no
+        parallel worker's `.github/` scan can see them.
         """
-        root = self._require_root("the tracked CI surface")
+        root = self._synthetic_ci_repo(tmp_path)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: root)
+        assert root / ".github" / "workflows" / "tests.yml" in \
+            self._workflow_files(root)
         workflow_probe = root / ".github" / "workflows" / "zzprobe1714.yml"
-        actions_root = root / ".github" / "actions"
-        created_actions_root = not actions_root.exists()
-        action_dir = actions_root / "zzprobe1714"
-        action_probe = action_dir / "action.yml"
         workflow_probe.write_text(
             "name: zzprobe1714\n"
             "on: [push]\n"
@@ -1095,7 +1155,10 @@ class TestDependencyDriftIsDetectable:
             "      - name: Run tests\n"
             "        run: python -m pytest -q\n",
             encoding="utf-8")
-        action_dir.mkdir(parents=True, exist_ok=True)
+        actions_root = root / ".github" / "actions"
+        action_dir = actions_root / "zzprobe1714"
+        action_dir.mkdir(parents=True)
+        action_probe = action_dir / "action.yml"
         action_probe.write_text(
             "name: zzprobe1714\n"
             "runs:\n"
@@ -1103,19 +1166,10 @@ class TestDependencyDriftIsDetectable:
             "  steps:\n"
             "    - uses: evil/repo@v1\n",
             encoding="utf-8")
-        try:
-            assert root / ".github" / "workflows" / "tests.yml" in \
-                self._workflow_files(root)
-            assert workflow_probe not in self._workflow_files(root)
-            assert action_probe not in self._action_files(root)
-            self.test_ci_environment_is_verified_around_every_test_run()
-            self.test_every_third_party_action_is_allowlisted()
-        finally:
-            workflow_probe.unlink()
-            action_probe.unlink()
-            action_dir.rmdir()
-            if created_actions_root:
-                actions_root.rmdir()
+        assert workflow_probe not in self._workflow_files(root)
+        assert action_probe not in self._action_files(root)
+        self.test_ci_environment_is_verified_around_every_test_run()
+        self.test_every_third_party_action_is_allowlisted()
 
     def _repo_copy_carrying(self, tmp_path, workflow_text=None,
                             script_text=None, extra_files=None):
