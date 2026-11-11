@@ -1373,12 +1373,13 @@ class PACTMemory:
                         )
                         logger.warning(
                             "legacy project bucket %r holds %d memories and %d "
-                            "file paths, but none of its absolute file rows "
+                            "file path%s, but none of its absolute file rows "
                             "lies under %s, so it is NOT in this read scope. "
                             "Move it explicitly with: %s",
                             candidate,
                             buckets.get(candidate, 0),
                             excluded_file_paths,
+                            "" if excluded_file_paths == 1 else "s",
                             repo_root,
                             render_rekey_command(candidate),
                         )
@@ -3268,6 +3269,7 @@ class PACTMemory:
                 "tracked_files_count": len(self._session_files),
                 "graph_stats": {
                     "files": 0,
+                    "file_paths": 0,
                     "memories": 0,
                     "memory_file_links": 0,
                     "file_relations": 0,
