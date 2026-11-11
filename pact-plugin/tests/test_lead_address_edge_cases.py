@@ -656,8 +656,17 @@ def _tracked_markdown_in(plugin_root: Path, sub: str) -> list[Path]:
         return []  # matches the old rglob on an absent directory
     repo_root = plugin_root.parent
     relative = directory.relative_to(repo_root).as_posix()
+    # agents/ and commands/ are flat DEFINITION surfaces: enumerate them at
+    # the sibling agent census's depth
+    # (test_lead_address_prose_pins._tracked_agent_files filters
+    # ``path.parent == PLUGIN_ROOT / "agents"``), so a nested .md is not a
+    # definition. skills/ and protocols/ carry nested reference markdown the
+    # placeholder census must reach, so they stay recursive like the
+    # sibling's own ``_tracked_markdown_in``.
+    flat = sub in ("agents", "commands")
     return sorted(path for path in _tracked_files(repo_root, relative)
-                  if path.suffix == ".md")
+                  if path.suffix == ".md"
+                  and (not flat or path.parent == directory))
 
 
 def _spawn_sentence_hits(plugin_root: Path) -> int:
@@ -746,6 +755,65 @@ def test_tracked_placeholder_census_ignores_untracked_markdown(tmp_path):
         assert _placeholder_carriers(plugin) == ["known.md"]
     finally:
         stray.unlink()
+
+
+def test_definition_censuses_enumerate_flat_like_the_agent_census(tmp_path):
+    """A nested tracked .md under agents/ is not a definition.
+
+    The sibling agent census (test_lead_address_prose_pins
+    ``_tracked_agent_files``) filters to the directory's own depth, and this
+    census enumerates agents/ and commands/ the same way. A nested note
+    carrying the spawn sentence without the address successor is invisible
+    here, exactly as it is to the sibling; a recursive census would flag it.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    agents = plugin / "agents"
+    agents.mkdir(parents=True)
+    known = agents / "pact-known.md"
+    known.write_text(
+        "You are joining team {team_name}."
+        " Send messages for your lead to `{lead_address}`.\n",
+        encoding="utf-8")
+    nested = agents / "notes" / "deep.md"
+    nested.parent.mkdir()
+    nested.write_text(
+        "You are joining team {team_name}. But not the address sentence.\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "--", "pact-plugin"],
+                   check=True, capture_output=True)
+
+    assert _spawn_sentence_hits(plugin) == 1
+
+
+def test_placeholder_census_still_reaches_nested_skills_markdown(tmp_path):
+    """A nested SKILL.md declaring both placeholders is a carrier.
+
+    skills/ and protocols/ stay recursive — the sibling module's own
+    ``_tracked_markdown_in`` enumerates them the same way — so a nested
+    reference file that declares `{team_name}` and `{session_dir}` without
+    `{lead_address}` is flagged, not flattened out of the census.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known = plugin / "commands" / "known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "| `{team_name}` | `{session_dir}` | `{lead_address}` |\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "--", "pact-plugin"],
+                   check=True, capture_output=True)
+    assert _placeholder_carriers(plugin) == ["known.md"]
+
+    skill = plugin / "skills" / "pact-probe" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("| `{team_name}` | `{session_dir}` |\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--",
+                    "pact-plugin/skills"], check=True, capture_output=True)
+    with pytest.raises(AssertionError, match="SKILL.md"):
+        _placeholder_carriers(plugin)
 
 
 def test_rule_says_spawn_prompt_or_task_address_beats_inbox_from():

@@ -42,11 +42,17 @@ def _shipped_agents():
     (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
     nothing. An install that genuinely omits the agents skips each requesting
     test by name instead of erroring through all of them.
+
+    Only the helper's empty-population shape is a layout omission. Its
+    fail-closed refusals (unavailable git, an unsafe root) fail in every
+    layout rather than skipping as though the agents were absent.
     """
     relative = f"{PLUGIN_ROOT.name}/agents"
     try:
         return _shared_tracked_files(REPO_ROOT, relative, "*.md")
-    except AssertionError:
+    except AssertionError as exc:
+        if "empty tracked population" not in str(exc):
+            raise
         if PLUGIN_ROOT.name == "pact-plugin":
             raise
         pytest.skip(
@@ -174,6 +180,52 @@ class TestTrackedAgentPopulation:
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(FileNotFoundError):
             _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_layout_guard_classifies_by_failure_shape(
+            self, tmp_path, monkeypatch):
+        """Outside the dev checkout, only an EMPTY population is a layout gap.
+
+        The helper's fail-closed refusals are failures in every layout; a
+        blanket catch would relabel broken git as an installed layout that
+        ships no agents. The skip reason must name the layout omission, and
+        the refusal must surface with its own message.
+        """
+        install = tmp_path / "PACT" / "4.8.34"
+        agents = install / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", install)
+
+        with pytest.raises(pytest.skip.Exception, match="installed layout"):
+            _shipped_agents()
+
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        try:
+            _shipped_agents()
+        except AssertionError as exc:
+            assert "Refusing to widen" in str(exc), exc
+        except pytest.skip.Exception as exc:
+            # A skip here means the guard swallowed the refusal as a layout
+            # omission; that is the defect this arm exists to catch.
+            raise AssertionError(
+                f"the layout guard swallowed a refusal as a skip: {exc}"
+            ) from exc
+        else:
+            raise AssertionError("the refusal did not surface at all")
 
     def test_absent_git_binary_keeps_gitless_fallback(self, tmp_path, monkeypatch):
         agents = tmp_path / "pact-plugin" / "agents"

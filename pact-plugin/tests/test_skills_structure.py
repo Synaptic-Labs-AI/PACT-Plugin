@@ -46,10 +46,16 @@ def _collection_population(relative_dir, pattern):
     literal ``pact-plugin/`` prefix matches nothing. A slim install that omits
     the artifact skips this module by name instead of aborting collection; a
     dev checkout whose population is empty still fails loudly.
+
+    Only the helper's empty-population shape is a layout omission. Its
+    fail-closed refusals (unavailable git, an unsafe root) fail in every
+    layout rather than skipping as though the artifact were absent.
     """
     try:
         return _shared_tracked_files(REPO_ROOT, relative_dir, pattern)
-    except AssertionError:
+    except AssertionError as exc:
+        if "empty tracked population" not in str(exc):
+            raise
         if PLUGIN_ROOT.name == "pact-plugin":
             raise
         pytest.skip(
@@ -431,6 +437,54 @@ class TestTrackedSkillPopulation:
         assert tracked in _tracked_files(
             tmp_path, "pact-plugin/skills", "*/SKILL.md"
         )
+
+    def test_layout_guard_classifies_by_failure_shape(
+            self, tmp_path, monkeypatch):
+        """Outside the dev checkout, only an EMPTY population is a layout gap.
+
+        The helper's fail-closed refusals are failures in every layout; a
+        blanket catch would relabel broken git as an installed layout that
+        ships no skills. The skip must name the layout omission, and the
+        refusal must surface with its own message.
+        """
+        install = tmp_path / "PACT" / "4.8.34"
+        skills = install / "skills"
+        skills.mkdir(parents=True)
+        (skills / "untracked").mkdir()
+        (skills / "untracked" / "SKILL.md").write_text(
+            "untracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", install)
+
+        with pytest.raises(pytest.skip.Exception, match="installed layout"):
+            _collection_population(f"{install.name}/skills", "*/SKILL.md")
+
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        try:
+            _collection_population(f"{install.name}/skills", "*/SKILL.md")
+        except AssertionError as exc:
+            assert "Refusing to widen" in str(exc), exc
+        except pytest.skip.Exception as exc:
+            # A skip here means the guard swallowed the refusal as a layout
+            # omission; that is the defect this arm exists to catch.
+            raise AssertionError(
+                f"the layout guard swallowed a refusal as a skip: {exc}"
+            ) from exc
+        else:
+            raise AssertionError("the refusal did not surface at all")
 
     def test_tracked_incomplete_skill_directory_still_fails(self, tmp_path):
         skills = tmp_path / "pact-plugin" / "skills"
