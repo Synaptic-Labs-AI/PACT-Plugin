@@ -244,7 +244,12 @@ def store_path(backlog_dir: Optional[Path] = None) -> Path:
     Raises BacklogWriteError when the project id will not resolve. A default
     slug would write a backlog nobody can find again.
     """
-    project = _memory_api().PACTMemory._detect_project_id()
+    # THE BASENAME, DELIBERATELY, NOT THE PROJECT ID. This value is a path
+    # component, and the canonical id now contains `/`: using it here would
+    # nest the file as `<dir>/host/owner/repo.json` and orphan every existing
+    # `<basename>.json` with no recovery path. Do not "fix" this to the
+    # canonical detector.
+    project = _memory_api().PACTMemory._detect_project_basename()
     if not project:
         raise BacklogWriteError(
             "project id did not resolve, so there is no name to write under. "

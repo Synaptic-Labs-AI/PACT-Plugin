@@ -28,6 +28,8 @@ Commands:
     setup                Initialize/verify memory system
     project-file         Print this session's project memory file path, or
                          `unavailable: <reason>` (exit 3). Writes nothing.
+    project-id show      Report the detected project id, how it was decided,
+                         and every populated bucket with its rekey command.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
-from scripts.config import store_scope
+from scripts.config import resolve_db_path, store_scope
 from scripts.database import (
     CALLER_FACING_CREATE_FIELDS,
     CALLER_FACING_UPDATE_FIELDS,
@@ -59,6 +61,7 @@ from scripts.memory_api import (
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
+    main_repo_root,
 )
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -973,6 +976,137 @@ def cmd_project_file(args, db_path=None) -> NoReturn:
     sys.exit(3)
 
 
+def _project_candidates(db_path) -> list:
+    """Every NON-EMPTY project bucket, with its count and its literal remedy.
+
+    A census, not a filtered list: only the operator can decide which legacy
+    bucket belongs to this repository, and hiding the ambiguous ones is what
+    leaves thousands of memories unreachable with no notice. An absent store
+    returns an empty list and is NOT created by this read.
+    """
+    from scripts.database import db_connection, project_bucket_counts
+
+    store = Path(db_path) if db_path else resolve_db_path()
+    if not store.exists():
+        return []
+    with db_connection() as conn:
+        buckets = project_bucket_counts(conn)
+    return [
+        {
+            "id": bucket_id,
+            "memory_count": count,
+            # The literal command, with the id already substituted. Naming
+            # the verb without its argument is not a remedy.
+            "rekey": f"pact-memory project-id rekey --from {bucket_id}",
+        }
+        for bucket_id, count in sorted(
+            buckets.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+
+
+def cmd_project_id(args, db_path=None) -> NoReturn:
+    """Handle the 'project-id' subcommand family.
+
+    `show` reports the detected identity, how it was decided (`source` and
+    `id_shape`), the resolved read scope, and the bucket census. It reads an
+    existing store only — a report must not bring a store into existence.
+    """
+    action = getattr(args, "project_id_action", None)
+    if action == "show":
+        memory = PACTMemory(db_path=db_path)
+        read_scope = memory._read_project_scopes()
+        repo_root = main_repo_root()
+        _success({
+            "project_id": memory._project_id_for_envelope(),
+            "id_shape": memory._project_id_shape,
+            "source": memory._project_id_source,
+            "override_ignored": memory._override_ignored,
+            "repo_root": str(repo_root) if repo_root is not None else None,
+            "read_scope": list(read_scope) if read_scope is not None else None,
+            "legacy_scope": memory._legacy_scope_state,
+            "candidates": _project_candidates(db_path),
+        })
+    if action == "rekey":
+        _project_id_rekey(args, db_path)
+    _error(
+        "MISSING_INPUT",
+        "project-id requires an action: show or rekey",
+        exit_code=2,
+    )
+
+
+def _project_id_rekey(args, db_path) -> NoReturn:
+    """Move one ENTIRE project bucket to the canonical id, or report the plan.
+
+    `--dry-run` is the default posture and is the same code path rolled back,
+    so the reported counters are what an apply would produce rather than a
+    second estimate. `--from == --to` is a no-op success.
+
+    Exit codes follow the module's existing channels: 0 for a clean plan or an
+    applied move, 1 for an identity that cannot be resolved (the
+    PROJECT_IDENTITY_UNRESOLVED class), 2 for bad input.
+    """
+    from scripts.database import db_connection, rekey_project
+
+    if getattr(args, "candidates", False):
+        _success({"candidates": _project_candidates(db_path)})
+
+    if args.dry_run and args.apply:
+        _error(
+            "INVALID_INPUT",
+            "--dry-run and --apply are mutually exclusive; --dry-run is the "
+            "default posture.",
+            exit_code=2,
+        )
+
+    from_id = args.from_id
+    if not from_id:
+        _error(
+            "INVALID_INPUT",
+            "rekey requires --from <id> naming the bucket to move, or "
+            "--candidates to list the buckets.",
+            exit_code=2,
+        )
+
+    memory = PACTMemory(db_path=db_path)
+    to_id = args.to_id or memory.project_id
+    if not to_id:
+        # The target cannot be invented: moving a bucket to a guessed id is
+        # the misfile this whole change exists to prevent.
+        _error(
+            "PROJECT_IDENTITY_UNRESOLVED",
+            "no canonical project id resolves for this repository, so the "
+            "rekey target is unknown. Pass --to <id>, or run from the "
+            "repository, or write an explicit id to "
+            "<git-common-dir>/pact-project-id.",
+        )
+
+    if from_id == to_id:
+        _success({
+            "from": from_id,
+            "to": to_id,
+            "dry_run": not args.apply,
+            "noop": True,
+        })
+
+    try:
+        with db_connection() as conn:
+            counters = rekey_project(
+                conn, from_id, to_id, dry_run=not args.apply
+            )
+    except ValueError as exc:
+        # The module's bad-input channel: an id that cannot be bound is
+        # caller input, not a system fault. Rendered inert because it is
+        # echoed back on a surface the caller parses and prints.
+        _error(
+            "INVALID_INPUT",
+            escape_for_envelope(str(exc)),
+            exit_code=2,
+        )
+    _success(counters)
+
+
 def cmd_delete(args, db_path=None):
     """Handle the 'delete' subcommand.
 
@@ -1079,6 +1213,10 @@ def build_parser():
         "delete": f'python3 "{prog}" delete <memory-id>',
         "sync": f'python3 "{prog}" sync',
         "project-file": f'python3 "{prog}" project-file',
+        "project-id": f'python3 "{prog}" project-id show',
+        "project-id-rekey": (
+            f'python3 "{prog}" project-id rekey --from <id> --dry-run'
+        ),
     }
 
     parser = _TeachParser(
@@ -1309,6 +1447,82 @@ def build_parser():
     )
     project_file_parser._teach_example = examples["project-file"]
 
+    # project-id
+    project_id_parser = subparsers.add_parser(
+        "project-id",
+        help="Show the project identity pact-memory keys this repository by",
+        parents=[parent],
+        description=(
+            "Report the detected project id, how it was decided (`source` and "
+            "`id_shape`), the read scope, and every populated bucket with the "
+            "literal command that moves it. Reads an existing store only; it "
+            "creates none."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-id"]),
+    )
+    project_id_parser._teach_example = examples["project-id"]
+    project_id_actions = project_id_parser.add_subparsers(
+        dest="project_id_action", parser_class=_TeachParser
+    )
+    project_id_show_parser = project_id_actions.add_parser(
+        "show",
+        help="Show the detected identity and the bucket census",
+        parents=[parent],
+        description=(
+            "The detected project id, `source`, `id_shape`, the resolved read "
+            "scope, and every non-empty bucket with its memory count and the "
+            "literal `project-id rekey --from <id>` command."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-id"]),
+    )
+    project_id_show_parser._teach_example = examples["project-id"]
+
+    project_id_rekey_parser = project_id_actions.add_parser(
+        "rekey",
+        help="Move an entire project bucket to the canonical id",
+        parents=[parent],
+        description=(
+            "Move EVERY row filed under `--from` to the canonical id in one "
+            "transaction: memories, file rows (merging the UNIQUE(path, "
+            "project_id) collision), graph links and vector partitions. "
+            "`--dry-run` is the default and reports the plan by running it "
+            "inside a rolled-back savepoint. `--to` defaults to the detected "
+            "canonical id and refuses when none resolves."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-id-rekey"]),
+    )
+    project_id_rekey_parser._teach_example = examples["project-id-rekey"]
+    project_id_rekey_parser.add_argument(
+        "--from",
+        dest="from_id",
+        metavar="<id>",
+        help="The entire bucket to retire.",
+    )
+    project_id_rekey_parser.add_argument(
+        "--to",
+        dest="to_id",
+        metavar="<canonical>",
+        help="Target id. Defaults to the detected canonical id.",
+    )
+    project_id_rekey_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the plan without changing anything (the default).",
+    )
+    project_id_rekey_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Perform the move.",
+    )
+    project_id_rekey_parser.add_argument(
+        "--candidates",
+        action="store_true",
+        help="List every populated bucket with its count and rekey command.",
+    )
+
     return parser
 
 
@@ -1324,6 +1538,7 @@ _COMMANDS = {
     "delete": cmd_delete,
     "sync": cmd_sync,
     "project-file": cmd_project_file,
+    "project-id": cmd_project_id,
 }
 
 # The commands that never open a store. They run before every store guard

@@ -1647,8 +1647,10 @@ def test_an_unresolvable_project_id_refuses_to_write(monkeypatch, tmp_path):
     """
     class _Stub:
         class PACTMemory:
+            # `store_path` asks for the BASENAME deliberately: the canonical
+            # id contains `/` and cannot be a path component.
             @staticmethod
-            def _detect_project_id():
+            def _detect_project_basename():
                 return None
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _Stub)

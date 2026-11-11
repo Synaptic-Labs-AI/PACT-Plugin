@@ -1123,8 +1123,10 @@ class TestUnresolvedIdentityRefusesWrites:
         before = _row_counts(db_path)
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None
@@ -1147,8 +1149,10 @@ class TestUnresolvedIdentityRefusesWrites:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "gone"))
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
 
@@ -1191,8 +1195,10 @@ class TestUnresolvedIdentityRefusesWrites:
         db_path = tmp_path / "payload.db"
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None
@@ -1236,8 +1242,10 @@ class TestUnresolvedIdentityRefusesWrites:
         db_path = tmp_path / "empty-id.db"
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None

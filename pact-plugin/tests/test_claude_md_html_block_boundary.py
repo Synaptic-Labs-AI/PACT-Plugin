@@ -126,7 +126,7 @@ OPENERS = {"t1": ("<pre>", "</pre>"), "t3": ("<?xml version=1.0", "?>"), "t4": (
 MEMORY_COMMENTS = (
     "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->",
     "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
-    "Keyed by folder name, so another checkout with the same name shares this section. -->",
+    "Keyed by repository identity when the checkout has a parseable origin, otherwise by folder name. -->",
 )
 
 

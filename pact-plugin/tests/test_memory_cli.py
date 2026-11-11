@@ -33,7 +33,7 @@ import pytest
 from helpers import create_test_schema, make_cli_memory_dict
 
 from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS, _refuse_live_db_under_pytest
-from scripts.memory_api import PACTMemory
+from scripts.memory_api import PACTMemory, _DetectedIdentity
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +295,7 @@ class TestCliArgParsing:
         assert exc_info.value.code == 2
 
     def test_dispatch_table_covers_all_subcommands(self):
-        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file"}
+        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file", "project-id"}
         assert set(_COMMANDS.keys()) == expected
 
 
@@ -4417,8 +4417,10 @@ class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (value, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(value, "cwd", None, None)
+            ),
         )
 
     def test_an_unusable_detected_id_is_null_and_matches_status(
@@ -4487,8 +4489,10 @@ class TestTheSyncAndStatusEnvelopesCarryDisplayUnsafeIdsRaw:
         detected = f"proj{char}X"
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (detected, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(detected, "cwd", None, None)
+            ),
         )
 
         with patch("scripts.memory_api._ensure_ready"), patch(
@@ -4632,8 +4636,10 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         )
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         with pytest.raises(SystemExit) as exit_info:
             main([
@@ -5129,8 +5135,10 @@ class TestThePrefixCallSiteIsScopedAndRefusesWithoutIdentity:
         _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         memory = PACTMemory(db_path=cli_db)
         assert memory.project_id is None, "precondition: identity is unresolved"
@@ -5220,8 +5228,10 @@ class TestTheUnresolvedPrefixRefusalHasItsOwnEnvelope:
         _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None)
+            ),
         )
         capfd.readouterr()
         with patch("scripts.memory_api._ensure_ready"), \

@@ -193,10 +193,10 @@ class TestMethodBodyExtractor:
     def test_x1_qualified_name_addresses_a_class_method(self):
         """A dotted qualified name reaches a method; a bare one still works."""
         dotted = _extract_method_body(
-            _MEMORY_API_PATH, "PACTMemory._detect_project_id_with_source"
+            _MEMORY_API_PATH, "PACTMemory._detect_project_identity_with_legacy"
         )
         bare = _extract_method_body(
-            _MEMORY_API_PATH, "_detect_project_id_with_source"
+            _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
         )
         assert dotted is not None and bare is not None
         assert dotted == bare
@@ -265,50 +265,61 @@ class TestSourceEquivalence:
     def test_source_equivalence(self):
         """Pin the real detector's strategy markers and ordering directly.
 
-        Reads _detect_project_id_with_source, NOT _detect_project_id: the
-        latter is a one-line delegation, so the strategy markers and their
-        order live in the former. The delegation itself is pinned separately
-        by test_detect_project_id_still_delegates_with_its_signature.
+        Reads _detect_project_identity_with_legacy, NOT
+        _detect_project_id_with_source: the latter is now a one-line
+        delegation, so the strategy markers and their order live in the
+        former. The delegation itself is pinned separately by
+        test_detect_project_id_still_delegates_with_its_signature.
 
         Verifies key implementation markers are present AND ordered correctly:
-        Strategy 1 (env var) before Strategy 1.5 (session record) before
-        Strategy 2 (git) before Strategy 3 (cwd). This catches accidental
-        strategy reordering that substring checks alone miss. The 1.5 position
-        is load-bearing: BELOW env and ABOVE git, because in a multi-repo
-        workspace the cwd's git root can be the wrong scope.
+        the repository override before Strategy 1 (env var) before Strategy 1.5
+        (session record) before Strategy 2 (git) before Strategy 3 (cwd). This
+        catches accidental strategy reordering that substring checks alone
+        miss. The 1.5 position is load-bearing: BELOW env and ABOVE git,
+        because in a multi-repo workspace the cwd's git root can be the wrong
+        scope.
         """
         real_source = _extract_method_body(
-            _MEMORY_API_PATH, "_detect_project_id_with_source"
+            _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
         )
         assert real_source is not None, (
-            "Could not find _detect_project_id_with_source in memory_api.py"
+            "Could not find _detect_project_identity_with_legacy in "
+            "memory_api.py"
         )
 
         # Check key implementation lines are present
         assert 'os.environ.get("CLAUDE_PROJECT_DIR")' in real_source
         # The env and record strategies name a project from a declared directory
-        # through the shared _project_name_for_declared_dir helper; the git
-        # derivation markers that used to sit inline moved with it and are
-        # pinned on the helper by
-        # test_declared_dir_helper_carries_the_main_repo_rewrite.
-        assert "_project_name_for_declared_dir(project_dir," in real_source
+        # through the shared _declared_dir_identity helper; the git derivation
+        # markers that used to sit inline moved with it and are pinned on the
+        # helper by test_declared_dir_helper_carries_the_main_repo_rewrite.
+        assert "_declared_dir_identity(" in real_source
+        assert "project_dir, \"CLAUDE_PROJECT_DIR\"" in real_source
         # Strategy 1.5: the session-record rung between env and git.
         assert "get_project_dir_from_session_record()" in real_source
-        assert "_project_name_for_declared_dir(record_dir," in real_source
-        # Strategy 2 reaches git through the module-level main_repo_root()
-        # helper rather than spawning its own subprocess. The subprocess
-        # markers this assertion used to carry moved with it and are pinned on
-        # the helper by test_main_repo_root_carries_the_git_derivation.
-        assert "repo_root = main_repo_root()" in real_source
+        assert 'record_dir, "session record"' in real_source
+        # Strategy 0 is the repository override, read from the git common dir.
+        assert "read_override(cwd_common_dir)" in real_source
+        # Strategy 2 reaches git through the module-level common-dir helper
+        # rather than spawning its own subprocess. The subprocess markers this
+        # assertion used to carry moved with it and are pinned on the helper by
+        # test_main_repo_root_carries_the_git_derivation.
+        assert "repo_root = cwd_common_dir.parent" in real_source
         # Strategy 3 now walks up from cwd to find the nearest project marker.
         assert "_find_project_root(Path.cwd())" in real_source
 
         # Verify strategy ordering in the CODE (not docstring).
         # Use code-specific markers that won't appear in the docstring.
+        pos_override = real_source.index("read_override(cwd_common_dir)")
         pos_env = real_source.index('os.environ.get("CLAUDE_PROJECT_DIR")')
         pos_record = real_source.index("get_project_dir_from_session_record()")
-        pos_git = real_source.index("repo_root = main_repo_root()")
+        pos_git = real_source.index("repo_root = cwd_common_dir.parent")
         pos_cwd = real_source.index("_find_project_root(Path.cwd())")
+
+        assert pos_override < pos_env, (
+            f"Strategy ordering violation: repository override (pos "
+            f"{pos_override}) should appear before env var (pos {pos_env})"
+        )
 
         assert pos_env < pos_record, (
             f"Strategy ordering violation: env var (pos {pos_env}) should appear "
@@ -328,15 +339,18 @@ class TestSourceEquivalence:
         declared-directory strategies (env, session record) share.
 
         These markers moved out of _detect_project_id when Strategy 1's inline
-        derivation collapsed onto _project_name_for_declared_dir, so they are
-        pinned here rather than dropped — the same migration pattern as
+        derivation collapsed onto the declared-dir helper, so they are pinned
+        here rather than dropped — the same migration pattern as
         test_main_repo_root_carries_the_git_derivation.
+
+        The helper is `_declared_dir_identity`; `_project_name_for_declared_dir`
+        remains as the two-element façade the outside callers use.
         """
-        helper_body = _extract_method_body(_MEMORY_API_PATH, "_project_name_for_declared_dir")
-        assert helper_body is not None, "_project_name_for_declared_dir must exist in memory_api.py"
-        assert "main_repo_root(declared_dir)" in helper_body
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "_declared_dir_identity")
+        assert helper_body is not None, "_declared_dir_identity must exist in memory_api.py"
+        assert "main_repo_common_dir(declared_dir)" in helper_body
         assert "os.path.normcase" in helper_body
-        assert "declared_root or Path(declared_dir)" in helper_body
+        assert "declared_main_root or declared_root or Path(declared_dir)" in helper_body
         # The dead-path consult: when the declared path is gone, the helper
         # asks the worktree identity record (recorded_main_root) before
         # declining — presence pin only; the behavior is proven in
@@ -352,8 +366,8 @@ class TestSourceEquivalence:
         returns a bare ".git" at a repo root, and a caller joining a relative
         base against a path would get a cwd-relative result.
         """
-        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_root")
-        assert helper_body is not None, "main_repo_root must exist in memory_api.py"
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_common_dir")
+        assert helper_body is not None, "main_repo_common_dir must exist in memory_api.py"
         assert '"rev-parse", "--git-common-dir"' in helper_body
         assert "timeout=5" in helper_body
         # ValueError joined the tuple with the #1653 path-byte fix: an
@@ -362,7 +376,12 @@ class TestSourceEquivalence:
             "(subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError)"
             in helper_body
         )
-        assert "if not common_dir.is_absolute():" in helper_body
+        assert "if not common.is_absolute():" in helper_body
+        # The root is the common dir's parent, in the delegating wrapper.
+        root_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_root")
+        assert root_body is not None, "main_repo_root must survive as a delegate"
+        assert "main_repo_common_dir(start)" in root_body
+        assert "common.parent" in root_body
 
     def test_main_repo_root_bases_a_relative_result_on_its_start_argument(self):
         """A relative git result resolves against `start`, not unconditionally
@@ -373,7 +392,7 @@ class TestSourceEquivalence:
         a worktree. A helper that always joined against the cwd would change
         Strategy 1 silently, in the one case the caller exists to handle.
         """
-        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_root")
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_common_dir")
         assert helper_body is not None
         assert "Path(start) if start is not None else Path.cwd()" in helper_body
 
@@ -387,10 +406,11 @@ class TestSourceEquivalence:
         split out, so the check follows it there.
         """
         real_source = _extract_method_body(
-            _MEMORY_API_PATH, "_detect_project_id_with_source"
+            _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
         )
         assert real_source is not None
         assert "main_repo_root =" not in real_source
+        assert "main_repo_common_dir =" not in real_source
 
     def test_detect_project_id_still_delegates_with_its_signature(self):
         """The bare-string detector must survive as a delegation.
@@ -638,8 +658,12 @@ class TestDetectProjectId:
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             PACTMemory._detect_project_id()
 
-        assert mock_run.call_count == 1
-        args, kwargs = mock_run.call_args
+        # TWO calls since the identity change: one `rev-parse` for the common
+        # dir and one `config --get` for the origin remote of the same root.
+        # A single call could not answer both, and the remote read is what
+        # canonicalises the id.
+        assert mock_run.call_count == 2
+        args, kwargs = mock_run.call_args_list[0]
         assert args[0] == ["git", "rev-parse", "--git-common-dir"]
         assert kwargs["capture_output"] is True
         # BYTES, decoded by os.fsdecode in the production helper: a path can
@@ -648,6 +672,13 @@ class TestDetectProjectId:
         assert kwargs["timeout"] == 5
         assert "env" in kwargs
         assert "CLAUDE_PROJECT_DIR" not in kwargs["env"]
+
+        origin_args, origin_kwargs = mock_run.call_args_list[1]
+        assert origin_args[0] == [
+            "git", "-C", "/some/repo", "config", "--get", "remote.origin.url"
+        ]
+        assert origin_kwargs["text"] is False
+        assert origin_kwargs["timeout"] == 5
 
 
 class TestFindProjectRoot:

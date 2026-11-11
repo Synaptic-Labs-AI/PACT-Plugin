@@ -2258,8 +2258,8 @@ class TestTheDetectedProjectIdIsValidated:
 
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (value, source)),
+            "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity(value, source, None, None)),
         )
         return PACTMemory(
             project_id=None,
@@ -3216,8 +3216,8 @@ class TestUpdatePayloadProjectIdGuard:
 
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity(None, "unresolved", None, None)),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None, (
@@ -3870,8 +3870,8 @@ class TestConstructorValidatesSuppliedIdentifiers:
     ):
         """The guard sits INSIDE the truthy branch, and this is its boundary."""
         monkeypatch.setattr(
-            PACTMemory, "_detect_project_id_with_source",
-            staticmethod(lambda: ("detected-proj", "cwd")),
+            PACTMemory, "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity("detected-proj", "cwd", None, None)),
         )
         monkeypatch.setattr(
             PACTMemory, "_detect_session_id",
@@ -3965,8 +3965,8 @@ class TestGetStatusFoldsAnUnusableDetectedSessionId:
         if project is not None:
             monkeypatch.setattr(
                 PACTMemory,
-                "_detect_project_id_with_source",
-                staticmethod(lambda: (project, "CLAUDE_PROJECT_DIR")),
+                "_detect_project_identity_with_legacy",
+                staticmethod(lambda: memory_api._DetectedIdentity(project, "CLAUDE_PROJECT_DIR", None, None)),
             )
         return PACTMemory(
             project_id=None if project is not None else "P",
@@ -4098,8 +4098,8 @@ class TestTheStatusCountersBindTheRawProjectScope:
 
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (project, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity(project, "cwd", None, None)),
         )
         memory = PACTMemory(
             project_id=None, session_id="s", db_path=db_path
@@ -4132,8 +4132,8 @@ class TestTheStatusEnvelopeCarriesTheDbPathRaw:
         if detected is not None:
             monkeypatch.setattr(
                 PACTMemory,
-                "_detect_project_id_with_source",
-                staticmethod(lambda: (detected, "cwd")),
+                "_detect_project_identity_with_legacy",
+                staticmethod(lambda: memory_api._DetectedIdentity(detected, "cwd", None, None)),
             )
             return PACTMemory(
                 project_id=None,

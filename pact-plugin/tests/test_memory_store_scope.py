@@ -630,8 +630,12 @@ class TestUnresolvedIdentityScopesReads:
     def _unresolved(self, monkeypatch, db_path: Path) -> PACTMemory:
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api_module._DetectedIdentity(
+                    None, "unresolved", None, None
+                )
+            ),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None
