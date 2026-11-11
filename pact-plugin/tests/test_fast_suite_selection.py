@@ -1285,6 +1285,51 @@ class TestScanIndex:
         assert control.scanner_roots == frozenset({"hooks", "skills"})
         assert unrelated.scanner_roots == control.scanner_roots
 
+    def test_a_shared_tracked_alias_is_a_scan(self, core, tmp_path):
+        """The in-tree alias spelling imports the helper as `_shared_tracked_*`.
+
+        Before this arm the predicate matched only `_tracked_*`, so these
+        modules were invisible as scanners — the same narrowing the fixture
+        conversion introduced, one spelling over.
+        """
+        scan = self._scan(core, tmp_path, "tests/test_s.py",
+                          'from pathlib import Path\n'
+                          'from fixtures.tracked_files import tracked_glob as '
+                          '_shared_tracked_glob\n'
+                          'PLUGIN = Path(__file__).parents[1]\n'
+                          'def test_x():\n'
+                          '    return list(_shared_tracked_glob(PLUGIN, "**/*.py"))\n')
+        assert scan.scans is True
+        assert scan.scanner_roots == frozenset({"."})
+
+    def test_a_local_wrapper_with_a_free_name_is_a_scan_at_its_call(
+            self, core, tmp_path):
+        """A wrapper that takes the directory as a parameter cannot be anchored
+        in its own body; the CALL SITE carries the root. Its name need not follow
+        any convention, so the call graph is what recognises it."""
+        scan = self._scan(core, tmp_path, "tests/test_w.py",
+                          'from pathlib import Path\n'
+                          'PLUGIN = Path(__file__).parents[1]\n'
+                          'def _shipped_shell_scripts(plugin):\n'
+                          '    return list(_tracked_glob(plugin, "**/*.sh"))\n'
+                          'def test_x():\n'
+                          '    return _shipped_shell_scripts(PLUGIN)\n')
+        assert scan.scans is True
+        assert scan.scanner_roots == frozenset({"."})
+
+    def test_a_wrapper_that_scans_nothing_adds_no_roots(self, core, tmp_path):
+        """The control: the call graph must not turn every local function into
+        a scanner, or every exclusion would be added back on every change."""
+        scan = self._scan(core, tmp_path, "tests/test_u.py",
+                          'from pathlib import Path\n'
+                          'PLUGIN = Path(__file__).parents[1]\n'
+                          'def _value(value):\n'
+                          '    return value\n'
+                          'def test_x():\n'
+                          '    return _value(PLUGIN)\n')
+        assert scan.scans is False
+        assert scan.scanner_roots is None
+
     def test_a_tmp_path_scan_is_not_a_scanner(self, core, tmp_path):
         scan = self._scan(core, tmp_path, "tests/test_e.py",
                           'def test_x(tmp_path):\n'

@@ -35,6 +35,12 @@ WORKFLOW_TEST_CMD = (
 UPLOAD_ARTIFACT_ACTION = (
     "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 )
+# The name expression admits only the two declared dispatch values, so the
+# filename sink is enum-constrained like the shell sink is by `DIST`.
+UPLOAD_ARTIFACT_NAME = (
+    "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+    "-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}"
+)
 _DIST_VARIABLE = "$DIST"
 _JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
 

@@ -489,6 +489,45 @@ class TestTempFileAllocationFailureIsARefusal:
         assert not capture.exists()
 
 
+class TestUnusableInterpreterIsRefused:
+    """The capture containment check runs through python3.
+
+    An empty `capture_real` matches no containment pattern, so an interpreter
+    that fails, or prints nothing, must refuse before pytest. Otherwise the
+    check is silently disarmed while the run proceeds.
+    """
+
+    def _run_with_python3(self, tmp_path, stub_body: str):
+        repo = _make_repo(tmp_path / "repo")
+        capture = tmp_path / "capture.txt"
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        stub = fake_bin / "python3"
+        stub.write_text(stub_body, encoding="utf-8")
+        stub.chmod(0o755)
+        env = _child_env()
+        env["PATH"] = os.pathsep.join([str(fake_bin), env["PATH"]])
+        result = subprocess.run(
+            ["bash", str(_SCRIPT), str(repo), str(capture),
+             "--collect-only", "-q"],
+            cwd=str(repo), env=env, capture_output=True, text=True)
+        return result, capture
+
+    def test_a_failing_python3_refuses_with_exit_2_and_no_capture(self, tmp_path):
+        result, capture = self._run_with_python3(tmp_path, "#!/bin/sh\nexit 1\n")
+
+        assert result.returncode == _REFUSED, result.stderr
+        assert "could not resolve the capture path" in result.stderr
+        assert not capture.exists()
+
+    def test_a_python3_that_prints_no_path_refuses(self, tmp_path):
+        result, capture = self._run_with_python3(tmp_path, "#!/bin/sh\nexit 0\n")
+
+        assert result.returncode == _REFUSED, result.stderr
+        assert "could not resolve the capture path" in result.stderr
+        assert not capture.exists()
+
+
 class TestWrongTreeIsRefused:
     """The catching leg. It must refuse BEFORE pytest starts."""
 

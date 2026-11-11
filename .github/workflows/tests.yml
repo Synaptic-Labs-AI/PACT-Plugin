@@ -487,9 +487,11 @@ jobs:
       #   `-ra` is everything except passes, so failures and errors stay.
       #
       # ENVIRONMENT CHECK AROUND THE TESTS (header: RUNTIME CHECK). The check
-      # runs IMMEDIATELY before this step and as the job's LAST step, with
-      # `if: always()` so a red suite still reports what it ran against. A
-      # test in the suite pins this placement, this step's exact command, and
+      # runs IMMEDIATELY before this step and as the job's LAST `run:` step,
+      # with `if: always()` so a red suite still reports what it ran against.
+      # The diagnostic upload after it is a `uses:` step and runs no command,
+      # so the last command this job runs is still the after-check.
+      # A test in the suite pins this placement, this step's exact command, and
       # the absence of `env:`/`shell:` on these steps, so the checked
       # interpreter and environment are the ones the tests use.
       # Both steps ENFORCE: drift fails the job. The runner image was
@@ -528,16 +530,23 @@ jobs:
       - name: Verify the certifying run
         run: python scripts/verify_full_run.py --record "$GITHUB_WORKSPACE/.full-run-record.json" --collection-record "$GITHUB_WORKSPACE/.full-collection-record.json"
 
+      - name: Verify the CI environment (after tests)
+        if: always()
+        run: python scripts/verify_ci_environment.py
+
       # DIAGNOSTIC EVIDENCE ONLY. JUnit supplements, never replaces, the
       # schema-v3 certification record above. All three files are dotfiles, so
-      # hidden-file inclusion is mandatory. Upload after a red or cancelled
-      # test step on EVERY event — a merge-queue or push failure or timeout is
-      # exactly the run a diagnostic reader needs, and a job re-run keeps its
-      # original event, so a dispatch-only upload could never recover it.
-      # Every dispatch uploads regardless of outcome; a green merge-queue or
-      # push run uploads nothing, so the merge gate pays no artifact cost. The
+      # hidden-file inclusion is mandatory. THIS STEP IS LAST ON PURPOSE: the
+      # environment check above can fail on its own, and an upload placed
+      # before it would be skipped with the failure already counted — exactly
+      # the run a diagnostic reader needs. The condition is evaluated when
+      # this step starts, after every other step, so any earlier red step, a
+      # cancellation, or any dispatch uploads; a green merge-queue or push
+      # run uploads nothing, so the merge gate pays no artifact cost. The
       # name carries the dispatch `dist`, so `load` and `loadfile` evidence is
-      # self-describing.
+      # self-describing. The name expression admits ONLY those two values, so
+      # a dispatch value outside the enum cannot reach a filename either; the
+      # shell sink is closed separately by the job-level `DIST` key.
       # A HARD TIMEOUT IS THIS STEP'S LIMIT, in two parts, and neither is
       # remedied here: pytest writes the JUnit file and the run record at
       # session finish, so a kill at the 50-minute cap leaves only the
@@ -548,14 +557,10 @@ jobs:
         if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist || 'loadfile' }}
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}
           path: |
             .full-suite-results.xml
             .full-run-record.json
             .full-collection-record.json
           if-no-files-found: error
           include-hidden-files: true
-
-      - name: Verify the CI environment (after tests)
-        if: always()
-        run: python scripts/verify_ci_environment.py

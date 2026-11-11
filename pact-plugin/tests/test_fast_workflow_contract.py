@@ -58,13 +58,37 @@ FULL_IF = (
     "github.event_name == 'merge_group' || github.event_name == 'push' || "
     "github.event_name == 'workflow_dispatch'"
 )
-ALLOWED_ACTIONS = (
+# PER WORKFLOW. The full suite may upload diagnostic evidence; the fast lane
+# may not, and the split is what makes an upload step added there redden
+# instead of riding the full-suite entry.
+_SHARED_ACTIONS = (
     "actions/checkout@",
     "actions/setup-python@",
     "actions/cache/restore@",
     "actions/cache/save@",
-    "actions/upload-artifact@",
 )
+ALLOWED_ACTIONS_BY_WORKFLOW = {
+    ci_contract.FAST_WORKFLOW: _SHARED_ACTIONS,
+    ci_contract.FULL_WORKFLOW: _SHARED_ACTIONS + ("actions/upload-artifact@",),
+}
+
+
+def _action_allowlist_problems(doc, relative, problems: list[str]) -> bool:
+    """Append this workflow's action problems; True when it had any step to read."""
+    allowed = ALLOWED_ACTIONS_BY_WORKFLOW[relative]
+    read_any = False
+    for job in ci_contract.jobs_of(doc).values():
+        for step in ci_contract.steps_of(job):
+            uses = step.get("uses")
+            if not isinstance(uses, str):
+                continue
+            read_any = True
+            if not uses.startswith(allowed):
+                problems.append(f"{relative}: {uses!r} is not allowlisted")
+            if not re.search(r"@[0-9a-f]{40}(?:\s|$)", uses):
+                problems.append(
+                    f"{relative}: {uses!r} is not pinned to a full commit SHA")
+    return read_any
 FAST_PATH_FILES = (
     Path("scripts/fast_suite_selection.py"),
     Path("scripts/fast_suite_args.py"),
@@ -338,20 +362,24 @@ class TestFastWorkflowHygiene:
         read_any = False
         for relative in (ci_contract.FAST_WORKFLOW, ci_contract.FULL_WORKFLOW):
             doc = ci_contract.load_workflow(root, relative)
-            for job in ci_contract.jobs_of(doc).values():
-                for step in ci_contract.steps_of(job):
-                    uses = step.get("uses")
-                    if not isinstance(uses, str):
-                        continue
-                    read_any = True
-                    if not uses.startswith(ALLOWED_ACTIONS):
-                        problems.append(f"{relative}: {uses!r} is not allowlisted")
-                    if not re.search(r"@[0-9a-f]{40}(?:\s|$)", uses):
-                        problems.append(
-                            f"{relative}: {uses!r} is not pinned to a full "
-                            f"commit SHA")
+            read_any = read_any or _action_allowlist_problems(
+                doc, relative, problems)
         assert read_any, "no action steps read from either workflow"
         assert not problems, "\n".join(problems)
+
+    def test_the_fast_lane_may_not_upload_artifacts(self):
+        """The per-workflow split: an upload step added to the fast lane must
+        redden. It is admitted only in the full-suite workflow."""
+        root = ci_contract.require_root("the fast-lane action allowlist")
+        doc = ci_contract.load_workflow(root, ci_contract.FAST_WORKFLOW)
+        job = next(iter(ci_contract.jobs_of(doc).values()))
+        job.setdefault("steps", []).append(
+            {"uses": ci_contract.UPLOAD_ARTIFACT_ACTION})
+        problems: list[str] = []
+        assert _action_allowlist_problems(
+            doc, ci_contract.FAST_WORKFLOW, problems)
+        assert any("upload-artifact" in problem for problem in problems), (
+            f"an upload step in the fast lane did not redden: {problems}")
 
 
 class TestWorkflowHardening:
@@ -438,6 +466,13 @@ def _assert_full_workflow_contract(root):
         f"the job-level `if:` is {job.get('if')!r}, not the pinned positive "
         f"three-event list {FULL_IF!r}"
     )
+    # The dispatch value reaches pytest only through this key, so the key IS
+    # the contract: a literal here flips the merge gate's xdist scheduling
+    # while every command-text pin stays green.
+    assert (job.get("env") or {}).get("DIST") == "${{ inputs.dist || 'loadfile' }}", (
+        f"the job-level DIST env is {(job.get('env') or {}).get('DIST')!r}; it "
+        "must evaluate from inputs.dist and default to loadfile outside a dispatch"
+    )
 
     steps = ci_contract.steps_of(job)
     runs = ci_contract.run_texts(steps)
@@ -488,8 +523,17 @@ def _assert_full_workflow_contract(root):
     assert runs[position - 1] == ci_contract.VERIFY_CMD, (
         "the full pytest step is not immediately preceded by the env verify"
     )
-    assert runs[-1] == ci_contract.VERIFY_CMD, "the after-verify is not the last step"
-    assert str(steps[-1].get("if", "")).strip() in ("always()", "${{ always() }}")
+    assert runs[-1] == ci_contract.VERIFY_CMD, (
+        "the after-verify is not the last `run:` step")
+    after_verify_indices = [
+        index for index, step in enumerate(steps)
+        if step.get("run") == ci_contract.VERIFY_CMD
+    ]
+    assert len(after_verify_indices) == 2, (
+        f"expected the before/after environment checks; found "
+        f"{len(after_verify_indices)}")
+    assert str(steps[after_verify_indices[-1]].get("if", "")).strip() in (
+        "always()", "${{ always() }}"), "the after-tests environment check is not `if: always()`"
 
     # The certifying run's own evidence step. It must be the step
     # immediately after the test step, must not name pytest (the one-pytest
@@ -547,9 +591,7 @@ def _assert_full_workflow_contract(root):
         "on a dispatch"
     )
     upload_with = upload.get("with") or {}
-    assert upload_with.get("name") == (
-        "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
-        "-${{ inputs.dist || 'loadfile' }}")
+    assert upload_with.get("name") == ci_contract.UPLOAD_ARTIFACT_NAME
     assert (upload_with.get("path") or "").splitlines() == [
         ".full-suite-results.xml",
         ".full-run-record.json",
@@ -560,10 +602,15 @@ def _assert_full_workflow_contract(root):
         "all three evidence files are dotfiles; omitting hidden files would "
         "silently upload no usable diagnostic evidence"
     )
-    assert upload_index == evidence_index + 1 == len(steps) - 2, (
-        f"diagnostic upload index {upload_index}, run evidence index "
-        f"{evidence_index}, final step index {len(steps) - 1}: upload must sit "
-        "immediately between run verification and the final environment check"
+    assert upload_index == len(steps) - 1, (
+        f"diagnostic upload index {upload_index}, final step index "
+        f"{len(steps) - 1}: the upload must be the LAST step, so a red "
+        "after-tests environment check still uploads the run's evidence"
+    )
+    assert steps[upload_index - 1].get("run") == ci_contract.VERIFY_CMD, (
+        f"the step before the upload is "
+        f"{steps[upload_index - 1].get('name')!r}, not the after-tests "
+        "environment check"
     )
 
     merge_steps = [step for step in steps

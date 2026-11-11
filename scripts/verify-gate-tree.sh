@@ -114,7 +114,15 @@ if [ "$declared_real" != "$actual_real" ]; then
     exit 2
 fi
 
-capture_real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$capture")"
+# An empty capture_real would match no containment pattern and let the run
+# proceed with the check silently disarmed, so a failure here is a refusal.
+if ! capture_real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$capture")" \
+        || [ -z "$capture_real" ]; then
+    printf 'GATE REFUSED: python3 could not resolve the capture path, so containment is unproven.\n' >&2
+    printf '  capture: %s\n' "$capture" >&2
+    printf '  Fix the interpreter, or call pytest directly.\n' >&2
+    exit 2
+fi
 case "$capture_real" in
     "$declared_real"|"$declared_real"/*)
         printf 'GATE REFUSED: the capture path must be outside the declared tree.\n' >&2

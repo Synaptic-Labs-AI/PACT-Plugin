@@ -970,10 +970,10 @@ def _uses_file(node: ast.AST) -> bool:
 
 
 # The shared tracked-enumeration fixture scans the directory it is given, but
-# module-local wrappers are named freely (`_tracked_glob`, `_tracked_files`,
+# module-local wrappers are named freely (`_tracked_glob`, `_shared_tracked_glob`,
 # `_tracked_agent_files`, ...), so a closed name list cannot recognise them.
-# The convention is the contract: `tracked_*` / `_tracked_*`.
-_TRACKED_SCAN_NAME = re.compile(r"^_?tracked_[a-z0-9_]+$")
+# The convention is the contract: `tracked_*`, `_tracked_*`, `shared_tracked_*`.
+_TRACKED_SCAN_NAME = re.compile(r"^_?(?:shared_)?tracked_[a-z0-9_]+$")
 
 
 def _is_scan_name(name: str) -> bool:
@@ -982,6 +982,35 @@ def _is_scan_name(name: str) -> bool:
 
 def _is_scan_call(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and _is_scan_name(_call_name(node))
+
+
+def _scan_wrapper_names(tree: ast.Module) -> frozenset[str]:
+    """Module-local functions that reach a scan, whatever they are named.
+
+    A wrapper may take the scanned directory as a PARAMETER, so the wrapper
+    body cannot be anchored; it is the call site that carries the root. The
+    name is free (`_shipped_shell_scripts`, `_population`), so the convention
+    cannot see it; the call graph can. Transitive, because a wrapper may call
+    another wrapper. A false positive only widens reach.
+    """
+    functions = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    wrappers: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, node in functions.items():
+            if name in wrappers:
+                continue
+            if any(isinstance(call, ast.Call)
+                   and (_is_scan_name(_call_name(call))
+                        or _call_name(call) in wrappers)
+                   for call in ast.walk(node)):
+                wrappers.add(name)
+                changed = True
+    return frozenset(wrappers)
 
 
 def _anchor_of(node: ast.AST,
@@ -1174,6 +1203,12 @@ def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
     constants, anchors, resolved = _module_anchors(
         tree, rel, module_files or {})
     module_parts = Path(rel).parts
+    wrappers = _scan_wrapper_names(tree)
+
+    def is_scan(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call)
+                and (_is_scan_name(_call_name(node))
+                     or _call_name(node) in wrappers))
 
     def directory_at(anchor: tuple[int, tuple[str, ...]]) -> str:
         """The plugin directory a resolved anchor names. One that climbs
@@ -1190,7 +1225,7 @@ def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
     roots: set[str] = set()
     found = False
     for scope in scopes:
-        if not any(_is_scan_call(inner) for inner in ast.walk(scope)):
+        if not any(is_scan(inner) for inner in ast.walk(scope)):
             continue
         used = {inner.id for inner in ast.walk(scope)
                 if isinstance(inner, ast.Name)}
@@ -1232,7 +1267,7 @@ def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
                          for inner in ast.walk(constants[name])]
         starts: set[str] = set()
         for call in ast.walk(scope):
-            if not _is_scan_call(call):
+            if not is_scan(call):
                 continue
             func = call.func
             on_module = (isinstance(func, ast.Attribute)
@@ -2666,6 +2701,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
     dynamic_imports: list[str] = []
     dynamic_fixtures: list[str] = []
     scans = False
+    scan_wrappers = _scan_wrapper_names(tree)
 
     def is_literal(node: ast.AST) -> bool:
         return _str_constant(node) is not None or (
@@ -2723,7 +2759,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         if not isinstance(node, ast.Call):
             continue
         call = _call_name(node)
-        if _is_scan_name(call):
+        if _is_scan_name(call) or call in scan_wrappers:
             scans = True
         if call in _PATH_CALLS:
             for argument in node.args:
