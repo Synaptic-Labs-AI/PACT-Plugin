@@ -81,12 +81,13 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
-                  keep_deleted: bool = True) -> list[Path]:
-    """The helper-option arms pass True; content consumers pass False.
+                  keep_deleted: bool = False) -> list[Path]:
+    """Deleted index entries are opt-in; the default is the safe direction.
 
-    A population read as TEXT must not keep deleted index entries: the reader
-    would raise FileNotFoundError on the deleted path instead of the named
-    coverage failure the scan already reports.
+    A population read as TEXT must not keep deleted entries: the reader would
+    raise FileNotFoundError on the deleted path instead of the named coverage
+    failure the scan already reports. Only a structural assertion that must
+    still SEE a deleted member passes True.
     """
     return _shared_tracked_glob(
         repo, pattern, known_member, keep_deleted=keep_deleted
@@ -616,9 +617,13 @@ def test_tracked_population_excludes_untracked_and_keeps_deleted(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "add", "--", "pact-plugin/protocols/tracked.md"], cwd=repo, check=True)
     pattern = "pact-plugin/protocols/*.md"
-    assert _tracked_glob(repo, pattern, "pact-plugin/protocols/tracked.md") == [tracked]
+    assert _tracked_glob(
+        repo, pattern, "pact-plugin/protocols/tracked.md",
+        keep_deleted=True) == [tracked]
     tracked.unlink()
-    assert _tracked_glob(repo, pattern, "pact-plugin/protocols/tracked.md") == [tracked]
+    assert _tracked_glob(
+        repo, pattern, "pact-plugin/protocols/tracked.md",
+        keep_deleted=True) == [tracked]
 
 
 def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):

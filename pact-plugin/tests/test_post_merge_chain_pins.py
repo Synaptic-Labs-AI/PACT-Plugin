@@ -20,12 +20,13 @@ PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
 
 
 def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
-                  keep_deleted: bool = True) -> list[Path]:
-    """The helper-option arms pass True; content consumers pass False.
+                  keep_deleted: bool = False) -> list[Path]:
+    """Deleted index entries are opt-in; the default is the safe direction.
 
-    A population read as TEXT must not keep deleted index entries: every reader
-    would raise FileNotFoundError on the deleted path instead of the named
-    missing-population failure the checkpoints already report.
+    A population read as TEXT must not keep deleted entries: every reader would
+    raise FileNotFoundError on the deleted path instead of the named
+    missing-population failure the checkpoints already report. Only a
+    structural assertion that must still SEE a deleted member passes True.
     """
     return _shared_tracked_glob(
         repo, pattern, known_member, keep_deleted=keep_deleted
@@ -104,9 +105,13 @@ class TestTrackedPopulation:
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         subprocess.run(["git", "add", "--", "pact-plugin/commands/tracked.md"], cwd=repo, check=True)
         pattern = "pact-plugin/commands/*.md"
-        assert _tracked_glob(repo, pattern, "pact-plugin/commands/tracked.md") == [tracked]
+        assert _tracked_glob(
+            repo, pattern, "pact-plugin/commands/tracked.md",
+            keep_deleted=True) == [tracked]
         tracked.unlink()
-        assert _tracked_glob(repo, pattern, "pact-plugin/commands/tracked.md") == [tracked]
+        assert _tracked_glob(
+            repo, pattern, "pact-plugin/commands/tracked.md",
+            keep_deleted=True) == [tracked]
 
     def test_nonzero_git_result_never_falls_back(self, tmp_path, monkeypatch):
         repo = tmp_path / "repo"

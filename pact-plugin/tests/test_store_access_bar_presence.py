@@ -115,13 +115,13 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
-                  keep_deleted: bool = True) -> list[Path]:
-    """Structural oracles keep deleted index entries; content consumers drop them.
+                  keep_deleted: bool = False) -> list[Path]:
+    """Content consumers drop deleted index entries; structural oracles keep them.
 
-    A content population reads every member, so a locally deleted tracked file
-    must leave it; keeping it turns one deletion into a FileNotFoundError with
-    no verdict. The structural population keeps the entry precisely so a named
-    missing-population oracle can still report it.
+    THE DEFAULT IS THE SAFE SIDE. A content population reads every member, so
+    omitting the keyword must not hand a reader a FileNotFoundError on a locally
+    deleted tracked file. A structural population that must keep the entry — to
+    name the deletion — passes ``keep_deleted=True`` explicitly.
     """
     return _shared_tracked_glob(
         repo, pattern, known_member, keep_deleted=keep_deleted
@@ -591,6 +591,7 @@ def _derived_population(root: Path) -> list[Path]:
     prefix = root.name
     return _tracked_glob(
         root.parent, f"{prefix}/**/*", f"{prefix}/{SOURCE_HOME}",
+        keep_deleted=True,
     )
 
 
@@ -647,7 +648,8 @@ def repair_package_entries(root: Path) -> list[Path]:
     if root != PLUGIN_DIR:
         return sorted(package.glob("*.py"))
     prefix = f"{root.name}/{REPAIR_PACKAGE_DIR}"
-    return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py")
+    return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py",
+                         keep_deleted=True)
 
 
 def missing_repair_package_modules(root: Path) -> list[str]:
@@ -791,7 +793,11 @@ def population_files(root: Path) -> list[Path]:
     for pattern in POPULATION_PATTERNS:
         found.extend(_tracked_glob(
             root.parent, f"{prefix}/{pattern}",
-            f"{prefix}/{POPULATION_KNOWN_MEMBERS[pattern]}"))
+            f"{prefix}/{POPULATION_KNOWN_MEMBERS[pattern]}",
+            # This population keeps a deleted tracked surface visible so
+            # `files_reaching_the_store` can NAME it instead of letting arm 3
+            # shrink in silence; that guard is its structural oracle.
+            keep_deleted=True))
     return sorted(set(found))
 
 
@@ -1040,9 +1046,11 @@ class TestTrackedPopulation:
         tracked_rel = tracked.relative_to(repo).as_posix()
         subprocess.run(["git", "add", "--", tracked_rel], cwd=repo, check=True)
         pattern = f"pact-plugin/{REPAIR_PACKAGE_DIR}/*.py"
-        assert _tracked_glob(repo, pattern, tracked_rel) == [tracked]
+        assert _tracked_glob(repo, pattern, tracked_rel,
+                             keep_deleted=True) == [tracked]
         tracked.unlink()
-        assert _tracked_glob(repo, pattern, tracked_rel) == [tracked]
+        assert _tracked_glob(repo, pattern, tracked_rel,
+                             keep_deleted=True) == [tracked]
 
     def test_empty_and_wrong_roots_refuse(self, tmp_path):
         repo = tmp_path / "repo"
