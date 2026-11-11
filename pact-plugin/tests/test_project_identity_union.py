@@ -49,13 +49,40 @@ LEGACY = "PACT-prompt"
 FOREIGN = "someone-elses-checkout"
 
 
+class _CursorSpy:
+    """A cursor that records through the same hook as its connection.
+
+    `sqlite3.Cursor` has its own `execute`/`executemany`, and a connection
+    wrapper that returns the inner cursor unwrapped is blind to a read path
+    writing through `conn.cursor().execute(...)` — the same defect as a spy
+    that wraps only `Connection.execute`.
+    """
+
+    def __init__(self, inner, record):
+        self._inner = inner
+        self._record = record
+
+    def execute(self, sql, *args, **kwargs):
+        self._record(sql)
+        return self._inner.execute(sql, *args, **kwargs)
+
+    def executemany(self, sql, seq):
+        self._record(sql)
+        return self._inner.executemany(sql, seq)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class _WriteSpy:
     """A connection wrapper that records WRITE statements through every
     write-capable method, so a read path cannot write unseen.
 
-    `executemany` is recorded as well as `execute`: a read path that writes
-    through the batch channel is the same defect, and a spy that only wraps
-    `execute` would report a clean sweep while it happened.
+    The three statement channels a `sqlite3.Connection` runs SQL through —
+    `execute`, `executemany`, `executescript` — are wrapped, and `cursor()`
+    returns a `_CursorSpy` so the cursor's own `execute`/`executemany` are
+    recorded too. A spy that wraps only `execute` reports a clean sweep while
+    a batch or cursor write happens.
 
     ALTER is deliberately NOT recorded: `_migrate_ct_fields` issues three
     swallowed ADD COLUMN attempts per connection, pre-existing behaviour
@@ -84,6 +111,15 @@ class _WriteSpy:
     def executemany(self, sql, seq):
         self._record(sql)
         return self._inner.executemany(sql, seq)
+
+    def executescript(self, sql_script, *args, **kwargs):
+        # Unconditional: a read path has no legitimate use for a multi-
+        # statement script, and `_record` would read only its first token.
+        self._writes.append(sql_script)
+        return self._inner.executescript(sql_script, *args, **kwargs)
+
+    def cursor(self, *args, **kwargs):
+        return _CursorSpy(self._inner.cursor(*args, **kwargs), self._record)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -501,6 +537,38 @@ class TestReadsNeverWrite:
         assert any("INSERT" in sql.upper() for sql in writes), (
             "the spy did not observe executemany, so a read path could write "
             "through that channel unseen"
+        )
+
+    def test_the_write_spy_observes_cursor_execute_and_executescript(self, union_env):
+        """The INSTRUMENT pin for the other two channels.
+
+        `conn.cursor().execute(...)` and `conn.executescript(...)` run SQL
+        without touching `Connection.execute`, so an unwrapped cursor or a
+        delegated script call is a blind spot in the sweep above.
+
+        RED WHEN: `_WriteSpy.cursor` returns the inner cursor unwrapped, or
+        `executescript` stops recording.
+        """
+        writes = []
+        conn = db_sqlite3.connect(str(union_env.store))
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS spy_probe (x TEXT)")
+            spy = _WriteSpy(conn, writes)
+            spy.cursor().execute(
+                "INSERT INTO spy_probe (x) VALUES ('cursor')"
+            )
+            spy.executescript(
+                "BEGIN; INSERT INTO spy_probe (x) VALUES ('script'); COMMIT;"
+            )
+        finally:
+            conn.close()
+        assert any("'cursor'" in sql for sql in writes), (
+            "the spy did not observe cursor().execute, so a read path could "
+            "write through that channel unseen"
+        )
+        assert any("'script'" in sql for sql in writes), (
+            "the spy did not observe executescript, so a read path could "
+            "write through that channel unseen"
         )
 
 
