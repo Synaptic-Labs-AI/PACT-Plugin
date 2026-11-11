@@ -48,6 +48,38 @@ def clean_env_no_claude_project_dir():
         yield
 
 
+def _rev_parse_mock(*, common, toplevel=None, git_dir=None, default_rc=1):
+    """A `subprocess.run` side_effect answering each `rev-parse` subcommand.
+
+    `main_repo_root` issues `--show-toplevel` and `--git-dir` IN ADDITION to
+    `--git-common-dir`, so a blanket `return_value` mock would feed the
+    common-dir answer to all three and describe a repository that cannot
+    exist. Any other git call (`config --get`) answers the default: exit 1,
+    which is "no key set" — a repository with no origin, NOT an unreadable
+    one. A higher default would model a broken repository and legitimately
+    DECLINE.
+    """
+
+    answers = {
+        "--git-common-dir": common,
+        "--show-toplevel": toplevel,
+        "--git-dir": git_dir,
+    }
+
+    def _run(command, **_kwargs):
+        result = MagicMock()
+        for option, stdout in answers.items():
+            if option in command and stdout is not None:
+                result.returncode = 0
+                result.stdout = stdout
+                return result
+        result.returncode = default_rc
+        result.stdout = ""
+        return result
+
+    return _run
+
+
 def _isolate_walkup_to(monkeypatch, tmp_path):
     """Confine the walk-up search to the test's tmp_path subtree.
 
@@ -304,7 +336,7 @@ class TestSourceEquivalence:
         # rather than spawning its own subprocess. The subprocess markers this
         # assertion used to carry moved with it and are pinned on the helper by
         # test_main_repo_root_carries_the_git_derivation.
-        assert "repo_root = cwd_common_dir.parent" in real_source
+        assert "repo_root = main_repo_root(common=cwd_common_dir)" in real_source
         # Strategy 3 now walks up from cwd to find the nearest project marker.
         assert "_find_project_root(Path.cwd())" in real_source
 
@@ -313,7 +345,7 @@ class TestSourceEquivalence:
         pos_override = real_source.index("read_override(cwd_common_dir)")
         pos_env = real_source.index('os.environ.get("CLAUDE_PROJECT_DIR")')
         pos_record = real_source.index("get_project_dir_from_session_record()")
-        pos_git = real_source.index("repo_root = cwd_common_dir.parent")
+        pos_git = real_source.index("repo_root = main_repo_root(common=cwd_common_dir)")
         pos_cwd = real_source.index("_find_project_root(Path.cwd())")
 
         assert pos_override < pos_env, (
@@ -486,12 +518,12 @@ class TestDetectProjectId:
         all sessions of the project share one key, rather than the worktree's
         own (fragmenting) basename.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/some/git/repo/.git\n"
-
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/env/var/project"}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common="/some/git/repo/.git\n",
+                 toplevel="/some/git/repo\n",
+                 git_dir="/some/git/repo/.git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "repo"
 
@@ -503,12 +535,12 @@ class TestDetectProjectId:
         repo basename — aligning Strategy 1 with the repo-root semantics of
         Strategies 2 and 3 and preventing per-subdirectory key fragmentation.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/home/user/myrepo/.git\n"
-
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/myrepo/src/mod"}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common="/home/user/myrepo/.git\n",
+                 toplevel="/home/user/myrepo\n",
+                 git_dir="/home/user/myrepo/.git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
@@ -519,13 +551,13 @@ class TestDetectProjectId:
         shared .git, so it resolves to the main basename like the worktree root
         and an in-repo subdirectory do.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/home/user/myrepo/.git\n"
-
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": "/home/user/wt-feature/src/mod"}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common="/home/user/myrepo/.git\n",
+                 toplevel="/home/user/myrepo\n",
+                 git_dir="/home/user/myrepo/.git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
@@ -534,14 +566,14 @@ class TestDetectProjectId:
         back to the root itself, so the rewrite does not fire and the env
         basename is kept.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = ".git\n"
-
         project = tmp_path / "myrepo"
         project.mkdir()
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common=".git\n",
+                 toplevel=str(project) + "\n",
+                 git_dir=".git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
@@ -568,21 +600,21 @@ class TestDetectProjectId:
         --git-common-dir returns the .git directory path; the code resolves
         its parent to get the repo root, then takes .name for project_id.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/users/dev/awesome-repo/.git\n"
-
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("subprocess.run", side_effect=_rev_parse_mock(
+            common="/users/dev/awesome-repo/.git\n",
+            toplevel="/users/dev/awesome-repo\n",
+            git_dir="/users/dev/awesome-repo/.git\n",
+        )):
             result = PACTMemory._detect_project_id()
         assert result == "awesome-repo"
 
     def test_git_strips_whitespace_from_output(self, clean_env_no_claude_project_dir):
         """Should strip trailing whitespace/newline from git output."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "  /path/to/repo/.git  \n"
-
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("subprocess.run", side_effect=_rev_parse_mock(
+            common="  /path/to/repo/.git  \n",
+            toplevel="  /path/to/repo  \n",
+            git_dir="  /path/to/repo/.git  \n",
+        )):
             result = PACTMemory._detect_project_id()
         assert result == "repo"
 
@@ -651,29 +683,37 @@ class TestDetectProjectId:
 
     def test_git_called_with_correct_args_and_timeout(self, clean_env_no_claude_project_dir):
         """Should call git with capture_output, text=True, timeout=5."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/some/repo/.git\n"
-
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("subprocess.run", side_effect=_rev_parse_mock(
+            common="/some/repo/.git\n",
+            toplevel="/some/repo\n",
+            git_dir="/some/repo/.git\n",
+        )) as mock_run:
             PACTMemory._detect_project_id()
 
-        # TWO calls since the identity change: one `rev-parse` for the common
-        # dir and one `config --get` for the origin remote of the same root.
-        # A single call could not answer both, and the remote read is what
-        # canonicalises the id.
-        assert mock_run.call_count == 2
-        args, kwargs = mock_run.call_args_list[0]
-        assert args[0] == ["git", "rev-parse", "--git-common-dir"]
-        assert kwargs["capture_output"] is True
-        # BYTES, decoded by os.fsdecode in the production helper: a path can
-        # contain bytes invalid in the locale, and locale decoding would raise.
-        assert kwargs["text"] is False
-        assert kwargs["timeout"] == 5
-        assert "env" in kwargs
-        assert "CLAUDE_PROJECT_DIR" not in kwargs["env"]
+        # FOUR calls since the identity change: `--git-common-dir`,
+        # `--show-toplevel` and `--git-dir` describe the repository shape,
+        # then `config --get` reads the origin. `common.parent` alone cannot
+        # name the identity root for a submodule or a
+        # `--separate-git-dir` repository.
+        assert mock_run.call_count == 4
+        expected = (
+            ["git", "rev-parse", "--git-common-dir"],
+            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse", "--git-dir"],
+        )
+        for index, command in enumerate(expected):
+            args, kwargs = mock_run.call_args_list[index]
+            assert args[0] == command
+            assert kwargs["capture_output"] is True
+            # BYTES, decoded by os.fsdecode in the production helper: a path
+            # can contain bytes invalid in the locale, and locale decoding
+            # would raise.
+            assert kwargs["text"] is False
+            assert kwargs["timeout"] == 5
+            assert "env" in kwargs
+            assert "CLAUDE_PROJECT_DIR" not in kwargs["env"]
 
-        origin_args, origin_kwargs = mock_run.call_args_list[1]
+        origin_args, origin_kwargs = mock_run.call_args_list[3]
         assert origin_args[0] == [
             "git", "-C", "/some/repo", "config", "--get", "remote.origin.url"
         ]

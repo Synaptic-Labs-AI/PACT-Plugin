@@ -747,6 +747,11 @@ class TestCliRefusalEnvelope:
             "project identity is unresolved or the project has no memories"
             in proc.stdout
         )
+        # THE REMEDY, NOT ONLY THE SYMPTOM. An empty result is not proof the
+        # project has no memories: the help must name the verb that shows the
+        # identity and the command that moves an older bucket.
+        assert "project-id show" in proc.stdout
+        assert "project-id rekey --from" in proc.stdout
 
     def test_child_env_defaults_delete_the_project_dir_var(self, tmp_path):
         """Guard the env-builder itself: DELETE is the default and the pytest

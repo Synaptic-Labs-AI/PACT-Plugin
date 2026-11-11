@@ -23,6 +23,7 @@ import functools
 import json
 import logging
 import os
+import shlex
 import struct
 import subprocess
 import threading
@@ -54,6 +55,7 @@ from .embeddings import (
     generate_embedding_text
 )
 from .graph import (
+    count_project_file_paths,
     link_memory_to_paths,
     track_file,
     get_files_for_memory
@@ -178,6 +180,14 @@ def _match_legacy_candidate(
     matches when more than one bucket differs only by case; it is carried into
     the disclosure so the operator can choose, rather than being dropped
     silently.
+
+    THE FOLDED MATCH IS NOT REQUIRED TO BE `verified`, AND MUST NOT BE. The
+    live legacy bucket's file rows are all relative, so the plausibility gate
+    can only ever call it `unverified`; requiring `verified` here would hide a
+    bucket holding thousands of memories on a case-folding path mismatch —
+    silent loss, which is the defect this change exists to remove. The guard
+    that keeps a fold from merging two projects is UNIQUENESS (exactly one
+    folded match), and the inclusion is disclosed as unverified.
     """
     if legacy in buckets:
         return legacy, []
@@ -327,24 +337,98 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         return None
 
 
-def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
-    """Resolve the MAIN repository root via `git rev-parse --git-common-dir`.
+def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
+    """One `git rev-parse` answer, decoded, or None.
 
-    Worktree-safe: --git-common-dir points at the shared .git directory from a
-    linked worktree as well as from the main checkout, so its parent is the
-    main repo root in both. `git rev-parse --show-toplevel` would return the
-    WORKTREE path instead, fragmenting a project across its own checkouts.
+    Bytes are decoded with `os.fsdecode` (never locale decoding), so a path
+    holding bytes invalid in the locale answers rather than raising.
+    """
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["rev-parse", *args]
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=False,
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return os.fsdecode(result.stdout).strip()
+
+
+def main_repo_root(
+    start: Optional[str] = None, common: Optional[Path] = None
+) -> Optional[Path]:
+    """The repository's identity ROOT — the working tree, or the main checkout.
+
+    `common.parent` IS NOT ALWAYS THE ROOT. It is right only when the common
+    dir is literally `<root>/.git`. Measured counter-examples:
+
+    - SUBMODULE: common is `<super>/.git/modules/vendor/sub`, so
+      `common.parent` is `.../modules/vendor` -- a path with no origin, which
+      filed the submodule under the basename `vendor`.
+    - `git init --separate-git-dir=<ext>/sep.git`: common is external, so
+      `common.parent` is `<ext>` -- again not the working tree.
+
+    The rule: `git rev-parse --show-toplevel` IS the identity root, EXCEPT for
+    a LINKED WORKTREE, where `git_dir` is per-worktree (`.../.git/worktrees/x`)
+    while `common` is the main repository's `.git`; there the main checkout is
+    the identity, so `common.parent` is returned. The discriminator is
+    `git_dir != common` AND `realpath(common.parent/.git) == common`: a
+    submodule's git dir EQUALS its common dir, and an external
+    `--separate-git-dir` has no `.git` at `common.parent`, so neither can be
+    mistaken for a linked worktree.
+
+    A BARE repository has no toplevel, so it DECLINES (None): there is no
+    working tree to name, and guessing one would be the misfile this change
+    exists to prevent.
 
     Args:
         start: Directory git resolves from, passed as `-C`. When None, git
             runs in the current working directory.
+        common: The already-resolved common dir, when the caller has it. Saves
+            a duplicate `rev-parse`; `None` resolves it here.
 
     Returns:
-        The main repo root, or None when git is absent, times out, exits
-        non-zero, or the path is not inside a repository.
+        The identity root, or None when git is absent, times out, exits
+        non-zero, the path is not inside a repository, or the repository is
+        bare.
     """
-    common = main_repo_common_dir(start)
-    return None if common is None else common.parent
+    if common is None:
+        common = main_repo_common_dir(start)
+    if common is None:
+        return None
+    toplevel = _git_rev_parse(start, "--show-toplevel")
+    if toplevel is None:
+        # No working tree: a bare repository, or a repository git cannot
+        # describe. There is no root to name.
+        return None
+    git_dir_raw = _git_rev_parse(start, "--git-dir")
+    if git_dir_raw is not None:
+        try:
+            git_dir = Path(git_dir_raw)
+            if not git_dir.is_absolute():
+                base = Path(start) if start is not None else Path.cwd()
+                git_dir = base / git_dir
+            git_dir = git_dir.resolve()
+            common_path = common.resolve()
+            main_git = (common_path.parent / ".git").resolve()
+            if git_dir != common_path and main_git == common_path:
+                # LINKED WORKTREE: per-worktree git dir, shared main `.git`.
+                return common_path.parent
+        except (OSError, RuntimeError):
+            # A path that will not resolve cannot prove the worktree shape;
+            # the toplevel is the safe answer.
+            pass
+    return Path(toplevel).resolve()
 
 
 def _declared_path_exists(declared_dir: str) -> bool:
@@ -697,9 +781,10 @@ class PACTMemory:
         # repository override file would live. The local name is
         # declared_common_dir, NOT the module helper's own name.
         declared_common_dir = main_repo_common_dir(declared_dir)
-        declared_main_root = (
-            None if declared_common_dir is None else declared_common_dir.parent
-        )
+        # THE IDENTITY ROOT, NOT `common.parent`: a submodule's common dir is
+        # `<super>/.git/modules/vendor/sub`, whose parent has no origin, and an
+        # external `--separate-git-dir` puts the common dir outside the tree.
+        declared_main_root = main_repo_root(declared_dir, declared_common_dir)
         # Compare via normcase so a case-insensitive filesystem does not
         # fire the rewrite for paths that differ only in case (a no-op on
         # case-sensitive systems, where normcase is identity).
@@ -989,7 +1074,18 @@ class PACTMemory:
         # which verifies the main checkout rather than trusting the common
         # dir's parent. This derivation names the project for its id only.
         if cwd_common_dir is not None:
-            repo_root = cwd_common_dir.parent
+            repo_root = main_repo_root(common=cwd_common_dir)
+            if repo_root is None:
+                # A bare repository has no working tree, so it has no root to
+                # name. Decline rather than inventing a directory.
+                logger.warning(
+                    "the process's repository has no working tree (a bare "
+                    "repository, or git cannot describe one), so no project "
+                    "id was derived from it."
+                )
+                return _DetectedIdentity(
+                    None, "unresolved", None, override_ignored
+                )
             identity = detect_id_for_root(repo_root, cwd_common_dir)
             if identity.project_id is not None:
                 source = (
@@ -1217,7 +1313,14 @@ class PACTMemory:
         )
 
         repo_root = main_repo_root()
-        with (db_connection() if conn is None else nullcontext(conn)) as connection:
+        # BIND THE RESOLVED STORE EXPLICITLY. A pathless `db_connection()` only
+        # inherits an enclosing scope; a direct call outside one (the CLI verb
+        # is scoped, but a library caller is not) would read the DEFAULT store
+        # while the stat above inspected the caller's. The two must be the
+        # same file.
+        with (
+            db_connection(Path(store)) if conn is None else nullcontext(conn)
+        ) as connection:
             buckets = project_bucket_counts(connection)
             # The canonical count is what lets a SAVE disclose that it landed
             # in a bucket with no prior rows. Two indexed COUNTs per process,
@@ -1225,10 +1328,23 @@ class PACTMemory:
             # second one free.
             canonical_count = count_project_memories(connection, scope)
             candidate, ambiguous = _match_legacy_candidate(legacy, buckets)
+            # THE FILE COUNT IS MEASURED ONLY WHERE SURFACE 4 NEEDS IT. The
+            # save path already pays two indexed COUNTs; a third query on
+            # every resolution would be a new cost on the hottest write for a
+            # value only the zero-prior-rows disclosure uses. `None` means
+            # "not measured on this path", never zero.
+            file_paths = (
+                count_project_file_paths(connection, candidate)
+                if candidate is not None and canonical_count == 0
+                else None
+            )
             if candidate is None:
                 result = (scope,)
                 state = {
                     "candidate": None,
+                    "memory_count": 0,
+                    "file_paths": None,
+                    "rekey": None,
                     "included": False,
                     "verified": False,
                     "excluded": False,
@@ -1243,6 +1359,18 @@ class PACTMemory:
                 included = outcome != "excluded"
                 state = {
                     "candidate": candidate,
+                    # SURFACE 4 CARRIES BOTH COUNTS AND THE COMMAND. A reader
+                    # deciding whether to move the bucket needs its size
+                    # (memories AND files) and the exact command, not just
+                    # the id.
+                    "memory_count": buckets.get(candidate, 0),
+                    # DISTINCT PATHS, not rows: one path can carry a row in
+                    # each bucket of a union, and `graph_stats` reports rows
+                    # and paths separately for the same reason.
+                    "file_paths": file_paths,
+                    "rekey": shlex.join(
+                        ["pact-memory", "project-id", "rekey", "--from", candidate]
+                    ),
                     "included": included,
                     "verified": outcome == "verified",
                     # LOAD-BEARING: the exclusion disclosure fires on this
@@ -3165,7 +3293,12 @@ class PACTMemory:
                 {
                     "id": bucket_id,
                     "memory_count": count,
-                    "rekey": f"pact-memory project-id rekey --from {bucket_id}",
+                    # SHELL-QUOTED: a bucket id is STORE-INFLUENCED and this string is
+                    # presented as a runnable command, so an unquoted id is a
+                    # copy-paste command-injection surface.
+                    "rekey": shlex.join(
+                        ["pact-memory", "project-id", "rekey", "--from", bucket_id]
+                    ),
                 }
                 for bucket_id, count in sorted(
                     project_bucket_counts(conn).items(),

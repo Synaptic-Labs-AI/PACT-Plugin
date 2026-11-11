@@ -453,15 +453,26 @@ def read_override(common_dir: Path) -> OverrideRead:
 
     The common dir is resolved by the caller with `rev-parse
     --git-common-dir`; this function never shells to git. The location is
-    deliberate: a working-tree `.pact/project-id` can arrive through a clone,
-    a tarball or a vendored copy, so it would let a repository redirect the
-    memory scope of whoever checks it out. A common-dir file cannot.
+    deliberate: a working-tree `.pact/project-id` arrives with a clone, so it
+    would let a repository redirect the memory scope of whoever checks it
+    out.
+
+    THE COMMON-DIR PLACEMENT IS NARROWER, NOT UNREACHABLE. An archive that
+    ships a `.git/` directory can carry this file, exactly as it can already
+    carry `.git/config`. The trust requirement is the one `.git/config`
+    already has: an untrusted checkout can influence the identity this
+    process binds, and the impact is confined to the caller's own rows.
+    Never claim the file cannot travel.
 
     Never raises; every failure is a fixed reason token.
     """
     path = Path(common_dir) / _OVERRIDE_FILENAME
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as handle:
+            # BOUNDED READ: one byte past the cap is enough to classify the
+            # file as too long, so an accidentally huge or hostile file is
+            # never allocated whole.
+            raw = handle.read(_MAX_OVERRIDE_BYTES + 1)
     except FileNotFoundError:
         return OverrideRead(None, None, None)
     except OSError:

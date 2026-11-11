@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -63,6 +64,7 @@ from scripts.memory_api import (
     ProjectScopeDisagreementError,
     main_repo_root,
 )
+from scripts.project_identity import is_canonical
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
 
@@ -989,7 +991,10 @@ def _project_candidates(db_path) -> list:
     store = Path(db_path) if db_path else resolve_db_path()
     if not store.exists():
         return []
-    with db_connection() as conn:
+    # The path is passed EXPLICITLY: a pathless connection inherits an
+    # enclosing scope, and a direct caller outside one would read the default
+    # store while this function reported a caller's.
+    with db_connection(store) as conn:
         buckets = project_bucket_counts(conn)
     return [
         {
@@ -997,7 +1002,14 @@ def _project_candidates(db_path) -> list:
             "memory_count": count,
             # The literal command, with the id already substituted. Naming
             # the verb without its argument is not a remedy.
-            "rekey": f"pact-memory project-id rekey --from {bucket_id}",
+            #
+            # SHELL-QUOTED: a bucket id is STORE-INFLUENCED and can contain a
+            # space, a semicolon, a dollar sign or a quote. This string is
+            # presented as a runnable command, so an unquoted id is a
+            # copy-paste command-injection surface.
+            "rekey": shlex.join(
+                ["pact-memory", "project-id", "rekey", "--from", bucket_id]
+            ),
         }
         for bucket_id, count in sorted(
             buckets.items(), key=lambda item: (-item[1], item[0])
@@ -1069,17 +1081,30 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
 
+    if args.to_id and not is_canonical(args.to_id):
+        # A SUPPLIED non-canonical target is caller input, refused on the
+        # bad-input channel. Moving rows into a basename bucket is the
+        # misfile this whole change exists to prevent.
+        _error(
+            "INVALID_INPUT",
+            f"--to {args.to_id!r} is not a canonical id. The target must be "
+            f"host/owner/repo (see `project-id show`). Nothing was moved.",
+            exit_code=2,
+        )
+
     memory = PACTMemory(db_path=db_path)
     to_id = args.to_id or memory.project_id
-    if not to_id:
-        # The target cannot be invented: moving a bucket to a guessed id is
-        # the misfile this whole change exists to prevent.
+    if not to_id or not is_canonical(to_id):
+        # No canonical identity resolves, so there is no defensible target:
+        # a detected BASENAME is exactly the bucket the move must leave.
         _error(
             "PROJECT_IDENTITY_UNRESOLVED",
             "no canonical project id resolves for this repository, so the "
-            "rekey target is unknown. Pass --to <id>, or run from the "
+            "rekey target is unknown. Pass --to <canonical id>, run from the "
             "repository, or write an explicit id to "
-            "<git-common-dir>/pact-project-id.",
+            "<git-common-dir>/pact-project-id. A folder-name target is "
+            "refused: moving rows into a basename bucket is the misfile this "
+            "command exists to prevent.",
         )
 
     if from_id == to_id:
@@ -1414,7 +1439,10 @@ def build_parser():
             "the section is a view of the store, so fix a record with update "
             "or delete and run sync again. When project identity is unresolved "
             "or the project has no memories, sync reports sync_status 'empty' "
-            "and leaves the file untouched."
+            "and leaves the file untouched. An empty result is not proof the "
+            "project has no memories: run `project-id show` and follow the "
+            "candidate it names. `pact-memory project-id rekey --from '<id>'` "
+            "moves a populated older bucket into the canonical id."
         ),
         parents=[parent],
         formatter_class=fmt,
