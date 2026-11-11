@@ -162,9 +162,13 @@ def _command_argv(lines: list[str]) -> list[str]:
             or len(candidates) == 2 and candidates[0] != candidates[1]):
         raise EvidenceError("expected one command, optionally repeated by the Actions group header")
     argv = candidates[0]
+    # `$DIST` is the shipped workflow's own text: Actions echoes the `run:` body
+    # unexpanded, so a real log carries the variable, not the resolved value.
+    # The fixed tokens and the literal JUnit argument still pin the command
+    # shape, so this widens the accepted VALUE, never the command.
     if (len(argv) != 9 or argv[:7] != [
             "python", "-m", "pytest", "-ra", "-n", "4", "--dist"]
-            or argv[7] not in ("loadfile", "load")
+            or argv[7] not in ("loadfile", "load", "$DIST")
             or argv[8] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
         raise EvidenceError(f"unexpected full-suite pytest argv: {argv!r}")
     return argv

@@ -25,6 +25,9 @@ if not SCRIPT.is_file():
         f"repo-level comparator not present in this layout: {SCRIPT}; this "
         "module exercises a repo script and is not part of the plugin payload",
         allow_module_level=True)
+
+import ci_contract  # noqa: E402  (repo-local helper; after the layout guard)
+
 SPEC = importlib.util.spec_from_file_location("compare_full_suite_results", SCRIPT)
 comparator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(comparator)
@@ -85,7 +88,7 @@ def environment_steps():
             for name in ENVIRONMENT_STEP_NAMES]
 
 
-def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
+def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
              record_updates=None, collection_updates=None, metadata_updates=None,
              teardown_after_pass=(), collection_skips=()):
     directory = root / name
@@ -165,8 +168,12 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist="loadfile",
     ET.ElementTree(root_element).write(artifact / ".full-suite-results.xml",
                                        encoding="utf-8", xml_declaration=True)
 
-    command = (f'python -m pytest -ra -n 4 --dist "{dist}" '
-               '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+    # The replica is the workflow's own run text: Actions echoes it unexpanded,
+    # so shlex sees $DIST. `dist=` builds the legacy literal form (older logs
+    # and the observation arm); no current workflow emits it.
+    command = (ci_contract.WORKFLOW_TEST_CMD if dist is None
+               else f'python -m pytest -ra -n 4 --dist "{dist}" '
+                    '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
     lines = [
         actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
@@ -211,8 +218,7 @@ def test_forward_mapping_literal_control():
 def test_real_actions_job_step_timestamp_envelope(tmp_path):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101)
-    command = ('python -m pytest -ra -n 4 --dist "loadfile" '
-               '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+    command = ci_contract.WORKFLOW_TEST_CMD
     for directory in (first, second):
         log = directory / "run.log"
         log.write_text(log.read_text().replace(
@@ -260,6 +266,8 @@ def test_summary_outcome_mismatch_is_invalid(tmp_path):
 
 
 def test_distribution_and_duration_changes_are_observations(tmp_path):
+    # Legacy literal form: the current workflow logs one `$DIST` argv for both
+    # distributions, so this observation is reachable only from older logs.
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101, dist="load",
                       cases=[case(ALPHA, duration=0.8), case(BETA, duration=0.9)])
@@ -269,16 +277,65 @@ def test_distribution_and_duration_changes_are_observations(tmp_path):
     assert {item["type"] for item in comparison["observations"]} == {"argv", "duration"}
 
 
-@pytest.mark.parametrize("dist", ["loadfile", "load"])
-def test_quoted_distribution_and_bom_command_envelope(tmp_path, dist):
+@pytest.mark.parametrize("dist, expected", [
+    (None, "$DIST"),          # the shipped workflow's unexpanded text
+    ("loadfile", "loadfile"),  # legacy literal forms, still accepted
+    ("load", "load"),
+])
+def test_quoted_distribution_and_bom_command_envelope(tmp_path, dist, expected):
     first = make_run(tmp_path, "one", dist=dist)
     second = make_run(tmp_path, "two", 101, dist=dist)
     completed, comparison, output = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
-    assert f'--dist "{dist}"' in (first / "run.log").read_text(encoding="utf-8")
+    assert f'--dist "{expected}"' in (first / "run.log").read_text(encoding="utf-8")
     assert "\t" + chr(0xFEFF) + "2026-" in (first / "run.log").read_text(encoding="utf-8")
     run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
-    assert run["argv"][7] == dist
+    assert run["argv"][7] == expected
+
+
+def test_unexpanded_dist_variable_is_accepted_on_an_identical_pair(tmp_path):
+    """Actions echoes the `run:` body unexpanded, so a real log carries $DIST.
+
+    The value is an argv observation, not a gate: the fixed tokens around it
+    still pin the command shape.
+    """
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    for directory in (first, second):
+        assert '--dist "$DIST"' in (directory / "run.log").read_text(encoding="utf-8")
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    assert comparison["observations"] == []
+    run = json.loads((output / "runs.jsonl").read_text().splitlines()[0])
+    assert run["argv"][7] == "$DIST"
+
+
+@pytest.mark.parametrize("mutation", [
+    "unknown_dist", "path_operand", "selection_flag", "wrong_junit"])
+def test_argv_relaxation_is_not_a_blanket_accept(tmp_path, mutation):
+    """Accepting `$DIST` must not accept a different shape or value."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    command = ci_contract.WORKFLOW_TEST_CMD
+    if mutation == "unknown_dist":
+        changed = command.replace('"$DIST"', '"loadgroup"')
+    elif mutation == "path_operand":
+        changed = command.replace("--junitxml=", "tests/test_example.py --junitxml=")
+    elif mutation == "selection_flag":
+        changed = command.replace("--junitxml=", "-k smoke --junitxml=")
+    else:
+        changed = command.replace(".full-suite-results.xml", ".other.xml", 1)
+    # Replace every occurrence so both candidate lines carry the mutation and
+    # the fixed-token check, not the duplicate-command check, is what fires.
+    log.write_text(log.read_text(encoding="utf-8").replace(command, changed),
+                   encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, (mutation, comparison)
+    assert comparison["status"] == "invalid"
+    assert "unexpected full-suite pytest argv" in (
+        comparison["evidence_errors"][0]["error"]), (mutation, comparison)
 
 
 @pytest.mark.parametrize("mutation", ["arbitrary", "narrowing", "unsupported", "conflicting"])
@@ -292,11 +349,10 @@ def test_dynamic_command_mutations_remain_invalid(tmp_path, mutation):
     elif mutation == "narrowing":
         text = text.replace("--junitxml=", "tests/test_example.py --junitxml=")
     elif mutation == "unsupported":
-        text = text.replace('"loadfile"', '"loadgroup"')
+        text = text.replace('"$DIST"', '"loadgroup"')
     else:
-        command = ('python -m pytest -ra -n 4 --dist "loadfile" '
-                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
-        conflicting = command.replace('"loadfile"', '"load"')
+        command = ci_contract.WORKFLOW_TEST_CMD
+        conflicting = command.replace('"$DIST"', '"load"')
         text = text.replace(actions_line(command), actions_line(conflicting))
     log.write_text(text, encoding="utf-8")
     completed, comparison, _ = invoke(tmp_path, first, second)
@@ -984,8 +1040,7 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
             "jobs": [{"name": "full-suite", "runnerName": "r1",
                       "conclusion": "failure", "steps": environment_steps()}]})
         (directory / "run.log").write_text("\n".join([
-            actions_line('python -m pytest -ra -n 4 --dist "loadfile" '
-                         '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"'),
+            actions_line(ci_contract.WORKFLOW_TEST_CMD),
             actions_line("platform linux -- Python 3.12.3"),
             actions_line("CI environment matches constraints-ci.txt."),
             actions_line(f"FULL-COLLECTION-OK 2 test files and "
