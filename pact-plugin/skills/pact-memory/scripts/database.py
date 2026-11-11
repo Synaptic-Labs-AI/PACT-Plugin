@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -1051,6 +1052,97 @@ def _unusable_identifier(value: object) -> bool:
             for char in value
         )
     )
+
+
+# =============================================================================
+# Project identity: canonical grammar (R1) and write ingress (R2)
+# =============================================================================
+#
+# ONE DEFINITION EACH, in this module, because the write ingress
+# (`create_memory`, `update_memory`) and the identity canonicaliser must agree
+# on what an identifier is. `project_identity` imports these; this module does
+# not import `project_identity`, so there is no cycle.
+#
+# R1 DESCRIBES A CANONICAL ID; it does not parse a remote URL. The
+# remote-to-canonical canonicaliser lives in `project_identity`, and the shape
+# below is what it must produce: `host[:port]/<segment>[/<segment>...]`.
+#
+# THE SHAPE IS ALSO A DISCRIMINATOR: every canonical id contains at least one
+# `/`, and no POSIX basename can, so a legacy folder-name bucket can never be
+# mistaken for a canonical id. Do not relax the `/` requirement.
+
+CANONICAL_ID_MAX_LENGTH = 255
+
+# Host: lowercase, alnum at BOTH ends, dots and hyphens only inside. The
+# optional port sits in the HOST position and nowhere else; a colon anywhere
+# else is refused by the segment class. `[1-9]` rejects a leading zero (and
+# zero itself); the 65535 ceiling is checked numerically because a regex
+# cannot express it. Path case is PRESERVED — owner/repo are case-sensitive
+# on a case-sensitive host, so folding them would silently merge two
+# repositories.
+# `fullmatch` is used below rather than `$`-anchored `match`: in Python `$`
+# also matches just BEFORE a trailing newline, so `host/owner/repo\n` would
+# pass an anchored pattern. The newline is git's record terminator and is
+# dropped by the parser; a value that still carries one is not an id.
+CANONICAL_ID_RE = re.compile(
+    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
+    r"(?::([1-9][0-9]{0,4}))?"
+    r"(?:/[A-Za-z0-9._~!$&'()*+,;=-]+)+"
+)
+
+
+def is_canonical_id(value: object) -> bool:
+    """R1: whether `value` is a canonical `host[:port]/owner/repo` id.
+
+    Pure and total: any object is accepted and answers False rather than
+    raising, because this runs on values that arrived from a remote, an
+    override file, an environment variable and a stored row.
+
+    This answers only whether a FINISHED id is in canonical shape. The
+    parser's own rules that leave no trace in the result — one `.git` strip,
+    default-port dropping, userinfo stripping — belong to the canonicaliser
+    that produces the id, not here.
+    """
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > CANONICAL_ID_MAX_LENGTH
+    ):
+        return False
+    match = CANONICAL_ID_RE.fullmatch(value)
+    if match is None:
+        return False
+    port = match.group(1)
+    if port is not None and int(port) > 65535:
+        return False
+    path = value.split("/", 1)[1]
+    return not any(segment in (".", "..") for segment in path.split("/"))
+
+
+def validate_identifier_for_write(value: object) -> None:
+    """R2: the write-ingress rule for project ids, session ids and ids.
+
+    `_unusable_identifier` plus a 255-character cap. NO printable-ASCII
+    restriction: a non-Latin directory name is a legitimate project basename,
+    and refusing it would reject real stores. The cap matches the canonical
+    grammar's own limit, so an id that can be detected can also be written.
+
+    Raises:
+        ValueError: naming the rule, never the value. A rejected value may
+            hold control characters or a credential-bearing remote, and the
+            remedy text is what callers surface.
+    """
+    if isinstance(value, str) and len(value) > CANONICAL_ID_MAX_LENGTH:
+        raise ValueError(
+            f"identifier must be at most {CANONICAL_ID_MAX_LENGTH} "
+            "characters; nothing was written."
+        )
+    if _unusable_identifier(value):
+        raise ValueError(
+            "identifier must be a non-empty string without control characters "
+            "(U+0000-U+001F, U+007F-U+009F) or lone surrogates "
+            "(U+D800-U+DFFF); nothing was written."
+        )
 
 
 def create_memory(
