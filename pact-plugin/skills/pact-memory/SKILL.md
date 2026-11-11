@@ -314,6 +314,17 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
+| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket with its literal rekey command. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "read_scope": [...], "candidates": [{"id": "...", "memory_count": N, "rekey": "..."}]}` |
+| `project-id rekey --from <id> [--to <id>] [--dry-run] [--apply] [--candidates]` | Move an ENTIRE project bucket to the canonical id in one transaction: memories, file rows, graph links and vector partitions. `--dry-run` is the default posture; `--candidates` lists the buckets | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "vectors_moved": N, ...}` |
+
+WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
+anything, and follow the candidate it names. It reports the identity this
+session resolved, how it was decided, and every populated bucket with the
+literal `pact-memory project-id rekey --from <id>` command. A bucket can hold
+thousands of records that this session's read scope does not include — an
+identity it cannot derive, or a legacy bucket the plausibility gate excluded —
+and an empty result never means those records do not exist. A full id still
+resolves by id, so `get <id>` is a way to check one record when you know it.
 
 On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 
