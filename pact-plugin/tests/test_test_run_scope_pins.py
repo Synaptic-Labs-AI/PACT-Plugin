@@ -765,10 +765,19 @@ def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
 def _surfaces() -> list[Path]:
     found: list[Path] = []
     for pattern in SURFACE_GLOBS:
-        matches = _tracked_glob(
-            PLUGIN.parent, f"pact-plugin/{pattern}",
-            f"pact-plugin/{SURFACE_KNOWN_MEMBERS[pattern]}",
-        )
+        # The directory name is READ, not hardcoded: an installed cache places
+        # the plugin under a version directory (.../PACT/4.8.34).
+        try:
+            matches = _tracked_glob(
+                PLUGIN.parent, f"{PLUGIN.name}/{pattern}",
+                f"{PLUGIN.name}/{SURFACE_KNOWN_MEMBERS[pattern]}",
+            )
+        except AssertionError:
+            if PLUGIN.name == "pact-plugin":
+                raise
+            pytest.skip(
+                f"installed layout {PLUGIN} ships no {PLUGIN.name}/{pattern}; "
+                "the run-scope claims are about the dev checkout")
         found.extend(matches)
     return sorted(set(found))
 

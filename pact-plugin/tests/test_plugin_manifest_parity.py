@@ -20,6 +20,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from fixtures.tracked_files import tracked_files as _tracked_files
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -58,10 +60,15 @@ def _tracked_markdown(dir_path: Path) -> list[Path]:
 
 
 def _tracked_skill_dirs() -> list[Path]:
-    """Every shipped skill directory, including one whose SKILL.md is missing."""
+    """Every shipped skill directory, including one whose SKILL.md is missing.
+
+    Deleted index entries stay visible: a locally deleted SKILL.md is exactly
+    the defect this oracle reports, so dropping the directory would hide it.
+    """
     relative = SKILLS_DIR.relative_to(PLUGIN_ROOT.parent).as_posix()
-    return sorted({path.parent for path in _tracked_files(PLUGIN_ROOT.parent, relative)
-                   if path.parent.parent == SKILLS_DIR})
+    return sorted({path.parent for path in _tracked_files(
+        PLUGIN_ROOT.parent, relative, keep_deleted=True)
+        if path.parent.parent == SKILLS_DIR})
 
 
 def _on_disk(rel_dir: str, dir_path: Path) -> set[str]:
@@ -233,3 +240,17 @@ def test_skill_directory_oracle_ignores_an_untracked_incomplete_directory(
         assert stray not in _tracked_skill_dirs()
     finally:
         stray.rmdir()
+
+
+def test_deleted_tracked_skill_md_still_reddens(tmp_path, monkeypatch):
+    """A deleted SKILL.md is the defect: the directory must not leave the walk."""
+    plugin = _synthetic_plugin(tmp_path, {
+        "skills/only/SKILL.md": "",
+        "skills/other/SKILL.md": "",
+    })
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", plugin / "skills")
+    (plugin / "skills" / "only" / "SKILL.md").unlink()
+    assert plugin / "skills" / "only" in _tracked_skill_dirs()
+    with pytest.raises(AssertionError, match=r"\./skills/only/"):
+        test_every_skill_subdir_has_skill_md()

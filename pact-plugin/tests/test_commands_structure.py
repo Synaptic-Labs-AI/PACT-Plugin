@@ -25,8 +25,9 @@ from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
 from shared.intentional_wait import KNOWN_RESOLVERS
 
-COMMANDS_DIR = Path(__file__).parent.parent / "commands"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+COMMANDS_DIR = PLUGIN_ROOT / "commands"
+REPO_ROOT = PLUGIN_ROOT.parent
 
 
 def _tracked_files(repo_root, relative_dir, pattern=None):
@@ -34,6 +35,24 @@ def _tracked_files(repo_root, relative_dir, pattern=None):
     return _shared_tracked_files(
         repo_root, relative_dir, pattern, keep_deleted=True
     )
+
+
+def _shipped_population(relative_dir, pattern=None):
+    """Tracked population under the plugin, named by the directory's own name.
+
+    An installed plugin cache places the plugin under a version directory
+    (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
+    nothing. An install that genuinely omits the artifact skips the asking
+    test by name instead of raising through it.
+    """
+    try:
+        return _tracked_files(REPO_ROOT, relative_dir, pattern)
+    except AssertionError:
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no {relative_dir!r}; "
+            "the command-structure claims are about the dev checkout")
 
 # The shutdown loop's call AS IT APPEARS INSIDE THE FENCED BLOCK.
 #
@@ -98,7 +117,7 @@ EXPECTED_COMMANDS = {
 @pytest.fixture
 def command_files():
     """Load tracked command markdown files."""
-    files = _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md")
+    files = _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md")
     assert COMMANDS_DIR / "refresh.md" in files
     return files
 
@@ -169,6 +188,9 @@ def test_command_files_fixture_excludes_untracked_commands(tmp_path, monkeypatch
     probe = commands / "000_untracked_probe.md"
     probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    # PLUGIN_ROOT too: the population name is derived from it, so a patched
+    # REPO_ROOT alone would keep looking for the real directory's name.
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
     monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
 
     files = request.getfixturevalue("command_files")
@@ -881,7 +903,7 @@ class TestNoDanglingOrchestrationSkillRefs:
     def _candidate_files(cls):
         files = []
         for subdir in cls.SCAN_DIRS:
-            for path in _tracked_files(REPO_ROOT, f"pact-plugin/{subdir}"):
+            for path in _shipped_population(f"{cls.PLUGIN_ROOT.name}/{subdir}"):
                 if path.suffix not in cls.SCAN_SUFFIXES:
                     continue
                 if path.relative_to(cls.PLUGIN_ROOT) in cls.IGNORED_PATHS:
@@ -1068,7 +1090,7 @@ class TestPerLoopDispatchSites:
         # sole-row files (peer-review, plan-mode, rePACT) all survived.
         # Globbing also covers a command file that has no row at all.
         found = {}
-        for path in _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md"):
+        for path in _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md"):
             count = sum(
                 1 for line in path.read_text(encoding="utf-8").splitlines()
                 if self.LEAD_IN in line
@@ -1821,7 +1843,7 @@ def test_no_undeclared_teammate_stopping_command():
     declared = set(TERMINATION_SKELETON_SURFACES)
     found = [
         f"commands/{p.name}"
-        for p in _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md")
+        for p in _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md")
         if "TaskStop(" in p.read_text(encoding="utf-8")
     ]
     # Non-vacuity control: an empty scan would make the assertion below pass
@@ -1887,7 +1909,7 @@ class TestResolverVocabularyIsSingleSourced:
         """Return [(relpath, lineno, value)] for every assignment found."""
         found = []
         for subdir in self.SCAN_DIRS:
-            for path in _tracked_files(REPO_ROOT, f"pact-plugin/{subdir}"):
+            for path in _shipped_population(f"{self.PLUGIN_ROOT.name}/{subdir}"):
                 if path.suffix not in self.SCAN_SUFFIXES:
                     continue
                 try:
@@ -2296,7 +2318,7 @@ def _expected_write_guard(filename):
 @pytest.fixture(scope="module")
 def journal_site_map():
     sites = []
-    for path in _tracked_files(REPO_ROOT, "pact-plugin/commands", "*.md"):
+    for path in _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md"):
         sites.extend(_parse_journal_sites(path.name, path.read_text(encoding="utf-8")))
     return {(site.filename, site.ordinal): site for site in sites}
 

@@ -18,8 +18,9 @@ import pytest
 from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import frontmatter_block, parse_frontmatter
 
-AGENTS_DIR = Path(__file__).parent.parent / "agents"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+AGENTS_DIR = PLUGIN_ROOT / "agents"
+REPO_ROOT = PLUGIN_ROOT.parent
 
 
 def _tracked_files(repo_root, relative_dir, pattern):
@@ -27,6 +28,25 @@ def _tracked_files(repo_root, relative_dir, pattern):
     return _shared_tracked_files(
         repo_root, relative_dir, pattern, keep_deleted=True
     )
+
+
+def _shipped_agents():
+    """Tracked agent markdown, named by the plugin directory's own name.
+
+    An installed plugin cache places the plugin under a version directory
+    (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
+    nothing. An install that genuinely omits the agents skips each requesting
+    test by name instead of erroring through all of them.
+    """
+    relative = f"{PLUGIN_ROOT.name}/agents"
+    try:
+        return _tracked_files(REPO_ROOT, relative, "*.md")
+    except AssertionError:
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no {relative!r}; "
+            "the agent-structure claims are about the dev checkout")
 
 
 # Expected agent files
@@ -52,7 +72,7 @@ REQUIRED_FRONTMATTER_KEYS = {"name", "description"}
 @pytest.fixture
 def agent_files():
     """Load tracked agent markdown files (orchestrator + 12 teammates)."""
-    files = _tracked_files(REPO_ROOT, "pact-plugin/agents", "*.md")
+    files = _shipped_agents()
     assert AGENTS_DIR / "pact-devops-engineer.md" in files
     return files
 
@@ -68,7 +88,7 @@ def teammate_agent_files():
     """Load only tracked teammate agent files (excludes pact-orchestrator)."""
     return [
         p
-        for p in _tracked_files(REPO_ROOT, "pact-plugin/agents", "*.md")
+        for p in _shipped_agents()
         if p.stem in TEAMMATE_AGENT_NAMES
     ]
 
