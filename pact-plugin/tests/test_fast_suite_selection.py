@@ -16,6 +16,7 @@ Rows fall into three groups:
   reinterpreting an ignore relative to its working directory.
 """
 
+import ast
 import importlib.util
 import json
 import os
@@ -1329,6 +1330,33 @@ class TestScanIndex:
                           '    return _value(PLUGIN)\n')
         assert scan.scans is False
         assert scan.scanner_roots is None
+
+    def test_a_shadowed_same_named_wrapper_still_scans(self, core, tmp_path):
+        """Two defs share a name and only one reaches a scan: the name is a
+        wrapper anyway. Keying the call graph by name alone let the surviving
+        def hide the other's scan call site -- the root was dropped and the
+        exclusion silently narrowed, the one direction this module forbids."""
+        (tmp_path / "pact-plugin" / "hooks").mkdir(parents=True)
+        shadowed = ('from pathlib import Path\n'
+                    'PLUGIN = Path(__file__).parents[1]\n'
+                    'def _populate(p):\n'
+                    '    return list(p.rglob("*.py"))\n'
+                    'def _populate(v):\n'
+                    '    return v\n'
+                    'def test_x():\n'
+                    '    return _populate(PLUGIN / "hooks")\n')
+        scan = self._scan(core, tmp_path, "tests/test_r.py", shadowed)
+        assert scan.scans is True
+        assert scan.scanner_roots == frozenset({"hooks"})
+        # The same-named pair across two classes: the scanning method must
+        # still make the NAME a wrapper, whichever def the walk sees last.
+        class_pair = ('class Census:\n'
+                      '    def _populate(self, p):\n'
+                      '        return list(p.rglob("*.py"))\n'
+                      'class Other:\n'
+                      '    def _populate(self, value):\n'
+                      '        return value\n')
+        assert "_populate" in core._scan_wrapper_names(ast.parse(class_pair))
 
     def test_a_tmp_path_scan_is_not_a_scanner(self, core, tmp_path):
         scan = self._scan(core, tmp_path, "tests/test_e.py",

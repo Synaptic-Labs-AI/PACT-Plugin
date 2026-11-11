@@ -992,22 +992,27 @@ def _scan_wrapper_names(tree: ast.Module) -> frozenset[str]:
     name is free (`_shipped_shell_scripts`, `_population`), so the convention
     cannot see it; the call graph can. Transitive, because a wrapper may call
     another wrapper. A false positive only widens reach.
+
+    Same-named defs (two classes with a like-named method, a redefinition)
+    are UNIONED: a name is a wrapper when ANY def with that name reaches a
+    scan. Keying by name alone let the last def shadow the others, hiding
+    the scan call sites that carry the root -- a narrowing.
     """
-    functions = {
-        node.name: node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    functions: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.setdefault(node.name, []).append(node)
     wrappers: set[str] = set()
     changed = True
     while changed:
         changed = False
-        for name, node in functions.items():
+        for name, defs in functions.items():
             if name in wrappers:
                 continue
             if any(isinstance(call, ast.Call)
                    and (_is_scan_name(_call_name(call))
                         or _call_name(call) in wrappers)
-                   for call in ast.walk(node)):
+                   for definition in defs for call in ast.walk(definition)):
                 wrappers.add(name)
                 changed = True
     return frozenset(wrappers)
@@ -1187,7 +1192,8 @@ def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
 
 
 def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
-                   module_files: dict[str, str] | None = None
+                   module_files: dict[str, str] | None = None,
+                   scan_wrappers: frozenset[str] | None = None,
                    ) -> frozenset[str] | None:
     """Plugin directories this module scans from the real checkout.
 
@@ -1203,7 +1209,8 @@ def _scanner_roots(tree: ast.Module, rel: str, is_tracked_dir,
     constants, anchors, resolved = _module_anchors(
         tree, rel, module_files or {})
     module_parts = Path(rel).parts
-    wrappers = _scan_wrapper_names(tree)
+    wrappers = (scan_wrappers if scan_wrappers is not None
+                else _scan_wrapper_names(tree))
 
     def is_scan(node: ast.AST) -> bool:
         return (isinstance(node, ast.Call)
@@ -2820,7 +2827,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
         names=frozenset(names),
         path_literals=frozenset(path_literals),
         scanner_roots=_scanner_roots(tree, module_rel, is_tracked_dir,
-                                     module_files),
+                                     module_files, scan_wrappers),
         repo_reach=(() if test_side else _repo_reach(
             tree, module_rel, root, module_files, docstrings)),
         unproven=(_test_side_reasons(tree, module_rel, roots, root,

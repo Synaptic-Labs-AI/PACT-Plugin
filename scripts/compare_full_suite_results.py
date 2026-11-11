@@ -67,9 +67,27 @@ COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 _WIDE_ENCODING_BOMS = (b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
 # A downloaded artifact is read whole; the bound exists only so a pathological
 # upload cannot exhaust memory. Measured: the 14 real full-suite artifacts at
-# the review head are ~5.2 MiB each, so this leaves about three times the
-# shipped shape.
-MAX_JUNIT_BYTES = 16 * 1024 * 1024
+# the review head are ~5.2 MiB each, so this leaves about 50% headroom.
+MAX_JUNIT_BYTES = 8 * 1024 * 1024
+# The structured evidence files (metadata, both records) are kilobytes in
+# every real run; one bound covers all three. The merged job log carries
+# per-test -ra detail and is larger, so it gets its own bound. Same shape,
+# same reason: a pathological upload cannot exhaust memory.
+MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_LOG_BYTES = 32 * 1024 * 1024
+
+
+def _read_bounded(path: Path, limit: int) -> bytes:
+    """Read at most ``limit``+1 bytes, so a larger file is refused by name
+    instead of being read whole. OSError propagates: each caller wraps it
+    with its own evidence wording."""
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise EvidenceError(
+            f"{path}: evidence exceeds the {limit}-byte bound; "
+            "refusing to read further")
+    return raw
 RAW_PATHS = {"metadata": "metadata.json", "log": "run.log",
              "junit": "artifact/.full-suite-results.xml",
              "run_record": "artifact/.full-run-record.json",
@@ -90,8 +108,12 @@ class EvidenceError(ValueError):
 
 def _json_object(path: Path) -> dict:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raw = _read_bounded(path, MAX_JSON_BYTES)
+    except OSError as exc:
+        raise EvidenceError(f"{path}: unreadable JSON: {exc}") from exc
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         # RecursionError is malformed evidence (pathological nesting), not an
         # internal fault, so it must refuse rather than exit 3.
         raise EvidenceError(f"{path}: unreadable JSON: {exc}") from exc
@@ -109,11 +131,15 @@ def _integer(record: dict, key: str, *, minimum: int = 0) -> int:
 
 def _log_lines(path: Path) -> list[str]:
     try:
-        raw_lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as exc:
+        raw = _read_bounded(path, MAX_LOG_BYTES)
+    except OSError as exc:
+        raise EvidenceError(f"{path}: unreadable log: {exc}") from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as exc:
         raise EvidenceError(f"{path}: unreadable log: {exc}") from exc
     return [TIMESTAMP.sub("", ACTIONS_ENVELOPE.sub("", line, count=1), count=1)
-            for line in raw_lines]
+            for line in text.splitlines()]
 
 
 def _summary_text(line: str) -> str:
@@ -191,17 +217,20 @@ def _junit_bytes(path: Path) -> bytes:
     NUL bytes. A NUL byte is therefore refused before parsing, which closes the
     wide encodings a byte-order mark alone cannot see (a BOM-less UTF-16
     document is still auto-detected by expat). pytest emits UTF-8, and the
-    guarantee is total over every document this tool accepts.
+    guarantee is total over every document this tool accepts. The one family
+    that still passes this byte scan — an EBCDIC document, whose '<!DOCTYPE'
+    bytes are not ASCII — is refused only because pyexpat cannot parse it;
+    swapping the parser reopens that gap, so the scan's totality is bounded
+    by the parser's encoding set.
     """
     try:
-        with path.open("rb") as stream:
-            raw = stream.read(MAX_JUNIT_BYTES + 1)
+        raw = _read_bounded(path, MAX_JUNIT_BYTES)
     except OSError as exc:
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
-    if len(raw) > MAX_JUNIT_BYTES:
+    except EvidenceError as exc:
         raise EvidenceError(
             f"{path}: JUnit XML exceeds the {MAX_JUNIT_BYTES}-byte bound; "
-            "refusing to read further")
+            "refusing to read further") from exc
     if raw.startswith(_WIDE_ENCODING_BOMS):
         raise EvidenceError(
             f"{path}: JUnit XML is not UTF-8 (UTF-16/32 byte-order mark); "
@@ -287,7 +316,8 @@ def _junit_outcome(classname: str, name: str, child) -> tuple[str, str | None]:
 def _parse_junit(path: Path) -> list[dict]:
     try:
         root = ET.fromstring(_junit_bytes(path))
-    except ET.ParseError as exc:
+    except (RecursionError, ET.ParseError) as exc:
+        # RecursionError is malformed evidence, aligned with _json_object.
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
     cases = []
     for index, element in enumerate(root.iter("testcase")):

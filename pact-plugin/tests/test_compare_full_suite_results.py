@@ -1146,6 +1146,36 @@ def test_junit_artifact_size_bound_is_exact(tmp_path):
         comparison["evidence_errors"][0]["error"])
 
 
+@pytest.mark.parametrize("relative,limit", [
+    ("metadata.json", "MAX_JSON_BYTES"),
+    ("artifact/.full-run-record.json", "MAX_JSON_BYTES"),
+    ("artifact/.full-collection-record.json", "MAX_JSON_BYTES"),
+    ("run.log", "MAX_LOG_BYTES"),
+])
+def test_text_evidence_size_bounds_are_exact(tmp_path, relative, limit):
+    """Every evidence read is bounded like the JUnit artifact, not just the
+    XML: the three JSON files and the merged log. Exactly at the bound is
+    accepted (trailing whitespace is inert in both formats); one byte over is
+    refused with exit 2, and the refusal names the file and the bound."""
+    bound = getattr(comparator, limit)
+    reader = (comparator._json_object if limit == "MAX_JSON_BYTES"
+              else comparator._log_lines)
+    first = make_run(tmp_path, "one")
+    path = first / relative
+    base = path.read_bytes()
+    at_limit = base + b" " * (bound - len(base))
+    assert len(at_limit) == bound
+    path.write_bytes(at_limit)
+    reader(path)  # accepted at the bound
+    path.write_bytes(at_limit + b" ")
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    error = comparison["evidence_errors"][0]["error"]
+    assert str(path) in error, error
+    assert str(bound) in error, error
+
+
 def test_deeply_nested_json_evidence_is_refused(tmp_path):
     """Pathological JSON nesting is malformed evidence (2), never a fault (3)."""
     first = make_run(tmp_path, "one")
