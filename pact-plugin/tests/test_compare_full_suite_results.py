@@ -1303,9 +1303,10 @@ def _rewrite_failure_child(directory, message, *, keep_type=False):
 
 
 def test_no_type_xfail_skip_message_is_a_failure_not_a_refusal(tmp_path):
-    """pytest's JUnit writer emits a no-type <skipped> with this exact message
-    when a FAILED report still carries wasxfail. The terminal reporter counts
-    that report as failed, never xpassed, so it reconciles as a failure."""
+    """A foreign or older pytest may emit a no-type <skipped> with this exact
+    message for a FAILED report carrying wasxfail; the pinned 9.2 emits a
+    <failure message="[XPASS(strict)]"> instead. Such a report is counted as
+    failed, never xpassed, so it reconciles as a failure."""
     def build(name, run_id):
         directory = make_run(tmp_path, name, run_id, nodes=[ALPHA],
                              cases=[case(ALPHA, "failure")])

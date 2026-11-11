@@ -80,10 +80,16 @@ from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
-    """Keep deleted index entries visible to failure assertions."""
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = True) -> list[Path]:
+    """The helper-option arms pass True; content consumers pass False.
+
+    A population read as TEXT must not keep deleted index entries: the reader
+    would raise FileNotFoundError on the deleted path instead of the named
+    coverage failure the scan already reports.
+    """
     return _shared_tracked_glob(
-        repo, pattern, known_member, keep_deleted=True
+        repo, pattern, known_member, keep_deleted=keep_deleted
     )
 
 
@@ -559,6 +565,7 @@ def _non_test_plugin_files() -> list:
     tracked = _tracked_glob(
         PLUGIN_ROOT.parent, f"{PLUGIN_ROOT.name}/**/*",
         f"{PLUGIN_ROOT.name}/protocols/pact-protocols.md",
+        keep_deleted=False,
     )
     return [
         path
@@ -567,6 +574,37 @@ def _non_test_plugin_files() -> list:
         and path.relative_to(PLUGIN_ROOT).parts[0] != "tests"
         and "__pycache__" not in path.parts
     ]
+
+
+def test_deleted_tracked_protocol_is_not_read_back(tmp_path, monkeypatch):
+    """A locally deleted tracked file must leave the text scan population.
+
+    With ``keep_deleted=True`` the deleted path stays in the scan and the
+    parametrized reader raises FileNotFoundError; the coverage arm's named
+    ``required`` failure never gets to report it.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    protocols = plugin / "protocols"
+    protocols.mkdir(parents=True)
+    known = protocols / "pact-protocols.md"
+    known.write_text("known\n", encoding="utf-8")
+    doomed = protocols / "pact-agent-stall.md"
+    doomed.write_text("doomed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    files = _non_test_plugin_files()
+
+    assert known in files
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the text scan "
+        "population; every parametrized reader would raise FileNotFoundError "
+        "instead of the named coverage failure")
+    for path in files:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
 
 
 def test_tracked_population_excludes_untracked_and_keeps_deleted(tmp_path):

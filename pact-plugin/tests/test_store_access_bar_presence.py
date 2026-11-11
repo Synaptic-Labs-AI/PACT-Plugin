@@ -114,10 +114,17 @@ from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
-def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
-    """Keep deleted index entries visible to failure assertions."""
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = True) -> list[Path]:
+    """Structural oracles keep deleted index entries; content consumers drop them.
+
+    A content population reads every member, so a locally deleted tracked file
+    must leave it; keeping it turns one deletion into a FileNotFoundError with
+    no verdict. The structural population keeps the entry precisely so a named
+    missing-population oracle can still report it.
+    """
     return _shared_tracked_glob(
-        repo, pattern, known_member, keep_deleted=True
+        repo, pattern, known_member, keep_deleted=keep_deleted
     )
 
 
@@ -620,12 +627,36 @@ def compared_carriers(root: Path) -> list[str]:
 
 
 def _repair_package_paths(root: Path) -> list[Path]:
-    """Use the index for shipped artifacts; keep synthetic fixture walks intact."""
+    """CONTENT population: the index, with locally deleted entries dropped.
+
+    Every member of this population is READ, so a deleted tracked module must
+    not be returned; `missing_repair_package_modules` keeps the structural
+    population that still names it.
+    """
+    package = root / REPAIR_PACKAGE_DIR
+    if root != PLUGIN_DIR:
+        return sorted(package.glob("*.py"))
+    prefix = f"{root.name}/{REPAIR_PACKAGE_DIR}"
+    return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py",
+                         keep_deleted=False)
+
+
+def repair_package_entries(root: Path) -> list[Path]:
+    """STRUCTURAL population: tracked package entries, deleted ones included."""
     package = root / REPAIR_PACKAGE_DIR
     if root != PLUGIN_DIR:
         return sorted(package.glob("*.py"))
     prefix = f"{root.name}/{REPAIR_PACKAGE_DIR}"
     return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py")
+
+
+def missing_repair_package_modules(root: Path) -> list[str]:
+    """Tracked repair-package modules absent from disk, named for the reader."""
+    return sorted(
+        relative_name(path, root)
+        for path in repair_package_entries(root)
+        if not path.is_file()
+    )
 
 
 def repair_modules_without_the_bar(root: Path, exemptions: dict) -> list[str]:
@@ -1135,6 +1166,50 @@ class TestTrackedPopulation:
             )
         finally:
             probe.unlink()
+
+    def test_no_tracked_repair_module_is_missing_from_disk(self):
+        """STRUCTURAL net: a deleted tracked module is NAMED, not silently gone.
+
+        `_repair_package_paths` drops a deleted entry because every member is
+        read. This population keeps it, so the deletion surfaces as one named
+        missing module instead of a read error or a smaller green set.
+        """
+        missing = missing_repair_package_modules(PLUGIN_DIR)
+        assert not missing, (
+            f"tracked modules of {REPAIR_PACKAGE_DIR} are missing from disk: "
+            f"{missing}. Restore them, or remove the index entry with "
+            f"`git rm` if the deletion is intended: the content population "
+            f"drops a deleted entry, so this net is what names it."
+        )
+
+    def test_deleted_tracked_repair_module_is_named_not_a_read_error(
+            self, tmp_path, monkeypatch):
+        """Deletion proof: the content population drops it, the structural one names it.
+
+        With ``keep_deleted=True`` on the content population, deleting one
+        tracked module makes ``repair_modules_without_the_bar`` raise
+        FileNotFoundError for that path instead of returning the survivors.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        package = plugin / REPAIR_PACKAGE_DIR
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        doomed = package / "shred_detect.py"
+        doomed.write_text("", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        doomed.unlink()  # the index entry stays; the disk entry is gone
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        assert repair_modules_without_the_bar(plugin, {}) == [
+            f"{REPAIR_PACKAGE_DIR}/__init__.py"], (
+            "the content population must drop the deleted tracked module; "
+            "keeping it makes the read raise FileNotFoundError")
+        assert missing_repair_package_modules(plugin) == [
+            f"{REPAIR_PACKAGE_DIR}/{doomed.name}"], (
+            "the structural population must keep the deleted entry and name "
+            "it; dropping it turns one deletion into a smaller green set")
 
 
 class TestEveryDeclaredCarrierIsPlaced:

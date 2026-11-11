@@ -19,10 +19,16 @@ COMMANDS_DIR = PLUGIN / "commands"
 PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
 
 
-def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
-    """Keep deleted index entries visible to failure assertions."""
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = True) -> list[Path]:
+    """The helper-option arms pass True; content consumers pass False.
+
+    A population read as TEXT must not keep deleted index entries: every reader
+    would raise FileNotFoundError on the deleted path instead of the named
+    missing-population failure the checkpoints already report.
+    """
     return _shared_tracked_glob(
-        repo, pattern, known_member, keep_deleted=True
+        repo, pattern, known_member, keep_deleted=keep_deleted
     )
 
 
@@ -32,7 +38,7 @@ def _command_files() -> list[Path]:
     # literal ``pact-plugin/`` prefix matches nothing.
     return _tracked_glob(
         REPO_ROOT, f"{PLUGIN.name}/commands/*.md",
-        f"{PLUGIN.name}/commands/refresh.md",
+        f"{PLUGIN.name}/commands/refresh.md", keep_deleted=False,
     )
 
 
@@ -180,6 +186,39 @@ class TestTrackedPopulation:
             "an untracked command joined the shipped population; "
             "_command_files is not reading the git index"
         )
+
+    def test_deleted_tracked_command_is_not_read_back(self, tmp_path, monkeypatch):
+        """A locally deleted tracked command must leave the text population.
+
+        With ``keep_deleted=True`` the deleted path stays in ``_command_files``
+        and every pin that reads it raises FileNotFoundError; the checkpoints'
+        named missing-command failure never gets to report it.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        commands = plugin / "commands"
+        commands.mkdir(parents=True)
+        known = commands / "refresh.md"
+        known.write_text("---\ndescription: known\n---\n", encoding="utf-8")
+        doomed = commands / "wrap-up.md"
+        doomed.write_text("---\ndescription: doomed\n---\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/commands"],
+                       cwd=repo, check=True)
+        doomed.unlink()  # the index entry stays; the disk entry is gone
+        monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+        monkeypatch.setitem(globals(), "PLUGIN", plugin)
+        monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+        files = _command_files()
+
+        assert known in files
+        assert doomed not in files, (
+            f"the deleted tracked {doomed.name} stayed in the text population; "
+            "every pin that reads it would raise FileNotFoundError instead of "
+            "the named missing-command failure")
+        for path in files:  # the population is readable; that is the contract
+            path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -474,8 +513,42 @@ def _llm_loaded_files() -> list[Path]:
         for path in _tracked_glob(
             REPO_ROOT, f"{PLUGIN.name}/{pattern}",
             f"{PLUGIN.name}/{_LLM_KNOWN_MEMBERS[pattern]}",
+            keep_deleted=False,
         )
     ]
+
+
+def test_deleted_tracked_llm_surface_is_not_read_back(tmp_path, monkeypatch):
+    """The LLM-loaded population is read as text; a deleted member must drop.
+
+    With ``keep_deleted=True`` the deleted path stays in ``_llm_loaded_files``
+    and every pin that reads it raises FileNotFoundError.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("known\n", encoding="utf-8")
+    doomed = commands / "wrap-up.md"
+    doomed.write_text("doomed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "_LLM_LOADED_GLOBS", ("commands/*.md",))
+    monkeypatch.setitem(globals(), "_LLM_KNOWN_MEMBERS",
+                        {"commands/*.md": "commands/refresh.md"})
+
+    files = _llm_loaded_files()
+
+    assert known in files
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the LLM-loaded text "
+        "population; every pin that reads it would raise FileNotFoundError")
+    for path in files:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
 
 
 # A merge and `/PACT:wrap-up` joined by "or", in either order: the two offered

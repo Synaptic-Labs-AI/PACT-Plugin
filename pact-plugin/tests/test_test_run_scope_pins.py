@@ -149,10 +149,16 @@ from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 PLUGIN = Path(__file__).resolve().parents[1]
 
 
-def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
-    """Keep deleted index entries visible to failure assertions."""
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = True) -> list[Path]:
+    """The helper-option arms pass True; the text census passes False.
+
+    A population read as TEXT must not keep deleted index entries: the census
+    reader would raise FileNotFoundError on the deleted path instead of the
+    named missing-surface failure the enumeration arm reports.
+    """
     return _shared_tracked_glob(
-        repo, pattern, known_member, keep_deleted=True
+        repo, pattern, known_member, keep_deleted=keep_deleted
     )
 
 
@@ -762,6 +768,40 @@ def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
         _tracked_glob(repo, "pact-plugin/agents/*.md", "pact-plugin/agents/tracked.md")
 
 
+def test_deleted_tracked_surface_is_not_read_back(tmp_path, monkeypatch):
+    """A locally deleted tracked surface must leave the text census population.
+
+    With ``keep_deleted=True`` the deleted path stays in ``_surfaces`` and
+    ``_candidates`` raises FileNotFoundError; the enumeration arm's named
+    ``missing from the enumerated surfaces`` failure never gets to report it.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("known\n", encoding="utf-8")
+    doomed = commands / "wrap-up.md"
+    doomed.write_text("doomed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "SURFACE_GLOBS", ("commands/*.md",))
+    monkeypatch.setitem(globals(), "SURFACE_KNOWN_MEMBERS",
+                        {"commands/*.md": "commands/refresh.md"})
+
+    surfaces = _surfaces()
+
+    assert known in surfaces
+    assert doomed not in surfaces, (
+        f"the deleted tracked {doomed.name} stayed in the text census "
+        "population; the census reader would raise FileNotFoundError instead "
+        "of the named missing-surface failure")
+    for path in surfaces:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
+
+
 def _surfaces() -> list[Path]:
     found: list[Path] = []
     for pattern in SURFACE_GLOBS:
@@ -771,6 +811,7 @@ def _surfaces() -> list[Path]:
             matches = _tracked_glob(
                 PLUGIN.parent, f"{PLUGIN.name}/{pattern}",
                 f"{PLUGIN.name}/{SURFACE_KNOWN_MEMBERS[pattern]}",
+                keep_deleted=False,
             )
         except AssertionError:
             if PLUGIN.name == "pact-plugin":

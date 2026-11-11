@@ -370,6 +370,37 @@ def _shipped(root, pattern):
             yield path
 
 
+def test_shipped_census_drops_a_locally_deleted_file(tmp_path):
+    """The text census reads existing files, so a deleted tracked file is dropped.
+
+    This population is a content consumer: it already enumerates with the
+    default ``keep_deleted`` false, so a local deletion cannot reach the
+    ``read_text`` below. Pinning it keeps a future ``keep_deleted=True`` from
+    turning one deletion into a FileNotFoundError from the census reader.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    hooks = plugin / "hooks"
+    hooks.mkdir(parents=True)
+    known = hooks / "known.py"
+    known.write_text("KNOWN = 1\n", encoding="utf-8")
+    doomed = hooks / "doomed.py"
+    doomed.write_text("DOOMED = 2\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    files = list(_shipped(hooks, "*.py"))
+
+    assert known in files
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the text census "
+        "population; the census reader would raise FileNotFoundError instead "
+        "of a named missing-file failure")
+    for path in files:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
+
+
 def _python_census(plugin):
     """Return a dict of the scan's results over ``plugin``'s scan roots."""
     found = {

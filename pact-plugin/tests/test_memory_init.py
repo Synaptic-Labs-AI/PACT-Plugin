@@ -750,7 +750,9 @@ class TestDependencyDriftIsDetectable:
         For every GOVERNED job (any step whose `run` names pytest, python,
         pip or ruff) in every workflow under .github/workflows/:
           (i) its last COMMAND step (one carrying `run:`) runs VERIFY_CMD
-              with `if: always()`; a `uses:`-only step may follow it;
+              with `if: always()`; only the pinned diagnostic upload of the
+              `full-suite` job may follow it — every other governed job must
+              end at the after-check;
           (ii) every TEST STEP is IMMEDIATELY preceded by VERIFY_CMD. A
                TEST STEP is one whose `run` names pytest OR matches the
                pinned fast runner path. In a profiled job (exactly one
@@ -787,9 +789,10 @@ class TestDependencyDriftIsDetectable:
                 governed_jobs += 1
                 where = f"{rel} job {jid}"
                 problems.extend(self._diagnostic_upload_problems(rel, jid, steps))
-                # A `uses:`-only step may follow the after-check (the evidence
-                # upload runs last on purpose); the rule is about the last
-                # COMMAND, so a command step added after the check still reds.
+                # THE AFTER-CHECK MUST BE THE JOB'S FINAL COMMAND, and only
+                # the pinned diagnostic upload of the `full-suite` job may
+                # follow it. Any other trailing `uses:` step can change what
+                # the check certified, which is the state it exists to see.
                 last_run = next(
                     (n for n in range(len(steps) - 1, -1, -1)
                      if isinstance(steps[n].get("run"), str)), None)
@@ -800,8 +803,20 @@ class TestDependencyDriftIsDetectable:
                             "always()", "${{ always() }}")):
                     problems.append(
                         f"{where}: the LAST command step must run "
-                        f"`{self.VERIFY_CMD}` with `if: always()` (a "
-                        f"`uses:`-only step may follow it)")
+                        f"`{self.VERIFY_CMD}` with `if: always()`")
+                trailing = steps[last_run + 1:] if last_run is not None else []
+                pinned_tail = (
+                    (rel, jid) == (".github/workflows/tests.yml", "full-suite")
+                    and len(trailing) == 1
+                    and trailing[0].get("name")
+                    == "Upload full-suite diagnostic evidence"
+                    and trailing[0].get("uses")
+                    == ci_contract.UPLOAD_ARTIFACT_ACTION)
+                if trailing and not pinned_tail:
+                    problems.append(
+                        f"{where}: steps follow the LAST command step; only "
+                        f"the pinned diagnostic upload of the `full-suite` "
+                        f"job may follow the after-check")
                 profile = self._PROFILES.get((rel, jid))
                 if profile is not None:
                     for pattern, expected_count in profile:

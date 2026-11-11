@@ -270,11 +270,14 @@ def _junit_outcome(classname: str, name: str, child) -> tuple[str, str | None]:
         return "skip", child.get("message")
     if child.get("type") == "pytest.xfail":
         return "xfail", child.get("message")
-    # pytest's JUnit writer emits a no-type <skipped> with this exact message
-    # when a FAILED report still carries wasxfail (its append_failure branch).
-    # The terminal reporter counts that report as failed, never xpassed, so it
-    # reconciles as a failure; the exact message keeps every other no-type
-    # skipped form a refusal.
+    # A foreign or older pytest may emit a no-type <skipped> with this exact
+    # message for a FAILED report that still carries wasxfail (junitxml's
+    # append_failure branch). The pinned 9.2 does not set wasxfail on a failed
+    # report; a strict xpass emits a <failure message="[XPASS(strict)]">
+    # instead. This is defensive handling, not coverage of a shape our
+    # toolchain produces. Such a report is counted as failed, never xpassed,
+    # so it reconciles as a failure; the exact message keeps every other
+    # no-type skipped form a refusal.
     if (child.get("type") is None
             and child.get("message") == "xfail-marked test passes unexpectedly"):
         return "failure", None
