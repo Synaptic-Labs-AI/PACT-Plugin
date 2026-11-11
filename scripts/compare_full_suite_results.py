@@ -65,6 +65,11 @@ COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
 # UTF-32 LE.
 _WIDE_ENCODING_BOMS = (b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
+# A downloaded artifact is read whole; the bound exists only so a pathological
+# upload cannot exhaust memory. Measured: the 14 real full-suite artifacts at
+# the review head are ~5.2 MiB each, so this leaves about three times the
+# shipped shape.
+MAX_JUNIT_BYTES = 16 * 1024 * 1024
 RAW_PATHS = {"metadata": "metadata.json", "log": "run.log",
              "junit": "artifact/.full-suite-results.xml",
              "run_record": "artifact/.full-run-record.json",
@@ -181,20 +186,32 @@ def _junit_bytes(path: Path) -> bytes:
     declaration is never emitted by pytest and is the only way to define
     entities, so refuse it BEFORE ElementTree can expand anything.
 
-    Scope: the scan below reads ASCII-compatible encodings only, so a wide
-    encoding is refused by its byte-order mark first. pytest emits UTF-8, and
-    the scan's guarantee is therefore total over every document this tool
-    accepts.
+    Scope: XML 1.0 forbids U+0000 outright, so no well-formed document can
+    contain a NUL byte, and every UTF-16/32 encoding of ASCII markup carries
+    NUL bytes. A NUL byte is therefore refused before parsing, which closes the
+    wide encodings a byte-order mark alone cannot see (a BOM-less UTF-16
+    document is still auto-detected by expat). pytest emits UTF-8, and the
+    guarantee is total over every document this tool accepts.
     """
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_JUNIT_BYTES + 1)
     except OSError as exc:
         raise EvidenceError(f"{path}: unreadable JUnit XML: {exc}") from exc
+    if len(raw) > MAX_JUNIT_BYTES:
+        raise EvidenceError(
+            f"{path}: JUnit XML exceeds the {MAX_JUNIT_BYTES}-byte bound; "
+            "refusing to read further")
     if raw.startswith(_WIDE_ENCODING_BOMS):
         raise EvidenceError(
             f"{path}: JUnit XML is not UTF-8 (UTF-16/32 byte-order mark); "
             "pytest emits UTF-8 only, and the entity scan cannot read a wide "
             "encoding")
+    if b"\x00" in raw:
+        raise EvidenceError(
+            f"{path}: JUnit XML contains a NUL byte; XML 1.0 forbids U+0000, "
+            "and every UTF-16/32 encoding of ASCII markup carries NUL bytes, "
+            "so a wide-encoded document cannot be pytest's UTF-8 output")
     if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)", raw, re.IGNORECASE):
         raise EvidenceError(
             f"{path}: JUnit XML declares a DOCTYPE or ENTITY declaration; "
@@ -253,6 +270,14 @@ def _junit_outcome(classname: str, name: str, child) -> tuple[str, str | None]:
         return "skip", child.get("message")
     if child.get("type") == "pytest.xfail":
         return "xfail", child.get("message")
+    # pytest's JUnit writer emits a no-type <skipped> with this exact message
+    # when a FAILED report still carries wasxfail (its append_failure branch).
+    # The terminal reporter counts that report as failed, never xpassed, so it
+    # reconciles as a failure; the exact message keeps every other no-type
+    # skipped form a refusal.
+    if (child.get("type") is None
+            and child.get("message") == "xfail-marked test passes unexpectedly"):
+        return "failure", None
     raise EvidenceError(f"{classname}.{name}: unknown skip type")
 
 

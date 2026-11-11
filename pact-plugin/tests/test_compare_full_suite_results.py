@@ -1108,6 +1108,44 @@ def test_junit_with_a_wide_encoding_is_refused(tmp_path):
     assert "not UTF-8" in comparison["evidence_errors"][0]["error"]
 
 
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_bomless_wide_encoding_with_an_entity_is_refused(tmp_path, encoding):
+    """A BOM-less wide document hides the DOCTYPE from the byte-order-mark
+    tuple AND from the ASCII byte scan, yet expat still auto-detects it. The
+    NUL-byte refusal must fire; the arm above encodes WITH a BOM, so it cannot
+    kill this gap."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    (first / "artifact" / ".full-suite-results.xml").write_bytes(
+        ('<?xml version="1.0" encoding="UTF-16"?>\n'
+         '<!DOCTYPE testsuites [<!ENTITY n "test_alpha">]>\n'
+         '<testsuites><testsuite name="pytest">'
+         '<testcase classname="tests.test_example" name="&n;" time="0.01"/>'
+         '<testcase classname="tests.test_example" name="test_beta" time="0.01"/>'
+         '</testsuite></testsuites>').encode(encoding))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert "NUL byte" in comparison["evidence_errors"][0]["error"]
+
+
+def test_junit_artifact_size_bound_is_exact(tmp_path):
+    """The bound is a named constant: exactly at it is accepted, one byte over
+    is refused with exit 2. The accepted arm reads directly; the refused arm
+    goes through the CLI so the exit code is part of the contract."""
+    first = make_run(tmp_path, "one")
+    artifact = first / "artifact" / ".full-suite-results.xml"
+    prologue = b'<?xml version="1.0" encoding="utf-8"?><testsuites/>'
+    at_limit = prologue + b" " * (comparator.MAX_JUNIT_BYTES - len(prologue))
+    artifact.write_bytes(at_limit)
+    assert comparator._junit_bytes(artifact) == at_limit
+    artifact.write_bytes(at_limit + b" ")
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert str(comparator.MAX_JUNIT_BYTES) in (
+        comparison["evidence_errors"][0]["error"])
+
+
 def test_deeply_nested_json_evidence_is_refused(tmp_path):
     """Pathological JSON nesting is malformed evidence (2), never a fault (3)."""
     first = make_run(tmp_path, "one")
@@ -1251,6 +1289,45 @@ def test_xpass_with_teardown_xfail_reconciles(tmp_path):
     completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
     assert completed.returncode == 0, comparison
     assert comparison["status"] == "identical"
+
+
+def _rewrite_failure_child(directory, message, *, keep_type=False):
+    artifact = directory / "artifact" / ".full-suite-results.xml"
+    tree = ET.parse(artifact)
+    for child in list(tree.find(".//testcase")):
+        child.tag = "skipped"
+        child.set("message", message)
+        if not keep_type:
+            child.attrib.pop("type", None)
+    tree.write(artifact, encoding="utf-8", xml_declaration=True)
+
+
+def test_no_type_xfail_skip_message_is_a_failure_not_a_refusal(tmp_path):
+    """pytest's JUnit writer emits a no-type <skipped> with this exact message
+    when a FAILED report still carries wasxfail. The terminal reporter counts
+    that report as failed, never xpassed, so it reconciles as a failure."""
+    def build(name, run_id):
+        directory = make_run(tmp_path, name, run_id, nodes=[ALPHA],
+                             cases=[case(ALPHA, "failure")])
+        _rewrite_failure_child(directory, "xfail-marked test passes unexpectedly")
+        return directory
+
+    completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+
+
+def test_unknown_no_type_skip_is_still_refused(tmp_path):
+    """The message-specific mapping must not swallow every no-type skip."""
+    def build(name, run_id):
+        directory = make_run(tmp_path, name, run_id, nodes=[ALPHA],
+                             cases=[case(ALPHA, "failure")])
+        _rewrite_failure_child(directory, "some future skip form")
+        return directory
+
+    completed, comparison, _ = invoke(tmp_path, build("one", 100), build("two", 101))
+    assert completed.returncode == 2, comparison
+    assert "unknown skip type" in comparison["evidence_errors"][0]["error"]
 
 
 def test_ambient_script_override_cannot_redirect_the_subject(tmp_path):

@@ -1,9 +1,18 @@
 """Strict tracked-file enumeration for test oracles.
 
-The caller chooses whether deleted index entries stay visible. Filesystem
-fallback is for gitless exports only — it refuses when a ``.git`` entry exists
-at or above the root — and a repository query failure never widens the
-population to untracked files.
+The caller chooses whether deleted index entries stay visible. The git index is
+the oracle whenever git can answer for this tree. The filesystem fallback is
+for gitless exports only — a checkout-free copy nested inside an unrelated
+repository counts as one when that repository tracks nothing under it — and it
+refuses a ``.git`` entry at or above the root when git is unavailable. A
+repository query failure never widens the population to untracked files, and
+the fallback never enumerates a path that resolves outside the root.
+
+ACCEPTED BOUNDARY: git cannot tell a checkout-free copy from a directory inside
+a tracked repository when that repository has no entry anywhere under the
+directory, so such a directory also takes the filesystem fallback. Do not
+narrow the test to the work-tree top: a tracked subdirectory must keep its
+index answer.
 """
 
 import os
@@ -69,6 +78,61 @@ def _pathspec(relative, pattern):
     return f":(glob){_glob_literal(str(relative))}/{pattern}"
 
 
+def _toplevel(repo_root):
+    """The work-tree root git reports, or None when git cannot name one."""
+    probe = _git(repo_root, "rev-parse", "--show-toplevel")
+    if probe is None or probe.returncode != 0:
+        return None
+    reported = probe.stdout.strip()
+    return Path(reported) if reported else None
+
+
+def _copy_inside_unrelated_repository(repo_root):
+    """True when git's enclosing repository tracks nothing under this root.
+
+    A checkout-free copy nested inside an unrelated repository (a dotfiles repo
+    containing ``~/.claude``) makes ``git ls-files`` succeed against the OUTER
+    index instead of reporting no repository. When that index holds no entry
+    under the caller's root, the enclosing repository says nothing about this
+    tree, so the copy is the documented gitless export. A root that is itself
+    the work-tree top, or a tracked subdirectory, keeps its index answer.
+    """
+    toplevel = _toplevel(repo_root)
+    if toplevel is None or toplevel.resolve() == repo_root.resolve():
+        return False
+    under_root = _git(repo_root, "ls-files", "-z", "--", ":(literal).")
+    return (under_root is not None and under_root.returncode == 0
+            and not under_root.stdout.strip())
+
+
+def _filesystem_population(repo_root, root, pattern):
+    """Enumerate a gitless export, refusing any path that escapes the root."""
+    resolved_root = repo_root.resolve()
+    resolved_start = root.resolve()
+    if (resolved_start != resolved_root
+            and not resolved_start.is_relative_to(resolved_root)):
+        raise AssertionError(
+            f"the gitless fallback start point escapes the repository: "
+            f"{root} resolves to {resolved_start}, outside {resolved_root}")
+    # ``Path.glob("**")`` yields only directories, so a bare ``**`` pattern
+    # would enumerate nothing and raise as an empty population.
+    candidates = (root.rglob("*")
+                  if pattern is None or PurePosixPath(pattern) == PurePosixPath("**")
+                  else root.glob(pattern))
+    files = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if (resolved != resolved_root
+                and not resolved.is_relative_to(resolved_root)):
+            raise AssertionError(
+                f"the gitless fallback enumerated {path}, which resolves to "
+                f"{resolved}, outside the repository root {resolved_root}")
+        files.append(path)
+    return files
+
+
 def _tracked_population(repo_root, root, relative, pathspec, pattern,
                         keep_deleted):
     """The git-index population, or the gitless export fallback."""
@@ -80,22 +144,22 @@ def _tracked_population(repo_root, root, relative, pathspec, pattern,
             for entry in result.stdout.split("\0")
             if entry
         ]
-        if not keep_deleted:
-            files = [path for path in files if path.is_file()]
-        return files, "git index"
+        if files or not _copy_inside_unrelated_repository(repo_root):
+            if not keep_deleted:
+                files = [path for path in files if path.is_file()]
+            return files, "git index"
+        # The enclosing repository tracks nothing under this root, so its
+        # index cannot answer for this tree: the copy is the gitless export.
+        return _filesystem_population(repo_root, root, pattern), (
+            "gitless filesystem fallback")
     if result is None or _outside_repository(repo_root):
         if _inside_git_worktree(repo_root):
             raise AssertionError(
                 f"git is unavailable for {repo_root} but a .git entry exists at or "
                 "above it; refusing the filesystem fallback because it cannot tell "
                 "tracked from untracked files.")
-        # ``Path.glob("**")`` yields only directories, so a bare ``**`` pattern
-        # would enumerate nothing and raise as an empty population.
-        candidates = (root.rglob("*")
-                      if pattern is None or PurePosixPath(pattern) == PurePosixPath("**")
-                      else root.glob(pattern))
-        return ([path for path in candidates if path.is_file()],
-                "gitless filesystem fallback")
+        return _filesystem_population(repo_root, root, pattern), (
+            "gitless filesystem fallback")
     raise AssertionError(
         f"git ls-files failed for {pathspec!r} under {repo_root}: "
         f"status {result.returncode}, stderr {result.stderr.strip()!r}. "
@@ -120,7 +184,9 @@ def tracked_files(repo_root, relative_dir, pattern=None, *, known_member=None,
         if glob.is_absolute() or ".." in glob.parts:
             raise ValueError(f"pattern escapes the repository: {pattern!r}")
     pathspec = str(relative) if pattern is None else f"{relative}/{pattern}"
-    repo_root = Path(repo_root)
+    # Absolute so the .git marker walk and the work-tree comparison see every
+    # ancestor: the parents of a relative path stop at the process cwd.
+    repo_root = Path(os.path.abspath(repo_root))
     if not repo_root.is_dir():
         raise AssertionError(f"repository root is not a directory: {repo_root}")
     files, source = _tracked_population(

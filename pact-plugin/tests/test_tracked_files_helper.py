@@ -6,6 +6,7 @@ gitless export and must refuse when the absence of git hides a real checkout.
 
 import io
 import os
+from pathlib import Path
 import subprocess
 import tarfile
 
@@ -54,9 +55,52 @@ def test_absolute_known_member_matches_a_relative_root(tmp_path, monkeypatch):
     root = _repo(tmp_path / "relative-repo")
     monkeypatch.chdir(tmp_path)
     relative = root.relative_to(tmp_path)
+    # The root is made absolute before use, so returned paths are absolute and
+    # the injected member stays comparable to them.
     assert tracked_files(relative, ".", "*.md",
                          known_member=str(root / "tracked.md")) == [
-                             relative / "tracked.md"]
+                             root / "tracked.md"]
+
+
+def test_relative_root_below_a_checkout_still_refuses(tmp_path, monkeypatch):
+    """A relative root's parents stop at the process cwd, so the .git marker
+    walk must see the real checkout root: the root is made absolute first."""
+    root = _repo(tmp_path / "repo")
+    sub = root / "sub"
+    sub.mkdir()
+    (sub / "untracked.md").write_text("x\n", encoding="utf-8")
+    _git_absent(monkeypatch)
+    monkeypatch.chdir(sub)
+    with pytest.raises(AssertionError, match="refusing the filesystem fallback"):
+        tracked_files(Path("."), ".", "*.md")
+
+
+def test_copy_inside_an_unrelated_repository_uses_the_fallback(tmp_path):
+    """The supported install shape: a checkout-free copy with no .git inside a
+    dotfiles-style repo. git ls-files succeeds against the OUTER index and
+    finds nothing under the copy, which must not read as an empty checkout."""
+    home = tmp_path / "home"
+    subprocess.run(["git", "init", "-q", str(home)], check=True,
+                   capture_output=True)
+    copy = home / ".claude" / "plugins" / "cache" / "PACT" / "4.8.34"
+    (copy / "agents").mkdir(parents=True)
+    (copy / "agents" / "x.md").write_text("x\n", encoding="utf-8")
+    assert tracked_files(copy, "agents", "*.md") == [copy / "agents" / "x.md"]
+
+
+def test_tracked_subdirectory_keeps_its_index_answer(tmp_path):
+    """Only a root the enclosing repository tracks NOTHING under may fall back.
+    A tracked subdirectory whose query matches nothing stays an empty index
+    population, so an untracked needle cannot join."""
+    root = _repo(tmp_path / "repo")
+    sub = root / "sub"
+    sub.mkdir()
+    (sub / "tracked.md").write_text("t\n", encoding="utf-8")
+    (sub / "untracked.py").write_text("u\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "sub/tracked.md"],
+                   check=True, capture_output=True)
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        tracked_files(sub, ".", "*.py")
 
 
 def test_missing_root_is_an_assertion_error(tmp_path):
@@ -130,3 +174,38 @@ def test_dangling_git_entry_refuses_the_filesystem_fallback(tmp_path, monkeypatc
     _git_absent(monkeypatch)
     with pytest.raises(AssertionError, match="refusing the filesystem fallback"):
         tracked_files(broken, ".", "*.md")
+
+
+def test_in_root_symlinks_still_enumerate(tmp_path):
+    """Containment must not drop legitimate in-root symlinks: only a target
+    that resolves outside the export is refused."""
+    export = tmp_path / "export"
+    real = export / "real"
+    real.mkdir(parents=True)
+    (real / "a.md").write_text("a\n", encoding="utf-8")
+    (export / "alias").symlink_to(real, target_is_directory=True)
+    assert tracked_files(export, "alias", "*.md") == [
+        export / "alias" / "a.md"]
+
+
+def test_symlinked_scan_root_must_stay_inside_the_export(tmp_path):
+    export = tmp_path / "export"
+    outside = tmp_path / "outside"
+    export.mkdir()
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret\n", encoding="utf-8")
+    (export / "pkg").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AssertionError, match="escapes the repository"):
+        tracked_files(export, "pkg", "*.md")
+
+
+def test_file_symlink_escaping_the_export_is_refused(tmp_path):
+    export = tmp_path / "export"
+    outside = tmp_path / "outside"
+    export.mkdir()
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret\n", encoding="utf-8")
+    (export / "link.md").symlink_to(outside / "secret.md")
+    (export / "a.md").write_text("a\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="outside the repository root"):
+        tracked_files(export, ".", "*.md")
