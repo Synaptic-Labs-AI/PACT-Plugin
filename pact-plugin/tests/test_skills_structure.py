@@ -8,6 +8,7 @@ Tests cover:
 4. Skill names and descriptions are present
 5. SKILL.md body contains substantive content
 """
+import ast
 import subprocess
 from pathlib import Path
 
@@ -22,7 +23,11 @@ REPO_ROOT = PLUGIN_ROOT.parent
 
 
 def _tracked_files(repo_root, relative_dir, pattern=None):
-    """Keep deleted index entries visible to structural failure assertions."""
+    """Keep deleted index entries visible to the structural skill-directory oracle.
+
+    Content consumers use ``_collection_population`` (keep_deleted false) so a
+    deleted SKILL.md is reported once by name, not raised through every read.
+    """
     return _shared_tracked_files(
         repo_root, relative_dir, pattern, keep_deleted=True
     )
@@ -31,6 +36,11 @@ def _tracked_files(repo_root, relative_dir, pattern=None):
 def _collection_population(relative_dir, pattern):
     """A collection-time population, derived from the plugin directory's own name.
 
+    A CONTENT consumer: deleted index entries are dropped (``keep_deleted``
+    false), because collection-time readers open each file. Keeping a deleted
+    entry here turns a local deletion into FileNotFoundError from every
+    parametrized case instead of the named structural failure.
+
     The name is read rather than hardcoded because an installed plugin cache
     places the plugin under a version directory (``.../PACT/4.8.34``), where a
     literal ``pact-plugin/`` prefix matches nothing. A slim install that omits
@@ -38,7 +48,7 @@ def _collection_population(relative_dir, pattern):
     dev checkout whose population is empty still fails loudly.
     """
     try:
-        return _tracked_files(REPO_ROOT, relative_dir, pattern)
+        return _shared_tracked_files(REPO_ROOT, relative_dir, pattern)
     except AssertionError:
         if PLUGIN_ROOT.name == "pact-plugin":
             raise
@@ -265,9 +275,17 @@ class TestPreResponseChannelCheckGate:
             "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§7)"
 
 
-_ALL_SKILL_FILES = _collection_population(
-    f"{PLUGIN_ROOT.name}/skills", "*/SKILL.md"
-)
+def _skill_file_population():
+    """The tracked SKILL.md population the collection-time constants read."""
+    return _collection_population(f"{PLUGIN_ROOT.name}/skills", "*/SKILL.md")
+
+
+def _pact_agent_file_population():
+    """The tracked pact-*.md agent population the constants read."""
+    return _collection_population(f"{PLUGIN_ROOT.name}/agents", "pact-*.md")
+
+
+_ALL_SKILL_FILES = _skill_file_population()
 
 
 # =============================================================================
@@ -281,14 +299,110 @@ _ALL_SKILL_FILES = _collection_population(
 # carved out.
 PACT_AGENTS_DIR = SKILLS_DIR.parent / "agents"
 F20_CARVE_OUT_FILES = frozenset({"pact-orchestrator"})
-_PACT_AGENT_FILES = _collection_population(
-    f"{PLUGIN_ROOT.name}/agents", "pact-*.md"
-)
+_PACT_AGENT_FILES = _pact_agent_file_population()
 
 
 def test_collection_time_populations_have_known_members():
     assert SKILLS_DIR / "pact-team-registration" / "SKILL.md" in _ALL_SKILL_FILES
     assert PACT_AGENTS_DIR / "pact-devops-engineer.md" in _PACT_AGENT_FILES
+
+
+def test_collection_population_builders_exclude_untracked_files(
+        tmp_path, monkeypatch):
+    """The BUILDERS behind the module constants must read the git index.
+
+    Reverting either builder to ``sorted(SKILLS_DIR.glob(...))`` keeps every
+    helper arm green; this arm drives the builders and reddens, because a
+    valid-shaped untracked file then joins the collection-time population.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    skills = plugin / "skills"
+    skill = skills / "pact-team-registration" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: pact-team-registration\n---\n", encoding="utf-8")
+    agent = plugin / "agents" / "pact-devops-engineer.md"
+    agent.parent.mkdir(parents=True)
+    agent.write_text("---\nname: pact-devops-engineer\n---\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    probe_skill = skills / "000_untracked_probe" / "SKILL.md"
+    probe_skill.parent.mkdir()
+    probe_skill.write_text(skill.read_text(encoding="utf-8"), encoding="utf-8")
+    probe_agent = plugin / "agents" / "pact-000-probe.md"
+    probe_agent.write_text(agent.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", skills)
+    monkeypatch.setitem(globals(), "PACT_AGENTS_DIR", plugin / "agents")
+
+    skill_files = _skill_file_population()
+    assert skill in skill_files
+    assert probe_skill not in skill_files, (
+        f"untracked {probe_skill} joined the collection-time skill population")
+
+    agent_files = _pact_agent_file_population()
+    assert agent in agent_files
+    assert probe_agent not in agent_files, (
+        f"untracked {probe_agent} joined the collection-time agent population")
+
+
+def test_collection_constants_are_built_from_their_builders():
+    """AST pin: the constants may not bypass the builders.
+
+    A constant rebound to ``sorted(SKILLS_DIR.glob(...))`` is invisible to any
+    runtime arm in a clean checkout, because the two populations are identical
+    until an untracked file exists. This pin reads the module's own assignment
+    nodes, so the assertion text cannot satisfy the pattern it searches for.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    assigned = {
+        target.id: node.value.func.id
+        for node in tree.body if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+        if isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+    }
+    assert assigned.get("_ALL_SKILL_FILES") == "_skill_file_population"
+    assert assigned.get("_PACT_AGENT_FILES") == "_pact_agent_file_population"
+
+
+def test_deleted_tracked_skill_md_is_named_by_the_structural_oracle(
+        tmp_path, monkeypatch):
+    """Deletion: content populations drop the entry, the structural one names it.
+
+    With ``keep_deleted=True`` on the content population, deleting one tracked
+    SKILL.md makes every parametrized case raise FileNotFoundError. The
+    structural oracle keeps the directory and reports the one named failure.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    skills = plugin / "skills"
+    known = skills / "pact-team-registration" / "SKILL.md"
+    known.parent.mkdir(parents=True)
+    known.write_text("---\nname: pact-team-registration\n---\n", encoding="utf-8")
+    doomed = skills / "pact-teachback" / "SKILL.md"
+    doomed.parent.mkdir()
+    doomed.write_text("---\nname: pact-teachback\n---\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", skills)
+
+    content = _skill_file_population()
+    assert doomed not in content, (
+        "the deleted tracked SKILL.md stayed in the content population; every "
+        "parametrized case would raise FileNotFoundError")
+
+    directories = _tracked_skill_dirs(plugin)
+    assert doomed.parent in directories, (
+        "the structural population dropped a tracked skill directory whose "
+        "SKILL.md is deleted; the named missing-SKILL.md failure would vanish")
+    with pytest.raises(AssertionError, match=r"pact-teachback/ missing SKILL.md"):
+        TestSkillMdFiles().test_each_skill_has_skill_md(directories)
 
 
 class TestTrackedSkillPopulation:

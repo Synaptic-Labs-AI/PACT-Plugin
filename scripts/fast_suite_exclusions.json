@@ -51,8 +51,8 @@
       "extra_reads": []
     },
     "tests/fixtures/tracked_files.py": {
-      "sha256": "2e482def84d1475756b889e1da34f0ec1ea9b4a63792d3dc48c3cb930eb0a7b2",
-      "reason": "All flagged sites operate on the caller's repository directory: subprocess.run executes git with an argv list and no shell; os.path.lexists and both os.path.abspath calls are path arithmetic, and the '.git' literal is the checkout marker the fallback refuses on; every .is_file/.rglob/.glob/.is_dir receiver is a path the caller supplied. The two directory scans are the documented gitless-export fallback, which refuses when a .git entry exists at or above the root. It reads no fixed path, so extra_reads is empty.",
+      "sha256": "ce1e393fa9da880ad59fe890920f98d00d2fdce513d39b9964d0374e6d03ee70",
+      "reason": "All flagged sites operate on the caller's repository directory: subprocess.run executes git with an argv list and no shell; os.path.lexists and the os.path.abspath calls are path arithmetic, and the '.git' literal is the checkout marker the fallback refuses on; every .is_file/.rglob/.glob/.is_dir receiver is a path the caller supplied. Path.resolve and .is_relative_to are containment checks on that caller root: a scan start point or an enumerated file that resolves outside it is refused, while an in-root symlink still enumerates. The two directory scans are the documented gitless-export fallback, which refuses when a .git entry exists at or above the root and also serves a checkout-free copy nested in a repository that tracks nothing under it (git rev-parse --show-toplevel plus a whole-root ls-files query, both argv lists with no shell). It reads no fixed path, so extra_reads is empty.",
       "extra_reads": []
     },
     "tests/merge_guard_baseline_loader.py": {
@@ -63,8 +63,8 @@
       ]
     },
     "tests/test_claude_md_locator_census.py": {
-      "sha256": "6ced13181054f4b89d00dfaaf5d8ae6f750d83e8da149b5d69437ca5219fa2ef",
-      "reason": "Flagged sites 618, 634 and 646 are the tracked-population read and its non-vacuity arm: 618 reads the files the tracked population returns; 634 runs git init/add in a tmp_path rig with an argv list and no shell; 646 reads that same population under the rig. The module's scans of the shipped tree are unchanged, and its scan roots are what the exclusion's scanned_tree reach is computed from.",
+      "sha256": "0fc5a83d482286e23545890ba98d62645bb19d13d862697a2a73c1f54d7b7358",
+      "reason": "Flagged sites 572, 621, 637 and 649 are the tracked-population reads and their non-vacuity arm: 572 reads each shipped Python file the tracked population returns; 621 reads the shell-script population the same way; 637 runs git init and git add in a tmp_path rig with an argv list and no shell; 649 reads that same rig population. The module's scans of the shipped tree are unchanged, and its scan roots are what the exclusion's scanned_tree reach is computed from.",
       "extra_reads": []
     },
     "tests/test_merge_guard_1140_carrier5_cert.py": {

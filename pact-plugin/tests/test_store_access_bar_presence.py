@@ -226,6 +226,20 @@ POPULATION_PATTERNS = (
     "scripts/*.py",
 )
 
+# THE NON-VACUITY CONTROL FOR EACH PATTERN, and each must be a tracked member
+# of its OWN pattern's population: a control borrowed from another pattern
+# proves the wrong glob reached the index. A pattern added without an entry
+# here fails at `population_files` rather than silently losing its control.
+POPULATION_KNOWN_MEMBERS = {
+    "agents/*.md": "agents/pact-orchestrator.md",
+    "commands/*.md": "commands/orchestrate.md",
+    "protocols/*.md": "protocols/pact-protocols.md",
+    "reference/*.md": "reference/config.md",
+    "skills/*/SKILL.md": "skills/pact-memory/SKILL.md",
+    "skills/pact-memory/**/*.md": "skills/pact-memory/SKILL.md",
+    "scripts/*.py": "scripts/archive_pin.py",
+}
+
 # THE MEMORY-REPAIR PACKAGE, walked as a DIRECTORY rather than as a path list.
 # Each module here must carry the bar, so a module added later joins the rule
 # on the day it arrives, and a path dropped from `DECLARED_CARRIERS` does not
@@ -716,9 +730,14 @@ def population_files(root: Path) -> list[Path]:
     THE PATTERNS ARE `POPULATION_PATTERNS`, and this docstring does not count
     them. A count here goes stale on the day one is added.
 
+    THE SHIPPED ROOT READS THE INDEX, like every other shipped population in
+    this file: an untracked surface must not enter arm 3 and redden a green
+    checkout. A synthetic model root keeps its disk walk, because the model
+    tree is built on disk and is deliberately its own population.
+
     🔴 THE YIELD IS DE-DUPLICATED AND THE DECLARATION IS NOT TOUCHED. Two of
     the patterns overlap on purpose, so one file can arrive two times.
-    MEASURED: 76 paths yielded and 75 distinct, with
+    MEASURED: 79 paths yielded and 78 distinct, with
     `skills/pact-memory/SKILL.md` matched by `skills/*/SKILL.md` and by
     `skills/pact-memory/**/*.md`.
 
@@ -733,8 +752,15 @@ def population_files(root: Path) -> list[Path]:
     idle. AN INFLATED COUNT READS AS SAFETY.
     """
     found: list[Path] = []
+    if root != PLUGIN_DIR:
+        for pattern in POPULATION_PATTERNS:
+            found.extend(root.glob(pattern))
+        return sorted(set(found))
+    prefix = root.name
     for pattern in POPULATION_PATTERNS:
-        found.extend(root.glob(pattern))
+        found.extend(_tracked_glob(
+            root.parent, f"{prefix}/{pattern}",
+            f"{prefix}/{POPULATION_KNOWN_MEMBERS[pattern]}"))
     return sorted(set(found))
 
 
@@ -747,7 +773,14 @@ def files_reaching_the_store(root: Path, tokens: dict, ignore_bar: bool = False)
     """
     selected = {}
     for path in population_files(root):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            # The index keeps a deleted tracked surface visible; name it here
+            # rather than letting the read raise an ERROR with no verdict.
+            raise AssertionError(
+                f"instruction surface {relative_name(path, root)} is in the "
+                f"tracked population but cannot be read: {exc}") from exc
         if ignore_bar:
             text = strip_marked_regions(text)
         text = without_non_route_invocations(text)
@@ -817,7 +850,7 @@ class TestTheInstrumentIsLive:
         """
         reachable = {
             relative_name(p, PLUGIN_DIR)
-            for p in PLUGIN_DIR.rglob("*")
+            for p in _derived_population(PLUGIN_DIR)
             if p.is_file() and is_source_file(p)
         }
         for expected in (SOURCE_HOME, "scripts/archive_pin.py"):
@@ -1061,6 +1094,47 @@ class TestTrackedPopulation:
             "an untracked carrier joined the derived population; "
             "derived_carriers is not reading the git index for the shipped root"
         )
+
+    def test_instruction_surface_population_reads_the_index(
+            self, tmp_path, monkeypatch):
+        """The arm-3 population must come from the index for the shipped root.
+
+        Reverting ``population_files`` to a disk glob for the shipped root
+        keeps every synthetic-model arm green, because the model builds its
+        tree on disk. This arm drives the shipped branch and reddens when an
+        untracked instruction surface joins the selected set.
+
+        EVERY production control is planted, so the arm also proves each entry
+        in ``POPULATION_KNOWN_MEMBERS`` is a tracked member of its OWN
+        pattern: a control that does not resolve there fails the positive
+        assertion below rather than passing on an empty population.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        members = sorted(set(POPULATION_KNOWN_MEMBERS.values()))
+        for relative in members:
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("no route token\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        control = {plugin / relative for relative in members}
+        assert set(population_files(plugin)) == control, (
+            "positive control: the tracked instruction surfaces are missing "
+            "from the population, so the exclusion below would prove nothing"
+        )
+        probe = plugin / "agents" / "000_untracked_surface.md"
+        probe.write_text("skills/pact-memory/scripts/cli.py\n", encoding="utf-8")
+        try:
+            assert set(population_files(plugin)) == control, (
+                "an untracked instruction surface joined arm 3; "
+                "population_files is not reading the git index for the "
+                "shipped root"
+            )
+        finally:
+            probe.unlink()
 
 
 class TestEveryDeclaredCarrierIsPlaced:

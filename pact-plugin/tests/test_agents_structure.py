@@ -24,7 +24,7 @@ REPO_ROOT = PLUGIN_ROOT.parent
 
 
 def _tracked_files(repo_root, relative_dir, pattern):
-    """Keep deleted index entries visible to structural failure assertions."""
+    """Exercise the helper's keep_deleted option; content consumers use false."""
     return _shared_tracked_files(
         repo_root, relative_dir, pattern, keep_deleted=True
     )
@@ -33,6 +33,11 @@ def _tracked_files(repo_root, relative_dir, pattern):
 def _shipped_agents():
     """Tracked agent markdown, named by the plugin directory's own name.
 
+    A CONTENT consumer: deleted index entries are dropped (``keep_deleted``
+    false), because every caller reads the file. Keeping a deleted entry here
+    turns one local deletion into a FileNotFoundError from each reader instead
+    of the single named ``Missing agent:`` failure the oracle already reports.
+
     An installed plugin cache places the plugin under a version directory
     (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
     nothing. An install that genuinely omits the agents skips each requesting
@@ -40,7 +45,7 @@ def _shipped_agents():
     """
     relative = f"{PLUGIN_ROOT.name}/agents"
     try:
-        return _tracked_files(REPO_ROOT, relative, "*.md")
+        return _shared_tracked_files(REPO_ROOT, relative, "*.md")
     except AssertionError:
         if PLUGIN_ROOT.name == "pact-plugin":
             raise
@@ -197,6 +202,79 @@ class TestTrackedAgentPopulation:
 
         with pytest.raises(AssertionError, match="empty tracked population"):
             _tracked_files(tmp_path, "pact-plugin/commands", "*.md")
+
+
+def test_agent_fixtures_exclude_untracked_agents(tmp_path, monkeypatch, request):
+    """The FIXTURES, not only the helper, must read the git index.
+
+    Reverting ``agent_files`` or ``teammate_agent_files`` to
+    ``AGENTS_DIR.glob("*.md")`` keeps every helper arm green; this arm resolves
+    both fixtures and reddens, because a valid-shaped untracked agent then joins
+    the judged population.
+    """
+    repo = tmp_path / "repo"
+    agents = repo / "pact-plugin" / "agents"
+    agents.mkdir(parents=True)
+    known = agents / "pact-devops-engineer.md"
+    known.write_text(
+        "---\nname: pact-devops-engineer\ndescription: known\n---\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", "--", "pact-plugin/agents/pact-devops-engineer.md"],
+        cwd=repo, check=True)
+    # An expected teammate name, so the teammate fixture's stem filter does not
+    # hide the probe from its own arm.
+    probe = agents / "pact-auditor.md"
+    probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "AGENTS_DIR", agents)
+
+    files = request.getfixturevalue("agent_files")
+    assert known in files
+    assert probe not in files, (
+        f"untracked {probe.name} joined the agent population; agent_files is "
+        "not reading the git index")
+
+    teammates = request.getfixturevalue("teammate_agent_files")
+    assert known in teammates
+    assert probe not in teammates, (
+        f"untracked {probe.name} joined the teammate population; "
+        "teammate_agent_files is not reading the git index")
+
+
+def test_deleted_tracked_agent_is_a_named_missing_failure(
+        tmp_path, monkeypatch, request):
+    """A deleted tracked agent must leave the content population, not crash it.
+
+    With ``keep_deleted=True`` the fixture keeps the path, every reader raises
+    FileNotFoundError, and one deletion surfaces as a storm of errors instead of
+    the named ``Missing agent:`` failure the oracle already provides.
+    """
+    repo = tmp_path / "repo"
+    agents = repo / "pact-plugin" / "agents"
+    agents.mkdir(parents=True)
+    for name in sorted(EXPECTED_AGENTS):
+        (agents / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: fixture\n---\nbody\n",
+            encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/agents"],
+                   cwd=repo, check=True)
+    doomed = agents / "pact-architect.md"
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "AGENTS_DIR", agents)
+
+    files = request.getfixturevalue("agent_files")
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the content population; "
+        "every reader would raise FileNotFoundError instead of naming it")
+    with pytest.raises(AssertionError, match=r"Missing agent: pact-architect"):
+        TestAgentFilesExist().test_all_expected_agents_present(files)
 
 
 class TestAgentFilesExist:

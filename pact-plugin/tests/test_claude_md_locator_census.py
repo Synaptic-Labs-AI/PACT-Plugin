@@ -652,6 +652,41 @@ def test_an_untracked_shell_needle_is_not_a_shipped_site(tmp_path):
         "an untracked needle was scanned as a shipped site")
 
 
+def test_an_untracked_python_needle_is_not_a_shipped_source(tmp_path, monkeypatch):
+    """An untracked module must not join the Python marker census.
+
+    This row was set aside as unprobed for want of a needle that demonstrably
+    enters the judgement. The needle is a module that locates a marker; the
+    positive control adds it to the census directly and shows the census names
+    it, so an arm that only proved the population was non-empty would not do.
+    """
+    root = tmp_path / "plugin"
+    tracked = root / "hooks" / "tracked.py"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root,
+                   check=True, capture_output=True)
+    needle_text = 'def locate(text):\n    return "PACT_MANAGED" in text\n'
+    needle = root / "hooks" / "zzprobe.py"
+    needle.write_text(needle_text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "PLUGIN", root)
+    monkeypatch.setitem(globals(), "TOPS", ("hooks",))
+
+    sources = _shipped_sources()
+
+    assert "hooks/tracked.py" in sources, (
+        "the tracked control is missing from the population")
+    assert "hooks/zzprobe.py" not in sources, (
+        f"untracked needle entered the shipped-source population: {needle.name}")
+
+    judged = census_sources({**sources, "hooks/zzprobe.py": needle_text})
+    assert any(rel == "hooks/zzprobe.py" for rel, *_ in judged), (
+        "the probe needle does not enter the census judgement, so this arm "
+        "could pass while the population carried it")
+
+
 # --- whole-text parsing -------------------------------------------------------------
 
 # Every `parse(...)` call in shipped code, as (path, function, argument source).

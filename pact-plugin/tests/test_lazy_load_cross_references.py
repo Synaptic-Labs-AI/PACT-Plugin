@@ -75,6 +75,32 @@ def test_every_expected_agent_file_is_present():
     assert not extra, f"unexpected agent files: {extra}"
 
 
+def test_agent_population_consumer_excludes_untracked_agents(tmp_path, monkeypatch):
+    """The CONSUMER, not only the helper, must read the git index.
+
+    Reverting the five ``_tracked_glob(AGENTS_DIR, ...)`` call sites to
+    ``AGENTS_DIR.glob("*.md")`` keeps the helper arm green; this arm drives
+    ``test_every_expected_agent_file_is_present`` and reddens, because an
+    untracked agent file then joins the population the oracle judges.
+    """
+    repo = tmp_path / "repo"
+    agents = repo / "pact-plugin" / "agents"
+    agents.mkdir(parents=True)
+    for name in sorted(EXPECTED_AGENT_FILES):
+        (agents / name).write_text("body\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    probe = agents / "000_untracked_probe.md"
+    probe.write_text("body\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "AGENTS_DIR", agents)
+
+    test_every_expected_agent_file_is_present()
+
+    # Positive control for the arm itself: the needle is on disk, so a green
+    # consumer above means the consumer ignored it rather than never seeing it.
+    assert probe.is_file()
+
+
 def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
     directory = tmp_path / "agents"
     directory.mkdir()

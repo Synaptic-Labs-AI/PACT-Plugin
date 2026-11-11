@@ -124,6 +124,36 @@ def test_every_corpus_file_is_a_case():
     assert {p.stem for p in files} == set(_CASES)
 
 
+def test_corpus_consumer_excludes_untracked_documents(tmp_path, monkeypatch):
+    """The CONSUMER, not only the helper, must read the git index.
+
+    Reverting ``test_every_corpus_file_is_a_case`` to
+    ``sorted(_CORPUS.glob("*.md"))`` keeps the helper arm green; this arm drives
+    the consumer and reddens, because an untracked corpus document then joins
+    the set it compares against ``expected.json``.
+    """
+    repo = tmp_path / "repo"
+    corpus = repo / "claude_md_corpus"
+    corpus.mkdir(parents=True)
+    names = [f"case_{index:03d}" for index in range(100)]
+    names[-1] = "hidden_pre_closed_at_row_end"
+    for name in names:
+        (corpus / f"{name}.md").write_text("body\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "claude_md_corpus"],
+                   cwd=repo, check=True)
+    probe = corpus / "000_untracked_probe.md"
+    probe.write_text("body\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "_CORPUS", corpus)
+    monkeypatch.setitem(globals(), "_CASES", sorted(names))
+
+    test_every_corpus_file_is_a_case()
+
+    # Positive control for the arm itself: the needle is on disk, so a green
+    # consumer above means the consumer ignored it rather than never seeing it.
+    assert probe.is_file()
+
+
 def test_nonzero_git_result_never_falls_back(tmp_path, monkeypatch):
     directory = tmp_path / "corpus"
     directory.mkdir()

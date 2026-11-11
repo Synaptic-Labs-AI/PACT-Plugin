@@ -31,7 +31,7 @@ REPO_ROOT = PLUGIN_ROOT.parent
 
 
 def _tracked_files(repo_root, relative_dir, pattern=None):
-    """Keep deleted index entries visible to structural failure assertions."""
+    """Exercise the helper's keep_deleted option; content consumers use false."""
     return _shared_tracked_files(
         repo_root, relative_dir, pattern, keep_deleted=True
     )
@@ -40,13 +40,18 @@ def _tracked_files(repo_root, relative_dir, pattern=None):
 def _shipped_population(relative_dir, pattern=None):
     """Tracked population under the plugin, named by the directory's own name.
 
+    A CONTENT consumer: deleted index entries are dropped (``keep_deleted``
+    false), because every caller reads the file. Keeping a deleted entry here
+    turns one local deletion into FileNotFoundError from each scan instead of
+    the named missing-file failure the consumers already report.
+
     An installed plugin cache places the plugin under a version directory
     (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
     nothing. An install that genuinely omits the artifact skips the asking
     test by name instead of raising through it.
     """
     try:
-        return _tracked_files(REPO_ROOT, relative_dir, pattern)
+        return _shared_tracked_files(REPO_ROOT, relative_dir, pattern)
     except AssertionError:
         if PLUGIN_ROOT.name == "pact-plugin":
             raise
@@ -200,6 +205,69 @@ def test_command_files_fixture_excludes_untracked_commands(tmp_path, monkeypatch
         "an untracked command joined the shipped population; command_files is "
         "not reading the git index"
     )
+
+
+def test_xref_scan_population_excludes_untracked_sources(tmp_path, monkeypatch):
+    """The SCAN, not only the helper, must read the git index.
+
+    Reverting ``_candidate_files`` to ``root.rglob("*")`` keeps every helper arm
+    green; this arm drives the scan and reddens, because an untracked source
+    file then enters the set the xref oracle judges.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    tracked = commands / "refresh.md"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    probe = commands / "000_untracked_probe.md"
+    probe.write_text("clean\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setattr(
+        TestNoDanglingOrchestrationSkillRefs, "PLUGIN_ROOT", plugin)
+    monkeypatch.setattr(
+        TestNoDanglingOrchestrationSkillRefs, "SCAN_DIRS", ("commands",))
+
+    candidates = TestNoDanglingOrchestrationSkillRefs._candidate_files()
+
+    assert tracked in candidates
+    assert probe not in candidates, (
+        f"untracked {probe.name} joined the xref scan population; "
+        "_candidate_files is not reading the git index")
+
+
+def test_deleted_tracked_command_is_a_named_missing_failure(
+        tmp_path, monkeypatch, request):
+    """A deleted tracked command must leave the content population, not crash it.
+
+    With ``keep_deleted=True`` the fixture keeps the path, every scan raises
+    FileNotFoundError, and one deletion surfaces as a storm of errors instead of
+    the named ``Missing command:`` failure the oracle already provides.
+    """
+    repo = tmp_path / "repo"
+    commands = repo / "pact-plugin" / "commands"
+    commands.mkdir(parents=True)
+    for name in sorted(EXPECTED_COMMANDS):
+        (commands / f"{name}.md").write_text(
+            "---\ndescription: fixture\n---\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed = commands / "orchestrate.md"
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+    files = request.getfixturevalue("command_files")
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the content population; "
+        "every scan would raise FileNotFoundError instead of naming it")
+    with pytest.raises(AssertionError, match="Missing command: orchestrate"):
+        TestCommandFilesExist().test_all_expected_commands_present(files)
 
 
 class TestCommandFilesExist:
