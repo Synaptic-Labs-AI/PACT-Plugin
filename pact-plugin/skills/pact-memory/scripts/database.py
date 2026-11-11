@@ -1306,6 +1306,259 @@ def legacy_candidate_plausibility(
     return LEGACY_PLAUSIBLE_EXCLUDED, detail
 
 
+def rekey_project(
+    conn: sqlite3.Connection,
+    from_id: str,
+    to_id: str,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Move an ENTIRE project bucket from `from_id` to `to_id`, atomically.
+
+    This is the only path that rewrites rows. The read union never moves
+    anything, and a save binds the canonical id, so a rekey is an explicit
+    operator action: `--dry-run` is the default posture.
+
+    ONE TRANSACTION. Apply begins `BEGIN IMMEDIATE` when the caller has not
+    already begun one; if the caller owns the transaction, this function
+    participates and does NOT commit, so the caller's context manager decides.
+    A crash before COMMIT leaves the old bucket intact — never a partial move.
+
+    DRY RUN IS THE SAME CODE PATH, ROLLED BACK. A SAVEPOINT wraps the work
+    and is rolled back (and released) before returning, so the reported
+    counters are exactly what an apply would produce rather than a second,
+    drifting estimate. The savepoint works inside or outside a caller
+    transaction.
+
+    FILES. `UNIQUE(path, project_id)` means a path can already exist under
+    both ids. A path present only under `from` is updated in place. A
+    CONFLICTING path keeps the target row: its memory links and its file
+    relations are re-pointed with `INSERT OR IGNORE` (the relation PK is
+    `(source_file, target_file, relationship)`, so a duplicate edge collapses)
+    and the old row is then deleted. `residue_files` counts rows that could
+    not be retired; it is 0 unless a reference outside this operation's
+    knowledge remains.
+
+    VECTORS. A vec0 partition key cannot be UPDATEd in place, so each moved
+    memory's row is read, deleted and re-inserted under the target with the
+    SAME embedding blob (a rekey does not change the text, so re-embedding
+    would be wasted work). A missing vector is skipped. When the vector table
+    cannot be OPENED, nothing is touched and `vectors_pending` reports the
+    number of moved memories; the partition-aware catch-up repairs them, and
+    the stored project on every read keeps a stranded vector from being served
+    to the old bucket.
+
+    NULL-PROJECT ROWS ARE NEVER MOVED and are reported in
+    `null_project_rows`: NULL is a real bucket, not a basename, and moving it
+    would change what every scoped read can see.
+
+    Args:
+        conn: Active database connection.
+        from_id: The entire bucket to retire.
+        to_id: The canonical id to move it to.
+        dry_run: True computes and rolls back; False commits.
+
+    Returns:
+        The counters dict (see the keys assigned below).
+    """
+    validate_identifier_for_write(from_id)
+    validate_identifier_for_write(to_id)
+
+    counters: Dict[str, Any] = {
+        "from": from_id,
+        "to": to_id,
+        "dry_run": dry_run,
+        "memories": 0,
+        "files_in_place": 0,
+        "files_conflicted": 0,
+        "links_repointed": 0,
+        "relations_repointed": 0,
+        "vectors_moved": 0,
+        "vectors_pending": 0,
+        "residue_files": 0,
+        "null_project_rows": 0,
+    }
+
+    ensure_initialized(conn)
+
+    if from_id == to_id:
+        return counters
+
+    savepoint = "rekey_project_work"
+    began_transaction = False
+    if dry_run:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    elif not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+        began_transaction = True
+
+    try:
+        # Collect the moved memories BEFORE the UPDATE: afterwards they share
+        # the target id with rows that were never in `from`.
+        moved_ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM memories WHERE project_id = ?", (from_id,)
+            ).fetchall()
+        ]
+        counters["memories"] = len(moved_ids)
+
+        conn.execute(
+            "UPDATE memories SET project_id = ? WHERE project_id = ?",
+            (to_id, from_id),
+        )
+
+        old_files = conn.execute(
+            "SELECT id, path FROM files WHERE project_id = ? ORDER BY path",
+            (from_id,),
+        ).fetchall()
+
+        for old in old_files:
+            old_id = old["id"]
+            target = conn.execute(
+                "SELECT id FROM files WHERE path = ? AND project_id = ?",
+                (old["path"], to_id),
+            ).fetchone()
+
+            if target is None:
+                conn.execute(
+                    "UPDATE files SET project_id = ? WHERE id = ?",
+                    (to_id, old_id),
+                )
+                counters["files_in_place"] += 1
+                continue
+
+            target_id = target["id"]
+            counters["files_conflicted"] += 1
+
+            links = conn.execute(
+                "INSERT OR IGNORE INTO memory_files "
+                "(memory_id, file_id, relationship) "
+                "SELECT memory_id, ?, relationship FROM memory_files "
+                "WHERE file_id = ?",
+                (target_id, old_id),
+            )
+            counters["links_repointed"] += links.rowcount
+            conn.execute(
+                "DELETE FROM memory_files WHERE file_id = ?", (old_id,)
+            )
+
+            outgoing = conn.execute(
+                "INSERT OR IGNORE INTO file_relations "
+                "(source_file, target_file, relationship) "
+                "SELECT ?, target_file, relationship FROM file_relations "
+                "WHERE source_file = ?",
+                (target_id, old_id),
+            )
+            counters["relations_repointed"] += outgoing.rowcount
+            conn.execute(
+                "DELETE FROM file_relations WHERE source_file = ?", (old_id,)
+            )
+
+            incoming = conn.execute(
+                "INSERT OR IGNORE INTO file_relations "
+                "(source_file, target_file, relationship) "
+                "SELECT source_file, ?, relationship FROM file_relations "
+                "WHERE target_file = ?",
+                (target_id, old_id),
+            )
+            counters["relations_repointed"] += incoming.rowcount
+            conn.execute(
+                "DELETE FROM file_relations WHERE target_file = ?", (old_id,)
+            )
+
+            still_referenced = conn.execute(
+                "SELECT 1 FROM memory_files WHERE file_id = ? "
+                "UNION ALL "
+                "SELECT 1 FROM file_relations WHERE source_file = ? "
+                "OR target_file = ? LIMIT 1",
+                (old_id, old_id, old_id),
+            ).fetchone()
+            if still_referenced:
+                counters["residue_files"] += 1
+            else:
+                conn.execute("DELETE FROM files WHERE id = ?", (old_id,))
+
+        # Vectors: delete+insert with the SAME blob, inside this transaction.
+        # THE TABLE MAY NOT EXIST when the extension or its init failed; a
+        # missing table means there is nothing to move, not a pending repair.
+        vector_table_present = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='vec_memories'"
+        ).fetchone() is not None
+
+        vector_ready = False
+        if moved_ids and vector_table_present and SQLITE_EXTENSIONS_ENABLED:
+            try:
+                conn.enable_load_extension(True)
+                import sqlite_vec
+                sqlite_vec.load(conn)
+                vector_ready = True
+            except Exception as exc:  # noqa: BLE001 - degrade, never fail the move
+                logger.debug(f"rekey_project: vector table unavailable: {exc}")
+
+        if vector_ready:
+            for memory_id in moved_ids:
+                # PER-VECTOR SAVEPOINT: a failed delete+insert must restore
+                # that memory's ORIGINAL vector, not leave it deleted. One bad
+                # row reports as pending and never fails the whole move.
+                conn.execute("SAVEPOINT rekey_vector")
+                try:
+                    vector = conn.execute(
+                        "SELECT embedding FROM vec_memories WHERE memory_id = ?",
+                        (memory_id,),
+                    ).fetchone()
+                    if vector is None:
+                        conn.execute("RELEASE rekey_vector")
+                        continue
+                    conn.execute(
+                        "DELETE FROM vec_memories WHERE memory_id = ?",
+                        (memory_id,),
+                    )
+                    conn.execute(
+                        "INSERT INTO vec_memories "
+                        "(memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                        (memory_id, to_id, vector["embedding"]),
+                    )
+                    conn.execute("RELEASE rekey_vector")
+                    counters["vectors_moved"] += 1
+                except Exception as exc:  # noqa: BLE001 - one row, not the move
+                    logger.debug(
+                        f"rekey_project: vector move failed for {memory_id!r}: {exc}"
+                    )
+                    conn.execute("ROLLBACK TO rekey_vector")
+                    conn.execute("RELEASE rekey_vector")
+                    counters["vectors_pending"] += 1
+        elif moved_ids and vector_table_present:
+            # The table exists but cannot be opened, so a delete is impossible
+            # too. Leave every row where it is; the catch-up repairs them.
+            counters["vectors_pending"] = len(moved_ids)
+
+        counters["null_project_rows"] = (
+            conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id IS NULL"
+            ).fetchone()[0]
+            + conn.execute(
+                "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
+            ).fetchone()[0]
+        )
+
+        if dry_run:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        elif began_transaction:
+            conn.commit()
+
+        return counters
+
+    except Exception:
+        if dry_run:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        elif began_transaction:
+            conn.rollback()
+        raise
+
+
 def create_memory(
     conn: sqlite3.Connection,
     memory: Dict[str, Any]
