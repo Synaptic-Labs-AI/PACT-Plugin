@@ -389,6 +389,25 @@ def _reset_specialist_registry_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_merge_guard_git_caches():
+    """Clear ``merge_guard_common``'s two git lookups before and after every test.
+
+    ``_git_config_aliases`` and ``_git_commands`` memoize what git reports, keyed
+    on the cwd (None for the process's own directory) but not on
+    ``os.environ``, so without this the first test in a worker to read them fixes
+    the answer for every later test there, whatever git config those tests set.
+    """
+    import shared.merge_guard_common as merge_guard_common
+
+    caches = (merge_guard_common._git_config_aliases, merge_guard_common._git_commands)
+    for cache in caches:
+        cache.cache_clear()
+    yield
+    for cache in caches:
+        cache.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _scrub_claude_project_dir_env():
     """Pop + restore ``os.environ['CLAUDE_PROJECT_DIR']`` around every test.
     Runs for EVERY test (autouse).

@@ -26,3 +26,16 @@ def test_hypothesis_stores_nothing_in_the_tree():
     home = Path(os.environ["HOME"]).resolve()
     assert where.is_relative_to(home), where
     assert not where.is_relative_to(_REPO_ROOT), where
+
+
+@pytest.mark.parametrize("round_", [1, 2])
+def test_the_merge_guard_git_caches_start_empty(request, tmp_path, round_):
+    import shared.merge_guard_common as merge_guard_common
+
+    assert "_reset_merge_guard_git_caches" in request.fixturenames
+    caches = (merge_guard_common._git_config_aliases, merge_guard_common._git_commands)
+    assert [cache.cache_info().currsize for cache in caches] == [0, 0]
+    # Fill both, so whichever test runs next in this process sees them cleared.
+    merge_guard_common._git_config_aliases(str(tmp_path))
+    merge_guard_common._git_commands(str(tmp_path))
+    assert all(cache.cache_info().currsize for cache in caches)
