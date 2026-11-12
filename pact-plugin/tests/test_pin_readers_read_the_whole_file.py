@@ -15,13 +15,14 @@ fixed rows pin what the readers say on a file whose section the whole file
 cannot read, and tie the block signal to `section_pins`.
 """
 
-import glob
 import random
+import subprocess
 from pathlib import Path
 
 import archive_pin
 import check_pin_caps
 import staleness
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from pin_caps import PIN_STALE_BLOCK_THRESHOLD, _PIN_HEADING_ROW, section_pins
 from shared.claude_md_markers import State, parse
 from test_claude_md_fence_oracle import _document
@@ -29,14 +30,46 @@ from test_claude_md_fence_oracle import _document
 CORPUS = Path(__file__).resolve().parent / "fixtures" / "claude_md_corpus"
 
 
+def _tracked_glob(directory, pattern):
+    """Tracked corpus files only; an untracked scratch file cannot join."""
+    return _shared_tracked_files(directory, ".", pattern)
+
+
 def _population():
-    texts = {Path(f).name: Path(f).read_text(encoding="utf-8", errors="replace")
-             for f in sorted(glob.glob(str(CORPUS / "*.md")))}
+    texts = {path.name: path.read_text(encoding="utf-8", errors="replace")
+             for path in _tracked_glob(CORPUS, "*.md")}
     for seed in (1, 2):
         rnd = random.Random(seed)
         for i in range(1000):
             texts[f"generated-{seed}-{i}"] = _document(rnd)
     return texts
+
+
+def test_population_excludes_untracked_corpus_documents(tmp_path, monkeypatch):
+    """The CORPUS half of the population reads the git index, not the tree.
+
+    The consumers below floor on the corpus half (``checked >= 40``); an
+    untracked document joins a raw ``glob`` walk with the same weight as a
+    committed one, so it can MASK the loss of a tracked corpus file. This arm
+    reverts to red exactly when the walk stops reading the index.
+    """
+    repo = tmp_path / "repo"
+    corpus = repo / "pact-plugin" / "tests" / "fixtures" / "claude_md_corpus"
+    corpus.mkdir(parents=True)
+    tracked = corpus / "case_tracked.md"
+    tracked.write_text("body\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    probe = corpus / "000_untracked_probe.md"
+    probe.write_text("body\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "CORPUS", corpus)
+
+    texts = _population()
+
+    assert "case_tracked.md" in texts, "the tracked control is missing"
+    assert "000_untracked_probe.md" not in texts, (
+        f"untracked {probe.name} joined the corpus population; "
+        "_population is not reading the git index")
 
 
 def _found(text):
