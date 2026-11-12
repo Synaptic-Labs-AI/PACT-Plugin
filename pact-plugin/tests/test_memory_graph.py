@@ -139,6 +139,28 @@ class TestTrackFile:
             "a refused path still reached the store"
         )
 
+    def test_a_path_object_carrying_a_nul_is_refused(self, db_conn):
+        """N-8: the guard tested `isinstance(path, str)`, so a `pathlib.Path`
+        carrying the NUL passed it and reached the INSERT. The check now runs
+        on the normalised spelling, which every accepted input type produces.
+
+        RED WHEN: the guard type-tests the argument again — this call returns
+        an id and stores an unresolvable row.
+        """
+        from pathlib import Path
+
+        from scripts.graph import track_file
+
+        assert "\x00" in str(Path("/tmp/x\x00y.py")), (
+            "fixture control: the Path spelling must carry the NUL"
+        )
+        with pytest.raises(ValueError, match="NUL"):
+            track_file(db_conn, Path("/tmp/x\x00y.py"))
+
+        assert db_conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0, (
+            "a Path-object path reached the store"
+        )
+
 
 # ---------------------------------------------------------------------------
 # get_file_id

@@ -93,26 +93,32 @@ def track_file(
     caller-supplied paths through `link_memory_to_paths`, so this is a real
     ingress, not a theoretical one.
 
+    THE CHECK RUNS ON THE NORMALISED SPELLING, NOT ON THE ARGUMENT'S TYPE.
+    It used to test `isinstance(path, str)`, so a `pathlib.Path` — or any
+    other object whose string form carries a NUL — passed the guard and was
+    inserted. `_normalize_path` performs no store work, so validating its
+    output keeps the refusal ahead of `ensure_initialized`, which can create
+    the schema.
+
     Args:
         conn: Active database connection.
-        path: File path (absolute or relative).
+        path: File path (absolute or relative), `str` or `Path`-like.
         project_id: Optional project identifier for scoping.
 
     Returns:
         The file ID (existing or newly created).
 
     Raises:
-        ValueError: `path` contains a NUL character. Nothing is written.
+        ValueError: the normalised path contains a NUL character. Nothing is
+            written.
     """
-    if isinstance(path, str) and "\x00" in path:
+    normalized_path = _normalize_path(path)
+    if "\x00" in normalized_path:
         raise ValueError(
             "file path must not contain a NUL character; nothing was written."
         )
 
     ensure_initialized(conn)
-
-    # Normalize path
-    normalized_path = _normalize_path(path)
 
     # Check if file already exists
     cursor = conn.execute(

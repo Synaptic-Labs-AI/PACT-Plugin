@@ -12,6 +12,7 @@ Tests cover:
 8. TOCTOU mitigation: atomic file pre-creation, race handling, WAL sidecar chmod
 """
 import json
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -3474,6 +3475,94 @@ class TestUpdatePayloadProjectIdGuard:
         assert [row[0] for row in rows] == ["projB"], (
             "the duplicate link aborted the cascade or left the old link "
             f"behind: {[row[0] for row in rows]!r}"
+        )
+
+    def test_a_poisoned_file_link_is_quarantined_not_fatal(
+        self, tmp_path, caplog
+    ):
+        """N-7 (cascade half): `update_memory` commits the row's NEW project
+        before the cascade runs, so a refusal that escaped here would leave
+        the update half applied — row moved, link stranded under the old
+        project — and re-issuing the update would hit the same row forever.
+
+        The unrepairable link is skipped (left in place, never deleted) and
+        reported once; every other link still moves; the row still moves.
+
+        RED WHEN: the cascade lets track_file's ValueError escape (this call
+        raises), or it "cleans up" the quarantined link (the anchor assertion
+        fails), or the quarantine goes unreported.
+        """
+        db_path = tmp_path / "poisoned-cascade.db"
+        memory = PACTMemory(
+            project_id="projA", session_id="s", db_path=db_path
+        )
+        memory_id = memory.save(
+            {"context": "POISONED-LINK"}, sync_to_claude=False
+        )
+        poisoned = "/tmp/x\x00y.py"
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                ("poisoned-file", poisoned, "projA"),
+            )
+            conn.execute(
+                "INSERT INTO memory_files "
+                "(memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+                (memory_id, "poisoned-file"),
+            )
+            conn.commit()
+
+        with caplog.at_level(logging.WARNING):
+            assert memory.update(
+                memory_id, {"project_id": "projB"}
+            ) == memory_id
+
+        with db_connection(db_path) as conn:
+            assert conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()[0] == "projB", (
+                "the memory row did not move; the cascade fix is beside the "
+                "point"
+            )
+            anchored = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT f.id, f.path, f.project_id "
+                    "FROM files f JOIN memory_files mf ON mf.file_id = f.id "
+                    "WHERE mf.memory_id = ?",
+                    (memory_id,),
+                )
+            ]
+        assert anchored == [("poisoned-file", poisoned, "projA")], (
+            "the quarantined link was moved or deleted instead of left in "
+            f"place: {anchored!r}"
+        )
+        assert "left 1 file link" in caplog.text, (
+            f"the quarantine was not reported: {caplog.text!r}"
+        )
+        assert memory.last_cascade_skipped == 1, (
+            "the counter did not report the quarantined link: "
+            f"{memory.last_cascade_skipped}"
+        )
+
+        # THE RETRY MUST NOT RAISE EITHER. The stranded link is still there,
+        # so the same cascade runs again and must skip it again.
+        with caplog.at_level(logging.WARNING):
+            assert memory.update(
+                memory_id, {"project_id": "projB"}
+            ) == memory_id
+        assert memory.last_cascade_skipped == 1, (
+            "the re-issue did not re-report the stranded link: "
+            f"{memory.last_cascade_skipped}"
+        )
+
+        # PER CALL, NOT CUMULATIVE: an update that runs no cascade reports 0.
+        clean_id = memory.save({"context": "CLEAN"}, sync_to_claude=False)
+        assert memory.update(clean_id, {"context": "CLEAN-2"}) == clean_id
+        assert memory.last_cascade_skipped == 0, (
+            "a clean update inherited an earlier call's skip count: "
+            f"{memory.last_cascade_skipped}"
         )
 
     def test_a_disagreement_refusal_precedes_the_payload_guard(

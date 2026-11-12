@@ -645,11 +645,32 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     restores it. A forgery can likewise bind a pin, but only one the victim
     deliberately wrote, never its remote.
     """
-    dotgit = Path(root) / ".git"
-    try:
-        if not dotgit.is_file():
+    # THE MARKER IS FOUND BY WALKING UP, AS GIT DOES. The caller may hand us a
+    # SUBDIRECTORY of the redirected checkout (a declared path one level down
+    # is the common shape), and `<subdir>/.git` does not exist — so testing
+    # only the immediate directory leaves the subdirectory case open. The
+    # `core.worktree` comparison below is against the MARKER'S directory (the
+    # checkout root), never the raw input, or a legitimate subdirectory of a
+    # genuine submodule would be refused.
+    start = Path(root)
+    marker_root = None
+    for candidate in [start, *start.parents]:
+        dotgit = candidate / ".git"
+        try:
+            if not os.path.lexists(dotgit):
+                continue
+            if not dotgit.is_file():
+                # A real `.git` DIRECTORY: an ordinary checkout, done.
+                return False
+        except OSError:
             return False
-        text = dotgit.read_text(encoding="utf-8", errors="replace")
+        marker_root = candidate
+        break
+    if marker_root is None:
+        return False
+
+    try:
+        text = (marker_root / ".git").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
     for line in text.splitlines():
@@ -660,7 +681,7 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
             return False
         resolved = Path(target)
         if not resolved.is_absolute():
-            resolved = Path(root) / resolved
+            resolved = marker_root / resolved
         try:
             resolved = resolved.resolve()
         except (OSError, RuntimeError):
@@ -670,12 +691,25 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
         # `<other>/.git/modules/<name>`: the submodule-admin redirect, whose
         # git dir EQUALS its common dir, so only the recorded checkout can
         # tell a genuine submodule from a pointer at somebody else's.
-        return _admin_dir_names_another_checkout(resolved, Path(root))
+        #
+        # THE SHAPE IS CHECKED FIRST, so a linked-worktree marker
+        # (`.../.git/worktrees/<name>`) never reaches the git subprocess —
+        # that call is unaffordable on every detection and its answer there is
+        # always "not recorded", since `core.worktree` is unset for a worktree
+        # admin dir.
+        if (
+            resolved.parent.name == "modules"
+            and resolved.parent.parent.name == ".git"
+        ):
+            return _admin_dir_names_another_checkout(resolved, marker_root)
+        return False
     return False
 
 
 def detect_id_for_root(
-    root: Optional[Path], common_dir: Optional[Path] = None
+    root: Optional[Path],
+    common_dir: Optional[Path] = None,
+    asked_root: Optional[Path] = None,
 ) -> RootIdentity:
     """Detect the identity for ONE repository root.
 
@@ -726,7 +760,16 @@ def detect_id_for_root(
     # forgery can at most bind a pin the victim deliberately wrote, which is
     # strictly narrower than binding its remote. See
     # `_gitfile_points_at_foreign_gitdir`.
-    if _gitfile_points_at_foreign_gitdir(Path(root)):
+    #
+    # THE PREDICATE IS EVALUATED ON THE ASKED DIRECTORY, NOT ON `root`. This
+    # is load-bearing and was measured wrong once: `main_repo_root` follows a
+    # forged gitfile's `core.worktree` to the VICTIM's checkout, so by the
+    # time `root` arrives here it is a genuine submodule from the predicate's
+    # point of view, the predicate answers False, and the origin read returns
+    # the victim's id. `asked_root` is the directory the caller actually
+    # asked about (the cwd, or the declared directory).
+    asked = Path(asked_root) if asked_root is not None else Path(root)
+    if _gitfile_points_at_foreign_gitdir(asked):
         return RootIdentity(None, None, "declined", override_ignored)
 
     origin = read_origin(root)

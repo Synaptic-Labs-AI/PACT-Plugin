@@ -907,6 +907,10 @@ class PACTMemory:
         # this is how a caller reaches the embedding outcome without changing
         # that signature.
         self._last_embedding_status: Optional[str] = None
+        # File links the most recent update() left on their old project
+        # because their recorded path could not be re-tracked. See
+        # _cascade_rekey: a quarantined link is reported, never fatal.
+        self._last_cascade_skipped: int = 0
 
         # Outcome of the most recent save()'s CLAUDE.md sync, or None before
         # any save has run. Unlike the embedding status above, this is set on
@@ -1065,7 +1069,11 @@ class PACTMemory:
             legacy_name = PACTMemory._legacy_project_name(
                 declared_common_dir, declared_main_root
             )
-            identity = detect_id_for_root(declared_main_root, declared_common_dir)
+            identity = detect_id_for_root(
+                declared_main_root,
+                declared_common_dir,
+                asked_root=declared_root or Path(declared_dir),
+            )
             PACTMemory._warn_override_ignored(identity)
             if identity.project_id is not None:
                 logger.debug(
@@ -1133,7 +1141,11 @@ class PACTMemory:
                 legacy_name = PACTMemory._legacy_project_name(
                     recorded_common_dir, recorded_root
                 )
-                identity = detect_id_for_root(recorded_root, recorded_common_dir)
+                identity = detect_id_for_root(
+                    recorded_root,
+                    recorded_common_dir,
+                    asked_root=Path(declared_dir),
+                )
                 PACTMemory._warn_override_ignored(identity)
                 if identity.project_id is not None:
                     logger.debug(
@@ -1198,7 +1210,9 @@ class PACTMemory:
         legacy_name = PACTMemory._legacy_project_name(declared_common_dir, live_root)
         # A non-git declared path has no common dir, so `detect_id_for_root`
         # returns the designed basename without shelling to git.
-        identity = detect_id_for_root(live_root, declared_common_dir)
+        identity = detect_id_for_root(
+            live_root, declared_common_dir, asked_root=Path(declared_dir)
+        )
         PACTMemory._warn_override_ignored(identity)
         if identity.project_id is not None:
             logger.debug(
@@ -1288,7 +1302,9 @@ class PACTMemory:
                 )
                 return _DetectedIdentity(None, "unresolved", None, None, None)
             legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, repo_root)
-            identity = detect_id_for_root(repo_root, cwd_common_dir)
+            identity = detect_id_for_root(
+                repo_root, cwd_common_dir, asked_root=_cwd_or_none()
+            )
             PACTMemory._warn_override_ignored(identity)
             if identity.project_id is not None:
                 # THE DISCLOSURE DECISION LIVES IN ONE PLACE. This rung used
@@ -1441,7 +1457,9 @@ class PACTMemory:
                     )
                     return _DetectedIdentity(None, "unresolved", None, None, cwd_root)
                 legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, cwd_root)
-                identity = detect_id_for_root(cwd_root, cwd_common_dir)
+                identity = detect_id_for_root(
+                    cwd_root, cwd_common_dir, asked_root=cwd_root
+                )
                 PACTMemory._warn_override_ignored(identity)
                 if identity.project_id is not None:
                     logger.debug(
@@ -1857,6 +1875,19 @@ class PACTMemory:
         return self._last_embedding_status
 
     @property
+    def last_cascade_skipped(self) -> int:
+        """File links the most recent update() quarantined.
+
+        A quarantined link is one whose recorded path could not be
+        re-tracked (a NUL byte, refused by `track_file`), so the link was
+        left on its old project instead of aborting the re-key. Zero is the
+        normal answer. Reported here because update() has no envelope: the
+        count is the structured half, the warning in `_cascade_rekey` is the
+        human half.
+        """
+        return self._last_cascade_skipped
+
+    @property
     def last_project_scope(self) -> Optional[Dict[str, Any]]:
         """How the most recent save resolved its project, and from where.
 
@@ -2000,7 +2031,7 @@ class PACTMemory:
         # another repository's common dir reads the wrong config. A path that
         # is not a repository answers None, which is the designed basename arm.
         common_dir = main_repo_common_dir(str(root))
-        identity = detect_id_for_root(root, common_dir)
+        identity = detect_id_for_root(root, common_dir, asked_root=_cwd_or_none())
         # NO FOLDER PSEUDO-ID ON A DECLINE. `identity.project_id or root.name`
         # invented an id the resolver had just refused, and the warning then
         # advised a save that would itself be refused. None means "unknown
@@ -2359,6 +2390,23 @@ class PACTMemory:
         if divergence_warning:
             logger.warning("%s", divergence_warning)
 
+        # VALIDATE THE FILE LIST BEFORE ANY ROW IS WRITTEN. A NUL in a path
+        # makes the file layer refuse, and by then `create_memory` has already
+        # inserted the memory row — MEASURED: the row persisted while the
+        # error text said "nothing was written". Refusing HERE, before the
+        # connection is even opened, is what makes that promise true.
+        files_to_link = []
+        if files:
+            files_to_link.extend(files)
+        if include_tracked and self._session_files:
+            files_to_link.extend(self._session_files)
+        for candidate in files_to_link:
+            if "\x00" in str(candidate):
+                raise ValueError(
+                    f"file path {str(candidate)!r} must not contain a NUL "
+                    "character; nothing was written."
+                )
+
         with db_connection() as conn:
             ensure_initialized(conn)
 
@@ -2370,13 +2418,6 @@ class PACTMemory:
 
             # Create the memory record
             memory_id = create_memory(conn, memory)
-
-            # Collect files to link
-            files_to_link = []
-            if files:
-                files_to_link.extend(files)
-            if include_tracked and self._session_files:
-                files_to_link.extend(self._session_files)
 
             # Link files to memory
             if files_to_link:
@@ -3059,6 +3100,10 @@ class PACTMemory:
         # readable as this one's. update() shares the field with save(), so a
         # failed update could surface the last SAVE's code.
         self._last_embedding_status = None
+        # The cascade's skip count is per call for the same reason: a caller
+        # reading it after a later update must not see an earlier one's
+        # quarantine.
+        self._last_cascade_skipped = 0
 
         # Same fail-closed rule as save()/sync(), evaluated at CALL time — the
         # constructor-bound project_id may predate a mid-process disagreement.
@@ -3300,6 +3345,17 @@ class PACTMemory:
         dangle `file_relations` references, so the residue is left, not
         hidden.
 
+        A LINK WHOSE PATH CANNOT BE RE-TRACKED IS QUARANTINED, NOT FATAL.
+        `track_file` refuses a path carrying a NUL byte, and that refusal
+        arrives AFTER update_memory has committed the row under its new
+        project. Letting it escape would half-apply the update — the row
+        moved, the link stranded under the old project — and re-issuing the
+        update would hit the same row and fail identically forever. The row is
+        SKIPPED (left where it is, never deleted), every other link still
+        moves, and one warning names the memory and the stranded file ids. No
+        scoped read serves the stranded link, because every read confirms the
+        row's stored project.
+
         Vector: vec0 partitions by project_id, so a vector left in the old
         partition is invisible to the new project's semantic search — and,
         because the partition is what a project-scoped query filters on,
@@ -3342,8 +3398,23 @@ class PACTMemory:
             "WHERE mf.memory_id = ?",
             (memory_id,),
         ).fetchall()
+        quarantined: List[str] = []
         for row in linked:
-            new_file_id = track_file(conn, row["path"], new_project)
+            try:
+                new_file_id = track_file(conn, row["path"], new_project)
+            except ValueError:
+                # A REFUSED PATH MUST NOT ABORT THE CASCADE. `update_memory`
+                # has ALREADY committed the memory row under its new project
+                # before this runs, so letting the refusal escape leaves the
+                # update half applied — the row moved, the link stranded under
+                # the old project — and re-issuing the update hits the same
+                # row and fails identically forever. The link is left exactly
+                # where it is (quarantined, never deleted: this is somebody's
+                # recorded data), and reported once below. No scoped read
+                # serves it: every read confirms the row's stored project, so
+                # the link and the row disagreeing is already invisible.
+                quarantined.append(row["file_id"])
+                continue
             # `new_file_id == row["file_id"]` IS THE "already in the target"
             # TEST. track_file resolves (path, new_project), which is this
             # very row iff it already carries the target, so a separate
@@ -3372,6 +3443,22 @@ class PACTMemory:
         # undone with it — the row would stay addressable only under its OLD
         # key, the exact state the cascade exists to retire.
         conn.commit()
+        self._last_cascade_skipped = len(quarantined)
+        if quarantined:
+            # THE REPORT. Ids only: the path is the thing that was refused,
+            # so it can carry a control character and must not reach a log
+            # line that someone tail-parses. Re-issuing the update skips the
+            # same rows and reports them again, which is the honest answer —
+            # the row is unrepairable until its recorded path is corrected.
+            logger.warning(
+                "re-key of memory %r left %d file link(s) on their old "
+                "project: the recorded path cannot be re-tracked (file ids: "
+                "%s). The memory row moved; the links did not, and no scoped "
+                "read serves a link whose file row carries another project.",
+                memory_id,
+                len(quarantined),
+                ", ".join(repr(file_id) for file_id in quarantined),
+            )
         if not vector_current:
             memory_dict = get_memory(conn, memory_id)
             if memory_dict:

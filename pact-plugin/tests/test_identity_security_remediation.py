@@ -584,6 +584,23 @@ class TestSubmoduleAdminRedirect:
         assert identity.project_id == "github.com/owner/sep"
         assert identity.source == "origin remote"
 
+    def test_a_subdirectory_of_a_genuine_submodule_is_not_a_redirect(self, tmp_path):
+        """POSITIVE CONTROL for the walk-up: the marker is found one level up,
+        and the comparison is against the MARKER's directory, so a genuine
+        submodule's own subdirectory must not be refused."""
+        _super, checkout, _admin = self._submodule(tmp_path)
+        (checkout / "pkg").mkdir()
+        assert pi._gitfile_points_at_foreign_gitdir(checkout / "pkg") is False
+
+    def test_a_subdirectory_of_a_forged_pointer_is_a_redirect(self, tmp_path):
+        """Catches testing only `<dir>/.git`: a declared path one level below
+        the forged checkout kept the victim bound."""
+        _super, _checkout, admin = self._submodule(tmp_path)
+        forged = tmp_path / "forged-sub"
+        (forged / "sub").mkdir(parents=True)
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        assert pi._gitfile_points_at_foreign_gitdir(forged / "sub") is True
+
     def test_a_gitfile_pointing_at_a_submodule_admin_dir_declines(self, tmp_path):
         """Catches a pointer at `<other>/.git/modules/<name>`: its git dir
         EQUALS its common dir, so the listing check cannot see it and the
@@ -597,6 +614,107 @@ class TestSubmoduleAdminRedirect:
         identity = pi.detect_id_for_root(forged, admin.resolve())
         assert identity.project_id is None
         assert identity.source == "declined"
+
+
+class TestSaveIngressRejectsNulFilePaths:
+    def test_a_nul_file_path_is_refused_before_any_row_is_written(self, tmp_path):
+        """Catches a save that raises 'nothing was written' AFTER the memory
+        row is committed — measured: the row persisted. The refusal must come
+        before the connection is opened."""
+        import scripts.memory_api as memory_api
+
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
+
+        with pytest.raises(ValueError) as caught:
+            memory.save(
+                {"context": "nul file path"},
+                files=["bad\x00path.py"],
+                sync_to_claude=False,
+            )
+        assert "must not contain a NUL" in str(caught.value)
+        # NOTHING WRITTEN. `_ensure_ready()` legitimately creates the store
+        # FILE, so the assertion is on ROWS: before the fix the memory row
+        # persisted while the error text claimed nothing was written.
+        import sqlite3
+
+        rows = 0
+        if store.exists():
+            check = sqlite3.connect(str(store))
+            try:
+                found = check.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='memories'"
+                ).fetchone()
+                if found:
+                    rows = check.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                check.close()
+        assert rows == 0, f"the refused save left {rows} memory row(s)"
+
+
+class TestForgedSubmoduleAdminEndToEnd:
+    def test_constructing_from_the_forged_dir_declines(self, tmp_path, monkeypatch):
+        """THE PRODUCTION PATH, which my unit arm above did not exercise.
+
+        `main_repo_root` follows the forged gitfile's `core.worktree` to the
+        VICTIM's checkout, so `detect_id_for_root` receives a genuine
+        submodule as `root` and reads the victim's origin. The predicate must
+        therefore be evaluated on the ASKED directory.
+        """
+        import scripts.memory_api as memory_api
+
+        victim = _repo(tmp_path / "victimlib", "https://github.com/victim/secret-lib")
+        sup = _repo(tmp_path / "super", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(sup), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(victim), "submod"],
+            check=True, capture_output=True,
+        )
+        admin = sup / ".git" / "modules" / "submod"
+        forged = tmp_path / "forged-sub"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        # The victim's origin must be a PORTABLE URL, or the redirect only
+        # reaches a basename and the arm would pass for the wrong reason.
+        subprocess.run(
+            ["git", "-C", str(sup / "submod"), "remote", "set-url", "origin",
+             "https://github.com/victim/secret-lib"],
+            check=True,
+        )
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "mem"))
+        (tmp_path / "mem").mkdir()
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+        monkeypatch.chdir(forged)
+
+        memory = memory_api.PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory.project_id != "github.com/victim/secret-lib"
+        assert memory.project_id is None
+        assert memory._project_id_source == "unresolved"
+
+        # THE DECLARED PATHS, including a SUBDIRECTORY of the forged dir:
+        # `<subdir>/.git` does not exist, so the marker must be found by
+        # walking up. In this suite the cwd is a real repository, so a
+        # declined declaration legitimately falls through to it — what must
+        # never appear is the VICTIM's id.
+        monkeypatch.chdir(tmp_path)
+        (forged / "sub").mkdir()
+        for declared in (forged, forged / "sub"):
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+            declared_memory = memory_api.PACTMemory(
+                db_path=tmp_path / "store" / "memory.db"
+            )
+            assert declared_memory.project_id != "github.com/victim/secret-lib"
+            assert declared_memory._project_id_source != "origin remote" or (
+                declared_memory.project_id
+                != "github.com/victim/secret-lib"
+            )
 
 
 class TestReadScopeCacheKeyIncludesTheIdentityRoot:
