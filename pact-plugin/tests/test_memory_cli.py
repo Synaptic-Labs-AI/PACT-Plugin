@@ -2783,14 +2783,50 @@ class TestSearchWindowContainment:
     margins here (10 verbatim fillers vs a zero-overlap target for the
     below-5 arm; an 11-record store against a 20 window for the visible arm)
     are chosen so rank wobble inside those margins cannot flip either arm.
+
+    BOTH ARMS HOLD ONLY ON THE VECTOR PATH, so that path is a checked
+    precondition rather than an assumption. When the CLI child cannot embed
+    the query, `search` silently falls back to keyword text search, which
+    never returns the zero-overlap target: the default-window arm would then
+    fail as a missing target, which reads as a search defect. The seed must
+    therefore store a vector for every record, and the child must report a
+    usable embedding service before it searches. Either failing fails the arm
+    with that cause named.
     """
 
     FILLER_QUERY = "orchestration cadence telemetry"
     FILLERS = 10
+    VECTOR_PATH_MARKER = "PACT_VECTOR_PATH="
+
+    # Runs IN THE CLI CHILD, before the real CLI entry point. It warms the
+    # embedding service in the same process the search then runs in (the
+    # service is a per-process singleton), and reports on stderr whether the
+    # vector path is usable: extensions enabled, sqlite_vec importable, and a
+    # query embedding produced. The CLI itself then runs unchanged as
+    # `__main__` with its own argv.
+    _CHILD_PRELUDE = (
+        "import runpy, sys\n"
+        "from pathlib import Path\n"
+        "cli = sys.argv[1]\n"
+        "sys.path.insert(0, str(Path(cli).resolve().parent.parent))\n"
+        "from scripts import database, embeddings\n"
+        "try:\n"
+        "    import sqlite_vec  # noqa: F401\n"
+        "    vec = True\n"
+        "except ImportError:\n"
+        "    vec = False\n"
+        "ready = (database.SQLITE_EXTENSIONS_ENABLED and vec\n"
+        "         and embeddings.generate_embedding('vector path probe') is not None)\n"
+        "sys.stderr.write('PACT_VECTOR_PATH=' + ('ready' if ready else 'unavailable') + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "sys.argv = sys.argv[1:]\n"
+        "runpy.run_path(cli, run_name='__main__')\n"
+    )
 
     def _seed(self, db_path):
         """Seed in-process: one model load for all saves, not one per save."""
         memory = PACTMemory(db_path=db_path)
+        statuses = []
         for i in range(self.FILLERS):
             memory.save(
                 {
@@ -2799,21 +2835,40 @@ class TestSearchWindowContainment:
                 },
                 sync_to_claude=False,
             )
-        return memory.save(
+            statuses.append(memory.last_embedding_status)
+        target_id = memory.save(
             {
                 "context": "zebra quorum calibration note",
                 "goal": "distinctive target marker",
             },
             sync_to_claude=False,
         )
+        statuses.append(memory.last_embedding_status)
+        # PRECONDITION: `last_embedding_status` is None when the record's
+        # vector was stored, and names the degradation otherwise.
+        assert statuses == [None] * (self.FILLERS + 1), (
+            "vector search unavailable for the seed: a record was saved "
+            f"without a vector (embedding statuses {statuses!r}), so the "
+            "ranked window this arm measures does not exist"
+        )
+        return target_id
 
     def _search(self, cli_script_path, db_path, *extra):
         result = subprocess.run(
-            [sys.executable, cli_script_path, "search", self.FILLER_QUERY,
-             "--db-path", str(db_path), *extra],
+            [sys.executable, "-c", self._CHILD_PRELUDE, cli_script_path,
+             "search", self.FILLER_QUERY, "--db-path", str(db_path), *extra],
             capture_output=True, text=True, timeout=300,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
+        markers = [
+            line for line in result.stderr.splitlines()
+            if line.startswith(self.VECTOR_PATH_MARKER)
+        ]
+        assert markers == [self.VECTOR_PATH_MARKER + "ready"], (
+            "vector search unavailable in the CLI child, so its search fell "
+            "back to keyword text search and the window cannot be measured: "
+            f"markers {markers!r}, stderr {result.stderr!r}"
+        )
         return json.loads(result.stdout)["result"]
 
     def test_target_below_window_invisible_at_5_visible_at_default(
@@ -4298,7 +4353,7 @@ class TestCliSyncSubprocess:
         expected_id = self._project_id(cli_script_path, project, cli_db)
         assert expected_id, "status reported no project id; the agreement pin below is vacuous"
         assert result == {"sync_status": "empty", "projected": 0, "memory_ids": [],
-                          "project_id": expected_id}
+                          "project_id": expected_id, "read_scope": [expected_id]}
         assert (project / "CLAUDE.md").read_bytes() == before
 
     def test_sync_projects_the_records_under_their_own_dates(

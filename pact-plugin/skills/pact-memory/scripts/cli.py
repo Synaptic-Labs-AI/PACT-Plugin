@@ -955,6 +955,11 @@ def cmd_sync(args, db_path=None):
         # here would skip the fold, so an unusable detected value could reach
         # the envelope.
         "project_id": memory._project_id_for_envelope(),
+        # THE SCOPE THIS SESSION READS UNDER, on every outcome: the canonical
+        # (or other) id, then an admitted legacy bucket; `[]` with no
+        # identity. A consumer counting this project's records must count
+        # across all of it, not only `project_id`.
+        "read_scope": list(memory._read_project_scopes()),
     })
 
 
@@ -1108,7 +1113,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     if not from_id:
         _error(
             "INVALID_INPUT",
-            "rekey requires --from <id> naming the bucket to move, or "
+            "rekey requires --from=BUCKET naming the bucket to move, or "
             "--candidates to list the buckets.",
             exit_code=2,
         )
@@ -1172,7 +1177,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "PROJECT_IDENTITY_UNRESOLVED",
                 escape_for_envelope(
                     "no canonical project id resolves here, so the rekey "
-                    f"target is unknown. Pass --to=<canonical id>{pin}. A "
+                    f"target is unknown. Pass --to=host/owner/repo{pin}. A "
                     "folder-name target is refused: moving rows into a "
                     "basename bucket is the misfile this command exists to "
                     "prevent. Nothing was moved."
@@ -1572,11 +1577,16 @@ def build_parser():
             "the section is a view of the store, so fix a record with update "
             "or delete and run sync again. When project identity is unresolved "
             "or the project has no memories, sync reports sync_status 'empty' "
-            "and leaves the file untouched. An empty result is not proof the "
-            "project has no memories: run `project-id show` and follow the "
-            "candidate it names. "
+            "and leaves the file untouched. When the project has memories but "
+            "no CLAUDE.md resolves, sync reports 'unresolved' and writes "
+            "nothing. An empty result is not proof the "
+            "project has no memories: run `project-id show`. Only this "
+            "checkout's own bucket that is not excluded carries a rekey "
+            "command; "
             + render_rekey_command("<id>", "<canonical>")
-            + " moves a populated older bucket into the canonical id."
+            + " names both ends and moves that bucket into the canonical id. "
+            "Run it with --apply only with the user's explicit approval, and "
+            "never for an excluded bucket or another repository's id."
         ),
         parents=[parent],
         formatter_class=fmt,
@@ -1635,7 +1645,8 @@ def build_parser():
             "The detected project id, `source`, `id_shape`, any structured "
             "`decline_reason` (with the override path that remedies it), the "
             "resolved read scope, and every non-empty bucket with its memory "
-            "count and the literal `project-id rekey --from <id>` command."
+            "count and its relation to this checkout. Only this checkout's own "
+            "buckets carry a rekey command, which names both ends."
         ),
         formatter_class=fmt,
         epilog=_cli_examples(examples["project-id"]),
@@ -1647,13 +1658,16 @@ def build_parser():
         help="Move an entire project bucket to the canonical id",
         parents=[parent],
         description=(
-            "Move EVERY row filed under `--from` to the canonical id in one "
+            "Move EVERY row filed under `--from` to `--to` in one "
             "transaction: memories, file rows (merging the UNIQUE(path, "
             "project_id) collision), graph links and vector partitions. "
             "`--dry-run` is the default and reports the plan by running it "
-            "inside a rolled-back savepoint. `--to` defaults to the detected "
-            "canonical id and refuses when none resolves. Exit codes: 0 for "
-            "a clean plan or an applied move, 1 when no identity resolves, 2 "
+            "inside a rolled-back savepoint. Name both ends: an omitted `--to` "
+            "is accepted only when `--from` is this checkout's own legacy "
+            "bucket and it is not excluded. Run --apply only with the user's "
+            "explicit approval, and never for an excluded bucket or another "
+            "repository's id: the move merges rows and cannot be undone. Exit "
+            "codes: 0 for a clean plan or an applied move, 1 for a refusal, 2 "
             "for bad input, 3 for an operational failure (nothing moved)."
         ),
         formatter_class=fmt,
@@ -1670,7 +1684,10 @@ def build_parser():
         "--to",
         dest="to_id",
         metavar="<canonical>",
-        help="Target id. Defaults to the detected canonical id.",
+        help=(
+            "Target canonical id. Name it: it defaults only for this "
+            "checkout's own legacy bucket."
+        ),
     )
     project_id_rekey_parser.add_argument(
         "--dry-run",
@@ -1680,12 +1697,15 @@ def build_parser():
     project_id_rekey_parser.add_argument(
         "--apply",
         action="store_true",
-        help="Perform the move.",
+        help="Perform the move; only with the user's explicit approval.",
     )
     project_id_rekey_parser.add_argument(
         "--candidates",
         action="store_true",
-        help="List every populated bucket with its count and rekey command.",
+        help=(
+            "List every populated bucket with its count; only this "
+            "checkout's own buckets carry a rekey command."
+        ),
     )
 
     return parser

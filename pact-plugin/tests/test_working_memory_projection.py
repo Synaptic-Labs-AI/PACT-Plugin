@@ -398,7 +398,7 @@ class TestSyncVerbReachesTheGuards:
         assert expected_id, "status reported no project id; the pin below is vacuous"
         assert result == {
             "sync_status": "unresolved", "projected": 0, "memory_ids": [],
-            "project_id": expected_id,
+            "project_id": expected_id, "read_scope": [expected_id],
         }
         assert (project / "CLAUDE.md").read_bytes() == before
 

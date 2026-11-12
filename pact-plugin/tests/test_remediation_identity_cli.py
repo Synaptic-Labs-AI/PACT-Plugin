@@ -8,7 +8,9 @@ origin URL, and every store is a scratch file under `tmp_path`.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 from fixtures.identity_git import (
@@ -322,6 +324,216 @@ class TestAPrintedCommandRuns:
         assert json.loads(proc.stdout)["result"]["dry_run"] is True
 
 
+class TestNoRekeyRefusalRendersAnAngleBracket:
+    """Every rekey refusal, and the show and status remedies, print as typed.
+
+    Catches a placeholder written with angle brackets: the envelope escaper
+    renders `<` as `<U+003C>`, so `--to=<canonical id>` reached the operator
+    as `--to=<U+003C>canonical id>`. The inputs below carry no `<`, so any
+    `<` or marker in the output came from the message text itself.
+    """
+
+    @staticmethod
+    def _rendered(argv, capfd):
+        from scripts.cli import main
+
+        capfd.readouterr()
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv)
+        captured = capfd.readouterr()
+        return exit_info.value.code, captured.out + captured.err
+
+    def _assert_plain(self, rendered):
+        """No marker anywhere; no `<` in any error message. Returns the
+        number of error envelopes read, so a caller can require one."""
+        assert "U+003C" not in rendered, rendered
+        errors = 0
+        for line in rendered.splitlines():
+            if line.startswith('{"ok": false'):
+                errors += 1
+                assert "<" not in json.loads(line)["message"], line
+        return errors
+
+    @pytest.mark.parametrize("args, code, error", [
+        (["--candidates", "--apply"], 2, "INVALID_INPUT"),
+        (["--from=proj", "--dry-run", "--apply"], 2, "INVALID_INPUT"),
+        ([], 2, "INVALID_INPUT"),
+        (["--from=proj", "--to=proj"], 2, "INVALID_INPUT"),
+        (["--from=proj"], 1, "REKEY_REFUSED"),
+        (["--from=github.com/o/other"], 1, "REKEY_REFUSED"),
+        (["--from=foreign"], 1, "REKEY_REFUSED"),
+    ], ids=["candidates-with-option", "dry-run-and-apply", "no-from",
+            "non-canonical-to", "excluded", "canonical-source", "not-candidate"])
+    def test_a_refusal_in_a_repository(self, excluded_rig, store, capfd, args, code, error):
+        _seed(store, "github.com/o/other", memory_id="other0001", path="x.py")
+        _seed(store, "foreign", memory_id="foreign01", path="y.py")
+        got, rendered = self._rendered(
+            ["project-id", "rekey", *args, "--db-path", str(store)], capfd
+        )
+        assert got == code, rendered
+        assert f'"error": "{error}"' in rendered, rendered
+        assert self._assert_plain(rendered) == 1
+
+    @pytest.mark.parametrize("remote", [None, UNREPRESENTABLE], ids=["no-repository", "declined"])
+    def test_the_unresolved_target_refusal(self, identity_env, store, monkeypatch, capfd, remote):
+        if remote is None:
+            where = identity_env / "proj"
+            where.mkdir()
+        else:
+            where = make_repo(identity_env / "proj", remote=remote)
+        monkeypatch.chdir(where)
+        got, rendered = self._rendered(
+            ["project-id", "rekey", "--from=proj", "--db-path", str(store)], capfd
+        )
+        assert got == 1, rendered
+        assert "PROJECT_IDENTITY_UNRESOLVED" in rendered
+        assert "--to=host/owner/repo" in rendered, rendered
+        assert self._assert_plain(rendered) == 1
+
+    @pytest.mark.parametrize("command", [["project-id", "show"], ["status"]])
+    def test_the_show_and_status_remedies_for_an_excluded_bucket(
+        self, excluded_rig, store, capfd, command
+    ):
+        got, rendered = self._rendered([*command, "--db-path", str(store)], capfd)
+        assert got == 0, rendered
+        assert self._assert_plain(rendered) == 0
+
+    @pytest.mark.parametrize("command", [["project-id", "show"], ["status"]])
+    def test_the_show_and_status_remedies_for_a_declined_repository(
+        self, identity_env, store, monkeypatch, capfd, caplog, command
+    ):
+        """The remedy is the decline warning; the envelope carries its cause."""
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=UNREPRESENTABLE))
+        got, rendered = self._rendered([*command, "--db-path", str(store)], capfd)
+        warned = "\n".join(caplog.messages)
+        assert got == 0, rendered
+        assert "origin_unrepresentable" in rendered, rendered
+        assert "cannot be represented" in warned, warned
+        assert self._assert_plain(rendered + warned) == 0
+
+
+def _rendered_help() -> dict:
+    """Every parser's `format_help()`, keyed by its command path, with the
+    wrapping argparse adds collapsed to single spaces."""
+    import argparse
+
+    from scripts.cli import build_parser
+
+    found = {}
+
+    def walk(parser, path):
+        found[path] = " ".join(parser.format_help().split())
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, child in action.choices.items():
+                    walk(child, f"{path} {name}".strip())
+
+    walk(build_parser(), "")
+    return found
+
+
+class TestTheHelpNeverSaysFollowTheCandidate:
+    """The rendered help gives the skill's rekey rule, not "follow the candidate".
+
+    Catches help text telling an operator to follow whatever bucket `show`
+    lists, which can be an excluded bucket or another repository's id, and a
+    defaulted `--to` described as always safe.
+    """
+
+    def test_no_help_says_follow_the_candidate(self):
+        rendered = _rendered_help()
+        assert {"sync", "project-id show", "project-id rekey"} <= set(rendered)
+        for path, text in rendered.items():
+            assert "follow the candidate" not in text.lower(), path
+
+    @pytest.mark.parametrize("path", ["sync", "project-id rekey"])
+    def test_the_rekey_help_requires_approval_and_names_the_limits(self, path):
+        text = _rendered_help()[path]
+        assert "--apply only with the user's explicit approval" in text, text
+        assert "never for an excluded bucket or another repository's id" in text, text
+
+    def test_the_target_defaults_only_for_this_checkouts_own_bucket(self):
+        text = _rendered_help()["project-id rekey"]
+        assert "Defaults to the detected canonical id" not in text, text
+        assert "it defaults only for this checkout's own legacy bucket" in text, text
+
+
+class TestTheSyncHelpMatchesWhatSyncReports:
+    """Each outcome the `sync` help states is the status `sync` reports.
+
+    Catches help that names the wrong status for a case: an operator reading
+    `empty` as "no CLAUDE.md" (or `unresolved` as "no identity") looks for the
+    wrong fault.
+    """
+
+    EMPTY_SENTENCE = (
+        "When project identity is unresolved or the project has no memories, "
+        "sync reports sync_status 'empty' and leaves the file untouched."
+    )
+    UNRESOLVED_SENTENCE = (
+        "When the project has memories but no CLAUDE.md resolves, sync "
+        "reports 'unresolved' and writes nothing."
+    )
+
+    def _sync(self, where, store, capfd, *, row_bucket=None, claude_md=True):
+        from scripts import memory_api
+
+        for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._EXCLUSION_WARNED):
+            memo.clear()
+        if row_bucket is not None:
+            _seed(store, row_bucket, memory_id="row000001", path="a.py")
+        target = where / "CLAUDE.md"
+        if claude_md:
+            target.write_text("# project\n", encoding="utf-8")
+        before = target.read_bytes() if claude_md else None
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
+        )
+        assert code == 0, envelope
+        after = target.read_bytes() if target.exists() else None
+        return envelope["result"], before == after
+
+    @pytest.mark.parametrize("remote", [UNREPRESENTABLE, None], ids=["unresolved-identity", "no-memories"])
+    def test_empty_is_an_unresolved_identity_or_no_memories(
+        self, identity_env, store, monkeypatch, capfd, remote
+    ):
+        assert self.EMPTY_SENTENCE in _rendered_help()["sync"]
+        where = make_repo(
+            identity_env / "proj", remote=remote or "https://github.com/o/proj.git"
+        )
+        monkeypatch.chdir(where)
+        # The unresolved identity holds a row too: `empty` is about the
+        # identity there, not about the store.
+        result, untouched = self._sync(
+            where, store, capfd, row_bucket="proj" if remote else None
+        )
+        assert result["sync_status"] == "empty"
+        assert (result["project_id"] is None) == (remote is not None)
+        assert untouched
+
+    def test_unresolved_is_memories_with_no_claude_md(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        assert self.UNRESOLVED_SENTENCE in _rendered_help()["sync"]
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        result, untouched = self._sync(
+            where, store, capfd, row_bucket="github.com/o/proj", claude_md=False
+        )
+        assert result["sync_status"] == "unresolved"
+        assert untouched and not (where / "CLAUDE.md").exists()
+
+    def test_the_same_project_writes_with_a_claude_md(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        """Control: the row and the identity above are writable."""
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        result, untouched = self._sync(where, store, capfd, row_bucket="github.com/o/proj")
+        assert result["sync_status"] == "wrote" and result["projected"] == 1
+        assert not untouched
+
+
 class TestRekeyInputAndStoreEdges:
     def test_candidates_takes_no_other_option(self, identity_env, store, capfd):
         code, envelope = _cli(
@@ -383,6 +595,104 @@ class TestRekeyInputAndStoreEdges:
         )
         assert code == 0, envelope
         assert PACTMemory(db_path=store)._read_project_scopes() == ("github.com/o/proj",)
+
+
+# ---------------------------------------------------------------------------
+# sync reports its read scope, and the secretary counts across it
+# ---------------------------------------------------------------------------
+
+SECRETARY = Path(__file__).resolve().parents[1] / "agents" / "pact-secretary.md"
+
+# The single-id form the secretary used before it read the scope: the inverse
+# control, so the arm below proves the scope is what reaches both buckets.
+SINGLE_ID_SQL = """
+SELECT COUNT(*) FROM memories
+WHERE project_id = ?2
+  AND EXISTS (
+    SELECT 1 FROM json_each(COALESCE(memories.entities,'[]')) je
+    WHERE (je.type='object' AND json_extract(je.value,'$.name') = ?1)
+       OR (je.type='text'   AND je.value = ?1))
+"""
+
+
+def _secretary_calibration_sql() -> str:
+    """The calibration count exactly as the secretary agent file states it."""
+    text = SECRETARY.read_text(encoding="utf-8")
+    blocks = re.findall(r"```sql\n(.*?)```", text, re.S)
+    matches = [block for block in blocks if "json_each(COALESCE" in block]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+class TestSyncReportsItsReadScope:
+    """`sync` names every bucket this session reads, and the count uses it.
+
+    Catches the secretary's calibration count reading only the canonical id
+    while the session also reads an admitted legacy bucket, so records filed
+    before the upgrade stop counting toward the gate.
+    """
+
+    def test_the_scope_and_the_secretary_count_cover_both_buckets(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        from fixtures.identity_git import seed_session_evidence
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        (repo / "CLAUDE.md").write_text("# proj\n", encoding="utf-8")
+        entity = json.dumps([{"name": "orchestration_calibration"}])
+        conn = sqlite3.connect(str(store))
+        for memory_id, project in (("canon001", "github.com/o/proj"), ("legacy01", "proj")):
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, entities, created_at, updated_at) "
+                "VALUES (?, 'c', ?, 'legacy-session', ?, ?, ?)",
+                (memory_id, project, entity, CREATED_AT, CREATED_AT),
+            )
+        conn.commit()
+        conn.close()
+        seed_session_evidence(identity_env / "home" / ".claude", repo, "legacy-session")
+        monkeypatch.chdir(repo)
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(repo)], capfd
+        )
+        assert code == 0, envelope
+        read_scope = envelope["result"]["read_scope"]
+        assert read_scope == ["github.com/o/proj", "proj"]
+
+        conn = sqlite3.connect(str(store))
+        try:
+            counted = conn.execute(
+                _secretary_calibration_sql(),
+                {"1": "orchestration_calibration", "2": json.dumps(read_scope)},
+            ).fetchone()[0]
+            single = conn.execute(
+                SINGLE_ID_SQL,
+                {"1": "orchestration_calibration", "2": "github.com/o/proj"},
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert counted == 2
+        assert single == 1
+
+    def test_no_identity_is_an_empty_scope(self, identity_env, store, monkeypatch, capfd):
+        from scripts import memory_api
+        from scripts.memory_api import PACTMemory
+
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(
+                    project_id=None, source="unresolved", legacy_basename=None,
+                    override_ignored=None, identity_root=None,
+                )
+            ),
+        )
+        code, envelope = _cli(["sync", "--db-path", str(store)], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["read_scope"] == []
 
 
 class TestAZeroByteStoreDegrades:

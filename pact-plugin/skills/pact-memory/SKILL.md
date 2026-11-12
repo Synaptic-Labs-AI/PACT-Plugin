@@ -320,7 +320,7 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `update <id\|prefix> -` | Update from piped JSON (`-` = stdin sentinel) | `{"memory_id": "<hex>"}` |
 | `update <id\|prefix> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |
 | `delete <id\|prefix>` | Delete a memory. Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"deleted": true, "memory_id": "<hex>"}` |
-| `sync` | Rebuild CLAUDE.md's Working Memory from this project's newest 3 memories (replaces the section; `--claude-md-root` bounds the write) | `{"sync_status": "wrote", "projected": 3, "memory_ids": [...], "project_id": "..."}` |
+| `sync` | Rebuild CLAUDE.md's Working Memory from this project's newest 3 memories (replaces the section; `--claude-md-root` bounds the write). `read_scope` lists every project id the records were read under, and is `[]` when no identity resolves | `{"sync_status": "wrote", "projected": 3, "memory_ids": [...], "project_id": "...", "read_scope": [...]}` |
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |

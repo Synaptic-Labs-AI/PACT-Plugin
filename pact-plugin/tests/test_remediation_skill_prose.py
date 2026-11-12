@@ -128,8 +128,21 @@ class TestSecretaryProjectionKey:
         assert (
             "The projection is keyed by the repository identity "
             "(host/owner/repo from the origin remote) when the checkout has a "
-            "parseable one, and by the project root's folder name otherwise."
+            "parseable one, and by the project root's folder name when the "
+            "origin is absent or local."
         ) in _body(SECRETARY)
+
+    def test_an_unrepresentable_origin_declines_rather_than_falling_back(self):
+        body = _body(SECRETARY)
+        assert (
+            "A present origin that cannot be represented declines instead: "
+            "sync reports empty with a null project_id, and nothing is "
+            "projected."
+        ) in body
+        assert "folder name otherwise" not in body.lower()
+        # `unresolved` names a missing CLAUDE.md, not an identity cause.
+        start = body.index("A present origin that cannot be represented")
+        assert "reports unresolved" not in body[start:start + 200]
 
     def test_the_legacy_bucket_is_named_as_read_beside_it(self):
         assert (
@@ -388,3 +401,42 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
         ) in _body(SKILL)
         assert remedy in source.replace("`", "")
         assert "--to=<canonical id>" not in source
+
+
+class TestCalibrationCountReadsTheWholeScope:
+    """The secretary's gate count binds every id `sync` read under."""
+
+    def _sql_block(self) -> str:
+        text = SECRETARY.read_text(encoding="utf-8")
+        blocks = re.findall(r"```sql\n(.*?)```", text, flags=re.S)
+        matches = [b for b in blocks if "json_each(COALESCE" in b]
+        assert len(matches) == 1, "expected exactly one calibration SQL block"
+        return _flatten(matches[0])
+
+    def test_the_count_binds_the_scope_array(self):
+        assert (
+            "WHERE project_id IN (SELECT value FROM json_each(?2))"
+        ) in self._sql_block()
+
+    def test_the_single_id_binding_is_gone(self):
+        assert "project_id = ?2" not in self._sql_block()
+
+    def test_the_placeholder_is_the_sync_read_scope(self):
+        assert (
+            "?2 to the read_scope array from this briefing's sync envelope, "
+            "serialised as JSON"
+        ) in _body(SECRETARY)
+
+    def test_no_scope_means_not_determined(self):
+        assert (
+            "If sync did not run in this briefing, or its read_scope is empty, "
+            "do not run the count and report the gate state not determined."
+        ) in _body(SECRETARY)
+
+    def test_the_sync_row_documents_read_scope(self):
+        row = _table_row(SKILL, "sync")
+        assert '"read_scope": [...]' in row
+        assert (
+            "read_scope lists every project id the records were read under, "
+            "and is [] when no identity resolves"
+        ) in row
