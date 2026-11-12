@@ -436,9 +436,10 @@ def _assert_full_workflow_contract(root):
         "constrained dist input"
     )
     inputs = dispatch.get("inputs")
-    assert isinstance(inputs, dict) and set(inputs) == {"dist"}, (
+    assert isinstance(inputs, dict) and set(inputs) == {"dist", "shuffle_seed"}, (
         f"workflow_dispatch inputs are {inputs!r}; only the constrained dist "
-        "choice is admitted, never arbitrary pytest arguments"
+        "choice and the guarded shuffle seed are admitted, never arbitrary "
+        "pytest arguments"
     )
     dist = inputs["dist"]
     assert dist.get("required") is False
@@ -448,6 +449,12 @@ def _assert_full_workflow_contract(root):
         f"dist options are {dist.get('options')!r}; loadfile stays the default "
         "and load is the only diagnostic alternative"
     )
+    # The seed is free text, so it is only ever admitted through the job-level
+    # SEED key and the seed guard below; empty, the default, is file order.
+    seed = inputs["shuffle_seed"]
+    assert seed.get("type") == "string", seed
+    assert seed.get("required") is False, seed
+    assert seed.get("default") == "", seed
     assert "merge_group" in triggers, "tests.yml has no merge_group trigger"
     merge = triggers.get("merge_group") or {}
     assert merge.get("types") == ["checks_requested"]
@@ -472,6 +479,12 @@ def _assert_full_workflow_contract(root):
     assert (job.get("env") or {}).get("DIST") == "${{ inputs.dist || 'loadfile' }}", (
         f"the job-level DIST env is {(job.get('env') or {}).get('DIST')!r}; it "
         "must evaluate from inputs.dist and default to loadfile outside a dispatch"
+    )
+    # Empty outside a dispatch, so the merge gate's run line expands the seed
+    # to no words and the root config keeps pytest-randomly blocked.
+    assert (job.get("env") or {}).get("SEED") == "${{ inputs.shuffle_seed || '' }}", (
+        f"the job-level SEED env is {(job.get('env') or {}).get('SEED')!r}; it "
+        "must evaluate from inputs.shuffle_seed and be empty outside a dispatch"
     )
 
     steps = ci_contract.steps_of(job)
@@ -526,6 +539,40 @@ def _assert_full_workflow_contract(root):
     assert verify_positions and guard_position < verify_positions[0], (
         "the DIST guard must run before the before-tests environment check, "
         "so an out-of-enum value refuses before setup work"
+    )
+
+    # The seed is word-split into the run line, so its guard is the DIST
+    # guard's twin: exactly one step, unconditional, in the job's own env and
+    # default shell, and it publishes the only seed text the artifact name
+    # uses (`steps.order.outputs.order`).
+    seed_guards = [step for step in steps
+                   if isinstance(step.get("run"), str)
+                   and "SEED GUARD" in step["run"]]
+    assert len(seed_guards) == 1, (
+        f"expected exactly one SEED guard step; found {seed_guards!r}")
+    seed_guard = seed_guards[0]
+    assert seed_guard.get("id") == "order", (
+        f"the SEED guard's id is {seed_guard.get('id')!r}; the artifact name "
+        "reads steps.order.outputs.order")
+    for key in ("if", "continue-on-error", "env", "shell"):
+        assert key not in seed_guard, (
+            f"the SEED guard carries `{key}:` ({seed_guard[key]!r}); it must "
+            "run unconditionally in the default shell with the job-level SEED"
+        )
+    seed_run = seed_guard["run"]
+    assert "$SEED" in seed_run, seed_run
+    assert "^(0|[1-9][0-9]{0,8})$" in seed_run, seed_run
+    assert ">> \"$GITHUB_OUTPUT\"" in seed_run, seed_run
+    assert not re.search(r"\bpytest\b", seed_run), (
+        "the SEED guard's run text names pytest; test_ci_collection_scope "
+        "permits exactly one pytest invocation in this file"
+    )
+    seed_position = runs.index(seed_run)
+    warm_positions = [index for index, run in enumerate(runs)
+                      if "StaticModel.from_pretrained" in run]
+    assert warm_positions and guard_position < seed_position < warm_positions[0], (
+        "the SEED guard must run after the DIST guard and before the "
+        "model warm, so an invalid seed refuses before setup work"
     )
 
     lint_lines = [

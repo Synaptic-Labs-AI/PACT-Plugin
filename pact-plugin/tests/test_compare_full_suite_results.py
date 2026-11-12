@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -90,7 +91,7 @@ def environment_steps():
 
 def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
              record_updates=None, collection_updates=None, metadata_updates=None,
-             teardown_after_pass=(), collection_skips=()):
+             teardown_after_pass=(), collection_skips=(), command=None, seeds=()):
     directory = root / name
     artifact = directory / "artifact"
     artifact.mkdir(parents=True)
@@ -171,9 +172,11 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
     # The replica is the workflow's own run text: Actions echoes it unexpanded,
     # so shlex sees $DIST. `dist=` builds the legacy literal form (older logs
     # and the observation arm); no current workflow emits it.
-    command = (ci_contract.WORKFLOW_TEST_CMD if dist is None
-               else f'python -m pytest -ra -n 4 --dist "{dist}" '
-                    '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+    # `seeds=` writes one pytest-randomly header line per value.
+    if command is None:
+        command = (ci_contract.WORKFLOW_TEST_CMD if dist is None
+                   else f'python -m pytest -ra -n 4 --dist "{dist}" '
+                        '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
     lines = [
         actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
@@ -181,6 +184,7 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
         actions_line("CI environment matches constraints-ci.txt."),
         actions_line(f"FULL-COLLECTION-OK 1 test files and {len(nodes)} items match discovery; subject={SHA}"),
     ]
+    lines[3:3] = [actions_line(f"Using --randomly-seed={seed}") for seed in seeds]
     lines.extend(actions_line(f"XPASS {item['node_id']}" +
                               (f" - {item['reason']}" if item["reason"] else ""))
                  for item in cases if item["outcome"] == "xpass")
@@ -358,6 +362,136 @@ def test_dynamic_command_mutations_remain_invalid(tmp_path, mutation):
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, (mutation, comparison)
     assert comparison["status"] == "invalid"
+
+
+# The two accepted run-line shapes, written out here so the shape check is
+# pinned independently of ci_contract; the shipped line must be the seeded one.
+ORDERED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
+                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+SEEDED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
+                  '${SEED:+-p randomly --randomly-seed="$SEED"} '
+                  '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+SEED_TOKENS = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED}"]
+
+
+def read_runs(output):
+    return [json.loads(line) for line in (output / "runs.jsonl").read_text().splitlines()]
+
+
+def test_the_shipped_run_line_is_the_seeded_shape():
+    assert shlex.split(ci_contract.WORKFLOW_TEST_CMD) == shlex.split(SEEDED_COMMAND)
+    assert comparator._command_argv([ci_contract.WORKFLOW_TEST_CMD])[8:11] == SEED_TOKENS
+
+
+def test_seeded_run_line_is_accepted_and_its_seed_is_recorded(tmp_path):
+    first = make_run(tmp_path, "one", command=SEEDED_COMMAND, seeds=(7,))
+    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [7, None]
+    runs = read_runs(output)
+    assert [run["shuffle_seed"] for run in runs] == [7, None]
+    assert runs[0]["argv"][8:11] == SEED_TOKENS
+    assert "shuffle_seed" not in runs[0]["environment"]
+    assert runs[0]["environment"] == runs[1]["environment"]
+
+
+def test_ordered_run_line_has_no_seed(tmp_path):
+    first = make_run(tmp_path, "one", command=ORDERED_COMMAND)
+    second = make_run(tmp_path, "two", 101, command=ORDERED_COMMAND)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [None, None]
+    assert len(read_runs(output)[0]["argv"]) == 9
+
+
+def test_shuffled_run_with_a_real_delta_is_different_not_invalid(tmp_path):
+    """A seed must never make a shuffled-versus-ordered delta unattributable."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, seeds=(3,),
+                      cases=[case(ALPHA), case(BETA, "failure", "order")])
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["status"] == "different"
+    assert comparison["evidence_errors"] == []
+    assert [(delta["type"], delta["name"]) for delta in comparison["deltas"]] == [
+        ("outcome", "test_beta")]
+    assert not any(item["type"] == "environment" for item in comparison["observations"])
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [None, 3]
+
+
+@pytest.mark.parametrize("decoy", [
+    "    Using --randomly-seed=9",       # indented, as inside a traceback
+    "E   Using --randomly-seed=9",       # an assertion-detail line
+    "Using --randomly-seed=9 (echo)",    # trailing text
+    "Using --randomly-seed=nine",
+])
+def test_only_a_whole_seed_header_line_is_a_seed(tmp_path, decoy):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    log.write_text(log.read_text(encoding="utf-8") + actions_line(decoy) + "\n",
+                   encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, (decoy, comparison)
+    assert comparison["input_runs"][0]["shuffle_seed"] is None
+
+
+def test_two_seed_lines_are_refused(tmp_path):
+    first = make_run(tmp_path, "one", seeds=(7, 8))
+    second = make_run(tmp_path, "two", 101, seeds=(7,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["status"] == "invalid"
+    assert comparison["evidence_errors"] == [
+        {"run": "one", "error": "more than one pytest-randomly seed line"}]
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [None, 7]
+
+
+@pytest.mark.parametrize("mutation", [
+    "literal_seed", "no_wrapper", "extra_token", "seed_after_junit", "wrong_junit"])
+def test_seeded_shape_is_exact(tmp_path, mutation):
+    """The second shape admits exactly three tokens in exactly one place."""
+    seed_text = '${SEED:+-p randomly --randomly-seed="$SEED"}'
+    if mutation == "literal_seed":
+        changed = SEEDED_COMMAND.replace('--randomly-seed="$SEED"', "--randomly-seed=7")
+    elif mutation == "no_wrapper":
+        changed = SEEDED_COMMAND.replace(seed_text, '-p randomly --randomly-seed="$SEED"')
+    elif mutation == "extra_token":
+        changed = SEEDED_COMMAND.replace("--junitxml=", "-x --junitxml=")
+    elif mutation == "seed_after_junit":
+        changed = ORDERED_COMMAND + " " + seed_text
+    else:
+        changed = SEEDED_COMMAND.replace(".full-suite-results.xml", ".other.xml")
+    assert changed != SEEDED_COMMAND
+    first = make_run(tmp_path, "one", command=changed)
+    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, (mutation, comparison)
+    assert "unexpected full-suite pytest argv" in (
+        comparison["evidence_errors"][0]["error"]), (mutation, comparison)
+
+
+def test_internal_error_comparison_still_records_each_seed(tmp_path, monkeypatch):
+    """The invalid-comparison builder reports the same input_runs fields."""
+    first = make_run(tmp_path, "one", seeds=(5,))
+    second = make_run(tmp_path, "two", 101)
+    normalize = comparator._normalize_run
+
+    def crash_on_two(logical, directory, expected_sha):
+        if logical == "two":
+            raise RuntimeError("synthetic crash")
+        return normalize(logical, directory, expected_sha)
+
+    monkeypatch.setattr(comparator, "_normalize_run", crash_on_two)
+    output = tmp_path / "out"
+    code = comparator.main(["--expected-sha", SHA, "--output-dir", str(output),
+                            f"--run=one={first}", f"--run=two={second}"])
+    comparison = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
+    assert code == 3
+    assert comparison["status"] == "invalid"
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [5, None]
 
 
 def test_repeated_run_identity_is_invalid(tmp_path):

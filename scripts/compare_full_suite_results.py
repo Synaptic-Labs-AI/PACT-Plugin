@@ -63,6 +63,10 @@ TIMESTAMP = re.compile("^" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 ACTIONS_ENVELOPE = re.compile(
     r"^[^\t\r\n]*\t[^\t\r\n]*\t" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 SHA = re.compile(r"[0-9a-fA-F]{40}")
+# The run line's unexpanded `${SEED:+-p randomly --randomly-seed="$SEED"}`, as
+# shlex splits it, and pytest-randomly's own report-header line.
+_SEED_ARGV = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED}"]
+SEED_LINE = re.compile(r"Using --randomly-seed=(\d+)")
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
 # the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
@@ -196,16 +200,33 @@ def _command_argv(lines: list[str]) -> list[str]:
             or len(candidates) == 2 and candidates[0] != candidates[1]):
         raise EvidenceError("expected one command, optionally repeated by the Actions group header")
     argv = candidates[0]
-    # `$DIST` is the shipped workflow's own text: Actions echoes the `run:` body
-    # unexpanded, so a real log carries the variable, not the resolved value.
-    # The fixed tokens and the literal JUnit argument still pin the command
-    # shape, so this widens the accepted VALUE, never the command.
-    if (len(argv) != 9 or argv[:7] != [
+    # `$DIST` and `${SEED:+…}` are the shipped workflow's own text: Actions
+    # echoes the `run:` body unexpanded, so a real log carries the variables,
+    # not the resolved values. The argv text is therefore the same for every
+    # seed and cannot tell a shuffled run from an ordered one; the seed comes
+    # from pytest-randomly's header line instead. Exactly two shapes are
+    # accepted: today's 9 tokens, and the same with the three seed tokens
+    # before the literal JUnit argument. This widens the accepted VALUE and
+    # adds one reviewed shape, never an open-ended command.
+    if (len(argv) not in (9, 12) or argv[:7] != [
             "python", "-m", "pytest", "-ra", "-n", "4", "--dist"]
             or argv[7] not in ("loadfile", "load", "$DIST")
-            or argv[8] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
+            or len(argv) == 12 and argv[8:11] != _SEED_ARGV
+            or argv[-1] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
         raise EvidenceError(f"unexpected full-suite pytest argv: {argv!r}")
     return argv
+
+
+def _shuffle_seed(lines: list[str]) -> int | None:
+    """The pytest-randomly seed from its header line, or None for an ordered run.
+
+    The line is matched as-is, so an indented traceback or quoted line cannot
+    supply a seed. Two seed lines cannot be attributed to one run.
+    """
+    seeds = [match.group(1) for match in map(SEED_LINE.fullmatch, lines) if match]
+    if len(seeds) > 1:
+        raise EvidenceError("more than one pytest-randomly seed line")
+    return int(seeds[0]) if seeds else None
 
 
 def _junit_bytes(path: Path) -> bytes:
@@ -718,6 +739,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     collected, terminal = _validate_records(metadata, record, collection, expected_sha)
     lines, argv, summary, environment_passes = _validate_log(
         directory, record, expected_sha)
+    shuffle_seed = _shuffle_seed(lines)
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
         record, lines, terminal, artifact)
@@ -731,6 +753,9 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
                      "attempt": 1, "head_sha": expected_sha,
                      "head_branch": metadata.get("headBranch"),
                      "url": metadata.get("url")},
+        # Beside identity, never in environment: a seed is the variable under
+        # test, so it must not make a delta unattributable.
+        "shuffle_seed": shuffle_seed,
         "argv": argv,
         "environment": {
             "overall_conclusion": overall_conclusion,
@@ -875,11 +900,17 @@ def _classify_environment(comparison: dict, reference: dict,
     comparison["status"] = "invalid"
 
 
+def _input_runs(runs: list[dict]) -> list[dict]:
+    """One summary per input run; a run refused during normalization has no
+    identity or seed, so both read None."""
+    return [{"logical_name": run["logical_name"], "identity": run.get("identity"),
+             "shuffle_seed": run.get("shuffle_seed"), "validity": run["validity"]}
+            for run in runs]
+
+
 def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
     comparison = {"schema_version": 1, "expected_sha": expected_sha,
-                  "input_runs": [{"logical_name": run["logical_name"],
-                                  "identity": run.get("identity"),
-                                  "validity": run["validity"]} for run in runs],
+                  "input_runs": _input_runs(runs),
                   "status": "invalid" if errors else "identical",
                   "deltas": [], "observations": [], "evidence_errors": errors}
     if errors:
@@ -989,9 +1020,7 @@ def _reject_repeated_identities(runs: list[dict], errors: list[dict]) -> None:
 def _invalid_comparison(expected_sha: str, runs: list[dict],
                         errors: list[dict]) -> dict:
     return {"schema_version": 1, "expected_sha": expected_sha,
-            "input_runs": [{"logical_name": run["logical_name"],
-                            "identity": run.get("identity"),
-                            "validity": run["validity"]} for run in runs],
+            "input_runs": _input_runs(runs),
             "status": "invalid", "deltas": [], "observations": [],
             "evidence_errors": errors}
 

@@ -358,6 +358,10 @@ class TestCiInvocationCollectsTheWholeCorpus:
     def test_dynamic_command_normalizes_to_the_static_default(self):
         normalized = ci_contract.normalized_workflow_test_argv()
         assert normalized == ci_contract.TEST_CMD.split()
+        # The seeded run line still normalizes to the static default: with
+        # SEED empty the expansion adds no words.
+        assert '${SEED:+-p randomly --randomly-seed="$SEED"}' in (
+            ci_contract.WORKFLOW_TEST_CMD)
         assert _pytest_args(ci_contract.WORKFLOW_TEST_CMD) == [
             "-ra", "-n", "4", "--dist", "loadfile"
         ]
@@ -373,6 +377,21 @@ class TestCiInvocationCollectsTheWholeCorpus:
             ci_contract.WORKFLOW_TEST_CMD + " tests",
             ci_contract.WORKFLOW_TEST_CMD.replace(" " + junit, "", 1),
             ci_contract.WORKFLOW_TEST_CMD + " --deselect tests/test_smoke.py",
+            # The seed must reach pytest only through the guarded SEED key,
+            # inside the `${SEED:+...}` wrapper that expands to nothing when
+            # it is empty: a bare seed flag, an inline expression, a quoted
+            # wrapper (one word) or a dropped expansion is drift.
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                '${SEED:+-p randomly --randomly-seed="$SEED"}',
+                '-p randomly --randomly-seed="$SEED"', 1),
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                '${SEED:+-p randomly --randomly-seed="$SEED"}',
+                '-p randomly --randomly-seed=${{ inputs.shuffle_seed }}', 1),
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                '${SEED:+-p randomly --randomly-seed="$SEED"}',
+                '"${SEED:+-p randomly --randomly-seed=$SEED}"', 1),
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                ' ${SEED:+-p randomly --randomly-seed="$SEED"}', '', 1),
         ):
             with pytest.raises(AssertionError, match="PARSE FAILURE"):
                 ci_contract.normalized_workflow_test_argv(command)

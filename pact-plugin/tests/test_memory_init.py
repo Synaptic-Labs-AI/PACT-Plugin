@@ -434,7 +434,7 @@ jobs:
         if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}-${{ steps.order.outputs.order || 'unguarded' }}
           path: |
             .full-suite-results.xml
             .full-run-record.json
