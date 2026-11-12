@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from clock_shift import clock_shift_census
 from fixtures.tracked_files import tracked_files as _tracked_files
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -444,3 +445,226 @@ def test_shutil_takes_the_same_rmtree_path_as_unshifted(tmp_path):
 
     rc, out = _run_child(tmp_path, FD_PARITY.replace("@EXPECTED@", repr(shutil._use_fd_functions)))
     assert (rc, "1 passed" in out) == (0, True), out
+
+
+# UNDER XDIST. A worker's exit status and output do not reach the controller,
+# and inside a worker check 2 is satisfied by its siblings' own ledger lines, so
+# the census hands each worker's findings to the controller. These arms run a
+# `-n 2` child wired the way tests/conftest.py wires the census, in both
+# directions; test_the_suite_conftest_collects_the_workers_findings pins that
+# wiring in tests/conftest.py itself.
+XDIST_CONFTEST = '''\
+import pytest
+
+from clock_shift_census import collect, finish, install
+
+
+def pytest_configure(config):
+    install()
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    collect(node)
+
+
+def pytest_sessionfinish(session):
+    finish(session)
+'''
+
+XDIST_LAUNCH = '''\
+import os
+import subprocess
+import sys
+
+
+def test_launch():
+    subprocess.run({argv}, env={env}, check=True, timeout=60)
+
+
+def test_plain():
+    pass
+'''
+
+DROPS_SHIFT = '{k: v for k, v in os.environ.items() if k != "PACT_TEST_CLOCK_SHIFT_SECONDS"}'
+
+
+def _run_xdist(tmp_path, argv="[sys.executable, '-c', 'pass']", env="None"):
+    (tmp_path / "conftest.py").write_text(XDIST_CONFTEST)
+    (tmp_path / "test_synthetic.py").write_text(XDIST_LAUNCH.format(argv=argv, env=env))
+    child_env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith(("PACT_TEST_CLOCK_SHIFT_", "PYTEST_XDIST_"))
+        and k not in ("PYTHONPATH", "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS")
+    }
+    child_env["PACT_TEST_CLOCK_SHIFT_LEDGER"] = str(tmp_path / "ledger")
+    child_env["PACT_TEST_CLOCK_SHIFT_SECONDS"] = str(TEN_YEARS)
+    child_env["PYTHONPATH"] = str(SHIM_DIR)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         "-n", "2", "-o", "pythonpath=%s" % SHIM_DIR, "test_synthetic.py"],
+        cwd=tmp_path, env=child_env, capture_output=True, text=True, timeout=300,
+    )
+    return result.returncode, result.stdout + result.stderr
+
+
+def test_under_xdist_a_worker_child_that_drops_the_shift_fails_the_run(tmp_path):
+    """MUTANT: the worker stops handing its misses over, or the controller stops
+    collecting them. The worker's line is lost and the run passes."""
+    rc, out = _run_xdist(tmp_path, env=DROPS_SHIFT)
+    line = "] %s (call): " % NODE
+    assert ("2 passed" in out, rc, line in out, "its env drops PACT_TEST_CLOCK_SHIFT_SECONDS" in out) == (
+        True, 1, True, True), out
+
+
+def test_under_xdist_a_worker_child_that_keeps_the_shift_passes_the_run(tmp_path):
+    """GUARD for the arm above: the same launch with the shift kept passes clean."""
+    rc, out = _run_xdist(tmp_path)
+    assert ("2 passed" in out, rc, "clock-shift census" in out) == (True, 0, False), out
+
+
+def test_under_xdist_a_worker_child_that_skips_the_shim_fails_the_run(tmp_path):
+    """MUTANT: check 2 counts the controller's or the workers' own ledger lines as
+    a child's. `-S` skips sitecustomize, so the child writes no ledger line while
+    its PYTHONPATH is right, and only the sibling processes' lines remain."""
+    rc, out = _run_xdist(tmp_path, argv="[sys.executable, '-S', '-c', 'pass']")
+    assert ("2 passed" in out, rc, "the shim did not load in children: 1 " in out) == (True, 1, True), out
+
+
+class _Reporter:
+    def __init__(self):
+        self.lines = []
+
+    def write_line(self, line):
+        self.lines.append(line)
+
+
+class _Session:
+    def __init__(self, reporter, workeroutput=None):
+        plugins = {"terminalreporter": reporter}
+        self.config = type("Config", (), {"pluginmanager": type(
+            "PM", (), {"get_plugin": staticmethod(plugins.get)})()})()
+        if workeroutput is not None:
+            self.config.workeroutput = workeroutput
+        self.exitstatus = 0
+
+
+def _fresh_census(monkeypatch, tmp_path, **state):
+    # The same module object tests/conftest.py installs and its hooks call.
+    assert clock_shift_census is sys.modules["clock_shift.clock_shift_census"]
+    census = clock_shift_census
+    fresh = {"installed": True, "misses": [], "python_children": 0, "workers": [], "worker_children": 0}
+    fresh.update(state)
+    monkeypatch.setattr(census, "_state", fresh)
+    monkeypatch.setenv("PACT_TEST_CLOCK_SHIFT_LEDGER", str(tmp_path / "ledger"))
+    return census
+
+
+def test_a_worker_hands_its_findings_to_the_controller(monkeypatch, tmp_path):
+    """MUTANT: the worker fails only itself, or collect() drops what it received."""
+    census = _fresh_census(monkeypatch, tmp_path, misses=["t::a (call): python3 -c pass -- x"],
+                           python_children=1)
+    workeroutput = {}
+    worker = _Session(_Reporter(), workeroutput=workeroutput)
+    census.finish(worker)
+    assert worker.exitstatus == 0, "xdist ignores a worker's exit status"
+    found = workeroutput[census.WORKEROUTPUT_KEY]
+    assert found == {"misses": ["t::a (call): python3 -c pass -- x"], "python_children": 1,
+                     "pid": os.getpid()}
+
+    census = _fresh_census(monkeypatch, tmp_path)
+    (tmp_path / "ledger").write_text("%d x\n4242424 child\n" % os.getpid())
+    node = type("Node", (), {"workeroutput": workeroutput,
+                             "gateway": type("Gateway", (), {"id": "gw1"})()})()
+    census.collect(node)
+    reporter = _Reporter()
+    controller = _Session(reporter)
+    census.finish(controller)
+    assert controller.exitstatus == 1
+    assert reporter.lines[1:] == ["  [gw1] t::a (call): python3 -c pass -- x"], reporter.lines
+
+
+@pytest.mark.parametrize("extra, failed", [("", True), ("4242424 child\n", False)])
+def test_the_controller_ignores_its_own_and_its_workers_ledger_lines(monkeypatch, tmp_path, extra, failed):
+    """MUTANT: the controller counts a worker's or its own ledger line as a child's."""
+    census = _fresh_census(monkeypatch, tmp_path)
+    worker_pid = 4141414
+    (tmp_path / "ledger").write_text("%d controller\n%d worker\n%s" % (os.getpid(), worker_pid, extra))
+    node = type("Node", (), {"workeroutput": {census.WORKEROUTPUT_KEY: {
+        "misses": [], "python_children": 2, "pid": worker_pid}}})()
+    census.collect(node)
+    reporter = _Reporter()
+    controller = _Session(reporter)
+    census.finish(controller)
+    assert controller.exitstatus == (1 if failed else 0), reporter.lines
+    assert any("the shim did not load in children: 2 " in line for line in reporter.lines) is failed
+
+
+def test_the_suite_conftest_collects_the_workers_findings(request, monkeypatch, tmp_path):
+    """MUTANT: tests/conftest.py's pytest_testnodedown stops calling the census."""
+    suite = Path(__file__).resolve().with_name("conftest.py")
+    plugins = [p for p in request.config.pluginmanager.get_plugins()
+               if getattr(p, "__file__", None) and Path(p.__file__).resolve() == suite]
+    assert len(plugins) == 1, plugins
+    census = _fresh_census(monkeypatch, tmp_path)
+    node = type("Node", (), {"workeroutput": {census.WORKEROUTPUT_KEY: {
+        "misses": ["t::c (call): x"], "python_children": 0, "pid": 4343434}},
+        "gateway": type("Gateway", (), {"id": "gw2"})()})()
+    plugins[0].pytest_testnodedown(node=node, error=None)
+    assert census._state["misses"] == ["[gw2] t::c (call): x"]
+    assert census._state["workers"] == [4343434]
+
+
+def _git_rig(*args, cwd):
+    subprocess.run(["git", "-c", "user.name=rig", "-c", "user.email=rig@invalid", *args],
+                   cwd=cwd, check=True, capture_output=True, timeout=120)
+
+
+def test_a_change_to_the_census_selects_this_module_in_the_fast_suite(tmp_path):
+    """OUTCOME PIN. A change to the census re-selects this module in the fast
+    suite. Four reasons add it back today: its import of the census (as a
+    closure module, and as a changed name its test-side closure uses), its
+    unproven reach and its scan of the whole plugin tree. MUTANT: the selector
+    drops all of them (any one alone still selects it). Runs on a copy of the
+    tracked tree in a fresh repository with no remote; the real checkout is only
+    read."""
+    import importlib.util
+    import uuid
+
+    root = PLUGIN_ROOT.parent
+    if not (root / "scripts" / "fast_suite_selection.py").is_file():
+        pytest.skip("SKIPPED, NOT PASSED: not a PACT source checkout, so there is no selector to ask")
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True,
+                            timeout=120).stdout.decode("utf-8").split("\0")
+    rig = tmp_path / "repo"
+    for rel in filter(None, listed):
+        source = root / rel
+        if source.is_file() and not source.is_symlink():
+            target = rig / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+    _git_rig("init", "-q", cwd=rig)
+    _git_rig("add", "-A", cwd=rig)
+    _git_rig("commit", "-qm", "base", cwd=rig)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rig, check=True, capture_output=True,
+                          text=True, timeout=60).stdout.strip()
+    # A name this module's source cannot contain, so the change reaches this
+    # module only through how it depends on the census, not by a shared name.
+    probe = "_probe_" + uuid.uuid4().hex
+    census_file = rig / "pact-plugin" / "tests" / "clock_shift" / "clock_shift_census.py"
+    census_file.write_text(census_file.read_text(encoding="utf-8") + "\n%s = 1\n" % probe,
+                           encoding="utf-8")
+    _git_rig("commit", "-qam", "change the census", cwd=rig)
+
+    spec = importlib.util.spec_from_file_location(
+        "_clock_shift_selection_probe", rig / "scripts" / "fast_suite_selection.py")
+    core = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = core  # dataclass annotations resolve through sys.modules
+    try:
+        spec.loader.exec_module(core)
+        manifest = core.load_manifest(rig / "scripts" / "fast_suite_exclusions.json")
+        selection, changed, status = core.select_for_change(rig, manifest, base)
+    finally:
+        sys.modules.pop(spec.name, None)
+    assert (status, changed) == ("ok", ["pact-plugin/tests/clock_shift/clock_shift_census.py"])
+    assert "tests/test_clock_shift_instrument.py" in selection.included, selection

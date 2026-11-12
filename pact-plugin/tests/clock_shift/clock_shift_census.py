@@ -1,7 +1,8 @@
 """
 Location: pact-plugin/tests/clock_shift/clock_shift_census.py
 Summary: Fails a clock-shift sweep in which a child process ran on the real clock.
-Used by: tests/conftest.py, whose pytest_configure installs it and whose
+Used by: tests/conftest.py, whose pytest_configure installs it, whose
+         pytest_testnodedown collects each xdist worker's findings, and whose
          pytest_sessionfinish reports; tests/test_clock_shift_instrument.py
          loads the same module in its child runs.
 
@@ -24,6 +25,16 @@ Launches are seen through the `subprocess.Popen` and `os.posix_spawn` audit
 events. The suite launches nothing through os.system, os.exec* or os.spawn*,
 which raise other events, so a launch added through one of those is not seen.
 
+Under xdist a worker cannot fail the run (the controller ignores a worker's exit
+status), and check 2 is vacuous inside a worker, because every sibling worker and
+the controller also write the ledger. So a worker's finish() hands its misses,
+its Python child count and its pid to the controller through workeroutput,
+collect() gathers them as each worker goes down, and the controller's finish()
+runs check 2 once for the whole run: the workers' children counted, and the
+controller's and workers' own ledger lines ignored. The controller's own Python
+launches are its workers, so they get check 1 but are not counted for check 2.
+A worker that crashes before its finish() hands over nothing.
+
 Each problem line names its test from PYTEST_CURRENT_TEST at launch time. A test
 that deletes that variable, to reach a refusal it gates, prints as "<outside a
 test>"; the lines around it follow launch order and place it.
@@ -39,7 +50,9 @@ CHAIN_LINE = "import clock_shift_shim"
 EXEMPT_ENV = "PACT_TEST_CLOCK_SHIFT_CENSUS_EXEMPT"
 _SHELLS = frozenset({"bash", "sh", "zsh"})
 
-_state = {"installed": False, "misses": [], "python_children": 0}
+WORKEROUTPUT_KEY = "clock_shift_census"
+
+_state = {"installed": False, "misses": [], "python_children": 0, "workers": [], "worker_children": 0}
 
 
 def installed():
@@ -129,7 +142,7 @@ def _record(line):
         _state["misses"].append(line)
 
 
-def _children_wrote_ledger():
+def _children_wrote_ledger(own=()):
     ledger = os.environ.get(LEDGER_ENV)
     if not ledger:
         return False
@@ -137,20 +150,45 @@ def _children_wrote_ledger():
         lines = Path(ledger).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    own = str(os.getpid())
-    return any(line.split(" ", 1)[0] != own for line in lines if line.strip())
+    own = {str(os.getpid()), *(str(pid) for pid in own)}
+    return any(line.split(" ", 1)[0] not in own for line in lines if line.strip())
+
+
+def collect(node):
+    """Controller side: take what a finished xdist worker handed over."""
+    found = (getattr(node, "workeroutput", None) or {}).get(WORKEROUTPUT_KEY)
+    if not found:
+        return
+    name = getattr(getattr(node, "gateway", None), "id", "worker")
+    _state["workers"].append(found["pid"])
+    _state["worker_children"] += found["python_children"]
+    for line in found["misses"]:
+        _state["misses"].append("[%s] %s" % (name, line))
 
 
 def finish(session):
-    """Report every problem and fail the session when there is one."""
+    """Report every problem and fail the session when there is one; a worker hands
+    its findings to the controller instead."""
     if not _state["installed"]:
         return
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput[WORKEROUTPUT_KEY] = {
+            "misses": list(_state["misses"]),
+            "python_children": _state["python_children"],
+            "pid": os.getpid(),
+        }
+        return
     problems = list(_state["misses"])
-    if _state["python_children"] and not _children_wrote_ledger():
+    if _state["workers"]:
+        children, own = _state["worker_children"], _state["workers"]
+    else:
+        children, own = _state["python_children"], ()
+    if children and not _children_wrote_ledger(own):
         problems.append(
             "the shim did not load in children: %d Python launch(es) writing this run's "
             "ledger seen, and no child process wrote to %s (%s)"
-            % (_state["python_children"], LEDGER_ENV, os.environ.get(LEDGER_ENV, "unset"))
+            % (children, LEDGER_ENV, os.environ.get(LEDGER_ENV, "unset"))
         )
     if not problems:
         return

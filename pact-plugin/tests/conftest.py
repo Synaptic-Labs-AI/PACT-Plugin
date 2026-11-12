@@ -240,7 +240,8 @@ def pytest_runtest_setup(item):
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
-    """Collect the child-pytest census misses an xdist worker handed over."""
+    """Collect the census findings an xdist worker handed over."""
+    clock_shift_census.collect(node)
     child_pytest_census.collect(node)
 
 
