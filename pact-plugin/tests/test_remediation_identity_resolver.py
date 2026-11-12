@@ -1343,6 +1343,90 @@ class TestACanonicalSessionWritesNoFolderNameBucket:
         assert _bucket_counts(store) == {"proj": 1}
 
 
+class TestAnAncestorRootDoesNotClaimANestedCheckout:
+    """A row belongs to the checkout nearest to it, not to every root above it.
+
+    Catches an identity root that is an ANCESTOR of another checkout counting
+    that checkout's absolute rows as contained: a repository unpacked into the
+    parent folder of the user's checkout verified, and read, its legacy bucket.
+    """
+
+    def _outer_over_victim(self, root):
+        """The unpacked repository's `.git` points at a git dir named `proj`,
+        so its legacy candidate is the victim's folder name."""
+        outer = root / "work"
+        make_separate_git_dir_repo(outer, outer / "evil" / "proj" / "gd")
+        run_git("remote", "add", "origin", REMOTE, cwd=outer)
+        victim = make_repo(outer / "proj", remote="https://github.com/me/proj.git")
+        return outer, victim
+
+    def test_the_nested_checkouts_rows_are_not_contained(self, identity_env, monkeypatch):
+        _fresh_scope_state()
+        outer, victim = self._outer_over_victim(identity_env)
+        (victim / "src").mkdir()
+        store = identity_env / "store.db"
+        _seed(store, "proj", path=str(victim / "src" / "a.py"))
+        monkeypatch.chdir(outer)
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._legacy_project_basename == "proj", "precondition: the victim's name"
+        assert memory._read_project_scopes() == (CANONICAL,)
+        state = memory._legacy_scope_state
+        assert state["verified"] is False and state["included"] is False
+
+    @staticmethod
+    def _gate(store, bucket, roots):
+        from scripts.database import db_connection, legacy_candidate_plausibility
+
+        with db_connection(store) as conn:
+            return legacy_candidate_plausibility(conn, bucket, roots)
+
+    def test_a_registered_submodules_rows_stay_the_superprojects(self, identity_env):
+        """A superproject session that saved a memory naming a file inside its
+        own submodule: that row is the superproject's, so its bucket still
+        verifies. Catches the nested-checkout rule excluding a genuine
+        superproject bucket whose rows all sit in submodules."""
+        from scripts.database import LEGACY_PLAUSIBLE_VERIFIED
+
+        source = make_repo(identity_env / "subsrc")
+        superproject = make_repo(identity_env / "super", remote=REMOTE)
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "vendor/lib", cwd=superproject,
+        )
+        store = identity_env / "store.db"
+        _seed(store, "super", path=str(superproject / "vendor" / "lib" / "x.py"))
+        outcome, detail = self._gate(store, "super", [superproject])
+        assert outcome == LEGACY_PLAUSIBLE_VERIFIED, detail
+
+    def test_a_nested_gitfile_naming_a_foreign_git_dir_is_a_separate_checkout(
+        self, identity_env
+    ):
+        """A `.git` FILE that names a git dir outside the root's modules (a
+        linked worktree of another repository, say) still ends the root's
+        claim: only the root's own submodules are exempt."""
+        from scripts.database import LEGACY_PLAUSIBLE_EXCLUDED
+
+        other = make_repo(identity_env / "other", remote="https://github.com/o/other.git")
+        outer = make_repo(identity_env / "outer", remote=REMOTE)
+        worktree = make_worktree(other, outer / "proj")
+        assert (worktree / ".git").is_file()
+        store = identity_env / "store.db"
+        _seed(store, "outer", path=str(worktree / "x.py"))
+        outcome, detail = self._gate(store, "outer", [outer])
+        assert outcome == LEGACY_PLAUSIBLE_EXCLUDED, detail
+
+    def test_a_row_in_the_roots_own_tree_still_verifies(self, identity_env):
+        """Control: a nested plain directory (no `.git`) is still the root's."""
+        from scripts.database import LEGACY_PLAUSIBLE_VERIFIED
+
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        (repo / "a" / "b").mkdir(parents=True)
+        store = identity_env / "store.db"
+        _seed(store, "proj", path=str(repo / "a" / "b" / "c.py"))
+        outcome, detail = self._gate(store, "proj", [repo])
+        assert outcome == LEGACY_PLAUSIBLE_VERIFIED, detail
+
+
 class TestTheGateTrustsOnlyLinkedWorktrees:
     """A worktree widens the gate only when it links back to the repository.
 

@@ -1392,6 +1392,99 @@ def _gate_root_paths(roots: Any) -> Tuple[str, ...]:
     return tuple(resolved)
 
 
+def _gitfile_target(marker: str) -> Optional[str]:
+    """The real path a `gitdir: <path>` file names, or None. Never raises."""
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            first = handle.readline(4096).strip()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not first.startswith("gitdir:"):
+        return None
+    target = first[len("gitdir:"):].strip()
+    if not target:
+        return None
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(marker), target)
+    try:
+        return os.path.realpath(target)
+    except (OSError, ValueError):
+        return None
+
+
+def _root_common_dir(root: str) -> Optional[str]:
+    """The git common dir of the checkout at `root`, read without git.
+
+    A `.git` directory is its own common dir. A `.git` file (a linked
+    worktree, a submodule, a separate git dir) names a git dir; that dir's
+    `commondir` file, when present, names the common dir relative to it.
+    """
+    marker = os.path.join(root, ".git")
+    if os.path.isdir(marker) and not os.path.islink(marker):
+        return os.path.realpath(marker)
+    git_dir = _gitfile_target(marker)
+    if git_dir is None:
+        return None
+    try:
+        with open(os.path.join(git_dir, "commondir"), encoding="utf-8") as handle:
+            common = handle.readline(4096).strip()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return git_dir
+    if not common:
+        return git_dir
+    if not os.path.isabs(common):
+        common = os.path.join(git_dir, common)
+    try:
+        return os.path.realpath(common)
+    except (OSError, ValueError):
+        return git_dir
+
+
+def _owns_row_instead_of(directory: str, root_common: Optional[str]) -> bool:
+    """Whether a `.git` at `directory` makes it a different checkout.
+
+    A ROOT'S OWN SUBMODULE STILL BELONGS TO THE ROOT: its `.git` is a file
+    naming a git dir under the root's `<common dir>/modules/`, and a
+    superproject session's rows inside it are the superproject's. Any other
+    `.git` (a directory, or a file naming a git dir anywhere else) is a
+    separate checkout, which owns the rows below it.
+    """
+    marker = os.path.join(directory, ".git")
+    if not os.path.lexists(marker):
+        return False
+    if root_common is None or os.path.isdir(marker) or os.path.islink(marker):
+        return True
+    target = _gitfile_target(marker)
+    modules = os.path.join(root_common, "modules") + os.sep
+    return target is None or not target.startswith(modules)
+
+
+def _contained_by_root(
+    resolved: str, root: str, nested: Dict[tuple, bool], commons: Dict[str, Optional[str]]
+) -> bool:
+    """Whether `resolved` belongs to the checkout at `root` itself.
+
+    Under the root is not enough. A directory strictly between the root and
+    the row that is a separate checkout (`_owns_row_instead_of`: a nested
+    repository, or one unpacked inside another) owns the row, so an ancestor
+    root must not count it; the root's own submodules do not end its claim.
+    `nested` and `commons` cache each answer for one gate call.
+    """
+    if resolved != root and not resolved.startswith(root + os.sep):
+        return False
+    if root not in commons:
+        commons[root] = _root_common_dir(root)
+    directory = os.path.dirname(resolved)
+    while directory != root and directory.startswith(root + os.sep):
+        key = (root, directory)
+        if key not in nested:
+            nested[key] = _owns_row_instead_of(directory, commons[root])
+        if nested[key]:
+            return False
+        directory = os.path.dirname(directory)
+    return True
+
+
 def legacy_candidate_plausibility(
     conn: sqlite3.Connection,
     candidate_id: str,
@@ -1426,6 +1519,12 @@ def legacy_candidate_plausibility(
                        proved;
       - `excluded`   — absolute rows exist and none lies under ANY root.
 
+    A ROW UNDER A NESTED CHECKOUT IS NOT CONTAINED. A row counts for a root
+    only when no directory strictly between the root and the row is a
+    separate checkout (`_contained_by_root`): an identity root that is an
+    ANCESTOR of another checkout must not claim that checkout's rows. The
+    root's own registered submodules are part of it, not separate.
+
     Containment RESOLVES BOTH SIDES (`realpath` on the row path and on each
     root) and then does a literal prefix comparison, with no case folding: a
     row written through a symlinked spelling resolves to its target, so it
@@ -1458,6 +1557,8 @@ def legacy_candidate_plausibility(
         (candidate_id,),
     )
     root_paths = _gate_root_paths(roots)
+    nested: Dict[tuple, bool] = {}
+    commons: Dict[str, Optional[str]] = {}
     file_rows = 0
     absolute_rows = 0
     contained_rows = 0
@@ -1474,7 +1575,7 @@ def legacy_candidate_plausibility(
             # UNRESOLVABLE ROW above.
             continue
         if any(
-            resolved == root or resolved.startswith(root + os.sep)
+            _contained_by_root(resolved, root, nested, commons)
             for root in root_paths
         ):
             contained_rows += 1
