@@ -577,16 +577,48 @@ def test_a_census_line_only_in_captured_output_does_not_explain_the_exit(tmp_pat
          "error": "green test outcomes have an inconsistent overall conclusion"}]
 
 
-def test_a_census_line_beside_a_non_census_exit_status_stays_refused(tmp_path):
+def test_a_census_line_beside_a_clean_exit_is_refused(tmp_path):
+    """A census that fails a session raises its status to 1, so exit 0 contradicts it."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, finish_lines=(CHILD_CENSUS_HEADER,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["deltas"] == []
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "the child_pytest census reported a failure beside exit status 0; "
+                  "a census raises a clean exit status to 1, so the run record and "
+                  "the log disagree"}]
+
+
+@pytest.mark.parametrize("exitstatus", [2, 3, 4])
+def test_a_census_line_beside_an_exit_status_a_census_cannot_set_is_refused(
+        tmp_path, exitstatus):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101, census_failed=True,
-                      finish_lines=(CHILD_CENSUS_HEADER,),
-                      record_updates={"exitstatus": 2})
+                      finish_lines=(CLOCK_CENSUS_HEADER,),
+                      record_updates={"exitstatus": exitstatus})
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
         {"run": "two",
-         "error": "green test outcomes have an inconsistent overall conclusion"}]
+         "error": f"the clock_shift census reported a failure beside exit status "
+                  f"{exitstatus}, which a census does not produce, so another cause "
+                  f"set the exit status"}]
+
+
+def test_every_output_carries_schema_version_2(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["schema_version"] == 2
+    assert [run["schema_version"] for run in read_runs(output)] == [2, 2]
+    refused = make_run(tmp_path, "three", 102, seeds=(7, 8))
+    completed, comparison, output = invoke(tmp_path, refused, second, "out2")
+    assert completed.returncode == 2, comparison
+    assert comparison["schema_version"] == 2
+    assert [run["schema_version"] for run in read_runs(output)] == [2, 2]
 
 
 def test_a_red_run_records_its_census_and_ignores_a_captured_one(tmp_path):
@@ -757,6 +789,7 @@ def test_internal_error_comparison_still_records_each_seed(tmp_path, monkeypatch
     comparison = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
     assert code == 3
     assert comparison["status"] == "invalid"
+    assert comparison["schema_version"] == 2
     assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [5, None]
 
 

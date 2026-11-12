@@ -46,6 +46,10 @@ if _SCRIPTS_DIR not in sys.path:
 from verify_full_run import SCHEMA_VERSION as RUN_RECORD_SCHEMA_VERSION  # noqa: E402
 
 COLLECTION_RECORD_SCHEMA_VERSION = 1
+# The shape of this tool's own outputs: comparison.json and every runs.jsonl
+# record. 2 added shuffle_seed, census_failures, the census delta type and the
+# census_outcome validity.
+OUTPUT_SCHEMA_VERSION = 2
 
 # The `tests.yml` workflow's immutable database id, read with
 # `gh api repos/{owner}/{repo}/actions/workflows/tests.yml --jq .id`. There is
@@ -807,7 +811,18 @@ def _validate_run_outcomes(record: dict, metadata: dict, lines: list[str],
     verifier_state, verifier_failures = _full_run_verifier(
         metadata, lines, bool(full_run_ok))
     red = record["failed"] > 0 or record["errors"] > 0
-    census = not red and bool(census_failures) and record["exitstatus"] == 1
+    if census_failures and not red and record["exitstatus"] != 1:
+        names = " and ".join(failure["census"] for failure in census_failures)
+        if record["exitstatus"] == 0:
+            raise EvidenceError(
+                f"the {names} census reported a failure beside exit status 0; a "
+                "census raises a clean exit status to 1, so the run record and "
+                "the log disagree")
+        raise EvidenceError(
+            f"the {names} census reported a failure beside exit status "
+            f"{record['exitstatus']}, which a census does not produce, so another "
+            "cause set the exit status")
+    census = not red and bool(census_failures)
     failing = red or census
     if failing and overall_conclusion != "failure":
         raise EvidenceError(
@@ -1015,7 +1030,7 @@ def _input_runs(runs: list[dict]) -> list[dict]:
 
 
 def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
-    comparison = {"schema_version": 1, "expected_sha": expected_sha,
+    comparison = {"schema_version": OUTPUT_SCHEMA_VERSION, "expected_sha": expected_sha,
                   "input_runs": _input_runs(runs),
                   "status": "invalid" if errors else "identical",
                   "deltas": [], "observations": [], "evidence_errors": errors}
@@ -1130,7 +1145,7 @@ def _reject_repeated_identities(runs: list[dict], errors: list[dict]) -> None:
 
 def _invalid_comparison(expected_sha: str, runs: list[dict],
                         errors: list[dict]) -> dict:
-    return {"schema_version": 1, "expected_sha": expected_sha,
+    return {"schema_version": OUTPUT_SCHEMA_VERSION, "expected_sha": expected_sha,
             "input_runs": _input_runs(runs),
             "status": "invalid", "deltas": [], "observations": [],
             "evidence_errors": errors}
@@ -1199,7 +1214,8 @@ def main(argv: list[str] | None = None) -> int:
         comparison["status"] = "invalid"
     try:
         _atomic_write(args.output_dir / "runs.jsonl", "".join(
-            json.dumps(run, sort_keys=True) + "\n" for run in runs))
+            json.dumps({"schema_version": OUTPUT_SCHEMA_VERSION, **run}, sort_keys=True)
+            + "\n" for run in runs))
         _atomic_write(args.output_dir / "comparison.json",
                       json.dumps(comparison, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
