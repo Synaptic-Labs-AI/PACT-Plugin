@@ -1,0 +1,118 @@
+"""
+Agent-facing prose that must agree with what the pact-memory code emits.
+
+Location: pact-plugin/tests/test_remediation_skill_prose.py
+
+The pact-memory SKILL.md and the secretary's agent file are loaded into agent
+sessions as instructions. When they describe an envelope field or an exit code
+the code does not produce, an agent looks for a key that is not there or reads
+a failure as something else. Each arm here binds one load-bearing clause.
+
+HOW THE ARMS READ THE PROSE. Markdown heading lines are dropped before any
+search, so a heading cannot satisfy its own clause. Backticks are removed and
+whitespace is collapsed on both sides, so a re-wrap or a backtick change does
+not red an arm, while a deleted or inverted clause does.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+SKILL = PLUGIN_ROOT / "skills" / "pact-memory" / "SKILL.md"
+SCRIPTS = PLUGIN_ROOT / "skills" / "pact-memory" / "scripts"
+
+# The decline causes `project-id show` and `status` can carry in
+# `decline_reason.reason`.
+DECLINE_TOKENS = (
+    "origin_unreadable",
+    "origin_unrepresentable",
+    "gitfile_redirect",
+    "broken_git_marker",
+    "no_working_tree",
+    "submodule_checkout",
+    "declaration_unresolved",
+)
+
+
+def _flatten(text: str) -> str:
+    """Backticks removed and whitespace collapsed."""
+    return re.sub(r"\s+", " ", text.replace("`", "")).strip()
+
+
+def _body_lines(path: Path) -> list:
+    """The file's lines with every markdown heading line removed."""
+    return [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+
+
+def _table_row(path: Path, first_cell: str) -> str:
+    """The one table row whose first cell is `first_cell`, flattened."""
+    rows = [
+        line
+        for line in _body_lines(path)
+        if line.startswith("|")
+        and _flatten(line.split("|")[1]) == first_cell
+    ]
+    assert len(rows) == 1, (
+        f"expected exactly one table row whose first cell is {first_cell!r}, "
+        f"found {len(rows)}"
+    )
+    return _flatten(rows[0])
+
+
+def _body(path: Path) -> str:
+    return _flatten("\n".join(_body_lines(path)))
+
+
+class TestDeclineReasonIsDocumentedAsEmitted:
+    """The `project-id show` row names the shape and every cause."""
+
+    def test_the_row_states_the_emitted_shape(self):
+        row = _table_row(SKILL, "project-id show")
+        assert (
+            "decline_reason is {source, reason, override_path} whenever "
+            "resolution declined for a named cause, and null otherwise"
+        ) in row
+
+    def test_the_retired_shape_is_gone(self):
+        assert "{reason, override}" not in _body(SKILL)
+
+    @pytest.mark.parametrize("token", DECLINE_TOKENS)
+    def test_each_cause_is_named_in_the_row(self, token):
+        assert token in _table_row(SKILL, "project-id show")
+
+    @pytest.mark.parametrize("token", DECLINE_TOKENS)
+    def test_each_documented_cause_is_one_the_code_emits(self, token):
+        """A renamed token reds here instead of leaving the prose stale."""
+        source = "".join(
+            (SCRIPTS / name).read_text(encoding="utf-8")
+            for name in ("memory_api.py", "project_identity.py")
+        )
+        assert f'"{token}"' in source
+
+    def test_the_documented_causes_match_the_code_registry_when_present(self):
+        """Once the code declares its cause set, the prose lists exactly it."""
+        from scripts import project_identity
+
+        registry = getattr(project_identity, "DECLINE_REASONS", None)
+        if registry is None:
+            pytest.skip("the code declares no DECLINE_REASONS registry yet")
+        assert set(registry) == set(DECLINE_TOKENS)
+
+
+class TestExitCodeThreeCoversBothVerbs:
+    def test_row_three_names_project_file_and_rekey(self):
+        row = _table_row(SKILL, "3")
+        assert "project-file: this session's project memory file is unavailable" in row
+        assert "project-id rekey: an operational failure; nothing was moved" in row
+
+    def test_the_rekey_one_and_two_meanings_are_stated(self):
+        assert (
+            "project-id rekey exits 1 when --to is omitted and no canonical "
+            "identity resolves, and 2 for bad input"
+        ) in _body(SKILL)
