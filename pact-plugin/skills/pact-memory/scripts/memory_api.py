@@ -442,6 +442,26 @@ def _suppression_record() -> dict:
     }
 
 
+def _pre_change_declared_name(
+    declared_dir: str, declared_root: Optional[Path], common_dir: Optional[Path]
+) -> Optional[str]:
+    """What the PRE-change resolver named a LIVE declared directory.
+
+    It compared the common dir's PARENT (not the worktree- and
+    submodule-aware root) with the resolved declared path: when they differ
+    it named the parent, otherwise the declared path itself. A path that
+    does not exist is the gone arm, which the caller names separately.
+    """
+    old_main = common_dir.parent if common_dir is not None else None
+    if (
+        old_main is not None
+        and declared_root is not None
+        and os.path.normcase(str(old_main)) != os.path.normcase(str(declared_root))
+    ):
+        return old_main.name
+    return (declared_root or Path(declared_dir)).name or None
+
+
 def _legacy_suppression(
     identity_root: Optional[Path],
 ) -> "tuple[Optional[dict], Optional[str]]":
@@ -1499,6 +1519,15 @@ class PACTMemory:
             declared_root = None
         declared_common_dir = main_repo_common_dir(declared_dir)
         declared_main_root = main_repo_root(declared_dir, declared_common_dir)
+        # WHAT THE PRE-CHANGE RESOLVER NAMED THIS DECLARATION, carried on every
+        # result below that the pre-change resolver would also have named.
+        pre_change = _pre_change_declared_name(
+            declared_dir, declared_root, declared_common_dir
+        )
+
+        def done(detected: "_DetectedIdentity") -> "_DetectedIdentity":
+            return detected._replace(pre_change_name=pre_change)
+
         # Compare via normcase so a case-insensitive filesystem does not fire
         # the rewrite for paths that differ only in case.
         if (
@@ -1507,13 +1536,13 @@ class PACTMemory:
             and os.path.normcase(str(declared_main_root))
             != os.path.normcase(str(declared_root))
         ):
-            return PACTMemory._identity_at_root(
+            return done(PACTMemory._identity_at_root(
                 declared_main_root,
                 declared_common_dir,
                 asked_root=declared_root or Path(declared_dir),
                 source=source,
                 label=source,
-            )
+            ))
         # A FORGED WORKTREE-ADMIN POINTER DECLINES HERE. `main_repo_root`
         # correctly refuses the redirect and returns None, but the fall-through
         # below would then hand `detect_id_for_root` the DECLARED directory
@@ -1536,17 +1565,17 @@ class PACTMemory:
                 root=live_root if declared_common_dir is None else None,
             )
             if guarded is not None:
-                return guarded
+                return done(guarded)
             if declared_common_dir is not None:
                 # A REPOSITORY WITH NO ROOT that is not a redirect: a BARE
                 # repository. It has no working tree to name, so the
                 # declaration declines exactly as the git rung does.
-                return _decline(
+                return done(_decline(
                     source,
                     "no_working_tree",
                     label=source,
                     detail=f"declared via {source}: {declared_dir!r} is a bare repository",
-                )
+                ))
 
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
         # fire AND the declared path does not resolve to an existing target.
@@ -1578,6 +1607,9 @@ class PACTMemory:
                     ),
                 )
             recorded_label = "worktree identity record"
+            # The pre-change resolver named a recorded declaration by the
+            # recorded checkout itself.
+            pre_change = recorded_root.name
             recorded_common_dir = main_repo_common_dir(str(recorded_root))
             # The same guards as every other rung, on the recorded checkout.
             guarded = _root_guard(
@@ -1585,20 +1617,20 @@ class PACTMemory:
                 label=recorded_label, root=recorded_root,
             )
             if guarded is not None:
-                return guarded
+                return done(guarded)
             # The record's own label is disclosed; a decline's record names the
             # rung that asked, as it always has.
-            return PACTMemory._identity_at_root(
+            return done(PACTMemory._identity_at_root(
                 recorded_root,
                 recorded_common_dir,
                 asked_root=Path(declared_dir),
                 source=source,
                 label=recorded_label,
-            )
-        return PACTMemory._identity_at_root(
+            ))
+        return done(PACTMemory._identity_at_root(
             live_root, declared_common_dir, asked_root=Path(declared_dir),
             source=source, label=source,
-        )
+        ))
 
     @staticmethod
     def _identity_at_root(
@@ -1699,6 +1731,9 @@ class PACTMemory:
         # Strategy 2: Git repository root (worktree-safe)
         cwd_common_dir = main_repo_common_dir()
         if cwd_common_dir is not None:
+            # The pre-change resolver named every repository it reached here,
+            # bare and redirected included, by its common dir's parent.
+            git_pre_change = cwd_common_dir.parent.name or None
             repo_root = main_repo_root(common=cwd_common_dir)
             if repo_root is None:
                 # NO ROOT: a forged worktree pointer, or a bare repository.
@@ -1707,10 +1742,11 @@ class PACTMemory:
                 # working tree.
                 guarded = _root_guard(_cwd_or_none(), cwd_common_dir, "git root")
                 if guarded is not None:
-                    return guarded
+                    return guarded._replace(pre_change_name=git_pre_change)
                 return _decline(
                     "git root",
                     "no_working_tree",
+                    pre_change_name=git_pre_change,
                     detail=(
                         "the process's repository is bare, or git cannot "
                         "describe its working tree"
@@ -1723,7 +1759,7 @@ class PACTMemory:
                 source="git root",
                 label="git root",
                 decline_label="unresolved",
-            )
+            )._replace(pre_change_name=git_pre_change)
             if detected.project_id is not None:
                 # THE DISCLOSURE DECISION LIVES IN ONE PLACE: a canonical id
                 # discloses its remote, a pin discloses the override file,
@@ -1741,10 +1777,18 @@ class PACTMemory:
         # different bucket. git absent from PATH, a corrupted or partial
         # `.git`, or a timeout all take this arm; a genuinely non-git umbrella
         # has no marker and keeps its designed basename fallback.
-        if _unanswerable_repository(_cwd_or_none()) is not None:
+        broken_start = _cwd_or_none()
+        if _unanswerable_repository(broken_start) is not None:
+            # With no declaration the pre-change resolver fell through to the
+            # cwd marker and named it; with one, it refused.
             return _decline(
                 "git root",
                 "broken_git_marker",
+                pre_change_name=(
+                    PACTMemory._find_project_root(broken_start).name or None
+                    if not declined_declaration and broken_start is not None
+                    else None
+                ),
                 detail="the working directory is inside that work tree",
             )
         # git not installed, not a repo, or command timed out
@@ -1797,6 +1841,7 @@ class PACTMemory:
                 legacy_basename=setting_root.name if setting_root is not None else None,
                 override_ignored=None,
                 identity_root=setting_root,
+                pre_change_name=setting_root.name if setting_root is not None else None,
             )
 
         # Strategy 3: Current working directory — walk UP to nearest project
@@ -1826,6 +1871,7 @@ class PACTMemory:
                     return _DetectedIdentity(
                         project_id=cwd_name, source="cwd", legacy_basename=cwd_name,
                         override_ignored=None, identity_root=cwd_root,
+                        pre_change_name=cwd_name,
                     )
                 cwd_common_dir = main_repo_common_dir(str(cwd_root))
                 # The same guards as the declared rungs: a marker without a
@@ -1833,7 +1879,7 @@ class PACTMemory:
                 # (`main_repo_root` is not called on this rung).
                 guarded = _root_guard(cwd_root, cwd_common_dir, "cwd", root=cwd_root)
                 if guarded is not None:
-                    return guarded
+                    return guarded._replace(pre_change_name=cwd_name)
                 return PACTMemory._identity_at_root(
                     cwd_root,
                     cwd_common_dir,
@@ -1841,7 +1887,7 @@ class PACTMemory:
                     source="cwd",
                     label="cwd",
                     decline_label="unresolved",
-                )
+                )._replace(pre_change_name=cwd_name)
         except OSError:
             logger.debug("Failed to detect project_id from cwd")
 
@@ -1862,38 +1908,19 @@ class PACTMemory:
 
     @staticmethod
     def _detect_project_basename() -> Optional[str]:
-        """The FOLDER-NAME id the pre-change resolver produced for this location.
+        """The FOLDER-NAME id the PRE-change resolver produced here, or None.
 
         For callers that use the id as a FILE NAME. A canonical id contains
         `/`, so using one as a path component silently nests the file and
         orphans every existing `<basename>.json` — the backlog does exactly
         that, so it asks for this shape explicitly.
 
-        A BROKEN REPOSITORY REPRODUCES THE PRE-CHANGE FOLDER NAME. When a
-        `.git` marker exists but git cannot answer for it (a `.git` file
-        pointing at a missing admin dir), detection declines and carries no
-        legacy basename, while the pre-change resolver returned the marker
-        directory's name. Returning None there made the backlog file writer
-        refuse to write at all, in a state its remedy text did not describe.
-
-        THE FALLBACK WALKS THE WINNING RUNG'S ROOT, NOT THE PROCESS CWD. In a
-        declared-repo session (`CLAUDE_PROJECT_DIR` at A, process sitting in
-        B) the cwd walk names the backlog file after B — a file the operator
-        never sees, created beside an unrelated checkout. The identity root is
-        where the winning rung actually looked, so the pre-change derivation
-        is applied there; the cwd walk runs only when no rung produced a root.
+        It returns the pre-change value AND NOTHING ELSE: where the pre-change
+        resolver refused, this refuses too, so the backlog writer refuses in
+        exactly the states it always did. No walk of the cwd or of the
+        identity root stands in for a missing value.
         """
-        detected = PACTMemory._detect_project_identity_with_legacy()
-        if detected.legacy_basename is not None:
-            return detected.legacy_basename
-        if detected.identity_root is not None:
-            name = PACTMemory._find_project_root(detected.identity_root).name
-            if name:
-                return name
-        start = _cwd_or_none()
-        if start is None:
-            return None
-        return PACTMemory._find_project_root(start).name or None
+        return PACTMemory._detect_project_identity_with_legacy().pre_change_name
 
     @staticmethod
     def _detect_project_id_with_source() -> "tuple[Optional[str], str]":

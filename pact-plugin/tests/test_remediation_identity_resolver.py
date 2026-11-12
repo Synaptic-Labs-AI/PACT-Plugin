@@ -21,6 +21,7 @@ from fixtures.identity_git import (
     write_common_dir_override,
 )
 from scripts.memory_api import PACTMemory
+from shared import backlog
 
 from scripts import memory_api
 
@@ -264,12 +265,196 @@ class TestALiveDeclinedDeclarationEndsResolution:
             "no_working_tree",
         )
 
+    def test_a_broken_git_marker_declines(self, identity_env, monkeypatch):
+        declared = identity_env / "declared"
+        declared.mkdir()
+        (declared / ".git").write_text("gitdir: /nonexistent/admin\n", encoding="utf-8")
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        self._assert_declines(
+            PACTMemory._detect_project_identity_with_legacy(),
+            "broken_git_marker",
+        )
+
     def test_a_gone_declaration_still_falls_through(self, identity_env, monkeypatch):
         """Control: the precedence the git root was designed for is kept."""
         self._elsewhere(identity_env, monkeypatch)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(identity_env / "gone"))
         detected = PACTMemory._detect_project_identity_with_legacy()
         assert detected.project_id == self.ELSEWHERE_PIN
+
+
+# ---------------------------------------------------------------------------
+# The backlog file name is the PRE-CHANGE value, including its refusals
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def name_rig(tmp_path_factory):
+    """One repository per rung, built once. Fresh `git init`, fake origins."""
+    root = tmp_path_factory.mktemp("prechange", numbered=False)
+    assert_outside_repository(root)
+    rig = {"root": root}
+    repo = make_repo(root / "repo", remote="https://github.com/o/Repo.git")
+    (repo / "sub" / "deep").mkdir(parents=True)
+    rig["repo"], rig["repo_deep"] = repo, repo / "sub" / "deep"
+    rig["repo_wt"] = make_worktree(repo, root / "repo-wt")
+    rig["sep"] = make_separate_git_dir_repo(root / "sep", root / "ext" / "sep.git")
+    source = make_repo(root / "subsrc")
+    superproject = make_repo(root / "super")
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+        str(source), "vendor/lib", cwd=superproject,
+    )
+    rig["submodule"] = superproject / "vendor" / "lib"
+    rig["plain"] = root / "plain"
+    (rig["plain"] / ".claude").mkdir(parents=True)
+    rig["bare"] = root / "bare.git"
+    run_git("init", "-q", "--bare", str(rig["bare"]), cwd=root)
+    rig["broken"] = root / "broken"
+    rig["broken"].mkdir()
+    (rig["broken"] / ".git").write_text("gitdir: /nonexistent/admin\n", encoding="utf-8")
+    victim = make_repo(root / "victim")
+    make_worktree(victim, root / "victim-wt")
+    rig["forged"] = root / "forged"
+    rig["forged"].mkdir()
+    (rig["forged"] / ".git").write_text(
+        f"gitdir: {victim / '.git' / 'worktrees' / 'victim-wt'}\n", encoding="utf-8"
+    )
+    rig["unrep"] = make_repo(root / "unrep", remote="https://host.example/own%ZZr/repo")
+    rig["nomark"] = root / "nomark" / "x"
+    rig["nomark"].mkdir(parents=True)
+    rig["home"] = root / "home"
+    (rig["home"] / "notes").mkdir(parents=True)
+    (rig["home"] / ".claude").mkdir()
+    rig["gone"] = root / "gone"
+    return rig
+
+
+# (case, cwd key, declared key, record key, the pre-change value). Each
+# expected value is a LITERAL, measured from the pre-change resolver on this
+# exact rig; it is never re-derived by the code under test.
+PRE_CHANGE_CASES = [
+    ("declared repo root", "nomark", "repo", None, "repo"),
+    ("declared repo subdir", "nomark", "repo_deep", None, "repo"),
+    ("declared linked worktree", "nomark", "repo_wt", None, "repo"),
+    ("declared separate git dir", "nomark", "sep", None, "ext"),
+    ("declared submodule", "nomark", "submodule", None, "vendor"),
+    ("declared non-git dir", "nomark", "plain", None, "plain"),
+    ("declared unrepresentable", "nomark", "unrep", None, "unrep"),
+    ("declared gone, cwd in a repo", "repo", "gone", None, "repo"),
+    ("declared gone, cwd non-git", "nomark", "gone", None, None),
+    ("declared gone, cwd broken", "broken", "gone", None, None),
+    ("record repo subdir", "nomark", None, "repo_deep", "repo"),
+    ("git repo subdir", "repo_deep", None, None, "repo"),
+    ("git linked worktree", "repo_wt", None, None, "repo"),
+    ("git separate git dir", "sep", None, None, "ext"),
+    ("git submodule", "submodule", None, None, "vendor"),
+    ("git bare", "bare", None, None, "prechange"),
+    ("git forged worktree pointer", "forged", None, None, "victim"),
+    ("git unrepresentable", "unrep", None, None, "unrep"),
+    ("broken marker, no declaration", "broken", None, None, "broken"),
+    ("cwd non-git marker", "plain", None, None, "plain"),
+    ("HOME landing", "home_notes", None, None, "home"),
+    ("no marker, no repo", "nomark", None, None, "x"),
+]
+
+
+class TestThePreChangeName:
+    """`_detect_project_basename` returns what the pre-change resolver did.
+
+    Catches a backlog file renamed by the upgrade (a submodule's `vendor.json`
+    becoming `lib.json`, a redirected checkout named after itself) and a
+    writer that writes where the pre-change resolver refused, under a name
+    nobody reads back.
+    """
+
+    @staticmethod
+    def _place(rig, monkeypatch, cwd, declared, record):
+        monkeypatch.setenv("HOME", str(rig["home"]))
+        paths = dict(rig, home_notes=rig["home"] / "notes")
+        monkeypatch.chdir(paths[cwd])
+        if declared is None:
+            monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        else:
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(paths[declared]))
+        monkeypatch.setattr(
+            memory_api,
+            "get_project_dir_from_session_record",
+            lambda: str(paths[record]) if record else "",
+        )
+
+    @pytest.mark.parametrize(
+        "case, cwd, declared, record, expected",
+        PRE_CHANGE_CASES,
+        ids=[case[0] for case in PRE_CHANGE_CASES],
+    )
+    def test_the_name_matches_the_pre_change_resolver(
+        self, name_rig, monkeypatch, case, cwd, declared, record, expected
+    ):
+        self._place(name_rig, monkeypatch, cwd, declared, record)
+        assert PACTMemory._detect_project_basename() == expected
+
+    def test_the_user_setting_rung_keeps_the_folder_name(
+        self, name_rig, monkeypatch, tmp_path
+    ):
+        self._place(name_rig, monkeypatch, "nomark", None, None)
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path))
+        (tmp_path / "config.json").write_text(
+            '{"project_id": "user/scope"}', encoding="utf-8"
+        )
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.source == "user setting"
+        assert PACTMemory._detect_project_basename() == "x"
+
+    def test_a_deleted_cwd_has_no_name(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        monkeypatch.chdir(doomed)
+        doomed.rmdir()
+        assert PACTMemory._detect_project_basename() is None
+
+    def test_the_real_writer_refuses_where_the_pre_change_resolver_did(
+        self, name_rig, monkeypatch, tmp_path
+    ):
+        """A gone declaration with a non-git cwd: no name, no file."""
+        self._place(name_rig, monkeypatch, "plain", "gone", None)
+        backlog_dir = tmp_path / "backlog"
+        backlog_dir.mkdir()
+        with pytest.raises(backlog.BacklogWriteError):
+            backlog.store_path(backlog_dir=backlog_dir)
+        assert list(backlog_dir.iterdir()) == []
+
+    def test_a_submodule_keeps_its_pre_change_file_name(
+        self, name_rig, monkeypatch, tmp_path
+    ):
+        self._place(name_rig, monkeypatch, "submodule", None, None)
+        assert backlog.store_path(backlog_dir=tmp_path).name == "vendor.json"
+
+    def test_a_broken_marker_names_the_marker_directory(
+        self, name_rig, monkeypatch, tmp_path
+    ):
+        self._place(name_rig, monkeypatch, "broken", None, None)
+        assert backlog.store_path(backlog_dir=tmp_path).name == "broken.json"
+
+    def test_two_store_paths_run_one_detection(self, tmp_path, monkeypatch):
+        repo = make_repo(tmp_path / "once")
+        monkeypatch.chdir(repo)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        calls = []
+        real = PACTMemory._detect_project_identity_with_legacy
+
+        def counting():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(
+            PACTMemory, "_detect_project_identity_with_legacy", staticmethod(counting)
+        )
+        first = backlog.store_path(backlog_dir=tmp_path)
+        second = backlog.store_path(backlog_dir=tmp_path)
+        assert first == second and first.name == "once.json"
+        assert len(calls) == 1
 
 
 class TestACeilingStartDirectoryIsExamined:
