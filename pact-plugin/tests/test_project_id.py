@@ -55,7 +55,7 @@ def _rev_parse_mock(*, common, toplevel=None, git_dir=None, default_rc=1):
     `main_repo_root` issues `--show-toplevel` and `--git-dir` IN ADDITION to
     `--git-common-dir`, so a blanket `return_value` mock would feed the
     common-dir answer to all three and describe a repository that cannot
-    exist. Any other git call (`config --get`) answers the default: exit 1,
+    exist. Any other git call (the origin `config` read) answers the default: exit 1,
     which is "no key set" — a repository with no origin, NOT an unreadable
     one. A higher default would model a broken repository and legitimately
     DECLINE.
@@ -738,7 +738,8 @@ class TestDetectProjectId:
 
         # FOUR calls since the identity change: `--git-common-dir`,
         # `--show-toplevel` and `--git-dir` describe the repository shape,
-        # then `config --get` reads the origin. `common.parent` alone cannot
+        # then `config --local --includes -z --get-all` reads the origin.
+        # `common.parent` alone cannot
         # name the identity root for a submodule or a
         # `--separate-git-dir` repository.
         assert mock_run.call_count == 4
@@ -761,7 +762,8 @@ class TestDetectProjectId:
 
         origin_args, origin_kwargs = mock_run.call_args_list[3]
         assert origin_args[0] == [
-            "git", "-C", "/some/repo", "config", "--get", "remote.origin.url"
+            "git", "-C", "/some/repo", "config", "--local", "--includes", "-z",
+            "--get-all", "remote.origin.url",
         ]
         assert origin_kwargs["text"] is False
         assert origin_kwargs["timeout"] == 5

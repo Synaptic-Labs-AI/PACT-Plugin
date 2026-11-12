@@ -505,15 +505,32 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
 def read_origin(root: Path) -> OriginRead:
     """Read this repository's `origin` URL, as a tri-state.
 
-    `git config --get remote.origin.url` and NOT `git remote get-url`: the
-    latter applies the machine-local `url.*.insteadOf` rewrite table, so a
-    local rewrite rule would silently change which repository this process
-    believes it is in.
+    THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` in the
+    repository's own config (`.git/config` plus the files it includes),
+    which is the url git fetches from; later values are push urls. An empty
+    value clears the urls before it (git 2.46 semantics), so only the values
+    after the last empty one count, and none left is ABSENT.
 
-    The value is returned RAW (un-normalized, terminator included) because
-    normalization is `normalize_remote_url`'s job and it must see the trailing
-    whitespace it is required to reject. Never logs the value: it can carry a
-    token (`x-access-token:<token>@` is routine in CI).
+    Global, system and environment config (`GIT_CONFIG_COUNT`/`KEY_n`/
+    `VALUE_n`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG`) and `config.worktree`
+    are NOT identity inputs: they are machine-local or per-worktree, so
+    reading them would give one repository different ids on different
+    machines or worktrees. That is the same reason `git remote get-url` is
+    not used: it applies the machine-local `url.*.insteadOf` rewrite table.
+    These exclusions are the rule, not exceptions to it.
+
+    `GIT_CONFIG` is also REMOVED from the environment, not only ignored: it
+    names a file for `git config` alone (git fetch never reads it), and
+    `--local` with it set exits 129 ("only one config file at a time"), which
+    would turn every memory operation into a decline.
+
+    `-z` because a quoted value may hold a newline, and a line-oriented
+    reader would take the text before it as a complete remote.
+
+    The value is returned RAW (un-normalized) because normalization is
+    `normalize_remote_url`'s job and it must see the whitespace it is
+    required to reject. Never logs the value: it can carry a token
+    (`x-access-token:<token>@` is routine in CI).
 
     Exit status is the whole distinction, never stderr text (git messages are
     localised): exit 1 with an empty answer is "no such key" = ABSENT; any
@@ -521,34 +538,41 @@ def read_origin(root: Path) -> OriginRead:
     git, a timeout and an unreadable configuration are all UNAVAILABLE.
 
     CONTRACT: call this only for a root ALREADY ESTABLISHED as a repository
-    (its common dir resolved). `git config --get` does not require a
-    repository — outside one it reads the global config and exits 1, which is
-    indistinguishable from a repository with no origin. `detect_id_for_root`
-    therefore gates on `common_dir` rather than using this call to discover
-    repo-ness.
+    (its common dir resolved). Outside one, `--local` exits 128, which reads
+    as UNAVAILABLE. `detect_id_for_root` therefore gates on `common_dir`
+    rather than using this call to discover repo-ness.
     """
     from shared.project_scope import git_env_without_location
 
+    env = git_env_without_location()
+    env.pop("GIT_CONFIG", None)
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            [
+                "git", "-C", str(root), "config", "--local", "--includes",
+                "-z", "--get-all", "remote.origin.url",
+            ],
             capture_output=True,
             text=False,
             timeout=5,
-            env=git_env_without_location(),
+            env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return OriginRead(ORIGIN_UNAVAILABLE, None)
-    if result.returncode == 0:
-        if not result.stdout.strip():
-            return OriginRead(ORIGIN_ABSENT, None)
-        # os.fsdecode, never locale decoding: a URL may hold bytes invalid in
-        # the locale, and UnicodeDecodeError must not escape this reader.
-        return OriginRead(ORIGIN_PRESENT, os.fsdecode(result.stdout))
-    if result.returncode == 1 and not result.stdout.strip():
-        # `git config --get` exits 1 when the key is not set.
+    if result.returncode == 1 and not result.stdout:
+        # `git config --get-all` exits 1 when the key is not set.
         return OriginRead(ORIGIN_ABSENT, None)
-    return OriginRead(ORIGIN_UNAVAILABLE, None)
+    if result.returncode != 0:
+        return OriginRead(ORIGIN_UNAVAILABLE, None)
+    # Every value is NUL-terminated, so the last piece of the split is empty.
+    values = result.stdout.split(b"\0")[:-1]
+    if b"" in values:
+        values = values[len(values) - values[::-1].index(b""):]
+    if not values or not values[0].strip():
+        return OriginRead(ORIGIN_ABSENT, None)
+    # os.fsdecode, never locale decoding: a URL may hold bytes invalid in
+    # the locale, and UnicodeDecodeError must not escape this reader.
+    return OriginRead(ORIGIN_PRESENT, os.fsdecode(values[0]))
 
 
 def read_override(common_dir: Path) -> OverrideRead:

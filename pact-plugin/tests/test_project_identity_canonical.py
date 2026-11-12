@@ -316,8 +316,7 @@ class TestReadOrigin:
 
     def test_a_configured_origin_is_returned_raw(self, tmp_path):
         """Catches normalization inside the reader (the canonicaliser must see
-        the raw value, including the trailing newline it is required to
-        tolerate)."""
+        the raw value, including any whitespace it is required to reject)."""
         assert_outside_repository(tmp_path)
         repo = make_repo(tmp_path / "repo", remote="https://github.com/o/r.git")
         origin = pi.read_origin(repo)
@@ -344,7 +343,7 @@ class TestReadOrigin:
         assert pi.read_origin(repo).state == pi.ORIGIN_UNAVAILABLE
 
     def test_exit_one_with_no_value_is_absent(self, tmp_path, monkeypatch):
-        """`git config --get` exits 1 when the key is unset; that is ABSENT."""
+        """`git config --get-all` exits 1 when the key is unset; that is ABSENT."""
         repo = make_repo(tmp_path / "repo")
         monkeypatch.setattr(
             pi.subprocess,
@@ -360,7 +359,7 @@ class TestReadOrigin:
             pi.subprocess,
             "run",
             lambda *a, **k: SimpleNamespace(
-                returncode=0, stdout=b"https://host/owner/re\xffpo\n"
+                returncode=0, stdout=b"https://host/owner/re\xffpo\x00"
             ),
         )
         origin = pi.read_origin(repo)

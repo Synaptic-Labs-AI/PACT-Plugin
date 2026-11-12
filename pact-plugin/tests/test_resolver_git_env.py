@@ -167,6 +167,14 @@ def _git_calls(function: ast.FunctionDef):
         and node.value.elts[0].value == "git"
         for target in node.targets if isinstance(target, ast.Name)
     }
+    # A name the function assigned straight from `git_env_without_location()`
+    # (and may then narrow further, as the origin reader drops GIT_CONFIG).
+    env_names = {
+        target.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign) and _is_location_free_env_call(node.value)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
     for node in ast.walk(function):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "run" and isinstance(node.func.value, ast.Name)
@@ -180,12 +188,20 @@ def _git_calls(function: ast.FunctionDef):
         if not is_git:
             continue
         passes = any(
-            kw.arg == "env" and isinstance(kw.value, ast.Call)
-            and isinstance(kw.value.func, ast.Name)
-            and kw.value.func.id == "git_env_without_location"
+            kw.arg == "env" and (
+                _is_location_free_env_call(kw.value)
+                or (isinstance(kw.value, ast.Name) and kw.value.id in env_names)
+            )
             for kw in node.keywords
         )
         yield node, passes
+
+
+def _is_location_free_env_call(node) -> bool:
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "git_env_without_location"
+    )
 
 
 def _function(source: str, name: str) -> ast.FunctionDef:
@@ -217,6 +233,10 @@ def test_the_scan_sees_both_argv_forms_and_a_missing_env():
             command += ["rev-parse"]
             subprocess.run(command)
             subprocess.run(["ls"])
+            env = git_env_without_location()
+            subprocess.run(["git", "config"], env=env)
+            other = dict(os.environ)
+            subprocess.run(["git", "config"], env=other)
     """)
     calls = list(_git_calls(_function(source, "resolver")))
-    assert [passes for _call, passes in calls] == [True, False]
+    assert [passes for _call, passes in calls] == [True, False, True, False]
