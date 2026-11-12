@@ -447,32 +447,31 @@ class TestDeclaredDirectoryDecline:
 
 
 class TestLegacyBasenameOverridePin:
-    def test_a_basename_override_is_an_explicit_operator_pin(
+    def test_a_basename_override_is_ignored_as_not_canonical(
         self, identity_env, monkeypatch
     ):
-        """The manual bridge for a copied db.
+        """A folder-name pin is reported and skipped, never bound.
 
-        `rekey --candidates` cannot name a bucket the new path cannot derive;
-        an operator who knows the old id writes it into the common dir. The
-        value must be honoured VERBATIM and disclosed as a basename, never
-        canonicalised and never overridden by the origin remote.
+        Honoured, it would let a delivered checkout name any legacy bucket in
+        the store. A copied store is moved with
+        `project-id rekey --from=<old> --to=<canonical>` instead, so the id
+        falls through to the origin remote.
         """
         repo = make_repo(identity_env / "checkout", remote=REMOTE)
-        write_common_dir_override(repo, "PACT-prompt")
+        override = write_common_dir_override(repo, "PACT-prompt")
         monkeypatch.chdir(repo)
 
         memory = _memory(identity_env)
 
-        assert memory._project_id == "PACT-prompt", (
-            "a basename-shaped override was not honoured as an explicit pin"
+        assert memory._project_id == CANONICAL, (
+            "a basename-shaped override was bound instead of the origin remote"
         )
-        assert memory._project_id_source == "override file"
-        assert memory._project_id_shape == "basename", (
-            "the operator pin was disclosed as canonical"
-        )
-        assert memory._project_id != CANONICAL, (
-            "the origin remote overrode the operator's explicit pin"
-        )
+        assert memory._project_id_source == "origin remote"
+        assert memory._project_id_shape == "canonical"
+        assert memory._override_ignored == {
+            "path": str(override),
+            "reason": "not_canonical",
+        }
 
 
 # ---------------------------------------------------------------------------

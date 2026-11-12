@@ -342,9 +342,11 @@ Two operator surfaces answer, and they are deliberately ordered:
 
 - `<git-common-dir>/pact-project-id` — a REPOSITORY-scoped pin. It follows the
   repository that won resolution (the identity root), not the process's
-  working directory. Its first non-blank, non-`#` line is the id; a canonical
-  `host/owner/repo` id and a legacy folder name are both accepted. It must be
-  a regular file: a FIFO or a symlink in that position is refused, and an
+  working directory. Its first non-blank, non-`#` line is the id, and only a
+  canonical `host/owner/repo` id is accepted: a folder-name value is reported
+  as `override_ignored` with reason `not_canonical`, and resolution continues
+  without it. To move a copied store's folder-name bucket, use
+  `project-id rekey --from=<old> --to=<canonical>`. It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
   without it.
 - `<memory_dir>/config.json` → `"project_id"` — a USER-scoped setting. It

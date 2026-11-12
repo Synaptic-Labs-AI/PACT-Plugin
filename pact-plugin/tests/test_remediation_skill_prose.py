@@ -81,7 +81,7 @@ class TestDeclineReasonIsDocumentedAsEmitted:
         ) in row
 
     def test_the_retired_shape_is_gone(self):
-        assert "{reason, override}" not in _body(SKILL)
+        assert "{reason, override}" not in _body(SKILL).lower()
 
     @pytest.mark.parametrize("token", DECLINE_TOKENS)
     def test_each_cause_is_named_in_the_row(self, token):
@@ -136,4 +136,27 @@ class TestSecretaryProjectionKey:
         ) in _body(SECRETARY)
 
     def test_the_retired_folder_name_key_is_gone(self):
-        assert "keyed by the basename of the project root" not in _body(SECRETARY)
+        assert "keyed by the basename of the project root" not in _body(SECRETARY).lower()
+
+
+class TestOverrideAcceptsCanonicalIdsOnly:
+    """The override bullet states the canonical-only rule the reader enforces."""
+
+    def test_only_a_canonical_id_is_accepted(self):
+        assert (
+            "only a canonical host/owner/repo id is accepted: a folder-name "
+            "value is reported as override_ignored with reason not_canonical"
+        ) in _body(SKILL)
+
+    def test_the_copied_store_route_is_an_explicit_rekey(self):
+        assert (
+            "To move a copied store's folder-name bucket, use project-id "
+            "rekey --from=<old> --to=<canonical>"
+        ) in _body(SKILL)
+
+    def test_the_retired_folder_name_pin_is_gone(self):
+        assert "legacy folder name are both accepted" not in _body(SKILL).lower()
+
+    def test_the_documented_reason_is_one_the_reader_emits(self):
+        source = (SCRIPTS / "project_identity.py").read_text(encoding="utf-8")
+        assert '"not_canonical"' in source

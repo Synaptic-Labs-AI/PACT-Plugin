@@ -89,8 +89,8 @@ class OverrideRead(NamedTuple):
     `value` is the usable first line, or None. `path` is the file consulted
     (None when it is absent). `reason` is a fixed token naming why a PRESENT
     file was unusable — "not_regular", "not_utf8", "empty", "control_chars",
-    "too_long" or "unreadable". Absence is `value=None, path=None`, never a
-    reason. "not_regular" covers a FIFO, a device node and a SYMLINK: none is
+    "too_long", "not_canonical" or "unreadable". Absence is `value=None,
+    path=None`, never a reason. "not_regular" covers a FIFO, a device node and a SYMLINK: none is
     read, because a FIFO in this position would block every memory operation
     that resolves an identity.
     """
@@ -656,12 +656,18 @@ def read_override(common_dir: Path) -> OverrideRead:
     would let a repository redirect the memory scope of whoever checks it
     out.
 
+    ONLY A CANONICAL `host/owner/repo` ID IS ACCEPTED. A folder-name value is
+    reported as `not_canonical` and resolution continues without it, because
+    a basename pin let a delivered checkout name a legacy bucket (any
+    project's folder-name rows) with no evidence that it was that project.
+    A copied store is moved with `project-id rekey` instead.
+
     THE COMMON-DIR PLACEMENT IS NARROWER, NOT UNREACHABLE, AND THE INFLUENCE
     IS NOT CONFINED TO THIS PROJECT. An archive that ships a `.git/`
     directory can carry this file, exactly as it can already carry
-    `.git/config`. What it can name is ANY bucket in the same user's store:
-    another project's canonical id, another project's legacy basename, or
-    this project's own. A plain `.git` FILE in a checkout can likewise carry
+    `.git/config`. What it can name is ANY canonical bucket in the same
+    user's store: another project's id or this project's own. A plain
+    `.git` FILE in a checkout can likewise carry
     `gitdir:` and point at any repository, binding that repository's id with
     no override file at all. The trust requirement is therefore the one
     `.git` already has — an untrusted checkout can choose which bucket this
@@ -712,6 +718,8 @@ def read_override(common_dir: Path) -> OverrideRead:
             validate_identifier_for_write(candidate)
         except ValueError:
             return OverrideRead(None, path, "control_chars")
+        if not is_canonical(candidate):
+            return OverrideRead(None, path, "not_canonical")
         return OverrideRead(candidate, path, None)
     return OverrideRead(None, path, "empty")
 
@@ -1147,12 +1155,8 @@ def detect_id_for_root(
     override = read_override(common_dir)
     override_ignored = None
     if override.value is not None:
-        return RootIdentity(
-            override.value,
-            "canonical" if is_canonical(override.value) else "basename",
-            "override file",
-            None,
-        )
+        # `read_override` returns only a canonical value.
+        return RootIdentity(override.value, "canonical", "override file", None)
     if override.reason is not None and override.path is not None:
         override_ignored = {"path": str(override.path), "reason": override.reason}
 

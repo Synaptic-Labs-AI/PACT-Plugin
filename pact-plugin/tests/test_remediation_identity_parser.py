@@ -18,6 +18,7 @@ from fixtures.identity_git import (
     common_dir,
     make_repo,
     run_git,
+    write_common_dir_override,
 )
 
 from scripts import project_identity as pi
@@ -507,3 +508,54 @@ class TestAPointerAtASubmoduleWorktreeAdminDirIsRefused:
         assert _memory_in(monkeypatch, worktree, tmp_path / "m.db").project_id == (
             SUBMODULE_ID
         )
+
+
+# ---------------------------------------------------------------------------
+# The repository override accepts canonical ids only
+# ---------------------------------------------------------------------------
+
+class TestTheOverrideAcceptsCanonicalIdsOnly:
+    def _delivered(self, tmp_path, pin: str) -> Path:
+        """A delivered checkout whose own `.git` carries an override pin."""
+        assert_outside_repository(tmp_path)
+        checkout = make_repo(
+            tmp_path / "delivered" / "checkout",
+            remote="https://github.com/evil/checkout.git",
+        )
+        write_common_dir_override(checkout, pin)
+        return checkout
+
+    def test_a_folder_name_pin_does_not_read_that_folder_bucket(
+        self, tmp_path, monkeypatch
+    ):
+        checkout = self._delivered(tmp_path, "proj")
+        store = tmp_path / "m.db"
+        _seed_relative_bucket(store, "proj")
+        memory = _memory_in(monkeypatch, checkout, store)
+
+        assert memory.project_id == "github.com/evil/checkout"
+        assert "proj" not in tuple(memory._read_project_scopes())
+        assert memory.list(limit=10) == []
+        assert memory._override_ignored == {
+            "path": str(common_dir(checkout) / "pact-project-id"),
+            "reason": "not_canonical",
+        }
+
+    @pytest.mark.parametrize("pin", ["proj", "not canonical/x y", "host/"])
+    def test_a_non_canonical_value_is_reported_and_skipped(self, tmp_path, pin):
+        checkout = self._delivered(tmp_path, pin)
+
+        identity = pi.detect_id_for_root(checkout, common_dir(checkout))
+
+        assert identity.source == "origin remote"
+        assert identity.override_ignored["reason"] == "not_canonical"
+
+    def test_a_canonical_pin_still_binds(self, tmp_path):
+        checkout = self._delivered(tmp_path, "github.com/me/pinned")
+
+        identity = pi.detect_id_for_root(checkout, common_dir(checkout))
+
+        assert (identity.project_id, identity.id_shape, identity.source) == (
+            "github.com/me/pinned", "canonical", "override file"
+        )
+        assert identity.override_ignored is None
