@@ -298,6 +298,27 @@ class TestCliArgParsing:
         expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file", "project-id"}
         assert set(_COMMANDS.keys()) == expected
 
+    def test_the_project_id_rows_are_documented_and_dispatched(self):
+        """F11: the SKILL.md rows and the CLI dispatch table agree.
+
+        The rows tell an agent to run `project-id show` when a project looks
+        empty, so a row for a verb the dispatcher does not accept is an
+        agent-facing dead end. Anchoring on `_COMMANDS` keeps the doc and the
+        parser from drifting apart in either direction.
+        """
+        skill = Path(__file__).parent.parent / "skills" / "pact-memory" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+
+        assert "project-id" in _COMMANDS, (
+            "SKILL.md documents a verb the dispatch table does not carry"
+        )
+        for subcommand in ("show", "rekey"):
+            assert f"project-id {subcommand}" in text, (
+                f"SKILL.md does not document `project-id {subcommand}`"
+            )
+        for flag in ("--from", "--candidates", "--apply", "--dry-run"):
+            assert flag in text, f"SKILL.md's project-id rows omit {flag}"
+
 
 # ---------------------------------------------------------------------------
 # project-file Command

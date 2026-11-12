@@ -218,13 +218,27 @@ class TestOverrideLocation:
         """DEFECT ARM. `main_repo_root()` assumes `common_dir.parent` is the
         repository root; in a submodule that is `<super>/.git/modules/vendor`,
         so the origin is read at the wrong path and the id collapses to
-        'vendor'. Expected: the submodule's own canonical id."""
+        'vendor'. Expected: the submodule's own canonical id.
+
+        ALSO PINS THE LEGACY CANDIDATE (F2). The union's legacy bucket is the
+        PRE-change resolver's output, `common_dir.resolve().parent.name`, which
+        for this fixture is 'vendor' — NOT the identity root's 'sub'. The two
+        derivations agree for a normal checkout, so only this shape can catch
+        a refactor to the identity root's name, and such a refactor would miss
+        every pre-upgrade row in a submodule.
+        """
         _, submodule = self._submodule(identity_env)
         monkeypatch.chdir(submodule)
         assert PACTMemory._detect_project_id_with_source() == (
             "github.com/o/sub",
             "origin remote",
         ), "a submodule did not keep its own canonical id (common_dir.parent)"
+
+        memory = _memory(identity_env)
+        assert memory._legacy_project_basename == "vendor", (
+            "the legacy candidate followed the identity root ('sub') instead "
+            "of the pre-change resolver's output ('vendor')"
+        )
 
     def test_a_separate_git_dir_repo_keeps_its_own_canonical_id(
         self, identity_env, monkeypatch
@@ -250,6 +264,15 @@ class TestOverrideLocation:
             "github.com/o/sep",
             "origin remote",
         ), "a --separate-git-dir repo lost its canonical id (common_dir.parent)"
+
+        # The legacy candidate is the EXTERNAL git dir's parent name, not the
+        # checkout folder: the pre-change resolver used common_dir.parent.
+        memory = _memory(identity_env)
+        assert memory._legacy_project_basename == identity_env.name, (
+            "the legacy candidate followed the checkout folder instead of "
+            "the external git dir's parent"
+        )
+        assert memory._legacy_project_basename != "checkout"
 
     def test_the_user_setting_is_the_no_repository_fallback(
         self, identity_env, monkeypatch
@@ -335,12 +358,19 @@ class TestBadOverride:
 
 
 class TestNonAsciiRemoteRemedy:
-    def test_the_decline_message_names_the_override_and_the_command(
+    def test_the_decline_message_names_the_override_and_the_inspection_verb(
         self, identity_env, monkeypatch, caplog
     ):
         """A34: a non-ASCII remote path is DECLINED, and the remedy must be
         actionable. Catches a decline that leaves the user with a folder-name
-        fallback or no way to recover."""
+        fallback or no way to recover.
+
+        THE REMEDY IS NAMED AS A VERB, not as a shell command: the rendered
+        rekey form is interpreter-prefixed and carries `--db-path`, so prose
+        warnings name `project-id show` and the CLI help carries the runnable
+        string. The override PATH is still the second half of the remedy and
+        is asserted here.
+        """
         repo = make_repo(
             identity_env / "checkout",
             remote="https://github.com/o/répo.git",
@@ -353,8 +383,92 @@ class TestNonAsciiRemoteRemedy:
         assert "pact-project-id" in text, (
             "the decline did not name the override path"
         )
-        assert "pact-memory project-id" in text, (
-            "the decline did not name the project-id command"
+        assert "`project-id show` verb" in text, (
+            "the decline did not name the project-id inspection verb"
+        )
+
+
+class TestDeclaredDirectoryDecline:
+    def test_an_unrepresentable_remote_on_a_declared_repo_declines(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """F1: the DECLARED rung's split, not only the git rung's.
+
+        The plan's P0 names three declared-dir outcomes: canonical, basename
+        with no portable origin, and DECLINE for a present network remote that
+        cannot be represented. Only the canonical one had an arm; the other
+        two were reachable only through `detect_id_for_root`'s unit tests,
+        which do not prove the DECLARED rung routes them. A regression that
+        returns the folder basename here files a session into a bucket nobody
+        can re-derive — the silent-misscope class this change removes. RED
+        WHEN the declared branch falls back to a basename on a decline.
+        """
+        repo = make_repo(identity_env / "checkout", remote="ftp://host/o/r.git")
+        workspace = identity_env / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+
+        with caplog.at_level(logging.WARNING):
+            name, source = PACTMemory._detect_project_id_with_source()
+
+        assert name is None, (
+            "an unrepresentable declared remote fell back to a basename"
+        )
+        text = caplog.text
+        assert "pact-project-id" in text, (
+            "the declared-rung decline did not name the override path"
+        )
+        assert "`project-id show` verb" in text, (
+            "the declared-rung decline did not name the inspection verb"
+        )
+
+    def test_a_declared_repo_without_a_portable_origin_still_basenames(
+        self, identity_env, monkeypatch
+    ):
+        """The SAME rung's other arm: no origin is a designed basename.
+
+        Paired with the decline above so a regression cannot satisfy one by
+        collapsing the two outcomes into each other.
+        """
+        repo = make_repo(identity_env / "checkout", remote=None)
+        workspace = identity_env / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+
+        assert PACTMemory._detect_project_id_with_source() == (
+            "checkout",
+            "CLAUDE_PROJECT_DIR",
+        )
+
+
+class TestLegacyBasenameOverridePin:
+    def test_a_basename_override_is_an_explicit_operator_pin(
+        self, identity_env, monkeypatch
+    ):
+        """F7: the manual bridge for a copied db.
+
+        `rekey --candidates` cannot name a bucket the new path cannot derive;
+        an operator who knows the old id writes it into the common dir. The
+        value must be honoured VERBATIM and disclosed as a basename, never
+        canonicalised and never overridden by the origin remote.
+        """
+        repo = make_repo(identity_env / "checkout", remote=REMOTE)
+        write_common_dir_override(repo, "PACT-prompt")
+        monkeypatch.chdir(repo)
+
+        memory = _memory(identity_env)
+
+        assert memory._project_id == "PACT-prompt", (
+            "a basename-shaped override was not honoured as an explicit pin"
+        )
+        assert memory._project_id_source == "override file"
+        assert memory._project_id_shape == "basename", (
+            "the operator pin was disclosed as canonical"
+        )
+        assert memory._project_id != CANONICAL, (
+            "the origin remote overrode the operator's explicit pin"
         )
 
 

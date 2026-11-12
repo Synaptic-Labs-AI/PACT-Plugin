@@ -10,7 +10,9 @@ Each arm names the defect it would catch.
 from __future__ import annotations
 
 import json
+import shlex
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -155,6 +157,31 @@ class TestRekeyLifecycle:
         assert second["files_in_place"] == 0
         assert second["files_conflicted"] == 0
 
+    def test_rekeying_into_a_populated_target_is_not_an_error(self, rekey_env):
+        """F10: both buckets populated is a NORMAL state, not a conflict.
+
+        The union serves a store holding canonical rows beside a legacy bucket
+        every day; the rekey must sum them, not refuse. RED WHEN the target's
+        existing rows make the command error or discard either side.
+        """
+        _seed(
+            rekey_env,
+            [("l1", LEGACY), ("l2", LEGACY), ("c1", CANONICAL)],
+        )
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+        assert counters["memories"] == 2
+        with db_connection(rekey_env.store) as conn:
+            canonical = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (CANONICAL,)
+            ).fetchone()[0]
+            legacy = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (LEGACY,)
+            ).fetchone()[0]
+        assert (legacy, canonical) == (0, 3), (
+            f"the merge lost or refused rows: legacy={legacy}, canonical={canonical}"
+        )
+
     def test_from_equals_to_is_a_zero_noop(self, rekey_env):
         _seed(rekey_env, [("m1", LEGACY)])
         before = _rows(rekey_env.store)
@@ -202,21 +229,20 @@ class TestRekeyAtomicity:
             )
             conn.commit()
 
+        # ROW IDS, NOT ONLY COUNTS: a move that swapped which rows moved, or
+        # duplicated an id across buckets, keeps the counts and would pass a
+        # count-only arm. The snapshot is taken AFTER the trigger exists so
+        # the comparison is of the data the failed rekey touched.
+        before = _rows(rekey_env.store)
         with db_connection(rekey_env.store) as conn, pytest.raises(
             db_sqlite3.IntegrityError
         ):
             rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
 
-        with db_connection(rekey_env.store) as conn:
-            legacy = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (LEGACY,)
-            ).fetchone()[0]
-            canonical = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (CANONICAL,)
-            ).fetchone()[0]
-        assert (legacy, canonical) == (2, 0), (
-            f"partial move: legacy={legacy}, canonical={canonical}; the crash "
-            "must leave the old partition intact OR the new one complete"
+        assert _rows(rekey_env.store) == before, (
+            "partial move: the row-id snapshot changed across a rolled-back "
+            "apply; the crash must leave the old partition byte-identical OR "
+            "the new one complete"
         )
 
     def test_a_failure_in_apply_can_be_retried_to_a_complete_move(self, rekey_env):
@@ -340,6 +366,37 @@ class TestVectorMove:
         finally:
             conn.close()
 
+    def test_a_memory_without_a_vector_row_is_skipped_not_pending(
+        self, rekey_env, monkeypatch
+    ):
+        """F3: a MISSING vector is a skip, never a pending repair.
+
+        The catch-up repairs a row that exists but could not be moved; it
+        cannot repair one that never existed. Counting a skip as pending
+        reports a permanent backlog. RED WHEN the `vector is None` branch
+        increments `vectors_pending` (or fails the move).
+        """
+        conn, _blob = _vec_store(rekey_env)
+        # A second memory under the same bucket with NO vec row.
+        conn.execute(
+            "INSERT INTO memories "
+            "(id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES ('m2', 'ctx2', ?, 's', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            (LEGACY,),
+        )
+        conn.commit()
+        monkeypatch.setattr(db, "_init_vector_table", lambda connection: True)
+        try:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["memories"] == 2
+            assert counters["vectors_moved"] == 1
+            assert counters["vectors_pending"] == 0, (
+                "a memory with no vector row was reported as a pending repair"
+            )
+        finally:
+            conn.close()
+
     def test_an_unopenable_vector_table_reports_pending_not_success(
         self, rekey_env, monkeypatch
     ):
@@ -422,9 +479,12 @@ class TestCliSurface:
         assert code == 0
         candidates = {item["id"]: item for item in payload["result"]["candidates"]}
         assert set(candidates) == {LEGACY, "foreign"}
-        assert candidates[LEGACY]["rekey"] == (
-            "pact-memory project-id rekey --from PACT-prompt"
-        )
+        # THE RUNNABLE FORM, against the store the candidates were read from.
+        argv = shlex.split(candidates[LEGACY]["rekey"])
+        assert argv[0] == "python3", argv
+        assert argv[1].endswith("cli.py") and Path(argv[1]).is_absolute(), argv
+        assert argv[2:6] == ["project-id", "rekey", "--from", LEGACY], argv
+        assert argv[argv.index("--db-path") + 1] == str(rekey_env.store), argv
 
     def test_rekey_dry_run_then_apply_then_noop(self, rekey_env, capfd):
         _seed(rekey_env, [("l1", LEGACY)])

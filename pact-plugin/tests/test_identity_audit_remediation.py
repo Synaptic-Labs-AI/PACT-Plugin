@@ -116,10 +116,14 @@ class TestRenderedRekeyCommandIsQuoted:
         assert len(candidates) == 1, candidates
         entry = candidates[0]
         assert entry["id"] == hostile
-        # The rendered command must survive shlex parsing as ONE argument tail.
+        # The rendered command must be RUNNABLE (interpreter + absolute
+        # script path, because no `pact-memory` executable exists) and survive
+        # shlex parsing as ONE `--from` argument, against THIS store.
         argv = shlex.split(entry["rekey"])
-        assert argv[:4] == ["pact-memory", "project-id", "rekey", "--from"]
-        assert argv[4] == hostile, argv
+        assert argv[0] == "python3", argv
+        assert Path(argv[1]).is_absolute() and argv[1].endswith("cli.py"), argv
+        assert argv[2:6] == ["project-id", "rekey", "--from", hostile], argv
+        assert argv[argv.index("--db-path") + 1] == str(store), argv
         # And it must not contain the raw, unquoted id as a command fragment.
         assert f"--from {hostile}" not in entry["rekey"]
 
@@ -153,9 +157,10 @@ class TestSaveEnvelopeDisclosesTheCandidate:
         assert legacy["memory_count"] == 1, legacy
         # DISTINCT PATHS, via `count_project_file_paths`, not file rows.
         assert legacy["file_paths"] == 1, legacy
-        assert legacy["rekey"] == shlex.join(
-            ["pact-memory", "project-id", "rekey", "--from", _LEGACY]
-        )
+        rekey_argv = shlex.split(legacy["rekey"])
+        assert rekey_argv[0] == "python3", rekey_argv
+        assert rekey_argv[2:6] == ["project-id", "rekey", "--from", _LEGACY], rekey_argv
+        assert rekey_argv[rekey_argv.index("--db-path") + 1] == str(store), rekey_argv
         assert legacy["canonical_count"] == 0, (
             "the disclosure exists because the canonical bucket was empty"
         )
@@ -218,11 +223,12 @@ class TestExclusionDisclosureIsQuoted:
             memory._read_project_scopes()
 
         text = caplog.text
-        expected = memory_api_module.render_rekey_command(hostile)
+        expected = memory_api_module.render_rekey_command(hostile, db_path=store)
         assert expected in text, f"the warning did not carry the quoted command: {text!r}"
         argv = shlex.split(expected)
-        assert argv[:4] == ["pact-memory", "project-id", "rekey", "--from"]
-        assert argv[4] == hostile
+        assert argv[0] == "python3", argv
+        assert argv[2:6] == ["project-id", "rekey", "--from", hostile], argv
+        assert argv[argv.index("--db-path") + 1] == str(store), argv
         assert f"--from {hostile}" not in text, (
             "the warning rendered the store-influenced id unquoted"
         )
@@ -261,13 +267,16 @@ class TestEveryRenderSurfaceUsesTheHelper:
         from scripts import memory_api as memory_api_module
 
         sentinel = "SENTINEL-REKEY-COMMAND"
+        # Every call site may pass `db_path=`/`prog=`, so the stub accepts
+        # keywords; a stub that took only the id would fail on the surfaces
+        # that carry the store and redden for the wrong reason.
         monkeypatch.setattr(
-            memory_api_module, "render_rekey_command", lambda _id: sentinel
+            memory_api_module, "render_rekey_command", lambda _id, **_kw: sentinel
         )
         # `cli` imported the name into its own namespace, so the CLI surfaces
         # need their reference patched too.
         monkeypatch.setattr(
-            cli_module, "render_rekey_command", lambda _id: sentinel
+            cli_module, "render_rekey_command", lambda _id, **_kw: sentinel
         )
 
         hostile = "Legacy; echo PWNED"
@@ -372,9 +381,11 @@ class TestEveryRenderSurfaceUsesTheHelper:
         legacy = memory.last_project_scope["legacy_scope"]
         assert legacy["candidate"] == hostile
         argv = shlex.split(legacy["rekey"])
-        assert argv[:4] == ["pact-memory", "project-id", "rekey", "--from"], argv
-        assert argv[4] == hostile, (
-            f"the save envelope did not quote the bucket id as ONE argument: {argv!r}"
+        assert argv[0] == "python3", argv
+        assert argv[2:6] == ["project-id", "rekey", "--from", hostile], argv
+        assert argv[argv.index("--db-path") + 1] == str(store), (
+            f"the save envelope did not carry the store the bucket was read "
+            f"from: {argv!r}"
         )
         assert f"--from {hostile}" not in legacy["rekey"], (
             "the save envelope rendered the store-influenced id unquoted"
@@ -441,7 +452,18 @@ class TestCwdRungDisclosesAnOperatorPin:
         (common / "pact-project-id").write_text(
             "operator/cwd-pinned\n", encoding="utf-8"
         )
-        monkeypatch.chdir(repo)
+        # THE PROCESS CWD MOVES OUT OF THE MARKER TREE. The git rung now
+        # DECLINES when the process cwd carries a `.git` marker git cannot
+        # answer for, so leaving the cwd on this repo would make Strategy 3
+        # unreachable by construction. The walk is pinned to the repo (its
+        # subject here is the disclosure, not the walk), and the explicit
+        # cwd-root lookup below still runs git for real.
+        plain = tmp_path / "plain-cwd"
+        plain.mkdir()
+        monkeypatch.chdir(plain)
+        monkeypatch.setattr(
+            PACTMemory, "_find_project_root", staticmethod(lambda start: repo.resolve())
+        )
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         # NEUTRALISE THE HIGHER RUNGS so the cwd walk is the one that answers:
         # no session record and no user-scope setting. The PROCESS-repo
@@ -466,10 +488,10 @@ class TestCwdRungDisclosesAnOperatorPin:
             _process_repo_must_not_answer,
         )
 
-        # POSITIVE PROOF OF THE RUNG: (a) the walk lands on this repo, and
-        # (b) the explicit cwd-root lookup resolves the REAL `.git`, so the
-        # source assertion cannot be satisfied by a higher rung or by a
-        # mocked common dir.
+        # POSITIVE PROOF OF THE RUNG: the walk lands on this repo, and the
+        # explicit cwd-root lookup resolves the REAL `.git`, so the source
+        # assertion cannot be satisfied by a higher rung or by a mocked
+        # common dir.
         assert PACTMemory._find_project_root(Path.cwd()) == repo.resolve()
         assert memory_api.main_repo_common_dir(str(repo)) == common.resolve()
 

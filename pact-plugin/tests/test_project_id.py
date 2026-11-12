@@ -23,6 +23,7 @@ method returned None.
 """
 
 import ast
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -825,20 +826,32 @@ class TestCwdSubdirectoryDetection:
     of a project should return the PROJECT's basename, not the subdirectory's.
     """
 
-    def test_cwd_from_subdirectory_returns_project_basename(
-        self, clean_env_no_claude_project_dir, tmp_path
+    def test_cwd_from_subdirectory_under_a_broken_marker_declines(
+        self, clean_env_no_claude_project_dir, tmp_path, caplog
     ):
-        """Running from project/.claude/ should return 'project', not '.claude'."""
+        """A `.git` marker git cannot answer for DECLINES, naming the marker.
+
+        The walk still lands on the project (not `.claude`), but a broken
+        marker must not be silent-basenamed: that files the session under a
+        folder name nobody can re-derive. The plain-marker basename shape is
+        held by `test_cwd_from_nested_subdirectory` (a CLAUDE.md marker) and
+        `test_cwd_no_markers_falls_back_to_cwd_basename`.
+        """
         project = tmp_path / "my-real-project"
         subdir = project / ".claude"
         subdir.mkdir(parents=True)
         (project / ".git").mkdir()
 
-        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+        with caplog.at_level(logging.WARNING), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=subdir):
             result = PACTMemory._detect_project_id()
 
-        assert result == "my-real-project"
+        assert result is None, "a broken .git marker was basenamed"
+        messages = " ".join(record.message for record in caplog.records)
+        assert "could not answer" in messages, (
+            f"the decline did not report the unanswerable repository: {messages!r}"
+        )
 
     def test_cwd_from_nested_subdirectory(
         self, clean_env_no_claude_project_dir, tmp_path
@@ -855,10 +868,15 @@ class TestCwdSubdirectoryDetection:
 
         assert result == "deep-project"
 
-    def test_cwd_from_project_root_unchanged(
+    def test_cwd_from_project_root_under_a_broken_marker_declines(
         self, clean_env_no_claude_project_dir, tmp_path
     ):
-        """Running from project root returns project root basename."""
+        """From the root, a `.git` marker git cannot answer for DECLINES.
+
+        The unchanged-root-basename intent still holds for a marker git CAN
+        answer for and for a plain non-git marker; this arm pins the broken
+        marker's new outcome.
+        """
         project = tmp_path / "root-project"
         project.mkdir()
         (project / ".git").mkdir()
@@ -867,7 +885,7 @@ class TestCwdSubdirectoryDetection:
              patch("pathlib.Path.cwd", return_value=project):
             result = PACTMemory._detect_project_id()
 
-        assert result == "root-project"
+        assert result is None, "a broken .git marker was basenamed"
 
     @pytest.mark.claude_md_ambient  # §11.3.1 (a): marker-absence detection — the fixture's CLAUDE.md IS a project marker
     def test_cwd_no_markers_falls_back_to_cwd_basename(

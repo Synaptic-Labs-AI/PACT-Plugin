@@ -357,6 +357,11 @@ class TestEmptyScopeNeverSelectsTheStore:
                 ("c1", "canonical", CANONICAL, "2026-01-01T00:00:00+00:00"),
                 ("f1", "foreign", FOREIGN, "2026-01-02T00:00:00+00:00"),
             ],
+            # THE FILE ROW IS THE ARM'S OWN CONTROL. Without a row at the
+            # probed path, `get_file_ids(..., [])` returns [] under the guard
+            # AND under an unscoped implementation, so the assertion below
+            # could not tell them apart.
+            files=[("file-f1", "any/path.py", FOREIGN)],
         )
         with db_connection(union_env.store) as conn:
             assert list_memories(conn, project_id=[]) == []
@@ -364,6 +369,9 @@ class TestEmptyScopeNeverSelectsTheStore:
             assert search_memories_by_text(conn, "canonical", project_id=()) == []
             assert get_memory_count(conn, []) == 0
             assert get_file_ids(conn, "any/path.py", []) == []
+            # Positive control for the file seam: the row IS reachable under
+            # its own bucket, so the [] above is the empty-scope guard's.
+            assert get_file_ids(conn, "any/path.py", (FOREIGN,)) == ["file-f1"]
             # Positive control: None keeps its no-filter meaning.
             assert len(list_memories(conn, project_id=None)) == 2
 
@@ -781,6 +789,23 @@ class TestReviewB3EmptyScope:
 
 
 class TestReviewB4FoldedCandidate:
+    def test_an_exact_case_match_wins_over_a_case_variant(self):
+        """F4: EXACT case first, the fold only as a fallback.
+
+        A folded-first implementation passes on a case-insensitive filesystem
+        and loses the bucket on a case-sensitive one: with an exact bucket and
+        a case variant both present, the fold sees two matches and returns
+        None. This arm reddens on any OS if the precedence is dropped. RED
+        WHEN the `if legacy in buckets` early return is removed.
+        """
+        candidate, ambiguous = memory_api._match_legacy_candidate(
+            "PACT-prompt", {"PACT-prompt": 1, "PACT-PROMPT": 2}
+        )
+        assert candidate == "PACT-prompt", (
+            "the exact-case bucket lost to a case-folded ambiguity"
+        )
+        assert ambiguous == [], "an exact match must not report ambiguity"
+
     def test_a_unique_case_folded_candidate_is_the_raw_stored_spelling(self):
         """B4-T: the unique folded fallback, as a PURE-STRING surrogate.
 
@@ -921,6 +946,51 @@ class TestReviewB2Seams:
                 )
                 == []
             ), "G5 served a foreign bucket's memory"
+
+
+    def test_search_by_file_resolves_the_union_and_rejects_a_foreign_bucket(
+        self, union_env
+    ):
+        """F5: the SECOND belt comparison (search.py's `search_by_file`).
+
+        `graph_enhanced_search`'s belt is live through
+        `test_search_reaches_the_legacy_bucket`; this sibling belt had no
+        union arm, so downgrading its membership test to equality left the
+        suite green. A legacy memory linked through the file graph would
+        silently disappear from the file view. RED WHEN the belt compares to
+        the first scope id instead of testing membership.
+        """
+        _seed(
+            union_env,
+            [
+                ("m-legacy", "legacy", LEGACY, "2026-01-01T00:00:00+00:00"),
+                ("m-foreign", "foreign", FOREIGN, "2026-01-02T00:00:00+00:00"),
+            ],
+            files=[
+                ("f-legacy", "src/y.py", LEGACY),
+                ("f-foreign", "src/y.py", FOREIGN),
+            ],
+        )
+        with db_connection(union_env.store) as conn:
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) "
+                "VALUES ('m-legacy', 'f-legacy')"
+            )
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) "
+                "VALUES ('m-foreign', 'f-foreign')"
+            )
+            conn.commit()
+
+        memory = _memory(union_env)
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(memory_api, "_ensure_ready", lambda: None)
+            rows = memory.search_by_file("src/y.py", limit=10)
+
+        assert [row.id for row in rows] == ["m-legacy"], (
+            "search_by_file did not resolve the legacy bucket, or served a "
+            f"foreign row: {[row.id for row in rows]}"
+        )
 
 
 class TestReviewDbConfirmationCap:
@@ -1298,12 +1368,14 @@ class TestReviewQuoting:
         with caplog.at_level(logging.WARNING):
             memory._read_project_scopes()
 
-        match = re.search(r"pact-memory project-id rekey --from .*", caplog.text)
+        match = re.search(r"Move it explicitly with: (.+)", caplog.text)
         assert match is not None, (
             f"the exclusion warning did not render a rekey command: {caplog.text!r}"
         )
-        argv = shlex.split(match.group(0))
+        argv = shlex.split(match.group(1))
         from_index = argv.index("--from")
         assert argv[from_index + 1] == hostile, (
             f"the bucket id did not round-trip as ONE --from argument: {argv!r}"
         )
+        # The surface knows the store, so the remedy must name it.
+        assert argv[argv.index("--db-path") + 1] == str(store), argv

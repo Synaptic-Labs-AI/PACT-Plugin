@@ -23,7 +23,7 @@ from fixtures.identity_git import (
     make_worktree,
     write_common_dir_override,
 )
-from scripts.database import is_canonical_id
+from scripts.database import CANONICAL_ID_MAX_LENGTH, is_canonical_id
 
 from scripts import project_identity as pi
 
@@ -221,6 +221,10 @@ class TestClassifierOutcomes:
             ("https://host:0/owner/repo", "port zero"),
             ("https://host:65536/owner/repo", "port above range"),
             ("https://host:022/owner/repo", "leading-zero port"),
+            ("https://host:abc/owner/repo", "non-numeric port"),
+            ("https://host:12a/owner/repo", "digit-prefixed port"),
+            ("https://host:-1/owner/repo", "negative port"),
+            ("https://host/owner/re po", "interior space in a path segment"),
             ("https://evil.com\\@github.com/o/n", "backslash ambiguity"),
             ("https://a@b@host/owner/repo", "more than one @"),
             ("\ufeffhttps://host/owner/repo", "BOM"),
@@ -254,6 +258,8 @@ class TestCanonicalGrammar:
             "github.com/owner/repo",
             "github.com/Owner/Repo",
             "host:2222/owner/repo",
+            "host:1/owner/repo",
+            "host:65535/owner/repo",
             "gitlab.example.com/group/subgroup/repo",
         ],
     )
@@ -289,8 +295,8 @@ class TestCanonicalGrammar:
     def test_a_max_length_id_is_accepted_and_one_character_more_is_not(self):
         """The boundary, not just 'long values fail'."""
         base = "h/"
-        value = base + "a" * (pi._MAX_ID_LENGTH - len(base))
-        assert len(value) == pi._MAX_ID_LENGTH
+        value = base + "a" * (CANONICAL_ID_MAX_LENGTH - len(base))
+        assert len(value) == CANONICAL_ID_MAX_LENGTH
         assert is_canonical_id(value) is True
         assert is_canonical_id(value + "a") is False
 
