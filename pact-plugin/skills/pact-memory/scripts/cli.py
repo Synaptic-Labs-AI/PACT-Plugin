@@ -1026,24 +1026,24 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
     if action == "show":
         memory = PACTMemory(db_path=db_path)
         read_scope = memory._read_project_scopes()
-        # THE ROOT THE WINNING RUNG RESOLVED FIRST; the process cwd only when
-        # no rung resolved one.
-        repo_root = memory._project_identity_root
-        if repo_root is None:
-            repo_root = main_repo_root()
+        # TWO ROOTS, REPORTED SIDE BY SIDE AND NAMED FOR WHAT THEY ARE.
+        # `repo_root` is the PROCESS's repository; `identity_root` is the root
+        # the winning rung resolved and the one the plausibility gate compared
+        # legacy rows against. In a declared-repo session they differ, and an
+        # operator deciding whether to paste the suggested rekey command needs
+        # the second one.
+        repo_root = main_repo_root()
         _success({
             "project_id": memory._project_id_for_envelope(),
             "id_shape": memory._project_id_shape,
             "source": memory._project_id_source,
             "override_ignored": memory._override_ignored,
-            # THE IDENTITY ROOT, NOT THE PROCESS ROOT. `repo_root` promises
-            # the root behind `project_id` and `legacy_scope`, and the gate
-            # compared legacy rows against the IDENTITY root; in a
-            # declared-repo session the process cwd is a different repository,
-            # and reporting it showed the operator the wrong tree while
-            # offering a rekey command. Fall back to the cwd root only when no
-            # rung resolved one (nothing was gated in that case).
             "repo_root": str(repo_root) if repo_root is not None else None,
+            "identity_root": (
+                str(memory._project_identity_root)
+                if memory._project_identity_root is not None
+                else None
+            ),
             "read_scope": list(read_scope) if read_scope is not None else None,
             "legacy_scope": memory._legacy_scope_state,
             "candidates": _project_candidates(db_path),
@@ -1452,8 +1452,9 @@ def build_parser():
             "or the project has no memories, sync reports sync_status 'empty' "
             "and leaves the file untouched. An empty result is not proof the "
             "project has no memories: run `project-id show` and follow the "
-            "candidate it names. `pact-memory project-id rekey --from '<id>'` "
-            "moves a populated older bucket into the canonical id."
+            "candidate it names. "
+            + render_rekey_command("<id>")
+            + " moves a populated older bucket into the canonical id."
         ),
         parents=[parent],
         formatter_class=fmt,

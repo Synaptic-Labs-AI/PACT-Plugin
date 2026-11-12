@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import scripts.project_identity as pi
 from scripts.database import CANONICAL_ID_MAX_LENGTH
 
@@ -366,6 +368,70 @@ class TestBrokenRepositoryDeclines:
 
 
 # ---------------------------------------------------------------------------
+# The legacy gate must not RAISE on a read path (S2 integration)
+# ---------------------------------------------------------------------------
+
+class TestTheGateDoesNotRaiseOnAReadPath:
+    def test_a_user_setting_identity_widens_instead_of_raising(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end S2 shape: canonical id from config.json, no
+        CLAUDE_PROJECT_DIR, no session record, cwd outside any repository, and
+        a populated legacy bucket.
+
+        THIS IS THE SHAPE THAT USED TO RAISE. An earlier caller resolved its
+        root set through `backlog.checkout_roots()`, which refuses with
+        BacklogWriteError exactly here, so a READ raised a write-oriented
+        error. The production path no longer touches that helper; the
+        negative control below is kept to pin the FIXTURE, so a later
+        simplification cannot quietly turn this into a shape that never
+        exercised the defect.
+        """
+        memory_dir = tmp_path / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        umbrella = tmp_path / "my-workspace"
+        umbrella.mkdir()
+        (umbrella / "CLAUDE.md").write_text("x", encoding="utf-8")
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+
+        from scripts.database import create_memory, db_connection
+
+        with db_connection(str(store)) as conn:
+            create_memory(
+                conn, {"project_id": "my-workspace", "context": "legacy row"}
+            )
+
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(umbrella)
+
+        import scripts.memory_api as memory_api
+
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+
+        # NEGATIVE CONTROL: the refusal must be live, or this arm is vacuous.
+        from shared.backlog import BacklogWriteError, checkout_roots
+
+        with pytest.raises(BacklogWriteError):
+            checkout_roots()
+
+        memory = memory_api.PACTMemory(db_path=store)
+        rows = memory.list(limit=10)
+        assert any(
+            "legacy row" in (getattr(row, "context", "") or "") for row in rows
+        ), rows
+        state = memory._legacy_scope_state
+        assert state is not None, "the legacy gate never ran"
+        assert state["included_unverified"] is True, state
+
+
+# ---------------------------------------------------------------------------
 # B1, THE DELIVERABLE: the printed remedy must execute
 # ---------------------------------------------------------------------------
 
@@ -446,8 +512,29 @@ class TestUserSettingRungCarriesTheLegacyCandidate:
 
 
 # ---------------------------------------------------------------------------
-# Warning text cannot be split by a hostile directory name
+# No user-facing text may name a `pact-memory <verb>` executable
 # ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts"
+
+_FAKE_EXECUTABLE_RE = __import__("re").compile(
+    r"\bpact-memory\s+(?:project-id|rekey|save|search|list|get|update|delete|sync|status|setup|project-file)\b"
+)
+
+
+def test_no_user_facing_text_names_a_pact_memory_executable():
+    """Catches a remedy that tells the operator to run an executable that
+    does not exist. Comments are exempt (`cli.py`'s explanation of the bug)."""
+    import ast
+
+    offences = []
+    for name in ("memory_api.py", "cli.py"):
+        tree = ast.parse((_SCRIPTS_DIR / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if _FAKE_EXECUTABLE_RE.search(node.value):
+                    offences.append((name, node.value[:80]))
+    assert not offences, offences
 
 def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
     tmp_path, monkeypatch, caplog

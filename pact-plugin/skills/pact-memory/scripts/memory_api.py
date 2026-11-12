@@ -644,7 +644,7 @@ def main_repo_root(
                         "the directory %r resolves to another repository's "
                         "worktree admin dir but is not one of its listed "
                         "worktrees, so no project id was derived from it. Run "
-                        "`pact-memory project-id show` to inspect the detected "
+                        "the `project-id show` verb to inspect the detected "
                         "identity.",
                         str(asked),
                     )
@@ -1046,7 +1046,7 @@ class PACTMemory:
                 "the repository at %r (declared via %s) has a remote that "
                 "could not be read or represented as a project id, so no id "
                 "was derived. "
-                "Run `pact-memory project-id show` to inspect the detected "
+                "Run the `project-id show` verb to inspect the detected "
                 "identity, or write an operator-chosen canonical id to %r.",
                 str(declared_main_root),
                 source,
@@ -1115,8 +1115,8 @@ class PACTMemory:
                 logger.warning(
                     "the recorded main checkout %r for the directory declared "
                     "via %s has a remote that could not be read or represented as a "
-                    "project id; no id was derived. Run `pact-memory "
-                    "project-id show` to inspect the detected identity, or "
+                    "project id; no id was derived. Run the "
+                    "`project-id show` verb to inspect the detected identity, or "
                     "write an operator-chosen canonical id to %s.",
                     str(recorded_root),
                     source,
@@ -1151,7 +1151,7 @@ class PACTMemory:
             logger.warning(
                 "the directory declared via %s is inside a git work tree whose "
                 "repository git could not answer for, so no project id was "
-                "derived. Run `pact-memory project-id show` to inspect the "
+                "derived. Run the `project-id show` verb to inspect the "
                 "detected identity, or write an operator-chosen canonical id "
                 "to <git-common-dir>/pact-project-id.",
                 source,
@@ -1177,7 +1177,7 @@ class PACTMemory:
             "the repository at %r (declared via %s) has a remote that could "
             "not be read or represented as a project id, so no id was "
             "derived. Run "
-            "`pact-memory project-id show` to inspect the detected identity, "
+            "the `project-id show` verb to inspect the detected identity, "
             "or write an operator-chosen canonical id to %r.",
             str(live_root),
             source,
@@ -1283,10 +1283,10 @@ class PACTMemory:
                     "the repository at %r has an origin remote that could not "
                     "be read or represented as a project id, so no id was "
                     "derived. Run "
-                    "`pact-memory project-id show` to inspect the detected "
+                    "the `project-id show` verb to inspect the detected "
                     "identity, or write an operator-chosen canonical id to %r.",
                     str(repo_root),
-                    cwd_common_dir / "pact-project-id",
+                    str(cwd_common_dir / "pact-project-id"),
                 )
                 return _DetectedIdentity(
                     None,
@@ -1305,7 +1305,7 @@ class PACTMemory:
             logger.warning(
                 "the working directory is inside a git work tree whose "
                 "repository git could not answer for, so no project id was "
-                "derived from it. Run `pact-memory project-id show` to inspect "
+                "derived from it. Run the `project-id show` verb to inspect "
                 "the detected identity, or write an operator-chosen canonical "
                 "id to <git-common-dir>/pact-project-id."
             )
@@ -1378,7 +1378,7 @@ class PACTMemory:
                     logger.warning(
                         "the project root %r carries a `.git` marker but git "
                         "could not answer for it, so no project id was "
-                        "derived. Run `pact-memory project-id show` to inspect "
+                        "derived. Run the `project-id show` verb to inspect "
                         "the detected identity, or write an operator-chosen "
                         "canonical id to <git-common-dir>/pact-project-id.",
                         str(cwd_root),
@@ -1625,25 +1625,31 @@ class PACTMemory:
                     "detail": None,
                 }
             else:
-                # A SET OF ROOTS, NOT ONE. The identity root of a linked
-                # worktree is the MAIN checkout (by design), while a row saved
-                # from the worktree records the WORKTREE's absolute path, so
-                # gating on the main checkout alone excludes the operator's own
-                # pre-upgrade bucket. `git worktree list` from the identity root
-                # yields every checkout of THIS repository; `checkout_roots()`
-                # resolves against the process instead, which in a declared
-                # session can be a different repository.
+                # A SET OF ROOTS, NOT ONE, AND ROOTED AT THE IDENTITY ROOT.
+                # A linked worktree's identity root is the MAIN checkout (by
+                # design), while a row saved from the worktree records the
+                # WORKTREE's absolute path, so gating on the main checkout
+                # alone excludes the operator's own pre-upgrade bucket.
+                # `git worktree list` run AT `repo_root` returns that
+                # repository's main checkout plus each of its worktrees —
+                # exactly the set the gate needs.
+                #
+                # NOT `backlog.checkout_roots()`, DELIBERATELY: that helper
+                # resolves against the PROCESS, so in a declared-repo session
+                # it appends a DIFFERENT repository's checkouts and a legacy
+                # bucket could be called `verified` from another repo's rows.
+                # It also refuses with a write-oriented BacklogWriteError when
+                # no project dir resolves, which must never escape a read.
                 gate_roots = []
                 if repo_root is not None:
                     gate_roots.append(str(Path(repo_root).resolve()))
-                    for listed in sorted(
-                        _listed_worktree_toplevels(repo_root) or ()
-                    ):
-                        entry = str(listed)
-                        if entry not in gate_roots:
-                            gate_roots.append(entry)
+                    gate_roots.extend(
+                        str(root)
+                        for root in sorted(_listed_worktree_toplevels(repo_root) or ())
+                    )
+                deduped = list(dict.fromkeys(gate_roots))
                 outcome, detail = legacy_candidate_plausibility(
-                    connection, candidate, gate_roots or None
+                    connection, candidate, deduped or None
                 )
                 included = outcome != "excluded"
                 state = {
@@ -2062,7 +2068,7 @@ class PACTMemory:
             "Run from inside the project directory, set CLAUDE_PROJECT_DIR "
             "to an existing project root, or write an operator-chosen "
             "canonical id to <git-common-dir>/pact-project-id. Run "
-            "`pact-memory project-id show` to inspect the detected identity."
+            "the `project-id show` verb to inspect the detected identity."
         )
 
     @_with_store_scope

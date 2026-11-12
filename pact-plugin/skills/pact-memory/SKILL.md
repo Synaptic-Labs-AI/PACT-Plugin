@@ -346,6 +346,19 @@ Two operator surfaces answer, and they are deliberately ordered:
 
 On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 
+### A Short Search Is Not an Empty Project
+
+`search` returns **at most** `--limit`, not exactly it. Every hit is confirmed
+against its stored project before it is returned, and the confirmation widens
+the fetch only up to a fixed budget of 200 candidates. On a store where many
+vector rows belong to another project — a rekey that could not move its
+vectors, or a copied store — a search can return fewer results than you asked
+for, including none, while matching memories exist.
+
+So a short or empty search is **not evidence** that this project has no
+memories. Check the read scope and any excluded bucket with the
+`project-id show` verb, then retry with a narrower query.
+
 ### Exit Codes
 
 | Code | Meaning |
