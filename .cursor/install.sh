@@ -53,9 +53,13 @@ require_floor .venv/bin/python "the existing .venv" \
 # shellcheck disable=SC1091
 . .venv/bin/activate
 
-# The same command as CI's install step (.github/workflows/tests.yml):
-# constraints-ci.txt is the hashed lock of the requirement set, so the package
-# list lives there only, and pip is pinned inside it.
+# CI's install step (.github/workflows/tests.yml) without its
+# --only-binary=:all:. constraints-ci.txt is the hashed lock of the requirement
+# set, so the package list lives there only, and pip is pinned inside it. This
+# install accepts source builds because pysqlite3 has no wheel for aarch64
+# Linux or x86_64 macOS; pip installs a source build's own build dependencies
+# (setuptools and the like) WITHOUT hash checks, so on such a platform those
+# dependencies are not covered by the lock.
 python -m pip install --require-hashes -r constraints-ci.txt
 
 # Report how this venv differs from the pinned set. A warning only, never a

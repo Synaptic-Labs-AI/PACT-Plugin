@@ -105,7 +105,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          python -m pip install --require-hashes -r constraints-ci.txt
+          python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt
 
       - name: Warm and verify the embedding model
         working-directory: pact-plugin

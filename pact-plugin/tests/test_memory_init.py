@@ -1012,7 +1012,8 @@ class TestDependencyDriftIsDetectable:
     )
     # Exact line (stripped) -> the reason it is accepted. Empty today.
     _ACCEPTED_TRIPWIRE_LINES = {}
-    _CANONICAL_INSTALL_LINE = "python -m pip install --require-hashes -r constraints-ci.txt"
+    _CANONICAL_INSTALL_LINE = (
+        "python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt")
 
     @staticmethod
     def _tracked_shell_and_make_files(root):
@@ -1786,7 +1787,8 @@ class TestDependencyDriftIsDetectable:
         # ruff's --target-version (the shipped lint legs use it too).
         self._shape_stays_green(
             tmp_path, monkeypatch, "faithful", arm, workflow_text=in_block(
-                "pip list; python -m pip install --require-hashes -r constraints-ci.txt; "
+                "pip list; python -m pip install --only-binary=:all: --require-hashes "
+                "-r constraints-ci.txt; "
                 "ruff check --target-version py312 pact-plugin/"))
 
     def test_unvetted_actions_redden(self, tmp_path, monkeypatch):

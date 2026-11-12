@@ -141,9 +141,11 @@
 #   a lock generated from the hand-edited constraints-ci.in. It pins every
 #   distribution of the closure, pip included, with a sha256 hash for each
 #   file the index serves at that version. The install step installs it with
-#   `pip install --require-hashes -r`, so what CI runs is a reviewed commit,
-#   byte for byte, not whatever the index serves at merge time: a missing pin
-#   or a changed file refuses the install.
+#   `pip install --only-binary=:all: --require-hashes -r`, so what CI runs is
+#   a reviewed commit, byte for byte, not whatever the index serves at merge
+#   time: a missing pin or a changed file refuses the install. --only-binary
+#   refuses a source build, whose own build dependencies pip would install
+#   without hash checks; every pinned version has an x86_64 wheel.
 #   RUNTIME CHECK: scripts/verify_ci_environment.py runs immediately before the
 #   test step and again as the job's last step, and the suite runs the same
 #   check inside its own process. It compares the distributions the
@@ -430,9 +432,9 @@ jobs:
         # pip is pinned in the lock, so this one hash-checked install also
         # moves pip to its pinned version. `--require-hashes` is explicit, so
         # a lock that lost its hashes refuses here instead of installing
-        # unchecked.
+        # unchecked, and `--only-binary=:all:` refuses a source build.
         run: |
-          python -m pip install --require-hashes -r constraints-ci.txt
+          python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt
 
       # WARM THE MODEL ONCE, HERE, WHERE NOTHING IS TIMING IT.
       #

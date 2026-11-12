@@ -1,10 +1,13 @@
 # The CI requirement set, as the hand-edited input. constraints-ci.txt is the
 # lock generated from it: every distribution of the closure pinned with a
 # sha256 hash for each file the index serves at that version. CI installs the
-# lock with `python -m pip install --require-hashes -r constraints-ci.txt`
-# (.github/workflows/tests.yml, .github/workflows/fast-tests.yml and
-# .cursor/install.sh); scripts/verify_ci_environment.py checks the installed
-# environment against it at runtime.
+# lock with `python -m pip install --only-binary=:all: --require-hashes -r
+# constraints-ci.txt` (.github/workflows/tests.yml and fast-tests.yml);
+# .cursor/install.sh runs the same line without --only-binary, because
+# pysqlite3 has no aarch64 Linux or x86_64 macOS wheel, and a source build's
+# own build dependencies are then installed without hash checks.
+# scripts/verify_ci_environment.py checks the installed environment against
+# the lock at runtime.
 #
 # The names below are the suite's direct dependencies plus pip, pinned to the
 # TEST-phase-verified versions. Merge-time resolution is code execution in CI,
@@ -32,8 +35,9 @@
 # Measured 2026-11-12 with uv 0.13.6: a second compile of the same input is
 # byte-identical, and the lock is byte-identical for Python 3.12, 3.13 and 3.14
 # and for x86_64 and aarch64 Linux and both macOS targets. Every pinned
-# version has an x86_64 manylinux wheel for CPython 3.12, 3.13 and 3.14, so CI
-# builds nothing from source. Windows adds colorama and is not a CI platform.
+# version has an x86_64 manylinux wheel for CPython 3.12, 3.13 and 3.14, and
+# CI's --only-binary=:all: refuses a source build. Windows adds colorama and is
+# not a CI platform.
 #
 # Incident path, a COMPROMISED TRANSITIVE: pin it here at a safe version and
 # refresh; the lock and the verify script then hold it there.

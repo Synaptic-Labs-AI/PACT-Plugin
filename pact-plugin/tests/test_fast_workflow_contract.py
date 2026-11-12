@@ -339,40 +339,6 @@ class TestFastWorkflowHygiene:
         )
 
 
-_LOCK_INSTALL = "python -m pip install --require-hashes -r constraints-ci.txt"
-
-
-class TestHashCheckedInstall:
-    """Every install of the CI set is the one hash-checked lock install."""
-
-    @staticmethod
-    def _install_lines(text):
-        return [line.strip() for line in text.splitlines()
-                if "pip install" in line and not line.strip().startswith(("#", "printf"))]
-
-    @pytest.mark.parametrize("source", ["tests.yml", "fast-tests.yml", ".cursor/install.sh"])
-    def test_the_only_install_is_the_hash_checked_lock(self, source):
-        root = ci_contract.require_root("the hash-checked install")
-        if source == ".cursor/install.sh":
-            text = (root / source).read_text(encoding="utf-8")
-        else:
-            doc = ci_contract.load_workflow(root, f".github/workflows/{source}")
-            text = "\n".join(
-                run for job in ci_contract.jobs_of(doc).values()
-                for run in ci_contract.run_texts(ci_contract.steps_of(job)))
-        assert self._install_lines(text) == [_LOCK_INSTALL], (
-            f"{source} installs {self._install_lines(text)!r}; the CI set is "
-            f"installed only by `{_LOCK_INSTALL}`, which moves pip to its "
-            "pinned version too. A `-c constraints-ci.txt` install fails under "
-            "hashes, and dropping --require-hashes lets a lock without hashes "
-            "install unchecked.")
-
-    def test_the_lint_gate_remedy_installs_the_lock(self):
-        root = ci_contract.require_root("the lint gate remedy")
-        text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
-        assert "python3 -m pip install --require-hashes -r constraints-ci.txt" in text
-        assert "-c constraints-ci.txt" not in text
-
     def test_checkout_uses_full_history(self):
         root = ci_contract.require_root("the fast checkout depth")
         steps = ci_contract.steps_of(
@@ -417,6 +383,58 @@ class TestHashCheckedInstall:
             doc, ci_contract.FAST_WORKFLOW, problems)
         assert any("upload-artifact" in problem for problem in problems), (
             f"an upload step in the fast lane did not redden: {problems}")
+
+
+# The exact install line at each site. CI refuses a source build; the local
+# install accepts one, because pysqlite3 has no aarch64 Linux or x86_64 macOS
+# wheel, and pip then installs that build's own dependencies without hashes.
+_CI_LOCK_INSTALL = (
+    "python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt")
+_LOCAL_LOCK_INSTALL = "python -m pip install --require-hashes -r constraints-ci.txt"
+
+
+class TestHashCheckedInstall:
+    """Every install of the CI set is the one hash-checked lock install for its site."""
+
+    @staticmethod
+    def _install_lines(text):
+        return [line.strip() for line in text.splitlines()
+                if "pip install" in line and not line.strip().startswith(("#", "printf"))]
+
+    @pytest.mark.parametrize("source, expected", [
+        ("tests.yml", _CI_LOCK_INSTALL),
+        ("fast-tests.yml", _CI_LOCK_INSTALL),
+        (".cursor/install.sh", _LOCAL_LOCK_INSTALL),
+    ])
+    def test_the_only_install_is_the_hash_checked_lock(self, source, expected):
+        root = ci_contract.require_root("the hash-checked install")
+        if source == ".cursor/install.sh":
+            text = (root / source).read_text(encoding="utf-8")
+        else:
+            doc = ci_contract.load_workflow(root, f".github/workflows/{source}")
+            text = "\n".join(
+                run for job in ci_contract.jobs_of(doc).values()
+                for run in ci_contract.run_texts(ci_contract.steps_of(job)))
+        assert self._install_lines(text) == [expected], (
+            f"{source} installs {self._install_lines(text)!r}; this site installs "
+            f"the CI set only by `{expected}`, which moves pip to its pinned "
+            "version too. A `-c constraints-ci.txt` install fails under hashes, "
+            "dropping --require-hashes lets a lock without hashes install "
+            "unchecked, and in CI dropping --only-binary=:all: lets a source "
+            "build install its build dependencies unchecked.")
+
+    def test_the_lint_gate_remedy_is_the_local_install(self):
+        """The remedy runs on a developer's machine, so it prints the local
+        install (.cursor/install.sh's line), not CI's, and says so."""
+        root = ci_contract.require_root("the lint gate remedy")
+        text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
+        printed = [line for line in text.splitlines()
+                   if line.strip().startswith("printf") and "pip install" in line]
+        assert len(printed) == 1, printed
+        command = printed[0].split("'")[1].strip().removesuffix("\\n").strip()
+        assert command.split(" ", 1)[1] == _LOCAL_LOCK_INSTALL.split(" ", 1)[1], command
+        assert "not the CI one" in text
+        assert "-c constraints-ci.txt" not in text
 
 
 class TestWorkflowHardening:
@@ -753,11 +771,33 @@ def _seed_guard_run(root):
     return guards[0]
 
 
+@pytest.fixture(scope="module")
+def range_widening_locale(tmp_path_factory):
+    """An en_US.UTF-8 locale built into a tmp LOCPATH, independent of which
+    locales the runner generated. Under it, bash's `[0-9]` matches non-ASCII
+    digits such as U+0663; under C.UTF-8 it does not. Building it needs only
+    localedef and glibc's en_US source, which the `locales` package ships."""
+    localedef = shutil.which("localedef")
+    assert localedef, (
+        "localedef is not on PATH, so the range-widening locale cannot be "
+        "built and the seed guard's digit classes go unproven")
+    locpath = tmp_path_factory.mktemp("locpath")
+    home = tmp_path_factory.mktemp("localedef-home")
+    proc = subprocess.run(
+        [localedef, "-i", "en_US", "-f", "UTF-8", str(locpath / "en_US.UTF-8")],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(home)},
+        capture_output=True, text=True, timeout=120)
+    assert (locpath / "en_US.UTF-8" / "LC_COLLATE").is_file(), (
+        f"localedef did not build en_US.UTF-8 (rc {proc.returncode}): {proc.stderr}")
+    return {"LC_ALL": "en_US.UTF-8", "LOCPATH": str(locpath)}
+
+
 class TestSeedGuardBehaviour:
-    """The seed guard's verdicts, EXECUTED under `bash -e` as the runner does."""
+    """The seed guard's verdicts, EXECUTED under `bash -e` as the runner does,
+    in an ASCII locale and in one where bracket ranges match non-ASCII digits."""
 
     @staticmethod
-    def _run_guard(tmp_path, seed):
+    def _run_guard(tmp_path, seed, locale):
         root = ci_contract.require_root("the seed guard's behaviour")
         bash = shutil.which("bash")
         assert bash, "bash is not on PATH; the seed guard is bash"
@@ -765,12 +805,38 @@ class TestSeedGuardBehaviour:
         script.write_text(_seed_guard_run(root), encoding="utf-8")
         output = tmp_path / "github_output"
         output.write_text("", encoding="utf-8")
+        home = tmp_path / "home"
+        home.mkdir(exist_ok=True)
         proc = subprocess.run(
             [bash, "-e", str(script)],
-            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8",
+            env={"PATH": "/usr/bin:/bin", "HOME": str(home),
+                 "LC_ALL": locale["LC_ALL"], "LOCPATH": locale["LOCPATH"],
                  "SEED": seed, "GITHUB_OUTPUT": str(output)},
             capture_output=True, text=True, timeout=30)
         return proc, output.read_text(encoding="utf-8")
+
+    @pytest.fixture(params=["ascii", "range-widening"])
+    def locale(self, request, tmp_path_factory):
+        """C.UTF-8 is built into glibc, so an empty LOCPATH leaves it intact."""
+        if request.param == "ascii":
+            return {"LC_ALL": "C.UTF-8", "LOCPATH": str(tmp_path_factory.mktemp("no-locales"))}
+        return request.getfixturevalue("range_widening_locale")
+
+    def test_the_widening_locale_widens_a_range(self, tmp_path, range_widening_locale):
+        """CONTROL: the non-ASCII digit rows can only catch a `[0-9]` guard
+        under a locale where `[0-9]` matches U+0663, so prove this one does."""
+        home = tmp_path / "home"
+        home.mkdir()
+        probe = subprocess.run(
+            [shutil.which("bash"), "-c", '[[ "\u0663" =~ ^[0-9]$ ]]'],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(home),
+                 "LC_ALL": range_widening_locale["LC_ALL"],
+                 "LOCPATH": range_widening_locale["LOCPATH"]},
+            capture_output=True, text=True, timeout=30)
+        assert probe.returncode == 0, (
+            "under the built en_US.UTF-8, bash's [0-9] no longer matches U+0663, "
+            f"so the non-ASCII digit rows cannot tell a range from the spelled-out "
+            f"class: {probe.stderr}")
 
     @pytest.mark.parametrize("seed, order", [
         ("", "ordered"),
@@ -778,21 +844,33 @@ class TestSeedGuardBehaviour:
         ("7", "seed-7"),
         ("123456789", "seed-123456789"),
     ])
-    def test_an_accepted_seed_writes_one_order_line(self, tmp_path, seed, order):
-        proc, written = self._run_guard(tmp_path, seed)
+    def test_an_accepted_seed_writes_one_order_line(self, tmp_path, locale, seed, order):
+        proc, written = self._run_guard(tmp_path, seed, locale)
         assert proc.returncode == 0, proc.stderr
         assert written == f"order={order}\n"
 
     @pytest.mark.parametrize("seed", [
         "007", "1234567890", "1 2", "$(id)", "-1", "abc", "5\n", "5\nx=y",
-        "٣", "1٣",
+        "\u0663", "1\u0663", "\u0969", "\uff13",
     ])
-    def test_a_refused_seed_exits_before_writing(self, tmp_path, seed):
-        proc, written = self._run_guard(tmp_path, seed)
+    def test_a_refused_seed_exits_before_writing(self, tmp_path, locale, seed):
+        proc, written = self._run_guard(tmp_path, seed, locale)
         assert proc.returncode == 1, (proc.returncode, proc.stderr)
         assert "SEED GUARD:" in proc.stderr
         assert seed not in proc.stdout + proc.stderr, "the guard echoed the value"
         assert written == ""
+
+    def test_the_guard_regex_spells_out_its_classes(self):
+        """A bracket range such as `[0-9]` is collation-dependent. The
+        range-widening rows catch it under the built locale; this pins it
+        without running anything."""
+        root = ci_contract.require_root("the seed guard's digit classes")
+        patterns = re.findall(r"=~\s+(\S+)\s+\]\]", _seed_guard_run(root))
+        assert len(patterns) == 1, patterns
+        classes = re.findall(r"\[([^\]]*)\]", patterns[0])
+        assert classes, patterns[0]
+        ranged = [c for c in classes if re.search(r".-.", c)]
+        assert not ranged, f"the seed guard's regex uses bracket ranges: {ranged}"
 
 
 class TestRemovability:
