@@ -501,13 +501,13 @@ class TestGitEnvBoolMatchesGit:
     )
     def test_boolean_values(self, value, expected, monkeypatch):
         """Catches Python truthiness: bool("0") is True, git reads FALSE."""
-        from scripts.memory_api import _git_env_bool
+        from scripts.project_identity import _git_env_bool
 
         monkeypatch.setenv("PACT_PROBE_BOOL", value)
         assert _git_env_bool("PACT_PROBE_BOOL") is expected
 
     def test_unset_is_false(self, monkeypatch):
-        from scripts.memory_api import _git_env_bool
+        from scripts.project_identity import _git_env_bool
 
         monkeypatch.delenv("PACT_PROBE_BOOL", raising=False)
         assert _git_env_bool("PACT_PROBE_BOOL") is False

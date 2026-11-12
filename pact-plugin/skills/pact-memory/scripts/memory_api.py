@@ -71,10 +71,10 @@ from .graph import (
 from .models import MemoryObject, memory_from_db_row
 from . import project_identity
 from .project_identity import (
-    _git_env_bool,
     _submodule_admin_dir,
     decline_record,
     detect_id_for_root,
+    find_git_marker,
     is_canonical,
     read_override,
     read_user_setting,
@@ -969,62 +969,23 @@ def _cwd_or_none() -> Optional[Path]:
 def _unanswerable_repository(start) -> Optional[Path]:
     """The `.git` marker proving `start` sits in a repository git could not answer for.
 
-    Returns the marker path, or None when no marker is reachable. The walk
-    honours the SAME boundaries git does, so a directory git would not treat
-    as inside a repository is never declined for that reason:
+    Returns the marker path, or None when no marker is reachable. ONE WALK,
+    `project_identity.find_git_marker`, with git's own boundaries, so a
+    directory git would not treat as inside a repository is never declined
+    for that reason:
 
     - a `.git` FILE counts (a submodule and a linked worktree both use one),
       tested with `lexists` so a broken marker still marks a repository;
-    - the walk stops at the filesystem root;
+    - the START directory is always examined, even when it is a
+      `GIT_CEILING_DIRECTORIES` entry (git uses it); a PARENT that is a
+      ceiling stops the walk before it is examined (git will not move up
+      into one);
     - it stops when the device changes, unless
-      `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy;
-    - it stops at a `GIT_CEILING_DIRECTORIES` ancestor (split on `os.pathsep`,
-      empty entries ignored, each resolved), and does not inspect the ceiling
-      directory itself — git refuses to use one as a repository.
+      `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy, and at the filesystem root.
 
     Never raises: an unreadable path or environment answers None.
     """
-    if start is None:
-        return None
-    try:
-        level = Path(start).resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-    ceilings = set()
-    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
-        if not entry:
-            continue
-        try:
-            ceilings.add(Path(entry).resolve())
-        except (OSError, RuntimeError, ValueError):
-            continue
-    cross_filesystem = _git_env_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM")
-
-    try:
-        device = os.stat(level).st_dev
-    except OSError:
-        return None
-
-    while True:
-        if level in ceilings:
-            return None
-        try:
-            marker = level / ".git"
-            if os.path.lexists(marker):
-                return marker
-        except (OSError, ValueError):
-            return None
-        parent = level.parent
-        if parent == level:
-            return None
-        if not cross_filesystem:
-            try:
-                if os.stat(parent).st_dev != device:
-                    return None
-            except OSError:
-                return None
-        level = parent
+    return find_git_marker(start)
 
 
 def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:

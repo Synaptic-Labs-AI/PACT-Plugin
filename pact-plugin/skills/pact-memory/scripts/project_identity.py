@@ -230,6 +230,61 @@ def _git_env_bool(name: str) -> bool:
     return False
 
 
+def find_git_marker(start) -> Optional[Path]:
+    """The `.git` marker (file or directory) git's discovery would reach, or None.
+
+    Walks up from `start` with git's own boundaries:
+
+    - the START directory is always examined, even when it is itself a
+      `GIT_CEILING_DIRECTORIES` entry;
+    - a PARENT equal to a ceiling entry stops the walk before it is examined
+      (entries split on `os.pathsep`, empty ones ignored, each resolved);
+    - the walk stops when the device changes, unless
+      `GIT_DISCOVERY_ACROSS_FILESYSTEM` is true (`_git_env_bool`);
+    - it stops at the filesystem root.
+
+    `lexists`, so a broken marker (a dangling symlink, a `.git` file naming a
+    missing directory) still counts. Never raises: an unreadable path or
+    environment answers None.
+    """
+    if start is None:
+        return None
+    try:
+        level = Path(start).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    ceilings = set()
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            ceilings.add(Path(entry).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    cross_filesystem = _git_env_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM")
+    try:
+        device = os.stat(level).st_dev
+    except OSError:
+        return None
+    while True:
+        marker = level / ".git"
+        try:
+            if os.path.lexists(marker):
+                return marker
+        except (OSError, ValueError):
+            return None
+        parent = level.parent
+        if parent == level or parent in ceilings:
+            return None
+        if not cross_filesystem:
+            try:
+                if os.stat(parent).st_dev != device:
+                    return None
+            except OSError:
+                return None
+        level = parent
+
+
 def _max_id_length() -> int:
     """The identifier length cap, from database.py (ONE definition).
 
@@ -1039,61 +1094,24 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     restores it. A forgery can likewise bind a pin, but only one the victim
     deliberately wrote, never its remote.
     """
-    # THE MARKER IS FOUND BY WALKING UP, AS GIT DOES. The caller may hand us a
-    # SUBDIRECTORY of the redirected checkout (a declared path one level down
-    # is the common shape), and `<subdir>/.git` does not exist — so testing
-    # only the immediate directory leaves the subdirectory case open. The
-    # `core.worktree` comparison below is against the MARKER'S directory (the
-    # checkout root), never the raw input, or a legitimate subdirectory of a
-    # genuine submodule would be refused.
-    start = Path(root)
-    marker_root = None
-    try:
-        level = start.resolve()
-    except (OSError, RuntimeError, ValueError):
+    # THE MARKER IS FOUND BY WALKING UP, AS GIT DOES (`find_git_marker`).
+    # The caller may hand us a SUBDIRECTORY of the redirected checkout (a
+    # declared path one level down is the common shape), and `<subdir>/.git`
+    # does not exist — so testing only the immediate directory leaves the
+    # subdirectory case open. The `core.worktree` comparison below is
+    # against the MARKER'S directory (the checkout root), never the raw
+    # input, or a legitimate subdirectory of a genuine submodule would be
+    # refused.
+    marker = find_git_marker(root)
+    if marker is None:
         return False
-    ceilings = set()
-    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
-        if not entry:
-            continue
-        try:
-            ceilings.add(Path(entry).resolve())
-        except (OSError, RuntimeError, ValueError):
-            continue
-    cross_filesystem = _git_env_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM")
     try:
-        device = os.stat(level).st_dev
+        if not marker.is_file():
+            # A real `.git` DIRECTORY: an ordinary checkout.
+            return False
     except OSError:
         return False
-
-    # THE SAME BOUNDARIES GIT HONOURS, so this walk never finds a marker git
-    # would not have found: the ceiling directories, the device boundary
-    # (unless GIT_DISCOVERY_ACROSS_FILESYSTEM), and the filesystem root.
-    while True:
-        if level in ceilings:
-            break
-        dotgit = level / ".git"
-        try:
-            if os.path.lexists(dotgit):
-                if not dotgit.is_file():
-                    # A real `.git` DIRECTORY: an ordinary checkout, done.
-                    return False
-                marker_root = level
-                break
-        except OSError:
-            return False
-        parent = level.parent
-        if parent == level:
-            break
-        if not cross_filesystem:
-            try:
-                if os.stat(parent).st_dev != device:
-                    break
-            except OSError:
-                return False
-        level = parent
-    if marker_root is None:
-        return False
+    marker_root = marker.parent
 
     try:
         text = (marker_root / ".git").read_text(encoding="utf-8", errors="replace")

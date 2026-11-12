@@ -185,3 +185,38 @@ class TestTheGitRungNamesARedirect:
         detected = PACTMemory._detect_project_identity_with_legacy()
         assert detected.project_id is None
         assert detected.decline_reason["reason"] == "no_working_tree"
+
+
+class TestACeilingStartDirectoryIsExamined:
+    """A broken `.git` marker AT a ceiling start directory still declines.
+
+    Catches the resolver's discovery walk skipping a start directory that is
+    a `GIT_CEILING_DIRECTORIES` entry. git examines it, so a broken marker
+    there is a broken repository, not an umbrella folder named after itself.
+    """
+
+    def _broken(self, root):
+        broken = root / "broken"
+        broken.mkdir()
+        (broken / ".git").write_text("gitdir: /nonexistent/admin\n", encoding="utf-8")
+        return broken
+
+    def test_a_broken_marker_at_the_ceiling_start_declines(
+        self, identity_env, monkeypatch
+    ):
+        broken = self._broken(identity_env)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(broken))
+        monkeypatch.chdir(broken)
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id is None
+        assert detected.decline_reason["reason"] == "broken_git_marker"
+
+    def test_a_marker_in_a_ceiling_parent_is_not_found(
+        self, identity_env, monkeypatch
+    ):
+        broken = self._broken(identity_env)
+        (broken / "sub").mkdir()
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(broken))
+        assert memory_api._unanswerable_repository(broken / "sub") is None
+        # Control: the same marker is found from its own directory.
+        assert memory_api._unanswerable_repository(broken) == broken / ".git"

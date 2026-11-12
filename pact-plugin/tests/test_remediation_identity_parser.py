@@ -625,3 +625,55 @@ class TestOneDeclineRecord:
         assert identity.decline_reason == pi.decline_record(
             "origin_unrepresentable", str(common_dir(repo) / "pact-project-id")
         )
+
+
+# ---------------------------------------------------------------------------
+# One git-discovery walk, with git's ceiling semantics
+# ---------------------------------------------------------------------------
+
+class TestGitDiscoveryHonoursACeilingAsGitDoes:
+    """git still examines the starting directory when it is a
+    `GIT_CEILING_DIRECTORIES` entry, and never examines a parent that is one
+    (measured: `git -C <ceiling>` finds a repository there; `git -C
+    <ceiling>/sub` does not)."""
+
+    def test_a_marker_at_a_ceiling_start_directory_is_found(self, tmp_path, monkeypatch):
+        (tmp_path / "top").mkdir()
+        (tmp_path / "top" / ".git").write_text("gitdir: /nonexistent\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path / "top"))
+
+        assert pi.find_git_marker(tmp_path / "top") == (tmp_path / "top" / ".git").resolve()
+
+    def test_a_marker_in_a_ceiling_parent_is_not_found(self, tmp_path, monkeypatch):
+        (tmp_path / "top" / "sub").mkdir(parents=True)
+        (tmp_path / "top" / ".git").mkdir()
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path / "top"))
+
+        assert pi.find_git_marker(tmp_path / "top" / "sub") is None
+
+    def test_a_marker_above_with_no_ceiling_is_found(self, tmp_path, monkeypatch):
+        (tmp_path / "top" / "sub").mkdir(parents=True)
+        (tmp_path / "top" / ".git").mkdir()
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+
+        assert pi.find_git_marker(tmp_path / "top" / "sub") == (
+            (tmp_path / "top" / ".git").resolve()
+        )
+
+    def test_a_dangling_marker_symlink_still_counts(self, tmp_path):
+        (tmp_path / "top").mkdir()
+        (tmp_path / "top" / ".git").symlink_to(tmp_path / "missing")
+
+        assert pi.find_git_marker(tmp_path / "top") is not None
+
+    def test_a_forged_pointer_at_a_ceiling_start_is_still_a_redirect(
+        self, tmp_path, monkeypatch
+    ):
+        assert_outside_repository(tmp_path)
+        victim = make_repo(tmp_path / "victim", remote="https://github.com/v/p.git")
+        forged = tmp_path / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(forged))
+
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
