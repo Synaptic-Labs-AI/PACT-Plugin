@@ -111,7 +111,9 @@ JUDGED_SHAPES = (
     "name",                 # a name, through its last binding in this function
     "annotated-binding",    # env: T = value
     "post-build-write",     # env["HOME"] = / update / setdefault / |= {"HOME": ...}
-    "strip",                # env.pop("HOME") / del env["HOME"]
+    "strip",                # env.pop("HOME") / del env["HOME"] / env.clear()
+    "merge-write",          # env.update(x) / env.update(**x) / env |= x: x decides
+    "variable-key-write",   # env[key] = / env.pop(key) / env.popitem(): unknown
     "carry-clock-shift",    # carry_clock_shift(x): x judged
     "bare-runner",          # run/Popen/... imported from subprocess, aliases included
     "asyncio-runner",       # asyncio.create_subprocess_exec / _shell
@@ -133,45 +135,71 @@ def _is_home_key(node) -> bool:
     return isinstance(node, ast.Constant) and node.value == "HOME"
 
 
+def _home_less_dict(node) -> bool:
+    """A dict literal with only constant keys, none of them HOME."""
+    return isinstance(node, ast.Dict) and None not in node.keys \
+        and all(isinstance(k, ast.Constant) for k in node.keys) \
+        and not any(_is_home_key(k) for k in node.keys)
+
+
 def _name_events(nodes) -> dict:
-    """name -> [(lineno, col, kind, value)], kind one of bind, strip, add."""
+    """name -> [(lineno, col, kind, value)] in source order.
+
+    kind: bind (value is the bound expression); add or strip (HOME written or
+    removed); maybe-add or maybe-strip (a key that might be HOME is written or
+    removed); merge (value is merged in, so HOME arrives exactly when value has
+    it).
+    """
     events: dict = {}
 
     def add(name, node, kind, value=None):
         events.setdefault(name, []).append((node.lineno, node.col_offset, kind, value))
+
+    def merged(name, node, value):
+        if isinstance(value, ast.Dict) and any(_is_home_key(k) for k in value.keys):
+            add(name, node, "add")
+        elif not _home_less_dict(value):
+            add(name, node, "merge", value)
+
+    def keyed(name, node, key, sure, maybe):
+        if _is_home_key(key):
+            add(name, node, sure)
+        elif not isinstance(key, ast.Constant):
+            add(name, node, maybe)
 
     for node in nodes:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     add(target.id, node, "bind", node.value)
-                elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) \
-                        and _is_home_key(target.slice):
-                    add(target.value.id, node, "add")
+                elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    keyed(target.value.id, node, target.slice, "add", "maybe-add")
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
                 and node.value is not None:
             add(node.target.id, node, "bind", node.value)
         elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) \
-                and isinstance(node.op, ast.BitOr) and isinstance(node.value, ast.Dict) \
-                and any(_is_home_key(k) for k in node.value.keys):
-            add(node.target.id, node, "add")
+                and isinstance(node.op, ast.BitOr):
+            merged(node.target.id, node, node.value)
         elif isinstance(node, ast.Delete):
             for target in node.targets:
-                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) \
-                        and _is_home_key(target.slice):
-                    add(target.value.id, node, "strip")
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    keyed(target.value.id, node, target.slice, "strip", "maybe-strip")
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and isinstance(node.func.value, ast.Name):
             name, method = node.func.value.id, node.func.attr
-            if method == "pop" and node.args and _is_home_key(node.args[0]):
+            if method == "pop" and node.args:
+                keyed(name, node, node.args[0], "strip", "maybe-strip")
+            elif method == "popitem":
+                add(name, node, "maybe-strip")
+            elif method == "clear":
                 add(name, node, "strip")
-            elif method == "setdefault" and node.args and _is_home_key(node.args[0]):
-                add(name, node, "add")
-            elif method == "update" and (
-                    any(k.arg == "HOME" for k in node.keywords)
-                    or any(isinstance(a, ast.Dict) and any(_is_home_key(k) for k in a.keys)
-                           for a in node.args)):
-                add(name, node, "add")
+            elif method == "setdefault" and node.args:
+                keyed(name, node, node.args[0], "add", "maybe-add")
+            elif method == "update":
+                if any(k.arg == "HOME" for k in node.keywords):
+                    add(name, node, "add")
+                for value in [*node.args, *(k.value for k in node.keywords if k.arg is None)]:
+                    merged(name, node, value)
     for entries in events.values():
         entries.sort(key=lambda entry: entry[:2])
     return events
@@ -196,8 +224,19 @@ def _verdict_at(node, events: dict, at: tuple, seen: frozenset = frozenset()) ->
         if (node.id, line, col) in seen:
             return UNKNOWN
         verdict = _verdict_at(value, events, (line, col), seen | {(node.id, line, col)})
-        for _line, _col, kind, _value in before[binds[-1] + 1:]:
-            verdict = HAS if kind == "add" else LACKS
+        for line, col, kind, value in before[binds[-1] + 1:]:
+            if kind == "add":
+                verdict = HAS
+            elif kind == "strip":
+                verdict = LACKS
+            elif kind == "maybe-add":
+                verdict = HAS if verdict == HAS else UNKNOWN
+            elif kind == "maybe-strip":
+                verdict = LACKS if verdict == LACKS else UNKNOWN
+            elif kind == "merge":
+                merged = _verdict_at(value, events, (line, col), seen)
+                verdict = HAS if HAS in (verdict, merged) else \
+                    UNKNOWN if UNKNOWN in (verdict, merged) else LACKS
         return verdict
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
         sides = {_verdict_at(node.left, events, at, seen),
@@ -325,10 +364,15 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
     show none (a spread of anything not shown to carry HOME counts as lacking
     it); a `|` of two lacking sides. A NAME is judged by its last binding
     (`=` or an annotated `x: T = v`) before the call in the same function, then
-    by every later write before the call, in line order: `env["HOME"] = `,
-    `env.update(HOME=...)` or `env.update({"HOME": ...})`, `env.setdefault("HOME",
-    ...)` and `env |= {"HOME": ...}` make it HAS; `env.pop("HOME")` and
-    `del env["HOME"]` make it LACKS. carry_clock_shift(x) is judged as x.
+    by every later write before the call, in line order. `env["HOME"] = `,
+    `env.update(HOME=...)`, `env.setdefault("HOME", ...)` and a merge of
+    something that has HOME (`env.update(x)`, `env.update(**x)`, `env |= x`)
+    make it HAS. `env.pop("HOME")`, `del env["HOME"]` and `env.clear()` make it
+    LACKS. A write or removal whose key is not a constant (`env[key] = v`,
+    `env.pop(key)`, `env.popitem()`), and a merge of something unjudged, make
+    it UNKNOWN unless the verdict already rules it out. A write of another
+    constant key, or a merge of a dict with no HOME key, changes nothing.
+    carry_clock_shift(x) is judged as x.
 
     EVERY OTHER SHAPE IS UNJUDGED AND PASSED. Examples: a helper call
     (`_env(root)`, `world.env()`); a name with no binding before the call in
@@ -356,7 +400,7 @@ def _verdict(source: str, scope_source: str = "") -> str:
     is `scope_source`; it goes through _env_judgements, the scan's own path."""
     module = ast.parse(f"def probe(param):\n{textwrap.indent(scope_source or 'pass', '    ')}\n"
                        f"    subprocess.run([], env={source})\n")
-    call_line = len(module.body[0].body) + 1
+    call_line = module.body[0].body[-1].lineno
     found = [verdict for line, verdict in _env_judgements(module) if line == call_line]
     assert len(found) == 1, found
     return found[0]
@@ -408,6 +452,27 @@ def _verdict(source: str, scope_source: str = "") -> str:
     ("env", "env = dict(os.environ)\nenv.pop('HOME')\nenv['HOME'] = '/h'", HAS),
     ("env", "env = {'PATH': '/bin'}\nenv['HOME'] = '/h'\nenv.pop('HOME')", LACKS),
     ("env", "env = {'PATH': '/bin'}\nenv['X'] = '1'", LACKS),
+    # Merges, clear() and writes whose key is not a constant.
+    ("env", "env = {'PATH': '/bin'}\nenv.update(os.environ)", HAS),
+    ("env", "env = {'PATH': '/bin'}\nenv.update(dict(os.environ))", HAS),
+    ("env", "env = {'PATH': '/bin'}\nenv.update(**os.environ)", HAS),
+    ("env", "env = {'PATH': '/bin'}\nenv |= os.environ", HAS),
+    ("env", "base = dict(os.environ)\nenv = {'PATH': '/bin'}\nenv.update(base)", HAS),
+    ("env", "env = {'PATH': '/bin'}\nenv.update(param)", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nenv |= param", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nenv.update({'X': '1'})", LACKS),
+    ("env", "env = dict(os.environ)\nenv.update({'X': '1'})", HAS),
+    ("env", "env = {'PATH': '/bin'}\nenv.update(param)\nenv['HOME'] = '/h'", HAS),
+    ("env", "env = {'PATH': '/bin'}\nfor k in ('HOME', 'PATH'):\n    env[k] = os.environ[k]",
+     UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nenv[key] = '/h'", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nenv.setdefault(key, '/h')", UNKNOWN),
+    ("env", "env = dict(os.environ)\nenv[key] = '/h'", HAS),
+    ("env", "env = {'PATH': '/bin', 'HOME': '/h'}\nenv.clear()", LACKS),
+    ("env", "env = dict(os.environ)\nenv.pop(key)", UNKNOWN),
+    ("env", "env = dict(os.environ)\ndel env[key]", UNKNOWN),
+    ("env", "env = dict(os.environ)\nenv.popitem()", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nenv.pop(key)", LACKS),
     # Unions and annotated assignments.
     ("{'X': '1'} | {'HOME': '/h'}", "", HAS),
     ("os.environ | {'X': '1'}", "", HAS),
@@ -493,6 +558,10 @@ _SHAPE_ROWS = {
                          "    subprocess.run([], env=e)\n", HAS),
     "strip": ("def t():\n    e = dict(os.environ)\n    e.pop('HOME')\n"
               "    subprocess.run([], env=e)\n", LACKS),
+    "merge-write": ("def t():\n    e = {'X': '1'}\n    e.update(os.environ)\n"
+                    "    subprocess.run([], env=e)\n", HAS),
+    "variable-key-write": ("def t(k):\n    e = {'X': '1'}\n    e[k] = '1'\n"
+                           "    subprocess.run([], env=e)\n", UNKNOWN),
     "carry-clock-shift": ("def t():\n    e = {'X': '1'}\n"
                           "    subprocess.run([], env=carry_clock_shift(e))\n", LACKS),
     "bare-runner": ("from subprocess import run as go\n\n\ndef t():\n"
