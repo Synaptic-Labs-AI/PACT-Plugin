@@ -48,6 +48,21 @@ os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
 os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
 
+# NO HYPOTHESIS EXAMPLE DATABASE, AND NO HYPOTHESIS STORAGE IN THE TREE.
+# Hypothesis otherwise saves failing examples under .hypothesis/ in the working
+# directory and replays them in later runs, so one run's outcome would depend on
+# what an earlier run left there. With the database off it still writes a
+# constants cache under the same directory, so its storage moves to the session
+# HOME; children inherit the variable.
+os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = os.path.join(_SESSION_HOME_DIR, ".hypothesis")
+try:
+    from hypothesis import settings as _hypothesis_settings
+except ImportError:
+    _hypothesis_settings = None
+else:
+    _hypothesis_settings.register_profile("pact-suite", database=None)
+    _hypothesis_settings.load_profile("pact-suite")
+
 # Add tests directory to path for helpers + fixtures module imports
 sys.path.insert(0, str(Path(__file__).parent))
 
