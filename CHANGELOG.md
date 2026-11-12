@@ -40,7 +40,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 
 ### Corrected during review
 
-- `project-id rekey` no longer initialises an uninitialised store during a dry run, refuses a caller-owned transaction, reports an empty source bucket as `from_bucket_empty`, and splits `null_project_rows` into `null_project_memories` and `null_project_files`.
+- `project-id rekey` no longer initialises an uninitialised store during a dry run, refuses a caller-owned transaction, reports an empty source bucket as `from_bucket_empty`, and splits `null_project_rows` into `null_project_memories` and `null_project_files`, which it reports on a no-op too. An error that makes SQLite roll the transaction back on its own, in either the row or the vector leg, now surfaces as that error rather than as a cleanup error.
 
 ### Why
 

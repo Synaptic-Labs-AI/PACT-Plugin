@@ -1287,8 +1287,13 @@ def count_project_memories(conn: sqlite3.Connection, project_id: str) -> int:
     One indexed COUNT (`idx_memories_project`), used by the resolver's
     two-count decision. A NULL-project row is not this project's row and is
     not counted, exactly as a scoped read excludes it.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
     """
-    ensure_initialized(conn)
     cursor = conn.execute(
         "SELECT COUNT(*) FROM memories WHERE project_id = ?",
         (project_id,),
@@ -1306,13 +1311,44 @@ def project_bucket_counts(conn: sqlite3.Connection) -> Dict[str, int]:
     NULL is excluded by construction: it is a real bucket in the store but
     never a project scope, and `IN (NULL)` never matches, so surfacing it as
     a candidate would produce a filter that silently selects nothing.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
     """
-    ensure_initialized(conn)
     cursor = conn.execute(
         "SELECT project_id, COUNT(*) AS n FROM memories "
         "WHERE project_id IS NOT NULL GROUP BY project_id"
     )
-    return {row["project_id"]: row["n"] for row in cursor.fetchall()}
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+def bucket_session_ids(conn: sqlite3.Connection, project_id: str) -> List[str]:
+    """Every session id that wrote a memory into `project_id`, newest first.
+
+    The legacy-admission evidence check reads this: a session that wrote into
+    the bucket and whose recorded project directory is this repository is
+    evidence the bucket belongs here. NULL and empty session ids are
+    excluded, because no session record can be found for them. Ordered by
+    each session's most recent memory (newest first, ties by id), so a caller
+    that stops at the first hit tries the sessions most likely to still have
+    a record on disk.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
+    """
+    cursor = conn.execute(
+        "SELECT session_id FROM memories "
+        "WHERE project_id = ? AND session_id IS NOT NULL AND session_id != '' "
+        "GROUP BY session_id ORDER BY MAX(created_at) DESC, session_id",
+        (project_id,),
+    )
+    return [row[0] for row in cursor.fetchall()]
 
 
 LEGACY_PLAUSIBLE_VERIFIED = "verified"
@@ -1402,8 +1438,13 @@ def legacy_candidate_plausibility(
     rather than being read on the strength of a row nobody can judge. The write
     seam (`graph.track_file`) refuses a NUL path so such rows cannot be created
     in the first place; this is the read-side backstop for rows already stored.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
     """
-    ensure_initialized(conn)
     cursor = conn.execute(
         "SELECT path FROM files WHERE project_id = ?",
         (candidate_id,),
@@ -1572,6 +1613,16 @@ def rekey_project(
             "SELECT 1 FROM files WHERE project_id = ? LIMIT 1", (from_id,)
         ).fetchone() is None
     )
+
+    # TAKEN BEFORE THE NO-OP RETURN, so every outcome reports the store's
+    # NULL rows. They are never moved, so the count is the same before and
+    # after the move.
+    counters["null_project_memories"] = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project_id IS NULL"
+    ).fetchone()[0]
+    counters["null_project_files"] = conn.execute(
+        "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
+    ).fetchone()[0]
 
     if from_id == to_id:
         return counters
@@ -1753,13 +1804,6 @@ def rekey_project(
             # The table exists but cannot be opened, so a delete is impossible
             # too. Leave every row where it is; the catch-up repairs them.
             counters["vectors_pending"] = len(moved_ids)
-
-        counters["null_project_memories"] = conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE project_id IS NULL"
-        ).fetchone()[0]
-        counters["null_project_files"] = conn.execute(
-            "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
-        ).fetchone()[0]
 
         if dry_run:
             conn.execute(f"ROLLBACK TO {savepoint}")

@@ -12,6 +12,11 @@ The rekey is the only row-rewriting surface in the memory store
 - every counter key is always present, NULL-project rows are reported per
   table, and an empty source bucket is reported as such.
 
+It also pins the identity READ primitives beside it (`count_project_memories`,
+`project_bucket_counts`, `bucket_session_ids`, `legacy_candidate_plausibility`
+and `graph.count_project_file_paths`): they never run the write-path
+initialiser, so a read-only probe cannot attempt DDL through them.
+
 Each arm names the defect it would catch. Every store is a scratch file under
 pytest's `tmp_path`.
 """
@@ -20,8 +25,18 @@ from __future__ import annotations
 
 import pytest
 from helpers import create_test_schema
-from scripts.database import rekey_project
+from scripts.database import (
+    bucket_session_ids,
+    count_project_memories,
+    legacy_candidate_plausibility,
+    project_bucket_counts,
+    rekey_project,
+)
 from scripts.database import sqlite3 as db_sqlite3
+from scripts.graph import count_project_file_paths
+
+from scripts import database as db
+from scripts import graph
 
 CANONICAL = "github.com/syn-labs/pact-plugin"
 LEGACY = "PACT-prompt"
@@ -163,12 +178,18 @@ class TestAFailureKeepsItsOwnError:
     def test_a_statement_that_rolls_sqlite_back_propagates_as_itself(
         self, tmp_path, dry_run
     ):
-        """Catches cleanup that replaces the real error.
+        """Catches cleanup that replaces the real error, and a partial move.
 
         `RAISE(ROLLBACK, ...)` makes SQLite end the whole transaction itself,
-        so the savepoint the cleanup would roll back to no longer exists. RED
-        WHEN the cleanup runs unguarded: the caller then sees "no such
-        savepoint" instead of the trigger's error.
+        so the savepoint the cleanup would roll back to no longer exists.
+
+        The two cases pin different things. `[True]` (dry run) is RED WHEN
+        the outer cleanup runs unguarded: `ROLLBACK TO` the vanished
+        savepoint raises "no such savepoint" instead of the trigger's error.
+        `[False]` (apply) cannot red on that guard, because
+        `conn.rollback()` with no open transaction is a no-op; it pins only
+        that the apply's failure propagates as itself and leaves no partial
+        move (RED WHEN a memory row stays moved).
         """
         path, conn = _store(tmp_path)
         _memory(conn, "m0", LEGACY)
@@ -190,7 +211,88 @@ class TestAFailureKeepsItsOwnError:
             conn.close()
 
 
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_a_vector_move_that_rolls_sqlite_back_propagates_as_itself(
+        self, tmp_path, dry_run
+    ):
+        """Catches the per-vector cleanup masking an error that ended the move.
+
+        The vector leg wraps each memory in its own savepoint and, on a
+        failure, rolls back to it and reports the vector pending. When the
+        failure has already made SQLite roll the WHOLE transaction back, that
+        savepoint is gone: the move is undone, so the loop must stop and the
+        original error must propagate. The connection below issues a real
+        `ROLLBACK` and then raises inside the vector INSERT. RED WHEN the
+        `if not conn.in_transaction: raise` guard in the vector loop is
+        removed: `ROLLBACK TO rekey_vector` then raises "no such savepoint"
+        and replaces the injected error.
+        """
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        if not db.SQLITE_EXTENSIONS_ENABLED:
+            pytest.skip("this sqlite3 build cannot load extensions")
+
+        class RollingBackConnection(db_sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql.startswith("INSERT INTO vec_memories"):
+                    super().execute("ROLLBACK")
+                    raise db_sqlite3.OperationalError("injected vector failure")
+                return super().execute(sql, *args)
+
+        path = tmp_path / "vectors.db"
+        conn = db_sqlite3.connect(str(path), factory=RollingBackConnection)
+        conn.row_factory = db_sqlite3.Row
+        create_test_schema(conn)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_memories USING vec0("
+            "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
+            "embedding float[3])"
+        )
+        _memory(conn, "m0", LEGACY)
+        db_sqlite3.Connection.execute(
+            conn,
+            "INSERT INTO vec_memories (memory_id, project_id, embedding) "
+            "VALUES (?, ?, ?)",
+            ("m0", LEGACY, sqlite_vec.serialize_float32([0.1, 0.2, 0.3])),
+        )
+        conn.commit()
+        try:
+            with pytest.raises(
+                db_sqlite3.OperationalError, match="injected vector failure"
+            ):
+                rekey_project(conn, LEGACY, CANONICAL, dry_run=dry_run)
+            assert not conn.in_transaction
+            assert _projects(conn) == [("m0", LEGACY)], (
+                "the vector failure ended the transaction, but the move "
+                "continued or partly committed"
+            )
+        finally:
+            conn.close()
+
+
 class TestTheCounters:
+    def test_a_no_op_still_reports_the_null_project_rows(self, tmp_path):
+        """Catches NULL counts that read 0 on the no-op path.
+
+        `from_id == to_id` returns before any move, and the NULL counts used
+        to be taken only after the move, so a no-op reported 0 whatever the
+        store held. RED WHEN the counts move back after the no-op return.
+        """
+        _path, conn = _store(tmp_path)
+        _memory(conn, "m0", LEGACY)
+        _memory(conn, "n1", None)
+        _file(conn, "fn", "src/null.py", None)
+        conn.commit()
+        try:
+            counters = rekey_project(conn, LEGACY, LEGACY, dry_run=False)
+        finally:
+            conn.close()
+        assert counters["null_project_memories"] == 1
+        assert counters["null_project_files"] == 1
+        assert counters["memories"] == 0
+
     def test_every_key_is_present_on_an_apply_and_on_a_no_op(self, tmp_path):
         """Catches a counter that appears only on some outcomes.
 
@@ -298,3 +400,87 @@ class TestTheCounters:
         assert counters["files_conflicted"] == 1
         assert counters["links_repointed"] == 1
         assert links == [("m0", "in-place"), ("m1", "in-place"), ("m2", "target")]
+
+
+class TestIdentityReadPrimitivesNeverInitialise:
+    """The identity read primitives run against read-only probes, so they must
+    never call the write-path initialiser. Their precondition is a present
+    schema, and on a schema-less store they raise instead of attempting DDL.
+    """
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda conn: count_project_memories(conn, LEGACY), id="count_project_memories"),
+            pytest.param(project_bucket_counts, id="project_bucket_counts"),
+            pytest.param(lambda conn: bucket_session_ids(conn, LEGACY), id="bucket_session_ids"),
+            pytest.param(
+                lambda conn: legacy_candidate_plausibility(conn, LEGACY, "/tmp"),
+                id="legacy_candidate_plausibility",
+            ),
+            pytest.param(lambda conn: count_project_file_paths(conn, LEGACY), id="count_project_file_paths"),
+        ],
+    )
+    def test_a_schema_less_store_raises_and_is_not_written(
+        self, tmp_path, monkeypatch, call
+    ):
+        """Catches a primitive that initialises the store it is reading.
+
+        Measured before the fix: `project-id show` printed "Could not create
+        vector table" six times and loaded the embedding service six times,
+        once per primitive, because each one re-ran `ensure_initialized`.
+        RED WHEN a primitive calls the initialiser again: the spy records the
+        call, and on this read-only 0-byte store the initialiser's DDL would
+        be refused with a READONLY error instead of the missing-table error
+        this arm expects.
+        """
+        initialiser_calls = []
+        monkeypatch.setattr(
+            db, "ensure_initialized", lambda conn: initialiser_calls.append(conn)
+        )
+        monkeypatch.setattr(
+            graph, "ensure_initialized", lambda conn: initialiser_calls.append(conn)
+        )
+        path = tmp_path / "empty.db"
+        path.write_bytes(b"")
+        conn = db_sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn.row_factory = db_sqlite3.Row
+        try:
+            with pytest.raises(db_sqlite3.OperationalError, match="no such table"):
+                call(conn)
+        finally:
+            conn.close()
+        assert initialiser_calls == []
+        assert path.stat().st_size == 0
+
+
+class TestBucketSessionIds:
+    def test_every_writing_session_is_listed_newest_first_and_scoped(self, tmp_path):
+        """Catches an evidence list that is unscoped, unordered or carries
+        sessions no record can be found for.
+
+        RED WHEN another bucket's session appears, a NULL or empty session id
+        is returned, a session repeats, or the order is not newest first.
+        """
+        _path, conn = _store(tmp_path)
+        rows = [
+            ("a1", LEGACY, "old-session", "2026-01-01T00:00:00+00:00"),
+            ("a2", LEGACY, "new-session", "2026-03-01T00:00:00+00:00"),
+            ("a3", LEGACY, "old-session", "2026-02-01T00:00:00+00:00"),
+            ("a4", LEGACY, None, "2026-04-01T00:00:00+00:00"),
+            ("a5", LEGACY, "", "2026-04-02T00:00:00+00:00"),
+            ("b1", "other", "foreign-session", "2026-05-01T00:00:00+00:00"),
+        ]
+        for memory_id, project, session, created in rows:
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, 'c', ?, ?, ?, ?)",
+                (memory_id, project, session, created, created),
+            )
+        conn.commit()
+        try:
+            assert bucket_session_ids(conn, LEGACY) == ["new-session", "old-session"]
+            assert bucket_session_ids(conn, "no-such-bucket") == []
+        finally:
+            conn.close()

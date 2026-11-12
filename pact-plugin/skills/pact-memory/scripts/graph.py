@@ -1036,9 +1036,13 @@ def count_project_file_paths(
     two buckets shared no files.
 
     `None` is the whole store; an empty scope is zero.
-    """
-    ensure_initialized(conn)
 
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the `files` table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
+    """
     scopes = normalise_project_scopes(project_id)
     if scopes is None:
         return conn.execute("SELECT COUNT(DISTINCT path) FROM files").fetchone()[0]

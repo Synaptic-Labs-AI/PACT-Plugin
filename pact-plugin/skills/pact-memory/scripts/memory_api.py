@@ -547,6 +547,10 @@ def read_project_bucket_census(store: str) -> Dict[str, int]:
 
     try:
         with closing(_read_only_connection(store)) as connection:
+            # NO SCHEMA, NO BUCKETS. `project_bucket_counts` requires the
+            # schema and never creates it, so the census checks first.
+            if not _connection_has_memories_table(connection):
+                return {}
             return project_bucket_counts(connection)
     except sqlite3.OperationalError as exc:
         if not _read_only_store_unavailable(exc, store):
