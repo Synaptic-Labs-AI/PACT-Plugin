@@ -2789,8 +2789,8 @@ class TestSearchWindowContainment:
     the query, `search` silently falls back to keyword text search, which
     never returns the zero-overlap target: the default-window arm would then
     fail as a missing target, which reads as a search defect. The seed must
-    therefore store a vector for every record, and the child must report a
-    usable embedding service before it searches. Either failing fails the arm
+    therefore store a vector for every record, and the CLI child's own cold
+    start must produce a usable embedding service. Either failing fails the arm
     with that cause named.
     """
 
@@ -2798,29 +2798,37 @@ class TestSearchWindowContainment:
     FILLERS = 10
     VECTOR_PATH_MARKER = "PACT_VECTOR_PATH="
 
-    # Runs IN THE CLI CHILD, before the real CLI entry point. It warms the
-    # embedding service in the same process the search then runs in (the
-    # service is a per-process singleton), and reports on stderr whether the
-    # vector path is usable: extensions enabled, sqlite_vec importable, and a
-    # query embedding produced. The CLI itself then runs unchanged as
-    # `__main__` with its own argv.
-    _CHILD_PRELUDE = (
+    # Runs IN THE CLI CHILD and WRAPS the real CLI entry point without warming
+    # anything, so the search's own first embedding is the cold start a user's
+    # fresh process makes. After the CLI exits it reports, from the same
+    # process, whether that cold start produced a usable embedding service
+    # (the per-process singleton the CLI's search created) with extensions
+    # enabled. `prewarmed` means something loaded the service before the CLI
+    # ran, which would make the arm measure the wrapper instead of the CLI.
+    _CHILD_WRAPPER = (
         "import runpy, sys\n"
         "from pathlib import Path\n"
         "cli = sys.argv[1]\n"
         "sys.path.insert(0, str(Path(cli).resolve().parent.parent))\n"
         "from scripts import database, embeddings\n"
-        "try:\n"
-        "    import sqlite_vec  # noqa: F401\n"
-        "    vec = True\n"
-        "except ImportError:\n"
-        "    vec = False\n"
-        "ready = (database.SQLITE_EXTENSIONS_ENABLED and vec\n"
-        "         and embeddings.generate_embedding('vector path probe') is not None)\n"
-        "sys.stderr.write('PACT_VECTOR_PATH=' + ('ready' if ready else 'unavailable') + '\\n')\n"
-        "sys.stderr.flush()\n"
+        "cold = embeddings._service is None\n"
         "sys.argv = sys.argv[1:]\n"
-        "runpy.run_path(cli, run_name='__main__')\n"
+        "code = 0\n"
+        "try:\n"
+        "    runpy.run_path(cli, run_name='__main__')\n"
+        "except SystemExit as exc:\n"
+        "    code = exc.code\n"
+        "service = embeddings._service\n"
+        "if not cold:\n"
+        "    state = 'prewarmed'\n"
+        "elif (service is not None and service.is_available()\n"
+        "      and database.SQLITE_EXTENSIONS_ENABLED):\n"
+        "    state = 'ready'\n"
+        "else:\n"
+        "    state = 'unavailable'\n"
+        "sys.stderr.write('PACT_VECTOR_PATH=' + state + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "raise SystemExit(code)\n"
     )
 
     def _seed(self, db_path):
@@ -2855,7 +2863,7 @@ class TestSearchWindowContainment:
 
     def _search(self, cli_script_path, db_path, *extra):
         result = subprocess.run(
-            [sys.executable, "-c", self._CHILD_PRELUDE, cli_script_path,
+            [sys.executable, "-c", self._CHILD_WRAPPER, cli_script_path,
              "search", self.FILLER_QUERY, "--db-path", str(db_path), *extra],
             capture_output=True, text=True, timeout=300,
         )
@@ -2865,8 +2873,10 @@ class TestSearchWindowContainment:
             if line.startswith(self.VECTOR_PATH_MARKER)
         ]
         assert markers == [self.VECTOR_PATH_MARKER + "ready"], (
-            "vector search unavailable in the CLI child, so its search fell "
-            "back to keyword text search and the window cannot be measured: "
+            "the CLI child's own cold start did not give it a vector path "
+            "(`unavailable`: its search fell back to keyword text search; "
+            "`prewarmed`: something loaded the service first), so the window "
+            "cannot be measured: "
             f"markers {markers!r}, stderr {result.stderr!r}"
         )
         return json.loads(result.stdout)["result"]
