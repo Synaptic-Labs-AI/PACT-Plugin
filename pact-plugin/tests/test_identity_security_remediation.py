@@ -878,6 +878,39 @@ class TestSaveIngressRejectsNulFilePaths:
                 check.close()
         assert rows == 0, f"the refused save left {rows} memory row(s)"
 
+    def test_a_NUL_FREE_bytes_path_is_refused_before_any_row(self, tmp_path):
+        """Catches a revert to decode-then-check: a NUL-free bytes path passes
+        a NUL test either way, so only this arm distinguishes "refused the
+        type" from "decoded it and let the original bytes through" — measured
+        under the old handling: 1 memory row, 0 file rows."""
+        import sqlite3
+
+        import scripts.memory_api as memory_api
+
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
+        with pytest.raises(ValueError) as caught:
+            memory.save(
+                {"context": "nul-free bytes"},
+                files=[b"/tmp/ok.py"],
+                sync_to_claude=False,
+            )
+        assert "must be str, not bytes" in str(caught.value)
+        rows = 0
+        if store.exists():
+            check = sqlite3.connect(str(store))
+            try:
+                found = check.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='memories'"
+                ).fetchone()
+                if found:
+                    rows = check.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                check.close()
+        assert rows == 0, f"the refused save left {rows} memory row(s)"
+
     def test_a_bytes_path_with_a_nul_is_refused_before_any_row(self, tmp_path):
         """Catches `str(b'bad\\x00.py')`, which renders the NUL as an ESCAPE
         and so slipped past a character check on `str(...)`; measured: the
