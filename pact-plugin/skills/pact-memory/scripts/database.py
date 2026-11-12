@@ -307,7 +307,6 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         # Enable WAL mode for corruption prevention and better concurrency
         conn.execute("PRAGMA journal_mode=WAL")
 
-
     # Harden WAL sidecar files on first creation (avoids a redundant syscall
     # on every connection). For a NEW store the WAL pragma above is what will
     # create them on the first write; `init_schema` also hardens after its own
@@ -2168,7 +2167,7 @@ def update_memory(
     # SAME R2 INGRESS AS create_memory, FOR THE SAME REASON: a supplied
     # project id replaces the stored TEXT and must obey the 255 cap and the
     # control/surrogate rule. An explicit None keeps its de-key meaning at
-    # THIS layer; the API layer refuses it upstream (#1719), so a library
+    # THIS layer; the API layer refuses it upstream, so a library
     # caller that reaches here with None has asked for a change the layer
     # below is allowed to make.
     supplied_project = updates.get("project_id")
