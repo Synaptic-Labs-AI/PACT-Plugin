@@ -36,6 +36,7 @@ The full suite can now be run in a shuffled order on demand, and only on demand:
 - Teammates and the cold reviewer record the HEAD and the worktree status immediately before and after each test run they report. If either changed during the run, the result is re-run or reported as unattributable, not as a pass or a failure of the change.
 - The embedding catch-up test loader no longer evicts the real `scripts.embeddings` and `scripts.embedding_catchup` modules, so a test that runs after it on the same worker patches the same module object the code under test uses.
 - The two gate-reload test modules restore the inline-mission and dispatch-variety mode variables to their prior values at teardown instead of deleting them, so an exported mode no longer vanishes for every later test on the worker.
+- The mint-matrix corpus and the Cat-2 name count read only git-tracked files, so an untracked file in a working tree (a probe another worker planted, a local draft) can no longer add rows or mask a dropped name. A reviewed reach entry in `scripts/fast_suite_exclusions.json` keeps the fast suite re-selecting the mint matrix when a test module changes.
 
 ### Why
 

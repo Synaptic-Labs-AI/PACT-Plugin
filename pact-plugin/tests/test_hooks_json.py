@@ -686,16 +686,23 @@ class TestCat2PreservationBaseline:
     )
     _BASELINE = 551
 
-    def test_cat2_total_at_or_above_baseline(self):
+    @staticmethod
+    def _cat2_total(repo_root):
+        """Count Cat-2 names across the TRACKED files under pact-plugin/.
+
+        Tracked only: an untracked file in a working tree (a probe another
+        worker planted, a local draft) must not raise the count and mask a
+        real drop.
+        """
         import re
-        plugin_dir = Path(__file__).parent.parent
+        from fixtures.tracked_files import tracked_files
+
+        plugin_dir = Path(repo_root) / "pact-plugin"
         pattern = re.compile(
             r"\b(?:TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput)\b"
         )
         total = 0
-        for path in plugin_dir.rglob("*"):
-            if not path.is_file():
-                continue
+        for path in tracked_files(repo_root, "pact-plugin"):
             # Skip binary-ish / vendored paths.
             if any(part.startswith(".") for part in path.relative_to(plugin_dir).parts):
                 continue
@@ -704,6 +711,10 @@ class TestCat2PreservationBaseline:
             except (UnicodeDecodeError, OSError):
                 continue
             total += sum(1 for _ in pattern.finditer(text))
+        return total
+
+    def test_cat2_total_at_or_above_baseline(self):
+        total = self._cat2_total(Path(__file__).resolve().parent.parent.parent)
         assert total >= self._BASELINE, (
             f"Cat-2 preservation regression (#662): grep total {total} < "
             f"baseline {self._BASELINE}. The Cat-1 rename Task→Agent MUST "
@@ -711,3 +722,16 @@ class TestCat2PreservationBaseline:
             f"a TaskCreate/TaskUpdate/TaskList/TaskGet/TaskStop/TaskOutput "
             f"reference."
         )
+
+    def test_cat2_total_counts_only_tracked_files(self, tmp_path):
+        import subprocess
+
+        plugin = tmp_path / "pact-plugin"
+        plugin.mkdir()
+        (plugin / "tracked.py").write_text('NAME = "TaskCreate"\n')
+        (plugin / "untracked.py").write_text('NAME = "TaskCreate"\n')
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/tracked.py"],
+                       cwd=tmp_path, check=True)
+
+        assert self._cat2_total(tmp_path) == 1

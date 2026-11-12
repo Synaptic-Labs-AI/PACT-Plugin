@@ -5,7 +5,8 @@ Summary: The differential property between the pre-hook and the mint: every comm
          mints a token for, and the pre-hook must then accept that token for that
          exact command. A refused command no click can mint blocks a faithful
          approval for good.
-Used by: pytest. The rows are every git/gh string literal in the test suite, shell
+Used by: pytest. The rows are every git/gh string literal in the tracked test-suite
+         files (untracked files in a working tree are not rows), shell
          nestings of -c, eval, substitution and heredoc around a guarded command (all
          two-level nestings and a covering set of three-level ones, escaped and
          unescaped), and the review matrices of heredoc, substitution and nested
@@ -17,8 +18,10 @@ Used by: pytest. The rows are every git/gh string literal in the test suite, she
 
 import ast
 import itertools
+import sys
 from pathlib import Path
 
+from fixtures.tracked_files import tracked_glob
 from merge_guard_post import _code_spans, _mint_context_from_bundle
 from merge_guard_pre import _token_matches_command
 from shared.merge_guard_common import is_compound_destructive_command, is_dangerous_command
@@ -117,8 +120,14 @@ def _prose_nodes(tree):
 
 
 def _corpus():
+    """Every git/gh string literal in the tracked .py files under _TESTS.
+
+    The walk names the module-level _TESTS anchor directly, so the fast-suite
+    detector proves its root; the arm swaps _TESTS for a rig rather than taking
+    a parameter.
+    """
     found = set()
-    for path in sorted(_TESTS.rglob("*.py")):
+    for path in tracked_glob(_TESTS, "**/*.py"):
         try:
             tree = ast.parse(path.read_text())
         except SyntaxError:
@@ -129,6 +138,23 @@ def _corpus():
                     and len(node.value) < 2000 and ("git " in node.value or "gh " in node.value):
                 found.add(node.value)
     return found
+
+
+def test_the_corpus_reads_only_tracked_test_files(tmp_path, monkeypatch):
+    """An untracked file in the tests tree, such as a probe another worker
+    planted or a stray local draft, must not become a row."""
+    import subprocess
+
+    tests = tmp_path / "pact-plugin" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "tracked_rows.py").write_text('ROW = "git x tracked"\n')
+    (tests / "untracked_rows.py").write_text('ROW = "git x untracked"\n')
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/tests/tracked_rows.py"],
+                   cwd=tmp_path, check=True)
+
+    monkeypatch.setattr(sys.modules[__name__], "_TESTS", tests)
+    assert _corpus() == {"git x tracked"}
 
 
 def _nested():
