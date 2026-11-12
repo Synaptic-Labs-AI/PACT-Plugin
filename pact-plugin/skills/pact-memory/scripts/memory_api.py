@@ -160,6 +160,9 @@ class _DetectedIdentity(NamedTuple):
     # cause, else None. `project-id show` reports it; a warning alone is
     # invisible to a caller that parses the envelope.
     decline_reason: Optional[dict] = None
+    # A FIXED sentence naming a narrower cause than the reason token
+    # (`RootIdentity.detail`), printed once in the warning and the refusal.
+    decline_detail: Optional[str] = None
     # WHAT THE PRE-CHANGE RESOLVER PRODUCED for this exact input, or None
     # where it refused. The backlog file name reads only this.
     pre_change_name: Optional[str] = None
@@ -435,7 +438,10 @@ _REDIRECT_REMEDY = (
 
 
 def _warn_declined(
-    record: Optional[dict], root: Any = None, detail: Optional[str] = None
+    record: Optional[dict],
+    root: Any = None,
+    detail: Optional[str] = None,
+    cause_detail: Optional[str] = None,
 ) -> None:
     """Log ONE decline warning with its real cause, never a generic origin claim.
 
@@ -444,7 +450,8 @@ def _warn_declined(
     and sent the operator to inspect a remote that was not the problem. The
     structured token knows the cause, so the message uses it and falls back
     to the generic sentence only when no reason was recorded. `detail` names
-    the rung's own facts (which declaration, which path).
+    the rung's own facts (which declaration, which path); `cause_detail` is
+    the decline's own fixed sentence, appended to the cause.
     """
     token = (record or {}).get("reason")
     cause = _DECLINE_CAUSES.get(token) if token else None
@@ -453,6 +460,8 @@ def _warn_declined(
             "the repository at %r has an origin remote that could not be "
             "read or represented as a project id" % (str(root),)
         )
+    if cause_detail:
+        cause = f"{cause}; {cause_detail}"
     if detail:
         cause = f"{cause} ({detail})"
     if token == "gitfile_redirect":
@@ -493,6 +502,7 @@ def _decline(
     pre_change_name: Optional[str] = None,
     override_ignored: Optional[dict] = None,
     detail: Optional[str] = None,
+    cause_detail: Optional[str] = None,
 ) -> "_DetectedIdentity":
     """THE ONE PLACE a resolver decline is built and reported.
 
@@ -501,7 +511,7 @@ def _decline(
     own label (the declared rungs do). Logs exactly one warning.
     """
     record = decline_record(reason, override_path, source)
-    _warn_declined(record, root, detail)
+    _warn_declined(record, root, detail, cause_detail)
     return _DetectedIdentity(
         project_id=None,
         source=label or "unresolved",
@@ -510,6 +520,7 @@ def _decline(
         identity_root=root,
         decline_reason=record,
         pre_change_name=pre_change_name,
+        decline_detail=cause_detail,
     )
 
 
@@ -537,6 +548,7 @@ def _decline_detected(
         legacy=legacy,
         pre_change_name=pre_change_name,
         override_ignored=identity.override_ignored,
+        cause_detail=getattr(identity, "detail", None),
     )
 
 
@@ -1640,6 +1652,7 @@ class PACTMemory:
             self._project_identity_root = None
             self._git_rung_root = None
             self._decline_reason = None
+            self._decline_detail = None
             self._legacy_suppressed = None
             self._legacy_suppressed_name = None
         else:
@@ -1668,6 +1681,7 @@ class PACTMemory:
             # on every resolution that produced an id; `{reason, override}`
             # when a rung refused a repository-chosen basename.
             self._decline_reason = detected.decline_reason
+            self._decline_detail = detected.decline_detail
             # STRUCTURED SUPPRESSION DISCLOSURE. A submodule admin dir yields
             # no legacy candidate; carry WHY and WHICH name, once, so every
             # later read can report it without another git call.
@@ -3062,6 +3076,9 @@ class PACTMemory:
         parts = []
         if reason.get("reason"):
             cause = _DECLINE_CAUSES.get(reason["reason"], reason["reason"])
+            detail = getattr(self, "_decline_detail", None)
+            if detail:
+                cause = f"{cause}; {detail}"
             parts.append(f"The {reason.get('source') or 'resolver'} rung declined: {cause}.")
         if declarations:
             parts.append("Declarations present: " + "; ".join(declarations) + ".")

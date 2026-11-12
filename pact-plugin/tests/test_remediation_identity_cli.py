@@ -101,6 +101,59 @@ class TestTheRefusalNamesTheDecision:
         assert "U+003C" not in message
 
 
+class TestAnEmptyUrlDeclineNamesItsDetailOnce:
+    """The empty-url decline's fixed detail prints once in the warning and
+    once in the refusal.
+
+    Catches the detail dropped on the way from the root identity to the
+    operator (the cause then reads as a generic unrepresentable origin), and
+    the detail appended twice by two layers.
+    """
+
+    def _repo(self, root):
+        from fixtures.identity_git import run_git
+
+        repo = make_repo(root / "proj", remote="git@a.example:o/a.git")
+        run_git("config", "--add", "remote.origin.url", "", cwd=repo)
+        return repo
+
+    def test_the_warning_and_the_refusal_each_carry_it_once(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import memory_api
+        from scripts.project_identity import EMPTY_URL_ENTRY_DETAIL
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        monkeypatch.chdir(self._repo(identity_env))
+        caplog.clear()
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1, envelope
+        assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
+        assert envelope["message"].count(EMPTY_URL_ENTRY_DETAIL) == 1, envelope
+        warnings = [r.getMessage() for r in caplog.records if "no project id was derived" in r.getMessage()]
+        assert warnings, caplog.text
+        assert all(w.count(EMPTY_URL_ENTRY_DETAIL) == 1 for w in warnings), warnings
+
+    def test_another_unrepresentable_origin_carries_no_detail(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        """Control: the detail belongs to the empty-url cause only."""
+        from scripts import memory_api
+        from scripts.project_identity import EMPTY_URL_ENTRY_DETAIL
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=UNREPRESENTABLE))
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1, envelope
+        assert "cannot be represented" in envelope["message"]
+        assert EMPTY_URL_ENTRY_DETAIL not in envelope["message"]
+        assert EMPTY_URL_ENTRY_DETAIL not in caplog.text
+
+
 class TestShowRunsNoWritePathInitialiser:
     """`project-id show` reports on a store; it never prepares one.
 

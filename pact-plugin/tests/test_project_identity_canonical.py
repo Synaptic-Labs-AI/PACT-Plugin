@@ -387,11 +387,11 @@ class TestReadOrigin:
 
 class TestDetectIdForRoot:
     def test_none_root_declines(self):
-        # FIVE fields: `decline_reason` was added as a defaulted fifth field
-        # so a caller can disclose WHY a root declined (e.g. a refused
-        # submodule basename). The decline itself is unchanged.
+        # SIX fields: `decline_reason` and `detail` are defaulted trailing
+        # fields, so a caller can disclose WHY a root declined. A bare None
+        # root has no named cause, so both stay None.
         assert pi.detect_id_for_root(None) == (
-            None, None, "declined", None, None
+            None, None, "declined", None, None, None
         )
 
     def test_no_common_dir_is_the_designed_basename_path(self, tmp_path):

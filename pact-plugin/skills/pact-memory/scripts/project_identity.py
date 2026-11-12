@@ -106,11 +106,13 @@ class OverrideRead(NamedTuple):
 
 
 class OriginRead(NamedTuple):
-    """The tri-state answer to "what does this repository's origin say?".
+    """The answer to "what does this repository's origin say?".
 
     `present`     — git answered with a configured value.
-    `absent`      — git answered, and no origin is configured (an empty value
-                    is the same thing).
+    `absent`      — git answered, and no origin is configured.
+    `empty_entry` — the url list holds an empty (or whitespace-only) value.
+                    Which url git then fetches depends on the git version,
+                    so no url in the list is the repository's identity.
     `unavailable` — git could not answer: missing, timed out, or the
                     repository's configuration could not be read.
 
@@ -138,6 +140,9 @@ class RootIdentity(NamedTuple):
     `declined` and no remedy. `source` names the rung that declined and is
     filled in by the caller, which is the only layer that knows it. Defaulted
     so the declines without a named cause keep their positional shape.
+    `detail` is a FIXED sentence (one of this module's `*_DETAIL` constants,
+    never user data) naming a narrower cause than the reason token, which the
+    resolver appends to its decline warning and refusal text. None otherwise.
     """
 
     project_id: Optional[str]
@@ -145,6 +150,14 @@ class RootIdentity(NamedTuple):
     source: str
     override_ignored: Optional[dict]
     decline_reason: Optional[dict] = None
+    detail: Optional[str] = None
+
+
+# The `detail` for an origin url list holding an empty value.
+EMPTY_URL_ENTRY_DETAIL = (
+    "its remote.origin.url list holds an empty value, so the url git uses "
+    "depends on the git version; remove the empty value"
+)
 
 
 # The three outcomes the classifier distinguishes. Collapsing any two is the
@@ -171,6 +184,7 @@ DECLINE_REASONS = frozenset(
 ORIGIN_PRESENT = "present"
 ORIGIN_ABSENT = "absent"
 ORIGIN_UNAVAILABLE = "unavailable"
+ORIGIN_EMPTY_ENTRY = "empty_entry"
 
 
 def decline_record(
@@ -739,8 +753,10 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     OUTCOME_NO_PORTABLE_ORIGIN or OUTCOME_DECLINE.
 
     - canonical: a network remote that parses under the canonical grammar.
-    - no_portable_origin: no origin, an empty value, a local path or
-      `file://`. The caller falls through to the basename.
+    - no_portable_origin: no origin, an empty or whitespace-only string, a
+      local path or `file://`. The caller falls through to the basename.
+      (An empty value inside the url list never reaches this function:
+      `read_origin` reports it as `empty_entry`, which declines.)
     - decline: a NETWORK remote that was present but cannot be a canonical id
       (a non-ASCII path, a bad port, a reserved character, a backslash, more
       than one `@`, a trailing space, or an unsupported scheme). No id is
@@ -761,13 +777,17 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
 
 
 def read_origin(root: Path) -> OriginRead:
-    """Read this repository's `origin` URL, as a tri-state.
+    """Read this repository's `origin` URL.
 
     THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` in the
     repository's own config (`.git/config` plus the files it includes),
-    which is the url git fetches from; later values are push urls. An empty
-    value clears the urls before it (git 2.46 semantics), so only the values
-    after the last empty one count, and none left is ABSENT.
+    which is the url git fetches from; later values are push urls.
+
+    A LIST HOLDING AN EMPTY OR WHITESPACE-ONLY VALUE IS `empty_entry`, AND
+    THE CALLER DECLINES IT, whatever the git version. Git 2.46 reads an
+    empty value as clearing the urls before it, and earlier versions do not
+    (measured on 2.43: `[A, "", B]` fetches A, where 2.46 fetches B). Taking
+    either reading would give one repository two ids on two machines.
 
     Global, system and environment config (`GIT_CONFIG_COUNT`/`KEY_n`/
     `VALUE_n`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG`) and `config.worktree`
@@ -828,10 +848,10 @@ def read_origin(root: Path) -> OriginRead:
         return OriginRead(ORIGIN_UNAVAILABLE, None)
     # Every value is NUL-terminated, so the last piece of the split is empty.
     values = result.stdout.split(b"\0")[:-1]
-    if b"" in values:
-        values = values[len(values) - values[::-1].index(b""):]
-    if not values or not values[0].strip():
+    if not values:
         return OriginRead(ORIGIN_ABSENT, None)
+    if any(not value.strip() for value in values):
+        return OriginRead(ORIGIN_EMPTY_ENTRY, None)
     # os.fsdecode, never locale decoding: a URL may hold bytes invalid in
     # the locale, and UnicodeDecodeError must not escape this reader.
     return OriginRead(ORIGIN_PRESENT, os.fsdecode(values[0]))
@@ -1350,6 +1370,15 @@ def detect_id_for_root(
             "declined",
             override_ignored,
             decline_record("origin_unreadable", override_path),
+        )
+    if origin.state == ORIGIN_EMPTY_ENTRY:
+        return RootIdentity(
+            None,
+            None,
+            "declined",
+            override_ignored,
+            decline_record("origin_unrepresentable", override_path),
+            EMPTY_URL_ENTRY_DETAIL,
         )
     if origin.state == ORIGIN_ABSENT:
         if submodule_controlled:

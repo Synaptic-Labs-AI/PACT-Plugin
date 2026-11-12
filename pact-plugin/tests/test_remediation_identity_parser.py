@@ -64,20 +64,42 @@ class TestTheOriginIsTheUrlGitFetches:
 
         assert _origin_id(repo) == (CANONICAL, "included.example/o/inc")
 
-    def test_an_empty_value_clears_the_urls_before_it(self, tmp_path):
+    @pytest.mark.parametrize(
+        "urls",
+        [
+            ["git@a.example:o/a.git", "", "git@b.example:o/b.git"],
+            ["git@a.example:o/a.git", ""],
+            ["", "git@b.example:o/b.git"],
+            [""],
+            ["git@a.example:o/a.git", "   "],
+        ],
+    )
+    def test_a_url_list_holding_an_empty_value_declines(self, tmp_path, urls):
+        """git 2.46 reads an empty value as clearing the urls before it, and
+        earlier versions do not, so no url in such a list is the repository's
+        identity on every machine. It declines, with the override as the
+        remedy, and never falls back to the folder name."""
         assert_outside_repository(tmp_path)
-        repo = make_repo(tmp_path / "repo", remote="git@old.example:o/old.git")
-        _add_url(repo, "")
-        _add_url(repo, "git@new.example:o/new.git")
+        repo = make_repo(tmp_path / "repo")
+        for url in urls:
+            _add_url(repo, url)
 
-        assert _origin_id(repo) == (CANONICAL, "new.example/o/new")
+        assert pi.read_origin(repo) == pi.OriginRead(pi.ORIGIN_EMPTY_ENTRY, None)
+        identity = pi.detect_id_for_root(repo, common_dir(repo))
+        assert identity.project_id is None
+        assert identity.decline_reason == pi.decline_record(
+            "origin_unrepresentable", str(common_dir(repo) / "pact-project-id")
+        )
+        assert identity.detail == pi.EMPTY_URL_ENTRY_DETAIL
 
-    def test_an_empty_value_with_nothing_after_it_is_absent(self, tmp_path):
+    def test_only_the_empty_entry_decline_carries_a_detail(self, tmp_path):
         assert_outside_repository(tmp_path)
-        repo = make_repo(tmp_path / "repo", remote="git@old.example:o/old.git")
-        _add_url(repo, "")
+        repo = make_repo(tmp_path / "repo", remote="https://host/owner/re po")
 
-        assert pi.read_origin(repo) == pi.OriginRead(pi.ORIGIN_ABSENT, None)
+        identity = pi.detect_id_for_root(repo, common_dir(repo))
+
+        assert identity.decline_reason["reason"] == "origin_unrepresentable"
+        assert identity.detail is None
 
     def test_a_value_holding_a_newline_is_read_as_one_value(self, tmp_path):
         """A line-oriented reader would take the text before the newline as a
@@ -964,3 +986,78 @@ class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
 
         assert memory.project_id == self.VICTIM_ID
         assert memory._decline_reason is None
+
+
+class TestAnEmptyOriginUrlValueAgainstRealGit:
+    """Differential against this machine's git: which url `git fetch` really
+    contacts, beside what the identity resolves. A fake ssh records the host
+    and fails, so nothing is contacted."""
+
+    @staticmethod
+    def _fetch_target(repo: Path, tmp_path: Path):
+        import subprocess
+
+        log = tmp_path / "ssh.log"
+        fake_ssh = tmp_path / "fake-ssh"
+        fake_ssh.write_text(
+            f'#!/bin/sh\necho "$@" >> {log}\nexit 1\n', encoding="utf-8"
+        )
+        fake_ssh.chmod(0o755)
+        env = dict(os.environ, GIT_SSH_COMMAND=str(fake_ssh))
+        env.pop("GIT_DIR", None)
+        subprocess.run(
+            ["git", "-C", str(repo), "fetch", "-q", "origin"],
+            capture_output=True, timeout=30, env=env,
+        )
+        hosts = [
+            word for line in (log.read_text().splitlines() if log.exists() else [])
+            for word in line.split() if word.startswith("git@")
+        ]
+        return hosts[0] if hosts else None
+
+    def _repo(self, tmp_path, urls):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo")
+        for url in urls:
+            _add_url(repo, url)
+        run_git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*",
+                cwd=repo)
+        return repo
+
+    @staticmethod
+    def _git_version() -> tuple:
+        import subprocess
+
+        words = subprocess.run(
+            ["git", "--version"], capture_output=True, text=True, timeout=30
+        ).stdout.split()
+        return tuple(int(part) for part in words[2].split(".")[:2])
+
+    @pytest.mark.parametrize(
+        "urls,before_2_46,from_2_46",
+        [
+            (["git@a.example:o/a.git", "", "git@b.example:o/b.git"],
+             "git@a.example", "git@b.example"),
+            (["git@a.example:o/a.git", ""], "git@a.example", None),
+        ],
+    )
+    def test_git_fetches_a_url_the_identity_declines_to_choose(
+        self, tmp_path, urls, before_2_46, from_2_46
+    ):
+        """The fetch target depends on the git version; the identity does
+        not, because it declines on every version."""
+        repo = self._repo(tmp_path, urls)
+
+        fetched = self._fetch_target(repo, tmp_path)
+        identity = pi.detect_id_for_root(repo, common_dir(repo))
+
+        expected = before_2_46 if self._git_version() < (2, 46) else from_2_46
+        assert fetched == expected
+        assert identity.project_id is None
+        assert identity.decline_reason["reason"] == "origin_unrepresentable"
+
+    def test_the_control_without_an_empty_value_matches_git(self, tmp_path):
+        repo = self._repo(tmp_path, ["git@a.example:o/a.git", "git@b.example:o/b.git"])
+
+        assert self._fetch_target(repo, tmp_path) == "git@a.example"
+        assert pi.detect_id_for_root(repo, common_dir(repo)).project_id == "a.example/o/a"
