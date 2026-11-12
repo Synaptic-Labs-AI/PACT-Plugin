@@ -295,12 +295,15 @@ def _seed_relative_bucket(store: Path, bucket: str) -> None:
         conn.commit()
 
 
-def _memory_in(monkeypatch, checkout: Path, store: Path):
+def _memory_in(monkeypatch, checkout: Path, store: Path, declared: Path = None):
     from scripts import memory_api
     from scripts.memory_api import PACTMemory
 
     monkeypatch.chdir(checkout)
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    if declared is None:
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
     memory_api._LEGACY_SCOPE_CACHE.clear()
     return PACTMemory(session_id="s", db_path=store)
 
@@ -885,3 +888,79 @@ class TestCeilingEntriesAreParsedAsGitParsesThem:
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep + str(tmp_path / "link"))
 
         assert pi.find_git_marker(tmp_path / "a" / "sub") is not None
+
+
+class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
+    """A `--separate-git-dir` repository keeps its git dir outside the
+    checkout (`vgit`, not `<checkout>/.git`), so a linked worktree's admin dir
+    is `vgit/worktrees/<wt>`. A forged `.git` FILE naming that admin dir makes
+    every git answer describe the victim, and only the victim's worktree
+    listing shows the folder is not one of its worktrees."""
+
+    VICTIM = "https://github.com/victim/repo.git"
+    VICTIM_ID = "github.com/victim/repo"
+
+    def _victim(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        checkout = tmp_path / "vrepo"
+        checkout.mkdir()
+        run_git("init", "-q", f"--separate-git-dir={tmp_path / 'vgit'}", ".", cwd=checkout)
+        run_git("config", "user.email", "t@example.invalid", cwd=checkout)
+        run_git("config", "user.name", "t", cwd=checkout)
+        (checkout / "README").write_text("seed\n", encoding="utf-8")
+        run_git("add", "README", cwd=checkout)
+        run_git("commit", "-qm", "seed", cwd=checkout)
+        run_git("remote", "add", "origin", self.VICTIM, cwd=checkout)
+        worktree = tmp_path / "vwt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "vwt", cwd=checkout)
+        admin = tmp_path / "vgit" / "worktrees" / "vwt"
+        assert (admin / "commondir").is_file()
+        delivered = tmp_path / "dl" / "repo"
+        (delivered / "sub").mkdir(parents=True)
+        (delivered / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        store = tmp_path / "m.db"
+        _seed_relative_bucket(store, self.VICTIM_ID)
+        return worktree, delivered, store
+
+    def _assert_refused(self, memory, store, monkeypatch, source):
+        from scripts import memory_api
+        from scripts.database import count_project_memories, db_connection
+        from scripts.memory_api import PACTMemory, ProjectIdentityUnresolvedError
+
+        assert memory.project_id is None
+        assert memory._decline_reason == pi.decline_record("gitfile_redirect", None, source)
+        assert tuple(memory._read_project_scopes()) == ()
+        assert memory.list(limit=10) == []
+        monkeypatch.setattr(memory_api, "_ensure_ready", lambda: None)
+        monkeypatch.setattr(PACTMemory, "_store_embedding", lambda self, *a, **k: None)
+        with pytest.raises(ProjectIdentityUnresolvedError):
+            memory.save({"context": "from the delivered checkout"}, sync_to_claude=False)
+        with db_connection(store) as conn:
+            assert count_project_memories(conn, self.VICTIM_ID) == 1
+
+    @pytest.mark.parametrize("where", ["root", "subdirectory"])
+    def test_the_delivered_checkout_binds_nothing(self, tmp_path, monkeypatch, where):
+        _worktree, delivered, store = self._victim(tmp_path)
+        cwd = delivered if where == "root" else delivered / "sub"
+        memory = _memory_in(monkeypatch, cwd, store)
+
+        self._assert_refused(memory, store, monkeypatch, "git root")
+
+    @pytest.mark.parametrize("where", ["root", "subdirectory"])
+    def test_a_declared_delivered_checkout_binds_nothing(
+        self, tmp_path, monkeypatch, where
+    ):
+        _worktree, delivered, store = self._victim(tmp_path)
+        elsewhere = tmp_path / "plain"
+        elsewhere.mkdir()
+        declared = delivered if where == "root" else delivered / "sub"
+        memory = _memory_in(monkeypatch, elsewhere, store, declared=declared)
+
+        self._assert_refused(memory, store, monkeypatch, "CLAUDE_PROJECT_DIR")
+
+    def test_the_genuine_worktree_still_resolves(self, tmp_path, monkeypatch):
+        worktree, _delivered, store = self._victim(tmp_path)
+        memory = _memory_in(monkeypatch, worktree, store)
+
+        assert memory.project_id == self.VICTIM_ID
+        assert memory._decline_reason is None
