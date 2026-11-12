@@ -304,6 +304,38 @@ def test_a_non_pytest_launch_is_untouched(census_state):
     assert census_state["misses"] == before
 
 
+def test_a_malformed_launch_that_names_no_pytest_is_left_to_its_launcher(census_state):
+    before = list(census_state["misses"])
+    with pytest.raises(TypeError):
+        subprocess.run(["true", 1], capture_output=True, timeout=60)
+    census._audit("subprocess.Popen", (None, ["true", 1], None, None))
+    census._audit("subprocess.Popen", (None, ["true"], None, {"A": 1}))
+    assert census_state["misses"] == before
+
+
+@pytest.mark.parametrize("argv,env", [
+    ([PY, "-m", "pytest", 1], None),
+    (["bash", "-c", b"pytest", 1], None),
+    (["py.test", "-q"], {"A": 1}),
+])
+def test_a_pytest_launch_the_census_cannot_read_fails_the_run_by_name(
+        census_state, argv, env):
+    before = len(census_state["misses"])
+    census._audit("subprocess.Popen", (None, argv, None, env))
+    added = census_state["misses"][before:]
+    assert len(added) == 1, added
+    assert "could not inspect a pytest launch" in added[0], added
+    assert "test_a_pytest_launch_the_census_cannot_read" in added[0], added
+
+
+def test_a_live_pytest_launch_the_census_cannot_read_is_recorded(census_state):
+    before = len(census_state["misses"])
+    with pytest.raises(TypeError):
+        subprocess.run([PY, "-m", "pytest", 1], capture_output=True, timeout=60)
+    added = census_state["misses"][before:]
+    assert len(added) == 1 and "test_a_live_pytest_launch" in added[0], added
+
+
 class _Reporter:
     def __init__(self):
         self.lines = []

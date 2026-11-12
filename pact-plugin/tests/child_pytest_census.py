@@ -58,6 +58,12 @@ worker's exit status), so a worker's finish() hands its lines to the controller
 through workeroutput, collect() gathers them as each worker goes down, and the
 controller's finish() reports and fails.
 
+A launch the census cannot read (a word or env value that is not text) is
+recorded as a fault line naming PYTEST_CURRENT_TEST and the launch, and fails
+the session, when any of its words names pytest (`pytest` or `py.test`). A
+malformed launch that names neither is left to the launcher's own error. The
+launch itself is never aborted for a fault.
+
 Blind spots:
 1. A pytest started by a shell script file or another program the census does
    not parse (`bash run.sh`, `make`). verify-gate-tree.sh is covered by the
@@ -91,6 +97,7 @@ AUTOLOAD_ENV = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 ADDOPTS_ENV = "PYTEST_ADDOPTS"
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _PYTEST_PROGRAMS = frozenset({"pytest", "py.test"})
+_PYTEST_MENTION = re.compile(r"py\.?test")
 _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
 _BLOCKING = "no:randomly"
 _LOADING = frozenset({"randomly", "pytest_randomly"})
@@ -154,11 +161,44 @@ def _audit(event, args):
     try:
         line = _miss(argv, cwd, env)
     except Exception as exc:  # a census fault must not break the launch it watches
-        _record("child pytest census could not inspect a launch: %r" % (exc,))
+        # Fail closed only where the launch could be a pytest child; a malformed
+        # launch of anything else is the launcher's own error to raise.
+        if _names_pytest(argv):
+            _record("%s: child pytest census could not inspect a pytest launch [%s]: %r" % (
+                _current_test(), _shown(argv), exc))
         return
     if line:
         _record(line)
         raise ChildPytestCensusError(line)
+
+
+def _current_test():
+    return os.environ.get("PYTEST_CURRENT_TEST") or "<outside a test>"
+
+
+def _text(item):
+    try:
+        return os.fsdecode(item)
+    except Exception:
+        return repr(item)
+
+
+def _items(argv):
+    if isinstance(argv, (str, bytes, os.PathLike)):
+        return [argv]
+    try:
+        return list(argv or ())
+    except Exception:
+        return [argv]
+
+
+def _shown(argv):
+    return " ".join(" ".join(_text(item) for item in _items(argv)).split())[:200]
+
+
+def _names_pytest(argv):
+    """True when any word of a launch the census could not judge names pytest."""
+    return any(_PYTEST_MENTION.search(_text(item)) for item in _items(argv))
 
 
 def _miss(argv, cwd, env):
@@ -172,11 +212,9 @@ def _miss(argv, cwd, env):
     for part, program, part_env in _commands(words, environment, shell_text, 0):
         start = _pytest_args(part, program)
         if start is not None and not _deterministic(part[start:], part_env):
-            current = os.environ.get("PYTEST_CURRENT_TEST") or "<outside a test>"
-            shown = " ".join(" ".join(words).split())[:200]
             where = os.fsdecode(cwd) if cwd is not None else os.getcwd()
             return "%s: pytest child [%s] (cwd %s) does not block pytest-randomly; %s" % (
-                current, shown, where, REMEDY)
+                _current_test(), _shown(words), where, REMEDY)
     return None
 
 
