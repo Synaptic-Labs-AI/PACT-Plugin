@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -531,6 +532,59 @@ def test_under_xdist_a_worker_child_that_skips_the_shim_fails_the_run(tmp_path):
     assert ("2 passed" in out, rc, "the shim did not load in children: 1 " in out) == (True, 1, True), out
 
 
+XDIST_CRASH = '''\
+import os
+import subprocess
+import sys
+
+
+def test_a_crashes_its_worker():
+    os._exit(3)
+
+
+def test_b_launch():
+    subprocess.run({argv}, check=True, timeout=60)
+'''
+
+
+def _run_xdist_after_a_crash(tmp_path, argv):
+    """One worker, which test_a kills; xdist restarts it and test_b runs there."""
+    (tmp_path / "conftest.py").write_text(XDIST_CONFTEST)
+    (tmp_path / "test_synthetic.py").write_text(XDIST_CRASH.format(argv=argv))
+    child_env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith(("PACT_TEST_CLOCK_SHIFT_", "PYTEST_XDIST_"))
+        and k not in ("PYTHONPATH", "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS")
+    }
+    child_env["PACT_TEST_CLOCK_SHIFT_LEDGER"] = str(tmp_path / "ledger")
+    child_env["PACT_TEST_CLOCK_SHIFT_SECONDS"] = str(TEN_YEARS)
+    child_env["PYTHONPATH"] = str(SHIM_DIR)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         "-n", "1", "--max-worker-restart", "1", "-o", "pythonpath=%s" % SHIM_DIR,
+         "test_synthetic.py"],
+        cwd=tmp_path, env=child_env, capture_output=True, text=True, timeout=300,
+    )
+    return result.returncode, result.stdout + result.stderr
+
+
+def test_under_xdist_a_crashed_workers_ledger_line_is_not_a_childs(tmp_path):
+    """MUTANT: the controller excludes only the pids workers handed over. The
+    crashed worker hands nothing over, so its own ledger line stands in for the
+    child that skipped the shim, and check 2 passes."""
+    rc, out = _run_xdist_after_a_crash(tmp_path, "[sys.executable, '-S', '-c', 'pass']")
+    assert "crashed" in out and "1 passed" in out, out
+    assert "the shim did not load in children: 1 " in out, out
+
+
+def test_under_xdist_a_crash_alone_does_not_fail_check_2(tmp_path):
+    """GUARD for the arm above: the same run with a child that loads the shim
+    reports only the crash."""
+    rc, out = _run_xdist_after_a_crash(tmp_path, "[sys.executable, '-c', 'pass']")
+    assert "crashed" in out and "1 passed" in out, out
+    assert "clock-shift census" not in out, out
+
+
 class _Reporter:
     def __init__(self):
         self.lines = []
@@ -598,6 +652,38 @@ def test_the_controller_ignores_its_own_and_its_workers_ledger_lines(monkeypatch
     census.finish(controller)
     assert controller.exitstatus == (1 if failed else 0), reporter.lines
     assert any("the shim did not load in children: 2 " in line for line in reporter.lines) is failed
+
+
+def test_a_crashed_workers_pid_comes_from_its_gateway(monkeypatch, tmp_path):
+    """MUTANT: collect() takes a pid only from a worker's handover. A node that
+    crashed has no workeroutput; its gateway's popen pid must still be excluded."""
+    census = _fresh_census(monkeypatch, tmp_path)
+    crashed, survivor = 5151515, 5252525
+    (tmp_path / "ledger").write_text("%d controller\n%d crashed\n%d survivor\n"
+                                     % (os.getpid(), crashed, survivor))
+    gateway = SimpleNamespace(id="gw0", _io=SimpleNamespace(popen=SimpleNamespace(pid=crashed)))
+    census.collect(SimpleNamespace(gateway=gateway))
+    census.collect(SimpleNamespace(
+        gateway=SimpleNamespace(id="gw1"),
+        workeroutput={census.WORKEROUTPUT_KEY: {
+            "misses": [], "python_children": 1, "pid": survivor}}))
+    assert sorted(census._state["workers"]) == [crashed, survivor]
+    reporter = _Reporter()
+    controller = _Session(reporter)
+    census.finish(controller)
+    assert controller.exitstatus == 1, reporter.lines
+    assert any("the shim did not load in children: 1 " in line for line in reporter.lines)
+
+
+@pytest.mark.parametrize("prior, after", [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4)])
+def test_a_problem_raises_only_a_clean_status(monkeypatch, tmp_path, prior, after):
+    """MUTANT: finish() overwrites the session's status with 1, so an
+    interrupted, internal-error or usage-error session reads as a test failure."""
+    census = _fresh_census(monkeypatch, tmp_path, misses=["t::a (call): x -- y"])
+    session = _Session(_Reporter())
+    session.exitstatus = prior
+    census.finish(session)
+    assert session.exitstatus == after
 
 
 def test_the_suite_conftest_collects_the_workers_findings(request, monkeypatch, tmp_path):

@@ -33,7 +33,11 @@ collect() gathers them as each worker goes down, and the controller's finish()
 runs check 2 once for the whole run: the workers' children counted, and the
 controller's and workers' own ledger lines ignored. The controller's own Python
 launches are its workers, so they get check 1 but are not counted for check 2.
-A worker that crashes before its finish() hands over nothing.
+A worker that crashes before its finish() hands over no misses and no child
+count. Its pid is still excluded from check 2, taken for every node, crashed or
+restarted, from the subprocess its execnet popen gateway holds (xdist's
+workerinfo carries no pid). A gateway that exposes no such subprocess gives no
+pid, and then that worker's own ledger lines would count as a child's.
 
 Each problem line names its test from PYTEST_CURRENT_TEST at launch time. A test
 that deletes that variable, to reach a refusal it gates, prints as "<outside a
@@ -154,9 +158,25 @@ def _children_wrote_ledger(own=()):
     return any(line.split(" ", 1)[0] not in own for line in lines if line.strip())
 
 
+def _gateway_pid(node):
+    """The pid of the process a popen gateway started for an xdist node, or None.
+
+    xdist's workerinfo carries no pid, and a crashed worker hands nothing over,
+    so the pid comes from the subprocess execnet's popen gateway holds.
+    """
+    io = getattr(getattr(node, "gateway", None), "_io", None)
+    pid = getattr(getattr(io, "popen", None), "pid", None)
+    return pid if isinstance(pid, int) else None
+
+
 def collect(node):
-    """Controller side: take what a finished xdist worker handed over."""
+    """Controller side: take what a finished xdist worker handed over, and every
+    worker's pid, a crashed one's included, so its own ledger lines never count
+    as a child's."""
     found = (getattr(node, "workeroutput", None) or {}).get(WORKEROUTPUT_KEY)
+    pid = _gateway_pid(node)
+    if pid is not None:
+        _state["workers"].append(pid)
     if not found:
         return
     name = getattr(getattr(node, "gateway", None), "id", "worker")
@@ -197,4 +217,7 @@ def finish(session):
     write("clock-shift census: %d problem(s); this run did not shift every clock" % len(problems))
     for line in problems:
         write("  " + line)
-    session.exitstatus = 1
+    # Raise a clean status only: an interrupted, internal-error or usage-error
+    # session keeps the status that says so.
+    if int(session.exitstatus) == 0:
+        session.exitstatus = 1

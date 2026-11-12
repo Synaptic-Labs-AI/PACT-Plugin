@@ -376,6 +376,18 @@ def test_finish_fails_the_session_and_reports_each_miss(census_state):
     assert reporter.lines[1] == "  " + census_state["misses"][0]
 
 
+@pytest.mark.parametrize("prior, after", [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4)])
+def test_a_miss_raises_only_a_clean_status(census_state, prior, after):
+    """MUTANT: finish() overwrites the session's status with 1, so an
+    interrupted, internal-error or usage-error session reads as a test failure."""
+    census_state["misses"][:] = ["t::a: pytest child [x] ...; " + census.REMEDY]
+    census_state["forwarded"][:] = []
+    session = _Session(_Config(_Reporter()))
+    session.exitstatus = prior
+    census.finish(session)
+    assert session.exitstatus == after
+
+
 def test_finish_with_no_miss_leaves_the_session_alone(census_state):
     census_state["misses"][:] = []
     census_state["forwarded"][:] = []

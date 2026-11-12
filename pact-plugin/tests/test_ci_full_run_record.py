@@ -258,6 +258,67 @@ def test_a_failing_session_still_writes_the_record(tmp_path):
     assert "RUN-VERIFY-FAILURE FAILED:" in verdict.stderr
 
 
+CENSUS = Path(__file__).with_name("child_pytest_census.py")
+
+# The suite's child-pytest census wired as tests/conftest.py wires it: a plain
+# sessionfinish that raises the session's status after pytest has passed the
+# old one to every sessionfinish hook.
+CENSUS_CONFTEST = '''
+
+import importlib.util as _util
+
+_spec = _util.spec_from_file_location("child_pytest_census", {census!r})
+_census = _util.module_from_spec(_spec)
+_spec.loader.exec_module(_census)
+_census.install()
+
+
+def pytest_sessionfinish(session):
+    _census.finish(session)
+'''.format(census=str(CENSUS))
+
+SWALLOWED_MISS_SUITE = '''\
+import subprocess
+import sys
+
+
+def test_swallows_a_census_refusal():
+    try:
+        subprocess.run([sys.executable, "-m", "pytest", "--version"],
+                       capture_output=True, timeout=60)
+    except Exception:
+        pass
+{tail}
+'''
+
+
+def test_the_record_carries_the_status_a_census_raised(tmp_path):
+    """MUTANT: the recorder writes the status pytest passed to sessionfinish, or
+    runs before the census. Every test passed, the census raised the session to
+    1, and the record must say 1 where the process exits 1."""
+    root, plugin_root, workspace = _rig(
+        tmp_path, SWALLOWED_MISS_SUITE.format(tail=""), CENSUS_CONFTEST)
+    proc = _run(plugin_root, workspace)
+    output = proc.stdout + proc.stderr
+    assert "CHILD PYTEST CENSUS: 1 " in output and "1 passed" in output, output
+    assert proc.returncode == 1, output
+    record = _record(workspace)
+    assert (record["failed"], record["errors"], record["exitstatus"]) == (0, 0, 1), record
+
+
+def test_an_interrupted_session_keeps_its_status_in_the_record(tmp_path):
+    """MUTANT: the census overwrites the session's status with 1. An interrupted
+    session exits 2 and its record must say 2, census miss or not."""
+    tail = "\n\ndef test_interrupts():\n    raise KeyboardInterrupt\n"
+    root, plugin_root, workspace = _rig(
+        tmp_path, SWALLOWED_MISS_SUITE.format(tail=tail), CENSUS_CONFTEST)
+    proc = _run(plugin_root, workspace)
+    output = proc.stdout + proc.stderr
+    assert "CHILD PYTEST CENSUS: 1 " in output, output
+    assert proc.returncode == 2, output
+    assert _record(workspace)["exitstatus"] == 2
+
+
 def test_deselection_is_read_from_terminal_stats_not_the_item_list(tmp_path):
     root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
     proc = _run(plugin_root, workspace, ["-k", "test_pass or test_skip"])
@@ -503,6 +564,7 @@ def _fake_session(tmp_path, *, testscollected, options=None,
 
     class _Session:
         config = _Config()
+        exitstatus = 0
 
     _Session.testscollected = testscollected
     return _Session()

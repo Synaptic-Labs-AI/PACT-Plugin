@@ -508,4 +508,7 @@ def finish(session):
           % len(problems))
     for line in problems:
         write("  " + line)
-    session.exitstatus = 1
+    # Raise a clean status only: an interrupted, internal-error or usage-error
+    # session keeps the status that says so.
+    if int(session.exitstatus) == 0:
+        session.exitstatus = 1
