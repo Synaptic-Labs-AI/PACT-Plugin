@@ -58,12 +58,37 @@ FULL_IF = (
     "github.event_name == 'merge_group' || github.event_name == 'push' || "
     "github.event_name == 'workflow_dispatch'"
 )
-ALLOWED_ACTIONS = (
+# PER WORKFLOW. The full suite may upload diagnostic evidence; the fast lane
+# may not, and the split is what makes an upload step added there redden
+# instead of riding the full-suite entry.
+_SHARED_ACTIONS = (
     "actions/checkout@",
     "actions/setup-python@",
     "actions/cache/restore@",
     "actions/cache/save@",
 )
+ALLOWED_ACTIONS_BY_WORKFLOW = {
+    ci_contract.FAST_WORKFLOW: _SHARED_ACTIONS,
+    ci_contract.FULL_WORKFLOW: _SHARED_ACTIONS + ("actions/upload-artifact@",),
+}
+
+
+def _action_allowlist_problems(doc, relative, problems: list[str]) -> bool:
+    """Append this workflow's action problems; True when it had any step to read."""
+    allowed = ALLOWED_ACTIONS_BY_WORKFLOW[relative]
+    read_any = False
+    for job in ci_contract.jobs_of(doc).values():
+        for step in ci_contract.steps_of(job):
+            uses = step.get("uses")
+            if not isinstance(uses, str):
+                continue
+            read_any = True
+            if not uses.startswith(allowed):
+                problems.append(f"{relative}: {uses!r} is not allowlisted")
+            if not re.search(r"@[0-9a-f]{40}(?:\s|$)", uses):
+                problems.append(
+                    f"{relative}: {uses!r} is not pinned to a full commit SHA")
+    return read_any
 FAST_PATH_FILES = (
     Path("scripts/fast_suite_selection.py"),
     Path("scripts/fast_suite_args.py"),
@@ -337,20 +362,24 @@ class TestFastWorkflowHygiene:
         read_any = False
         for relative in (ci_contract.FAST_WORKFLOW, ci_contract.FULL_WORKFLOW):
             doc = ci_contract.load_workflow(root, relative)
-            for job in ci_contract.jobs_of(doc).values():
-                for step in ci_contract.steps_of(job):
-                    uses = step.get("uses")
-                    if not isinstance(uses, str):
-                        continue
-                    read_any = True
-                    if not uses.startswith(ALLOWED_ACTIONS):
-                        problems.append(f"{relative}: {uses!r} is not allowlisted")
-                    if not re.search(r"@[0-9a-f]{40}(?:\s|$)", uses):
-                        problems.append(
-                            f"{relative}: {uses!r} is not pinned to a full "
-                            f"commit SHA")
+            read_any = read_any or _action_allowlist_problems(
+                doc, relative, problems)
         assert read_any, "no action steps read from either workflow"
         assert not problems, "\n".join(problems)
+
+    def test_the_fast_lane_may_not_upload_artifacts(self):
+        """The per-workflow split: an upload step added to the fast lane must
+        redden. It is admitted only in the full-suite workflow."""
+        root = ci_contract.require_root("the fast-lane action allowlist")
+        doc = ci_contract.load_workflow(root, ci_contract.FAST_WORKFLOW)
+        job = next(iter(ci_contract.jobs_of(doc).values()))
+        job.setdefault("steps", []).append(
+            {"uses": ci_contract.UPLOAD_ARTIFACT_ACTION})
+        problems: list[str] = []
+        assert _action_allowlist_problems(
+            doc, ci_contract.FAST_WORKFLOW, problems)
+        assert any("upload-artifact" in problem for problem in problems), (
+            f"an upload step in the fast lane did not redden: {problems}")
 
 
 class TestWorkflowHardening:
@@ -401,8 +430,23 @@ def _assert_full_workflow_contract(root):
         f"tests.yml pull_request types are {pull_request.get('types')!r}, "
         f"not ['opened', 'synchronize', 'reopened']"
     )
-    assert "workflow_dispatch" in triggers, (
-        "the documented manual fallback needs workflow_dispatch"
+    dispatch = triggers.get("workflow_dispatch")
+    assert isinstance(dispatch, dict), (
+        "the documented manual fallback needs workflow_dispatch with its "
+        "constrained dist input"
+    )
+    inputs = dispatch.get("inputs")
+    assert isinstance(inputs, dict) and set(inputs) == {"dist"}, (
+        f"workflow_dispatch inputs are {inputs!r}; only the constrained dist "
+        "choice is admitted, never arbitrary pytest arguments"
+    )
+    dist = inputs["dist"]
+    assert dist.get("required") is False
+    assert dist.get("default") == "loadfile"
+    assert dist.get("type") == "choice"
+    assert dist.get("options") == ["loadfile", "load"], (
+        f"dist options are {dist.get('options')!r}; loadfile stays the default "
+        "and load is the only diagnostic alternative"
     )
     assert "merge_group" in triggers, "tests.yml has no merge_group trigger"
     merge = triggers.get("merge_group") or {}
@@ -422,6 +466,13 @@ def _assert_full_workflow_contract(root):
         f"the job-level `if:` is {job.get('if')!r}, not the pinned positive "
         f"three-event list {FULL_IF!r}"
     )
+    # The dispatch value reaches pytest only through this key, so the key IS
+    # the contract: a literal here flips the merge gate's xdist scheduling
+    # while every command-text pin stays green.
+    assert (job.get("env") or {}).get("DIST") == "${{ inputs.dist || 'loadfile' }}", (
+        f"the job-level DIST env is {(job.get('env') or {}).get('DIST')!r}; it "
+        "must evaluate from inputs.dist and default to loadfile outside a dispatch"
+    )
 
     steps = ci_contract.steps_of(job)
     runs = ci_contract.run_texts(steps)
@@ -430,11 +481,11 @@ def _assert_full_workflow_contract(root):
         f"tests.yml must contain exactly one pytest invocation; found "
         f"{len(pytest_runs)}: {pytest_runs!r}"
     )
-    assert pytest_runs[0] == ci_contract.TEST_CMD, (
+    assert pytest_runs[0] == ci_contract.WORKFLOW_TEST_CMD, (
         f"the pytest step is {pytest_runs[0]!r}, not exactly "
-        f"{ci_contract.TEST_CMD!r}"
+        f"{ci_contract.WORKFLOW_TEST_CMD!r}"
     )
-    words = pytest_runs[0].split()
+    words = shlex.split(pytest_runs[0])
     after_pytest = words[words.index("pytest") + 1:]
     for flag in ("-k", "-m", "--deselect", "--ignore", "--maxfail"):
         assert flag not in after_pytest, (
@@ -444,6 +495,37 @@ def _assert_full_workflow_contract(root):
         root, ci_contract.FULL_WORKFLOW), (
         "tests.yml names PYTEST_ADDOPTS; fast-only options must never reach "
         "the unrestricted run"
+    )
+
+    # The dispatch value is one argv element, so it is case-guarded before
+    # anything expensive runs. A guard that can be skipped or silenced
+    # certifies nothing, and one with its own env/shell view would check a
+    # different DIST than the test step sees.
+    guard_runs = [run for run in runs if "DIST GUARD" in run]
+    assert len(guard_runs) == 1, (
+        f"expected exactly one DIST guard run step; found {guard_runs!r}")
+    guard = next(step for step in steps
+                 if isinstance(step.get("run"), str)
+                 and "DIST GUARD" in step["run"])
+    for key in ("if", "continue-on-error", "env", "shell"):
+        assert key not in guard, (
+            f"the DIST guard carries `{key}:` ({guard[key]!r}); it must run "
+            "unconditionally in the default shell with the job-level DIST"
+        )
+    assert "loadfile|load)" in guard_runs[0], guard_runs[0]
+    assert "$DIST" in guard_runs[0], guard_runs[0]
+    assert not re.search(r"\bpytest\b", guard_runs[0]), (
+        "the DIST guard's run text names pytest; test_ci_collection_scope "
+        "permits exactly one pytest invocation in this file"
+    )
+    guard_position = runs.index(guard_runs[0])
+    verify_positions = [
+        index for index, run in enumerate(runs)
+        if run == ci_contract.VERIFY_CMD
+    ]
+    assert verify_positions and guard_position < verify_positions[0], (
+        "the DIST guard must run before the before-tests environment check, "
+        "so an out-of-enum value refuses before setup work"
     )
 
     lint_lines = [
@@ -468,12 +550,21 @@ def _assert_full_workflow_contract(root):
         "test_ci_collection_scope permits exactly one such line"
     )
 
-    position = runs.index(ci_contract.TEST_CMD)
+    position = runs.index(ci_contract.WORKFLOW_TEST_CMD)
     assert runs[position - 1] == ci_contract.VERIFY_CMD, (
         "the full pytest step is not immediately preceded by the env verify"
     )
-    assert runs[-1] == ci_contract.VERIFY_CMD, "the after-verify is not the last step"
-    assert str(steps[-1].get("if", "")).strip() in ("always()", "${{ always() }}")
+    assert runs[-1] == ci_contract.VERIFY_CMD, (
+        "the after-verify is not the last `run:` step")
+    after_verify_indices = [
+        index for index, step in enumerate(steps)
+        if step.get("run") == ci_contract.VERIFY_CMD
+    ]
+    assert len(after_verify_indices) == 2, (
+        f"expected the before/after environment checks; found "
+        f"{len(after_verify_indices)}")
+    assert str(steps[after_verify_indices[-1]].get("if", "")).strip() in (
+        "always()", "${{ always() }}"), "the after-tests environment check is not `if: always()`"
 
     # The certifying run's own evidence step. It must be the step
     # immediately after the test step, must not name pytest (the one-pytest
@@ -510,6 +601,48 @@ def _assert_full_workflow_contract(root):
         "the test step; the continue-on-error pin would check the wrong step")
     _assert_step_cannot_be_silenced(
         steps, evidence_cmd, "tests.yml run-evidence step")
+
+    uploads = [
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Upload full-suite diagnostic evidence"
+    ]
+    assert len(uploads) == 1, (
+        f"expected exactly one diagnostic evidence upload; found {len(uploads)}"
+    )
+    upload_index, upload = uploads[0]
+    assert upload.get("uses") == ci_contract.UPLOAD_ARTIFACT_ACTION, (
+        f"diagnostic upload uses {upload.get('uses')!r}, not the reviewed "
+        f"full-SHA action {ci_contract.UPLOAD_ARTIFACT_ACTION!r}"
+    )
+    assert str(upload.get("if", "")).strip() == (
+        "always() && (failure() || cancelled() || "
+        "github.event_name == 'workflow_dispatch')"), (
+        f"diagnostic upload condition is {upload.get('if')!r}; it must upload "
+        "after a red or cancelled step on every event and after either outcome "
+        "on a dispatch"
+    )
+    upload_with = upload.get("with") or {}
+    assert upload_with.get("name") == ci_contract.UPLOAD_ARTIFACT_NAME
+    assert (upload_with.get("path") or "").splitlines() == [
+        ".full-suite-results.xml",
+        ".full-run-record.json",
+        ".full-collection-record.json",
+    ], f"diagnostic upload paths are {upload_with.get('path')!r}"
+    assert upload_with.get("if-no-files-found") == "error"
+    assert upload_with.get("include-hidden-files") is True, (
+        "all three evidence files are dotfiles; omitting hidden files would "
+        "silently upload no usable diagnostic evidence"
+    )
+    assert upload_index == len(steps) - 1, (
+        f"diagnostic upload index {upload_index}, final step index "
+        f"{len(steps) - 1}: the upload must be the LAST step, so a red "
+        "after-tests environment check still uploads the run's evidence"
+    )
+    assert steps[upload_index - 1].get("run") == ci_contract.VERIFY_CMD, (
+        f"the step before the upload is "
+        f"{steps[upload_index - 1].get('name')!r}, not the after-tests "
+        "environment check"
+    )
 
     merge_steps = [step for step in steps
                    if step.get("name") == "Assert the merge-group certification subject"]
@@ -556,6 +689,10 @@ class TestRemovability:
             Path("pact-plugin") / "tests" / "test_ci_collection_scope.py",
             Path("pact-plugin") / "tests" / "test_memory_init.py",
             Path("pact-plugin") / "tests" / "ci_contract.py",
+            # The converted modules import this fixture at module scope, so a
+            # rig that collects them without it fails collection instead of
+            # exercising the arm.
+            Path("pact-plugin") / "tests" / "fixtures" / "tracked_files.py",
         ):
             target = rig / relative
             target.parent.mkdir(parents=True, exist_ok=True)

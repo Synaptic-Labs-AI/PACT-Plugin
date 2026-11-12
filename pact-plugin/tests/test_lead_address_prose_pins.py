@@ -12,11 +12,13 @@ Design: docs/architecture/session-start-lead-address.md §8.2.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from dispatch_gate import PROMPT_MAX_LENGTH
+from fixtures.tracked_files import tracked_files as _tracked_files
 from test_commands_structure import (
     EXPECTED_SPAWN_LITERAL_COUNTS,
     _spawn_prompt_literals,
@@ -126,15 +128,55 @@ def _frontmatter_skills(text: str) -> list[str]:
     return skills
 
 
-def _to_team_lead_sites():
+def _tracked_markdown_in(plugin_root: Path, sub: str) -> list[Path]:
+    directory = plugin_root / sub
+    if not directory.is_dir():
+        return []  # matches the old rglob on an absent directory
+    repo_root = plugin_root.parent
+    relative = directory.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".md")
+
+
+def _to_team_lead_sites(plugin_root: Path | None = None):
+    root = PLUGIN_ROOT if plugin_root is None else plugin_root
     sites = []
     for sub in ("agents", "commands", "skills", "protocols"):
-        for path in sorted((PLUGIN_ROOT / sub).rglob("*.md")):
+        for path in _tracked_markdown_in(root, sub):
             text = path.read_text(encoding="utf-8")
             count = len(_TO_TEAM_LEAD.findall(text))
             if count:
-                sites.append((path.relative_to(PLUGIN_ROOT).as_posix(), count))
+                sites.append((path.relative_to(root).as_posix(), count))
     return sites
+
+
+def test_tracked_to_team_lead_census_ignores_untracked_markdown(tmp_path):
+    """The needle sits under commands/, which the arm forbids outright."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known = plugin / "agents" / "known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        'SendMessage(to="team-lead", message="x")\n', encoding="utf-8")
+    (plugin / "commands").mkdir(parents=True)
+    (plugin / "commands" / "plain.md").write_text("no address here\n",
+                                                 encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+
+    assert _to_team_lead_sites(plugin) == [("agents/known.md", 1)]
+
+    stray = plugin / "commands" / "zzprobe.md"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text(
+        'SendMessage(to="team-lead", message="x")\n', encoding="utf-8")
+    try:
+        assert _to_team_lead_sites(plugin) == [("agents/known.md", 1)]
+    finally:
+        stray.unlink()
 
 
 def test_to_team_lead_literals_sit_under_the_rule():
@@ -154,11 +196,18 @@ def test_to_team_lead_literals_sit_under_the_rule():
     assert 'SendMessage(to="team-lead", ...)' in section
 
 
+def _tracked_agent_files() -> list[Path]:
+    repo_root = PLUGIN_ROOT.parent
+    relative = (PLUGIN_ROOT / "agents").relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.parent == PLUGIN_ROOT / "agents" and path.suffix == ".md")
+
+
 def test_every_teammate_agent_preloads_the_rule():
     """The rule reaches a teammate only through the skills: preload, so every
     agent except the orchestrator (the lead itself) must list
     pact-agent-teams."""
-    agents = sorted((PLUGIN_ROOT / "agents").glob("*.md"))
+    agents = _tracked_agent_files()
     assert agents
     missing = [
         path.name for path in agents
@@ -167,6 +216,33 @@ def test_every_teammate_agent_preloads_the_rule():
             path.read_text(encoding="utf-8"))
     ]
     assert missing == []
+
+
+def test_tracked_agent_population_ignores_untracked_agents(tmp_path, monkeypatch):
+    """The needle is an untracked agent with no skills: preload, so the old
+    working-tree glob would report it missing."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known = plugin / "agents" / "pact-known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text("---\nskills:\n  - pact-agent-teams\n---\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    assert known in _tracked_agent_files()
+    test_every_teammate_agent_preloads_the_rule()
+
+    stray = plugin / "agents" / "pact-zzprobe.md"
+    stray.write_text("", encoding="utf-8")
+    try:
+        test_every_teammate_agent_preloads_the_rule()
+        assert stray not in _tracked_agent_files()
+    finally:
+        stray.unlink()
 
 
 def test_task_b_template_lines_name_the_lead_address():

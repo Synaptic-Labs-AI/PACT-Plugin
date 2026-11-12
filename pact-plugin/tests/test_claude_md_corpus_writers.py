@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -34,6 +35,7 @@ import pytest
 
 import archive_pin
 from fixtures.hf_cache import hf_cache_env
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from pin_caps import section_pins
 from scripts import working_memory
 from shared.claude_md_manager import (
@@ -54,6 +56,13 @@ from staleness import check_pinned_staleness, locate_pinned
 from helpers import doc_at  # noqa: E402
 
 _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
+
+
+def _tracked_glob(directory, pattern):
+    """Return current tracked files only, excluding deleted index entries."""
+    return _shared_tracked_files(directory, ".", pattern)
+
+
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
 _CASES = sorted(_EXPECTED)
 _UNCERTAIN = {"UNKNOWN", "DUPLICATE", "MALFORMED"}
@@ -109,8 +118,81 @@ def _only_block_and_blank_rows(doc, rows, span):
 
 
 def test_every_corpus_file_is_a_case():
+    files = _tracked_glob(_CORPUS, "*.md")
     assert len(_CASES) >= 100
-    assert {p.stem for p in _CORPUS.glob("*.md")} == set(_CASES)
+    assert _CORPUS / "hidden_pre_closed_at_row_end.md" in files
+    assert {p.stem for p in files} == set(_CASES)
+
+
+def test_corpus_consumer_excludes_untracked_documents(tmp_path, monkeypatch):
+    """The CONSUMER, not only the helper, must read the git index.
+
+    Reverting ``test_every_corpus_file_is_a_case`` to
+    ``sorted(_CORPUS.glob("*.md"))`` keeps the helper arm green; this arm drives
+    the consumer and reddens, because an untracked corpus document then joins
+    the set it compares against ``expected.json``.
+    """
+    repo = tmp_path / "repo"
+    corpus = repo / "claude_md_corpus"
+    corpus.mkdir(parents=True)
+    names = [f"case_{index:03d}" for index in range(100)]
+    names[-1] = "hidden_pre_closed_at_row_end"
+    for name in names:
+        (corpus / f"{name}.md").write_text("body\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "claude_md_corpus"],
+                   cwd=repo, check=True)
+    probe = corpus / "000_untracked_probe.md"
+    probe.write_text("body\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "_CORPUS", corpus)
+    monkeypatch.setitem(globals(), "_CASES", sorted(names))
+
+    test_every_corpus_file_is_a_case()
+
+    # Positive control for the arm itself: the needle is on disk, so a green
+    # consumer above means the consumer ignored it rather than never seeing it.
+    assert probe.is_file()
+
+
+def test_nonzero_git_result_never_falls_back(tmp_path, monkeypatch):
+    directory = tmp_path / "corpus"
+    directory.mkdir()
+    (directory / "untracked.md").write_text("untracked", encoding="utf-8")
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(
+                args, 128, stdout="", stderr="fatal: synthetic index failure"
+            )
+        if args[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(AssertionError, match="Refusing to widen"):
+        _tracked_glob(directory, "*.md")
+
+
+def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
+    directory = tmp_path / "corpus"
+    directory.mkdir()
+    keep = directory / "keep.md"
+    removed = directory / "removed.md"
+    nested = directory / "nested" / "nested.md"
+    nested.parent.mkdir()
+    for path in (keep, removed, nested, directory / "other.txt"):
+        path.write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    (directory / "untracked.md").write_text("scratch", encoding="utf-8")
+
+    assert _tracked_glob(directory, "*.md") == [keep, removed]
+    removed.unlink()
+    assert _tracked_glob(directory, "*.md") == [keep]
+    keep.unlink()
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(directory, "*.md")
 
 
 # --- the Current Session block ----------------------------------------------

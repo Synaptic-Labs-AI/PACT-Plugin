@@ -22,7 +22,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 PLUGIN = Path(__file__).resolve().parent.parent
 SHIPPED_TOPS = ("hooks", "skills", "scripts")
@@ -36,11 +39,15 @@ RETIRED_IN_WORKING_MEMORY = RETIRED + ("extract_managed_region", "_find_terminat
 WORKING_MEMORY = PLUGIN / "skills" / "pact-memory" / "scripts" / "working_memory.py"
 
 
+def _shipped_population(root):
+    """Tracked shipped modules; a working-tree walk reads an untracked file."""
+    return [path for top in SHIPPED_TOPS
+            for path in _tracked_glob(root, f"{top}/**/*.py", allow_empty=True)
+            if "__pycache__" not in path.parts and not path.name.startswith("test_")]
+
+
 def _shipped_files():
-    for top in SHIPPED_TOPS:
-        for path in sorted((PLUGIN / top).rglob("*.py")):
-            if "__pycache__" not in path.parts and not path.name.startswith("test_"):
-                yield path
+    yield from _shipped_population(PLUGIN)
 
 
 def _defined_functions(path: Path) -> set[str]:
@@ -80,3 +87,24 @@ def test_working_memory_parses_with_the_finder_itself():
 
     assert working_memory.parse is finder.parse
     assert working_memory.State is finder.State
+
+
+def test_an_untracked_module_cannot_define_a_retired_locator(tmp_path):
+    """An untracked scratch module must not join the shipped-module scan."""
+    root = tmp_path / "plugin"
+    (root / "hooks").mkdir(parents=True)
+    tracked = root / "hooks" / "tracked.py"
+    tracked.write_text("def marker_line_span():\n    pass\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+
+    needle = root / "hooks" / "zzprobe.py"
+    needle.write_text("def marker_line_span():\n    pass\n", encoding="utf-8")
+
+    population = _shipped_population(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the shipped-module scan: {needle}")
+    assert "marker_line_span" in _defined_functions(tracked)

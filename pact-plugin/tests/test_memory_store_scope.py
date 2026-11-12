@@ -45,7 +45,10 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 SCRIPTS_PARENT = Path(__file__).parent.parent / "skills" / "pact-memory"
 
@@ -80,7 +83,7 @@ _SCRIPTS_DIR = SCRIPTS_PARENT / "scripts"
 # ---------------------------------------------------------------------------
 
 
-def _package_modules():
+def _package_modules(root=_SCRIPTS_DIR):
     """Every module of the store package. The population for the AST arms.
 
     The population is the PACKAGE, not the repository. Test files and skill
@@ -89,7 +92,7 @@ def _package_modules():
     as useless as an arm that cannot fail and worse in one respect, because
     somebody would change the code to satisfy it.
     """
-    return sorted(_SCRIPTS_DIR.rglob("*.py"))
+    return sorted(_tracked_glob(root, "**/*.py", allow_empty=True))
 
 
 def _parse(module: Path) -> ast.Module:
@@ -796,3 +799,24 @@ class TestTheGraphLegConfirmsTheStoredProject:
         # project and unscoped, so [] above is the confirmation's doing.
         assert [m.id for m in owned] == [memory_id]
         assert [m.id for m in whole] == [memory_id]
+
+
+def test_an_untracked_package_module_cannot_join_the_census(tmp_path):
+    """An untracked scratch module must not join the package population."""
+    root = tmp_path / "scripts"
+    root.mkdir(parents=True)
+    body = 'DB_FILENAME = "memory.db"\n'
+    tracked = root / "tracked.py"
+    tracked.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "zzprobe.py"
+    needle.write_text(body, encoding="utf-8")
+
+    population = _package_modules(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the package population: {needle}")
+    assert 'DB_FILENAME' in tracked.read_text(encoding="utf-8")

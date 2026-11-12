@@ -130,7 +130,10 @@ bottom of this file.
 import re
 from pathlib import Path
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
@@ -1018,11 +1021,15 @@ RETIRED_POINTER_PINS = [
 INSTRUCTION_SURFACE_FLOOR = 60
 
 
-def _instruction_surfaces() -> list:
+def _instruction_population(root):
+    """Tracked instruction surfaces; a working-tree glob reads a scratch file."""
     patterns = ("skills/*/SKILL.md", "agents/*.md", "commands/*.md", "protocols/*.md")
-    surfaces = sorted(
-        {p for pattern in patterns for p in PLUGIN_ROOT.glob(pattern)}
-    )
+    return sorted({p for pattern in patterns
+                   for p in _tracked_glob(root, pattern, allow_empty=True)})
+
+
+def _instruction_surfaces() -> list:
+    surfaces = _instruction_population(PLUGIN_ROOT)
     assert len(surfaces) >= INSTRUCTION_SURFACE_FLOOR, (
         f"instruction-surface sweep found only {len(surfaces)} surfaces "
         f"(floor {INSTRUCTION_SURFACE_FLOOR}) — a glob regression has "
@@ -1544,3 +1551,28 @@ def test_blindness_claim_not_scoped_to_handoff_tree_wide(narrow: "re.Pattern"):
 #     instrument check, not a tree mutation: it proves the control fires, so
 #     a sweep that has stopped matching reports as broken rather than clean.
 # ---------------------------------------------------------------------------
+
+
+def test_an_untracked_instruction_surface_is_not_swept(tmp_path):
+    """A scratch markdown file must not join the tree-wide absence scan."""
+    root = tmp_path / "plugin"
+    (root / "commands").mkdir(parents=True)
+    tracked = root / "commands" / "tracked.md"
+    tracked.write_text("a clean command\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+
+    needle = root / "commands" / "zzprobe.md"
+    needle.write_text("See metadata.teachback_rejection\n", encoding="utf-8")
+
+    population = _instruction_population(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the instruction-surface sweep: {needle}")
+    assert any(_phrase(pointer) in _normalized(needle)
+               for pointer in RETIRED_POINTER_PINS), "the needle would be flagged"
+    assert not [path for path in population
+                if any(_phrase(pointer) in _normalized(path)
+                       for pointer in RETIRED_POINTER_PINS)]

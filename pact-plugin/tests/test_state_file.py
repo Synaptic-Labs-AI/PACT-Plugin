@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from shared import background_work as bw
 from shared import state_file
 
@@ -490,8 +491,10 @@ OLDER_WRITER_HELPERS = frozenset({
 def _older_writer_calls():
     """(file:line name, passes_root) for every call to an older-writer helper under hooks/."""
     calls = []
-    for path in sorted(HOOKS_DIR.rglob("*.py")):
-        if "__pycache__" in path.parts:
+    # The index, not the working tree: an untracked scratch hook must not
+    # change which production calls this scan reports.
+    for path in _shared_tracked_files(HOOKS_DIR.parent, HOOKS_DIR.name):
+        if path.suffix != ".py":
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
@@ -506,6 +509,37 @@ def _older_writer_calls():
                 site = f"{path.relative_to(HOOKS_DIR)}:{node.lineno} {name}"
                 calls.append((site, any(k.arg == "root" for k in node.keywords)))
     return calls
+
+
+def test_untracked_hook_cannot_join_the_root_scan(tmp_path, monkeypatch):
+    """The root= scan reads the index; an untracked hook is invisible.
+
+    Reverting ``_older_writer_calls`` to ``HOOKS_DIR.rglob("*.py")`` keeps the
+    shipped tree green; this arm drives the assertion and reddens naming the
+    untracked call. The seeded tracked calls are the positive control.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    hooks = plugin / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "known.py").write_text(
+        "def f(root, path):\n"
+        "    write_idle_counts(path, root=root)\n"
+        "    _atomic_update_idle_counts(path, root=root)\n"
+        "    read_idle_counts(path, root=root)\n"
+        "    check_idle_cleanup(path, root=root)\n"
+        "    reset_idle_count(path, root=root)\n"
+        "    track_edit(path, root=root)\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setitem(globals(), "HOOKS_DIR", hooks)
+
+    calls = _older_writer_calls()
+    assert len(calls) >= 5, f"positive control: found only {len(calls)} calls"
+    (hooks / "zzprobe.py").write_text(
+        "def f(path):\n    get_environment_delta(path)\n", encoding="utf-8")
+
+    test_every_production_call_to_an_older_state_writer_passes_a_root()
 
 
 def test_every_production_call_to_an_older_state_writer_passes_a_root():

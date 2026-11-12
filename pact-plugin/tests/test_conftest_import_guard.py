@@ -10,13 +10,49 @@ names such a module.
 """
 
 import ast
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 PLUGIN = Path(__file__).resolve().parents[1]
 HOOKS = PLUGIN / "hooks"
 CONFTEST = PLUGIN / "tests" / "conftest.py"
+
+
+def _tracked_plugin_python_files(plugin: Path) -> list[Path]:
+    repo_root = plugin.parent
+    relative = plugin.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
+def _census_test_files(plugin: Path) -> list[Path]:
+    files = _tracked_plugin_python_files(plugin)
+    tests = plugin / "tests"
+    skill_files = [p for p in files if "skills" in p.relative_to(plugin).parts]
+    return sorted(
+        [p for p in files if tests in p.parents]
+        + [p for p in skill_files if p.name.startswith("test_")]
+        + [p for p in skill_files if p.name == "conftest.py"]
+    )
+
+
+def _tracked_hook_python_files(hooks: Path) -> list[Path]:
+    repo_root = hooks.parent.parent
+    relative = hooks.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
+def _shared_module_stems(hooks: Path) -> set[str]:
+    return {
+        path.stem
+        for path in _tracked_hook_python_files(hooks)
+        if path.parent == hooks / "shared" and path.stem != "__init__"
+    }
 
 # {module: reason}, only for a module that no test imports in-process.
 EXEMPT: dict = {}
@@ -112,7 +148,7 @@ def by_value_importers(hooks_root, patched):
     """{module: [(source module, name), ...]} for every hooks module whose
     module-level body copies a patched shared name by value."""
     found = {}
-    for path in sorted(hooks_root.rglob("*.py")):
+    for path in _tracked_hook_python_files(hooks_root):
         if "__pycache__" in path.parts:
             continue
         in_shared = path.parent == hooks_root / "shared"
@@ -158,19 +194,153 @@ def guarded_modules(conftest, hooks_root):
     return lines, loaded
 
 
-@pytest.fixture(scope="module")
-def census():
-    test_files = sorted(
-        p for p in (
-            set((PLUGIN / "tests").rglob("*.py"))
-            | set((PLUGIN / "skills").rglob("test_*.py"))
-            | set((PLUGIN / "skills").rglob("conftest.py"))
-        )
-        if "__pycache__" not in p.parts
-    )
-    shared_modules = {p.stem for p in (HOOKS / "shared").glob("*.py") if p.stem != "__init__"}
+def _census_values():
+    test_files = _census_test_files(PLUGIN)
+    shared_modules = _shared_module_stems(HOOKS)
     patched = patched_names(test_files, shared_modules, HOOKS)
     return patched, by_value_importers(HOOKS, patched), guarded_modules(CONFTEST, HOOKS)
+
+
+@pytest.fixture(scope="module")
+def census():
+    return _census_values()
+
+
+def _git_init(repo: Path) -> None:
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+
+
+def test_census_test_population_ignores_untracked_files(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    tests = plugin / "tests"
+    tests.mkdir(parents=True)
+    known = tests / "test_known.py"
+    known.write_text(
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(\"shared.pact_context.resolve_agent_name\", None)\n",
+        encoding="utf-8")
+    (tests / "conftest.py").write_text("", encoding="utf-8")
+    hooks = plugin / "hooks"
+    (hooks / "shared").mkdir(parents=True)
+    (hooks / "shared" / "pact_context.py").write_text(
+        "resolve_agent_name = None\n", encoding="utf-8")
+    _git_init(repo)
+
+    stems = _shared_module_stems(hooks)
+    files = _census_test_files(plugin)
+    assert known in files
+    assert ("pact_context", "resolve_agent_name") in patched_names(files, stems, hooks)
+
+    stray = tests / "test_zzprobe.py"
+    stray.write_text(
+        "def test_y(monkeypatch):\n"
+        "    monkeypatch.setattr(\"shared.pact_context.is_lead\", None)\n",
+        encoding="utf-8")
+    try:
+        files = _census_test_files(plugin)
+        assert stray not in files
+        assert ("pact_context", "is_lead") not in patched_names(files, stems, hooks)
+    finally:
+        stray.unlink()
+
+
+def test_census_skill_populations_ignore_untracked_files(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known_dir = plugin / "skills" / "known"
+    known_dir.mkdir(parents=True)
+    (known_dir / "test_known.py").write_text(
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(\"shared.pact_context.is_lead\", None)\n",
+        encoding="utf-8")
+    (known_dir / "conftest.py").write_text(
+        "def test_y(monkeypatch):\n"
+        "    monkeypatch.setattr(\"shared.pact_context.get_team_name\", None)\n",
+        encoding="utf-8")
+    hooks = plugin / "hooks"
+    (hooks / "shared").mkdir(parents=True)
+    (hooks / "shared" / "pact_context.py").write_text(
+        "is_lead = None\n", encoding="utf-8")
+    _git_init(repo)
+
+    stems = _shared_module_stems(hooks)
+    files = _census_test_files(plugin)
+    pairs = patched_names(files, stems, hooks)
+    assert known_dir / "test_known.py" in files
+    assert known_dir / "conftest.py" in files
+    assert ("pact_context", "is_lead") in pairs
+    assert ("pact_context", "get_team_name") in pairs
+
+    stray_dir = plugin / "skills" / "zzprobe"
+    stray_dir.mkdir(parents=True)
+    stray_test = stray_dir / "test_zzprobe.py"
+    stray_test.write_text(
+        "def test_z(monkeypatch):\n"
+        "    monkeypatch.setattr(\"shared.pact_context.resolve_actor\", None)\n",
+        encoding="utf-8")
+    stray_conftest = stray_dir / "conftest.py"
+    stray_conftest.write_text(
+        "def test_w(monkeypatch):\n"
+        "    monkeypatch.setattr(\"shared.pact_context.resolve_agent_name\", None)\n",
+        encoding="utf-8")
+    try:
+        files = _census_test_files(plugin)
+        assert stray_test not in files
+        assert stray_conftest not in files
+        pairs = patched_names(files, stems, hooks)
+        assert ("pact_context", "resolve_actor") not in pairs
+        assert ("pact_context", "resolve_agent_name") not in pairs
+    finally:
+        stray_test.unlink()
+        stray_conftest.unlink()
+
+
+def test_shared_module_stems_ignore_untracked_modules(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    hooks = plugin / "hooks"
+    (hooks / "shared").mkdir(parents=True)
+    known = hooks / "shared" / "known.py"
+    known.write_text("X = 1\n", encoding="utf-8")
+    _git_init(repo)
+
+    assert _shared_module_stems(hooks) == {"known"}
+
+    stray = hooks / "shared" / "zzprobeattr.py"
+    stray.write_text("thing = 1\n", encoding="utf-8")
+    try:
+        assert _shared_module_stems(hooks) == {"known"}
+    finally:
+        stray.unlink()
+
+
+def test_by_value_importers_ignore_untracked_hooks(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    hooks = plugin / "hooks"
+    hooks.mkdir(parents=True)
+    known = hooks / "known.py"
+    known.write_text(
+        "from shared.pact_context import resolve_agent_name\n", encoding="utf-8")
+    _git_init(repo)
+    patched = {("pact_context", "resolve_agent_name")}
+
+    assert by_value_importers(hooks, patched) == {
+        "known": [("pact_context", "resolve_agent_name")]}
+
+    stray = hooks / "zzprobe.py"
+    stray.write_text(
+        "from shared.pact_context import resolve_agent_name\n", encoding="utf-8")
+    try:
+        assert by_value_importers(hooks, patched) == {
+            "known": [("pact_context", "resolve_agent_name")]}
+    finally:
+        stray.unlink()
 
 
 def test_the_census_sees_a_known_patch_and_a_known_importer(census):

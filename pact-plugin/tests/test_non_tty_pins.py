@@ -31,22 +31,32 @@ mechanically against the approved plan and PREPARE census):
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _PLUGIN_ROOT = _TESTS_DIR.parent
+
+
+def _tracked_surface(pattern):
+    relative = _PLUGIN_ROOT.relative_to(_PLUGIN_ROOT.parent).as_posix()
+    return sorted(
+        path for path in _tracked_files(_PLUGIN_ROOT.parent, relative)
+        if Path(path.relative_to(_PLUGIN_ROOT)).match(pattern))
 
 # LLM-loaded surfaces the census enumerates (agents, commands, skills,
 # protocols). The SSOT (pact-protocols.md) is enumerated SEPARATELY from its
 # extracts so per-class counts stay legible.
 _AGENT_SURFACE_FILES = [
     _PLUGIN_ROOT / "agents" / "pact-orchestrator.md",
-    *sorted((_PLUGIN_ROOT / "commands").glob("*.md")),
+    *_tracked_surface("commands/*.md"),
 ]
 _DOC_SURFACE_FILES = [
     *_AGENT_SURFACE_FILES,
-    *sorted((_PLUGIN_ROOT / "skills").glob("*/SKILL.md")),
-    *sorted((_PLUGIN_ROOT / "protocols").glob("*.md")),
+    *_tracked_surface("skills/*/SKILL.md"),
+    *_tracked_surface("protocols/*.md"),
 ]
 _SSOT = _PLUGIN_ROOT / "protocols" / "pact-protocols.md"
 _REPO_ROOT = _PLUGIN_ROOT.parent
@@ -578,28 +588,39 @@ class TestDocPathSitesCiteTheRealignedName:
         ]
 
 
+def _command_task_a_tails():
+    """Each tracked command line that waits on the lead, with its ending proof."""
+    tails = []
+    for path in _tracked_surface("commands/*.md"):
+        for n, line in enumerate(
+            path.read_text(encoding="utf-8").split("\n"), start=1
+        ):
+            if "intentional_wait{reason=awaiting_lead_completion" in line:
+                tails.append((_rel(path), n, "End the turn (idle)." in line))
+    return tails
+
+
+def _skill_collapsed_form_hits():
+    """The collapsed idle form across every tracked skill body."""
+    return sum(
+        path.read_text(encoding="utf-8").count("End the turn (idle)")
+        for path in _tracked_surface("skills/*/SKILL.md")
+    )
+
+
 class TestCollapsedWaitWording:
     """Harness-agnostic idle semantics: ending the turn IS idling, the
     main-fallback covers the unreachable lead, the relay is the sanctioned
     escape for the one case prevention cannot reach."""
 
     def test_every_command_task_a_tail_ends_the_turn(self):
-        tails = []
-        for path in sorted((_PLUGIN_ROOT / "commands").glob("*.md")):
-            for n, line in enumerate(
-                path.read_text(encoding="utf-8").split("\n"), start=1
-            ):
-                if "intentional_wait{reason=awaiting_lead_completion" in line:
-                    tails.append((_rel(path), n, "End the turn (idle)." in line))
+        tails = _command_task_a_tails()
         assert len(tails) == 6
         for rel, n, ends in tails:
             assert ends, f"{rel}:{n} Task A tail does not end the turn"
 
     def test_skills_carry_the_collapsed_form_three_times(self):
-        hits = 0
-        for path in sorted((_PLUGIN_ROOT / "skills").glob("*/SKILL.md")):
-            hits += path.read_text(encoding="utf-8").count("End the turn (idle)")
-        assert hits == 3  # agent-teams canonical bullet + rejection tail, teachback post-store
+        assert _skill_collapsed_form_hits() == 3  # agent-teams canonical bullet + rejection tail, teachback post-store
 
     def test_agent_teams_canonical_bullet_has_full_collapsed_form(self):
         skill = (_PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md").read_text(
@@ -615,3 +636,88 @@ class TestCollapsedWaitWording:
         skill = (_PLUGIN_ROOT / "skills" / "pact-teachback" / "SKILL.md").read_text(
             encoding="utf-8")
         assert "If `team-lead` is unreachable, send the notify to `main`." in skill
+
+
+def test_tracked_doc_surface_population_controls_untracked_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known_members = (
+        ("commands/*.md", "commands/orchestrate.md"),
+        ("skills/*/SKILL.md", "skills/pact-handoff-harvest/SKILL.md"),
+        ("protocols/*.md", "protocols/pact-protocols.md"),
+    )
+    for _, known in known_members:
+        path = plugin / known
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_PLUGIN_ROOT", plugin)
+
+    for pattern, known in known_members:
+        assert plugin / known in _tracked_surface(pattern)
+    before = _tracked_surface("protocols/*.md")
+    stray = plugin / "protocols" / "000_backend_non_tty_issue1714_probe.md"
+    stray.write_text("tasks/{team_name}\n", encoding="utf-8")
+    try:
+        assert _tracked_surface("protocols/*.md") == before
+    finally:
+        stray.unlink()
+
+
+def test_tracked_protocol_population_omits_a_deleted_member(monkeypatch):
+    known = _PLUGIN_ROOT / "protocols" / "pact-protocols.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _tracked_surface("protocols/*.md")
+
+
+def test_wait_wording_oracles_ignore_untracked_content(tmp_path, monkeypatch):
+    """The probes carry the phrase, so an untracked carrier would move the count."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    command = plugin / "commands" / "orchestrate.md"
+    command.parent.mkdir(parents=True)
+    command.write_text(
+        "End the turn (idle).\n"
+        "intentional_wait{reason=awaiting_lead_completion\n",
+        encoding="utf-8",
+    )
+    skill = plugin / "skills" / "known" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("End the turn (idle)\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_PLUGIN_ROOT", plugin)
+
+    assert command in _tracked_surface("commands/*.md")
+    assert skill in _tracked_surface("skills/*/SKILL.md")
+    tails_before = _command_task_a_tails()
+    hits_before = _skill_collapsed_form_hits()
+    assert len(tails_before) == 1 and hits_before == 1
+
+    stray_command = plugin / "commands" / "000_issue1714_probe.md"
+    stray_command.write_text(
+        "End the turn (idle).\n"
+        "intentional_wait{reason=awaiting_lead_completion\n",
+        encoding="utf-8",
+    )
+    stray_skill = plugin / "skills" / "000_issue1714_probe" / "SKILL.md"
+    stray_skill.parent.mkdir()
+    stray_skill.write_text("End the turn (idle)\n" * 3, encoding="utf-8")
+    try:
+        assert stray_command not in _tracked_surface("commands/*.md")
+        assert stray_skill not in _tracked_surface("skills/*/SKILL.md")
+        assert _command_task_a_tails() == tails_before
+        assert _skill_collapsed_form_hits() == hits_before
+    finally:
+        stray_command.unlink()
+        stray_skill.unlink()
+        stray_skill.parent.rmdir()

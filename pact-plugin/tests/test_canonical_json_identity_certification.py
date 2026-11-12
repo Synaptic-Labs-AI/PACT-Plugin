@@ -56,9 +56,12 @@ does not see comments.
 
 import ast
 import importlib
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 import shared.canonical_json as canonical  # noqa: E402
 
@@ -66,6 +69,13 @@ CANONICAL_MODULE = "shared.canonical_json"
 
 _SHARED_DIR = Path(canonical.__file__).parent
 _DEFINING_MODULE_FILE = Path(canonical.__file__)
+
+
+def _shared_module_paths() -> list[Path]:
+    repo_root = _SHARED_DIR.parents[2]
+    relative = _SHARED_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
 
 
 def _bound_serializer_name(source_path: Path) -> "str | None":
@@ -106,7 +116,7 @@ def _discover_family() -> tuple:
     keeps a member the derivation invented out of the family.
     """
     found = []
-    for path in sorted(_SHARED_DIR.glob("*.py")):
+    for path in _shared_module_paths():
         if path == _DEFINING_MODULE_FILE:
             continue
         binding = _bound_serializer_name(path)
@@ -124,6 +134,35 @@ FAMILY_BINDINGS = tuple(
 )
 
 _FAMILY_SOURCES = tuple(path for path, _ in _FAMILY)
+
+
+def test_discover_family_ignores_an_untracked_serializer_member(tmp_path, monkeypatch):
+    """The needle binds canonical_bytes; under the old glob it joins the family."""
+    repo = tmp_path / "repo"
+    shared = repo / "pact-plugin" / "hooks" / "shared"
+    known = shared / "known.py"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "from shared.canonical_json import canonical_bytes\n", encoding="utf-8")
+    defining = shared / "canonical_json.py"
+    defining.write_text("def canonical_bytes(x):\n    return x\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_SHARED_DIR", shared)
+    monkeypatch.setitem(globals(), "_DEFINING_MODULE_FILE", defining)
+
+    assert [path.name for path, _ in _discover_family()] == ["known.py"]
+
+    stray = shared / "zzprobe.py"
+    stray.write_text(
+        "from shared.canonical_json import canonical_bytes\n", encoding="utf-8")
+    try:
+        assert [path.name for path, _ in _discover_family()] == ["known.py"]
+    finally:
+        stray.unlink()
 
 
 def _serializer_calls(source_path: Path) -> list[str]:

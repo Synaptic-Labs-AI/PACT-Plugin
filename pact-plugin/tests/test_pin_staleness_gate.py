@@ -9,6 +9,7 @@ Matrix: marker absence/present × CLAUDE.md path match/miss × teammate/team-lea
         × Edit/Write → 16 cells minimum, plus fail-open assertions.
 """
 
+import ast
 import json
 import os
 import subprocess
@@ -17,7 +18,17 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files  # noqa: E402
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+
+# The corpus this module's census rows walk. Tracked-only: an untracked
+# scratch .md must not join (see _tracked_corpus_files and its arms).
+_CLAUDE_MD_CORPUS = Path(__file__).resolve().parent / "fixtures" / "claude_md_corpus"
+
+
+def _tracked_corpus_files(root):
+    """Tracked corpus .md files; an untracked scratch file cannot join."""
+    return _shared_tracked_files(root, ".", "*.md")
 
 # Text an exception raised after the gate reads CLAUDE.md could carry. No
 # fail-open report may repeat it.
@@ -1473,7 +1484,7 @@ class TestPinStalenessGate_WholeFileCount:
         from staleness import locate_pinned
 
         checked = 0
-        for path in sorted((Path(__file__).parent / "fixtures" / "claude_md_corpus").glob("*.md")):
+        for path in _tracked_corpus_files(_CLAUDE_MD_CORPUS):
             doc = parse(path.read_text(encoding="utf-8", errors="replace"))
             located = locate_pinned(doc)
             if located.state is not State.FOUND:
@@ -1484,6 +1495,57 @@ class TestPinStalenessGate_WholeFileCount:
             assert pin_staleness_gate._count_pin_comments(doc, heading + 1, last) == expected, path.name
             checked += 1
         assert checked >= 10, f"only {checked} corpus files locate a Pinned section"
+
+    def test_corpus_files_exclude_untracked_documents(self, tmp_path):
+        """The census row's population reads the git index, not the tree.
+
+        The row floors on ``checked >= 10``; an untracked document joins a
+        raw ``glob`` walk with the same weight as a committed one, so it can
+        MASK the loss of a tracked corpus file. The row's per-file equality
+        cannot redden on ANY document (it restates the implementation — see
+        the observation note in the census ledger), so the conversion binds
+        here at the population, and the AST pin below binds the row to this
+        provider.
+        """
+        repo = tmp_path / "repo"
+        corpus = repo / "pact-plugin" / "tests" / "fixtures" / "claude_md_corpus"
+        corpus.mkdir(parents=True)
+        tracked = corpus / "case_tracked.md"
+        tracked.write_text("body\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+        probe = corpus / "000_untracked_probe.md"
+        probe.write_text("body\n", encoding="utf-8")
+
+        files = _tracked_corpus_files(corpus)
+
+        assert tracked in files, "the tracked control is missing"
+        assert probe not in files, (
+            f"untracked {probe.name} joined the corpus population; "
+            "_tracked_corpus_files is not reading the git index")
+
+    def test_the_count_row_iterates_the_tracked_provider(self):
+        """AST pin: the count row may not bypass the tracked provider.
+
+        Reverting the row's walk to a raw ``glob`` keeps every runtime arm
+        green (the row's equality is tautological and its floor only counts
+        up), so the binding is structural: the row must enumerate through
+        ``_tracked_corpus_files`` and must not ``.glob`` the corpus itself.
+        """
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        row = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "test_the_count_of_a_located_section_is_the_cap_parsers")
+        source = ast.get_source_segment(
+            Path(__file__).read_text(encoding="utf-8"), row) or ""
+        assert "_tracked_corpus_files(" in source, (
+            "the count row no longer enumerates through _tracked_corpus_files; "
+            "an untracked corpus file can join its population")
+        assert ".glob(" not in source, (
+            "the count row walks the filesystem directly; an untracked corpus "
+            "file can join its population")
 
 
 class TestPinStalenessGate_UncertainPinnedSection:

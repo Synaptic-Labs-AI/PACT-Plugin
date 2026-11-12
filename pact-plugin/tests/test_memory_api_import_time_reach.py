@@ -59,8 +59,11 @@ Treat a pass as evidence about the code as written, not as a proof of absence.
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 from pathlib import Path
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 # Names that mean "the memory API". Reaching any of these at import time is what
 # would make the collection window live.
@@ -130,12 +133,13 @@ def _import_time_calls(tree: ast.AST) -> list[tuple[int, str]]:
     return found
 
 
-def _python_files() -> list[Path]:
+def _python_files(root=_PLUGIN_ROOT) -> list[Path]:
     # Do NOT filter on ".worktrees": the plugin is routinely checked out inside
     # a worktree, so that filter excludes the entire population and the scan
     # passes at zero files. The non-empty control below exists because this
     # exact mistake makes the tripwire permanently and silently green.
-    return [p for p in _PLUGIN_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
+    return [p for p in _tracked_glob(root, "**/*.py", allow_empty=True)
+            if "__pycache__" not in p.parts]
 
 
 class TestNoImportTimeReachIntoMemoryAPI:
@@ -239,3 +243,25 @@ class TestNoImportTimeReachIntoMemoryAPI:
             "window is now LIVE. Convert the conftest scrub to an unconditional "
             "module-level scrub. Offenders:\n  " + "\n  ".join(offenders)
         )
+
+
+def test_an_untracked_module_cannot_reach_the_memory_api(tmp_path):
+    """An untracked scratch module must not join the import-time census."""
+    root = tmp_path / "plugin"
+    (root / "hooks").mkdir(parents=True)
+    body = "from store import PACTMemory\n\nPACTMemory().save_memory('x')\n"
+    tracked = root / "hooks" / "tracked.py"
+    tracked.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "hooks" / "zzprobe.py"
+    needle.write_text(body, encoding="utf-8")
+
+    population = _python_files(root)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the import-time census: {needle}")
+    assert _import_time_calls(ast.parse(tracked.read_text(encoding="utf-8"))), (
+        "the oracle is not live")

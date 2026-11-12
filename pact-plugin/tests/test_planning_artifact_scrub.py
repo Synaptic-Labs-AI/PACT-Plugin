@@ -59,10 +59,13 @@ the regression at PR time rather than at next-session context-load.
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 
 # ─── Directory scope ─────────────────────────────────────────────────────────
@@ -353,12 +356,20 @@ def _scan_file(path: Path) -> list[Violation]:
     return violations
 
 
+def _population(directory: Path) -> list[Path]:
+    """Tracked .md files under one LLM-loaded directory, recursively.
+
+    A working-tree walk reads an untracked scratch file as a shipped one.
+    """
+    return sorted(_tracked_glob(directory, "**/*.md", allow_empty=True))
+
+
 def _scan_directory(directory: Path) -> list[Violation]:
-    """Walk a directory recursively for .md files and scan each."""
+    """Scan every tracked .md file under a directory."""
     if not directory.is_dir():
         return []
     violations: list[Violation] = []
-    for md_path in sorted(directory.rglob("*.md")):
+    for md_path in _population(directory):
         violations.extend(_scan_file(md_path))
     return violations
 
@@ -402,7 +413,7 @@ class TestPlanningArtifactScrub:
         if not directory.is_dir():
             return
         offenders: list[tuple[Path, list[int]]] = []
-        for md_path in sorted(directory.rglob("*.md")):
+        for md_path in _population(directory):
             try:
                 text = md_path.read_text(encoding="utf-8")
             except OSError:
@@ -730,3 +741,34 @@ class TestScannerSelfDiscipline:
             "commit_letter",
             "bug_letter",
         } <= names
+
+
+def test_an_untracked_markdown_needle_is_not_scanned(tmp_path):
+    """An untracked scratch .md must not join the scrub population.
+
+    Positive control: a TRACKED file carrying the same defect IS scanned and
+    reported, so an empty population cannot pass this arm.
+    """
+    directory = tmp_path / "commands"
+    directory.mkdir(parents=True)
+    tracked = directory / "tracked.md"
+    tracked.write_text("<!-- planning-artifact-exempt-block: stray -->\n",
+                       encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(directory)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(directory), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = directory / "zzprobe.md"
+    needle.write_text("<!-- planning-artifact-exempt-block: stray -->\n",
+                      encoding="utf-8")
+
+    population = _population(directory)
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the scrub population: {needle}")
+    flagged = {
+        path.name for path in population
+        if _unmatched_block_start_lines(path.read_text(encoding="utf-8").splitlines())
+    }
+    assert flagged == {"tracked.md"}, flagged

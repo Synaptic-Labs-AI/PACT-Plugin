@@ -26,8 +26,15 @@ from unittest.mock import patch
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
+
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "peer_inject.py"
 SUPPRESS = {"suppressOutput": True}
+
+
+def _tracked_glob(directory, pattern):
+    """Return current tracked files only, excluding deleted index entries."""
+    return _shared_tracked_files(directory, ".", pattern)
 
 
 def _write_team_config(tmp_path, team, members, **extra):
@@ -1246,7 +1253,8 @@ class TestCompletionAuthorityNoteParametrizedAgents:
           files and silently pass.
         """
         agents_dir = Path(__file__).parent.parent / "agents"
-        files = set(p.stem for p in agents_dir.glob("pact-*.md"))
+        files = {p.stem for p in _tracked_glob(agents_dir, "pact-*.md")}
+        assert "pact-devops-engineer" in files
         files.discard("pact-orchestrator")
         listed = set(_PACT_AGENT_TYPES)
         missing = files - listed
@@ -1258,6 +1266,26 @@ class TestCompletionAuthorityNoteParametrizedAgents:
             f"unexpected (in list but no agent file): {sorted(unexpected)}. "
             "Update _PACT_AGENT_TYPES to match the SPAWNABLE pact-* agents."
         )
+
+    def test_tracked_glob_excludes_untracked_and_detects_deletion(self, tmp_path):
+        directory = tmp_path / "agents"
+        directory.mkdir()
+        keep = directory / "pact-keep.md"
+        removed = directory / "pact-removed.md"
+        nested = directory / "nested" / "pact-nested.md"
+        nested.parent.mkdir()
+        for path in (keep, removed, nested, directory / "other.md"):
+            path.write_text("fixture", encoding="utf-8")
+        subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+        (directory / "pact-untracked.md").write_text("scratch", encoding="utf-8")
+
+        assert _tracked_glob(directory, "pact-*.md") == [keep, removed]
+        removed.unlink()
+        assert _tracked_glob(directory, "pact-*.md") == [keep]
+        keep.unlink()
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(directory, "pact-*.md")
 
 
 class TestCompletionAuthorityLiteralPhraseRegressionGuard:

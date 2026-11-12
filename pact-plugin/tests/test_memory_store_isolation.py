@@ -342,73 +342,109 @@ class TestTheSuiteIsActuallyIsolatedRightNow:
         )
 
 
-_LEFT_THE_FLAG_SET = False
+def _dirty_process_flag(monkeypatch):
+    """Set the lazy-init flag without doing environment-dependent real work."""
+    from scripts import memory_init
+
+    for name in (
+        "check_and_install_dependencies",
+        "maybe_migrate_embeddings",
+        "maybe_embed_pending",
+    ):
+        monkeypatch.setattr(
+            memory_init, name,
+            lambda *a, **k: {"status": "ok", "installed": [], "failed": []},
+        )
+    memory_init.ensure_memory_ready()
+    assert memory_init.is_initialized(), (
+        "the test could not establish its dirty-flag precondition"
+    )
+    return memory_init
 
 
 class TestInitStateDoesNotLeakBetweenStores:
-    """The process-global lazy-init flag must not carry across tests.
-
-    `memory_init.ensure_memory_ready()` returns early on a MODULE-LEVEL flag,
-    before resolving any path, and two of the three things it guards are
-    per-database. With the store now per-test, a test that runs after one which
-    initialised a DIFFERENT store would be told the work was already done for a
-    store nothing had touched.
-
-    AN ORDERED PAIR, WHICH IS A LIABILITY AND IS GUARDED. The first test leaves
-    the flag set; the second asserts it was cleared. If the two ever stop
-    running in this order, the second would pass for the wrong reason -- it
-    would find a clean flag because nothing had dirtied it. `_LEFT_THE_FLAG_SET`
-    exists to turn that false green into a loud failure. No ordering plugin is
-    installed in this suite today, so definition order holds; the guard is for
-    the day that stops being true.
-    """
+    """Each test owns its dirty precondition; no sibling or worker supplies it."""
 
     def test_a_leaves_the_process_flag_set_for_its_own_store(self, monkeypatch):
-        """Dirty the global deliberately. This is the precondition, not a check.
+        """The setup used by both tests sets the process-global flag."""
+        memory_init = _dirty_process_flag(monkeypatch)
+        assert memory_init.is_initialized()
 
-        The guarded work is replaced with no-ops: this pair is about the FLAG,
-        and running the real dependency check and migration here would make the
-        test slow and dependent on the environment for no added signal.
-        """
-        global _LEFT_THE_FLAG_SET
-        from scripts import memory_init
+    def test_b_starts_from_a_clean_flag(self, monkeypatch):
+        """The owner reset clears a flag this test dirtied itself."""
+        memory_init = _dirty_process_flag(monkeypatch)
+        memory_init.reset_initialization()
+        assert not memory_init.is_initialized(), (
+            "reset_initialization() left the lazy-init flag set after this test "
+            "established it. ensure_memory_ready() would return early for this "
+            "test's store and skip the per-database work it guards."
+        )
 
-        for name in (
-            "check_and_install_dependencies",
-            "maybe_migrate_embeddings",
-            "maybe_embed_pending",
-        ):
-            monkeypatch.setattr(
-                memory_init, name,
-                lambda *a, **k: {"status": "ok", "installed": [], "failed": []},
+
+class TestAutouseResetIntegration:
+    """One worker-local observer, independent of test order and distribution."""
+
+    def test_autouse_reset_removal_is_detected_in_all_distributions(self, tmp_path):
+        """Enabled reset clears the collection-time dirty flag; no-op reset reddens it."""
+        plugin = tmp_path / "plugin"
+        tests_dir = plugin / "tests"
+        tests_dir.mkdir(parents=True)
+        source_root = Path(__file__).parent.parent
+        conftest_source = (Path(__file__).parent / "conftest.py").read_text(encoding="utf-8")
+        (plugin / "conftest.py").write_text(conftest_source, encoding="utf-8")
+        (tests_dir / "test_autouse_reset_observer.py").write_text(
+            "import os\n"
+            "import sys\n"
+            "sys.path.insert(0, os.environ['PACT_AUTOUSE_SOURCE_ROOT'] + '/skills/pact-memory')\n"
+            "from scripts import memory_init\n"
+            "for name in ('check_and_install_dependencies', 'maybe_migrate_embeddings', 'maybe_embed_pending'):\n"
+            "    setattr(memory_init, name, lambda *a, **k: {'status': 'ok', 'installed': [], 'failed': []})\n"
+            "memory_init.ensure_memory_ready()\n"
+            "assert memory_init.is_initialized()\n\n"
+            "def test_clean_at_start():\n"
+            "    assert not memory_init.is_initialized(), (\n"
+            "        'the real autouse reset did not clear the collection-time dirty flag. '\n"
+            "        'This observer deliberately has no owner-level reset of its own.'\n"
+            "    )\n",
+            encoding="utf-8",
+        )
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env["PACT_AUTOUSE_SOURCE_ROOT"] = str(source_root)
+        env["PYTHONPATH"] = os.pathsep.join(str(path) for path in (
+            source_root / "tests",
+            source_root / "hooks",
+            source_root / "skills" / "pact-memory",
+            source_root / "skills" / "pact-memory" / "scripts",
+            source_root / "skills" / "pact-coding-standards" / "scripts",
+            source_root / "scripts",
+            source_root,
+        ))
+        for name in ("PYTEST_ADDOPTS", "GITHUB_ACTIONS", "GITHUB_WORKSPACE"):
+            env.pop(name, None)
+        for name in list(env):
+            if name.startswith("PYTEST_XDIST_"):
+                env.pop(name, None)
+
+        def run_pair(mode):
+            plugin_control = [] if mode else ["-p", "no:xdist"]
+            return subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "-p", "no:randomly", *plugin_control, *mode,
+                 "tests/test_autouse_reset_observer.py"],
+                cwd=plugin, env=env, capture_output=True, text=True, timeout=120,
             )
 
-        memory_init.ensure_memory_ready()
-        assert memory_init.is_initialized(), (
-            "this test could not establish its own precondition: the flag did "
-            "not become set, so the next test would prove nothing"
-        )
-        _LEFT_THE_FLAG_SET = True
-
-    def test_b_starts_from_a_clean_flag(self):
-        """FAILS without the reset fixture. Its own store would be skipped.
-
-        The failure this prevents is silent: the second store is simply told the
-        work is done, and nothing raises.
-        """
-        from scripts import memory_init
-
-        assert _LEFT_THE_FLAG_SET, (
-            "the sibling that dirties the flag did not run before this one, so "
-            "a clean flag here means nothing. The order this pair depends on "
-            "has changed -- fix the pair rather than trusting this pass."
-        )
-        assert not memory_init.is_initialized(), (
-            "the lazy-init flag arrived already set, left by a test whose store "
-            "was a DIFFERENT directory. ensure_memory_ready() would return "
-            "early for this test's store and skip the per-database work it "
-            "guards. The reset fixture in conftest is not running."
-        )
+        reset_line = "    reset_initialization()\n"
+        assert conftest_source.count(reset_line) == 1
+        for mode in ((), ("-n", "2", "--dist", "load"), ("-n", "4", "--dist", "loadfile")):
+            enabled = run_pair(mode)
+            assert enabled.returncode == 0, (mode, enabled.stdout + enabled.stderr)
+            (plugin / "conftest.py").write_text(
+                conftest_source.replace(reset_line, "    return\n", 1), encoding="utf-8")
+            disabled = run_pair(mode)
+            assert disabled.returncode == 1, (mode, disabled.stdout + disabled.stderr)
+            assert "test_clean_at_start" in disabled.stdout, (mode, disabled.stdout)
+            (plugin / "conftest.py").write_text(conftest_source, encoding="utf-8")
 
 
 class TestEachIsolationLayerHasAWitness:

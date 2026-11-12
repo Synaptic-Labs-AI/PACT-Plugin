@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from shared import claude_md_markers
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
@@ -36,6 +37,13 @@ from shared.claude_md_manager import (
 from shared.claude_md_markers import Cause, Kind, State, parse
 
 _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
+
+
+def _tracked_glob(directory, pattern):
+    """Return current tracked files only, excluding deleted index entries."""
+    return _shared_tracked_files(directory, ".", pattern)
+
+
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
 # The legacy kernel markers are locals of claude_md_manager._plan_kernel_strip,
 # so they cannot be imported; the start is a prefix literal.
@@ -97,8 +105,31 @@ def _in_html_rows(doc):
 # --- the corpus ------------------------------------------------------------
 
 def test_corpus_is_populated():
+    files = _tracked_glob(_CORPUS, "*.md")
     assert len(_EXPECTED) >= 40
-    assert {p.stem for p in _CORPUS.glob("*.md")} == set(_EXPECTED)
+    assert _CORPUS / "hidden_pre_closed_at_row_end.md" in files
+    assert {p.stem for p in files} == set(_EXPECTED)
+
+
+def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
+    directory = tmp_path / "corpus"
+    directory.mkdir()
+    keep = directory / "keep.md"
+    removed = directory / "removed.md"
+    nested = directory / "nested" / "nested.md"
+    nested.parent.mkdir()
+    for path in (keep, removed, nested, directory / "other.txt"):
+        path.write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    (directory / "untracked.md").write_text("scratch", encoding="utf-8")
+
+    assert _tracked_glob(directory, "*.md") == [keep, removed]
+    removed.unlink()
+    assert _tracked_glob(directory, "*.md") == [keep]
+    keep.unlink()
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(directory, "*.md")
 
 
 @pytest.mark.parametrize("case", sorted(_EXPECTED))

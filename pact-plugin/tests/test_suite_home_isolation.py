@@ -13,7 +13,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 _PLUGIN = Path(__file__).resolve().parent.parent
+
+
+def _test_source_files():
+    """Test sources from the git index, one glob per population.
+
+    An untracked scratch test file must not be judged by this scan; the two
+    seeded modes are the known members that keep an empty root loud.
+    """
+    name = _PLUGIN.name
+    return (
+        _shared_tracked_glob(
+            _PLUGIN.parent, f"{name}/tests/**/*.py",
+            f"{name}/tests/test_suite_home_isolation.py")
+        + _shared_tracked_glob(
+            _PLUGIN.parent, f"{name}/skills/*/test_*.py",
+            f"{name}/skills/pact-handoff-harvest/test_skill_loading_harvest.py")
+    )
 _HOOKS = _PLUGIN / "hooks"
 
 # Read at collection, before any fixture runs: what import-time code in a test
@@ -82,9 +103,52 @@ def _env_lacks_home(node: ast.expr) -> bool:
     return False
 
 
+@pytest.mark.parametrize("relative", [
+    "tests/zzprobe.py", "skills/zzprobe/test_zzprobe.py",
+], ids=["tests", "skills"])
+def test_untracked_test_file_cannot_join_the_home_scan(
+        tmp_path, monkeypatch, relative):
+    """Both populations read the index; an untracked test file is invisible.
+
+    Reverting ``_test_source_files`` to the two filesystem globs keeps the
+    shipped tree green; this arm drives the HOME scan and reddens naming the
+    untracked file. The seeded tracked files are the positive control.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    tests_dir = plugin / "tests"
+    tests_dir.mkdir(parents=True)
+    # The production arm carries its own `len(files) > 100` denominator guard,
+    # so the fixture must clear it to reach the assertion under test.
+    (tests_dir / "test_suite_home_isolation.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    for index in range(100):
+        (tests_dir / f"test_known_{index}.py").write_text(
+            "def test_ok():\n    assert True\n", encoding="utf-8")
+    known = plugin / "skills/pact-handoff-harvest/test_skill_loading_harvest.py"
+    known.parent.mkdir(parents=True)
+    known.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setitem(globals(), "_PLUGIN", plugin)
+
+    assert len(_test_source_files()) == 102, (
+        f"positive control: expected the 102 seeded sources, got "
+        f"{len(_test_source_files())}")
+    probe = plugin / relative
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text(
+        "import subprocess\n\n\n"
+        "def test_child():\n"
+        "    env = {'X': '1'}\n"
+        "    subprocess.run(['true'], env=env)\n", encoding="utf-8")
+
+    test_no_child_environment_built_in_a_test_leaves_out_home()
+
+
 def test_no_child_environment_built_in_a_test_leaves_out_home():
     runners = {"run", "Popen", "check_output", "check_call", "call"}
-    files = list(_PLUGIN.glob("tests/**/*.py")) + list(_PLUGIN.glob("skills/*/test_*.py"))
+    files = _test_source_files()
     misses = []
     for path in files:
         if "fixtures" in path.parts:

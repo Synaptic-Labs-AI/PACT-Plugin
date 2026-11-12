@@ -12,9 +12,17 @@
 #      the declared one.
 #   2. STAMPS the tree identity into the capture file above the pytest output,
 #      so a later reader can tell what was measured without a re-run.
+#   3. READS HEAD and the complete porcelain state again after pytest, and marks
+#      the run stable only when both are unchanged. A green run whose tree moved
+#      is unattributable and returns 6; a red pytest status is preserved.
 #
 #   The STAMP is the load-bearing part. The REFUSAL is the enhancement. If the
 #   two are ever in tension, keep the stamp.
+#
+#   The after-run comparison is a cheap shared-tree guard, not decisive clean-SHA
+#   certification. An in-place edit while already dirty can leave porcelain text
+#   unchanged, and ignored files are outside it. Use a detached clean worktree at
+#   the named SHA for decisive local certification.
 #
 # WHAT THIS DOES NOT COVER
 #   This wrapper gates the MERGE-GATE suite run only. It requires a git
@@ -27,9 +35,15 @@
 #   verify-gate-tree.sh <declared-worktree-path> <capture-file> [pytest args...]
 #
 # EXIT CODES
-#   0    pytest ran and passed
-#   2    refused before pytest started
-#   1    a usage error, or the pytest exit code
+#   0    pytest passed and the tree stayed stable
+#   2    refused before pytest started, including a temporary-file allocation
+#        failure and a tree whose HEAD names no commit; a refusal writes no
+#        capture
+#   6    pytest was green but the tree became unattributable. 6 sits above
+#        pytest's own 0-5 exit range, so it can never be a preserved pytest
+#        status
+#   1    a usage error, or the pytest exit code (test failures)
+#   any other nonzero pytest status is preserved verbatim
 
 set -u
 
@@ -56,6 +70,15 @@ shift 2
 
 if ! command -v git >/dev/null 2>&1; then
     printf 'GATE REFUSED: git is not available, so the tree cannot be identified.\n' >&2
+    printf '  To run the suite without this check, call pytest directly.\n' >&2
+    exit 2
+fi
+
+# The capture-path containment check below is computed by python3. Without it
+# that check would read an empty path, match nothing, and silently proceed to
+# write the capture inside the tree it is meant to keep clear.
+if ! command -v python3 >/dev/null 2>&1; then
+    printf 'GATE REFUSED: python3 is not available, so the capture path cannot be checked.\n' >&2
     printf '  To run the suite without this check, call pytest directly.\n' >&2
     exit 2
 fi
@@ -94,8 +117,51 @@ if [ "$declared_real" != "$actual_real" ]; then
     exit 2
 fi
 
-head_sha="$(git -C "$actual_real" rev-parse HEAD)"
-dirty_count="$(git -C "$actual_real" status --porcelain | wc -l | tr -d ' ')"
+# An empty capture_real would match no containment pattern and let the run
+# proceed with the check silently disarmed, so a failure here is a refusal.
+if ! capture_real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$capture")" \
+        || [ -z "$capture_real" ]; then
+    printf 'GATE REFUSED: python3 could not resolve the capture path, so containment is unproven.\n' >&2
+    printf '  capture: %s\n' "$capture" >&2
+    printf '  Fix the interpreter, or call pytest directly.\n' >&2
+    exit 2
+fi
+case "$capture_real" in
+    "$declared_real"|"$declared_real"/*)
+        printf 'GATE REFUSED: the capture path must be outside the declared tree.\n' >&2
+        printf '  declared: %s\n' "$declared_real" >&2
+        printf '  capture : %s\n' "$capture_real" >&2
+        printf '  Choose a capture path outside this worktree; no capture or pytest run was started.\n' >&2
+        exit 2
+        ;;
+esac
+
+# An unborn branch names no commit: rev-parse fails (or echoes a literal
+# `HEAD`), and a stamp without a commit certifies nothing. Refuse here,
+# before any snapshot work, rather than exit unattributable after a full run.
+if ! head_sha="$(git -C "$actual_real" rev-parse HEAD 2>/dev/null)" \
+        || [ -z "$head_sha" ] || [ "$head_sha" = "HEAD" ]; then
+    printf 'GATE REFUSED: the tree has no commit at HEAD, so there is nothing to certify.\n' >&2
+    printf '  Commit (or check out a commit) in %s, or call pytest directly.\n' "$actual_real" >&2
+    exit 2
+fi
+porcelain_before="$(mktemp)" || {
+    printf 'GATE REFUSED: cannot allocate the before-run porcelain capture.\n' >&2
+    exit 2
+}
+porcelain_after="$(mktemp)" || {
+    rm -f "$porcelain_before"
+    printf 'GATE REFUSED: cannot allocate the after-run porcelain capture.\n' >&2
+    exit 2
+}
+trap 'rm -f "$porcelain_before" "$porcelain_after"' EXIT
+# --untracked-files=all overrides status.showUntrackedFiles from git config;
+# without it a repo configured to hide untracked files disarms this check.
+if ! git -C "$actual_real" status --porcelain --untracked-files=all > "$porcelain_before"; then
+    printf 'GATE REFUSED: git status failed before pytest.\n' >&2
+    exit 2
+fi
+dirty_count="$(wc -l < "$porcelain_before" | tr -d ' ')"
 
 # Make the capture directory, because a missing directory is a faithful call
 # with an absent parent, and a refusal there would teach the operator nothing.
@@ -114,8 +180,41 @@ mkdir -p "$capture_dir" || {
     printf 'GATE-COMMAND python3 -m pytest %s\n' "$*"
 } > "$capture"
 
+# The stamp records only argv. An ambient PYTEST_ADDOPTS can narrow the run
+# without appearing in it, so enforce what the canary asks the operator to
+# remember.
+unset PYTEST_ADDOPTS
 python3 -m pytest "$@" >> "$capture" 2>&1
 status=$?
 
-printf 'GATE-PYTEST-EXIT %s\n' "$status" >> "$capture"
-exit "$status"
+head_after="$(git -C "$actual_real" rev-parse HEAD 2>/dev/null || true)"
+porcelain_readable=1
+if ! git -C "$actual_real" status --porcelain --untracked-files=all > "$porcelain_after"; then
+    porcelain_readable=0
+fi
+if [ "$porcelain_readable" -eq 1 ]; then
+    dirty_after="$(wc -l < "$porcelain_after" | tr -d ' ')"
+else
+    dirty_after="unknown"
+fi
+attribution="unattributable"
+if [ "$porcelain_readable" -eq 1 ] && [ -n "$head_after" ] \
+        && [ "$head_after" = "$head_sha" ] \
+        && cmp -s "$porcelain_before" "$porcelain_after"; then
+    attribution="stable"
+fi
+
+{
+    printf 'GATE-HEAD-AFTER %s\n' "$head_after"
+    printf 'GATE-DIRTY-PATHS-AFTER %s\n' "$dirty_after"
+    printf 'GATE-TREE-ATTRIBUTION %s\n' "$attribution"
+    printf 'GATE-PYTEST-EXIT %s\n' "$status"
+} >> "$capture"
+
+if [ "$status" -ne 0 ]; then
+    exit "$status"
+fi
+if [ "$attribution" != "stable" ]; then
+    exit 6
+fi
+exit 0

@@ -104,11 +104,29 @@ Used by: pytest.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = False) -> list[Path]:
+    """Content consumers drop deleted index entries; structural oracles keep them.
+
+    THE DEFAULT IS THE SAFE SIDE. A content population reads every member, so
+    omitting the keyword must not hand a reader a FileNotFoundError on a locally
+    deleted tracked file. A structural population that must keep the entry — to
+    name the deletion — passes ``keep_deleted=True`` explicitly.
+    """
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=keep_deleted
+    )
+
 
 # THE ADDRESS OF THE GUARDED REGION, and not a copy of it. An HTML comment does
 # not appear when a reader renders the markdown, so the pair costs a reader
@@ -214,6 +232,20 @@ POPULATION_PATTERNS = (
     # needs no exemption. It does NOT reach the memory package or the hooks.
     "scripts/*.py",
 )
+
+# THE NON-VACUITY CONTROL FOR EACH PATTERN, and each must be a tracked member
+# of its OWN pattern's population: a control borrowed from another pattern
+# proves the wrong glob reached the index. A pattern added without an entry
+# here fails at `population_files` rather than silently losing its control.
+POPULATION_KNOWN_MEMBERS = {
+    "agents/*.md": "agents/pact-orchestrator.md",
+    "commands/*.md": "commands/orchestrate.md",
+    "protocols/*.md": "protocols/pact-protocols.md",
+    "reference/*.md": "reference/config.md",
+    "skills/*/SKILL.md": "skills/pact-memory/SKILL.md",
+    "skills/pact-memory/**/*.md": "skills/pact-memory/SKILL.md",
+    "scripts/*.py": "scripts/archive_pin.py",
+}
 
 # THE MEMORY-REPAIR PACKAGE, walked as a DIRECTORY rather than as a path list.
 # Each module here must carry the bar, so a module added later joins the rule
@@ -547,6 +579,22 @@ def is_source_file(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _derived_population(root: Path) -> list[Path]:
+    """Shipped artifacts read the index; a synthetic model root keeps its walk.
+
+    The same split as ``_repair_package_paths``: the model tree is built on
+    disk and is deliberately its own population, while the shipped root must
+    not gain an untracked carrier from whoever's scratch file is present.
+    """
+    if root != PLUGIN_DIR:
+        return sorted(root.rglob("*"))
+    prefix = root.name
+    return _tracked_glob(
+        root.parent, f"{prefix}/**/*", f"{prefix}/{SOURCE_HOME}",
+        keep_deleted=True,
+    )
+
+
 def derived_carriers(root: Path) -> list[str]:
     """Each file below `root` that holds the begin marker, by any extension.
 
@@ -554,7 +602,7 @@ def derived_carriers(root: Path) -> list[str]:
     with no edit to this file, and no count in a document can go stale.
     """
     found = []
-    for path in sorted(root.rglob("*")):
+    for path in _derived_population(root):
         if not path.is_file() or not is_source_file(path):
             continue
         name = relative_name(path, root)
@@ -579,6 +627,40 @@ def compared_carriers(root: Path) -> list[str]:
     return sorted(set(derived_carriers(root)) | set(DECLARED_CARRIERS))
 
 
+def _repair_package_paths(root: Path) -> list[Path]:
+    """CONTENT population: the index, with locally deleted entries dropped.
+
+    Every member of this population is READ, so a deleted tracked module must
+    not be returned; `missing_repair_package_modules` keeps the structural
+    population that still names it.
+    """
+    package = root / REPAIR_PACKAGE_DIR
+    if root != PLUGIN_DIR:
+        return sorted(package.glob("*.py"))
+    prefix = f"{root.name}/{REPAIR_PACKAGE_DIR}"
+    return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py",
+                         keep_deleted=False)
+
+
+def repair_package_entries(root: Path) -> list[Path]:
+    """STRUCTURAL population: tracked package entries, deleted ones included."""
+    package = root / REPAIR_PACKAGE_DIR
+    if root != PLUGIN_DIR:
+        return sorted(package.glob("*.py"))
+    prefix = f"{root.name}/{REPAIR_PACKAGE_DIR}"
+    return _tracked_glob(root.parent, f"{prefix}/*.py", f"{prefix}/__init__.py",
+                         keep_deleted=True)
+
+
+def missing_repair_package_modules(root: Path) -> list[str]:
+    """Tracked repair-package modules absent from disk, named for the reader."""
+    return sorted(
+        relative_name(path, root)
+        for path in repair_package_entries(root)
+        if not path.is_file()
+    )
+
+
 def repair_modules_without_the_bar(root: Path, exemptions: dict) -> list[str]:
     """Modules of the memory-repair package that hold no begin marker.
 
@@ -596,7 +678,7 @@ def repair_modules_without_the_bar(root: Path, exemptions: dict) -> list[str]:
         return []
     return sorted(
         relative_name(path, root)
-        for path in package.glob("*.py")
+        for path in _repair_package_paths(root)
         if relative_name(path, root) not in exemptions
         and MARKER_BEGIN not in path.read_text(encoding="utf-8", errors="replace")
     )
@@ -681,9 +763,14 @@ def population_files(root: Path) -> list[Path]:
     THE PATTERNS ARE `POPULATION_PATTERNS`, and this docstring does not count
     them. A count here goes stale on the day one is added.
 
+    THE SHIPPED ROOT READS THE INDEX, like every other shipped population in
+    this file: an untracked surface must not enter arm 3 and redden a green
+    checkout. A synthetic model root keeps its disk walk, because the model
+    tree is built on disk and is deliberately its own population.
+
     🔴 THE YIELD IS DE-DUPLICATED AND THE DECLARATION IS NOT TOUCHED. Two of
     the patterns overlap on purpose, so one file can arrive two times.
-    MEASURED: 76 paths yielded and 75 distinct, with
+    MEASURED: 79 paths yielded and 78 distinct, with
     `skills/pact-memory/SKILL.md` matched by `skills/*/SKILL.md` and by
     `skills/pact-memory/**/*.md`.
 
@@ -698,8 +785,19 @@ def population_files(root: Path) -> list[Path]:
     idle. AN INFLATED COUNT READS AS SAFETY.
     """
     found: list[Path] = []
+    if root != PLUGIN_DIR:
+        for pattern in POPULATION_PATTERNS:
+            found.extend(root.glob(pattern))
+        return sorted(set(found))
+    prefix = root.name
     for pattern in POPULATION_PATTERNS:
-        found.extend(root.glob(pattern))
+        found.extend(_tracked_glob(
+            root.parent, f"{prefix}/{pattern}",
+            f"{prefix}/{POPULATION_KNOWN_MEMBERS[pattern]}",
+            # This population keeps a deleted tracked surface visible so
+            # `files_reaching_the_store` can NAME it instead of letting arm 3
+            # shrink in silence; that guard is its structural oracle.
+            keep_deleted=True))
     return sorted(set(found))
 
 
@@ -712,7 +810,14 @@ def files_reaching_the_store(root: Path, tokens: dict, ignore_bar: bool = False)
     """
     selected = {}
     for path in population_files(root):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            # The index keeps a deleted tracked surface visible; name it here
+            # rather than letting the read raise an ERROR with no verdict.
+            raise AssertionError(
+                f"instruction surface {relative_name(path, root)} is in the "
+                f"tracked population but cannot be read: {exc}") from exc
         if ignore_bar:
             text = strip_marked_regions(text)
         text = without_non_route_invocations(text)
@@ -782,7 +887,7 @@ class TestTheInstrumentIsLive:
         """
         reachable = {
             relative_name(p, PLUGIN_DIR)
-            for p in PLUGIN_DIR.rglob("*")
+            for p in _derived_population(PLUGIN_DIR)
             if p.is_file() and is_source_file(p)
         }
         for expected in (SOURCE_HOME, "scripts/archive_pin.py"):
@@ -930,6 +1035,191 @@ class TestTheInstrumentIsLive:
             )
 
 
+class TestTrackedPopulation:
+    def test_untracked_is_excluded_and_deleted_tracked_stays_visible(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / REPAIR_PACKAGE_DIR / "tracked.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        (tracked.parent / "untracked.py").write_text("untracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        tracked_rel = tracked.relative_to(repo).as_posix()
+        subprocess.run(["git", "add", "--", tracked_rel], cwd=repo, check=True)
+        pattern = f"pact-plugin/{REPAIR_PACKAGE_DIR}/*.py"
+        assert _tracked_glob(repo, pattern, tracked_rel,
+                             keep_deleted=True) == [tracked]
+        tracked.unlink()
+        assert _tracked_glob(repo, pattern, tracked_rel,
+                             keep_deleted=True) == [tracked]
+
+    def test_empty_and_wrong_roots_refuse(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        pattern = f"pact-plugin/{REPAIR_PACKAGE_DIR}/*.py"
+        known = f"pact-plugin/{REPAIR_PACKAGE_DIR}/tracked.py"
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(repo, pattern, known)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(repo, pattern, known)
+
+    def test_consumer_reads_the_index_not_a_glob(self, tmp_path, monkeypatch):
+        """The CONSUMER, not only the helper, must exclude untracked modules.
+
+        Reverting ``_repair_package_paths`` to ``package.glob("*.py")`` keeps
+        the helper arms green; this arm drives ``repair_modules_without_the_bar``
+        and reddens, because the untracked module then joins the reported set.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        package = plugin / REPAIR_PACKAGE_DIR
+        package.mkdir(parents=True)
+        tracked = package / "__init__.py"
+        tracked.write_text("", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        tracked_rel = f"pact-plugin/{REPAIR_PACKAGE_DIR}/__init__.py"
+        subprocess.run(["git", "add", "--", tracked_rel], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        before = repair_modules_without_the_bar(plugin, {})
+        assert before == [f"{REPAIR_PACKAGE_DIR}/__init__.py"]
+        stray = package / "000_untracked_probe.py"
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert repair_modules_without_the_bar(plugin, {}) == before, (
+                "an untracked module joined the shipped repair population; "
+                "_repair_package_paths is not reading the git index"
+            )
+        finally:
+            stray.unlink()
+
+    def test_derived_carriers_reads_the_index_for_the_shipped_root(
+            self, tmp_path, monkeypatch):
+        """The SHIPPED branch of ``derived_carriers`` must exclude untracked files.
+
+        Reverting ``_derived_population`` to ``root.rglob("*")`` for the
+        shipped root keeps every synthetic-model arm green — the model builds
+        its tree on disk and is unaffected. This arm drives the shipped branch
+        and reddens, because the untracked carrier then joins the derived
+        population. The tracked carrier is the positive control: without it the
+        arm would pass on an empty population.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        carriers = plugin / "agents"
+        carriers.mkdir(parents=True)
+        known = carriers / "pact-preparer.md"
+        known.write_text(f"New surface.\n\n{_region()}", encoding="utf-8")
+        source = plugin / SOURCE_HOME
+        source.parent.mkdir(parents=True)
+        source.write_text("The CLI lives at cli.py.\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin/agents/pact-preparer.md",
+             f"pact-plugin/{SOURCE_HOME}"],
+            cwd=repo, check=True,
+        )
+        probe = carriers / "000_untracked_carrier.md"
+        probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        derived = derived_carriers(plugin)
+
+        assert "agents/pact-preparer.md" in derived, (
+            "positive control: the tracked carrier is missing from the derived "
+            "population, so the exclusion below would prove nothing"
+        )
+        assert "agents/000_untracked_carrier.md" not in derived, (
+            "an untracked carrier joined the derived population; "
+            "derived_carriers is not reading the git index for the shipped root"
+        )
+
+    def test_instruction_surface_population_reads_the_index(
+            self, tmp_path, monkeypatch):
+        """The arm-3 population must come from the index for the shipped root.
+
+        Reverting ``population_files`` to a disk glob for the shipped root
+        keeps every synthetic-model arm green, because the model builds its
+        tree on disk. This arm drives the shipped branch and reddens when an
+        untracked instruction surface joins the selected set.
+
+        EVERY production control is planted, so the arm also proves each entry
+        in ``POPULATION_KNOWN_MEMBERS`` is a tracked member of its OWN
+        pattern: a control that does not resolve there fails the positive
+        assertion below rather than passing on an empty population.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        members = sorted(set(POPULATION_KNOWN_MEMBERS.values()))
+        for relative in members:
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("no route token\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        control = {plugin / relative for relative in members}
+        assert set(population_files(plugin)) == control, (
+            "positive control: the tracked instruction surfaces are missing "
+            "from the population, so the exclusion below would prove nothing"
+        )
+        probe = plugin / "agents" / "000_untracked_surface.md"
+        probe.write_text("skills/pact-memory/scripts/cli.py\n", encoding="utf-8")
+        try:
+            assert set(population_files(plugin)) == control, (
+                "an untracked instruction surface joined arm 3; "
+                "population_files is not reading the git index for the "
+                "shipped root"
+            )
+        finally:
+            probe.unlink()
+
+    def test_no_tracked_repair_module_is_missing_from_disk(self):
+        """STRUCTURAL net: a deleted tracked module is NAMED, not silently gone.
+
+        `_repair_package_paths` drops a deleted entry because every member is
+        read. This population keeps it, so the deletion surfaces as one named
+        missing module instead of a read error or a smaller green set.
+        """
+        missing = missing_repair_package_modules(PLUGIN_DIR)
+        assert not missing, (
+            f"tracked modules of {REPAIR_PACKAGE_DIR} are missing from disk: "
+            f"{missing}. Restore them, or remove the index entry with "
+            f"`git rm` if the deletion is intended: the content population "
+            f"drops a deleted entry, so this net is what names it."
+        )
+
+    def test_deleted_tracked_repair_module_is_named_not_a_read_error(
+            self, tmp_path, monkeypatch):
+        """Deletion proof: the content population drops it, the structural one names it.
+
+        With ``keep_deleted=True`` on the content population, deleting one
+        tracked module makes ``repair_modules_without_the_bar`` raise
+        FileNotFoundError for that path instead of returning the survivors.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        package = plugin / REPAIR_PACKAGE_DIR
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        doomed = package / "shred_detect.py"
+        doomed.write_text("", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        doomed.unlink()  # the index entry stays; the disk entry is gone
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        assert repair_modules_without_the_bar(plugin, {}) == [
+            f"{REPAIR_PACKAGE_DIR}/__init__.py"], (
+            "the content population must drop the deleted tracked module; "
+            "keeping it makes the read raise FileNotFoundError")
+        assert missing_repair_package_modules(plugin) == [
+            f"{REPAIR_PACKAGE_DIR}/{doomed.name}"], (
+            "the structural population must keep the deleted entry and name "
+            "it; dropping it turns one deletion into a smaller green set")
+
+
 class TestEveryDeclaredCarrierIsPlaced:
     """The anti-shrinkage floor.
 
@@ -969,8 +1259,7 @@ class TestEveryDeclaredCarrierIsPlaced:
         and `test_each_repair_module_holds_the_marker` reddens. AN ENTRY THAT
         CANNOT DO WORK FAILS OPEN. So the burden sits on REMOVAL.
         """
-        package = PLUGIN_DIR / REPAIR_PACKAGE_DIR
-        walked = {relative_name(path, PLUGIN_DIR) for path in package.glob("*.py")}
+        walked = {relative_name(path, PLUGIN_DIR) for path in _repair_package_paths(PLUGIN_DIR)}
         idle = sorted(key for key in REPAIR_PACKAGE_EXEMPTIONS if key not in walked)
         assert not idle, (
             f"these repair-package exemptions cannot do work: {idle}. The "

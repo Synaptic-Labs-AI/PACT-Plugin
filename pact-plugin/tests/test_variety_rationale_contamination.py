@@ -12,7 +12,10 @@ arrives rather than when someone remembers this file.
 """
 
 import re
+import subprocess
 from pathlib import Path
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 PLUGIN = Path(__file__).resolve().parent.parent
 VARIETY = PLUGIN / "protocols" / "pact-variety.md"
@@ -24,8 +27,13 @@ _PLACEHOLDER = re.compile(r"why this score for THIS dispatch's (?:novelty|scope|
 _RULE = "Do not write the dispatch's hypothesis, its expected answer, or the reasoning that produced it."
 
 
+def _command_files(root=PLUGIN):
+    """Tracked command templates; a working-tree walk reads scratch files."""
+    return sorted(_tracked_glob(root, "commands/*.md", allow_empty=True))
+
+
 def _surfaces():
-    return sorted(PLUGIN.glob("commands/*.md")) + [VARIETY, PROTOCOLS]
+    return _command_files() + [VARIETY, PROTOCOLS]
 
 
 def test_no_bare_rationale_placeholder_survives():
@@ -132,7 +140,7 @@ def test_ignorance_dependent_dispatches_stamp_the_withheld_sentinel():
     stamp_key = '"novelty_rationale":'
     stamps: dict[str, int] = {}
     shows: dict[str, int] = {}
-    for writer in sorted(PLUGIN.glob("commands/*.md")):
+    for writer in _command_files():
         body = writer.read_text(encoding="utf-8")
         if stamp_key in body:
             stamps[writer.name] = body.count(stamp_key)
@@ -486,3 +494,37 @@ def test_withholding_exclusion_is_executable_where_it_is_stated():
             f"{spec.name}: the aggregation spec section omits the exclusion, so "
             f"a reader sent here for the rule meets no exclusion"
         )
+
+
+def test_an_untracked_command_needle_cannot_change_the_stamp_sets(tmp_path):
+    """An untracked scratch command must not join the stamping population.
+
+    Positive control: the tracked command IS in the population and is counted
+    on both sides, so an empty population cannot pass this arm.
+    """
+    root = tmp_path / "plugin"
+    (root / "commands").mkdir(parents=True)
+    tracked = root / "commands" / "tracked.md"
+    body = '"novelty_rationale":\nWITHHELD: ignorance-dependent dispatch\n'
+    tracked.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "commands" / "zzprobe.md"
+    needle.write_text("WITHHELD: ignorance-dependent dispatch\n", encoding="utf-8")
+
+    population = _command_files(root)
+    sentinel = "WITHHELD: ignorance-dependent dispatch"
+    stamp_key = '"novelty_rationale":'
+    stamps = {path.name: path.read_text(encoding="utf-8").count(stamp_key)
+              for path in population
+              if stamp_key in path.read_text(encoding="utf-8")}
+    shows = {path.name: path.read_text(encoding="utf-8").count(sentinel)
+             for path in population
+             if sentinel in path.read_text(encoding="utf-8")}
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the stamping population: {needle}")
+    assert shows == stamps == {"tracked.md": 1}, (shows, stamps)

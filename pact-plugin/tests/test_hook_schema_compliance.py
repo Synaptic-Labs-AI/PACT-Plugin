@@ -27,9 +27,43 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import subprocess
 import textwrap
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 HOOKS_DIR = pathlib.Path(__file__).parent.parent / "hooks"
+
+
+def _synthetic_hook_repo(tmp_path):
+    """A git repo holding the tracked hooks the gate judges.
+
+    The arm plants its needle HERE, never in the live checkout: under
+    `--dist load` another worker still walks the real hooks tree, and a probe
+    visible there for even a moment can redden its hygiene or classifier
+    scan.
+    """
+    repo = tmp_path / "repo"
+    hooks = repo / "pact-plugin" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "bootstrap_gate.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=arm@example.invalid", "-c", "user.name=arm",
+         "commit", "-qm", "seed"], cwd=repo, check=True)
+    return hooks
+
+
+def _tracked_hook_files():
+    """The SHIPPED hook modules, from the git index rather than the tree.
+
+    The gate claims to judge what ships. A working-tree walk lets an untracked
+    hook enter the population; `known_member` is the positive control.
+    """
+    return _tracked_files(
+        HOOKS_DIR.parent, "hooks", "*.py",
+        known_member="hooks/bootstrap_gate.py")
 
 
 def _find_hook_specific_output_dicts(tree: ast.AST):
@@ -65,12 +99,34 @@ def test_every_hookSpecificOutput_dict_includes_hookEventName():
     to silently reject the JSON and fail open on permission gates.
     """
     violations = []
-    for hook_file in sorted(HOOKS_DIR.glob("*.py")):
+    for hook_file in _tracked_hook_files():
         tree = ast.parse(hook_file.read_text())
         violations.extend(_inner_dict_violations(tree, hook_file.name))
     assert not violations, (
         "hookEventName missing at:\n" + "\n".join(violations)
     )
+
+
+def test_control_untracked_hook_stays_out_of_the_judged_population(
+        tmp_path, monkeypatch):
+    """An untracked hook must not enter the judged population.
+
+    The probe carries a hookSpecificOutput dict without hookEventName, so a
+    reverted working-tree walk reddens HERE with the probe named. The
+    tracked-member assertion is the positive control, and the needle lives in
+    a synthetic repo so no parallel worker's walk of the live hooks tree can
+    see it.
+    """
+    hooks = _synthetic_hook_repo(tmp_path)
+    monkeypatch.setitem(globals(), "HOOKS_DIR", hooks)
+    probe = hooks / "zzprobe1714_schema.py"
+    probe.write_text(
+        'OUT = {"hookSpecificOutput": {"permissionDecision": "deny"}}\n',
+        encoding="utf-8",
+    )
+    assert hooks / "bootstrap_gate.py" in _tracked_hook_files()
+    assert probe not in _tracked_hook_files()
+    test_every_hookSpecificOutput_dict_includes_hookEventName()
 
 
 def test_ast_walk_detects_missing_hookEventName_in_synthesized_source():

@@ -216,6 +216,15 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      dist:
+        description: xdist distribution for diagnostic evidence
+        required: false
+        default: loadfile
+        type: choice
+        options:
+          - loadfile
+          - load
 
 # Minimal privilege: this workflow only checks out the repo and runs pytest —
 # it needs read access to repo contents and nothing else. Pinning the token
@@ -235,6 +244,16 @@ jobs:
     if: github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    # THE DIAGNOSTIC DISTRIBUTION, NEVER INTERPOLATED INTO SHELL TEXT. The
+    # dispatch input is untrusted text, so it reaches pytest only through this
+    # environment key; a `run:` line that embedded it could execute a value
+    # outside the two declared options as shell. The key sits on the JOB, not
+    # on the test step: the verify/test bracketing rule forbids `env:` on a
+    # verify or pytest step so the before-check sees the environment the tests
+    # run in, and a job-level key is visible to every step, both checks
+    # included. The default outside a dispatch is the historical `loadfile`.
+    env:
+      DIST: ${{ inputs.dist || 'loadfile' }}
     # THE TESTED SET. IT IS NOT THE SUPPORTED FLOOR, AND THE TWO ARE
     # DIFFERENT QUESTIONS THAT LIVE IN DIFFERENT FILES.
     #   THE TESTED SET is the interpreter this job runs: 3.12, set below.
@@ -292,6 +311,26 @@ jobs:
           test "$MERGE_GROUP_HEAD" = "$GITHUB_SHA"
           test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
           echo "CERTIFIED-MERGE-GROUP-HEAD $GITHUB_SHA"
+
+      # THE DIST VALUE IS AN ARGV ELEMENT, SO IT IS CASE-GUARDED BEFORE
+      # ANYTHING EXPENSIVE RUNS. The dispatch UI and the artifact-name
+      # expression both constrain `dist`, but a dispatch through the REST API
+      # is not provably enum-checked server-side, and the job-level DIST key
+      # would hand such a value to pytest as one argv word — failing only
+      # after minutes of setup, with argparse's message instead of a named
+      # refusal. This step refuses early and by name. The value is never
+      # echoed: an untrusted string does not go into the log either.
+      # No `env:` or `shell:` keys: the job-level DIST key is the same value
+      # the test step sees, in the default shell every other plain step uses.
+      - name: Guard the diagnostic distribution value
+        run: |
+          case "$DIST" in
+            loadfile|load) ;;
+            *)
+              printf '%s\n' "DIST GUARD: DIST must be loadfile or load; refusing before setup." >&2
+              exit 1
+              ;;
+          esac
 
       # HuggingFace model cache. THE ONE PATH THE IN-TEST REMEDIES CANNOT REACH.
       #
@@ -468,9 +507,11 @@ jobs:
       #   `-ra` is everything except passes, so failures and errors stay.
       #
       # ENVIRONMENT CHECK AROUND THE TESTS (header: RUNTIME CHECK). The check
-      # runs IMMEDIATELY before this step and as the job's LAST step, with
-      # `if: always()` so a red suite still reports what it ran against. A
-      # test in the suite pins this placement, this step's exact command, and
+      # runs IMMEDIATELY before this step and as the job's LAST `run:` step,
+      # with `if: always()` so a red suite still reports what it ran against.
+      # The diagnostic upload after it is a `uses:` step and runs no command,
+      # so the last command this job runs is still the after-check.
+      # A test in the suite pins this placement, this step's exact command, and
       # the absence of `env:`/`shell:` on these steps, so the checked
       # interpreter and environment are the ones the tests use.
       # Both steps ENFORCE: drift fails the job. The runner image was
@@ -496,7 +537,7 @@ jobs:
 
       - name: Run test suite
         working-directory: pact-plugin
-        run: python -m pytest -ra -n 4 --dist loadfile
+        run: python -m pytest -ra -n 4 --dist "$DIST" --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
 
       # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
       # inspects a separate --collect-only run; this reads the in-band record
@@ -512,3 +553,41 @@ jobs:
       - name: Verify the CI environment (after tests)
         if: always()
         run: python scripts/verify_ci_environment.py
+
+      # DIAGNOSTIC EVIDENCE ONLY. JUnit supplements, never replaces, the
+      # schema-v3 certification record above. All three files are dotfiles, so
+      # hidden-file inclusion is mandatory. THIS STEP IS LAST ON PURPOSE: the
+      # environment check above can fail on its own, and an upload placed
+      # before it would be skipped with the failure already counted — exactly
+      # the run a diagnostic reader needs. The condition is evaluated when
+      # this step starts, after every other step, so any earlier red step, a
+      # cancellation, or any dispatch uploads; a green merge-queue or push
+      # run uploads nothing, so the merge gate pays no artifact cost. The
+      # name carries the dispatch `dist`, so `load` and `loadfile` evidence is
+      # self-describing. The name expression admits ONLY those two values, so
+      # a dispatch value outside the enum cannot reach a filename either; the
+      # shell sink is closed separately by the job-level `DIST` key.
+      # THE EMPTY-EVIDENCE CANCELLATION IS DELIBERATE: a run cancelled before
+      # the collection step (during checkout or the model warm) has written
+      # none of the three files, and this step then ERRS by
+      # `if-no-files-found: error` — reddening an already-cancelled job. That
+      # red is the loud "no evidence exists" signal, not an upload defect:
+      # softening it would turn a genuinely missing evidence set into a
+      # green-looking empty upload.
+      # A HARD TIMEOUT IS THIS STEP'S LIMIT, in two parts, and neither is
+      # remedied here: pytest writes the JUnit file and the run record at
+      # session finish, so a kill at the 50-minute cap leaves only the
+      # collection record written before the tests ran; and whether GitHub
+      # executes an `always()` step at all after a `timeout-minutes` kill is
+      # GitHub's behaviour, not something this expression can demonstrate.
+      - name: Upload full-suite diagnostic evidence
+        if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}
+          path: |
+            .full-suite-results.xml
+            .full-run-record.json
+            .full-collection-record.json
+          if-no-files-found: error
+          include-hidden-files: true

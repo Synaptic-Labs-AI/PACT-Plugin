@@ -14,9 +14,13 @@ L10. Lead-Side HALT Fan-Out slug stability — canonical heading + 4 consumer fi
 L11. Archive step's resolution pointer resolves to a step that is present
 """
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 
 PROTOCOLS_DIR = Path(__file__).parent.parent / "protocols"
@@ -229,10 +233,11 @@ class TestDeadReferencesToMovedOrchestratorCore:
     # define the guard. Listing it here keeps the exclusion explicit.
     SELF_EXCLUDED_FILES = frozenset({"tests/test_cross_references.py"})
 
-    def test_no_live_references_to_old_orchestrator_core_path(self):
-        """Scan every .py/.md/.json/.txt/.yml/.yaml/.toml file under
-        pact-plugin/'s live subdirectories AND top-level plugin files
-        for the banned substring. Zero hits expected post-#452."""
+    def _scan_root(self, plugin_root: Path) -> list[str]:
+        """Banned-substring hits under one plugin root, tracked files only.
+
+        A working-tree walk reads an untracked scratch file as shipped.
+        """
         hits = []
 
         def _scan(path: Path) -> None:
@@ -240,7 +245,7 @@ class TestDeadReferencesToMovedOrchestratorCore:
                 return
             if path.suffix not in self.SCANNED_SUFFIXES:
                 return
-            rel = path.relative_to(self.PLUGIN_ROOT)
+            rel = path.relative_to(plugin_root)
             if str(rel) in self.SELF_EXCLUDED_FILES:
                 return
             try:
@@ -250,20 +255,26 @@ class TestDeadReferencesToMovedOrchestratorCore:
             if self.BANNED_SUBSTRING in text:
                 hits.append(str(rel))
 
-        # Pass 1: subdirectory walk (agents/, commands/, hooks/, etc.).
+        # Pass 1: tracked files in the live subdirectories.
         for subdir in self.SEARCH_SUBDIRS:
-            root = self.PLUGIN_ROOT / subdir
-            if not root.exists():
+            if not (plugin_root / subdir).exists():
                 continue
-            for path in root.rglob("*"):
+            for path in _tracked_glob(plugin_root, f"{subdir}/**/*",
+                                      allow_empty=True):
                 _scan(path)
 
-        # Pass 2: top-level plugin files (README.md, pyrightconfig.json,
-        # LICENSE-adjacent files, etc.) — files directly under PLUGIN_ROOT
-        # that aren't in any SEARCH_SUBDIRS entry.
-        for path in self.PLUGIN_ROOT.iterdir():
+        # Pass 2: tracked top-level plugin files (README.md,
+        # pyrightconfig.json, LICENSE-adjacent files, etc.) — files directly
+        # under the root that aren't in any SEARCH_SUBDIRS entry.
+        for path in _tracked_files(plugin_root, ".", "*", allow_empty=True):
             _scan(path)
+        return hits
 
+    def test_no_live_references_to_old_orchestrator_core_path(self):
+        """Scan every .py/.md/.json/.txt/.yml/.yaml/.toml file under
+        pact-plugin/'s live subdirectories AND top-level plugin files
+        for the banned substring. Zero hits expected post-#452."""
+        hits = self._scan_root(self.PLUGIN_ROOT)
         assert not hits, (
             f"Found {len(hits)} file(s) still referencing the banned "
             f"substring {self.BANNED_SUBSTRING!r} (pre-#452 path). "
@@ -271,6 +282,31 @@ class TestDeadReferencesToMovedOrchestratorCore:
             f"copies of the moved content; both break the dual-purpose "
             f"SSOT invariant for the orchestration skill. Hits: {hits}"
         )
+
+    def test_an_untracked_command_needle_is_not_scanned(self, tmp_path):
+        """An untracked scratch command must not join the reference scan.
+
+        Positive control: a TRACKED file carrying the banned substring IS
+        reported, so an empty scan cannot pass this arm.
+        """
+        root = tmp_path / "plugin"
+        (root / "commands").mkdir(parents=True)
+        tracked = root / "commands" / "tracked.md"
+        tracked.write_text(f"{self.BANNED_SUBSTRING}\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(root)],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(root), "add", "-A"],
+                       check=True, capture_output=True)
+        needle = root / "commands" / "zzprobe.md"
+        needle.write_text(f"{self.BANNED_SUBSTRING}\n", encoding="utf-8")
+
+        population = _tracked_glob(root, "commands/**/*", allow_empty=True)
+
+        assert tracked in population, "the tracked control is missing from the population"
+        assert needle not in population, (
+            f"untracked needle entered the scan population: {needle}")
+        assert self._scan_root(root) == ["commands/tracked.md"], (
+            f"the untracked needle was scanned: {needle}")
 
 
 class TestLeadSideHaltFanOutSlugStability:

@@ -41,10 +41,13 @@ Used by: pact-plugin test suite (standing merge gate).
 from __future__ import annotations
 
 import ast
+import subprocess
 from pathlib import Path
 from typing import Iterator, List, Set, Tuple
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 
@@ -67,7 +70,10 @@ ORCHESTRATE_CMD = COMMANDS_DIR / "orchestrate.md"
 
 def _all_markdown() -> List[Path]:
     """Every markdown surface in the plugin, sorted for stable diagnostics."""
-    return sorted(PLUGIN_ROOT.rglob("*.md"))
+    repo_root = PLUGIN_ROOT.parent
+    relative = PLUGIN_ROOT.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".md")
 
 
 def _occurrences(literal: str) -> List[Tuple[Path, int]]:
@@ -479,7 +485,57 @@ def hook_python_files() -> List[Path]:
     no control, because its red gets dismissed as noise and then its green
     stops being read.
     """
-    return sorted(p for p in HOOKS_DIR.rglob("*.py") if "__pycache__" not in p.parts)
+    repo_root = HOOKS_DIR.parent.parent
+    relative = HOOKS_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py" and "__pycache__" not in path.parts)
+
+
+def test_markdown_sweep_ignores_untracked_markdown(tmp_path, monkeypatch):
+    plugin = tmp_path / "repo" / "pact-plugin"
+    known = plugin / "commands" / "known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text("x\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(plugin.parent)], check=True,
+        capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(plugin.parent), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    assert _all_markdown() == [known]
+
+    stray = plugin / "commands" / "zzprobe.md"
+    stray.write_text("x\n", encoding="utf-8")
+    try:
+        assert _all_markdown() == [known]
+    finally:
+        stray.unlink()
+
+
+def test_hook_sweep_ignores_untracked_python(tmp_path, monkeypatch):
+    plugin = tmp_path / "repo" / "pact-plugin"
+    hooks = plugin / "hooks"
+    known = hooks / "known.py"
+    known.parent.mkdir(parents=True)
+    known.write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(plugin.parent)], check=True,
+        capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(plugin.parent), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "HOOKS_DIR", hooks)
+
+    assert hook_python_files() == [known]
+
+    stray = hooks / "zzprobe.py"
+    stray.write_text("def broken(:\n", encoding="utf-8")
+    try:
+        assert hook_python_files() == [known]
+    finally:
+        stray.unlink()
 
 
 def _callee_name(node: ast.Call) -> str | None:

@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 
 import scripts.working_memory as wm  # noqa: E402
 from scripts.memory_api import PACTMemory  # noqa: E402
@@ -489,7 +491,14 @@ _KNOWN_GUARDED_CALLERS = {
 
 
 def _production_files():
-    for path in sorted(_PLUGIN_ROOT.rglob("*.py")):
+    """Shipped production modules from the git index.
+
+    An untracked scratch module must not be judged by the guard scan, and the
+    session-init hook is the known member that keeps a misnamed root loud.
+    """
+    for path in _shared_tracked_glob(
+            _PLUGIN_ROOT.parent, f"{_PLUGIN_ROOT.name}/**/*.py",
+            f"{_PLUGIN_ROOT.name}/hooks/session_init.py"):
         rel = path.relative_to(_PLUGIN_ROOT)
         if "tests" in rel.parts or path.name.startswith("test_") or path.name == "conftest.py":
             continue
@@ -557,6 +566,41 @@ class TestEveryResolverCallerCallsTheEscapeGuard:
             f"these callers resolve a CLAUDE.md without the escape guard after "
             f"it: {unguarded}"
         )
+
+    def test_untracked_production_module_cannot_join_the_guard_scan(
+            self, tmp_path, monkeypatch):
+        """The guard scan reads the index; an untracked module is invisible.
+
+        Reverting ``_production_files`` to ``_PLUGIN_ROOT.rglob("*.py")``
+        keeps the shipped tree green; this arm drives the population the
+        guard comparison iterates and reddens naming the untracked module.
+        The seeded tracked module is the positive control.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        hooks = plugin / "hooks"
+        hooks.mkdir(parents=True)
+        known = hooks / "session_init.py"
+        known.write_text(
+            "def f():\n"
+            f"    path, base = {_DISPLAY_RESOLVER}()\n"
+            f"    {_DISPLAY_GUARD}(None, None, base, path)\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "_PLUGIN_ROOT", plugin)
+
+        files = [p.name for p in _production_files()]
+        assert files == ["session_init.py"], (
+            f"positive control: the seeded production module is missing: {files}")
+        scripts = plugin / "scripts"
+        scripts.mkdir()
+        (scripts / "zzprobe.py").write_text(
+            "def g():\n"
+            f"    path, base = {_DISPLAY_RESOLVER}()\n", encoding="utf-8")
+
+        after = [p.name for p in _production_files()]
+        assert after == files, (
+            f"an untracked production module joined the guard scan: {after}")
 
     def test_the_scan_catches_an_unguarded_and_a_misordered_caller(self):
         """The live control: the scan above can report a caller at all."""

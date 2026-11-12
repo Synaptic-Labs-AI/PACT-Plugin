@@ -446,6 +446,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
 from shared import backlog
 from shared import backlog_store
 
@@ -3158,6 +3159,13 @@ def test_the_query_requests_every_field_the_outcome_logic_reads(monkeypatch):
 
 
 _COMMANDS_DIR = HOOKS_DIR.parent / "commands"
+
+
+def _tracked_command_files() -> list[Path]:
+    repo_root = _COMMANDS_DIR.parent.parent
+    relative = _COMMANDS_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".md")
 # A WRITE site is an invocation of the module with a mutating verb. `show` and
 # a bare `/PACT:next` mention are READS and are deliberately not members: the
 # architect's ruling is about where something FINISHED, not where the backlog
@@ -3341,6 +3349,45 @@ def _read_sites(name):
 # from an oversight — the rule it pins is written beside the write rule in
 # next.md.
 _REPORT_CALL_SITES = frozenset({"bootstrap.md", "wrap-up.md", "next.md"})
+
+
+def _report_carriers() -> set[str]:
+    return {path.name for path in _tracked_command_files() if _read_sites(path.name)}
+
+
+def _write_carriers() -> set[str]:
+    return {path.name for path in _tracked_command_files()
+            if path.name != "next.md" and _write_sites(path.name)}
+
+
+def test_tracked_command_population_ignores_untracked_sites(tmp_path, monkeypatch):
+    """The needle carries both a report and a write site."""
+    repo = tmp_path / "repo"
+    commands = repo / "pact-plugin" / "commands"
+    known = commands / "known.md"
+    known.parent.mkdir(parents=True)
+    known.write_text(
+        "python3 scripts/backlog.py show\npython3 scripts/backlog.py add item\n",
+        encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_COMMANDS_DIR", commands)
+
+    assert _report_carriers() == {"known.md"}
+    assert _write_carriers() == {"known.md"}
+
+    stray = commands / "zzprobe.md"
+    stray.write_text(
+        "python3 scripts/backlog.py show\npython3 scripts/backlog.py add item\n",
+        encoding="utf-8")
+    try:
+        assert _report_carriers() == {"known.md"}
+        assert _write_carriers() == {"known.md"}
+    finally:
+        stray.unlink()
 # The decision wrap-up's report must precede, quoted as it appears in the file.
 _SESSION_DECISION = "Use `AskUserQuestion` with these exact options:"
 # The clause that makes section 8's missing write-site enumeration safe.
@@ -3431,7 +3478,7 @@ def test_every_backlog_report_site_is_a_choice_point():
     )
     sentence = text.split(marker, 1)[1].split("\n\n", 1)[0]
     stated = _files_named_in(sentence)
-    carrying = {p.name for p in _COMMANDS_DIR.glob("*.md") if _read_sites(p.name)}
+    carrying = _report_carriers()
 
     # THE WORD AND THE LIST MUST AGREE — the set comparison below cannot see a
     # fourth name added to the sentence while the word stays THREE.
@@ -3639,8 +3686,7 @@ def test_next_md_names_exactly_the_files_that_carry_write_sites():
     # lines are usage documentation rather than call sites. A command cannot be
     # a boundary for itself. Found by this arm on its first run — the detector
     # counted the implementation as a caller.
-    actual = {path.name for path in sorted(_COMMANDS_DIR.glob("*.md"))
-              if path.name != "next.md" and _write_sites(path.name)}
+    actual = _write_carriers()
     assert claimed == actual, (
         f"next.md's trigger sentence and the tree disagree. Named there: "
         f"{sorted(claimed)}. Carrying write sites: {sorted(actual)}. "

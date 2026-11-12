@@ -50,12 +50,22 @@
       "reason": "All flagged sites are re.Match.group() calls on in-memory text. No file is read.",
       "extra_reads": []
     },
+    "tests/fixtures/tracked_files.py": {
+      "sha256": "b24094735d16b8ddedaffd3031f30904c898fdbfb8f1944734f526cc606105df",
+      "reason": "All flagged sites operate on the caller's repository directory: subprocess.run executes git with an argv list and no shell; os.path.lexists and the os.path.abspath calls are path arithmetic, and the '.git' literal is the checkout marker the fallback refuses on; every .is_file/.rglob/.glob/.is_dir receiver is a path the caller supplied. Path.resolve and .is_relative_to are containment checks on that caller root: a scan start point or an enumerated file that resolves outside it is refused, while an in-root symlink still enumerates. The two directory scans are the documented gitless-export fallback, which refuses when a .git entry exists at or above the root and also serves a checkout-free copy nested in a repository that tracks nothing under it (git rev-parse --show-toplevel plus a whole-root ls-files query, both argv lists with no shell). It reads no fixed path, so extra_reads is empty.",
+      "extra_reads": []
+    },
     "tests/merge_guard_baseline_loader.py": {
       "sha256": "e5eb9a16c31a878f230bf1fef38b00978e092dff610f82a3c00a2c4c6ffee7e5",
       "reason": "Loads committed vendored copies of merge_guard_common.py from tests/fixtures/merge_guard_baseline/ through importlib, after a git-blob pin check. Those files have no import edge, so they are declared as extra_reads. The vendored modules import .paths through the shared package; hooks/shared/paths.py and shared/__init__.py are already in the closure.",
       "extra_reads": [
         "pact-plugin/tests/fixtures/merge_guard_baseline/**"
       ]
+    },
+    "tests/test_claude_md_locator_census.py": {
+      "sha256": "0fc5a83d482286e23545890ba98d62645bb19d13d862697a2a73c1f54d7b7358",
+      "reason": "Flagged sites 572, 621, 637 and 649 are the tracked-population reads and their non-vacuity arm: 572 reads each shipped Python file the tracked population returns; 621 reads the shell-script population the same way; 637 runs git init and git add in a tmp_path rig with an argv list and no shell; 649 reads that same rig population. The module's scans of the shipped tree are unchanged, and its scan roots are what the exclusion's scanned_tree reach is computed from.",
+      "extra_reads": []
     },
     "tests/test_merge_guard_1140_carrier5_cert.py": {
       "sha256": "71bde42242afd11e6fd06eae077c7b83d781c73094b2b6aa96b1d85150fd7183",

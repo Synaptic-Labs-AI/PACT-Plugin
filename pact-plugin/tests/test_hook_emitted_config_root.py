@@ -31,10 +31,13 @@ import ast
 import io
 import json
 import re
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 HOOKS = Path(__file__).parent.parent / "hooks"
 LITERAL = re.compile(r"(?:~|\$HOME|\$\{HOME\})/\.claude")
@@ -56,11 +59,43 @@ GUARDED_FILES = (
 )
 
 
+def _tracked_hook_files():
+    """The SHIPPED hook modules, from the git index rather than the tree.
+
+    The gate claims to judge what ships. A working-tree walk lets an untracked
+    file carrying an emitted literal enter the population and redden a green
+    checkout; `known_member` is the positive control that this walk still
+    reaches the tree.
+    """
+    return _tracked_files(
+        HOOKS.parent, "hooks", "**/*.py",
+        known_member="hooks/bootstrap_gate.py")
+
+
+def _synthetic_hook_repo(tmp_path):
+    """A git repo holding the tracked hooks the arm judges.
+
+    The arm plants its needle HERE, never in the real checkout: under
+    `--dist load` another worker still walks the live hooks tree, and a probe
+    visible there for even a moment can redden its hygiene or schema scan.
+    """
+    repo = tmp_path / "repo"
+    hooks = repo / "pact-plugin" / "hooks"
+    (hooks / "shared").mkdir(parents=True)
+    (hooks / "bootstrap_gate.py").write_text(
+        'DEGRADED = "$HOME/.claude"\n', encoding="utf-8")
+    (hooks / "shared" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=arm@example.invalid", "-c", "user.name=arm",
+         "commit", "-qm", "seed"], cwd=repo, check=True)
+    return hooks
+
+
 def _emitted_literals():
     """Yield (relpath, lineno, rendered) for every EMITTED config-root literal."""
-    for path in sorted(HOOKS.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in _tracked_hook_files():
         rel = path.relative_to(HOOKS.parent).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         docstrings = set()
@@ -89,6 +124,27 @@ def test_no_hook_emits_a_hardcoded_config_root():
         "get_claude_config_dir() (or, on a degraded path that must not import "
         f"it, os.environ). Sites: {found}"
     )
+
+
+def test_control_the_gate_ignores_an_untracked_hook_file(tmp_path, monkeypatch):
+    """An untracked hook must not enter the judged population.
+
+    The probe carries the exact literal the gate matches, so a reverted
+    working-tree walk reddens HERE with the probe named rather than passing
+    quietly. The tracked-member assertions are the positive control. The
+    needle lives in a synthetic repo, never the live checkout, so a parallel
+    worker's walk of the real hooks tree cannot see it.
+    """
+    hooks = _synthetic_hook_repo(tmp_path)
+    monkeypatch.setitem(globals(), "HOOKS", hooks)
+    probe = hooks / "zzprobe1714_emit.py"
+    probe.write_text('X = "~/.claude"\n', encoding="utf-8")
+    assert hooks / "bootstrap_gate.py" in _tracked_hook_files()
+    # The walk is RECURSIVE, as the rglob it replaced was: the shared
+    # subpackage is part of the judged population too.
+    assert hooks / "shared" / "helper.py" in _tracked_hook_files()
+    assert probe not in _tracked_hook_files()
+    test_no_hook_emits_a_hardcoded_config_root()
 
 
 def test_control_the_classifier_can_see_an_emitted_literal():

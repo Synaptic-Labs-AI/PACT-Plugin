@@ -70,11 +70,29 @@ recorded in the module-level comment at the bottom of this file.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = False) -> list[Path]:
+    """Deleted index entries are opt-in; the default is the safe direction.
+
+    A population read as TEXT must not keep deleted entries: the reader would
+    raise FileNotFoundError on the deleted path instead of the named coverage
+    failure the scan already reports. Only a structural assertion that must
+    still SEE a deleted member passes True.
+    """
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=keep_deleted
+    )
+
 
 SKILL = PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md"
 COMPLETION_AUTHORITY = PLUGIN_ROOT / "protocols" / "pact-completion-authority.md"
@@ -535,20 +553,107 @@ def _retired_claim_clauses(text: str) -> list:
 
 
 def _non_test_plugin_files() -> list:
-    """Every text file under the plugin root outside tests/, from the tree."""
+    """Every tracked text file under the plugin root outside tests/.
+
+    The directory name is READ from the plugin root rather than hardcoded: an
+    installed plugin cache places it under a version directory
+    (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
+    nothing and the empty population aborts collection of this module.
+    """
+    # ``**/*`` rather than a bare ``**``: identical pathspec in git (verified
+    # against the index), but pathlib's glob yields only DIRECTORIES for a
+    # trailing ``**``, so the gitless export fallback would return no files.
+    tracked = _tracked_glob(
+        PLUGIN_ROOT.parent, f"{PLUGIN_ROOT.name}/**/*",
+        f"{PLUGIN_ROOT.name}/protocols/pact-protocols.md",
+        keep_deleted=False,
+    )
     return [
         path
-        for path in sorted(PLUGIN_ROOT.rglob("*"))
-        if path.is_file()
-        and path.suffix in _RETIRED_CLAIM_SUFFIXES
+        for path in tracked
+        if path.suffix in _RETIRED_CLAIM_SUFFIXES
         and path.relative_to(PLUGIN_ROOT).parts[0] != "tests"
         and "__pycache__" not in path.parts
     ]
 
 
+def test_deleted_tracked_protocol_is_not_read_back(tmp_path, monkeypatch):
+    """A locally deleted tracked file must leave the text scan population.
+
+    With ``keep_deleted=True`` the deleted path stays in the scan and the
+    parametrized reader raises FileNotFoundError; the coverage arm's named
+    ``required`` failure never gets to report it.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    protocols = plugin / "protocols"
+    protocols.mkdir(parents=True)
+    known = protocols / "pact-protocols.md"
+    known.write_text("known\n", encoding="utf-8")
+    doomed = protocols / "pact-agent-stall.md"
+    doomed.write_text("doomed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+    files = _non_test_plugin_files()
+
+    assert known in files
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the text scan "
+        "population; every parametrized reader would raise FileNotFoundError "
+        "instead of the named coverage failure")
+    for path in files:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
+
+
+def test_tracked_population_excludes_untracked_and_keeps_deleted(tmp_path):
+    repo = tmp_path / "repo"
+    tracked = repo / "pact-plugin" / "protocols" / "tracked.md"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked")
+    (tracked.parent / "untracked.md").write_text("untracked")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/protocols/tracked.md"], cwd=repo, check=True)
+    pattern = "pact-plugin/protocols/*.md"
+    assert _tracked_glob(
+        repo, pattern, "pact-plugin/protocols/tracked.md",
+        keep_deleted=True) == [tracked]
+    tracked.unlink()
+    assert _tracked_glob(
+        repo, pattern, "pact-plugin/protocols/tracked.md",
+        keep_deleted=True) == [tracked]
+
+
+def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(repo, "pact-plugin/protocols/*.md", "pact-plugin/protocols/tracked.md")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(repo, "pact-plugin/protocols/*.md", "pact-plugin/protocols/tracked.md")
+
+
+def _collection_population() -> list:
+    """The collection-time scan, or a named skip in a layout that omits it."""
+    try:
+        return _non_test_plugin_files()
+    except AssertionError:
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no "
+            f"{PLUGIN_ROOT.name}/protocols tree; the retired-claim scan is "
+            "about the dev checkout",
+            allow_module_level=True,
+        )
+
+
 @pytest.mark.parametrize(
     "doc_path",
-    _non_test_plugin_files(),
+    _collection_population(),
     ids=lambda p: p.relative_to(PLUGIN_ROOT).as_posix(),
 )
 def test_retired_sendmessage_hook_denial_absent(doc_path: Path):

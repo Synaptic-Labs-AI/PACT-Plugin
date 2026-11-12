@@ -39,15 +39,18 @@ import ast
 import hashlib
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 from memory_repair import shred_detect  # noqa: E402
 
 
 MODULE_PATH = Path(shred_detect.__file__)
 PACKAGE_DIR = MODULE_PATH.parent
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 SCHEMA = """
 CREATE TABLE memories (
@@ -662,7 +665,20 @@ class TestTheCommandLine:
 # ---------------------------------------------------------------------------
 
 def _package_sources():
-    paths = sorted(PACKAGE_DIR.rglob("*.py"))
+    """The package's own sources, from the git index when it ships with us.
+
+    An untracked scratch module dropped into the package must not be judged by
+    the discipline arms; ``config.py`` is the known member that keeps a
+    misnamed prefix from passing on an empty scan.
+    """
+    try:
+        relative = PACKAGE_DIR.relative_to(PLUGIN_ROOT).as_posix()
+    except ValueError:
+        paths = sorted(PACKAGE_DIR.rglob("*.py"))
+    else:
+        prefix = f"{PLUGIN_ROOT.name}/{relative}"
+        paths = _shared_tracked_glob(
+            PLUGIN_ROOT.parent, f"{prefix}/**/*.py", f"{prefix}/shred_detect.py")
     assert paths, "control: the package scan found no source files"
     return paths
 
@@ -718,6 +734,31 @@ class TestStaticDiscipline:
                     assert root not in forbidden, (
                         "{0} imports from {1}".format(source.name, node.module)
                     )
+
+    def test_untracked_module_cannot_join_the_package_scan(
+            self, tmp_path, monkeypatch):
+        """The discipline scan reads the index; an untracked module is invisible.
+
+        Reverting ``_package_sources`` to ``PACKAGE_DIR.rglob("*.py")`` keeps
+        the shipped package green; this arm drives the import arm and reddens
+        naming the untracked module. ``config.py`` is the positive control.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        package = plugin / "scripts" / "memory_repair"
+        package.mkdir(parents=True)
+        known = package / "shred_detect.py"
+        known.write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        monkeypatch.setitem(globals(), "PACKAGE_DIR", package)
+
+        assert known in _package_sources(), (
+            "positive control: the tracked package source is missing from the scan")
+        (package / "zzprobe.py").write_text("import config\n", encoding="utf-8")
+
+        self.test_the_package_imports_no_pact_memory_module()
 
     def test_the_package_hard_codes_no_job_size(self):
         # A population count belongs to a COUNT at run time. Several

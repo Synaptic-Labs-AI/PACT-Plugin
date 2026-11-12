@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
@@ -48,8 +53,26 @@ def _load_manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
 
+def _tracked_markdown(dir_path: Path) -> list[Path]:
+    relative = dir_path.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted(path for path in _tracked_files(PLUGIN_ROOT.parent, relative)
+                  if path.parent == dir_path and path.suffix == ".md")
+
+
+def _tracked_skill_dirs() -> list[Path]:
+    """Every shipped skill directory, including one whose SKILL.md is missing.
+
+    Deleted index entries stay visible: a locally deleted SKILL.md is exactly
+    the defect this oracle reports, so dropping the directory would hide it.
+    """
+    relative = SKILLS_DIR.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted({path.parent for path in _tracked_files(
+        PLUGIN_ROOT.parent, relative, keep_deleted=True)
+        if path.parent.parent == SKILLS_DIR})
+
+
 def _on_disk(rel_dir: str, dir_path: Path) -> set[str]:
-    return {f"./{rel_dir}/{p.name}" for p in dir_path.glob("*.md")}
+    return {f"./{rel_dir}/{p.name}" for p in _tracked_markdown(dir_path)}
 
 
 def test_every_command_md_file_is_registered():
@@ -99,10 +122,12 @@ def test_every_skill_subdir_has_skill_md():
     plugin.json), so a subdirectory without a `SKILL.md` is silently
     non-discoverable rather than caught by manifest-array parity.
     """
+    directories = _tracked_skill_dirs()
+    assert directories, "the tracked skill population is empty; this oracle would pass vacuously"
     missing = sorted(
         f"./skills/{d.name}/"
-        for d in SKILLS_DIR.iterdir()
-        if d.is_dir() and not (d / "SKILL.md").is_file()
+        for d in directories
+        if not (d / "SKILL.md").is_file()
     )
     assert not missing, (
         f"Skill subdirectories without a SKILL.md: {missing}"
@@ -117,7 +142,7 @@ def test_agent_frontmatter_name_matches_filename():
     different identifier than the file's declared name.
     """
     mismatches = []
-    for md in sorted(AGENTS_DIR.glob("*.md")):
+    for md in _tracked_markdown(AGENTS_DIR):
         declared = _frontmatter_name(md)
         if declared != md.stem:
             mismatches.append(
@@ -127,3 +152,105 @@ def test_agent_frontmatter_name_matches_filename():
         "Agent frontmatter `name:` diverges from filename stem:\n  "
         + "\n  ".join(mismatches)
     )
+
+
+def _synthetic_plugin(tmp_path: Path, files: dict[str, str]) -> Path:
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    for relative, text in files.items():
+        path = plugin / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    return plugin
+
+
+def test_tracked_manifest_population_controls_untracked_files(tmp_path, monkeypatch):
+    plugin = _synthetic_plugin(tmp_path, {
+        "commands/orchestrate.md": "",
+        "agents/pact-orchestrator.md": "",
+    })
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    for rel_dir, known_name in (
+        ("commands", "orchestrate.md"),
+        ("agents", "pact-orchestrator.md"),
+    ):
+        dir_path = plugin / rel_dir
+        before = _tracked_markdown(dir_path)
+        assert dir_path / known_name in before
+        stray = dir_path / "000_backend_manifest_issue1714_probe.md"
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert _tracked_markdown(dir_path) == before
+        finally:
+            stray.unlink()
+
+
+def test_manifest_probe_coexists_with_raw_glob_teammate_consumer(tmp_path, monkeypatch):
+    plugin = _synthetic_plugin(
+        tmp_path, {"agents/pact-orchestrator.md": ""})
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    agents = plugin / "agents"
+    before = _tracked_markdown(agents)
+    assert agents / "pact-orchestrator.md" in before
+    stray = agents / "000_backend_manifest_issue1714_probe.md"
+    shared_stray = AGENTS_DIR / stray.name
+    assert not shared_stray.exists()
+    stray.write_text("", encoding="utf-8")
+    try:
+        from test_lead_address_prose_pins import (
+            test_every_teammate_agent_preloads_the_rule,
+        )
+
+        test_every_teammate_agent_preloads_the_rule()
+        assert _tracked_markdown(agents) == before
+        assert not shared_stray.exists()
+    finally:
+        stray.unlink()
+    assert not shared_stray.exists()
+
+
+def test_tracked_manifest_population_omits_a_deleted_member(monkeypatch):
+    known = AGENTS_DIR / "pact-orchestrator.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _tracked_markdown(AGENTS_DIR)
+
+
+def test_skill_directory_oracle_ignores_an_untracked_incomplete_directory(
+        tmp_path, monkeypatch):
+    """The probe is an incomplete skill dir: it reddens the old iterdir walk."""
+    plugin = _synthetic_plugin(tmp_path, {"skills/complete/SKILL.md": ""})
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", plugin / "skills")
+    assert plugin / "skills" / "complete" in _tracked_skill_dirs()
+    test_every_skill_subdir_has_skill_md()
+
+    stray = plugin / "skills" / "000_issue1714_probe"
+    stray.mkdir()
+    try:
+        # The oracle must be unchanged by the untracked directory, and the
+        # directory must not enter the tracked population.
+        test_every_skill_subdir_has_skill_md()
+        assert stray not in _tracked_skill_dirs()
+    finally:
+        stray.rmdir()
+
+
+def test_deleted_tracked_skill_md_still_reddens(tmp_path, monkeypatch):
+    """A deleted SKILL.md is the defect: the directory must not leave the walk."""
+    plugin = _synthetic_plugin(tmp_path, {
+        "skills/only/SKILL.md": "",
+        "skills/other/SKILL.md": "",
+    })
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setitem(globals(), "SKILLS_DIR", plugin / "skills")
+    (plugin / "skills" / "only" / "SKILL.md").unlink()
+    assert plugin / "skills" / "only" in _tracked_skill_dirs()
+    with pytest.raises(AssertionError, match=r"\./skills/only/"):
+        test_every_skill_subdir_has_skill_md()

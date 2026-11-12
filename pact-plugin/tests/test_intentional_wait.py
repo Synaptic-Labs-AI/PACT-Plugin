@@ -19,7 +19,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 
 # --- helpers ---------------------------------------------------------------
@@ -1257,6 +1260,11 @@ class TestIsExemptAgentTypeMixedTeamConfig:
         )
 
 
+def _doc_markdown(root):
+    """Tracked markdown under a doc surface; a working-tree walk reads a scratch file."""
+    return sorted(_tracked_glob(root, "**/*.md", allow_empty=True))
+
+
 class TestDocSurfaceStalenessSweep:
     """Doc-staleness regression pin (lead-approved per #682 TEST phase).
 
@@ -1333,7 +1341,7 @@ class TestDocSurfaceStalenessSweep:
         root = self._doc_root() / subdir
         assert root.is_dir(), f"Expected doc directory {root} to exist"
         violations = []
-        for md_path in root.rglob("*.md"):
+        for md_path in _doc_markdown(root):
             content = md_path.read_text(encoding="utf-8")
             in_fence = False
             for line_no, line in enumerate(content.splitlines(), start=1):
@@ -1519,3 +1527,26 @@ class TestDocSurfaceStalenessSweep:
             f"None of the 5 canonical doc surfaces references "
             f"`{new_name}`; doc-surface drift suspected."
         )
+
+
+def test_an_untracked_doc_file_is_not_swept(tmp_path):
+    """A scratch markdown file must not join the old-name staleness sweep."""
+    root = tmp_path / "plugin"
+    (root / "commands").mkdir(parents=True)
+    tracked = root / "commands" / "tracked.md"
+    tracked.write_text("a clean command\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+
+    needle = root / "commands" / "zzprobe.md"
+    needle.write_text("SELF_COMPLETE_EXEMPT_AGENTS\n", encoding="utf-8")
+
+    population = _doc_markdown(root / "commands")
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the doc-surface sweep: {needle}")
+    assert any(pattern.search(needle.read_text(encoding="utf-8"))
+               for pattern in TestDocSurfaceStalenessSweep.ALL_OLD_NAME_PATTERNS), (
+        "the needle would be flagged")
