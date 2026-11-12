@@ -134,10 +134,10 @@ class RootIdentity(NamedTuple):
     decided it. `override_ignored` is a structured {path, reason} when a
     PRESENT override file was unusable and resolution continued without it;
     `detect_id_for_root` sets it, and the caller discloses it.
-    `decline_reason` is a structured {source, reason, override_path} when the
-    decline had a NAMED cause (a repository-chosen basename), so
-    `project-id show` can report it rather than leaving the operator with
-    `declined` and no remedy. `source` names the rung that declined and is
+    `decline_reason` is a structured {source, reason, override_path} built by
+    `decline_record` for every decline with a named cause (a
+    `DECLINE_REASONS` token), so `project-id show` can report it rather than
+    leaving the operator with `declined` and no remedy. `source` names the rung that declined and is
     filled in by the caller, which is the only layer that knows it. Defaulted
     so the declines without a named cause keep their positional shape.
     `detail` is a FIXED sentence (one of this module's `*_DETAIL` constants,
@@ -581,6 +581,25 @@ def _has_control_character(value: str) -> bool:
     return any(char < "\x20" or char == "\x7f" for char in value)
 
 
+# The schemes whose path the remote SHELL resolves, so a leading `~/` names
+# the login's home exactly as an scp-relative path does.
+_HOME_RELATIVE_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
+
+
+def _drop_home_prefix(segments: list) -> list:
+    """`segments` without a leading `~` segment that has more path after it.
+
+    git sends `~/srv/repo` for `ssh://host/~/srv/repo` and `git@host:~/srv/repo`,
+    and `srv/repo` for `git@host:srv/repo`. A plain sshd resolves all three
+    in the login's home, so they are one repository and must be one id.
+    Only the bare `~` is dropped: `~user/...` names ANOTHER user's home (and
+    is a forge's real path on SourceHut), and a lone `~` is the home itself.
+    """
+    if len(segments) > 1 and segments[0] == "~":
+        return segments[1:]
+    return segments
+
+
 def normalize_remote_url(url: object) -> Optional[str]:
     """Return the canonical `host[:port]/<path>` id for a remote URL.
 
@@ -640,10 +659,17 @@ def normalize_remote_url(url: object) -> Optional[str]:
         host = host.lower()
         if not _valid_host(host):
             return None
+        if scheme in _HOME_RELATIVE_SCHEMES:
+            # git percent-decodes an ssh url's WHOLE path before sending it,
+            # so an encoded `/` is a separator there (measured: `~%2Fsrv`
+            # sends `~/srv`). Other schemes keep `%2F` inside its segment.
+            path = re.sub("%2[Ff]", "/", path)
         path = _strip_path_suffixes(path)
         segments = _split_path(path)
         if not segments:
             return None
+        if scheme in _HOME_RELATIVE_SCHEMES:
+            segments = _drop_home_prefix(segments)
         identifier = _identifier(host, port, segments)
     else:
         scp_match = _scp_match(value)
@@ -667,6 +693,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # `bob@host:repo` share one), and nothing in the URL says which kind
         # of server it is.
         #
+        # HOME-RELATIVE SPELLINGS JOIN THAT SAME ID: `git@host:~/srv/repo` and
+        # `ssh://git@host/~/srv/repo` send `~/srv/repo`, which a plain sshd
+        # resolves exactly as it resolves `srv/repo` (`_drop_home_prefix`). So
+        # the one accepted collision above is reached by more spellings, and
+        # no new kind of collision is added. The `~` is tested on the RAW scp
+        # path, because git sends an scp path literally: `%7E/srv/repo` is a
+        # directory named `%7E`, not the home.
+        #
         # Exactly ONE leading slash is removed, mirroring the URL branch's
         # `partition("/")`: a doubled separator still declines in BOTH
         # spellings (`git@host://a/b` and `https://host//a/b`), which stops a
@@ -674,10 +708,20 @@ def normalize_remote_url(url: object) -> Optional[str]:
         scp_path = scp_match.group("path")
         if scp_path.startswith("/"):
             scp_path = scp_path[1:]
+        if host not in _AZURE_SSH_HOSTS:
+            # git sends an scp path LITERALLY (measured: `srv/%41bc` sends
+            # `srv/%41bc`), so a `%` there is an ordinary character and is
+            # kept as `%25`. Decoding it would merge `srv/%41bc` with
+            # `srv/Abc`, two directories. Azure DevOps Services is the one
+            # exception: its server decodes the scp path, so its `%20` names
+            # the same project as the https spelling's `%20`.
+            scp_path = scp_path.replace("%", "%25")
         path = _strip_path_suffixes(scp_path)
         segments = _split_path(path)
         if not segments:
             return None
+        if path.startswith("~/"):
+            segments = _drop_home_prefix(segments)
         # ONE SEGMENT IS ENOUGH. `git@host:repo` and `https://host/repo` name
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would
@@ -757,14 +801,20 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
       local path or `file://`. The caller falls through to the basename.
       (An empty value inside the url list never reaches this function:
       `read_origin` reports it as `empty_entry`, which declines.)
-    - decline: a NETWORK remote that was present but cannot be a canonical id
-      (a non-ASCII path, a bad port, a reserved character, a backslash, more
-      than one `@`, a trailing space, or an unsupported scheme). No id is
-      produced and no basename is used; the override is the remedy.
+    - decline: a NETWORK remote that was present but cannot be a canonical id:
+      an unsupported scheme; a bad, zero, out-of-range or leading-zero port;
+      a backslash or more than one `@`; a host outside `[a-z0-9.-]` or with a
+      leading or trailing `.`/`-`; an empty path or an empty, `.` or `..`
+      segment (including `%2E%2E`); whitespace, `@`, `?`, `#` or a control
+      character in a path segment; a `%` not followed by two hex digits; an
+      undecodable byte; a leading BOM; or an id over the length cap. A
+      non-ASCII character or a sub-delimiter does NOT decline: it is kept in
+      percent-encoded form (`_normalize_segment`). No id is produced and no
+      basename is used; the override is the remedy.
 
     This exists because a single Optional cannot carry the distinction, and
-    because the grammar only judges a FINISHED string — it cannot see whether a remote
-    was present at all.
+    because the grammar only judges a FINISHED string — it cannot see whether
+    a remote was present at all.
     """
     if not url or not url.strip():
         return OUTCOME_NO_PORTABLE_ORIGIN, None
@@ -1293,8 +1343,11 @@ def detect_id_for_root(
       override FOLLOWS THE IDENTITY ROOT: reading it at the process's
       repository instead would let a cwd pin retarget a declared session and
       would silently ignore a pin in the repository that actually won;
+    - the asked directory's `.git` FILE redirects at another repository's git
+      dir -> DECLINE (`gitfile_redirect`, no override path);
     - the origin is PRESENT and canonicalises -> the canonical id;
-    - the origin is PRESENT and cannot be represented -> DECLINE;
+    - the origin is PRESENT and cannot be represented, or its url list holds
+      an empty value -> DECLINE (`origin_unrepresentable`);
     - the origin is ABSENT (none configured, `file://`, a local path) ->
       the basename, the designed non-git form, EXCEPT in a submodule: there
       the checkout path is chosen by the superproject's tracked `.gitmodules`,

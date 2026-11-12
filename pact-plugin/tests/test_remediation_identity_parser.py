@@ -727,7 +727,9 @@ class TestPercentEncodingIsNormalisedNotDecoded:
             ("https://host/o/a%21b", "host/o/a%21b"),
             ("https://host/o/a!b", "host/o/a!b"),
             ("https://host/owner/répo", "host/owner/r%C3%A9po"),
-            ("git@host:o/My%20Project.git", "host/o/My%20Project"),
+            # scp is sent literally, so its `%` is an ordinary character.
+            ("git@host:o/My%20Project.git", "host/o/My%2520Project"),
+            ("ssh://git@host/o/My%20Project.git", "host/o/My%20Project"),
         ],
     )
     def test_a_segment_is_put_in_rfc3986_normal_form(self, url, expected):
@@ -1061,3 +1063,158 @@ class TestAnEmptyOriginUrlValueAgainstRealGit:
 
         assert self._fetch_target(repo, tmp_path) == "git@a.example"
         assert pi.detect_id_for_root(repo, common_dir(repo)).project_id == "a.example/o/a"
+
+
+class TestHomeRelativeSpellingsFollowGitsParse:
+    """Differential against git's own parse: a fake ssh records the path git
+    sends (`git-upload-pack '<path>'`) for each spelling; nothing is contacted.
+
+    On a plain sshd, a sent `~/P` and a sent `P` are one directory (the
+    login's home). A sent `/P` also shares the id by the accepted rule that
+    relative and absolute scp paths are one id. A sent `~user/P` is another
+    home and must keep its own id. An scp path is sent literally, so scp
+    `%7E/...` is a directory named `%7E`, not the home."""
+
+    SPELLINGS = (
+        "git@host:srv/repo",
+        "git@host:~/srv/repo",
+        "git@host:/srv/repo",
+        "ssh://git@host/srv/repo",
+        "ssh://git@host/~/srv/repo",
+        "git+ssh://git@host/~/srv/repo",
+        "ssh+git://git@host/~/srv/repo",
+        "ssh://git@host/%7E/srv/repo",
+        "git@host:%7E/srv/repo",
+        "ssh://git@host/%257E/srv/repo",
+        "ssh://git@host/~%2Fsrv/repo",
+        "ssh://git@host/srv%2Frepo",
+        "git@host:~user/srv/repo",
+        "ssh://git@host/~user/srv/repo",
+    )
+
+    @staticmethod
+    def _sent_paths(tmp_path):
+        import subprocess
+
+        log = tmp_path / "ssh.log"
+        fake_ssh = tmp_path / "fake-ssh"
+        fake_ssh.write_text(f'#!/bin/sh\necho "$@" >> {log}\nexit 1\n', encoding="utf-8")
+        fake_ssh.chmod(0o755)
+        env = dict(os.environ, GIT_SSH_COMMAND=str(fake_ssh))
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            env.pop(name, None)
+        sent = {}
+        for url in TestHomeRelativeSpellingsFollowGitsParse.SPELLINGS:
+            log.write_text("", encoding="utf-8")
+            subprocess.run(["git", "ls-remote", url], capture_output=True,
+                           timeout=30, env=env, cwd=tmp_path)
+            text = log.read_text(encoding="utf-8")
+            marker = "git-upload-pack '"
+            assert marker in text, (url, text)
+            sent[url] = text.split(marker, 1)[1].split("'", 1)[0]
+        return sent
+
+    @staticmethod
+    def _home_key(sent_path: str) -> str:
+        if sent_path.startswith("~/"):
+            return sent_path[2:]
+        return sent_path.lstrip("/")
+
+    def test_spellings_git_sends_to_one_directory_share_one_id(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        sent = self._sent_paths(tmp_path)
+        ids = {url: pi.normalize_remote_url(url) for url in self.SPELLINGS}
+        assert None not in ids.values(), ids
+
+        for left in self.SPELLINGS:
+            for right in self.SPELLINGS:
+                same_directory = self._home_key(sent[left]) == self._home_key(sent[right])
+                assert (ids[left] == ids[right]) is same_directory, (
+                    left, sent[left], ids[left], right, sent[right], ids[right]
+                )
+
+    def test_the_two_homes_are_both_present_in_the_measurement(self, tmp_path):
+        """Control: the differential above compares two real groups, so a
+        parser that merged everything or split everything would red it."""
+        assert_outside_repository(tmp_path)
+        sent = self._sent_paths(tmp_path)
+
+        keys = {self._home_key(path) for path in sent.values()}
+        assert keys == {"srv/repo", "~user/srv/repo", "%7E/srv/repo"}, sent
+        assert sent["ssh://git@host/~%2Fsrv/repo"] == "~/srv/repo", sent
+
+
+class TestPercentEscapesFollowGitsParse:
+    """git decodes an ssh url's whole path, `%2F` included, and sends an scp
+    path literally. A fake ssh records what git sends; nothing is contacted.
+    Spellings git sends to one directory share an id, and others do not."""
+
+    SPELLINGS = (
+        "git@host:srv/%41bc",
+        "ssh://git@host/srv/%2541bc",
+        "git@host:srv/Abc",
+        "ssh://git@host/srv/%41bc",
+        "ssh://git@host/srv%2FAbc",
+        "git@host:caf\u00e9/r",
+        "ssh://git@host/caf%C3%A9/r",
+        "git@host:caf%C3%A9/r",
+    )
+
+    def test_spellings_git_sends_to_one_directory_share_one_id(self, tmp_path):
+        import subprocess
+
+        assert_outside_repository(tmp_path)
+        log = tmp_path / "ssh.log"
+        fake_ssh = tmp_path / "fake-ssh"
+        fake_ssh.write_text(f'#!/bin/sh\necho "$@" >> {log}\nexit 1\n', encoding="utf-8")
+        fake_ssh.chmod(0o755)
+        env = dict(os.environ, GIT_SSH_COMMAND=str(fake_ssh))
+        sent = {}
+        for url in self.SPELLINGS:
+            log.write_text("", encoding="utf-8")
+            subprocess.run(["git", "ls-remote", url], capture_output=True,
+                           timeout=30, env=env, cwd=tmp_path)
+            text = log.read_text(encoding="utf-8")
+            sent[url] = text.split("git-upload-pack '", 1)[1].split("'", 1)[0].lstrip("/")
+        ids = {url: pi.normalize_remote_url(url) for url in self.SPELLINGS}
+        assert None not in ids.values(), ids
+        # Four directories: srv/%41bc, srv/Abc, caf\u00e9/r and a literal caf%C3%A9/r.
+        assert len(set(sent.values())) == 4, sent
+
+        for left in self.SPELLINGS:
+            for right in self.SPELLINGS:
+                assert (ids[left] == ids[right]) is (sent[left] == sent[right]), (
+                    left, sent[left], ids[left], right, sent[right], ids[right]
+                )
+
+
+class TestAzureDevOpsKeepsItsDecodedScpPath:
+    """Azure DevOps Services decodes the scp path on its server, so its scp
+    `%20` is the same project as the https and ssh url spellings' `%20`. The
+    literal-`%` scp rule applies to every other host."""
+
+    AZURE_ID = "dev.azure.com/fabrikam/My%20Project/_git/repo"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "git@ssh.dev.azure.com:v3/fabrikam/My%20Project/repo",
+            "ssh://git@ssh.dev.azure.com/v3/fabrikam/My%20Project/repo",
+            "ssh://git@ssh.dev.azure.com:22/v3/Fabrikam/My%20Project/repo",
+            "https://dev.azure.com/fabrikam/My%20Project/_git/repo",
+            "https://fabrikam.visualstudio.com/My%20Project/_git/repo",
+            "fabrikam@vs-ssh.visualstudio.com:v3/fabrikam/My%20Project/repo",
+        ],
+    )
+    def test_every_azure_spelling_keeps_one_id(self, url):
+        assert pi.normalize_remote_url(url) == self.AZURE_ID
+
+    def test_a_raw_space_still_declines(self):
+        assert pi.classify_remote_origin(
+            "git@ssh.dev.azure.com:v3/fabrikam/My Project/repo"
+        ) == (DECLINE, None)
+
+    def test_the_same_path_on_another_ssh_host_is_literal(self):
+        assert pi.normalize_remote_url("git@other.example:v3/o/My%20Project/repo") == (
+            "other.example/v3/o/My%2520Project/repo"
+        )

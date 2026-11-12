@@ -63,6 +63,40 @@ class TestNormalizationEquivalence:
         )
         assert len(outputs) == 1, f"spellings diverged: {outputs}"
 
+    def test_one_home_relative_repository_spelled_five_ways_has_one_id(self):
+        """Catches `~/` (the login's home) splitting from the scp-relative
+        spelling git resolves in that same home."""
+        urls = [
+            "git@host:srv/repo.git",
+            "git@host:~/srv/repo.git",
+            "ssh://git@host/~/srv/repo.git",
+            "git+ssh://git@host/~/srv/repo",
+            "ssh+git://git@host/%7E/srv/repo",
+        ]
+        outputs = {pi.normalize_remote_url(url) for url in urls}
+        assert outputs == {"host/srv/repo"}, outputs
+
+    def test_another_users_home_is_never_stripped(self):
+        """`~user/...` names another user's home, and is SourceHut's real
+        repository path, so it keeps its `~user` segment in every spelling."""
+        sourcehut = {
+            pi.normalize_remote_url("git@git.sr.ht:~user/repo"),
+            pi.normalize_remote_url("ssh://git@git.sr.ht/~user/repo"),
+            pi.normalize_remote_url("https://git.sr.ht/~user/repo"),
+        }
+        assert sourcehut == {"git.sr.ht/~user/repo"}, sourcehut
+        assert pi.normalize_remote_url("git@host:~user/repo") != (
+            pi.normalize_remote_url("git@host:~/repo")
+        )
+
+    def test_a_tilde_with_no_home_expansion_is_kept(self):
+        """Only the ssh family and scp go through a remote shell; https and
+        git:// keep `~` as an ordinary segment, and the home itself stays."""
+        assert pi.normalize_remote_url("https://host/~/x") == "host/~/x"
+        assert pi.normalize_remote_url("git://host/~/x") == "host/~/x"
+        assert pi.normalize_remote_url("git@host:~") == "host/~"
+        assert pi.normalize_remote_url("ssh://git@host/~") == "host/~"
+
     def test_the_literal_format_is_pinned_in_exactly_one_place(self):
         """The user-visible shape, pinned once so a format change is one edit.
 
