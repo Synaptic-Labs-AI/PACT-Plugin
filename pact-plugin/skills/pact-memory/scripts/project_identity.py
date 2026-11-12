@@ -381,7 +381,19 @@ def normalize_remote_url(url: object) -> Optional[str]:
         host = scp_match.group("host").lower()
         if not _valid_host(host):
             return None
-        path = _strip_path_suffixes(scp_match.group("path"))
+        # AN ABSOLUTE SCP PATH IS THE SAME ENDPOINT AS THE URL FORM.
+        # `git@host:/srv/git/repo.git` and `ssh://host/srv/git/repo.git` name
+        # one repository, but the URL branch's `partition("/")` consumes the
+        # separator while the scp form leaves it in the path, so the leading
+        # slash produced an empty first segment and every absolute scp remote
+        # DECLINED. Exactly ONE slash is removed, mirroring `partition`: a
+        # doubled separator still declines in BOTH spellings (`git@host://a/b`
+        # and `https://host//a/b`), which is the symmetry that stops a typo
+        # from silently naming a different path.
+        scp_path = scp_match.group("path")
+        if scp_path.startswith("/"):
+            scp_path = scp_path[1:]
+        path = _strip_path_suffixes(scp_path)
         segments = _decode_path(path)
         if not segments:
             return None

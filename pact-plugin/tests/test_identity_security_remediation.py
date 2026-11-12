@@ -47,6 +47,41 @@ class TestLeadingBytesClassification:
         assert pi.classify_remote_origin(" /srv/git/repo")[0] == NO_PORTABLE_ORIGIN
 
 
+class TestAbsoluteScpRemotes:
+    """Bugbot: an ABSOLUTE scp path named the same endpoint as the URL form,
+    but left its leading slash in the path, produced an empty first segment,
+    and declined — so a present network remote silently failed to bind."""
+
+    def test_an_absolute_scp_path_matches_its_url_spellings(self):
+        """Three spellings, ONE id — the equivalence the fix exists for."""
+        spellings = (
+            "git@host:/srv/git/repo.git",
+            "ssh://host/srv/git/repo.git",
+            "https://host/srv/git/repo",
+        )
+        ids = {pi.normalize_remote_url(value) for value in spellings}
+        assert ids == {"host/srv/git/repo"}, ids
+        for value in spellings:
+            assert pi.classify_remote_origin(value) == (
+                CANONICAL, "host/srv/git/repo"
+            ), value
+
+    def test_a_single_segment_absolute_scp_path_is_canonical(self):
+        assert pi.classify_remote_origin("git@host:/repo") == (CANONICAL, "host/repo")
+
+    def test_relative_scp_controls_are_unchanged(self):
+        assert pi.normalize_remote_url("git@host:owner/repo.git") == "host/owner/repo"
+        assert pi.normalize_remote_url("git@host:owner/repo") == "host/owner/repo"
+
+    def test_a_doubled_separator_still_declines_in_both_spellings(self):
+        """The one-slash strip MIRRORS partition rather than deleting every
+        leading slash: a doubled separator must stay a decline in both forms,
+        or a typo would silently name a different path."""
+        assert pi.normalize_remote_url("git@host://srv/x") is None
+        assert pi.normalize_remote_url("https://host//srv/x") is None
+        assert pi.normalize_remote_url("git@host:/") is None
+
+
 class TestSchemeLessColonUserinfo:
     def test_a_colon_in_userinfo_declines(self):
         """Catches the CI shape `deploy-token:<token>@host/path` being filed
@@ -897,19 +932,28 @@ class TestSaveIngressRejectsNulFilePaths:
                 sync_to_claude=False,
             )
         assert "must be str, not bytes" in str(caught.value)
-        rows = 0
+        counts = {}
         if store.exists():
             check = sqlite3.connect(str(store))
             try:
-                found = check.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='memories'"
-                ).fetchone()
-                if found:
-                    rows = check.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                for table in ("memories", "files"):
+                    found = check.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (table,),
+                    ).fetchone()
+                    counts[table] = (
+                        check.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                        if found
+                        else 0
+                    )
             finally:
                 check.close()
-        assert rows == 0, f"the refused save left {rows} memory row(s)"
+        assert counts.get("memories", 0) == 0, (
+            f"the refused save left {counts['memories']} memory row(s)"
+        )
+        assert counts.get("files", 0) == 0, (
+            f"the refused save left {counts['files']} file row(s)"
+        )
 
     def test_a_bytes_path_with_a_nul_is_refused_before_any_row(self, tmp_path):
         """Catches `str(b'bad\\x00.py')`, which renders the NUL as an ESCAPE
