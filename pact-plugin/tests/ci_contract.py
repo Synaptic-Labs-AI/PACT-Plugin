@@ -30,7 +30,7 @@ VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
 WORKFLOW_TEST_CMD = (
     "python -m pytest -ra -n 4 --dist \"$DIST\" "
-    "${SEED:+-p randomly --randomly-seed=\"$SEED\"} "
+    "${SEED:+-p randomly --randomly-seed=\"$SEED\" --randomly-dont-reset-seed} "
     "--junitxml=\"$GITHUB_WORKSPACE/.full-suite-results.xml\""
 )
 UPLOAD_ARTIFACT_ACTION = (
@@ -47,10 +47,12 @@ UPLOAD_ARTIFACT_NAME = (
 )
 _DIST_VARIABLE = "$DIST"
 _JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
-# shlex's view of the unquoted `${SEED:+-p randomly --randomly-seed="$SEED"}`.
+# shlex's view of the unquoted
+# `${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}`.
 # With SEED empty the shell expands it to no words, so the static default
-# argv drops these three tokens.
-_SEED_EXPANSION = ("${SEED:+-p", "randomly", "--randomly-seed=$SEED}")
+# argv drops these four tokens.
+_SEED_EXPANSION = ("${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+                   "--randomly-dont-reset-seed}")
 
 
 def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):

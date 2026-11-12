@@ -386,9 +386,10 @@ def test_dynamic_command_mutations_remain_invalid(tmp_path, mutation):
 ORDERED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
                    '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
 SEEDED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
-                  '${SEED:+-p randomly --randomly-seed="$SEED"} '
+                  '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} '
                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
-SEED_TOKENS = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED}"]
+SEED_TOKENS = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+               "--randomly-dont-reset-seed}"]
 
 
 def read_runs(output):
@@ -397,7 +398,7 @@ def read_runs(output):
 
 def test_the_shipped_run_line_is_the_seeded_shape():
     assert shlex.split(ci_contract.WORKFLOW_TEST_CMD) == shlex.split(SEEDED_COMMAND)
-    assert comparator._command_argv([ci_contract.WORKFLOW_TEST_CMD])[8:11] == SEED_TOKENS
+    assert comparator._command_argv([ci_contract.WORKFLOW_TEST_CMD])[8:12] == SEED_TOKENS
 
 
 def test_seeded_run_line_is_accepted_and_its_seed_is_recorded(tmp_path):
@@ -409,7 +410,7 @@ def test_seeded_run_line_is_accepted_and_its_seed_is_recorded(tmp_path):
     assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [7, None]
     runs = read_runs(output)
     assert [run["shuffle_seed"] for run in runs] == [7, None]
-    assert runs[0]["argv"][8:11] == SEED_TOKENS
+    assert runs[0]["argv"][8:12] == SEED_TOKENS
     assert "shuffle_seed" not in runs[0]["environment"]
     assert runs[0]["environment"] == runs[1]["environment"]
 
@@ -428,7 +429,7 @@ def test_ordered_run_line_has_no_seed(tmp_path):
     (ORDERED_COMMAND, (4,), "refused"),
     (SEEDED_COMMAND, (), None),     # every ordered post-change run logs this
     (SEEDED_COMMAND, (4,), 4),
-], ids=["9-unseeded", "9-seeded", "12-unseeded", "12-seeded"])
+], ids=["9-unseeded", "9-seeded", "13-unseeded", "13-seeded"])
 def test_run_line_shape_and_seed_line_agree(tmp_path, command, seeds, expected):
     first = make_run(tmp_path, "one", command=command, seeds=seeds)
     second = make_run(tmp_path, "two", 101, command=command)
@@ -544,14 +545,21 @@ def test_two_seed_lines_are_refused(tmp_path):
 
 
 @pytest.mark.parametrize("mutation", [
-    "literal_seed", "no_wrapper", "extra_token", "seed_after_junit", "wrong_junit"])
+    "literal_seed", "no_wrapper", "extra_token", "seed_after_junit", "wrong_junit",
+    "previous_seeded_line", "dont_reset_outside_expansion"])
 def test_seeded_shape_is_exact(tmp_path, mutation):
-    """The second shape admits exactly three tokens in exactly one place."""
-    seed_text = '${SEED:+-p randomly --randomly-seed="$SEED"}'
-    if mutation == "literal_seed":
+    """The second shape admits exactly four tokens in exactly one place."""
+    seed_text = '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}'
+    if mutation == "previous_seeded_line":
+        changed = SEEDED_COMMAND.replace(" --randomly-dont-reset-seed}", "}")
+    elif mutation == "dont_reset_outside_expansion":
+        changed = SEEDED_COMMAND.replace(" --randomly-dont-reset-seed}",
+                                         "} --randomly-dont-reset-seed")
+    elif mutation == "literal_seed":
         changed = SEEDED_COMMAND.replace('--randomly-seed="$SEED"', "--randomly-seed=7")
     elif mutation == "no_wrapper":
-        changed = SEEDED_COMMAND.replace(seed_text, '-p randomly --randomly-seed="$SEED"')
+        changed = SEEDED_COMMAND.replace(
+            seed_text, '-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed')
     elif mutation == "extra_token":
         changed = SEEDED_COMMAND.replace("--junitxml=", "-x --junitxml=")
     elif mutation == "seed_after_junit":

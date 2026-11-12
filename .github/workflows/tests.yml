@@ -130,7 +130,10 @@
 #                          `addopts = "-p no:randomly"` in the root
 #                          pyproject.toml. Only a workflow_dispatch with a
 #                          `shuffle_seed` loads it (`-p randomly` on the run
-#                          line). Child pytest sessions the suite starts must
+#                          line). tests/randomly_seed_gate.py fails a session
+#                          that has it loaded with no explicit seed, which is
+#                          what losing or shadowing that addopts line causes.
+#                          Child pytest sessions the suite starts must
 #                          block it themselves; tests/child_pytest_census.py
 #                          refuses one that does not.
 #
@@ -268,9 +271,9 @@ jobs:
     # included. The default outside a dispatch is the historical `loadfile`.
     # THE SHUFFLE SEED TAKES THE SAME ROUTE. The dispatch input is free text,
     # so it reaches the run line only through this key, and the seed guard
-    # step proves it is decimal digits before setup. A merge-group or push
-    # run has no inputs, so SEED is empty there and the suite runs in file
-    # order: the root pyproject.toml blocks pytest-randomly by default.
+    # step refuses anything but decimal digits before setup. A merge-group or
+    # push run has no inputs, so SEED is empty there and the suite runs in
+    # file order: the root pyproject.toml blocks pytest-randomly by default.
     env:
       DIST: ${{ inputs.dist || 'loadfile' }}
       SEED: ${{ inputs.shuffle_seed || '' }}
@@ -352,19 +355,23 @@ jobs:
               ;;
           esac
 
-      # THE SEED IS WORD-SPLIT INTO THE RUN LINE, SO IT IS GUARDED HERE. Empty
-      # means file order. Otherwise it must be a decimal integer without
-      # leading zeros, at most 9 digits (below 2^32). Anything else refuses
-      # before setup, and the value is never echoed. The step writes its
-      # verdict as the `order` output (`ordered` or `seed-N`), which is the
-      # only seed text the artifact name uses. Same shape as the DIST guard:
-      # no `if:`, `env:`, `shell:` or `continue-on-error:`, and no pytest token.
+      # THE SEED GUARD. Empty means file order. Otherwise SEED must be a
+      # decimal integer without leading zeros, at most 9 digits (below 2^32);
+      # anything else refuses before setup, and the value is never echoed. The
+      # digit classes are spelled out rather than written as ranges, so the
+      # locale cannot widen them. This guard protects two sinks: the
+      # `order=...` line it appends to GITHUB_OUTPUT, where a newline in SEED
+      # would add an output of its own, and the artifact name, which reads
+      # only the `order` output (`ordered` or `seed-N`), never the raw input.
+      # The run line does not depend on it: there SEED stays one argv word
+      # (see the comment on that step). Same shape as the DIST guard: no
+      # `if:`, `env:`, `shell:` or `continue-on-error:`, and no pytest token.
       - name: Guard the diagnostic shuffle seed
         id: order
         run: |
           if [ -z "$SEED" ]; then
             order=ordered
-          elif [[ "$SEED" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+          elif [[ "$SEED" =~ ^(0|[123456789][0123456789]{0,8})$ ]]; then
             order="seed-$SEED"
           else
             printf '%s\n' "SEED GUARD: shuffle_seed must be empty or a decimal integer without leading zeros, at most 9 digits; refusing before setup." >&2
@@ -575,13 +582,19 @@ jobs:
       - name: Verify the CI environment (before tests)
         run: python scripts/verify_ci_environment.py
 
-      # `${SEED:+…}` IS UNQUOTED ON PURPOSE: with SEED set it word-splits into
-      # `-p randomly --randomly-seed=N`, and with SEED empty it adds no words,
-      # so the merge gate's argv is unchanged. The split is safe only because
-      # the seed guard above has proven SEED is digits.
+      # `${SEED:+…}` IS UNQUOTED ON PURPOSE: with SEED set it splits into the
+      # four words `-p randomly --randomly-seed=N --randomly-dont-reset-seed`,
+      # and with SEED empty it adds no words, so the merge gate's argv is
+      # unchanged. The split happens only between those literal words: the
+      # inner "$SEED" is quoted, so whatever SEED holds stays one argv word,
+      # with no further splitting, globbing or command substitution. The seed
+      # guard is what keeps that word a decimal integer. With
+      # --randomly-dont-reset-seed the plugin does not reseed the random
+      # generators before each test; it still seeds them once from N at
+      # session start, so a seeded run's random draws also depend on N.
       - name: Run test suite
         working-directory: pact-plugin
-        run: python -m pytest -ra -n 4 --dist "$DIST" ${SEED:+-p randomly --randomly-seed="$SEED"} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
+        run: python -m pytest -ra -n 4 --dist "$DIST" ${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
 
       # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
       # inspects a separate --collect-only run; this reads the in-band record

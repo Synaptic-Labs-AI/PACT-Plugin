@@ -360,7 +360,7 @@ class TestCiInvocationCollectsTheWholeCorpus:
         assert normalized == ci_contract.TEST_CMD.split()
         # The seeded run line still normalizes to the static default: with
         # SEED empty the expansion adds no words.
-        assert '${SEED:+-p randomly --randomly-seed="$SEED"}' in (
+        assert '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}' in (
             ci_contract.WORKFLOW_TEST_CMD)
         assert _pytest_args(ci_contract.WORKFLOW_TEST_CMD) == [
             "-ra", "-n", "4", "--dist", "loadfile"
@@ -382,16 +382,20 @@ class TestCiInvocationCollectsTheWholeCorpus:
             # it is empty: a bare seed flag, an inline expression, a quoted
             # wrapper (one word) or a dropped expansion is drift.
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                '${SEED:+-p randomly --randomly-seed="$SEED"}',
-                '-p randomly --randomly-seed="$SEED"', 1),
+                '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}',
+                '-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed', 1),
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                '${SEED:+-p randomly --randomly-seed="$SEED"}',
-                '-p randomly --randomly-seed=${{ inputs.shuffle_seed }}', 1),
+                '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}',
+                '-p randomly --randomly-seed=${{ inputs.shuffle_seed }} '
+                '--randomly-dont-reset-seed', 1),
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                '${SEED:+-p randomly --randomly-seed="$SEED"}',
-                '"${SEED:+-p randomly --randomly-seed=$SEED}"', 1),
+                '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}',
+                '"${SEED:+-p randomly --randomly-seed=$SEED --randomly-dont-reset-seed}"', 1),
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                ' ${SEED:+-p randomly --randomly-seed="$SEED"}', '', 1),
+                ' ${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}', '', 1),
+            # A seeded run must not reseed before each test.
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                ' --randomly-dont-reset-seed}', '}', 1),
         ):
             with pytest.raises(AssertionError, match="PARSE FAILURE"):
                 ci_contract.normalized_workflow_test_argv(command)

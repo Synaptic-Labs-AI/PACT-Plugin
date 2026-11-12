@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import ci_contract
 import ci_full_run_record
 
@@ -561,7 +563,7 @@ def _assert_full_workflow_contract(root):
         )
     seed_run = seed_guard["run"]
     assert "$SEED" in seed_run, seed_run
-    assert "^(0|[1-9][0-9]{0,8})$" in seed_run, seed_run
+    assert "^(0|[123456789][0123456789]{0,8})$" in seed_run, seed_run
     assert ">> \"$GITHUB_OUTPUT\"" in seed_run, seed_run
     assert not re.search(r"\bpytest\b", seed_run), (
         "the SEED guard's run text names pytest; test_ci_collection_scope "
@@ -705,6 +707,57 @@ class TestFullWorkflowContract:
     def test_full_workflow_contract(self):
         root = ci_contract.require_root("the full workflow contract")
         _assert_full_workflow_contract(root)
+
+
+def _seed_guard_run(root):
+    """The seed guard step's `run:` body, as tests.yml ships it."""
+    job = ci_contract.jobs_of(_full_doc(root))["full-suite"]
+    guards = [text for text in ci_contract.run_texts(ci_contract.steps_of(job))
+              if "SEED GUARD" in text]
+    assert len(guards) == 1, f"expected exactly one SEED guard step, found {len(guards)}"
+    return guards[0]
+
+
+class TestSeedGuardBehaviour:
+    """The seed guard's verdicts, EXECUTED under `bash -e` as the runner does."""
+
+    @staticmethod
+    def _run_guard(tmp_path, seed):
+        root = ci_contract.require_root("the seed guard's behaviour")
+        bash = shutil.which("bash")
+        assert bash, "bash is not on PATH; the seed guard is bash"
+        script = tmp_path / "guard.sh"
+        script.write_text(_seed_guard_run(root), encoding="utf-8")
+        output = tmp_path / "github_output"
+        output.write_text("", encoding="utf-8")
+        proc = subprocess.run(
+            [bash, "-e", str(script)],
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8",
+                 "SEED": seed, "GITHUB_OUTPUT": str(output)},
+            capture_output=True, text=True, timeout=30)
+        return proc, output.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("seed, order", [
+        ("", "ordered"),
+        ("0", "seed-0"),
+        ("7", "seed-7"),
+        ("123456789", "seed-123456789"),
+    ])
+    def test_an_accepted_seed_writes_one_order_line(self, tmp_path, seed, order):
+        proc, written = self._run_guard(tmp_path, seed)
+        assert proc.returncode == 0, proc.stderr
+        assert written == f"order={order}\n"
+
+    @pytest.mark.parametrize("seed", [
+        "007", "1234567890", "1 2", "$(id)", "-1", "abc", "5\n", "5\nx=y",
+        "٣", "1٣",
+    ])
+    def test_a_refused_seed_exits_before_writing(self, tmp_path, seed):
+        proc, written = self._run_guard(tmp_path, seed)
+        assert proc.returncode == 1, (proc.returncode, proc.stderr)
+        assert "SEED GUARD:" in proc.stderr
+        assert seed not in proc.stdout + proc.stderr, "the guard echoed the value"
+        assert written == ""
 
 
 class TestRemovability:
