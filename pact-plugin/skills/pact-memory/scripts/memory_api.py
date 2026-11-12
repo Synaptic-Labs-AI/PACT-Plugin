@@ -3571,14 +3571,16 @@ class PACTMemory:
         # first and may do store work itself, including a whole-store
         # embedding catch-up on the process's first memory surface.
         #
-        # WHAT ZERO HERE GUARANTEES: EVERY counters in `graph_stats`.
-        # All four are project-scoped — `graph.get_graph_stats` applies the
-        # same scope predicate to `memory_file_links` and `file_relations` as
-        # to `files` and `memories`. The earlier wording here called those two
-        # "UNCONDITIONAL global counts"; that was false, and a reader who
-        # trusted it would write a global-count arm (red) or revert the
-        # scoping. They read 0 here only because the guard performs no query —
-        # an implementation choice, not a guarantee.
+        # WHAT ZERO HERE GUARANTEES: every counter in `graph_stats`.
+        # All five are project-scoped — `files`, `file_paths`, `memories`,
+        # `memory_file_links` and `file_relations`. `graph.get_graph_stats`
+        # applies the same scope predicate to the last three as to `files`
+        # and `memories`, and derives `file_paths` from the scoped rows.
+        # The earlier wording here called `memory_file_links` and
+        # `file_relations` "UNCONDITIONAL global counts"; that was false, and
+        # a reader who trusted it would write a global-count arm (red) or
+        # revert the scoping. They read 0 here only because the guard performs
+        # no query — an implementation choice, not a guarantee.
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
         # value. The ENVELOPE VALUES are computed once so BOTH arms report
