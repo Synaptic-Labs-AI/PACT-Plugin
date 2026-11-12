@@ -666,11 +666,11 @@ SECRETARY = Path(__file__).resolve().parents[1] / "agents" / "pact-secretary.md"
 # control, so the arm below proves the scope is what reaches both buckets.
 SINGLE_ID_SQL = """
 SELECT COUNT(*) FROM memories
-WHERE project_id = ?2
+WHERE project_id = :project_id
   AND EXISTS (
     SELECT 1 FROM json_each(COALESCE(memories.entities,'[]')) je
-    WHERE (je.type='object' AND json_extract(je.value,'$.name') = ?1)
-       OR (je.type='text'   AND je.value = ?1))
+    WHERE (je.type='object' AND json_extract(je.value,'$.name') = :name)
+       OR (je.type='text'   AND je.value = :name))
 """
 
 
@@ -724,11 +724,11 @@ class TestSyncReportsItsReadScope:
         try:
             counted = conn.execute(
                 _secretary_calibration_sql(),
-                {"1": "orchestration_calibration", "2": json.dumps(read_scope)},
+                {"name": "orchestration_calibration", "scope": json.dumps(read_scope)},
             ).fetchone()[0]
             single = conn.execute(
                 SINGLE_ID_SQL,
-                {"1": "orchestration_calibration", "2": "github.com/o/proj"},
+                {"name": "orchestration_calibration", "project_id": "github.com/o/proj"},
             ).fetchone()[0]
         finally:
             conn.close()

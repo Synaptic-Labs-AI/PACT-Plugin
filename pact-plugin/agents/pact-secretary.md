@@ -109,16 +109,17 @@ You are **exempted from the standard teachback** at spawn — your bootstrap tas
 
    ```sql
    SELECT COUNT(*) FROM memories
-   WHERE project_id IN (SELECT value FROM json_each(?2))
+   WHERE project_id IN (SELECT value FROM json_each(:scope))
      AND EXISTS (
        SELECT 1 FROM json_each(COALESCE(memories.entities,'[]')) je
-       WHERE (je.type='object' AND json_extract(je.value,'$.name') = ?1)
-          OR (je.type='text'   AND je.value = ?1))
+       WHERE (je.type='object' AND json_extract(je.value,'$.name') = :name)
+          OR (je.type='text'   AND je.value = :name))
    ```
 
-   Set `?1` to `orchestration_calibration` and `?2` to the `read_scope` array
-   from this briefing's `sync` envelope, serialised as JSON. If `sync` did not
-   run in this briefing, or its `read_scope` is empty, do not run the count and
+   Run it with Python's `sqlite3` module and bind a mapping, not a tuple:
+   `{"name": "orchestration_calibration", "scope": json.dumps(read_scope)}`,
+   where `read_scope` is the array from this briefing's `sync` envelope. If
+   `sync` did not run in this briefing, or its `read_scope` is empty, do not run the count and
    report the gate state `not determined`. Keep the three guards. `COALESCE` gives an empty array for a null column. The object
    arm keeps `json_extract` off a bare string, which gives an error. The text
    arm finds a record that holds the name in a bare string.

@@ -415,17 +415,107 @@ class TestCalibrationCountReadsTheWholeScope:
 
     def test_the_count_binds_the_scope_array(self):
         assert (
-            "WHERE project_id IN (SELECT value FROM json_each(?2))"
+            "WHERE project_id IN (SELECT value FROM json_each(:scope))"
         ) in self._sql_block()
 
     def test_the_single_id_binding_is_gone(self):
-        assert "project_id = ?2" not in self._sql_block()
+        block = self._sql_block()
+        assert "project_id = ?2" not in block
+        assert "project_id = :scope" not in block
+        assert "?1" not in block and "?2" not in block
 
-    def test_the_placeholder_is_the_sync_read_scope(self):
+    BINDING_LEAD = "bind a mapping, not a tuple:"
+
+    def _binding_literal(self) -> str:
+        text = SECRETARY.read_text(encoding="utf-8")
+        start = text.index(self.BINDING_LEAD) + len(self.BINDING_LEAD)
+        literal = re.search(r"`(\{[^`]*\})`", text[start:start + 200])
+        assert literal, "no backticked binding mapping after the binding lead"
+        return literal.group(1)
+
+    @staticmethod
+    def _build_binding(literal: str, read_scope: list) -> dict:
+        """The prose's mapping, built from its AST without evaluating code.
+
+        Each value must be a string constant or `json.dumps(read_scope)`;
+        any other shape fails the arm, so the binding the prose shows is the
+        binding executed.
+        """
+        import ast
+        import json
+
+        node = ast.parse(literal, mode="eval").body
+        assert isinstance(node, ast.Dict), "the binding is not a mapping"
+        binding = {}
+        for key, value in zip(node.keys, node.values):
+            assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                binding[key.value] = value.value
+            elif (
+                isinstance(value, ast.Call)
+                and ast.unparse(value.func) == "json.dumps"
+                and [ast.unparse(arg) for arg in value.args] == ["read_scope"]
+                and not value.keywords
+            ):
+                binding[key.value] = json.dumps(read_scope)
+            else:
+                raise AssertionError(
+                    f"unsupported binding value {ast.unparse(value)!r}"
+                )
+        return binding
+
+    def test_the_binding_is_a_mapping_over_the_sync_read_scope(self):
         assert (
-            "?2 to the read_scope array from this briefing's sync envelope, "
-            "serialised as JSON"
+            "Run it with Python's sqlite3 module and bind a mapping, not a "
+            "tuple: {\"name\": \"orchestration_calibration\", \"scope\": "
+            "json.dumps(read_scope)}, where read_scope is the array from this "
+            "briefing's sync envelope."
         ) in _body(SECRETARY)
+
+    def test_the_documented_sql_and_binding_count_both_buckets(self, tmp_path):
+        """Executes the prose's SQL with the prose's own binding, warnings fatal."""
+        import json
+        import sqlite3
+        import warnings
+
+        store = tmp_path / "memory.db"
+        conn = sqlite3.connect(store)
+        conn.execute(
+            "CREATE TABLE memories (id TEXT, project_id TEXT, entities TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO memories VALUES (?, ?, ?)",
+            [
+                ("a", "github.com/o/r",
+                 json.dumps([{"name": "orchestration_calibration"}])),
+                ("b", "legacy", json.dumps(["orchestration_calibration"])),
+                ("c", "legacy", json.dumps([{"name": "other"}])),
+                ("d", "unrelated",
+                 json.dumps([{"name": "orchestration_calibration"}])),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        read_scope = ["github.com/o/r", "legacy"]
+        binding = self._build_binding(self._binding_literal(), read_scope)
+        sql = [
+            block
+            for block in re.findall(
+                r"```sql\n(.*?)```",
+                SECRETARY.read_text(encoding="utf-8"),
+                flags=re.S,
+            )
+            if "json_each(COALESCE" in block
+        ][0]
+        ro = sqlite3.connect(f"file:{store}?mode=ro&immutable=1", uri=True)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                counted = ro.execute(sql, binding).fetchone()[0]
+        finally:
+            ro.close()
+        assert counted == 2
 
     def test_no_scope_means_not_determined(self):
         assert (
