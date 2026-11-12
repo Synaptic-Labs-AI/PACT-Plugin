@@ -708,6 +708,37 @@ class TestStatusNeverWritesIntoACorruptStore:
         changed = {i for i in range(100) if after[i] != before[i]}
         assert changed <= self.HEADER_FIELDS_AN_OPEN_REWRITES, sorted(changed)
 
+    def test_a_check_that_reports_rows_instead_of_raising_stops_the_catch_up(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        """`quick_check` RETURNS rows, rather than raising, for a store whose
+        pages read but whose structure is wrong (here a freelist count), so
+        the rows are the only signal and must stop the catch-up."""
+        import struct
+
+        store = identity_env / "store.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES ('m00001', 'c', 'github.com/o/proj', 's', ?, ?)",
+            (CREATED_AT, CREATED_AT),
+        )
+        conn.commit()
+        conn.close()
+        data = bytearray(store.read_bytes())
+        data[36:40] = struct.pack(">I", 999)
+        store.write_bytes(bytes(data))
+        check = sqlite3.connect(store.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = check.execute("PRAGMA quick_check").fetchall()
+        finally:
+            check.close()
+        assert rows != [("ok",)], "precondition: the check must report rows"
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        self._status(store, capfd)
+        assert catchup == [], "the catch-up embedded into a store that failed its check"
+
     @pytest.mark.parametrize("journal", ["wal", "delete"])
     def test_the_real_pending_query_writes_no_schema(
         self, identity_env, monkeypatch, capfd, journal

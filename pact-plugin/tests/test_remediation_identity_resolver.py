@@ -1009,6 +1009,26 @@ class TestTheDivergenceCheckFollowsTheWorkingDirectory:
         assert "github.com/o/other" in warnings[0]
         assert memory._last_project_scope["location_divergence"] is True
 
+    def test_an_answer_cached_before_the_move_is_not_reused_after_it(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """The first repository's identity is CACHED by a check made there;
+        after the move both cached answers, root and id, must be dropped."""
+        from unittest.mock import patch
+
+        _fresh_scope_state()
+        first = make_repo(identity_env / "proj", remote=REMOTE)
+        second = make_repo(identity_env / "other", remote=self.OTHER)
+        monkeypatch.chdir(first)
+        with patch("scripts.memory_api._ensure_ready"):
+            memory = self._memory(identity_env)
+            assert memory._location_divergence_warning(CANONICAL) is None
+            assert memory._cwd_repo_id == CANONICAL, "precondition: id cached"
+            monkeypatch.chdir(second)
+            caplog.clear()
+            memory.save({"context": "x"}, sync_to_claude=False)
+        assert memory._last_project_scope["location_divergence"] is True, caplog.text
+
     def test_without_a_move_the_check_asks_git_nothing(
         self, identity_env, monkeypatch, caplog
     ):
@@ -1351,6 +1371,55 @@ class TestTheGateTrustsOnlyLinkedWorktrees:
         assert memory._read_project_scopes() == (CANONICAL,)
         state = memory._legacy_scope_state
         assert state["verified"] is False and state["included"] is False
+
+    def test_a_forged_entry_naming_another_repositorys_worktree_adds_no_root(
+        self, identity_env, monkeypatch
+    ):
+        """The victim is a LINKED worktree, so its `.git` is a file and the
+        forged entry passes the is-a-file check; only the requirement that
+        the file point into THIS repository's worktrees dir refuses it."""
+        _fresh_scope_state()
+        victim_main = make_repo(identity_env / "victim" / "main", remote="https://github.com/v/proj.git")
+        victim = make_worktree(victim_main, identity_env / "victim" / "proj")
+        assert (victim / ".git").is_file()
+        delivered = make_repo(identity_env / "delivered" / "proj", remote=REMOTE)
+        admin = delivered / ".git" / "worktrees" / "x"
+        admin.mkdir(parents=True)
+        (admin / "gitdir").write_text(f"{victim / '.git'}\n", encoding="utf-8")
+        (admin / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (admin / "commondir").write_text("../..\n", encoding="utf-8")
+        store = identity_env / "store.db"
+        _seed(store, "proj", path=str(victim / "secret.py"))
+        monkeypatch.chdir(delivered)
+        assert memory_api._verified_worktree_roots(
+            delivered, delivered / ".git"
+        ) == [delivered.resolve()]
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        state = memory._legacy_scope_state
+        assert state["verified"] is False and state["included"] is False
+
+    def test_an_entry_whose_admin_dir_does_not_name_it_back_adds_no_root(
+        self, identity_env
+    ):
+        """W's `.git` points into this repository's worktrees dir, but that
+        admin dir names another checkout: only the back-link refuses W."""
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        worktree = make_worktree(repo, identity_env / "proj-wt")
+        admin = Path(
+            (worktree / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        )
+        (admin / "gitdir").write_text(
+            f"{identity_env / 'elsewhere' / '.git'}\n", encoding="utf-8"
+        )
+        forged = repo / ".git" / "worktrees" / "x"
+        forged.mkdir()
+        (forged / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+        (forged / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (forged / "commondir").write_text("../..\n", encoding="utf-8")
+        assert memory_api._verified_worktree_roots(repo, repo / ".git") == [
+            repo.resolve()
+        ]
 
     def test_a_genuine_worktree_still_widens_the_gate(self, identity_env, monkeypatch):
         _fresh_scope_state()
