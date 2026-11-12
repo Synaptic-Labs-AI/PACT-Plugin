@@ -152,6 +152,40 @@ def _server_identity_impl() -> tuple:
     return is_canonical_id, validate_identifier_for_write
 
 
+_GIT_ENV_TRUE = frozenset({"true", "yes", "on"})
+_GIT_ENV_FALSE = frozenset({"false", "no", "off"})
+
+
+def _git_env_bool(name: str) -> bool:
+    """A git boolean environment variable, parsed the way git parses it.
+
+    Python truthiness is WRONG here: `bool("0")`, `bool("false")`, `bool("no")`
+    and `bool("off")` are all True, while git reads each as FALSE. A value of
+    "0" therefore crossed a filesystem boundary git would have stopped at.
+
+    Accepted, case-insensitively: `true`/`yes`/`on` and any non-zero decimal;
+    false for `false`/`no`/`off`/`0`/empty. An UNSET variable is the default,
+    which is 0 for both git variables this module reads. Git treats anything
+    else as a fatal config error; here it is FALSE.
+
+    The empty string is FALSE and whitespace is NOT stripped, both MEASURED
+    against git's own parser (`git -c probe.bool=<v> config --type=bool`):
+    `""` answers false, and both `" "` and `" true"` answer
+    `fatal: bad boolean config value`.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    value = raw.lower()
+    if not value or value in _GIT_ENV_FALSE:
+        return False
+    if value in _GIT_ENV_TRUE:
+        return True
+    if value.isascii() and value.isdigit():
+        return int(value) != 0
+    return False
+
+
 def _max_id_length() -> int:
     """The identifier length cap, from database.py (ONE definition).
 
@@ -654,18 +688,50 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     # genuine submodule would be refused.
     start = Path(root)
     marker_root = None
-    for candidate in [start, *start.parents]:
-        dotgit = candidate / ".git"
+    try:
+        level = start.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    ceilings = set()
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            continue
         try:
-            if not os.path.lexists(dotgit):
-                continue
-            if not dotgit.is_file():
-                # A real `.git` DIRECTORY: an ordinary checkout, done.
-                return False
+            ceilings.add(Path(entry).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    cross_filesystem = _git_env_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM")
+    try:
+        device = os.stat(level).st_dev
+    except OSError:
+        return False
+
+    # THE SAME BOUNDARIES GIT HONOURS, so this walk never finds a marker git
+    # would not have found: the ceiling directories, the device boundary
+    # (unless GIT_DISCOVERY_ACROSS_FILESYSTEM), and the filesystem root.
+    while True:
+        if level in ceilings:
+            break
+        dotgit = level / ".git"
+        try:
+            if os.path.lexists(dotgit):
+                if not dotgit.is_file():
+                    # A real `.git` DIRECTORY: an ordinary checkout, done.
+                    return False
+                marker_root = level
+                break
         except OSError:
             return False
-        marker_root = candidate
-        break
+        parent = level.parent
+        if parent == level:
+            break
+        if not cross_filesystem:
+            try:
+                if os.stat(parent).st_dev != device:
+                    break
+            except OSError:
+                return False
+        level = parent
     if marker_root is None:
         return False
 

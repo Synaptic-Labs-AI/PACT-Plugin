@@ -616,6 +616,225 @@ class TestSubmoduleAdminRedirect:
         assert identity.source == "declined"
 
 
+VICTIM_ID = "github.com/victim/secret-lib"
+
+
+def _forged_shapes(tmp_path):
+    """One forged pointer per shape, each aimed at the VICTIM's real git dir.
+
+    Every victim carries a PORTABLE (https) origin, so a basename fallback
+    cannot make a green arm mean nothing.
+    """
+    victim = _repo(tmp_path / "victim", VICTIM_ID)
+    subprocess.run(
+        ["git", "-C", str(victim), "worktree", "add", "-q",
+         str(tmp_path / "victim-wt"), "-b", "wt"],
+        check=True,
+    )
+    admin_worktree = next((victim / ".git" / "worktrees").iterdir())
+
+    src = _repo(tmp_path / "subsrc", VICTIM_ID)
+    superrepo = _repo(tmp_path / "super", "https://github.com/owner/super")
+    subprocess.run(
+        ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+         "submodule", "add", str(src), "submod"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(superrepo / "submod"), "remote", "set-url",
+         "origin", VICTIM_ID],
+        check=True,
+    )
+    admin_modules = superrepo / ".git" / "modules" / "submod"
+
+    shapes = {
+        "worktree-admin": admin_worktree,
+        "modules-admin": admin_modules,
+        "direct": victim / ".git",
+    }
+    roots = {}
+    for name, target in shapes.items():
+        forged = tmp_path / f"forged-{name}"
+        (forged / "sub").mkdir(parents=True)
+        (forged / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+        roots[name] = forged
+    return roots, victim, superrepo, admin_worktree, admin_modules
+
+
+ROUTES = ("cwd", "declared-root", "declared-sub", "record-root", "record-sub")
+
+
+class TestForgedPointerMatrix:
+    """ROUTES x SHAPES: no cell may bind the victim's id.
+
+    The per-shape arms each pinned one cell; this matrix is the regression
+    guarantee for the CLASS. Every assertion is `!= VICTIM_ID` rather than
+    `is None`, because a declined declaration legitimately falls through to
+    later rungs — what must never happen is binding the victim.
+    """
+
+    @pytest.mark.parametrize("shape", ("worktree-admin", "modules-admin", "direct"))
+    @pytest.mark.parametrize("route", ROUTES)
+    def test_no_route_binds_the_victim(self, shape, route, tmp_path, monkeypatch):
+        import scripts.memory_api as memory_api
+
+        roots, _victim, _superrepo, _aw, _am = _forged_shapes(tmp_path)
+        forged = roots[shape]
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "mem"))
+        (tmp_path / "mem").mkdir()
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        declared = forged if route.endswith("root") else forged / "sub"
+        if route == "cwd":
+            monkeypatch.setattr(
+                memory_api, "get_project_dir_from_session_record", lambda: None
+            )
+            monkeypatch.chdir(forged)
+        elif route.startswith("declared"):
+            monkeypatch.setattr(
+                memory_api, "get_project_dir_from_session_record", lambda: None
+            )
+            monkeypatch.chdir(tmp_path)
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        else:  # the session-record rung
+            monkeypatch.setattr(
+                memory_api, "get_project_dir_from_session_record",
+                lambda: str(declared),
+            )
+            monkeypatch.chdir(tmp_path)
+
+        memory = memory_api.PACTMemory(db_path=store)
+        assert memory.project_id != VICTIM_ID, (
+            f"route={route} shape={shape} bound the victim: {memory.project_id!r}"
+        )
+
+
+class TestGenuineLayoutsStillResolve:
+    """POSITIVE CONTROLS, so a matrix full of declines cannot be green for
+    the wrong reason."""
+
+    def test_a_genuine_linked_worktree_resolves(self, tmp_path):
+        victim = _repo(tmp_path / "repo", "https://github.com/owner/repo")
+        worktree = tmp_path / "wt"
+        subprocess.run(
+            ["git", "-C", str(victim), "worktree", "add", "-q", str(worktree), "-b", "wt"],
+            check=True,
+        )
+        identity = pi.detect_id_for_root(worktree, _common(victim))
+        assert identity.project_id == "github.com/owner/repo"
+
+    def test_a_genuine_submodule_with_an_https_origin_resolves(self, tmp_path):
+        src = _repo(tmp_path / "src", "https://github.com/owner/subsrc")
+        superrepo = _repo(tmp_path / "super2", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(src), "submod"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(superrepo / "submod"), "remote", "set-url",
+             "origin", "https://github.com/owner/subsrc"],
+            check=True,
+        )
+        checkout = superrepo / "submod"
+        admin = superrepo / ".git" / "modules" / "submod"
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        identity = pi.detect_id_for_root(checkout, admin.resolve())
+        assert identity.project_id == "github.com/owner/subsrc"
+
+    def test_an_external_separate_git_dir_resolves(self, tmp_path):
+        store = tmp_path / "ext.git"
+        checkout = tmp_path / "sep"
+        subprocess.run(
+            ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout), "remote", "add", "origin",
+             "https://github.com/owner/sep"], check=True,
+        )
+        identity = pi.detect_id_for_root(checkout, store.resolve())
+        assert identity.project_id == "github.com/owner/sep"
+
+
+class TestWalkBoundariesMatchGit:
+    def test_a_ceiling_directory_stops_the_marker_walk(self, tmp_path, monkeypatch):
+        """Catches an unbounded walk: git never inspects a ceiling directory,
+        so a marker above one must not be found."""
+        _super, _checkout, admin = TestSubmoduleAdminRedirect()._submodule(tmp_path)
+        outer = tmp_path / "outer"
+        (outer / "sub").mkdir(parents=True)
+        (outer / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is True
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outer))
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is False
+
+    def test_a_device_boundary_stops_the_walk_unless_git_would_cross(
+        self, tmp_path, monkeypatch
+    ):
+        _super, _checkout, admin = TestSubmoduleAdminRedirect()._submodule(tmp_path)
+        outer = tmp_path / "outer2"
+        (outer / "sub").mkdir(parents=True)
+        (outer / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        real_stat = os.stat
+
+        def fake_stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            device = 1 if str(path).endswith("sub") else 2
+            return os.stat_result(
+                (result.st_mode, result.st_ino, device, result.st_nlink,
+                 result.st_uid, result.st_gid, result.st_size,
+                 result.st_atime, result.st_mtime, result.st_ctime)
+            )
+
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        monkeypatch.setattr(pi.os, "stat", fake_stat)
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is False
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is True
+
+
+class TestForgedWorktreeAdminViaDeclaration:
+    def _fixture(self, tmp_path):
+        victim = _repo(tmp_path / "victim", "https://github.com/victim/secret-lib")
+        subprocess.run(["git", "-C", str(victim), "worktree", "add", "-q",
+                        str(tmp_path / "victim-wt"), "-b", "wt"], check=True)
+        admin = next((victim / ".git" / "worktrees").iterdir())
+        forged = tmp_path / "forged-admin"
+        (forged / "sub").mkdir(parents=True)
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        return victim, forged
+
+    def test_a_declared_forged_worktree_admin_dir_binds_no_victim(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches the DECLARED route: `main_repo_root` refuses the redirect
+        and returns None, and the fall-through then paired the declared dir
+        with the victim's common dir. Measured: both the root and a
+        subdirectory bound the victim."""
+        import scripts.memory_api as memory_api
+
+        victim, forged = self._fixture(tmp_path)
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "mem"))
+        (tmp_path / "mem").mkdir()
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+        monkeypatch.chdir(tmp_path)
+
+        for declared in (forged, forged / "sub"):
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+            memory = memory_api.PACTMemory(db_path=store)
+            assert memory.project_id != "github.com/victim/secret-lib", declared
+
+
 class TestSaveIngressRejectsNulFilePaths:
     def test_a_nul_file_path_is_refused_before_any_row_is_written(self, tmp_path):
         """Catches a save that raises 'nothing was written' AFTER the memory
@@ -639,6 +858,37 @@ class TestSaveIngressRejectsNulFilePaths:
         # persisted while the error text claimed nothing was written.
         import sqlite3
 
+        rows = 0
+        if store.exists():
+            check = sqlite3.connect(str(store))
+            try:
+                found = check.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='memories'"
+                ).fetchone()
+                if found:
+                    rows = check.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                check.close()
+        assert rows == 0, f"the refused save left {rows} memory row(s)"
+
+    def test_a_bytes_path_with_a_nul_is_refused_before_any_row(self, tmp_path):
+        """Catches `str(b'bad\\x00.py')`, which renders the NUL as an ESCAPE
+        and so slipped past a character check on `str(...)`; measured: the
+        memory row was committed and the file layer raised TypeError later."""
+        import sqlite3
+
+        import scripts.memory_api as memory_api
+
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
+        with pytest.raises(ValueError):
+            memory.save(
+                {"context": "bytes nul"},
+                files=[b"/tmp/bad\x00.py"],
+                sync_to_claude=False,
+            )
         rows = 0
         if store.exists():
             check = sqlite3.connect(str(store))

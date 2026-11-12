@@ -62,6 +62,7 @@ from .graph import (
 )
 from .models import MemoryObject, memory_from_db_row
 from .project_identity import (
+    _git_env_bool,
     detect_id_for_root,
     is_canonical,
     read_override,
@@ -484,44 +485,6 @@ def _cwd_or_none() -> Optional[Path]:
         return Path.cwd()
     except (OSError, RuntimeError):
         return None
-
-
-_GIT_ENV_TRUE = frozenset({"true", "yes", "on"})
-_GIT_ENV_FALSE = frozenset({"false", "no", "off"})
-
-
-def _git_env_bool(name: str) -> bool:
-    """A git boolean environment variable, parsed the way git parses it.
-
-    Python truthiness is WRONG here: `bool("0")`, `bool("false")`, `bool("no")`
-    and `bool("off")` are all True, while git reads each as FALSE. A value of
-    "0" therefore crossed a filesystem boundary git would have stopped at, and
-    the walk found a marker git would never have found — a false decline.
-
-    Accepted, case-insensitively: `true`/`yes`/`on` and any non-zero decimal;
-    false for `false`/`no`/`off`/`0`/empty. An UNSET variable is the default,
-    which is 0 for this one. Git treats anything else as a fatal config error;
-    here it is FALSE, which is the direction that keeps the walk inside one
-    filesystem.
-
-    The empty string is FALSE and whitespace is NOT stripped, both MEASURED
-    against git's own parser (`git -c probe.bool=<v> config --type=bool`):
-    `""` answers false, and both `" "` and `" true"` answer
-    `fatal: bad boolean config value`. `git_parse_maybe_bool_text` returns 1
-    for a NULL pointer, not for an empty string — the NULL case is the
-    variable being absent, which is the default above.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return False
-    value = raw.lower()
-    if not value or value in _GIT_ENV_FALSE:
-        return False
-    if value in _GIT_ENV_TRUE:
-        return True
-    if value.isascii() and value.isdigit():
-        return int(value) != 0
-    return False
 
 
 def _unanswerable_repository(start) -> Optional[Path]:
@@ -1105,6 +1068,35 @@ class PACTMemory:
                 declared_main_root,
                 identity.override_ignored,
             )
+        # A FORGED WORKTREE-ADMIN POINTER DECLINES HERE. `main_repo_root`
+        # correctly refuses the redirect and returns None, but the fall-through
+        # below would then hand `detect_id_for_root` the DECLARED directory
+        # paired with the VICTIM's common dir, and the origin read binds the
+        # victim. The asked-root predicate cannot see this shape: the target's
+        # basename is the worktree's name, not `.git`, and it is not under
+        # `.git/modules/`. Measured: both the declared root and a declared
+        # subdirectory bound `github.com/victim/secret-lib`.
+        #
+        # A BARE repository also has `main_repo_root() is None`, but its git
+        # dir EQUALS its common dir, so `_worktree_redirect` answers False and
+        # the bare path below is untouched.
+        if (
+            declared_main_root is None
+            and declared_common_dir is not None
+            and declared_root is not None
+            and _worktree_redirect(declared_root, declared_common_dir)
+        ):
+            logger.warning(
+                "the directory declared via %s resolves to another "
+                "repository's worktree admin dir but is not one of its listed "
+                "worktrees, so no project id was derived from it. Run the "
+                "`project-id show` verb to inspect the detected identity, or "
+                "write an operator-chosen canonical id to %r.",
+                source,
+                str(declared_common_dir / "pact-project-id"),
+            )
+            return None, source, None, None, None
+
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
         # fire AND the declared path does not resolve to an existing target.
         if not _declared_path_exists(declared_dir):
@@ -2401,10 +2393,23 @@ class PACTMemory:
         if include_tracked and self._session_files:
             files_to_link.extend(self._session_files)
         for candidate in files_to_link:
-            if "\x00" in str(candidate):
+            try:
+                raw_path = os.fspath(candidate)
+            except TypeError:
                 raise ValueError(
-                    f"file path {str(candidate)!r} must not contain a NUL "
-                    "character; nothing was written."
+                    "file path must be a string or a path-like object, got "
+                    f"{type(candidate).__name__}; nothing was written."
+                ) from None
+            if isinstance(raw_path, bytes):
+                # `str(b'bad\x00.py')` renders the NUL as an ESCAPE, so a
+                # bytes path slipped past a character check on `str(...)` and
+                # the memory row was committed before the file layer refused.
+                # Decode first, then check the decoded text.
+                raw_path = os.fsdecode(raw_path)
+            if "\x00" in raw_path:
+                raise ValueError(
+                    f"file path {raw_path!r} must not contain a NUL character; "
+                    "nothing was written."
                 )
 
         with db_connection() as conn:
