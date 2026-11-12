@@ -413,6 +413,19 @@ def _root_guard(
     return None
 
 
+def _is_live_decline(detected: "_DetectedIdentity") -> bool:
+    """Whether a declared rung declined for a cause OTHER than a gone path.
+
+    Only `declaration_unresolved` means "the declared directory is gone", the
+    one case the git root is designed to answer for. Every other cause names
+    a LIVE repository that refused (an unrepresentable origin, a submodule, a
+    redirected `.git`): falling through to the process's own repository would
+    file the declared session's memories under another project.
+    """
+    reason = (detected.decline_reason or {}).get("reason")
+    return detected.project_id is None and reason not in (None, "declaration_unresolved")
+
+
 def _suppression_record() -> dict:
     """The record for a SUPPRESSED legacy candidate. Not a decline.
 
@@ -1511,12 +1524,8 @@ class PACTMemory:
         # subdirectory bound `github.com/victim/secret-lib`.
         #
         # A BARE repository also has `main_repo_root() is None`, but its git
-        # dir EQUALS its common dir, so `_worktree_redirect` answers False and
-        # the bare path below is untouched. KNOWN LIMITATION, PRE-EXISTING and
-        # outside this change: a DECLARED bare repository therefore resolves
-        # from its origin or basename here instead of declining the way the
-        # git rung does. Recorded, not repaired — do not read this branch as
-        # treating the two the same.
+        # dir EQUALS its common dir, so `_worktree_redirect` answers False; it
+        # declines `no_working_tree` below, exactly as the git rung does.
         live_root = declared_main_root or declared_root or Path(declared_dir)
         if declared_main_root is None and declared_root is not None:
             # A `.git`-MARKED BUT UNANSWERABLE declared directory declines for
@@ -1528,6 +1537,16 @@ class PACTMemory:
             )
             if guarded is not None:
                 return guarded
+            if declared_common_dir is not None:
+                # A REPOSITORY WITH NO ROOT that is not a redirect: a BARE
+                # repository. It has no working tree to name, so the
+                # declaration declines exactly as the git rung does.
+                return _decline(
+                    source,
+                    "no_working_tree",
+                    label=source,
+                    detail=f"declared via {source}: {declared_dir!r} is a bare repository",
+                )
 
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
         # fire AND the declared path does not resolve to an existing target.
@@ -1655,6 +1674,9 @@ class PACTMemory:
             detected = PACTMemory._declared_dir_identity(project_dir, "CLAUDE_PROJECT_DIR")
             if detected.project_id:
                 return detected
+            if _is_live_decline(detected):
+                # A LIVE declaration that declines ENDS resolution.
+                return detected._replace(source="unresolved")
             declined_reason = declined_reason or detected.decline_reason
             declined_root = declined_root or detected.identity_root
             declined_declaration = True
@@ -1667,6 +1689,9 @@ class PACTMemory:
             detected = PACTMemory._declared_dir_identity(record_dir, "session record")
             if detected.project_id:
                 return detected
+            if _is_live_decline(detected):
+                # A LIVE declaration that declines ENDS resolution.
+                return detected._replace(source="unresolved")
             declined_reason = declined_reason or detected.decline_reason
             declined_root = declined_root or detected.identity_root
             declined_declaration = True

@@ -15,8 +15,10 @@ import pytest
 from fixtures.identity_git import (
     assert_outside_repository,
     make_repo,
+    make_separate_git_dir_repo,
     make_worktree,
     run_git,
+    write_common_dir_override,
 )
 from scripts.memory_api import PACTMemory
 
@@ -185,6 +187,89 @@ class TestTheGitRungNamesARedirect:
         detected = PACTMemory._detect_project_identity_with_legacy()
         assert detected.project_id is None
         assert detected.decline_reason["reason"] == "no_working_tree"
+
+
+class TestALiveDeclinedDeclarationEndsResolution:
+    """A declared repository that declines is the answer, not a fall-through.
+
+    Catches the resolver handing a declared session to the process's OWN
+    repository when the declared one refuses: the session's memories would be
+    filed under a project nobody declared. Only a GONE declaration falls
+    through to the git root.
+    """
+
+    ELSEWHERE_PIN = "gitlab.example.com/elsewhere/pinned"
+
+    def _elsewhere(self, root: Path, monkeypatch) -> Path:
+        """An unrelated repository with its own pin, holding the cwd."""
+        elsewhere = make_repo(root / "elsewhere", remote="https://github.com/o/e.git")
+        write_common_dir_override(elsewhere, self.ELSEWHERE_PIN)
+        monkeypatch.chdir(elsewhere)
+        return elsewhere
+
+    def _assert_declines(self, detected, reason: str) -> None:
+        assert detected.project_id is None, (
+            f"the declared session bound {detected.project_id!r}"
+        )
+        assert detected.project_id != self.ELSEWHERE_PIN
+        assert detected.source == "unresolved"
+        assert detected.decline_reason["reason"] == reason
+        assert detected.decline_reason["source"] == "CLAUDE_PROJECT_DIR"
+
+    def test_an_unrepresentable_origin_declines(self, identity_env, monkeypatch):
+        # `%ZZ` is not a hex escape, so no percent rule can represent it.
+        declared = make_repo(
+            identity_env / "declared", remote="https://host.example/own%ZZr/repo"
+        )
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        self._assert_declines(
+            PACTMemory._detect_project_identity_with_legacy(),
+            "origin_unrepresentable",
+        )
+
+    def test_a_submodule_checkout_declines(self, identity_env, monkeypatch):
+        source = make_repo(identity_env / "submodule-source")
+        superproject = make_repo(identity_env / "super")
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "vendor/lib", cwd=superproject,
+        )
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(superproject / "vendor" / "lib"))
+        self._assert_declines(
+            PACTMemory._detect_project_identity_with_legacy(),
+            "submodule_checkout",
+        )
+
+    def test_a_redirected_git_marker_declines(self, identity_env, monkeypatch):
+        declared = make_separate_git_dir_repo(
+            identity_env / "declared", identity_env / "store" / ".git"
+        )
+        run_git("remote", "add", "origin", "https://github.com/o/d.git", cwd=declared)
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        self._assert_declines(
+            PACTMemory._detect_project_identity_with_legacy(),
+            "gitfile_redirect",
+        )
+
+    def test_a_bare_repository_declines(self, identity_env, monkeypatch):
+        bare = identity_env / "declared.git"
+        run_git("init", "-q", "--bare", str(bare), cwd=identity_env)
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(bare))
+        self._assert_declines(
+            PACTMemory._detect_project_identity_with_legacy(),
+            "no_working_tree",
+        )
+
+    def test_a_gone_declaration_still_falls_through(self, identity_env, monkeypatch):
+        """Control: the precedence the git root was designed for is kept."""
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(identity_env / "gone"))
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id == self.ELSEWHERE_PIN
 
 
 class TestACeilingStartDirectoryIsExamined:
