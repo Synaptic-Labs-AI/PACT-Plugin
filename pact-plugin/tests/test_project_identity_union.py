@@ -1236,22 +1236,24 @@ class TestReviewDbGateWorktreeRoots:
             )
             conn.commit()
 
-    def test_an_unresolvable_path_is_not_evidence_and_never_raises(
-        self, union_env
-    ):
+    def test_an_unreadable_path_is_evidence_and_fails_closed(self, union_env):
         """A `files.path` with an embedded NUL makes `os.path.realpath` raise
         ValueError. This gate runs on every read, so letting that escape fails
         every read for the project from a check that only decides whether to
-        widen the scope.
+        widen the scope. Swallowing it as non-evidence is the opposite
+        failure: a row nobody can judge would buy the bucket an INCLUDE.
 
-        RED WHEN: the realpath call is unguarded (the first assertion raises
-        ValueError) or an unjudgeable row is counted as absolute evidence
-        (the bucket then lands in `excluded`, dropping rows the store cannot
-        judge).
+        Ruling: an unreadable absolute row counts as `absolute_rows` and can
+        never count as `contained_rows`, so a bucket whose only absolute rows
+        are unreadable lands in EXCLUDED (disclosed, with the rekey remedy).
+
+        RED WHEN: the realpath call is unguarded (ValueError escapes) or the
+        unreadable row is dropped from `absolute_rows` (the bucket then lands
+        in `unverified` and its rows are read).
         """
         from scripts.database import (
             LEGACY_PLAUSIBLE_EXCLUDED,
-            LEGACY_PLAUSIBLE_UNVERIFIED,
+            LEGACY_PLAUSIBLE_VERIFIED,
             legacy_candidate_plausibility,
         )
 
@@ -1263,6 +1265,12 @@ class TestReviewDbGateWorktreeRoots:
             str(union_env.tmp_path / "elsewhere" / "z.py"),
             "legacy-nul-plus",
         )
+        self._seed_row(union_env, "f-nul3", nul_path, "legacy-nul-contained")
+        self._seed_row(
+            union_env, "f-contained",
+            str(union_env.repo / "src" / "kept.py"),
+            "legacy-nul-contained",
+        )
 
         with db_connection(union_env.store) as conn:
             only_nul = legacy_candidate_plausibility(
@@ -1271,28 +1279,41 @@ class TestReviewDbGateWorktreeRoots:
             nul_plus_real = legacy_candidate_plausibility(
                 conn, "legacy-nul-plus", [union_env.repo]
             )
+            nul_plus_contained = legacy_candidate_plausibility(
+                conn, "legacy-nul-contained", [union_env.repo]
+            )
 
-        assert only_nul[0] == LEGACY_PLAUSIBLE_UNVERIFIED, (
-            "a bucket whose only absolute row is unjudgeable must be "
-            f"included-as-unverified, never dropped: {only_nul}"
+        assert only_nul[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
+            "a bucket whose only absolute row is unreadable must FAIL CLOSED "
+            f"(excluded, disclosed), not be read: {only_nul}"
         )
         assert only_nul[1]["file_rows"] == 1
-        assert only_nul[1]["absolute_rows"] == 0, (
-            "the unjudgeable row was counted as absolute evidence: "
-            f"{only_nul[1]}"
+        assert only_nul[1]["absolute_rows"] == 1, (
+            "the unreadable row was dropped from absolute evidence, so it "
+            f"bought the bucket an include: {only_nul[1]}"
         )
+        assert only_nul[1]["contained_rows"] == 0
         assert nul_plus_real[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
-            "a judgeable row outside every root must still exclude, with the "
-            f"unjudgeable row skipped: {nul_plus_real}"
+            "a judgeable row outside every root must still exclude: "
+            f"{nul_plus_real}"
         )
-        assert nul_plus_real[1]["absolute_rows"] == 1
+        assert nul_plus_real[1]["absolute_rows"] == 2
         assert nul_plus_real[1]["contained_rows"] == 0
+        assert nul_plus_contained[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+            "an unreadable row must not veto a bucket that also holds a "
+            f"contained row: {nul_plus_contained}"
+        )
+        assert nul_plus_contained[1]["absolute_rows"] == 2
+        assert nul_plus_contained[1]["contained_rows"] == 1
 
     def test_a_nul_path_row_does_not_break_the_read(self, union_env):
-        """The user-visible shape of N-2: one corrupt `files.path` used to
-        make `list` (and every other read) raise for the WHOLE project.
-        RED WHEN: the gate's realpath call is unguarded — this call raises
-        ValueError instead of returning the project's rows.
+        """The user-visible shape: one corrupt `files.path` must not make
+        `list` (or any read) raise for the WHOLE project, and the bucket it
+        makes unjudgeable must be EXCLUDED and disclosed, so the project's
+        canonical rows still come back.
+
+        RED WHEN: the gate's realpath call is unguarded (this call raises
+        ValueError) or the exclusion is not disclosed in `legacy_scope`.
         """
         _seed(
             union_env,
@@ -1307,10 +1328,19 @@ class TestReviewDbGateWorktreeRoots:
         with pytest.MonkeyPatch.context() as patcher:
             patcher.setattr(memory_api, "_ensure_ready", lambda: None)
             ids = _ids(memory.list(limit=10))
+        legacy_state = memory._legacy_scope_state
 
-        assert sorted(ids) == ["c1", "l1"], (
-            "a NUL-bearing files.path row cost the project its other rows: "
-            f"{ids}"
+        assert ids == ["c1"], (
+            "the read did not return exactly the canonical row; the legacy "
+            f"bucket should be excluded and the call should not raise: {ids}"
+        )
+        assert legacy_state["excluded"] is True, (
+            f"the exclusion was not disclosed: {legacy_state}"
+        )
+        assert legacy_state["memory_count"] == 1
+        assert legacy_state["file_paths"] == 1
+        assert legacy_state["rekey"] is not None, (
+            "the exclusion disclosure must carry the remedy command"
         )
 
     def test_the_gate_accepts_every_checkout_and_nothing_else(self, union_env):

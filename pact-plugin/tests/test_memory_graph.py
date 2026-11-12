@@ -122,6 +122,23 @@ class TestTrackFile:
         id2 = track_file(db_conn, "/src/app.py", project_id=None)
         assert id1 == id2
 
+    def test_a_nul_path_is_refused_before_any_write(self, db_conn):
+        """SQLite stores an embedded NUL in TEXT, but no platform accepts it
+        as a path, so a stored row could never be resolved by the identity
+        gate (`realpath` raises) or opened. The write seam must refuse it.
+
+        RED WHEN: `track_file` drops the NUL check — this call returns an id
+        and inserts a row that the gate can only ever treat as unreadable.
+        """
+        from scripts.graph import track_file
+
+        with pytest.raises(ValueError, match="NUL"):
+            track_file(db_conn, "/tmp/x\x00y.py")
+
+        assert db_conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0, (
+            "a refused path still reached the store"
+        )
+
 
 # ---------------------------------------------------------------------------
 # get_file_id

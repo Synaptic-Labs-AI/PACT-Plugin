@@ -1309,14 +1309,18 @@ def legacy_candidate_plausibility(
     also normalises `..`, so a path escaping a root cannot be counted as
     inside it.
 
-    AN UNRESOLVABLE ROW IS SKIPPED AS EVIDENCE, NOT ALLOWED TO RAISE.
-    `realpath` raises `ValueError` for a path carrying an embedded NUL byte
-    (a corrupt or hostile `files.path`), and this gate runs on every read, so
-    letting it escape would fail EVERY read for the project from a check that
-    only decides whether to WIDEN the scope. Such a row still counts in
-    `file_rows`, and is not counted as absolute evidence: a bucket whose only
-    absolute rows are unjudgeable lands in `unverified` (included, disclosed)
-    rather than `excluded` (dropped), which is the non-destructive direction.
+    AN UNRESOLVABLE ROW IS EVIDENCE AND IS NEVER CONTAINED, AND IT NEVER
+    RAISES. `realpath` raises `ValueError` for a path carrying an embedded NUL
+    byte (a corrupt or hostile `files.path`), and this gate runs on every
+    read, so letting it escape would fail EVERY read for the project from a
+    check that only decides whether to WIDEN the scope. Swallowing it silently
+    is the other failure: a row the store cannot read would then buy the
+    bucket an INCLUDE. So the row counts in `absolute_rows` and can never count
+    in `contained_rows`: a bucket whose only absolute rows are unreadable lands
+    in `excluded`, which is DISCLOSED with its counts and the rekey command,
+    rather than being read on the strength of a row nobody can judge. The write
+    seam (`graph.track_file`) refuses a NUL path so such rows cannot be created
+    in the first place; this is the read-side backstop for rows already stored.
     """
     ensure_initialized(conn)
     cursor = conn.execute(
@@ -1332,13 +1336,13 @@ def legacy_candidate_plausibility(
         path = row["path"]
         if not path or not os.path.isabs(path):
             continue
+        absolute_rows += 1
         try:
             resolved = os.path.realpath(path)
         except (OSError, ValueError):
-            # Unjudgeable path: see AN UNRESOLVABLE ROW above. Counted in
-            # `file_rows`, deliberately NOT in `absolute_rows`.
+            # Counted as absolute evidence above; never as contained. See AN
+            # UNRESOLVABLE ROW above.
             continue
-        absolute_rows += 1
         if any(
             resolved == root or resolved.startswith(root + os.sep)
             for root in root_paths

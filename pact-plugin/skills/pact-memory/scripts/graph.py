@@ -84,6 +84,15 @@ def track_file(
     cross-scope link (canonical memory -> legacy file row), which the
     ownership rule forbids.
 
+    A PATH CONTAINING A NUL BYTE IS REFUSED BEFORE ANY WRITE. No platform
+    accepts it as a path, and SQLite stores it happily in TEXT, so without
+    this ingress check a caller can persist a row that the identity gate can
+    never resolve (`realpath` raises) and that no filesystem operation can
+    open. The read side treats such a row as unreadable evidence and fails
+    closed, but the row should not exist at all. The file tables take
+    caller-supplied paths through `link_memory_to_paths`, so this is a real
+    ingress, not a theoretical one.
+
     Args:
         conn: Active database connection.
         path: File path (absolute or relative).
@@ -91,7 +100,15 @@ def track_file(
 
     Returns:
         The file ID (existing or newly created).
+
+    Raises:
+        ValueError: `path` contains a NUL character. Nothing is written.
     """
+    if isinstance(path, str) and "\x00" in path:
+        raise ValueError(
+            "file path must not contain a NUL character; nothing was written."
+        )
+
     ensure_initialized(conn)
 
     # Normalize path
