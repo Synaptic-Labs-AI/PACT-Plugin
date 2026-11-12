@@ -231,3 +231,65 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
         clause = self._clause()
         assert "For gitfile_redirect, never write an override:" in clause
         assert _flatten(_REDIRECT_REMEDY) in clause
+
+
+class TestLegacyScopeStatesAreDocumented:
+    """The `legacy_scope` key set and its three exclusive states."""
+
+    KEY_LIST_START = "legacy_scope carries the same keys in every state:"
+    KEY_LIST_END = ". It is null only when no identity resolves"
+
+    def _documented_keys(self) -> set:
+        body = _body(SKILL)
+        start = body.index(self.KEY_LIST_START) + len(self.KEY_LIST_START)
+        end = body.index(self.KEY_LIST_END, start)
+        names = body[start:end].replace(" and ", ", ").split(",")
+        return {name.strip() for name in names if name.strip()}
+
+    def test_the_documented_keys_are_the_code_key_set(self):
+        from scripts.memory_api import LEGACY_SCOPE_KEYS
+
+        assert self._documented_keys() == set(LEGACY_SCOPE_KEYS)
+
+    def test_exactly_one_state_is_true_when_a_candidate_is_set(self):
+        assert (
+            "When candidate is set, exactly one of included, excluded and "
+            "unproven is true"
+        ) in _body(SKILL)
+
+    def test_included_unverified_rests_on_session_evidence(self):
+        assert (
+            "included_unverified means no file row places it but a recorded "
+            "session from this repository wrote into it (session_evidence is true)"
+        ) in _body(SKILL)
+
+    def test_excluded_is_not_read(self):
+        assert (
+            "excluded: its absolute file rows place it in another repository, "
+            "and it is not read"
+        ) in _body(SKILL)
+
+    def test_unproven_is_not_read_and_names_its_command(self):
+        assert (
+            "unproven: no file row places it and no recorded session from this "
+            "repository wrote into it (session_evidence is false). It is not "
+            "read, and its rekey command is printed once per process"
+        ) in _body(SKILL)
+
+    def test_the_suppression_reason_is_documented_only_there(self):
+        from scripts.project_identity import DECLINE_REASONS
+
+        body = _body(SKILL)
+        assert (
+            "suppressed is set for a submodule checkout, as {source: "
+            "submodule_admin_dir, reason: repository_chosen_name, "
+            "override_path: null, memory_count: N}"
+        ) in body
+        assert (
+            "The reason repository_chosen_name appears only here, never in "
+            "decline_reason"
+        ) in body
+        assert "repository_chosen_name" not in DECLINE_REASONS
+
+    def test_the_retired_unverified_admission_is_gone(self):
+        assert "the gate includes the bucket as unverified" not in _body(SKILL).lower()

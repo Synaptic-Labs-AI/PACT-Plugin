@@ -37,7 +37,12 @@ import logging
 from pathlib import Path
 
 import pytest
-from fixtures.identity_git import assert_outside_repository, make_repo, run_git
+from fixtures.identity_git import (
+    assert_outside_repository,
+    make_repo,
+    run_git,
+    seed_session_evidence,
+)
 from scripts.database import (
     count_project_memories,
     db_connection,
@@ -280,6 +285,9 @@ class TestNoRepositoryChosenNameBindsAStoreKey:
         )
         store = tmp_path / "store.db"
         _seed_bucket(store, "ForeignProj", memory_id="folded")
+        # A recorded session of this checkout wrote the bucket: the evidence
+        # an unverified bucket needs to be read.
+        seed_session_evidence(tmp_path / "home" / ".claude", repo, "s")
         _enter(monkeypatch, tmp_path, repo)
         memory = _memory(store)
 
@@ -305,6 +313,9 @@ class TestNoRepositoryChosenNameBindsAStoreKey:
         repo = make_repo(tmp_path / "own-bucket", remote="https://github.com/o/r.git")
         store = tmp_path / "store.db"
         _seed_bucket(store, "own-bucket", memory_id="own")
+        # A recorded session of this checkout wrote the bucket: the evidence
+        # an unverified bucket needs to be read.
+        seed_session_evidence(tmp_path / "home" / ".claude", repo, "s")
         _enter(monkeypatch, tmp_path, repo)
         memory = _memory(store)
 

@@ -444,12 +444,22 @@ class TestTheGateDoesNotRaiseOnAReadPath:
         store = tmp_path / "store" / "memory.db"
         store.parent.mkdir()
 
+        from fixtures.identity_git import seed_session_evidence
         from scripts.database import create_memory, db_connection
 
         with db_connection(str(store)) as conn:
             create_memory(
-                conn, {"project_id": "my-workspace", "context": "legacy row"}
+                conn,
+                {
+                    "project_id": "my-workspace",
+                    "context": "legacy row",
+                    "session_id": "workspace-session",
+                },
             )
+        # The row is this workspace's own: a recorded session of it wrote it.
+        seed_session_evidence(
+            tmp_path / "home" / ".claude", umbrella.resolve(), "workspace-session"
+        )
 
         monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)

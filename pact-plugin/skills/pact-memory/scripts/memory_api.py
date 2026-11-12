@@ -183,35 +183,173 @@ _CASE_VARIANT_WARNED: set = set()
 # Detection runs on every memory operation, so this disclosure is once per
 # process for the same reason `_EXCLUSION_WARNED` is.
 _SUBMODULE_SUPPRESSED: set = set()
+# Unproven legacy buckets already disclosed in this process, (store, bucket).
+_UNPROVEN_WARNED: set = set()
 
 
-def _warn_submodule_legacy_suppressed(common_dir: Path) -> None:
-    """DISCLOSE the suppressed legacy candidate for a submodule checkout.
+LEGACY_SCOPE_KEYS = frozenset({
+    "candidate", "memory_count", "file_paths", "rekey", "included",
+    "verified", "included_unverified", "excluded", "unproven",
+    "session_evidence", "ambiguous", "canonical_count", "detail",
+    "case_variant", "case_variant_rekey", "suppressed",
+    "suppressed_candidate", "degraded",
+})
 
-    The suppression must never be silent: an operator whose pre-upgrade rows
-    live in that bucket would otherwise see them disappear with no notice.
-    The notice names the derived bucket and the explicit rekey route; it does
-    NOT render a runnable command, because the store is not known at
-    detection time and a command against the default store would be wrong.
+
+def _legacy_scope_record(**overrides: Any) -> Dict[str, Any]:
+    """THE ONE BUILDER for `legacy_scope`: every key, in every state.
+
+    A consumer reads a fixed key set, so a branch that forgets a key cannot
+    turn "absent" into a second meaning of "false". Exactly one of
+    `included`, `excluded` and `unproven` is true when `candidate` is set;
+    all three are false when it is not.
     """
-    key = str(common_dir)
-    if key in _SUBMODULE_SUPPRESSED:
-        return
-    _SUBMODULE_SUPPRESSED.add(key)
+    unknown = set(overrides) - LEGACY_SCOPE_KEYS
+    if unknown:
+        raise ValueError(f"unknown legacy_scope keys: {sorted(unknown)}")
+    record: Dict[str, Any] = {
+        "candidate": None,
+        "memory_count": 0,
+        "file_paths": None,
+        "rekey": None,
+        "included": False,
+        "verified": False,
+        "included_unverified": False,
+        "excluded": False,
+        "unproven": False,
+        "session_evidence": None,
+        "ambiguous": [],
+        "canonical_count": None,
+        "detail": None,
+        "case_variant": [],
+        "case_variant_rekey": [],
+        "suppressed": None,
+        "suppressed_candidate": None,
+        "degraded": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def _suppressed_bucket_rows(store: str, bucket: Optional[str]) -> int:
+    """Rows in a SUPPRESSED legacy bucket, read read-only; disclosed if any.
+
+    The suppression must never be silent when it hides rows: an operator
+    whose pre-upgrade memories sit in that bucket would otherwise see them
+    disappear with no notice. It is silent when the bucket is empty, because
+    a notice with nothing behind it is one readers learn to skip. Once per
+    process per (store, bucket). The bucket is never read beyond its count.
+    """
+    if not bucket:
+        return 0
+    count = read_project_bucket_census(store).get(bucket, 0)
+    key = (store, bucket)
+    if count and key not in _SUBMODULE_SUPPRESSED:
+        _SUBMODULE_SUPPRESSED.add(key)
+        logger.warning(
+            "this repository is a submodule, so the pre-upgrade project "
+            "bucket %r derived from its admin directory (%d memories) is NOT "
+            "in this project's read scope: a superproject chooses that name "
+            "through its tracked .gitmodules, so reading it would let a "
+            "repository read another project's memories. If those rows belong "
+            "to this checkout, list them with `project-id show` and move them "
+            "with `project-id rekey`.",
+            bucket,
+            count,
+        )
+    return count
+
+
+def _legacy_session_evidence(conn: Any, candidate: str, gate_roots: list) -> bool:
+    """Whether a recorded session from one of `gate_roots` wrote `candidate`.
+
+    The evidence an UNVERIFIED legacy bucket needs to be read: a session id
+    that wrote into the bucket, whose session context file (reconstructed
+    from a gate root) records a `project_dir` that IS a gate root. A
+    delivered checkout with the same folder name has no such record, and
+    every new write binds the canonical id, so the evidence cannot be
+    manufactured after the upgrade. Stops at the first hit. Never raises:
+    any failure for one record is "no evidence" for that record.
+    """
+    from shared.pact_context import reconstruct_session_dir
+
+    from .database import bucket_session_ids
+
+    roots = set()
+    for root in gate_roots:
+        try:
+            roots.add(os.path.realpath(root))
+        except (OSError, ValueError):
+            continue
+    if not roots:
+        return False
     try:
-        derived = common_dir.resolve().parent.name
-    except (OSError, RuntimeError, ValueError):
-        derived = common_dir.parent.name
+        session_ids = bucket_session_ids(conn, candidate)
+    except sqlite3.Error:
+        return False
+    for session_id in session_ids:
+        for root in sorted(roots):
+            try:
+                session_dir = reconstruct_session_dir(root, session_id)
+                if not session_dir:
+                    continue
+                context = Path(session_dir) / "pact-session-context.json"
+                recorded = json.loads(context.read_text(encoding="utf-8"))
+                project_dir = recorded.get("project_dir")
+                if (
+                    isinstance(project_dir, str)
+                    and project_dir
+                    and os.path.realpath(project_dir) in roots
+                ):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _warn_legacy_excluded(
+    store: str, candidate: str, memories: int, file_paths: int, repo_root: Any
+) -> None:
+    """Disclose an EXCLUDED legacy bucket, once per process per bucket."""
+    key = (store, candidate)
+    if key in _EXCLUSION_WARNED:
+        return
+    _EXCLUSION_WARNED.add(key)
     logger.warning(
-        "the repository at %r is a submodule, so the pre-upgrade project "
-        "bucket derived from its admin directory (%r) is NOT admitted to this "
-        "project's read scope: a superproject chooses that name through its "
-        "tracked .gitmodules, so unioning it would let a repository read "
-        "another project's memories. If that bucket holds rows that belong "
-        "to this checkout, list it with `project-id show` and move it with "
-        "`project-id rekey --from <id>`.",
-        str(common_dir),
-        derived,
+        "legacy project bucket %r holds %d memories and %d file path%s, but "
+        "none of its absolute file rows could be located under %r, so it is "
+        "NOT in this read scope. A row the gate could not READ has an "
+        "unknown location, not a known one — check for a corrupt or "
+        "unreadable file row before hunting paths. Move it explicitly with: "
+        "%r",
+        candidate,
+        memories,
+        file_paths,
+        "" if file_paths == 1 else "s",
+        str(repo_root) if repo_root is not None else "none",
+        render_rekey_command(candidate, db_path=store),
+    )
+
+
+def _warn_legacy_unproven(
+    store: str, candidate: str, memories: int, file_paths: int
+) -> None:
+    """Disclose an UNPROVEN legacy bucket, once per process per bucket."""
+    key = (store, candidate)
+    if key in _UNPROVEN_WARNED:
+        return
+    _UNPROVEN_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r holds %d memories and %d file path%s, but "
+        "no file row places it and no recorded session from this repository "
+        "wrote it, so it is NOT in this read scope: its folder name alone "
+        "cannot tell this checkout's rows from another checkout of the same "
+        "name. If the rows belong here, move them explicitly with: %r",
+        candidate,
+        memories,
+        file_paths,
+        "" if file_paths == 1 else "s",
+        render_rekey_command(candidate, db_path=store),
     )
 
 
@@ -720,15 +858,19 @@ def _legacy_probe_context(store: str, conn):
         return
     try:
         connection = _read_only_connection(store)
-        # THE SAME initialization check the counters rely on, run here so a
-        # 0-byte store degrades BEFORE any of the body's work.
-        ensure_initialized(connection)
+        # A SCHEMA CHECK, NOT THE INITIALISER: a read never runs migrations
+        # or the vector-table CREATE. A store with no schema degrades BEFORE
+        # any of the body's work.
+        if not _connection_has_memories_table(connection):
+            connection.close()
+            yield None, "no schema"
+            return
     except sqlite3.OperationalError as exc:
         if not _read_only_store_unavailable(exc, store):
             raise
         yield None, str(exc)
         return
-    with closing(connection):
+    with closing(connection), read_only_scope():
         yield connection, None
 
 
@@ -1510,12 +1652,13 @@ class PACTMemory:
         let a checkout read another project's memories. An ordinary
         `--separate-git-dir` checkout is NOT suppressed: its common dir is an
         arbitrary external path, not `<...>/.git/modules/<name>`, and it
-        keeps its pre-upgrade name. The suppression is disclosed by
-        `_warn_submodule_legacy_suppressed`.
+        keeps its pre-upgrade name. The suppression is disclosed by the read
+        scope when the bucket holds rows (`_suppressed_bucket_rows`).
         """
         if common_dir is not None:
             if _submodule_admin_dir(common_dir):
-                _warn_submodule_legacy_suppressed(common_dir)
+                # Disclosed by the read scope, and only when the bucket holds
+                # rows: see `_suppressed_bucket_rows`.
                 return None
             try:
                 return common_dir.resolve().parent.name
@@ -2111,31 +2254,22 @@ class PACTMemory:
         if not is_canonical(scope):
             return (scope,)
         legacy = self._legacy_project_basename
+        store = str(self._db_path or resolve_db_path())
         if not legacy or legacy == scope:
             if self._legacy_suppressed is not None:
-                # STRUCTURED SUPPRESSION DISCLOSURE, mirroring the shape of
-                # every other read-scope field: the operator sees that a
-                # candidate existed, what it was, why it is not read, and (via
-                # the warning + census) how to move it. Nothing is read.
-                self._legacy_scope_state = {
-                    "candidate": None,
-                    "memory_count": 0,
-                    "file_paths": None,
-                    "rekey": None,
-                    "included": False,
-                    "verified": False,
-                    "included_unverified": False,
-                    "excluded": False,
-                    "ambiguous": [],
-                    "canonical_count": None,
-                    "detail": None,
-                    "case_variant": [],
-                    "case_variant_rekey": [],
-                    "suppressed": self._legacy_suppressed,
-                    "suppressed_candidate": self._legacy_suppressed_name,
-                }
+                # STRUCTURED SUPPRESSION DISCLOSURE: the operator sees that a
+                # candidate existed, what it was, why it is not read and how
+                # many rows it holds. Nothing is read from it.
+                self._legacy_scope_state = _legacy_scope_record(
+                    suppressed={
+                        **self._legacy_suppressed,
+                        "memory_count": _suppressed_bucket_rows(
+                            store, self._legacy_suppressed_name
+                        ),
+                    },
+                    suppressed_candidate=self._legacy_suppressed_name,
+                )
             return (scope,)
-        store = str(self._db_path or resolve_db_path())
         stat_key = _store_stat_key(store)
         if stat_key is None:
             # Absent store: nothing to reconcile and nothing to create.
@@ -2170,7 +2304,7 @@ class PACTMemory:
         with _legacy_probe_context(store, conn) as (connection, degraded_reason):
             if connection is None:
                 # FAIL-SOFT, DISCLOSED. The read-only probe could not read the
-                # store (uninitialized or unreadable), so the legacy bucket
+                # store (no schema, or unreadable), so the legacy bucket
                 # cannot be judged. Narrow to the canonical scope and say so;
                 # nothing was written and the degraded result is NOT cached,
                 # so repairing the store is observed on the next read.
@@ -2183,29 +2317,20 @@ class PACTMemory:
                     degraded_reason,
                     scope,
                 )
-                self._legacy_scope_state = {
-                    "candidate": None,
-                    "memory_count": 0,
-                    "file_paths": None,
-                    "rekey": None,
-                    "included": False,
-                    "verified": False,
-                    "included_unverified": False,
-                    "excluded": False,
-                    "ambiguous": [],
-                    "canonical_count": None,
-                    "detail": None,
-                    "degraded": "store_unreadable",
-                    "case_variant": [],
-                    "case_variant_rekey": [],
-                }
+                self._legacy_scope_state = _legacy_scope_record(
+                    degraded=(
+                        "no schema"
+                        if degraded_reason == "no schema"
+                        else "store_unreadable"
+                    ),
+                )
                 return (scope,)
             buckets = project_bucket_counts(connection)
             # The canonical count is what lets a SAVE disclose that it landed
             # in a bucket with no prior rows. The in-process cache makes a
             # second READ cheap, but on a saving process every save/update/
             # delete clears `_LEGACY_SCOPE_CACHE`, so both COUNTs and the
-            # `git worktree list` above re-run after each write — that is the
+            # `git worktree list` below re-run after each write — that is the
             # accepted cost, not a once-per-process constant.
             canonical_count = count_project_memories(connection, scope)
             # THE FOLD IS GATED ON THE FILESYSTEM, NOT ON `verified`: see
@@ -2220,10 +2345,8 @@ class PACTMemory:
             # basename only by case is never read — and it may be the
             # operator's own pre-upgrade bucket, filed on a machine whose
             # filesystem folded case. Report it as PRESENT BUT NOT INCLUDED
-            # with the literal rekey command, exactly like an excluded bucket,
-            # while never reading it. It is NOT the `excluded` state: the
-            # plausibility gate never judged it, so the operator is not told
-            # their bucket was disproved.
+            # with the literal rekey command, while never reading it. It is
+            # NOT the `excluded` state: the plausibility gate never judged it.
             case_variants = (
                 sorted(
                     bucket
@@ -2234,12 +2357,9 @@ class PACTMemory:
                 else []
             )
             # MEASURED WHENEVER A CANDIDATE EXISTS, not only when the canonical
-            # bucket is empty. Gating on `canonical_count == 0` made the field
-            # null on every operator surface for any repo with canonical rows,
-            # i.e. after its first canonical save — exactly the dangerous case
-            # (a few canonical rows hiding a large legacy bucket) where the
-            # file count is how the loss is judged. `None` still means "no
-            # candidate", never zero.
+            # bucket is empty: a few canonical rows hiding a large legacy
+            # bucket is exactly the case the file count is judged by. `None`
+            # still means "no candidate", never zero.
             file_paths = (
                 count_project_file_paths(connection, candidate)
                 if candidate is not None
@@ -2247,27 +2367,15 @@ class PACTMemory:
             )
             if candidate is None:
                 result = (scope,)
-                state = {
-                    "candidate": None,
-                    "memory_count": 0,
-                    "file_paths": None,
-                    "rekey": None,
-                    "included": False,
-                    "verified": False,
-                    "included_unverified": False,
-                    "excluded": False,
-                    "ambiguous": ambiguous,
-                    "canonical_count": canonical_count,
-                    "detail": None,
-                    # PRESENT BUT NOT INCLUDED: a case-variant bucket the
-                    # suppressed fold would have matched. Never read; the
-                    # command is how the operator moves it deliberately.
-                    "case_variant": case_variants,
-                    "case_variant_rekey": [
+                state = _legacy_scope_record(
+                    ambiguous=ambiguous,
+                    canonical_count=canonical_count,
+                    case_variant=case_variants,
+                    case_variant_rekey=[
                         render_rekey_command(bucket, db_path=store)
                         for bucket in case_variants
                     ],
-                }
+                )
                 if case_variants:
                     _warn_case_variant(store, legacy, case_variants)
             else:
@@ -2280,14 +2388,11 @@ class PACTMemory:
                 # repository's main checkout plus each of its worktrees —
                 # exactly the set the gate needs.
                 #
-                # NOT `backlog.checkout_roots()`, DELIBERATELY, AND THE REASON
-                # IS MEASURED: that helper resolves against the PROCESS, so in
-                # a declared-repo session (cwd in repo-a, CLAUDE_PROJECT_DIR in
-                # repo-b) it appends repo-a's checkouts to repo-b's gate, and a
-                # legacy bucket can be called `verified` from rows under a
-                # DIFFERENT repository. It also refuses with a write-oriented
-                # BacklogWriteError when no project dir resolves, which must
-                # never escape a read.
+                # NOT `backlog.checkout_roots()`, DELIBERATELY: that helper
+                # resolves against the PROCESS, so in a declared-repo session
+                # it appends the cwd repository's checkouts to the declared
+                # one's gate, and it refuses with a write-oriented error that
+                # must never escape a read.
                 gate_roots = []
                 if repo_root is not None:
                     gate_roots.append(str(Path(repo_root).resolve()))
@@ -2306,67 +2411,51 @@ class PACTMemory:
                 outcome, detail = legacy_candidate_plausibility(
                     connection, candidate, deduped or None
                 )
-                included = outcome != "excluded"
-                state = {
-                    "candidate": candidate,
-                    # SURFACE 4 CARRIES BOTH COUNTS AND THE COMMAND. A reader
-                    # deciding whether to move the bucket needs its size
-                    # (memories AND files) and the exact command, not just
-                    # the id.
-                    "memory_count": buckets.get(candidate, 0),
+                # ADMISSION. `verified` is read; `excluded` is not. An
+                # UNVERIFIED bucket (no absolute file row places it) is read
+                # only when a recorded session from one of these roots wrote
+                # into it: its folder name alone cannot tell this checkout's
+                # rows from a same-named checkout's.
+                session_evidence = (
+                    _legacy_session_evidence(connection, candidate, deduped)
+                    if outcome == "unverified"
+                    else None
+                )
+                included = outcome == "verified" or bool(session_evidence)
+                unproven = outcome == "unverified" and not session_evidence
+                memory_count = buckets.get(candidate, 0)
+                state = _legacy_scope_record(
+                    candidate=candidate,
+                    memory_count=memory_count,
                     # DISTINCT PATHS, not rows: one path can carry a row in
-                    # each bucket of a union, and `graph_stats` reports rows
-                    # and paths separately for the same reason.
-                    "file_paths": file_paths,
-                    "rekey": render_rekey_command(candidate, db_path=store),
-                    "included": included,
-                    "verified": outcome == "verified",
-                    # A3: the gate cannot discriminate in practice — the live
-                    # legacy bucket's file rows are all relative — so the
-                    # inclusion is a first-class field rather than something a
-                    # consumer must infer from `verified`.
-                    "included_unverified": included and outcome != "verified",
+                    # each bucket of a union.
+                    file_paths=file_paths,
+                    rekey=render_rekey_command(candidate, db_path=store),
+                    included=included,
+                    verified=outcome == "verified",
+                    included_unverified=included and outcome != "verified",
                     # LOAD-BEARING: the exclusion disclosure fires on this
                     # field. Without it a populated legacy bucket can be
                     # dropped with no notice at all.
-                    "excluded": outcome == "excluded",
-                    "ambiguous": ambiguous,
-                    "canonical_count": canonical_count,
-                    "detail": detail,
-                }
+                    excluded=outcome == "excluded",
+                    unproven=unproven,
+                    session_evidence=session_evidence,
+                    ambiguous=ambiguous,
+                    canonical_count=canonical_count,
+                    detail=detail,
+                )
                 if outcome == "excluded":
-                    # ONCE PER PROCESS: a warning emitted on every read is a
-                    # warning readers learn to skip. The file count is what
-                    # lets the operator judge the loss.
-                    warn_key = (store, candidate)
-                    if warn_key not in _EXCLUSION_WARNED:
-                        _EXCLUSION_WARNED.add(warn_key)
-                        # THE WARNING ALWAYS REPORTS A FILE COUNT, even when
-                        # the surface-4 query was skipped: the count is how
-                        # the operator judges the loss, and this branch runs
-                        # at most once per bucket per process.
-                        excluded_file_paths = (
-                            file_paths
-                            if file_paths is not None
-                            else count_project_file_paths(connection, candidate)
-                        )
-                        logger.warning(
-                            "legacy project bucket %r holds %d memories and %d "
-                            "file path%s, but none of its absolute file rows "
-                            "could be located under '%s', so it is NOT in this "
-                            "read scope. A row the gate could not READ has an "
-                            "unknown location, not a known one — check for a "
-                            "corrupt or unreadable file row before hunting "
-                            "paths. Move it explicitly with: %s",
-                            candidate,
-                            buckets.get(candidate, 0),
-                            excluded_file_paths,
-                            "" if excluded_file_paths == 1 else "s",
-                            # A PLAIN QUOTED PATH, not %r: the operator reads
-                            # this line, and `PosixPath('/...')` is noise.
-                            str(repo_root) if repo_root is not None else "none",
-                            render_rekey_command(candidate, db_path=store),
-                        )
+                    _warn_legacy_excluded(
+                        store, candidate, memory_count,
+                        file_paths
+                        if file_paths is not None
+                        else count_project_file_paths(connection, candidate),
+                        repo_root,
+                    )
+                elif unproven:
+                    _warn_legacy_unproven(
+                        store, candidate, memory_count, file_paths or 0
+                    )
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
         # PRUNE superseded stamps for this same store/scope/legacy pair: the
@@ -3467,14 +3556,15 @@ class PACTMemory:
             return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
-        # THE UNION, AFTER `_ensure_ready()`: the canonical id plus the
-        # caller's own legacy bucket when the plausibility gate admits it. The
-        # early `_project_scope()` return above stays first so a no-op read
-        # does no store work.
-        project_scopes = self._read_project_scopes()
-
-        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`. The scope is
+        # computed INSIDE the block too: it is a read, and its probe must not
+        # run the write-path initialiser either.
         with read_only_scope():
+            # THE UNION, AFTER `_ensure_ready()`: the canonical id plus the
+            # caller's own legacy bucket when the gate admits it. The early
+            # `_project_scope()` return above stays first so a no-op read
+            # does no store work.
+            project_scopes = self._read_project_scopes()
             results = graph_enhanced_search(
                 query,
                 current_file=current_file,

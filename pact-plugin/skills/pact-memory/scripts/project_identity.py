@@ -23,15 +23,12 @@ both at function level and never defines a second copy of either rule.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import stat
 import subprocess
 from pathlib import Path
 from typing import NamedTuple, Optional
-
-logger = logging.getLogger(__name__)
 
 # Accepted remote schemes. The same set `hooks/shared/backlog.py` already
 # ships, plus `ssh+git`, an alias git itself still honours (it connects over
@@ -1074,17 +1071,10 @@ def _refuse_submodule_basename(
     name another project's bucket — and that bucket is then read AND written
     with no union involved. A canonical origin or an operator override still
     answers; only the basename fallback is refused. The override is named in
-    the warning because it is the remedy, and it is read BEFORE this point,
-    so a deliberate pin still works.
+    the decline record because it is the remedy, and it is read BEFORE this
+    point, so a deliberate pin still works. NOTHING IS LOGGED HERE: the
+    resolver reports the decline once, with its rung.
     """
-    logger.warning(
-        "the checkout %r is a submodule, so its folder name is chosen by the "
-        "superproject's tracked .gitmodules and is not used as a project id. "
-        "No id was derived. Write an operator-chosen canonical id to %r to "
-        "give this checkout a scope.",
-        str(root),
-        str(common_dir / _OVERRIDE_FILENAME),
-    )
     return RootIdentity(
         None,
         None,

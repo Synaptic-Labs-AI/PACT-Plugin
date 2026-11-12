@@ -326,15 +326,39 @@ literal, runnable rekey command — interpreter-prefixed
 (`python3 "<skill>/scripts/cli.py" project-id rekey --from <id> --db-path <store>`),
 because there is no `pact-memory` executable on PATH. A bucket can hold
 thousands of records that this session's read scope does not include — an
-identity it cannot derive, or a legacy bucket the plausibility gate excluded —
+identity it cannot derive, or a legacy bucket left `excluded` or `unproven` —
 and an empty result never means those records do not exist. A full id still
 resolves by id, so `get <id>` is a way to check one record when you know it.
 
-A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. When a legacy bucket's file rows
-carry no usable location the gate includes the bucket as UNVERIFIED, so a
-result can contain rows from another checkout that happened to share the
-folder name. Treat an unverified inclusion as a discovery to review, not as
-proof that every row belongs here.
+A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. An `included_unverified` bucket is
+read because a recorded session from this repository wrote into it, not because
+its file rows place it here, so a result can contain rows from another checkout
+that shares the folder name. Treat it as a discovery to review, not as proof
+that every row belongs here.
+
+`legacy_scope` carries the same keys in every state: `candidate`,
+`memory_count`, `file_paths`, `rekey`, `included`, `verified`,
+`included_unverified`, `excluded`, `unproven`, `session_evidence`, `ambiguous`,
+`canonical_count`, `detail`, `case_variant`, `case_variant_rekey`,
+`suppressed`, `suppressed_candidate` and `degraded`. It is `null` only when no
+identity resolves or the id is not canonical. When `candidate` is set, exactly
+one of `included`, `excluded` and `unproven` is true:
+
+- `included`: the bucket is read. `verified` means an absolute file row places
+  it in this repository. `included_unverified` means no file row places it but
+  a recorded session from this repository wrote into it (`session_evidence` is
+  `true`).
+- `excluded`: its absolute file rows place it in another repository, and it is
+  not read.
+- `unproven`: no file row places it and no recorded session from this
+  repository wrote into it (`session_evidence` is `false`). It is not read, and
+  its `rekey` command is printed once per process.
+
+`suppressed` is set for a submodule checkout, as `{source:
+submodule_admin_dir, reason: repository_chosen_name, override_path: null,
+memory_count: N}`. The reason `repository_chosen_name` appears only here, never
+in `decline_reason`. `degraded` is `no schema` or `store_unreadable` when the
+store could not be checked, else `null`.
 
 ### Choosing a Project Identity
 

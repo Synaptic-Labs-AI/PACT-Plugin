@@ -99,6 +99,83 @@ class TestTheRefusalNamesTheDecision:
         assert "U+003C" not in message
 
 
+class TestShowRunsNoWritePathInitialiser:
+    """`project-id show` reports on a store; it never prepares one.
+
+    Catches the legacy probe running the write-path initialiser behind a
+    read: on a store with no vector table it tries the CREATE, logs that it
+    could not, and loads the embedding service a report never needs.
+    """
+
+    def test_show_on_a_store_without_a_vector_table(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        import logging
+
+        from scripts import embeddings
+
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        conn = sqlite3.connect(str(store))
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+            "VALUES ('legacy0001', 'c', 'proj', '2026-01-01', '2026-01-01')"
+        )
+        conn.commit()
+        conn.close()
+        calls = []
+        real = embeddings.get_embedding_service
+        monkeypatch.setattr(
+            embeddings, "get_embedding_service",
+            lambda: calls.append(1) or real(),
+        )
+        monkeypatch.chdir(repo)
+        with caplog.at_level(logging.WARNING):
+            code, envelope = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["legacy_scope"]["candidate"] == "proj"
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "Could not create vector table" not in messages
+        assert calls == []
+
+
+class TestAZeroByteStoreDegrades:
+    """A store file with no schema is reported, never initialised or crashed.
+
+    Catches a read primitive reached before the schema check: with the
+    primitives free of any initialiser, a 0-byte store would raise "no such
+    table" from `show` or `search` instead of degrading.
+    """
+
+    def _zero_byte(self, identity_env, monkeypatch):
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(repo)
+        store = identity_env / "zero.db"
+        store.write_bytes(b"")
+        return store
+
+    def test_show_on_a_zero_byte_store(self, identity_env, monkeypatch, capfd):
+        store = self._zero_byte(identity_env, monkeypatch)
+        code, envelope = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["candidates"] == []
+        assert store.read_bytes() == b""
+
+    def test_search_on_a_zero_byte_store(self, identity_env, monkeypatch, capfd):
+        store = self._zero_byte(identity_env, monkeypatch)
+        from scripts.cli import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main(["search", "anything", "--db-path", str(store)])
+        captured = capfd.readouterr()
+        assert "no such table" not in captured.err + captured.out
+        assert exit_info.value.code == 0, captured.err
+        assert json.loads(captured.out)["result"] == []
+        assert store.read_bytes() == b""
+
+
 class TestARedirectsRemedyIsItsMarker:
     """A forged `.git` pointer's remedy names the marker, never a pin.
 

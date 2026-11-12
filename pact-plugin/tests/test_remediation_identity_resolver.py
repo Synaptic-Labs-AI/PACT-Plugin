@@ -18,6 +18,7 @@ from fixtures.identity_git import (
     make_separate_git_dir_repo,
     make_worktree,
     run_git,
+    seed_session_evidence,
     write_common_dir_override,
 )
 from scripts.memory_api import PACTMemory
@@ -562,6 +563,303 @@ class TestTheReadScopeIsNeverNone:
             assert vector_search(conn, "populated", ()) == []
         with store_scope(store):
             assert search_by_file("/abs/shared.py", ()) == []
+
+
+# ---------------------------------------------------------------------------
+# legacy_scope: one key set, and admission on session evidence
+# ---------------------------------------------------------------------------
+
+def _seed(store: Path, bucket: str, *, session_id: str = "legacy-session",
+          path: str = "src/relative.py", memory_id: str = "legacy0001") -> None:
+    """One memory and one file row in `bucket`, written by `session_id`."""
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute(
+            "INSERT INTO memories "
+            "(id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES (?, 'legacy memory', ?, ?, ?, ?)",
+            (memory_id, bucket, session_id, CREATED_AT, CREATED_AT),
+        )
+        conn.execute(
+            "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+            ("file-" + memory_id, path, bucket),
+        )
+        conn.commit()
+
+
+def _config_root(tmp_path: Path) -> Path:
+    """The per-test config root the suite's isolation fixture sandboxes."""
+    return tmp_path / "home" / ".claude"
+
+
+def _fresh_scope_state() -> None:
+    """Clear the per-process read-scope cache and the once-only notice memos."""
+    for name in (
+        "_LEGACY_SCOPE_CACHE", "_EXCLUSION_WARNED", "_CASE_VARIANT_WARNED",
+        "_UNPROVEN_WARNED", "_SUBMODULE_SUPPRESSED",
+    ):
+        memo = getattr(memory_api, name, None)
+        if memo is not None:
+            memo.clear()
+
+
+REMOTE = "https://github.com/o/proj.git"
+CANONICAL = "github.com/o/proj"
+
+
+class TestSessionEvidenceAdmitsAnUnverifiedBucket:
+    """An unverified legacy bucket is read only on a recorded session's word.
+
+    Catches a delivered checkout that shares a folder name with one of the
+    user's projects reading that project's pre-upgrade memories: a bucket
+    whose file rows carry no location cannot be told apart by name alone.
+    """
+
+    def _checkout(self, identity_env, monkeypatch, name="proj"):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / name, remote=REMOTE)
+        monkeypatch.chdir(repo)
+        return repo
+
+    def test_a_recorded_session_from_this_root_admits_it(
+        self, identity_env, monkeypatch
+    ):
+        repo = self._checkout(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL, "proj")
+        state = memory._legacy_scope_state
+        assert state["included"] and state["included_unverified"]
+        assert state["session_evidence"] is True and not state["unproven"]
+
+    def test_no_recorded_session_leaves_it_unproven_and_unread(
+        self, identity_env, monkeypatch, caplog
+    ):
+        self._checkout(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        memory = PACTMemory(session_id="s", db_path=store)
+        with caplog.at_level(logging.WARNING):
+            assert memory._read_project_scopes() == (CANONICAL,)
+        state = memory._legacy_scope_state
+        assert state["unproven"] and not state["included"] and not state["excluded"]
+        assert state["session_evidence"] is False
+        notices = [
+            record.getMessage() for record in caplog.records
+            if "no recorded session" in record.getMessage()
+        ]
+        assert len(notices) == 1 and "project-id rekey" in notices[0]
+
+    def test_a_session_recorded_for_a_same_named_folder_is_no_evidence(
+        self, identity_env, monkeypatch
+    ):
+        self._checkout(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        # The delivered-checkout shape: same basename, different directory.
+        elsewhere = identity_env / "delivered" / "proj"
+        elsewhere.mkdir(parents=True)
+        seed_session_evidence(_config_root(identity_env), elsewhere, "legacy-session")
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert memory._legacy_scope_state["unproven"]
+
+    def test_a_session_that_did_not_write_the_bucket_is_no_evidence(
+        self, identity_env, monkeypatch
+    ):
+        repo = self._checkout(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj", session_id="writer")
+        seed_session_evidence(_config_root(identity_env), repo, "someone-else")
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert memory._legacy_scope_state["unproven"]
+
+
+class TestLegacyScopeHasOneKeySet:
+    """`legacy_scope` carries the same keys in every state.
+
+    Catches a branch that builds its own dict and drops a key, which turns
+    "absent" into a second meaning of "false" for every envelope consumer.
+    """
+
+    def _state(self, memory):
+        memory._read_project_scopes()
+        return memory._legacy_scope_state
+
+    def test_every_state_carries_the_fixed_keys(self, identity_env, monkeypatch):
+        keys = memory_api.LEGACY_SCOPE_KEYS
+        states = {}
+
+        def checkout(name, remote=REMOTE):
+            _fresh_scope_state()
+            repo = make_repo(identity_env / name, remote=remote)
+            monkeypatch.chdir(repo)
+            return repo
+
+        repo = checkout("nocand")
+        states["no candidate"] = self._state(
+            PACTMemory(session_id="s", db_path=identity_env / "empty.db")
+        )
+        _seed(identity_env / "empty.db", "unrelated")
+        states["no candidate, populated"] = self._state(
+            PACTMemory(session_id="s", db_path=identity_env / "empty.db")
+        )
+
+        repo = checkout("ver")
+        _seed(identity_env / "ver.db", "ver", path=str(repo / "a.py"))
+        states["verified"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "ver.db"))
+
+        repo = checkout("unv")
+        _seed(identity_env / "unv.db", "unv")
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        states["included_unverified"] = self._state(
+            PACTMemory(session_id="s", db_path=identity_env / "unv.db")
+        )
+
+        checkout("unp")
+        _seed(identity_env / "unp.db", "unp")
+        states["unproven"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "unp.db"))
+
+        checkout("exc")
+        _seed(identity_env / "exc.db", "exc", path="/elsewhere/x.py")
+        states["excluded"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "exc.db"))
+
+        checkout("case")
+        _seed(identity_env / "case.db", "CASE")
+        states["case_variant"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "case.db"))
+
+        checkout("deg")
+        (identity_env / "deg.db").write_bytes(b"")
+        states["degraded"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "deg.db"))
+
+        source = make_repo(identity_env / "subsrc")
+        superproject = make_repo(identity_env / "super")
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "vendor/lib", cwd=superproject,
+        )
+        lib = superproject / "vendor" / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/o/lib.git", cwd=lib)
+        _fresh_scope_state()
+        monkeypatch.chdir(lib)
+        states["suppressed"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "empty.db"))
+
+        # The absent-store state has no legacy record at all; the rest must
+        # each be a full record. Every named state was actually reached.
+        assert states["no candidate"] is None
+        del states["no candidate"]
+        assert states["unproven"]["unproven"]
+        assert states["excluded"]["excluded"]
+        assert states["case_variant"]["case_variant"] == ["CASE"]
+        assert states["degraded"]["degraded"] == "no schema"
+        assert states["suppressed"]["suppressed"]["reason"] == "repository_chosen_name"
+        for name, state in states.items():
+            assert set(state) == keys, (name, sorted(set(state) ^ keys))
+            if state["candidate"] is not None:
+                assert [state["included"], state["excluded"], state["unproven"]].count(True) == 1, name
+
+
+class TestTheSubmoduleNoticeHasSomethingToSay:
+    """The suppression notice fires only when the suppressed bucket has rows.
+
+    Catches a warning on every command in every submodule, whether or not
+    anything was hidden: a notice with nothing behind it is one readers
+    learn to skip, so the real one is skipped too.
+    """
+
+    def _submodule(self, root, origin):
+        source = make_repo(root / "subsrc")
+        superproject = make_repo(root / "super")
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "vendor/lib", cwd=superproject,
+        )
+        lib = superproject / "vendor" / "lib"
+        if origin is not None:
+            run_git("remote", "set-url", "origin", origin, cwd=lib)
+        return lib
+
+    @staticmethod
+    def _notices(caplog):
+        return [
+            record.getMessage() for record in caplog.records
+            if "is a submodule" in record.getMessage()
+            or "submodule" in record.getMessage().split(",")[0]
+        ]
+
+    def test_an_empty_store_gets_no_suppression_notice(
+        self, identity_env, monkeypatch, caplog
+    ):
+        lib = self._submodule(identity_env, "https://github.com/o/lib.git")
+        _fresh_scope_state()
+        monkeypatch.chdir(lib)
+        with caplog.at_level(logging.WARNING):
+            memory = PACTMemory(session_id="s", db_path=identity_env / "absent.db")
+            memory._read_project_scopes()
+        assert self._notices(caplog) == []
+
+    def test_a_populated_bucket_gets_exactly_one_notice_with_its_count(
+        self, identity_env, monkeypatch, caplog
+    ):
+        lib = self._submodule(identity_env, "https://github.com/o/lib.git")
+        store = identity_env / "store.db"
+        _seed(store, "vendor", memory_id="vendor0001")
+        _seed(store, "vendor", memory_id="vendor0002", path="src/other.py")
+        _fresh_scope_state()
+        monkeypatch.chdir(lib)
+        with caplog.at_level(logging.WARNING):
+            memory = PACTMemory(session_id="s", db_path=store)
+            memory._read_project_scopes()
+            memory._read_project_scopes()
+        notices = self._notices(caplog)
+        assert len(notices) == 1 and "2 memories" in notices[0]
+        assert memory._legacy_scope_state["suppressed"]["memory_count"] == 2
+
+    def test_a_declined_submodule_logs_one_decline_line(
+        self, identity_env, monkeypatch, caplog
+    ):
+        lib = self._submodule(identity_env, None)
+        _fresh_scope_state()
+        monkeypatch.chdir(lib)
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.decline_reason["reason"] == "submodule_checkout"
+        assert len(self._notices(caplog)) == 1
+
+
+class TestNoticesQuoteWhatTheyLog:
+    """A path or command in a legacy notice is rendered with repr.
+
+    Catches a directory name carrying a newline forging a second log line:
+    the notice is read by operators and agents as trusted output.
+    """
+
+    FORGED = "WARNING: forged"
+
+    def test_a_newline_in_a_path_cannot_start_a_log_line(
+        self, identity_env, monkeypatch, caplog
+    ):
+        parent = identity_env / ("evil\n" + self.FORGED)
+        parent.mkdir()
+        for name, path in (("exc", "/elsewhere/x.py"), ("unp", "src/relative.py")):
+            _fresh_scope_state()
+            repo = make_repo(parent / name, remote=f"https://github.com/o/{name}.git")
+            monkeypatch.chdir(repo)
+            store = parent / f"{name}.db"
+            _seed(store, name, path=path)
+            with caplog.at_level(logging.WARNING):
+                PACTMemory(session_id="s", db_path=store)._read_project_scopes()
+        messages = [record.getMessage() for record in caplog.records]
+        lines = [line for message in messages for line in message.splitlines()]
+        assert not any(line.startswith(self.FORGED) for line in lines)
+        # Control: both notices fired, so the zero above is not silence.
+        assert any("legacy project bucket 'exc'" in m for m in messages)
+        assert any("legacy project bucket 'unp'" in m for m in messages)
 
 
 class TestACeilingStartDirectoryIsExamined:

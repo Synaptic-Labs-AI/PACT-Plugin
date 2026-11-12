@@ -11,6 +11,7 @@ query), which returns the whole store instead of one project.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -22,7 +23,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fixtures.identity_git import assert_outside_repository, make_repo
+from fixtures.identity_git import (
+    assert_outside_repository,
+    make_repo,
+    seed_session_evidence,
+)
 from scripts.database import (
     count_project_memories,
     db_connection,
@@ -149,6 +154,10 @@ def union_env(tmp_path, monkeypatch):
     monkeypatch.chdir(repo)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     memory_api._LEGACY_SCOPE_CACHE.clear()
+    # THE SEEDED ROWS ARE THIS CHECKOUT'S OWN: `_seed` writes them as session
+    # "s", and this records "s" as a session of this repository, which is the
+    # evidence an unverified legacy bucket needs to be read.
+    seed_session_evidence(tmp_path / "home" / ".claude", repo, "s")
     yield SimpleNamespace(
         repo=repo, store=tmp_path / "union.db", tmp_path=tmp_path
     )
@@ -444,6 +453,7 @@ class TestDisclosure:
         assert state["included"] is True
         assert state["verified"] is False
         assert state["excluded"] is False
+        assert state["session_evidence"] is True
         assert str(state["candidate"]) == LEGACY
 
     def test_an_ambiguous_folded_match_is_not_guessed(
@@ -1517,7 +1527,9 @@ class TestReviewQuoting:
         assert match is not None, (
             f"the exclusion warning did not render a rekey command: {caplog.text!r}"
         )
-        argv = shlex.split(match.group(1))
+        # The command is logged with repr, so a newline in an id cannot
+        # forge a log line; read the repr back before splitting it.
+        argv = shlex.split(ast.literal_eval(match.group(1)))
         from_index = argv.index("--from")
         assert argv[from_index + 1] == hostile, (
             f"the bucket id did not round-trip as ONE --from argument: {argv!r}"

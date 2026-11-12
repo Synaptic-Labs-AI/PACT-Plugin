@@ -112,3 +112,30 @@ def make_separate_git_dir_repo(path: Path, external_git_dir: Path) -> Path:
     run_git("add", "README", cwd=path)
     run_git("commit", "-qm", "seed", cwd=path)
     return path
+
+def seed_session_evidence(config_dir, project_dir: Path, session_id: str) -> Path:
+    """Record a session for `project_dir`, where the legacy-admission check looks.
+
+    Writes `pact-session-context.json` into the session directory
+    `reconstruct_session_dir(project_dir, session_id)` names, with the
+    `project_dir` it records. A legacy bucket whose rows carry `session_id`
+    is then read by a session whose identity root is `project_dir`.
+    `config_dir` is the isolated config root the file must land under (the
+    suite sandboxes it at `tmp_path / "home" / ".claude"`); the helper
+    refuses to write anywhere else, so a test can never seed a real session.
+    """
+    import json
+
+    from shared.pact_context import reconstruct_session_dir
+
+    session_dir = Path(reconstruct_session_dir(str(project_dir), session_id))
+    assert Path(config_dir).resolve() in session_dir.resolve().parents, (
+        f"{session_dir} is not under the isolated config root {config_dir}"
+    )
+    session_dir.mkdir(parents=True, exist_ok=True)
+    context = session_dir / "pact-session-context.json"
+    context.write_text(
+        json.dumps({"project_dir": str(project_dir), "session_id": session_id}),
+        encoding="utf-8",
+    )
+    return context

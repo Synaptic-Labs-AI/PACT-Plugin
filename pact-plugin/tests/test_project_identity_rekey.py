@@ -16,7 +16,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fixtures.identity_git import assert_outside_repository, make_repo
+from fixtures.identity_git import (
+    assert_outside_repository,
+    make_repo,
+    seed_session_evidence,
+)
 from scripts.database import (
     db_connection,
     ensure_initialized,
@@ -442,6 +446,13 @@ class TestCliSurface:
         _seed(
             rekey_env,
             [("l1", LEGACY), ("c1", CANONICAL)],
+        )
+        # The legacy row is this checkout's own: a recorded session of it
+        # wrote it, which is what admits an unverified bucket to the scope.
+        # The config root is conftest's per-test sandbox (`tmp_path/home/
+        # .claude`); naming it makes the helper refuse to write anywhere else.
+        seed_session_evidence(
+            rekey_env.tmp_path / "home" / ".claude", rekey_env.repo, "s"
         )
         code, payload = _cli(
             ["project-id", "show", "--db-path", str(rekey_env.store)], capfd
