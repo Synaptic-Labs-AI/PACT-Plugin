@@ -27,6 +27,7 @@ The full suite can now be run in a shuffled order on demand, and only on demand:
 ### What landed
 
 - `constraints-ci.txt` pins pytest-randomly 5.1.0, and the root `pyproject.toml` blocks it by default with `addopts = "-p no:randomly"`, so every gate, fast-suite and local run stays in file order. The pytest child sessions the suite starts now pass `-p no:randomly` themselves, because a child rooted outside the repository does not read the root config; so does the full-collection guard's own collection run.
+- A child-pytest census in the test suite refuses any pytest child the suite starts without blocking pytest-randomly (`-p no:randomly`, a visible `-p randomly` opt-in, or plugin autoload disabled). The launch aborts before the child starts, and under xdist a worker hands its refusals to the controller, so a test that swallows the error still fails the run.
 - The embedding catch-up test loader no longer evicts the real `scripts.embeddings` and `scripts.embedding_catchup` modules, so a test that runs after it on the same worker patches the same module object the code under test uses.
 
 ### Why
