@@ -1221,7 +1221,10 @@ class TestReviewDbGateWorktreeRoots:
     worktree, so a bucket whose only absolute rows were written from the
     worktree verified against the main root alone would be EXCLUDED — reads
     collapse to the canonical id and the operator is told to rekey their own
-    rows. `checkout_roots()` is the existing source for the set.
+    rows. The caller builds the set from `git worktree list` run AT the
+    identity root (`_listed_worktree_toplevels`), deliberately NOT from
+    `backlog.checkout_roots()`: that helper resolves against the PROCESS, so
+    a declared session would append another repository's checkouts.
     """
 
     def _seed_row(self, env, file_id, path, project):
@@ -1232,6 +1235,83 @@ class TestReviewDbGateWorktreeRoots:
                 (file_id, path, project),
             )
             conn.commit()
+
+    def test_an_unresolvable_path_is_not_evidence_and_never_raises(
+        self, union_env
+    ):
+        """A `files.path` with an embedded NUL makes `os.path.realpath` raise
+        ValueError. This gate runs on every read, so letting that escape fails
+        every read for the project from a check that only decides whether to
+        widen the scope.
+
+        RED WHEN: the realpath call is unguarded (the first assertion raises
+        ValueError) or an unjudgeable row is counted as absolute evidence
+        (the bucket then lands in `excluded`, dropping rows the store cannot
+        judge).
+        """
+        from scripts.database import (
+            LEGACY_PLAUSIBLE_EXCLUDED,
+            LEGACY_PLAUSIBLE_UNVERIFIED,
+            legacy_candidate_plausibility,
+        )
+
+        nul_path = "/tmp/x\x00y.py"
+        self._seed_row(union_env, "f-nul", nul_path, "legacy-nul")
+        self._seed_row(union_env, "f-nul2", nul_path, "legacy-nul-plus")
+        self._seed_row(
+            union_env, "f-elsewhere",
+            str(union_env.tmp_path / "elsewhere" / "z.py"),
+            "legacy-nul-plus",
+        )
+
+        with db_connection(union_env.store) as conn:
+            only_nul = legacy_candidate_plausibility(
+                conn, "legacy-nul", [union_env.repo]
+            )
+            nul_plus_real = legacy_candidate_plausibility(
+                conn, "legacy-nul-plus", [union_env.repo]
+            )
+
+        assert only_nul[0] == LEGACY_PLAUSIBLE_UNVERIFIED, (
+            "a bucket whose only absolute row is unjudgeable must be "
+            f"included-as-unverified, never dropped: {only_nul}"
+        )
+        assert only_nul[1]["file_rows"] == 1
+        assert only_nul[1]["absolute_rows"] == 0, (
+            "the unjudgeable row was counted as absolute evidence: "
+            f"{only_nul[1]}"
+        )
+        assert nul_plus_real[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
+            "a judgeable row outside every root must still exclude, with the "
+            f"unjudgeable row skipped: {nul_plus_real}"
+        )
+        assert nul_plus_real[1]["absolute_rows"] == 1
+        assert nul_plus_real[1]["contained_rows"] == 0
+
+    def test_a_nul_path_row_does_not_break_the_read(self, union_env):
+        """The user-visible shape of N-2: one corrupt `files.path` used to
+        make `list` (and every other read) raise for the WHOLE project.
+        RED WHEN: the gate's realpath call is unguarded — this call raises
+        ValueError instead of returning the project's rows.
+        """
+        _seed(
+            union_env,
+            [
+                ("c1", "canon", CANONICAL, "2026-01-01T00:00:00+00:00"),
+                ("l1", "legacy", LEGACY, "2026-01-02T00:00:00+00:00"),
+            ],
+        )
+        self._seed_row(union_env, "f-nul", "/tmp/x\x00y.py", LEGACY)
+
+        memory = _memory(union_env)
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(memory_api, "_ensure_ready", lambda: None)
+            ids = _ids(memory.list(limit=10))
+
+        assert sorted(ids) == ["c1", "l1"], (
+            "a NUL-bearing files.path row cost the project its other rows: "
+            f"{ids}"
+        )
 
     def test_the_gate_accepts_every_checkout_and_nothing_else(self, union_env):
         from scripts.database import (

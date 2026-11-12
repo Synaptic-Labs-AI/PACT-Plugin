@@ -1308,6 +1308,15 @@ def legacy_candidate_plausibility(
     case-insensitive filesystem and miss on a case-sensitive one. Resolution
     also normalises `..`, so a path escaping a root cannot be counted as
     inside it.
+
+    AN UNRESOLVABLE ROW IS SKIPPED AS EVIDENCE, NOT ALLOWED TO RAISE.
+    `realpath` raises `ValueError` for a path carrying an embedded NUL byte
+    (a corrupt or hostile `files.path`), and this gate runs on every read, so
+    letting it escape would fail EVERY read for the project from a check that
+    only decides whether to WIDEN the scope. Such a row still counts in
+    `file_rows`, and is not counted as absolute evidence: a bucket whose only
+    absolute rows are unjudgeable lands in `unverified` (included, disclosed)
+    rather than `excluded` (dropped), which is the non-destructive direction.
     """
     ensure_initialized(conn)
     cursor = conn.execute(
@@ -1323,8 +1332,13 @@ def legacy_candidate_plausibility(
         path = row["path"]
         if not path or not os.path.isabs(path):
             continue
+        try:
+            resolved = os.path.realpath(path)
+        except (OSError, ValueError):
+            # Unjudgeable path: see AN UNRESOLVABLE ROW above. Counted in
+            # `file_rows`, deliberately NOT in `absolute_rows`.
+            continue
         absolute_rows += 1
-        resolved = os.path.realpath(path)
         if any(
             resolved == root or resolved.startswith(root + os.sep)
             for root in root_paths
