@@ -27,17 +27,31 @@ bare `-` empty it, `-u NAME`, `-uNAME` and `--unset=NAME` remove a name, and its
 NAME=VALUE words set one. `sudo` starts from an empty environment unless it is
 given `-E` or `--preserve-env`, or `--preserve-env=NAMES` for those names.
 
-A pytest child is a command whose program is `pytest` or `py.test`, whose program
-is `coverage run` with `-m pytest` (or `--module pytest`), or whose first Python
-interpreter word (a basename starting with `python` or `pypy`, or
-sys.executable) runs `-m pytest` or `-m coverage run ... -m pytest`. The
-interpreter's short and long options before `-m` are stepped over, including the
-values of `-W`, `-X` and `--check-hash-based-pycs`. A word that only names an
-interpreter followed by `-m pytest`, as in `echo python -m pytest`, is refused
-too. The program is the first word past NAME=VALUE words, the shell's own
-`{ } ! if then elif else fi do done while until`, and the listed wrappers
-(`timeout`, `nice`, `nohup`, `stdbuf`, `sudo`, `env`, `exec`, `time`, `xvfb-run`,
-`uv run`, `poetry run`) with their options, option values and numeric arguments.
+A pytest child is a command that runs pytest by any of these routes:
+- its program is pytest's own: `pytest` or `py.test`, by path or not, with a
+  distro version suffix (`pytest-3`, `pytest3`, `py.test-3`) or `.exe`, or the
+  package's `pytest/__main__.py`;
+- its program is `coverage run` (any `coverage`, `coverage3` or `coverage-3.12`)
+  given `-m pytest`, `-m pytest.__main__`, `--module pytest`, or pytest's program
+  or `__main__.py` as its script;
+- its first Python interpreter word runs `-m pytest`, `-m pytest.__main__`, the
+  same `-m coverage run ...` forms, or pytest's program or `__main__.py` as its
+  script (`python /venv/bin/pytest`). An interpreter word is a basename starting
+  with `python` or `pypy`, the Windows launcher `py` or `pyw`, any of these with
+  `.exe`, or sys.executable. Its short and long options before `-m` or the script
+  are stepped over, including the values of `-W`, `-X` and
+  `--check-hash-based-pycs`, and the launcher's `-3`, `-3.12` and `-V:3.12`.
+A word that only names an interpreter followed by one of these, as in
+`echo python -m pytest` or `echo py -m pytest`, is refused too. `-m py.test` and
+`-m _pytest` start no pytest session and are not pytest children.
+
+The program is the first word past NAME=VALUE words, the shell's own
+`{ } ! if then elif else fi do done while until`, and the listed wrappers with
+their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
+`stdbuf`, `sudo`, `env`, `exec`, `time`, `xvfb-run`, and the tool runners
+`uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
+(and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
+`micromamba run`, `pipenv run`, `rye run` and `pixi run`.
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
@@ -77,14 +91,21 @@ Blind spots:
    load this census.
 7. A worker that crashes before its finish() runs sends no lines; xdist reports
    the crash itself.
-8. A bare `pytest` program behind a wrapper not in the list (`hatch run pytest`,
-   `pdm run pytest`), or behind a listed wrapper's option whose separate value
-   the list does not name. The interpreter form (`<wrapper> python -m pytest`) is
-   still caught.
+8. A bare `pytest` program behind a wrapper not in the list: a test runner or
+   task runner (`tox`, `nox`, `make`, `just`), a tool runner whose options come
+   before its run verb (`hatch -e test run pytest`, `conda -v run pytest`), and
+   process wrappers such as `chrt`, `taskset`, `ionice` or `setsid`; or behind a
+   listed wrapper's option whose separate value the list does not name. The
+   interpreter form (`<wrapper> python -m pytest`) is still caught.
 9. Shell text the census does not expand or track: `$( )` and backtick
    substitutions, variables (`$PYTEST`), `export`, aliases, functions, `eval`,
    `env -S`, and a script fed to a shell's stdin (`bash <<EOF`, `bash -s`). An
    operator written alone inside quotes (`";"`) is read as an operator.
+10. pytest run from a file the census cannot name: a renamed or wrapper copy of
+    the console script, a zipapp (`python pytest.pyz`), or a module other than
+    `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
+    plugin's own entry point). The census judges a launch by its words, not by
+    what the named file does.
 """
 import os
 import re
@@ -96,7 +117,14 @@ WORKEROUTPUT_KEY = "child_pytest_census_misses"
 AUTOLOAD_ENV = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 ADDOPTS_ENV = "PYTEST_ADDOPTS"
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_PYTEST_PROGRAMS = frozenset({"pytest", "py.test"})
+# pytest's program names: pytest and py.test, with a distro version suffix
+# (pytest-3, pytest3, py.test-3) and, after _command_name, without `.exe`.
+_PYTEST_PROGRAM = re.compile(r"py\.?test(-?[0-9]+(\.[0-9]+)*)?\Z")
+# The modules `-m` can run pytest as.
+_PYTEST_MODULES = frozenset({"pytest", "pytest.__main__"})
+# The Windows launcher's names; any basename starting with python or pypy is an
+# interpreter too.
+_LAUNCHERS = frozenset({"py", "pyw"})
 _PYTEST_MENTION = re.compile(r"py\.?test")
 _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
 _BLOCKING = "no:randomly"
@@ -122,8 +150,25 @@ _WRAPPERS = {
     "uv run": frozenset({"--with", "--python", "-p", "--project", "--directory", "--package",
                          "--extra", "--group", "--env-file", "--with-requirements"}),
     "poetry run": frozenset({"-C", "--directory", "-P", "--project"}),
+    "uv tool run": frozenset({"--from", "--with", "--python", "-p", "--with-requirements",
+                              "--with-editable", "--index", "--default-index"}),
+    "uvx": frozenset({"--from", "--with", "--python", "-p", "--with-requirements",
+                      "--with-editable", "--index", "--default-index"}),
+    "pipx run": frozenset({"--spec", "--python", "--index-url", "-i", "--pip-args"}),
+    "pdm run": frozenset({"-p", "--project", "--venv"}),
+    "hatch run": frozenset(),
+    "conda run": frozenset({"-n", "--name", "-p", "--prefix", "--cwd"}),
+    "micromamba run": frozenset({"-n", "--name", "-p", "--prefix", "-r", "--root-prefix",
+                                 "--cwd"}),
+    "pipenv run": frozenset(),
+    "rye run": frozenset({"--pyproject"}),
+    "pixi run": frozenset({"-e", "--environment", "--manifest-path"}),
 }
-_TWO_WORD_WRAPPERS = frozenset({("uv", "run"), ("poetry", "run")})
+# Wrappers named by more than one word, longest first.
+_MULTI_WORD_WRAPPERS = tuple(sorted(
+    (tuple(name.split()) for name in _WRAPPERS if " " in name), key=len, reverse=True))
+# hatch names an environment before its command: `hatch run test:pytest`.
+_ENVIRONMENT_PREFIX = re.compile(r"[A-Za-z0-9_.-]+:")
 _DURATION = re.compile(r"\d+(\.\d+)?[smhd]?\Z")
 # Shell options that take a separate value, and the long ones that take a file.
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
@@ -292,9 +337,10 @@ def _program(part, env):
         if word in _RESERVED:
             i += 1
             continue
-        pair = tuple(part[i:i + 2])
-        if pair in _TWO_WORD_WRAPPERS:
-            name, i = " ".join(pair), i + 2
+        words = next((words for words in _MULTI_WORD_WRAPPERS
+                      if tuple(part[i:i + len(words)]) == words), None)
+        if words is not None:
+            name, i = " ".join(words), i + len(words)
         elif os.path.basename(word) in _WRAPPERS:
             name, i = os.path.basename(word), i + 1
         else:
@@ -364,11 +410,28 @@ def _shell_command(part, program):
     return part[i] if has_c and i < len(part) else None
 
 
+def _command_name(word):
+    """A program word's name: its basename, lower-cased, without `.exe` and
+    without a hatch environment prefix (`test:pytest`)."""
+    name = os.path.basename(word).lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    prefix = _ENVIRONMENT_PREFIX.match(name)
+    return name[prefix.end():] if prefix else name
+
+
+def _is_pytest_script(word):
+    """True for a word naming pytest's program or console-script file, or its
+    package's __main__.py."""
+    parts = word.replace("\\", "/").split("/")
+    return bool(_PYTEST_PROGRAM.match(_command_name(word))) or parts[-2:] == ["pytest", "__main__.py"]
+
+
 def _interpreter(tokens):
     """Index of the first Python interpreter word, or None."""
     for i, word in enumerate(tokens):
-        base = os.path.basename(word)
-        if base.startswith(("python", "pypy")) or word == sys.executable:
+        name = _command_name(word)
+        if name.startswith(("python", "pypy")) or name in _LAUNCHERS or word == sys.executable:
             return i
     return None
 
@@ -404,39 +467,42 @@ def _module(words, i):
 
 
 def _coverage_run(words, i):
-    """Index of pytest's first argument when `words[i:]` is `run ... -m pytest`."""
+    """Index of pytest's first argument when `words[i:]` is `run ... -m pytest`
+    or `run ... <pytest's script>`."""
     if i >= len(words) or words[i] != "run":
         return None
     i += 1
     while i < len(words):
         word = words[i]
         if word in ("-m", "--module"):
-            return i + 2 if i + 1 < len(words) and words[i + 1] == "pytest" else None
+            return i + 2 if i + 1 < len(words) and words[i + 1] in _PYTEST_MODULES else None
         if word in _COVERAGE_VALUE_OPTIONS:
             i += 2
         elif word.startswith("-") and word != "-":
             i += 1
         else:
-            return None  # a script
+            return i + 1 if _is_pytest_script(word) else None
     return None
 
 
 def _pytest_args(part, program):
     """Index of the first pytest argument when `part` runs pytest, else None."""
     if program < len(part):
-        base = os.path.basename(part[program])
-        if base in _PYTEST_PROGRAMS:
+        name = _command_name(part[program])
+        if _is_pytest_script(part[program]):
             return program + 1
-        if _COVERAGE_PROGRAM.match(base):
+        if _COVERAGE_PROGRAM.match(name):
             return _coverage_run(part, program + 1)
     at = _interpreter(part)
     if at is None:
         return None
     module, after = _module(part, at + 1)
-    if module == "pytest":
+    if module in _PYTEST_MODULES:
         return after
     if module == "coverage":
         return _coverage_run(part, after)
+    if module is None and after < len(part) and _is_pytest_script(part[after]):
+        return after + 1  # the interpreter runs pytest's script file
     return None
 
 

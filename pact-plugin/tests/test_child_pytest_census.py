@@ -276,6 +276,94 @@ def test_a_mention_of_pytest_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None
 
 
+# THE LAUNCHER FAMILY. Every way the suite could start pytest by a module name, a
+# launcher, a console-script file or a tool runner, each refused unblocked and
+# accepted with the flag.
+_LAUNCHER_FORMS = [
+    # pytest's __main__ module, plain and bundled.
+    [PY, "-m", "pytest.__main__"],
+    [PY, "-mpytest.__main__"],
+    [PY, "-I", "-m", "pytest.__main__", "-q"],
+    # The Windows launcher and .exe names.
+    ["py", "-m", "pytest"],
+    ["py", "-3", "-m", "pytest"],
+    ["py", "-3.12", "-m", "pytest", "-q"],
+    ["py", "-V:3.12", "-m", "pytest"],
+    ["py.exe", "-3", "-m", "pytest"],
+    ["pyw", "-m", "pytest"],
+    ["python.exe", "-m", "pytest"],
+    # An interpreter running pytest's console script or its __main__ file.
+    [PY, "/venv/bin/pytest"],
+    [PY, "/venv/bin/py.test", "-q"],
+    [PY, "-I", "/venv/bin/pytest", "-q"],
+    [PY, "/venv/lib/python3.12/site-packages/pytest/__main__.py"],
+    # coverage's script and __main__ forms.
+    ["coverage", "run", "/venv/bin/pytest"],
+    ["coverage", "run", "--branch", "/venv/bin/pytest", "-q"],
+    ["coverage", "run", "-m", "pytest.__main__"],
+    [PY, "-m", "coverage", "run", "-m", "pytest.__main__"],
+    [PY, "-m", "coverage", "run", "/venv/bin/pytest"],
+    # Distro and Windows program names.
+    ["pytest-3"],
+    ["py.test-3", "-q"],
+    ["pytest3"],
+    ["/usr/bin/pytest-3.12"],
+    ["pytest.exe", "-q"],
+    # Tool runners that start a pytest program by name.
+    ["uvx", "pytest"],
+    ["uvx", "--with", "pytest-xdist", "pytest", "-q"],
+    ["uv", "tool", "run", "pytest"],
+    ["uv", "tool", "run", "--from", "pytest==9.2", "pytest"],
+    ["pipx", "run", "pytest"],
+    ["pipx", "run", "--spec", "pytest==9.2", "pytest"],
+    ["pdm", "run", "pytest"],
+    ["hatch", "run", "pytest"],
+    ["hatch", "run", "test:pytest", "-q"],
+    ["conda", "run", "-n", "dev", "pytest"],
+    ["micromamba", "run", "-n", "dev", "pytest"],
+    ["pipenv", "run", "pytest"],
+    ["rye", "run", "pytest"],
+    ["pixi", "run", "pytest"],
+    # The same forms inside a shell command.
+    ["bash", "-c", "py -3 -m pytest"],
+    ["bash", "-c", "cd x && uvx pytest"],
+]
+
+
+@pytest.mark.parametrize("argv", _LAUNCHER_FORMS)
+def test_each_launcher_form_is_refused_unblocked(argv):
+    assert census._miss(argv, None, {}) is not None, argv
+
+
+@pytest.mark.parametrize("argv", _LAUNCHER_FORMS)
+def test_each_launcher_form_is_accepted_with_the_flag(argv):
+    if argv[0] == "bash":
+        blocked = [argv[0], argv[1], argv[2] + " -p no:randomly"]
+    else:
+        blocked = [*argv, "-p", "no:randomly"]
+    assert census._miss(blocked, None, {}) is None, blocked
+
+
+@pytest.mark.parametrize("argv", [
+    # These name pytest but launch no pytest session.
+    [PY, "-m", "py.test"],
+    [PY, "-m", "_pytest"],
+    [PY, "-m", "pytest_randomly"],
+    [PY, "/venv/bin/pip", "install", "pytest"],
+    [PY, "tests/pytest_helpers.py"],
+    ["py", "-3", "script.py", "-m", "pytest"],
+    ["py", "--list"],
+    ["uvx", "ruff", "check"],
+    ["pipx", "run", "black", "."],
+    ["hatch", "run", "lint:ruff"],
+    ["conda", "run", "-n", "dev", "python", "script.py"],
+    ["coverage", "run", "/venv/bin/pip"],
+    ["pytest-cov-report"],
+])
+def test_a_neighbouring_form_that_launches_no_pytest_is_ignored(argv):
+    assert census._miss(argv, None, {}) is None, argv
+
+
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):
     assert census.installed(), "tests/conftest.py did not install the census"
     before = len(census_state["misses"])
