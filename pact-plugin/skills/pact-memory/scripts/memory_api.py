@@ -1079,7 +1079,11 @@ class PACTMemory:
         #
         # A BARE repository also has `main_repo_root() is None`, but its git
         # dir EQUALS its common dir, so `_worktree_redirect` answers False and
-        # the bare path below is untouched.
+        # the bare path below is untouched. KNOWN LIMITATION, PRE-EXISTING and
+        # outside this change: a DECLARED bare repository therefore resolves
+        # from its origin or basename here instead of declining the way the
+        # cwd rung does. Recorded, not repaired — do not read this branch as
+        # treating the two the same.
         if (
             declared_main_root is None
             and declared_common_dir is not None
@@ -2401,11 +2405,15 @@ class PACTMemory:
                     f"{type(candidate).__name__}; nothing was written."
                 ) from None
             if isinstance(raw_path, bytes):
-                # `str(b'bad\x00.py')` renders the NUL as an ESCAPE, so a
-                # bytes path slipped past a character check on `str(...)` and
-                # the memory row was committed before the file layer refused.
-                # Decode first, then check the decoded text.
-                raw_path = os.fsdecode(raw_path)
+                # THE CONTRACT IS `List[str]`, SO BYTES ARE REFUSED OUTRIGHT.
+                # Decoding only to CHECK left the original bytes in the list,
+                # and `_normalize_path` raised on them AFTER the memory row
+                # was committed — measured: 1 memory row, 0 file rows. Refusing
+                # the type at the ingress is what makes the promise true for
+                # NUL-free bytes as well as NUL-bearing ones.
+                raise ValueError(
+                    "file paths must be str, not bytes; nothing was written."
+                )
             if "\x00" in raw_path:
                 raise ValueError(
                     f"file path {raw_path!r} must not contain a NUL character; "

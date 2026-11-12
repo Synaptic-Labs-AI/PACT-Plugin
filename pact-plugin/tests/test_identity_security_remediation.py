@@ -616,6 +616,12 @@ class TestSubmoduleAdminRedirect:
         assert identity.source == "declined"
 
 
+# THE FORBIDDEN VALUE AND THE FIXTURE URL ARE NOT THE SAME STRING.
+# A remote must be a SCHEME-BEARING URL to classify as canonical; using the
+# bare id as the remote made every redirected origin fall back to a basename,
+# so the matrix passed 15/15 with the guard removed. This is that defect,
+# pinned: the fixture uses the URL, the assertion forbids the ID.
+VICTIM_URL = "https://github.com/victim/secret-lib"
 VICTIM_ID = "github.com/victim/secret-lib"
 
 
@@ -625,7 +631,7 @@ def _forged_shapes(tmp_path):
     Every victim carries a PORTABLE (https) origin, so a basename fallback
     cannot make a green arm mean nothing.
     """
-    victim = _repo(tmp_path / "victim", VICTIM_ID)
+    victim = _repo(tmp_path / "victim", VICTIM_URL)
     subprocess.run(
         ["git", "-C", str(victim), "worktree", "add", "-q",
          str(tmp_path / "victim-wt"), "-b", "wt"],
@@ -633,7 +639,7 @@ def _forged_shapes(tmp_path):
     )
     admin_worktree = next((victim / ".git" / "worktrees").iterdir())
 
-    src = _repo(tmp_path / "subsrc", VICTIM_ID)
+    src = _repo(tmp_path / "subsrc", VICTIM_URL)
     superrepo = _repo(tmp_path / "super", "https://github.com/owner/super")
     subprocess.run(
         ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
@@ -642,7 +648,7 @@ def _forged_shapes(tmp_path):
     )
     subprocess.run(
         ["git", "-C", str(superrepo / "submod"), "remote", "set-url",
-         "origin", VICTIM_ID],
+         "origin", VICTIM_URL],
         check=True,
     )
     admin_modules = superrepo / ".git" / "modules" / "submod"
