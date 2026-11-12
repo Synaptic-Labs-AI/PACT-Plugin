@@ -43,10 +43,16 @@ def _load_embedding_catchup():
 
     Returns the module object with database functions mocked.
     """
-    # Clear cached
+    # Clear cached. The `scripts` package keeps the deleted module as an
+    # attribute, and `from scripts import embedding_catchup` returns that
+    # attribute without importing, so a later test would patch a module the
+    # code under test no longer uses. Drop the attribute with the entry.
     for key in list(sys.modules.keys()):
         if "embedding_catchup" in key:
             del sys.modules[key]
+    scripts_pkg = sys.modules.get("scripts")
+    if scripts_pkg is not None and hasattr(scripts_pkg, "embedding_catchup"):
+        delattr(scripts_pkg, "embedding_catchup")
 
     # Create a fake package that embedding_catchup thinks it belongs to
     pkg_name = "_test_scripts_pkg"
@@ -394,7 +400,8 @@ class TestGetUnembeddedMemories:
         mock_cursor_master.fetchone.return_value = ("vec_memories",)
         mock_cursor_query = MagicMock()
         mock_cursor_query.fetchall.return_value = [("mem-1",), ("mem-2",), ("mem-3",)]
-        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_query]
+        # The `memories` schema check, the vector-table check, then the query.
+        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_master, mock_cursor_query]
 
         ec_module.db_connection = MagicMock()
         ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -428,7 +435,8 @@ class TestGetUnembeddedMemories:
         mock_cursor_master.fetchone.return_value = ("vec_memories",)
         mock_cursor_query = MagicMock()
         mock_cursor_query.fetchall.return_value = [("mem-1",)]
-        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_query]
+        # The `memories` schema check, the vector-table check, then the query.
+        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_master, mock_cursor_query]
 
         ec_module.db_connection = MagicMock()
         ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -437,7 +445,7 @@ class TestGetUnembeddedMemories:
         result = ec_module.get_unembedded_memories(project_id="my-proj", limit=5)
         assert result == ["mem-1"]
         # Verify the query params include project_id and limit
-        call_args = mock_conn.execute.call_args_list[1]
+        call_args = mock_conn.execute.call_args_list[2]
         params = call_args[0][1]
         assert "my-proj" in params
         assert 5 in params

@@ -708,6 +708,46 @@ class TestStatusNeverWritesIntoACorruptStore:
         changed = {i for i in range(100) if after[i] != before[i]}
         assert changed <= self.HEADER_FIELDS_AN_OPEN_REWRITES, sorted(changed)
 
+    @pytest.mark.parametrize("journal", ["wal", "delete"])
+    def test_the_real_pending_query_writes_no_schema(
+        self, identity_env, monkeypatch, capfd, journal
+    ):
+        """Unpatched: the real pending query and the real integrity check run.
+
+        A store without a vector table is the shape where the pending query's
+        connection used to CREATE vec_memories before the check.
+        """
+        pytest.importorskip("sqlite_vec")
+        from scripts import database, embedding_catchup, memory_init
+
+        assert database.SQLITE_EXTENSIONS_ENABLED, "no extension loading: nothing to prove"
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path",
+            lambda: identity_env / "catchup-attempted",
+        )
+        monkeypatch.setattr(embedding_catchup, "get_available_ram_mb", lambda: 1e9)
+        queried = []
+        real_query = embedding_catchup.get_unembedded_memories
+
+        def recording_query(*args, **kwargs):
+            result = real_query(*args, **kwargs)
+            queried.append(list(result))
+            return result
+
+        monkeypatch.setattr(embedding_catchup, "get_unembedded_memories", recording_query)
+        store = _page_corrupt_store(identity_env / "store.db", journal=journal)
+        before = store.read_bytes()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        after = store.read_bytes()
+        assert queried and queried[0], "the real pending query found no work"
+        assert code == 2, rendered
+        assert "no memory was written to it" in rendered, rendered
+        if journal == "wal":
+            assert after == before
+        else:
+            assert after[100:] == before[100:] and len(after) == len(before)
+
     def test_an_intact_store_still_gets_its_catch_up(
         self, identity_env, monkeypatch, capfd, catchup
     ):

@@ -18,12 +18,14 @@ import logging
 import platform
 import struct
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, List, Optional
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
+from .config import read_only_scope
 from .database import (
     db_connection,
     ensure_initialized,
@@ -189,14 +191,31 @@ def get_unembedded_memories(
         return UnembeddedResult(reason=UnembeddedResult.NO_EXTENSIONS)
 
     try:
+        # ON AN EXISTING STORE THIS IS A READ, AND IT MUST WRITE NOTHING. The
+        # integrity check runs only after this query finds work, so this
+        # query is what a corrupt store meets first: under the read-only
+        # scope `ensure_initialized` creates no vector table and runs no
+        # migration, and the first embedding's own connection creates the
+        # table (`embed_single_memory`). A store with no `memories` table yet
+        # is a first use, and is still initialised here as before.
         with db_connection() as conn:
-            ensure_initialized(conn)
+            has_schema = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+            ).fetchone() is not None
+            with read_only_scope() if has_schema else nullcontext():
+                ensure_initialized(conn)
 
             # Check if vec_memories table exists
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
             )
-            if cursor.fetchone() is None:
+            has_vector_table = cursor.fetchone() is not None
+            try:
+                import sqlite_vec
+            except ImportError:
+                sqlite_vec = None
+            if sqlite_vec is None and not has_vector_table:
+                # No table, and no extension to make one with.
                 logger.debug("vec_memories table doesn't exist, skipping")
                 return UnembeddedResult(
                     reason=UnembeddedResult.NO_VECTOR_TABLE
@@ -218,6 +237,15 @@ def get_unembedded_memories(
                     ON m.id = v.memory_id AND v.project_id IS m.project_id
                 WHERE v.memory_id IS NULL
             """
+            if has_vector_table:
+                # A vec0 virtual table: the read needs the extension that
+                # `_init_vector_table` loads on a writing connection.
+                if sqlite_vec is not None:
+                    conn.enable_load_extension(True)
+                    sqlite_vec.load(conn)
+            else:
+                # No vector table yet: every memory is unembedded.
+                query = "SELECT m.id FROM memories m WHERE 1"
             params: List[Any] = []
 
             if project_id is not None:
