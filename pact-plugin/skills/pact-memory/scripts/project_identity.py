@@ -180,13 +180,15 @@ def decline_record(
 
     `reason` must be one of `DECLINE_REASONS` (ValueError otherwise).
     `override_path` is the `<git-common-dir>/pact-project-id` file that would
-    remedy the decline, or None when no repository was found. It is ALWAYS
-    None for `gitfile_redirect` (ValueError otherwise): the common dir git
+    remedy the decline, or None when no override file can remedy it. It is
+    None for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and
+    `declaration_unresolved`.
+    A `gitfile_redirect` given a path raises ValueError: the common dir git
     reports there belongs to the repository the `.git` file points at, so a
     pin written to it would re-pin that other repository. The remedy is the
-    `.git` file itself. `source` is the
-    rung that declined; this module leaves it None, and the resolver in
-    memory_api, the only layer that knows the rung, fills it in.
+    `.git` file itself. `source` is the rung that declined; this module
+    leaves it None, and the resolver in memory_api, the only layer that
+    knows the rung, fills it in.
     """
     if reason not in DECLINE_REASONS:
         raise ValueError(f"unknown decline reason: {reason!r}")

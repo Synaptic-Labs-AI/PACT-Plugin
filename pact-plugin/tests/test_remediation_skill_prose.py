@@ -573,3 +573,88 @@ class TestUpdateCascadeQuarantineIsDocumented:
     def test_the_field_is_on_the_update_envelope(self):
         cli = (SCRIPTS / "cli.py").read_text(encoding="utf-8")
         assert '"last_cascade_skipped": memory.last_cascade_skipped' in cli
+
+
+class TestDocumentedNullOverrideCausesAreTheCodes:
+    """The documented null-`override_path` causes equal the ones the code builds.
+
+    The set is derived from every decline site in the code, not restated:
+    a site that builds a decline with no override path (or a literal None)
+    makes its reason a null-override cause. A new such cause therefore reds
+    this arm until SKILL.md names it.
+    """
+
+    CLAUSE_START = "or null when no override file can remedy the decline: that is the case for"
+
+    @staticmethod
+    def _code_null_override_causes() -> tuple:
+        import ast
+
+        null, nonnull, located = set(), set(), set()
+        for name in ("memory_api.py", "project_identity.py"):
+            tree = ast.parse((SCRIPTS / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = ast.unparse(node.func)
+                if func.endswith("decline_record"):
+                    reason_node = node.args[0] if node.args else None
+                    path_node = node.args[1] if len(node.args) > 1 else None
+                elif func == "_decline":
+                    reason_node = node.args[1] if len(node.args) > 1 else None
+                    path_node = next(
+                        (k.value for k in node.keywords if k.arg == "override_path"),
+                        None,
+                    )
+                else:
+                    continue
+                if not (
+                    isinstance(reason_node, ast.Constant)
+                    and isinstance(reason_node.value, str)
+                ):
+                    continue
+                reason = reason_node.value
+                located.add(reason)
+                is_null = path_node is None or (
+                    isinstance(path_node, ast.Constant) and path_node.value is None
+                )
+                (null if is_null else nonnull).add(reason)
+        # A cause with ANY site that names a path is not a null-override cause.
+        return null - nonnull, located
+
+    def _documented(self) -> set:
+        row = _table_row(SKILL, "project-id show")
+        start = row.index(self.CLAUSE_START) + len(self.CLAUSE_START)
+        end = row.index(".", start)
+        names = row[start:end].replace(" and ", ", ").split(",")
+        return {name.strip() for name in names if name.strip()}
+
+    def test_the_documented_set_is_the_code_set(self):
+        null, _ = self._code_null_override_causes()
+        assert self._documented() == null
+
+    DOC_LEAD = "It is None for "
+
+    def test_the_decline_record_docstring_lists_the_code_set(self):
+        from scripts.project_identity import decline_record
+
+        doc = _flatten(decline_record.__doc__ or "")
+        assert doc.count(self.DOC_LEAD) == 1, "the null-cause sentence must appear once"
+        start = doc.index(self.DOC_LEAD) + len(self.DOC_LEAD)
+        listed = doc[start:doc.index(".", start)]
+        names = {n.strip() for n in listed.replace(" and ", ", ").split(",") if n.strip()}
+        null, _ = self._code_null_override_causes()
+        assert names == null
+        assert "when no repository was found" not in doc
+
+    def test_every_decline_reason_has_a_literal_site(self):
+        from scripts.project_identity import DECLINE_REASONS
+
+        _, located = self._code_null_override_causes()
+        assert located == set(DECLINE_REASONS)
+
+    def test_a_redirect_decline_can_never_carry_a_path(self):
+        from scripts.project_identity import decline_record
+
+        with pytest.raises(ValueError):
+            decline_record("gitfile_redirect", "/r/.git/pact-project-id")
