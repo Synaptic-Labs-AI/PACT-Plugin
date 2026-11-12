@@ -436,6 +436,34 @@ class TestHashCheckedInstall:
         assert "not the CI one" in text
         assert "-c constraints-ci.txt" not in text
 
+    def test_the_environment_check_remedy_is_the_local_install(self):
+        """The verifier's MISSING remedy is printed wherever it runs, CI or a
+        developer's machine, so it names the install that works on both."""
+        root = ci_contract.require_root("the environment check remedy")
+        text = (root / "scripts" / "verify_ci_environment.py").read_text(encoding="utf-8")
+        printed = re.findall(r"install the pinned set: (python[^\"]*)\"", text)
+        assert printed == [_LOCAL_LOCK_INSTALL], printed
+
+    def test_the_tripwire_names_the_ci_install(self):
+        """test_memory_init's tripwire tells a workflow author which install to
+        use, so its canonical line is the CI one."""
+        root = ci_contract.require_root("the tripwire's canonical install")
+        tree = ast.parse((root / "pact-plugin" / "tests" / "test_memory_init.py")
+                         .read_text(encoding="utf-8"))
+        values = [ast.literal_eval(node.value) for node in ast.walk(tree)
+                  if isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and getattr(node.targets[0], "id", "") == "_CANONICAL_INSTALL_LINE"]
+        assert values == [_CI_LOCK_INSTALL], values
+
+    def test_the_lock_input_documents_the_ci_install(self):
+        root = ci_contract.require_root("the lock input header")
+        header = " ".join(
+            line.lstrip("#").strip() for line in
+            (root / "constraints-ci.in").read_text(encoding="utf-8").splitlines()
+            if line.startswith("#"))
+        assert f"`{_CI_LOCK_INSTALL}`" in header, (
+            "constraints-ci.in no longer documents CI's install line verbatim")
+
 
 class TestWorkflowHardening:
     """Minimal permissions and no pull_request_target.

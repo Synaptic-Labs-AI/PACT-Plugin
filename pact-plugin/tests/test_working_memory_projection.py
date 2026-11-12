@@ -280,7 +280,8 @@ def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
     #
     # The helper wins over the caller's env deliberately: this is an isolation
     # guarantee rather than a preference, and no caller here sets either key.
-    env = {**env, **hf_cache_env()}
+    # HOME is read from the caller's env, so a caller that dropped it fails here.
+    env = {**env, **hf_cache_env(), "HOME": env["HOME"]}
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
         # 30s rather than 180s: the long budget absorbed a first-run model

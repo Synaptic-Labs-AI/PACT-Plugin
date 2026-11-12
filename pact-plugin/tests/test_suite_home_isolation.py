@@ -11,6 +11,7 @@ import os
 import pwd
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,8 @@ _HOME_AT_COLLECTION = os.environ.get("HOME", "")
 _CHILD = (
     "import os, pathlib\n"
     "from shared.paths import get_claude_config_dir\n"
-    "print(os.environ.get('CLAUDE_CONFIG_DIR'))\n"
+    "config_dir = os.environ.get('CLAUDE_CONFIG_DIR')\n"
+    "print(config_dir)\n"
     "print(pathlib.Path.home())\n"
     "print(get_claude_config_dir())\n"
 )
@@ -89,31 +91,78 @@ def test_the_embedding_cache_is_not_moved_into_the_sandbox_home():
     assert cache != sandbox and sandbox not in cache.parents, (cache, sandbox)
 
 
-def _env_lacks_home(node: ast.expr) -> bool:
-    """Whether an `env=` value is a dict built here without HOME, which leaves the
-    child to find its home through the password database: the real one."""
-    while isinstance(node, ast.Call) and getattr(node.func, "id", "") == "carry_clock_shift":
-        node = node.args[0]
-    if isinstance(node, ast.Dict):
-        keys = [k.value if isinstance(k, ast.Constant) else None for k in node.keys]
-        return None not in keys and "HOME" not in keys
-    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "dict" and not node.args:
-        keys = [k.arg for k in node.keywords]
-        return None not in keys and "HOME" not in keys
-    return False
+HAS, LACKS, UNKNOWN = "has", "lacks", "unknown"
+_ENVIRON = frozenset({"os.environ", "dict(os.environ)", "os.environ.copy()"})
 
 
-@pytest.mark.parametrize("relative", [
-    "tests/zzprobe.py", "skills/zzprobe/test_zzprobe.py",
-], ids=["tests", "skills"])
-def test_untracked_test_file_cannot_join_the_home_scan(
-        tmp_path, monkeypatch, relative):
-    """Both populations read the index; an untracked test file is invisible.
+def _home_verdict(node: ast.expr, built: dict, seen: frozenset = frozenset()) -> str:
+    """Whether an `env=` value carries HOME, as far as this scope shows.
 
-    Reverting ``_test_source_files`` to the two filesystem globs keeps the
-    shipped tree green; this arm drives the HOME scan and reddens naming the
-    untracked file. The seeded tracked files are the positive control.
+    A child env without HOME finds its home through the password database: the
+    real one. HAS: os.environ or a copy of it (the conftest's sandbox HOME
+    rides along), `env=None` (inherit), or an explicit HOME key. LACKS: a dict
+    built here with no HOME key whose spreads, if any, carry no HOME either; a
+    spread of anything not shown to carry HOME counts as lacking it. A name is
+    resolved through every value this scope assigns to it.
+
+    UNKNOWN, and therefore passed, because judging it needs another function or
+    a run: a helper call (`_env(root)`, `world.env()`), a name the scope does
+    not bind (a parameter or a global), an attribute or subscript (`w.env`,
+    `calls[0][1]["env"]`), and a comprehension over `os.environ.items()`, whose
+    filter could drop HOME only by evaluating its condition.
     """
+    while isinstance(node, ast.Call) and getattr(node.func, "id", "") == "carry_clock_shift" \
+            and node.args:
+        node = node.args[0]
+    if isinstance(node, ast.Constant) and node.value is None:
+        return HAS
+    if ast.unparse(node) in _ENVIRON:
+        return HAS
+    if isinstance(node, ast.Name):
+        if node.id in seen or node.id not in built:
+            return UNKNOWN
+        verdicts = {_home_verdict(v, built, seen | {node.id}) for v in built[node.id]}
+        return verdicts.pop() if len(verdicts) == 1 else UNKNOWN
+    if isinstance(node, ast.Dict):
+        keys = [k.value if isinstance(k, ast.Constant) else k for k in node.keys]
+        if "HOME" in keys:
+            return HAS
+        if any(k is not None and not isinstance(k, str) for k in keys):
+            return UNKNOWN
+        spreads = [v for k, v in zip(node.keys, node.values) if k is None]
+        return HAS if any(_home_verdict(s, built, seen) == HAS for s in spreads) else LACKS
+    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "dict":
+        if any(k.arg == "HOME" for k in node.keywords):
+            return HAS
+        parts = [*node.args[:1], *(k.value for k in node.keywords if k.arg is None)]
+        verdicts = [_home_verdict(part, built, seen) for part in parts]
+        if HAS in verdicts:
+            return HAS
+        return UNKNOWN if UNKNOWN in verdicts and node.args else LACKS
+    return UNKNOWN
+
+
+def _home_removed(scope: ast.AST) -> set:
+    """Names this scope strips HOME from: `env.pop("HOME", ...)` or `del env["HOME"]`."""
+    removed = set()
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "pop" and isinstance(node.func.value, ast.Name) \
+                and node.args and isinstance(node.args[0], ast.Constant) \
+                and node.args[0].value == "HOME":
+            removed.add(node.func.value.id)
+        if isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) \
+                        and isinstance(target.slice, ast.Constant) \
+                        and target.slice.value == "HOME":
+                    removed.add(target.value.id)
+    return removed
+
+
+def _seeded_rig(tmp_path, monkeypatch, extra=None):
+    """A git-indexed plugin tree with 102 clean test sources, plus `extra`
+    ({relative path: source}) tracked beside them; the scan reads it."""
     repo = tmp_path / "repo"
     plugin = repo / "pact-plugin"
     tests_dir = plugin / "tests"
@@ -128,9 +177,26 @@ def test_untracked_test_file_cannot_join_the_home_scan(
     known = plugin / "skills/pact-handoff-harvest/test_skill_loading_harvest.py"
     known.parent.mkdir(parents=True)
     known.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    for relative, source in (extra or {}).items():
+        (plugin / relative).write_text(source, encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     monkeypatch.setitem(globals(), "_PLUGIN", plugin)
+    return plugin
+
+
+@pytest.mark.parametrize("relative", [
+    "tests/zzprobe.py", "skills/zzprobe/test_zzprobe.py",
+], ids=["tests", "skills"])
+def test_untracked_test_file_cannot_join_the_home_scan(
+        tmp_path, monkeypatch, relative):
+    """Both populations read the index; an untracked test file is invisible.
+
+    Reverting ``_test_source_files`` to the two filesystem globs keeps the
+    shipped tree green; this arm drives the HOME scan and reddens naming the
+    untracked file. The seeded tracked files are the positive control.
+    """
+    plugin = _seeded_rig(tmp_path, monkeypatch)
 
     assert len(_test_source_files()) == 102, (
         f"positive control: expected the 102 seeded sources, got "
@@ -147,6 +213,9 @@ def test_untracked_test_file_cannot_join_the_home_scan(
 
 
 def test_no_child_environment_built_in_a_test_leaves_out_home():
+    """Every `env=` a test passes to a subprocess runner carries HOME, or strips
+    none. What is judged, and which shapes are passed unjudged and why, is in
+    _home_verdict's docstring."""
     runners = {"run", "Popen", "check_output", "check_call", "call"}
     files = _test_source_files()
     misses = []
@@ -161,6 +230,7 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
                 if isinstance(node, ast.Assign) and len(node.targets) == 1 \
                         and isinstance(node.targets[0], ast.Name):
                     built.setdefault(node.targets[0].id, []).append(node.value)
+            removed = _home_removed(scope)
             for node in ast.walk(scope):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr in runners):
@@ -168,9 +238,94 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
                 for kw in node.keywords:
                     if kw.arg != "env":
                         continue
-                    value = kw.value
-                    sources = built.get(value.id, []) if isinstance(value, ast.Name) else [value]
-                    if sources and all(_env_lacks_home(v) for v in sources):
+                    value = target = kw.value
+                    while isinstance(target, ast.Call) and target.args \
+                            and getattr(target.func, "id", "") == "carry_clock_shift":
+                        target = target.args[0]
+                    stripped = isinstance(target, ast.Name) and target.id in removed
+                    if stripped or _home_verdict(value, built) == LACKS:
                         misses.append(f"{path.relative_to(_PLUGIN)}:{node.lineno}")
     assert len(files) > 100, files
     assert not sorted(set(misses)), sorted(set(misses))
+
+
+def _verdict(source: str, scope_source: str = "") -> str:
+    """The verdict for one env expression, inside a function whose body is
+    `scope_source` (assignments the scanner resolves names through)."""
+    module = ast.parse(f"def probe(param):\n{textwrap.indent(scope_source or 'pass', '    ')}\n"
+                       f"    subprocess.run([], env={source})\n")
+    scope = module.body[0]
+    built: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            built.setdefault(node.targets[0].id, []).append(node.value)
+    call = next(n for n in ast.walk(scope) if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", "") == "run")
+    value = next(k.value for k in call.keywords if k.arg == "env")
+    target = value
+    while isinstance(target, ast.Call) and target.args \
+            and getattr(target.func, "id", "") == "carry_clock_shift":
+        target = target.args[0]
+    if isinstance(target, ast.Name) and target.id in _home_removed(scope):
+        return LACKS
+    return _home_verdict(value, built)
+
+
+@pytest.mark.parametrize("source, scope_source, verdict", [
+    # The os.environ allowance: a spread or copy of it carries the sandbox HOME.
+    ("{**os.environ}", "", HAS),
+    ("{**os.environ, 'X': '1'}", "", HAS),
+    ("{**dict(os.environ), 'X': '1'}", "", HAS),
+    ("{**os.environ.copy()}", "", HAS),
+    ("{**base, 'X': '1'}", "base = os.environ.copy()", HAS),
+    ("dict(os.environ, X='1')", "", HAS),
+    ("os.environ.copy()", "", HAS),
+    ("None", "", HAS),
+    # An explicit HOME key wins over any spread.
+    ("{**param, 'HOME': '/sandbox'}", "", HAS),
+    ("dict(param, HOME='/sandbox')", "", HAS),
+    # A spread of anything not shown to carry HOME, with no HOME key, lacks it.
+    ("{**param}", "", LACKS),
+    ("{**param, 'X': '1'}", "", LACKS),
+    ("{**helper(), 'X': '1'}", "", LACKS),
+    ("{**base}", "base = {'PATH': '/bin'}", LACKS),
+    ("{'X': '1'}", "", LACKS),
+    ("dict(X='1')", "", LACKS),
+    ("dict(base, X='1')", "base = {'PATH': '/bin'}", LACKS),
+    # Names resolve through this scope, including through carry_clock_shift.
+    ("carry_clock_shift(env)", "env = {'PATH': '/bin'}", LACKS),
+    ("carry_clock_shift(env)", "env = {'HOME': '/h'}", HAS),
+    ("env", "env = carry_clock_shift(base)\nbase = {'PATH': '/bin'}", LACKS),
+    # HOME stripped from a name after it is built.
+    ("env", "env = dict(os.environ)\nenv.pop('HOME', None)", LACKS),
+    ("env", "env = dict(os.environ)\ndel env['HOME']", LACKS),
+    ("carry_clock_shift(env)", "env = dict(os.environ)\nenv.pop('HOME')", LACKS),
+    # Not judgeable from this scope: passed.
+    ("helper()", "", UNKNOWN),
+    ("param", "", UNKNOWN),
+    ("dict(param, X='1')", "", UNKNOWN),
+    ("w.env", "", UNKNOWN),
+    ("{k: v for k, v in os.environ.items() if k != 'X'}", "", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nenv = helper()", UNKNOWN),
+    ("env", "env = env", UNKNOWN),
+])
+def test_the_scanner_judges_each_env_shape(source, scope_source, verdict):
+    assert _verdict(source, scope_source) == verdict
+
+
+@pytest.mark.parametrize("probe, flagged", [
+    ("def test_child(base):\n    subprocess.run(['true'], env={**base, 'X': '1'})\n", True),
+    ("def test_child():\n    env = {**os.environ, 'X': '1'}\n"
+     "    subprocess.run(['true'], env=env)\n", False),
+], ids=["spread-without-home", "environ-spread"])
+def test_the_scan_flags_a_spread_env_without_home(tmp_path, monkeypatch, probe, flagged):
+    """Through the whole scan: a tracked test whose child env spreads something
+    that carries no HOME is named; one spreading os.environ is not."""
+    _seeded_rig(tmp_path, monkeypatch, {
+        "tests/test_zzspread.py": "import os\nimport subprocess\n\n\n" + probe})
+    if flagged:
+        with pytest.raises(AssertionError, match=r"tests/test_zzspread\.py:6"):
+            test_no_child_environment_built_in_a_test_leaves_out_home()
+    else:
+        test_no_child_environment_built_in_a_test_leaves_out_home()
