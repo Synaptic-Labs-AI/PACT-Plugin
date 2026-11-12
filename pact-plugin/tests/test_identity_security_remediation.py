@@ -93,14 +93,25 @@ class TestSchemeLessColonUserinfo:
             "gitlab-ci-token:abc@gitlab.com/g/p"
         ) == (DECLINE, None)
 
-    def test_the_ruled_narrowing_is_unchanged(self):
-        """Catches a wider rule that would decline a user-less `host:path` or
-        a Windows drive path."""
+    def test_a_user_less_host_path_follows_gits_scp_rule(self, monkeypatch):
+        """Catches a rule narrower than git's: git treats any `host:path` with
+        no `/` before the first `:` as an ssh remote, user or not, and a drive
+        prefix exists only on Windows."""
         assert pi.classify_remote_origin("github.com:owner/repo") == (
-            NO_PORTABLE_ORIGIN, None
+            CANONICAL, "github.com/owner/repo"
         )
+        # POSIX: a one-letter host is an ssh host (an ssh_config alias), as
+        # it is to git.
+        assert pi.classify_remote_origin("C:/repo") == (CANONICAL, "c/repo")
+        # A backslash is refused in every spelling, and a network-shaped
+        # value that cannot be represented declines.
+        assert pi.classify_remote_origin("C:\\repo") == (DECLINE, None)
+        monkeypatch.setattr(pi.os, "name", "nt")
         assert pi.classify_remote_origin("C:/repo") == (NO_PORTABLE_ORIGIN, None)
         assert pi.classify_remote_origin("C:\\repo") == (NO_PORTABLE_ORIGIN, None)
+        assert pi.classify_remote_origin("github.com:owner/repo") == (
+            CANONICAL, "github.com/owner/repo"
+        )
 
     def test_a_local_path_containing_at_is_still_local(self):
         assert pi.classify_remote_origin("/srv/mirrors/team@repo.git") == (

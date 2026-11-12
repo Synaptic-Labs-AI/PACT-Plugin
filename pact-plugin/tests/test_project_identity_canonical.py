@@ -171,7 +171,6 @@ class TestClassifierOutcomes:
         [
             "/abs/path/to/repo",
             "../relative/repo",
-            "C:\\work\\repo",
             "file:///srv/git/repo.git",
         ],
     )
@@ -183,22 +182,26 @@ class TestClassifierOutcomes:
         """
         assert pi.classify_remote_origin(url) == (NO_PORTABLE, None)
 
-    def test_a_user_less_scp_form_is_no_portable_origin(self):
-        """S1: a DOCUMENTED NARROWING, not an accident.
+    def test_a_windows_drive_path_is_no_portable_origin_on_windows(self, monkeypatch):
+        """git reads `C:\\work\\repo` as a drive path only on Windows."""
+        monkeypatch.setattr(pi.os, "name", "nt")
+        assert pi.classify_remote_origin("C:\\work\\repo") == (NO_PORTABLE, None)
 
-        `github.com:owner/repo` has no userinfo, so it is lexically
-        indistinguishable from a Windows drive path (`C:work\\repo`): both
-        are `<single-token>:<rest>`. The classifier resolves the ambiguity
-        toward a LOCAL PATH, so this spelling falls back to the basename.
-        Git itself treats a slash-containing `host:path` as scp, so the same
-        repository cloned in this spelling and in HTTPS can split by clone
-        form; the narrowing is accepted and pinned here rather than silently
-        changing. The drive-letter reading is the reason a user-less scp
-        cannot be accepted without a Windows-only misclassification.
-        """
+    def test_a_drive_shaped_value_with_a_backslash_declines_on_posix(self, monkeypatch):
+        """Elsewhere git connects to host `C`, so the value is a network
+        remote, and its backslash makes it unrepresentable."""
+        monkeypatch.setattr(pi.os, "name", "posix")
+        assert pi.classify_remote_origin("C:\\work\\repo") == (DECLINE, None)
+
+    def test_a_user_less_scp_form_canonicalises(self):
+        """git reads `host:path` as scp when no `/` precedes the first `:`,
+        with or without a user, so both spellings are one repository."""
         assert pi.classify_remote_origin("github.com:owner/repo") == (
-            NO_PORTABLE,
-            None,
+            CANONICAL,
+            "github.com/owner/repo",
+        )
+        assert pi.classify_remote_origin("github.com:owner/repo") == (
+            pi.classify_remote_origin("git@github.com:owner/repo")
         )
 
     def test_an_unsupported_network_scheme_declines(self):

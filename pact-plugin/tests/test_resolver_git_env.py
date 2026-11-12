@@ -167,14 +167,6 @@ def _git_calls(function: ast.FunctionDef):
         and node.value.elts[0].value == "git"
         for target in node.targets if isinstance(target, ast.Name)
     }
-    # A name the function assigned straight from `git_env_without_location()`
-    # (and may then narrow further, as the origin reader drops GIT_CONFIG).
-    env_names = {
-        target.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Assign) and _is_location_free_env_call(node.value)
-        for target in node.targets if isinstance(target, ast.Name)
-    }
     for node in ast.walk(function):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "run" and isinstance(node.func.value, ast.Name)
@@ -189,8 +181,7 @@ def _git_calls(function: ast.FunctionDef):
             continue
         passes = any(
             kw.arg == "env" and (
-                _is_location_free_env_call(kw.value)
-                or (isinstance(kw.value, ast.Name) and kw.value.id in env_names)
+                _is_location_free_env_call(kw.value) or _is_key_filter_of_it(kw.value)
             )
             for kw in node.keywords
         )
@@ -201,6 +192,41 @@ def _is_location_free_env_call(node) -> bool:
     return (
         isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         and node.func.id == "git_env_without_location"
+    )
+
+
+def _is_key_filter_of_it(node) -> bool:
+    """`{k: v for k, v in git_env_without_location().items() if k != "X"}`.
+
+    Checked INLINE and by shape only: a pure key filter can drop variables
+    but cannot add one back. A NAME is never accepted, because the scan
+    cannot follow what happens to a variable between its assignment and the
+    call (an `.update(os.environ)` would restore GIT_DIR).
+    """
+    if not (isinstance(node, ast.DictComp) and len(node.generators) == 1):
+        return False
+    generator = node.generators[0]
+    target, source = generator.target, generator.iter
+    if not (
+        isinstance(target, ast.Tuple) and len(target.elts) == 2
+        and all(isinstance(element, ast.Name) for element in target.elts)
+        and isinstance(source, ast.Call) and not source.args
+        and isinstance(source.func, ast.Attribute) and source.func.attr == "items"
+        and _is_location_free_env_call(source.func.value)
+    ):
+        return False
+    key, value = (element.id for element in target.elts)
+    if not (
+        isinstance(node.key, ast.Name) and node.key.id == key
+        and isinstance(node.value, ast.Name) and node.value.id == value
+    ):
+        return False
+    return all(
+        isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
+        and test.left.id == key and len(test.ops) == 1
+        and isinstance(test.ops[0], (ast.NotEq, ast.NotIn))
+        and isinstance(test.comparators[0], (ast.Constant, ast.Tuple, ast.Set))
+        for test in generator.ifs
     )
 
 
@@ -233,10 +259,56 @@ def test_the_scan_sees_both_argv_forms_and_a_missing_env():
             command += ["rev-parse"]
             subprocess.run(command)
             subprocess.run(["ls"])
-            env = git_env_without_location()
-            subprocess.run(["git", "config"], env=env)
-            other = dict(os.environ)
-            subprocess.run(["git", "config"], env=other)
     """)
     calls = list(_git_calls(_function(source, "resolver")))
-    assert [passes for _call, passes in calls] == [True, False, True, False]
+    assert [passes for _call, passes in calls] == [True, False]
+
+
+def test_the_scan_accepts_only_an_inline_key_filter_of_the_location_free_env():
+    """Live control: what the scan accepts besides the bare helper call.
+
+    Only an inline comprehension that FILTERS keys out of
+    `git_env_without_location()` passes. Every name-based form is refused,
+    including one assigned from the helper, because a later `.update` or a
+    rebinding would put GIT_DIR back without the scan seeing it."""
+    source = textwrap.dedent("""
+        def resolver():
+            subprocess.run(["git", "a"], env={
+                key: value for key, value in git_env_without_location().items()
+                if key != "GIT_CONFIG"})
+            subprocess.run(["git", "b"], env={
+                k: v for k, v in git_env_without_location().items()})
+            env = git_env_without_location()
+            subprocess.run(["git", "c"], env=env)
+            env = git_env_without_location()
+            env.update(os.environ)
+            subprocess.run(["git", "d"], env=env)
+            env = git_env_without_location()
+            env = dict(os.environ)
+            subprocess.run(["git", "e"], env=env)
+            subprocess.run(["git", "f"], env={
+                k: v for k, v in os.environ.items() if k != "GIT_CONFIG"})
+            subprocess.run(["git", "g"], env={
+                k: "x" for k, v in git_env_without_location().items()})
+            subprocess.run(["git", "h"], env={
+                k: v for k, v in git_env_without_location().items() if v})
+            subprocess.run(["git", "i"], env={
+                **git_env_without_location(), "GIT_DIR": "/x"})
+            subprocess.run(["git", "j"], env={
+                k: v for k, v in git_env_without_location().items()
+                for _ in range(1)})
+    """)
+    calls = list(_git_calls(_function(source, "resolver")))
+    verdicts = {call.args[0].elts[1].value: passes for call, passes in calls}
+    assert verdicts == {
+        "a": True,   # filter out one key
+        "b": True,   # no filter at all: a copy of the location-free env
+        "c": False,  # a name, even one assigned from the helper
+        "d": False,  # a name widened by .update after the helper
+        "e": False,  # a name rebound after the helper
+        "f": False,  # a filter over os.environ, not the helper
+        "g": False,  # values rewritten
+        "h": False,  # a filter on the value, not the key
+        "i": False,  # a dict display adding a variable
+        "j": False,  # a second generator
+    }

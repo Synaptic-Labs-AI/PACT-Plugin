@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fixtures.identity_git import assert_outside_repository, make_repo, run_git
+import pytest
+from fixtures.identity_git import (
+    assert_outside_repository,
+    common_dir,
+    make_repo,
+    run_git,
+)
 
 from scripts import project_identity as pi
 
@@ -143,3 +149,76 @@ class TestMachineLocalConfigIsNotAnIdentityInput:
                 "git@worktree.example:o/w.git", cwd=repo)
 
         assert pi.read_origin(repo).state == pi.ORIGIN_ABSENT
+
+
+class TestAUserLessScpRemoteFollowsGitsRule:
+    """git reads a value as scp syntax when it contains `:` and no `/`
+    precedes the first `:`; the user is optional. Only on Windows is a single
+    letter followed by `:` a drive path instead (git's `has_dos_drive_prefix`)."""
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("github.com:owner/repo.git", "github.com/owner/repo"),
+            ("ab:foo", "ab/foo"),
+            ("c:foo", "c/foo"),
+            ("C:repos/x", "c/repos/x"),
+        ],
+    )
+    def test_a_user_less_host_path_canonicalises_on_posix(self, url, expected, monkeypatch):
+        monkeypatch.setattr(pi.os, "name", "posix")
+        assert pi.classify_remote_origin(url) == (CANONICAL, expected)
+
+    @pytest.mark.parametrize("url", ["C:/repos/x", "c:foo", "C:\\work\\repo"])
+    def test_a_drive_letter_is_a_local_path_on_windows(self, url, monkeypatch):
+        monkeypatch.setattr(pi.os, "name", "nt")
+        assert pi.classify_remote_origin(url) == (NO_PORTABLE, None)
+
+    def test_a_two_letter_host_is_not_a_drive_on_windows(self, monkeypatch):
+        monkeypatch.setattr(pi.os, "name", "nt")
+        assert pi.classify_remote_origin("ab:foo") == (CANONICAL, "ab/foo")
+
+    def test_a_drive_letter_with_a_user_is_an_scp_host_on_windows(self, monkeypatch):
+        monkeypatch.setattr(pi.os, "name", "nt")
+        assert pi.classify_remote_origin("git@c:foo") == (CANONICAL, "c/foo")
+
+    @pytest.mark.parametrize("url", ["github.com:", "git@github.com:"])
+    def test_an_empty_scp_path_declines(self, url):
+        assert pi.classify_remote_origin(url) == (DECLINE, None)
+
+    @pytest.mark.parametrize("url", ["x/y:z", "./a:b", "/abs/p:q"])
+    def test_a_slash_before_the_colon_is_a_local_path(self, url):
+        assert pi.classify_remote_origin(url) == (NO_PORTABLE, None)
+
+
+class TestAControlCharacterInTheOriginDeclines:
+    """A value still holding a control character after its one terminator is
+    dropped is a present remote that cannot be represented; falling back to
+    the folder name would silently mis-scope it."""
+
+    def test_a_newline_between_two_remotes_declines(self):
+        url = "git@a.example:o/a.git\ngit@evil.example:x/y\n"
+        assert pi.classify_remote_origin(url) == (DECLINE, None)
+
+    def test_the_newline_value_read_from_git_declines(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo")
+        with open(repo / ".git" / "config", "a", encoding="utf-8") as handle:
+            handle.write(
+                '[remote "origin"]\n'
+                '\turl = "git@a.example:o/a.git\\ngit@evil.example:x/y"\n'
+            )
+        assert pi.detect_id_for_root(repo, common_dir(repo)).project_id is None
+
+    @pytest.mark.parametrize(
+        "url",
+        ["/srv/repo\nother", "../rel\tpath", "/srv/re\x7fpo", "/srv/re\x00po"],
+    )
+    def test_a_control_character_in_a_local_path_also_declines(self, url):
+        """Documented: the value is not a path any repository uses, so it is
+        refused visibly rather than read as a folder name."""
+        assert pi.classify_remote_origin(url) == (DECLINE, None)
+
+    def test_one_trailing_terminator_is_still_tolerated(self):
+        assert pi.classify_remote_origin("https://host/o/r\n") == (CANONICAL, "host/o/r")
+        assert pi.classify_remote_origin("/srv/repo\n") == (NO_PORTABLE, None)

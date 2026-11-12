@@ -62,12 +62,16 @@ _DEFAULT_PORTS = {
 # silently treated as a local path.
 _SCHEME_PREFIX_RE = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
 
-# scp-style `user@host:path`. The user is REQUIRED and non-empty, matching
-# `backlog.py`'s regex; a bare `host:path` is a Windows drive-letter form, not
-# scp, and is deliberately not parsed here. The colon is the PATH SEPARATOR in
-# this form and is never a port, so `git@host:2222/owner/repo` has path
-# `2222/owner/repo`.
-_SCP_FORM_RE = re.compile(r"^[^@\s/:\\]+@(?P<host>[^:/\s\\]+):(?P<path>.+)$")
+# scp-style `[user@]host:path`, by GIT'S OWN RULE: a value is scp syntax when
+# it contains `:` and no `/` precedes the first `:`. The user is optional, so
+# `github.com:owner/repo` is the same remote as `git@github.com:owner/repo`.
+# The colon is the PATH SEPARATOR in this form and is never a port, so
+# `git@host:2222/owner/repo` has path `2222/owner/repo`. An empty path
+# (`host:`) still matches, so it classifies as a network remote and DECLINES.
+# The one exception, a Windows drive path, is applied by `_scp_match`.
+_SCP_FORM_RE = re.compile(
+    r"^(?P<user>[^@\s/:\\]+@)?(?P<host>[^@:/\s\\]+):(?P<path>.*)$"
+)
 
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-")
 _PATH_BANNED_CHARS = frozenset("@?#%")
@@ -322,6 +326,35 @@ def _strip_one_terminator(url: str) -> str:
     return url
 
 
+def _scp_match(value: str) -> Optional["re.Match[str]"]:
+    """The scp-form match for `value`, or None when git would not read it so.
+
+    On Windows only, a user-less single ASCII letter before the `:` is a
+    drive path (`C:/repos/x`, `c:foo`), exactly as git's
+    `has_dos_drive_prefix`, which is non-zero only there. On every other
+    platform git connects to a one-letter host (typically an ssh_config
+    alias), so it is a network remote here too.
+    """
+    match = _SCP_FORM_RE.match(value)
+    if match is None:
+        return None
+    host = match.group("host")
+    if (
+        os.name == "nt"
+        and match.group("user") is None
+        and len(host) == 1
+        and host.isascii()
+        and host.isalpha()
+    ):
+        return None
+    return match
+
+
+def _has_control_character(value: str) -> bool:
+    """Whether `value` holds a C0 control character or DEL."""
+    return any(char < "\x20" or char == "\x7f" for char in value)
+
+
 def normalize_remote_url(url: object) -> Optional[str]:
     """Return the canonical `host[:port]/<path>` id for a remote URL.
 
@@ -391,7 +424,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             else f"{host}/{'/'.join(segments)}"
         )
     else:
-        scp_match = _SCP_FORM_RE.match(value)
+        scp_match = _scp_match(value)
         if scp_match is None:
             # Neither a URL nor scp syntax: indistinguishable from a relative
             # local path, which is NO PORTABLE ORIGIN.
@@ -449,25 +482,32 @@ def _is_network_shaped(url: object) -> bool:
     A scheme-less value whose PRE-SLASH prefix holds BOTH `@` and `:` is
     ALSO network-shaped. git's own scp heuristic reads the first `:` as the
     host/path separator, so `deploy-token:<token>@host/owner/repo` names a
-    network host to git even though our stricter scp form rejects it (its
-    user class excludes `:`). Downgrading that to a folder basename is the
-    silent mis-scope this change exists to remove, so it DECLINES and names
-    the override remedy instead. A user-less `host:path` and a drive path
-    keep the ruled no-portable-origin narrowing.
+    network host to git. Downgrading that to a folder basename is the silent
+    mis-scope this change exists to remove, so it DECLINES and names the
+    override remedy instead. Only a Windows drive path (see `_scp_match`)
+    and a value with a `/` before its first `:` are local.
+
+    A value that still holds a control character once its one terminator is
+    dropped is network-shaped too, whatever else it looks like: no
+    repository uses such a path, and `git@a:o/a\\ngit@b:x/y` must not reach
+    the basename because the scp form cannot match across the newline.
     """
     if not isinstance(url, str):
         return False
+    value = _strip_one_terminator(url)
+    if _has_control_character(value):
+        return True
     # A leading BOM or leading WHITESPACE is a present network remote that
     # cannot be represented. Both are stripped for CLASSIFICATION only: the
     # canonicaliser refuses the value outright, so this decides
     # decline-versus-basename, never acceptance.
-    value = _strip_one_terminator(url).lstrip("\ufeff").lstrip()
+    value = value.lstrip("\ufeff").lstrip()
     if "\\" in value or value.count("@") > 1:
-        return "://" in value or _SCP_FORM_RE.match(value) is not None
+        return "://" in value or _scp_match(value) is not None
     scheme_match = _SCHEME_PREFIX_RE.match(value)
     if scheme_match is not None:
         return scheme_match.group("scheme").lower() not in _LOCAL_SCHEMES
-    if _SCP_FORM_RE.match(value) is not None:
+    if _scp_match(value) is not None:
         return True
     first_slash = value.find("/")
     prefix = value if first_slash == -1 else value[:first_slash]
@@ -544,8 +584,6 @@ def read_origin(root: Path) -> OriginRead:
     """
     from shared.project_scope import git_env_without_location
 
-    env = git_env_without_location()
-    env.pop("GIT_CONFIG", None)
     try:
         result = subprocess.run(
             [
@@ -555,7 +593,13 @@ def read_origin(root: Path) -> OriginRead:
             capture_output=True,
             text=False,
             timeout=5,
-            env=env,
+            # Inline, so the resolver git-env guard can check the shape: a
+            # pure key filter over the location-free environment.
+            env={
+                key: value
+                for key, value in git_env_without_location().items()
+                if key != "GIT_CONFIG"
+            },
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return OriginRead(ORIGIN_UNAVAILABLE, None)
