@@ -325,13 +325,13 @@ class TestRunnableRekeyCommand:
 
         hostile = "Legacy; echo PWNED"
         words = shlex.split(pi_module_render(hostile))
-        assert words[-1] == hostile
+        assert f"--from={hostile}" in words, words
 
 
 def pi_module_render(project_id, db_path=None):
     from scripts.memory_api import render_rekey_command
 
-    return render_rekey_command(project_id, db_path=db_path)
+    return render_rekey_command(project_id, "host/owner/repo", db_path=db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1215,9 +1215,10 @@ class TestTheRenderedCommandExecutes:
         cli = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts" / "cli.py"
         store = tmp_path / "store" / "memory.db"
         store.parent.mkdir()
-        # The operator runs the remedy from the repository, so the canonical
-        # target resolves by detection and the command needs no --to.
-        checkout = _repo(tmp_path / "checkout", "https://github.com/owner/target")
+        # The checkout's folder name IS the legacy bucket, so the bucket is
+        # this checkout's own candidate and the census renders its command,
+        # which names the canonical target explicitly.
+        checkout = _repo(tmp_path / "Legacy-Bucket", "https://github.com/owner/target")
         env = dict(
             os.environ,
             PACT_TEST_MEMORY_DIR=str(store.parent),
@@ -1234,7 +1235,9 @@ class TestTheRenderedCommandExecutes:
             capture_output=True, text=True, env=env, cwd=str(tmp_path),
         )
         assert show.returncode == 0, show.stderr
-        rendered = json.loads(show.stdout)["result"]["candidates"][0]["rekey"]
+        rows = json.loads(show.stdout)["result"]["candidates"]
+        rendered = next(row["rekey"] for row in rows if row["id"] == "Legacy-Bucket")
+        assert "--to=github.com/owner/target" in rendered, rendered
 
         run = subprocess.run(
             rendered, shell=True, capture_output=True, text=True,

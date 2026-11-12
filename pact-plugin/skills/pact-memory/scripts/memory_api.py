@@ -310,7 +310,12 @@ def _legacy_session_evidence(conn: Any, candidate: str, gate_roots: list) -> boo
 def _warn_legacy_excluded(
     store: str, candidate: str, memories: int, file_paths: int, repo_root: Any
 ) -> None:
-    """Disclose an EXCLUDED legacy bucket, once per process per bucket."""
+    """Disclose an EXCLUDED legacy bucket, once per process per bucket.
+
+    NO COMMAND IS RENDERED. The gate excluded it because its absolute rows lie
+    outside this repository, so they belong to the repository their paths
+    name; a printed move into THIS id would file another checkout's rows here.
+    """
     key = (store, candidate)
     if key in _EXCLUSION_WARNED:
         return
@@ -318,21 +323,21 @@ def _warn_legacy_excluded(
     logger.warning(
         "legacy project bucket %r holds %d memories and %d file path%s, but "
         "none of its absolute file rows could be located under %r, so it is "
-        "NOT in this read scope. A row the gate could not READ has an "
-        "unknown location, not a known one — check for a corrupt or "
-        "unreadable file row before hunting paths. Move it explicitly with: "
-        "%r",
+        "NOT in this read scope: its rows belong to the repository their "
+        "paths name. Run "
+        "the `project-id show` verb from that repository to move them. A row "
+        "the gate could not READ has an unknown location, not a known one — "
+        "check for a corrupt or unreadable file row before hunting paths.",
         candidate,
         memories,
         file_paths,
         "" if file_paths == 1 else "s",
         str(repo_root) if repo_root is not None else "none",
-        render_rekey_command(candidate, db_path=store),
     )
 
 
 def _warn_legacy_unproven(
-    store: str, candidate: str, memories: int, file_paths: int
+    store: str, candidate: str, target: str, memories: int, file_paths: int
 ) -> None:
     """Disclose an UNPROVEN legacy bucket, once per process per bucket."""
     key = (store, candidate)
@@ -349,11 +354,13 @@ def _warn_legacy_unproven(
         memories,
         file_paths,
         "" if file_paths == 1 else "s",
-        render_rekey_command(candidate, db_path=store),
+        render_rekey_command(candidate, target, db_path=store),
     )
 
 
-def _warn_case_variant(store: str, legacy: str, variants: list) -> None:
+def _warn_case_variant(
+    store: str, legacy: str, variants: list, target: str
+) -> None:
     """DISCLOSE a suppressed case-variant candidate, once per process.
 
     A fold suppression that is not reported is silent loss: the operator's
@@ -367,14 +374,14 @@ def _warn_case_variant(store: str, legacy: str, variants: list) -> None:
         return
     _CASE_VARIANT_WARNED.add(key)
     commands = " ; ".join(
-        render_rekey_command(variant, db_path=store) for variant in variants
+        render_rekey_command(variant, target, db_path=store) for variant in variants
     )
     logger.warning(
         "the legacy project basename %r matches stored bucket(s) %s only by "
         "case, and this filesystem distinguishes case, so none is in this "
         "read scope: on a case-sensitive filesystem those are different "
         "projects, not one project spelled differently. If a bucket belongs "
-        "to this project, move its rows explicitly with: %s",
+        "to this project, move its rows explicitly with: %r",
         legacy,
         ", ".join(repr(variant) for variant in variants),
         commands,
@@ -682,37 +689,81 @@ def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
     return "override file" if identity.source == "override file" else rung_label
 
 
-def render_rekey_command(project_id: str, db_path: Any = None, prog: Any = None) -> str:
-    """The literal, SHELL-QUOTED AND RUNNABLE rekey command for one bucket id.
+def render_rekey_command(
+    from_id: str, to_id: str, db_path: Any = None, prog: Any = None
+) -> str:
+    """The literal, SHELL-QUOTED AND RUNNABLE rekey command for one bucket.
 
-    ONE HELPER FOR EVERY RENDER SURFACE — the candidate list, the exclusion
-    warning, the save-envelope state and the CLI examples — because a bucket
-    id is STORE-INFLUENCED and this string is presented as something a user
-    pastes into a shell. An unquoted id containing a space, `;`, `$` or a
-    quote is a copy-paste command-injection surface, and four renderers with
-    four spellings is how one of them loses the quoting.
+    ONE HELPER FOR EVERY RENDER SURFACE, because a bucket id is
+    STORE-INFLUENCED and this string is presented as something a user pastes
+    into a shell. An unquoted id containing a space, `;`, `$` or a quote is a
+    copy-paste command-injection surface.
+
+    THE TARGET IS REQUIRED. A command that leaves `--to` to its default
+    moves the bucket into whatever id the session that RUNS it resolves,
+    which is another repository's id when the command is pasted elsewhere.
+
+    EVERY VALUE IS ONE `--flag=value` ARGUMENT, so an id that begins with `-`
+    (a legal folder name) is a value to argparse, never an option.
 
     INTERPRETER-PREFIXED, because there is no `pact-memory` executable: the
-    skill's documented invocation is `python3 <skill>/scripts/cli.py`, and a
-    bare verb exits 2 with argparse's "invalid choice". `cli.py` carries the
-    same reasoning for its own examples.
+    skill's documented invocation is `python3 <skill>/scripts/cli.py`.
 
     `db_path` IS CARRIED WHEN KNOWN. Without it the printed remedy runs
     against the DEFAULT store, so a bucket reported from `--db-path X` is
-    "moved" in some other file and reports success — a no-op that reads like
-    a completed move.
+    "moved" in some other file and reports success.
     """
     argv = [
         "python3",
         str(prog) if prog is not None else str(Path(__file__).with_name("cli.py")),
         "project-id",
         "rekey",
-        "--from",
-        project_id,
+        "--from=" + from_id,
+        "--to=" + to_id,
     ]
     if db_path is not None:
-        argv += ["--db-path", str(db_path)]
+        argv.append("--db-path=" + str(db_path))
     return shlex.join(argv)
+
+
+def project_candidate_rows(
+    buckets: Dict[str, int],
+    *,
+    store: Any,
+    current_id: Optional[str],
+    legacy_state: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """THE ONE CENSUS BUILDER: every non-empty bucket, its relation and remedy.
+
+    A command is rendered only for a bucket this session can defend moving
+    into its own id: its own legacy candidate (unless the gate excluded it,
+    whose rows lie in another repository) and a case variant of it. The
+    session's own bucket and every other bucket get none, because a printed
+    command is read as advice to run it.
+    """
+    state = legacy_state or {}
+    candidate = state.get("candidate")
+    variants = list(state.get("case_variant") or [])
+    variant_commands = list(state.get("case_variant_rekey") or [])
+    rows = []
+    for bucket_id, count in sorted(buckets.items(), key=lambda item: (-item[1], item[0])):
+        if bucket_id == current_id:
+            relation, rekey = "current", None
+        elif candidate is not None and bucket_id == candidate:
+            relation, rekey = "legacy_candidate", state.get("rekey")
+        elif bucket_id in variants:
+            index = variants.index(bucket_id)
+            relation = "case_variant"
+            rekey = variant_commands[index] if index < len(variant_commands) else None
+        else:
+            relation, rekey = "other", None
+        rows.append({
+            "id": bucket_id,
+            "memory_count": count,
+            "relation": relation,
+            "rekey": rekey,
+        })
+    return rows
 
 
 def _store_stat_key(store: str):
@@ -2372,12 +2423,12 @@ class PACTMemory:
                     canonical_count=canonical_count,
                     case_variant=case_variants,
                     case_variant_rekey=[
-                        render_rekey_command(bucket, db_path=store)
+                        render_rekey_command(bucket, scope, db_path=store)
                         for bucket in case_variants
                     ],
                 )
                 if case_variants:
-                    _warn_case_variant(store, legacy, case_variants)
+                    _warn_case_variant(store, legacy, case_variants, scope)
             else:
                 # A SET OF ROOTS, NOT ONE, AND ROOTED AT THE IDENTITY ROOT.
                 # A linked worktree's identity root is the MAIN checkout (by
@@ -2430,7 +2481,13 @@ class PACTMemory:
                     # DISTINCT PATHS, not rows: one path can carry a row in
                     # each bucket of a union.
                     file_paths=file_paths,
-                    rekey=render_rekey_command(candidate, db_path=store),
+                    # An EXCLUDED bucket's rows belong elsewhere, so it gets
+                    # no runnable command anywhere.
+                    rekey=(
+                        None
+                        if outcome == "excluded"
+                        else render_rekey_command(candidate, scope, db_path=store)
+                    ),
                     included=included,
                     verified=outcome == "verified",
                     included_unverified=included and outcome != "verified",
@@ -2454,7 +2511,7 @@ class PACTMemory:
                     )
                 elif unproven:
                     _warn_legacy_unproven(
-                        store, candidate, memory_count, file_paths or 0
+                        store, candidate, scope, memory_count, file_paths or 0
                     )
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
@@ -4525,23 +4582,12 @@ class PACTMemory:
             # SURFACE 2: every populated bucket, with the literal command that
             # moves it. This is the report a reader lands on after an empty
             # search, so it must name the remedy rather than only the counts.
-            project_candidates = [
-                {
-                    "id": bucket_id,
-                    "memory_count": count,
-                    # SHELL-QUOTED THROUGH THE SHARED HELPER. This surface
-                    # was the fifth renderer and the one that made "one
-                    # helper" false: a mutation of the helper left it green
-                    # because it hand-rolled the join.
-                    "rekey": render_rekey_command(
-                        bucket_id, db_path=str(resolve_db_path())
-                    ),
-                }
-                for bucket_id, count in sorted(
-                    project_bucket_counts(conn).items(),
-                    key=lambda item: (-item[1], item[0]),
-                )
-            ]
+            project_candidates = project_candidate_rows(
+                project_bucket_counts(conn),
+                store=str(resolve_db_path()),
+                current_id=self._project_scope(),
+                legacy_state=self._legacy_scope_state,
+            )
 
         capabilities = get_search_capabilities()
 

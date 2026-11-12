@@ -61,7 +61,9 @@ from scripts.memory_api import (
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
+    _invalidate_legacy_scope_cache,
     main_repo_root,
+    project_candidate_rows,
     read_project_bucket_census,
     render_rekey_command,
 )
@@ -986,35 +988,26 @@ def cmd_project_file(args, db_path=None) -> NoReturn:
     sys.exit(3)
 
 
-def _project_candidates(db_path) -> list:
-    """Every NON-EMPTY project bucket, with its count and its literal remedy.
+def _project_candidates(memory, db_path) -> list:
+    """Every NON-EMPTY project bucket, with its relation and its remedy.
 
     A census, not a filtered list: only the operator can decide which legacy
     bucket belongs to this repository, and hiding the ambiguous ones is what
-    leaves thousands of memories unreachable with no notice. The store is
-    read READ-ONLY (`read_project_bucket_census`), so an absent, 0-byte or
-    unreadable store answers an empty list and is NEVER created or given a
-    schema by this report.
+    leaves thousands of memories unreachable with no notice. A command is
+    rendered only for the rows `project_candidate_rows` can defend. The store
+    is read READ-ONLY (`read_project_bucket_census`), so an absent or
+    schema-less store answers an empty list and is NEVER created or given a
+    schema by this report; a present store that cannot be opened raises.
+    `memory` must already have computed its read scope, which is what names
+    the legacy candidate.
     """
     store = Path(db_path) if db_path else resolve_db_path()
-    buckets = read_project_bucket_census(str(store))
-    return [
-        {
-            "id": bucket_id,
-            "memory_count": count,
-            # The literal command, with the id already substituted. Naming
-            # the verb without its argument is not a remedy.
-            #
-            # SHELL-QUOTED: a bucket id is STORE-INFLUENCED and can contain a
-            # space, a semicolon, a dollar sign or a quote. This string is
-            # presented as a runnable command, so an unquoted id is a
-            # copy-paste command-injection surface.
-            "rekey": render_rekey_command(bucket_id, db_path=store),
-        }
-        for bucket_id, count in sorted(
-            buckets.items(), key=lambda item: (-item[1], item[0])
-        )
-    ]
+    return project_candidate_rows(
+        read_project_bucket_census(str(store)),
+        store=store,
+        current_id=memory._project_scope(),
+        legacy_state=memory._legacy_scope_state,
+    )
 
 
 def cmd_project_id(args, db_path=None) -> NoReturn:
@@ -1053,7 +1046,7 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
             ),
             "read_scope": list(read_scope),
             "legacy_scope": memory._legacy_scope_state,
-            "candidates": _project_candidates(db_path),
+            "candidates": _project_candidates(memory, db_path),
         })
     if action == "rekey":
         _project_id_rekey(args, db_path)
@@ -1064,24 +1057,44 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
     )
 
 
+_REKEY_ZERO_COUNTERS = (
+    "memories", "files_in_place", "files_conflicted", "links_repointed",
+    "links_conflicted", "relations_repointed", "vectors_moved",
+    "vectors_pending", "null_project_memories", "null_project_files",
+)
+
+
 def _project_id_rekey(args, db_path) -> NoReturn:
-    """Move one ENTIRE project bucket to the canonical id, or report the plan.
+    """Move one ENTIRE project bucket to a canonical id, or report the plan.
 
     `--dry-run` is the default posture and is the same code path rolled back,
-    so the reported counters are what an apply would produce rather than a
-    second estimate. `--from == --to` is a no-op success.
+    so the reported counters are what an apply would produce. `--from ==
+    --to` is a no-op success.
 
-    Exit codes: 0 for a clean plan or an applied move, 1 for an identity that
-    cannot be resolved (the PROJECT_IDENTITY_UNRESOLVED class), 2 for BAD
-    INPUT only, and 3 for an OPERATIONAL failure (a locked store, an integrity
-    error, an I/O fault). An operational failure is not the caller's input
-    being wrong, so it must not share the bad-input channel.
+    A DEFAULTED `--to` is the detected canonical id, and it is accepted only
+    for THIS checkout's own legacy candidate that the gate did not exclude:
+    a defaulted target applied to any other bucket moves rows the session
+    cannot show are its own. Every other move names its target.
+
+    Exit codes: 0 for a clean plan or an applied move, 1 for a refusal (no
+    canonical identity, or a defaulted target the gate does not support), 2
+    for BAD INPUT only, and 3 for an OPERATIONAL failure (a locked store, an
+    integrity error, an I/O fault), with nothing moved.
     """
     from scripts.database import db_connection, rekey_project
     from scripts.database import sqlite3 as db_sqlite3
 
     if getattr(args, "candidates", False):
-        _success({"candidates": _project_candidates(db_path)})
+        if args.from_id or args.to_id or args.apply or args.dry_run:
+            _error(
+                "INVALID_INPUT",
+                "--candidates lists the buckets and takes no other option; "
+                "run it alone, then rekey one bucket with --from and --to.",
+                exit_code=2,
+            )
+        memory = PACTMemory(db_path=db_path)
+        memory._read_project_scopes()
+        _success({"candidates": _project_candidates(memory, db_path)})
 
     if args.dry_run and args.apply:
         _error(
@@ -1106,25 +1119,97 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         # misfile this whole change exists to prevent.
         _error(
             "INVALID_INPUT",
-            f"--to {args.to_id!r} is not a canonical id. The target must be "
-            f"host/owner/repo (see `project-id show`). Nothing was moved.",
+            escape_for_envelope(
+                f"--to {args.to_id!r} is not a canonical id. The target must "
+                "be host/owner/repo (see `project-id show`). Nothing was moved."
+            ),
             exit_code=2,
         )
 
+    store = Path(db_path) if db_path else resolve_db_path()
     memory = PACTMemory(db_path=db_path)
+    target_defaulted = not args.to_id
     to_id = args.to_id or memory.project_id
-    if not to_id or not is_canonical(to_id):
-        # No canonical identity resolves, so there is no defensible target:
-        # a detected BASENAME is exactly the bucket the move must leave.
-        _error(
-            "PROJECT_IDENTITY_UNRESOLVED",
-            "no canonical project id resolves for this repository, so the "
-            "rekey target is unknown. Pass --to <canonical id>, run from the "
-            "repository, or write an explicit id to "
-            "<git-common-dir>/pact-project-id. A folder-name target is "
-            "refused: moving rows into a basename bucket is the misfile this "
-            "command exists to prevent.",
+    legacy_verdict = None
+    if not store.exists():
+        # NOTHING TO MOVE AND NOTHING TO CREATE: a plan against a store that
+        # does not exist must not bring one into existence.
+        _success({
+            "from": from_id,
+            "to": to_id,
+            "dry_run": not args.apply,
+            "store_absent": True,
+            "from_bucket_empty": True,
+            "schema_absent": True,
+            "target_defaulted": target_defaulted,
+            "legacy_verdict": None,
+            **{key: 0 for key in _REKEY_ZERO_COUNTERS},
+        })
+
+    memory._read_project_scopes()
+    state = memory._legacy_scope_state or {}
+    own_legacy = from_id == memory._legacy_project_basename
+    if state.get("candidate") is not None and from_id == state["candidate"]:
+        legacy_verdict = (
+            "excluded" if state.get("excluded")
+            else "verified" if state.get("verified")
+            else "unverified"
         )
+    if target_defaulted:
+        if not to_id or not is_canonical(to_id):
+            # No canonical identity resolves, so there is no defensible target:
+            # a detected BASENAME is exactly the bucket the move must leave.
+            # A PIN IS OFFERED ONLY WHERE ONE CAN WORK: an override file the
+            # resolver named for this decline. With no repository there is no
+            # override file, so the remedy is the explicit target.
+            override_path = (memory._decline_reason or {}).get("override_path")
+            pin = (
+                f" or write an explicit canonical id to {str(override_path)!r}"
+                if override_path
+                else ""
+            )
+            _error(
+                "PROJECT_IDENTITY_UNRESOLVED",
+                escape_for_envelope(
+                    "no canonical project id resolves here, so the rekey "
+                    f"target is unknown. Pass --to=<canonical id>{pin}. A "
+                    "folder-name target is refused: moving rows into a "
+                    "basename bucket is the misfile this command exists to "
+                    "prevent. Nothing was moved."
+                ),
+            )
+        if is_canonical(from_id):
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} is a canonical bucket; a canonical "
+                    "bucket moves only with an explicit --to. Nothing was moved."
+                ),
+            )
+        # THIS CHECKOUT'S OWN pre-upgrade name with no rows left under it
+        # (already moved) is a no-op, not a foreign bucket: re-running an
+        # applied rekey must stay a clean success.
+        if legacy_verdict is None and not own_legacy:
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} is not this checkout's legacy "
+                    "candidate; pass --to explicitly after confirming the rows "
+                    "belong here. Nothing was moved."
+                ),
+            )
+        if legacy_verdict == "excluded":
+            detail = state.get("detail") or {}
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} was excluded: its absolute file rows "
+                    f"({detail}) lie outside this repository, so they belong "
+                    "to the repository their paths name. Run `project-id "
+                    "show` there, or pass --to explicitly if you have "
+                    "confirmed otherwise. Nothing was moved."
+                ),
+            )
 
     if from_id == to_id:
         _success({
@@ -1132,6 +1217,8 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             "to": to_id,
             "dry_run": not args.apply,
             "noop": True,
+            "target_defaulted": target_defaulted,
+            "legacy_verdict": legacy_verdict,
         })
 
     try:
@@ -1149,16 +1236,30 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
     except db_sqlite3.DatabaseError as exc:
-        # OPERATIONAL FAILURE, NOT BAD INPUT. A locked store, an integrity
-        # error or an I/O fault says nothing about the caller's arguments;
-        # reporting it on the bad-input channel sends them to fix a value
-        # that is probably fine. Exit 3 is the operation-failed channel.
+        # OPERATIONAL FAILURE, NOT BAD INPUT: a locked store, an integrity
+        # error or an I/O fault says nothing about the caller's arguments.
         _error(
             "REKEY_FAILED",
             escape_for_envelope(_scrub(str(exc))),
             exit_code=3,
         )
-    _success(counters)
+    if args.apply:
+        # The move changed the bucket set this process cached.
+        _invalidate_legacy_scope_cache()
+    if counters.get("from_bucket_empty"):
+        _best_effort_report(
+            print,
+            escape_for_envelope(
+                f"warning: no rows are filed under --from={from_id!r}; nothing "
+                "to move (a typo, or already moved)."
+            ),
+            file=_envelope_stream(),
+        )
+    _success({
+        **counters,
+        "target_defaulted": target_defaulted,
+        "legacy_verdict": legacy_verdict,
+    })
 
 
 def cmd_delete(args, db_path=None):
@@ -1272,7 +1373,8 @@ def build_parser():
         # Prefixing `python3 "<prog>"` here made the example
         # `python3 cli.py pact-memory project-id rekey ...`, which exits 2
         # with argparse's "invalid choice: 'pact-memory'".
-        "project-id-rekey": render_rekey_command("<id>") + " --dry-run",
+        "project-id-rekey": render_rekey_command("<id>", "<canonical>")
+        + " --dry-run",
     }
 
     parser = _TeachParser(
@@ -1473,7 +1575,7 @@ def build_parser():
             "and leaves the file untouched. An empty result is not proof the "
             "project has no memories: run `project-id show` and follow the "
             "candidate it names. "
-            + render_rekey_command("<id>")
+            + render_rekey_command("<id>", "<canonical>")
             + " moves a populated older bucket into the canonical id."
         ),
         parents=[parent],

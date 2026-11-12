@@ -114,8 +114,10 @@ class TestExitCodeThreeCoversBothVerbs:
 
     def test_the_rekey_one_and_two_meanings_are_stated(self):
         assert (
-            "project-id rekey exits 1 when --to is omitted and no canonical "
-            "identity resolves, and 2 for bad input"
+            "project-id rekey exits 1 when it refuses — --to is omitted and no "
+            "canonical identity resolves, or --to is omitted and --from is not "
+            "this checkout's own non-excluded legacy candidate — and 2 for bad "
+            "input"
         ) in _body(SKILL)
 
 
@@ -293,3 +295,72 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_the_retired_unverified_admission_is_gone(self):
         assert "the gate includes the bucket as unverified" not in _body(SKILL).lower()
+
+
+class TestRekeyRemediesNameTheirTarget:
+    """The rekey rules an agent must follow before an irreversible move."""
+
+    def test_apply_needs_explicit_approval_and_never_crosses_projects(self):
+        assert (
+            "Run that command with --apply ONLY with the user's explicit "
+            "approval, and NEVER for an excluded bucket or for another "
+            "repository's canonical id"
+        ) in _body(SKILL)
+
+    def test_the_documented_command_names_its_target(self):
+        assert (
+            "project-id rekey --from=<id> --to=<canonical> --db-path=<store>"
+        ) in _body(SKILL)
+
+    def test_the_documented_command_form_is_the_rendered_form(self):
+        from scripts.memory_api import render_rekey_command
+
+        rendered = render_rekey_command("OLD", "host/o/r", db_path="/s.db")
+        assert "--from=OLD" in rendered and "--to=host/o/r" in rendered
+        assert "--db-path=/s.db" in rendered
+
+    def test_no_targetless_command_form_remains(self):
+        body = _body(SKILL)
+        assert "rekey --from <id>" not in body
+        assert "follow the candidate it names" not in body.lower()
+
+    def test_the_census_row_shape_and_which_rows_carry_a_command(self):
+        row = _table_row(SKILL, "project-id show")
+        assert (
+            "Each candidate row is {id, memory_count, relation, rekey}, with "
+            "relation one of current, legacy_candidate, case_variant or other; "
+            "only a legacy_candidate row that is not excluded and a "
+            "case_variant row carry a rekey command"
+        ) in row
+
+    def test_a_defaulted_target_is_only_for_the_own_candidate(self):
+        assert (
+            "An omitted --to is accepted only when --from is this checkout's "
+            "own legacy candidate and it is not excluded; otherwise the move "
+            "is refused with REKEY_REFUSED"
+        ) in _body(SKILL)
+
+    def test_the_envelope_field_sentences_are_present(self):
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply], or project-id rekey --candidates alone")
+        assert (
+            "A store path that does not exist answers store_absent: true and "
+            "creates nothing; a --from bucket with no rows answers "
+            "from_bucket_empty: true. The envelope also carries "
+            "target_defaulted and legacy_verdict."
+        ) in row
+
+    @pytest.mark.parametrize(
+        "field",
+        ("store_absent", "from_bucket_empty", "target_defaulted", "legacy_verdict"),
+    )
+    def test_each_documented_envelope_field_is_one_the_cli_emits(self, field):
+        cli = (SCRIPTS / "cli.py").read_text(encoding="utf-8")
+        assert f'"{field}"' in cli
+
+    def test_links_repointed_is_described_as_merged_rows_only(self):
+        body = _body(SKILL)
+        assert (
+            "links_repointed counts the links on file rows merged into an "
+            "existing target row"
+        ) in body
+        assert "links_repointed counts old links examined" not in body

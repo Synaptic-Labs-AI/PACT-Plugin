@@ -191,6 +191,24 @@ def _ids(memories):
     return [memory.id for memory in memories]
 
 
+def _seed_hostile(store, bucket, path):
+    """One memory and one file row under `bucket`, outside any fixture."""
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute(
+            "INSERT INTO memories "
+            "(id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES ('m1', 'hostile', ?, 's', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            (bucket,),
+        )
+        conn.execute(
+            "INSERT INTO files (id, path, project_id) VALUES ('f1', ?, ?)",
+            (path, bucket),
+        )
+        conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # B1-B4: the widening and its negative controls
 # ---------------------------------------------------------------------------
@@ -427,7 +445,10 @@ class TestDisclosure:
         assert state["included"] is False
         assert state["canonical_count"] == 1
         assert LEGACY in caplog.text
-        assert "project-id rekey" in caplog.text
+        # Its rows belong to the repository their paths name, so the notice
+        # hands the reader no command to paste here.
+        assert "project-id rekey" not in caplog.text
+        assert state["rekey"] is None
         # B5: the warning carries the file count §5 requires, so the operator
         # can judge the loss (2 memories and 1 file row in this fixture).
         assert re.search(r"holds 2 memories and 1 file path", caplog.text), (
@@ -504,7 +525,11 @@ class TestDisclosure:
         assert status["memory_count"] == 2
         candidates = {item["id"]: item for item in status["project_candidates"]}
         assert candidates[LEGACY]["memory_count"] == 1
-        assert "project-id rekey --from PACT-prompt" in candidates[LEGACY]["rekey"]
+        assert candidates[LEGACY]["relation"] == "legacy_candidate"
+        assert (
+            f"project-id rekey --from=PACT-prompt --to={CANONICAL}"
+            in candidates[LEGACY]["rekey"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1384,8 +1409,8 @@ class TestReviewDbGateWorktreeRoots:
         )
         assert legacy_state["memory_count"] == 1
         assert legacy_state["file_paths"] == 1
-        assert legacy_state["rekey"] is not None, (
-            "the exclusion disclosure must carry the remedy command"
+        assert legacy_state["rekey"] is None, (
+            "an excluded bucket must carry no runnable command"
         )
 
     def test_the_gate_accepts_every_checkout_and_nothing_else(self, union_env):
@@ -1482,15 +1507,14 @@ class TestReviewDbGateWorktreeRoots:
 
 
 class TestReviewQuoting:
-    def test_the_exclusion_command_round_trips_a_hostile_bucket_id(
+    def test_the_exclusion_notice_renders_no_command(
         self, tmp_path, monkeypatch, caplog
     ):
-        """S2-sec: the exclusion surface must render the rekey command with
-        `shlex.join`, so a hostile bucket id is ONE `--from` argument.
+        """An EXCLUDED bucket's notice hands the reader nothing to paste.
 
-        The pre-fix `%s` form splits `Legacy;echo PWNED` into two tokens and
-        the pasted command runs `echo PWNED`. RED WHEN the renderer is
-        unquoted or the id is split across arguments.
+        Its absolute rows lie in another repository, so a command moving it
+        into this id would file that checkout's rows here. RED WHEN the
+        exclusion notice renders a rekey command.
         """
         assert_outside_repository(tmp_path)
         hostile = "Legacy;echo PWNED"
@@ -1502,40 +1526,52 @@ class TestReviewQuoting:
         monkeypatch.chdir(repo)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         memory_api._LEGACY_SCOPE_CACHE.clear()
-
-        with db_connection(store) as conn:
-            ensure_initialized(conn)
-            conn.execute(
-                "INSERT INTO memories "
-                "(id, context, project_id, session_id, created_at, updated_at) "
-                "VALUES ('m1', 'hostile', ?, 's', "
-                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
-                (hostile,),
-            )
-            conn.execute(
-                "INSERT INTO files (id, path, project_id) VALUES ('f1', ?, ?)",
-                (str(tmp_path / "elsewhere" / "x.py"), hostile),
-            )
-            conn.commit()
+        memory_api._EXCLUSION_WARNED.clear()
+        _seed_hostile(store, hostile, str(tmp_path / "elsewhere" / "x.py"))
 
         memory = PACTMemory(session_id="s", db_path=store)
-        assert memory._legacy_project_basename == hostile
+        with caplog.at_level(logging.WARNING):
+            memory._read_project_scopes()
+        assert memory._legacy_scope_state["excluded"] is True
+        assert "legacy project bucket" in caplog.text
+        assert "project-id rekey" not in caplog.text
+
+    def test_the_unproven_command_round_trips_a_hostile_bucket_id(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The unproven notice renders the command with `shlex.join`, so a
+        hostile bucket id is ONE `--from=` argument, logged with repr so a
+        newline cannot forge a log line. RED WHEN the renderer is unquoted or
+        the id is split across arguments.
+        """
+        assert_outside_repository(tmp_path)
+        hostile = "Legacy;echo PWNED"
+        repo = make_repo(
+            tmp_path / hostile,
+            remote="https://github.com/syn-labs/pact-plugin.git",
+        )
+        store = tmp_path / "quoting.db"
+        monkeypatch.chdir(repo)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory_api._UNPROVEN_WARNED.clear()
+        _seed_hostile(store, hostile, "src/relative.py")
+
+        memory = PACTMemory(session_id="s", db_path=store)
         with caplog.at_level(logging.WARNING):
             memory._read_project_scopes()
 
-        match = re.search(r"Move it explicitly with: (.+)", caplog.text)
+        match = re.search(r"move them explicitly with: (.+)", caplog.text)
         assert match is not None, (
-            f"the exclusion warning did not render a rekey command: {caplog.text!r}"
+            f"the unproven notice did not render a rekey command: {caplog.text!r}"
         )
-        # The command is logged with repr, so a newline in an id cannot
-        # forge a log line; read the repr back before splitting it.
         argv = shlex.split(ast.literal_eval(match.group(1)))
-        from_index = argv.index("--from")
-        assert argv[from_index + 1] == hostile, (
+        assert f"--from={hostile}" in argv, (
             f"the bucket id did not round-trip as ONE --from argument: {argv!r}"
         )
+        assert f"--to={CANONICAL}" in argv, argv
         # The surface knows the store, so the remedy must name it.
-        assert argv[argv.index("--db-path") + 1] == str(store), argv
+        assert f"--db-path={store}" in argv, argv
 
 
 # ---------------------------------------------------------------------------

@@ -25,11 +25,22 @@ from unittest.mock import patch
 import pytest
 
 from scripts import memory_api, project_identity
-from scripts.cli import _project_candidates, main
+from scripts.cli import main
 from scripts.database import db_connection, ensure_initialized
 from scripts.memory_api import PACTMemory, _DetectedIdentity
 
 _LEGACY = "Legacy-Bucket"
+_TARGET = "host/owner/repo"
+
+
+def _assert_rekey_argv(argv, from_id, store) -> None:
+    """A runnable, targeted rekey command: one `--flag=value` per argument."""
+    assert argv[0] == "python3", argv
+    assert Path(argv[1]).is_absolute() and argv[1].endswith("cli.py"), argv
+    assert argv[2:6] == [
+        "project-id", "rekey", f"--from={from_id}", f"--to={_TARGET}",
+    ], argv
+    assert f"--db-path={store}" in argv, argv
 
 
 def _make_store(store: Path) -> None:
@@ -110,22 +121,13 @@ class TestRenderedRekeyCommandIsQuoted:
     ):
         store = tmp_path / "candidates.db"
         hostile = "Legacy; rm -rf /tmp/x $(id)"
-        _seed(store, hostile, "a" * 32)
-
-        candidates = _project_candidates(store)
-        assert len(candidates) == 1, candidates
-        entry = candidates[0]
-        assert entry["id"] == hostile
+        command = memory_api.render_rekey_command(hostile, _TARGET, db_path=store)
         # The rendered command must be RUNNABLE (interpreter + absolute
         # script path, because no `pact-memory` executable exists) and survive
         # shlex parsing as ONE `--from` argument, against THIS store.
-        argv = shlex.split(entry["rekey"])
-        assert argv[0] == "python3", argv
-        assert Path(argv[1]).is_absolute() and argv[1].endswith("cli.py"), argv
-        assert argv[2:6] == ["project-id", "rekey", "--from", hostile], argv
-        assert argv[argv.index("--db-path") + 1] == str(store), argv
-        # And it must not contain the raw, unquoted id as a command fragment.
-        assert f"--from {hostile}" not in entry["rekey"]
+        _assert_rekey_argv(shlex.split(command), hostile, store)
+        # And it must not contain the raw id as an UNQUOTED argument.
+        assert f" --from={hostile}" not in command
 
 
 class TestSaveEnvelopeDisclosesTheCandidate:
@@ -157,10 +159,7 @@ class TestSaveEnvelopeDisclosesTheCandidate:
         assert legacy["memory_count"] == 1, legacy
         # DISTINCT PATHS, via `count_project_file_paths`, not file rows.
         assert legacy["file_paths"] == 1, legacy
-        rekey_argv = shlex.split(legacy["rekey"])
-        assert rekey_argv[0] == "python3", rekey_argv
-        assert rekey_argv[2:6] == ["project-id", "rekey", "--from", _LEGACY], rekey_argv
-        assert rekey_argv[rekey_argv.index("--db-path") + 1] == str(store), rekey_argv
+        _assert_rekey_argv(shlex.split(legacy["rekey"]), _LEGACY, store)
         assert legacy["canonical_count"] == 0, (
             "the disclosure exists because the canonical bucket was empty"
         )
@@ -194,7 +193,7 @@ class TestExclusionDisclosureIsQuoted:
     surface even though every sibling renderer quotes.
     """
 
-    def test_the_exclusion_warning_renders_a_quoted_command(
+    def test_the_exclusion_warning_renders_no_command(
         self, tmp_path, monkeypatch, caplog
     ):
         import logging
@@ -223,15 +222,11 @@ class TestExclusionDisclosureIsQuoted:
             memory._read_project_scopes()
 
         text = caplog.text
-        expected = memory_api_module.render_rekey_command(hostile, db_path=store)
-        assert expected in text, f"the warning did not carry the quoted command: {text!r}"
-        argv = shlex.split(expected)
-        assert argv[0] == "python3", argv
-        assert argv[2:6] == ["project-id", "rekey", "--from", hostile], argv
-        assert argv[argv.index("--db-path") + 1] == str(store), argv
-        assert f"--from {hostile}" not in text, (
-            "the warning rendered the store-influenced id unquoted"
-        )
+        # The rows belong to the repository their paths name, so the warning
+        # hands the reader no command to paste here.
+        assert "legacy project bucket" in text, text
+        assert "project-id rekey" not in text and "--from" not in text, text
+        assert memory._legacy_scope_state["rekey"] is None
 
 
 class TestSuppliedIdentityDoesNotWiden:
@@ -271,18 +266,22 @@ class TestEveryRenderSurfaceUsesTheHelper:
         # keywords; a stub that took only the id would fail on the surfaces
         # that carry the store and redden for the wrong reason.
         monkeypatch.setattr(
-            memory_api_module, "render_rekey_command", lambda _id, **_kw: sentinel
+            memory_api_module,
+            "render_rekey_command",
+            lambda _from, _to, **_kw: sentinel,
         )
         # `cli` imported the name into its own namespace, so the CLI surfaces
         # need their reference patched too.
         monkeypatch.setattr(
-            cli_module, "render_rekey_command", lambda _id, **_kw: sentinel
+            cli_module, "render_rekey_command", lambda _from, _to, **_kw: sentinel
         )
 
         hostile = "Legacy; echo PWNED"
         store = tmp_path / "surfaces.db"
         _make_store(store)
-        _seed(store, hostile, "d" * 32, path=str(tmp_path / "elsewhere" / "f.py"))
+        # A RELATIVE file row and no recorded session: the bucket is UNPROVEN,
+        # the state that renders a command on every surface.
+        _seed(store, hostile, "d" * 32, path="relative/f.py")
         monkeypatch.setattr(
             PACTMemory,
             "_detect_project_identity_with_legacy",
@@ -300,14 +299,14 @@ class TestEveryRenderSurfaceUsesTheHelper:
             text = captured.out.strip() or captured.err.strip()
             return excinfo.value.code, json.loads(text)
 
-        memory_api_module._EXCLUSION_WARNED.clear()
+        memory_api_module._UNPROVEN_WARNED.clear()
         memory = PACTMemory(session_id="s", db_path=store)
 
-        # SITE 3 — the exclusion warning (memory_api.py's state render).
+        # SITE 3 — the unproven warning (memory_api.py's state render).
         with caplog.at_level(logging.WARNING):
             memory._read_project_scopes()
         assert sentinel in caplog.text, (
-            "the exclusion warning bypassed the shared render helper"
+            "the unproven warning bypassed the shared render helper"
         )
 
         # SITE 1 — the candidate list, driven through BOTH commands that
@@ -339,8 +338,11 @@ class TestEveryRenderSurfaceUsesTheHelper:
         # SITE 2 — the status envelope.
         with patch("scripts.memory_api._ensure_ready"):
             status = memory.get_status()
-        rekeys = [entry["rekey"] for entry in status["project_candidates"]]
-        assert rekeys and all(rekey == sentinel for rekey in rekeys), (
+        rekeys = [
+            entry["rekey"] for entry in status["project_candidates"]
+            if entry["relation"] == "legacy_candidate"
+        ]
+        assert rekeys == [sentinel], (
             f"the status envelope bypassed the shared render helper: {rekeys!r}"
         )
 
@@ -380,14 +382,8 @@ class TestEveryRenderSurfaceUsesTheHelper:
 
         legacy = memory.last_project_scope["legacy_scope"]
         assert legacy["candidate"] == hostile
-        argv = shlex.split(legacy["rekey"])
-        assert argv[0] == "python3", argv
-        assert argv[2:6] == ["project-id", "rekey", "--from", hostile], argv
-        assert argv[argv.index("--db-path") + 1] == str(store), (
-            f"the save envelope did not carry the store the bucket was read "
-            f"from: {argv!r}"
-        )
-        assert f"--from {hostile}" not in legacy["rekey"], (
+        _assert_rekey_argv(shlex.split(legacy["rekey"]), hostile, store)
+        assert f" --from={hostile}" not in legacy["rekey"], (
             "the save envelope rendered the store-influenced id unquoted"
         )
 

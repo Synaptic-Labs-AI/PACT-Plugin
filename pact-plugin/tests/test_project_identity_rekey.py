@@ -492,12 +492,20 @@ class TestCliSurface:
         assert code == 0
         candidates = {item["id"]: item for item in payload["result"]["candidates"]}
         assert set(candidates) == {LEGACY, "foreign"}
-        # THE RUNNABLE FORM, against the store the candidates were read from.
+        # A command only for this checkout's own candidate; another bucket
+        # gets none, because a printed command is read as advice to run it.
+        assert candidates[LEGACY]["relation"] == "legacy_candidate"
+        assert candidates["foreign"]["relation"] == "other"
+        assert candidates["foreign"]["rekey"] is None
+        # THE RUNNABLE FORM, against the store the candidates were read from,
+        # naming its target.
         argv = shlex.split(candidates[LEGACY]["rekey"])
         assert argv[0] == "python3", argv
         assert argv[1].endswith("cli.py") and Path(argv[1]).is_absolute(), argv
-        assert argv[2:6] == ["project-id", "rekey", "--from", LEGACY], argv
-        assert argv[argv.index("--db-path") + 1] == str(rekey_env.store), argv
+        assert argv[2:6] == [
+            "project-id", "rekey", f"--from={LEGACY}", f"--to={CANONICAL}",
+        ], argv
+        assert f"--db-path={rekey_env.store}" in argv, argv
 
     def test_rekey_dry_run_then_apply_then_noop(self, rekey_env, capfd):
         _seed(rekey_env, [("l1", LEGACY)])
@@ -657,12 +665,16 @@ class TestReviewB6IncidentFlow:
         )
         assert candidates["PACT-prompt"]["memory_count"] == 2
 
+        # The bucket is NOT this checkout's own folder name, so the operator
+        # names the target: a defaulted --to is refused for a foreign bucket.
         code, payload = _cli(
             [
                 "project-id",
                 "rekey",
                 "--from",
                 "PACT-prompt",
+                "--to",
+                CANONICAL,
                 "--apply",
                 "--db-path",
                 str(env.store),
