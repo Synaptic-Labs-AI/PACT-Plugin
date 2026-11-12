@@ -1239,12 +1239,40 @@ LEGACY_PLAUSIBLE_UNVERIFIED = "unverified"
 LEGACY_PLAUSIBLE_EXCLUDED = "excluded"
 
 
+def _gate_root_paths(roots: Any) -> Tuple[str, ...]:
+    """Resolve the containment roots the legacy gate accepts.
+
+    A single `Path`/`str` is ONE root, never a sequence of characters. A
+    sequence is every checkout the caller knows about. Falsy entries are
+    dropped and every surviving spelling is resolved with `realpath`, so a
+    symlinked checkout and its target compare equal. NEVER case-fold: the
+    repository's containment rule is validate-as-given, anchor raw, and a
+    fold that passes on a case-insensitive filesystem would miss here.
+    Duplicates are removed so a caller that passes a main root already
+    present in a worktree list does not test the same prefix twice.
+    """
+    if roots is None:
+        return ()
+    if isinstance(roots, (str, os.PathLike)):
+        candidates = [roots]
+    else:
+        candidates = list(roots)
+    resolved: list = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = os.path.realpath(str(candidate))
+        if root not in resolved:
+            resolved.append(root)
+    return tuple(resolved)
+
+
 def legacy_candidate_plausibility(
     conn: sqlite3.Connection,
     candidate_id: str,
-    repo_root: Optional[Path],
+    roots: Optional[Union[Path, str, Sequence[Union[Path, str]]]],
 ) -> Tuple[str, Dict[str, int]]:
-    """Whether a legacy basename bucket plausibly belongs to `repo_root`.
+    """Whether a legacy basename bucket plausibly belongs to `roots`.
 
     The gate decides whether a populated legacy bucket joins the read scope.
     Evidence is the bucket's own absolute `files.path` rows: `_normalize_path`
@@ -1252,50 +1280,64 @@ def legacy_candidate_plausibility(
     was actually used. A RELATIVE path carries no location and is not
     evidence — it is counted but never used to decide.
 
+    `roots` IS A SEQUENCE, NOT ONE ROOT, AND THAT IS THE WORKTREE FIX. The
+    identity root a linked worktree resolves to is the MAIN checkout — by
+    design, so every worktree of one repository shares one id — but a row
+    saved while the process sat in the worktree records the WORKTREE's
+    absolute path. Gating on the main checkout alone then calls the bucket
+    `excluded` and collapses the read scope to the canonical id, so the
+    operator's own pre-upgrade rows disappear from reads and the disclosure
+    tells them to rekey a bucket that is already theirs. The CALLER computes
+    the set (the identity root plus every non-bare path from
+    `git worktree list --porcelain`) and passes it in; this module does not
+    run git. A single `Path`/`str` is still accepted and treated as a
+    one-element sequence, so an existing single-root caller keeps working.
+
     Returns `(outcome, detail)` where outcome is one of:
-      - `verified`   — at least one absolute row lies under `repo_root`;
-      - `unverified` — no absolute rows exist at all, so the store cannot
-                       judge; the caller INCLUDES the bucket but must disclose
-                       the inclusion as unverified, never as proved;
-      - `excluded`   — absolute rows exist and none lies under `repo_root`.
+      - `verified`   — at least one absolute row lies under SOME root;
+      - `unverified` — no roots, or no absolute rows exist at all, so the
+                       store cannot judge; the caller INCLUDES the bucket but
+                       must disclose the inclusion as unverified, never as
+                       proved;
+      - `excluded`   — absolute rows exist and none lies under ANY root.
 
-    Containment is a LITERAL prefix comparison on the normalised path, with
-    no case folding: folding a path here would pass on a case-insensitive
-    filesystem and fail on a case-sensitive one, and the store's rows are
-    spelled for the machine that wrote them. `normpath` is used because a
-    path carrying `..` must not be counted as inside a root it escapes.
-
-    `repo_root` None cannot refute anything, so it reports `unverified`.
+    Containment RESOLVES BOTH SIDES (`realpath` on the row path and on each
+    root) and then does a literal prefix comparison, with no case folding: a
+    row written through a symlinked spelling resolves to its target, so it
+    matches a root spelled either way, while a fold would pass on a
+    case-insensitive filesystem and miss on a case-sensitive one. Resolution
+    also normalises `..`, so a path escaping a root cannot be counted as
+    inside it.
     """
     ensure_initialized(conn)
     cursor = conn.execute(
         "SELECT path FROM files WHERE project_id = ?",
         (candidate_id,),
     )
+    root_paths = _gate_root_paths(roots)
     file_rows = 0
     absolute_rows = 0
     contained_rows = 0
-    root = None
-    if repo_root is not None:
-        root = os.path.normpath(str(repo_root))
     for row in cursor.fetchall():
         file_rows += 1
         path = row["path"]
         if not path or not os.path.isabs(path):
             continue
         absolute_rows += 1
-        if root is None:
-            continue
-        normalised = os.path.normpath(path)
-        if normalised == root or normalised.startswith(root + os.sep):
+        resolved = os.path.realpath(path)
+        if any(
+            resolved == root or resolved.startswith(root + os.sep)
+            for root in root_paths
+        ):
             contained_rows += 1
 
     detail = {
         "file_rows": file_rows,
         "absolute_rows": absolute_rows,
         "contained_rows": contained_rows,
+        "roots": len(root_paths),
     }
-    if root is None or absolute_rows == 0:
+    if not root_paths or absolute_rows == 0:
         # Nothing to test against, or no absolute row to test: not proof
         # either way. A bucket holding ONLY relative paths is the measured
         # case for this repo's own legacy bucket, and it must never be

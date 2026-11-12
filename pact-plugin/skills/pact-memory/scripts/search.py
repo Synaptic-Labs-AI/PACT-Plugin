@@ -116,8 +116,20 @@ def vector_search(
         limit: Maximum number of results.
 
     Returns:
-        List of (memory_id, distance) tuples, sorted by similarity.
-        Returns empty list if vector search unavailable (falls back to keyword).
+        List of (memory_id, distance) tuples, sorted by similarity. Returns
+        empty list if vector search unavailable (falls back to keyword).
+
+        AT MOST `limit` ROWS, NOT EXACTLY `limit` WHEN THAT MANY EXIST. Every
+        hit is confirmed against the row's STORED project before it is
+        returned (a stale vec partition must not serve another project's
+        memory), and the confirmation widens the fetch until enough hits
+        survive, the scoped partitions are exhausted, or
+        `CONFIRMATION_FETCH_CAP` is reached. The cap is a cost bound: a store
+        whose in-scope partitions are full of rows belonging to other projects
+        can make this return fewer than `limit` — including none — while more
+        matches exist beyond the window. That is the documented trade, not an
+        empty store; a caller that cannot tolerate a short result must read
+        the count it got rather than assume `limit`.
     """
     project_id = _scope_or_none(project_id)
     scopes = normalise_project_scopes(project_id)
@@ -233,6 +245,12 @@ def vector_search(
                 or len(rows) < fetch
                 or fetch >= CONFIRMATION_FETCH_CAP
             ):
+                # THE CAP MEANS THIS EXIT CAN TRUNCATE. A capped fetch that is
+                # also a FULL window means ranked rows existed beyond it, so
+                # this returns fewer than `limit` even though the store holds
+                # more; a capped fetch that is exhausted returns everything
+                # there was. Both exit here, so the return is "at most
+                # `limit`", never "exactly `limit` when that many exist".
                 return confirmed[:limit]
             fetch = min(fetch * 2, CONFIRMATION_FETCH_CAP)
             rows = _fetch(fetch)
@@ -572,7 +590,14 @@ def search_by_file(
         # window grows until enough confirmed memories exist, the relation set
         # is exhausted, or the scope is unscoped. Its natural cap is the size
         # of the set, so a pathological store cannot spin.
-        ordered = list(memory_ids)
+        #
+        # SORTED, NOT SET ORDER. The ids arrive as a set, so `list(...)` yields
+        # an order that changes with the process hash seed; with more related
+        # memories than `limit`, WHICH subset the window returns was arbitrary
+        # and a re-run answered differently from the same store. This path has
+        # no relevance signal to rank by, so id order is the honest
+        # deterministic choice (same rule as `get_file_ids`).
+        ordered = sorted(memory_ids)
         memories = []
         window = limit
         index = 0

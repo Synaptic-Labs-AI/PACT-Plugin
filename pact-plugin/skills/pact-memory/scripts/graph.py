@@ -538,7 +538,11 @@ def get_memories_for_files(
         project_id: Optional project scope: one id or a union.
 
     Returns:
-        List of unique memory IDs.
+        List of unique memory IDs, sorted so the order does not depend on the
+        process hash seed. The ids are accumulated in a set and this path has
+        no relevance signal to rank by, so id order is the deterministic
+        choice; a caller that truncates must not return a different subset
+        per run.
     """
     ensure_initialized(conn)
 
@@ -556,7 +560,7 @@ def get_memories_for_files(
             memories = get_memories_for_file(conn, file_id, project_id)
             memory_ids.update(memories)
 
-    return list(memory_ids)
+    return sorted(memory_ids)
 
 
 # =============================================================================
@@ -707,7 +711,10 @@ def get_related_files(
         max_depth: Maximum traversal depth (default 2).
 
     Returns:
-        List of related file paths.
+        List of related file paths, SORTED. The traversal walks sets, so
+        returning them in visit order made the list change with the process
+        hash seed and a caller that truncates kept a different subset per run.
+        A file's depth carries no ranking here, so paths are sorted.
     """
     ensure_initialized(conn)
 
@@ -762,7 +769,7 @@ def get_related_files(
         if not current_level:
             break
 
-    return related_paths
+    return sorted(related_paths)
 
 
 def get_related_files_via_memories(
@@ -781,7 +788,8 @@ def get_related_files_via_memories(
         project_id: Optional project scope: one id or a union.
 
     Returns:
-        List of related file paths.
+        List of related file paths, sorted so the order does not depend on the
+        process hash seed.
     """
     ensure_initialized(conn)
 
@@ -795,30 +803,41 @@ def get_related_files_via_memories(
 
     placeholders = ",".join("?" for _ in file_ids)
     scope_sql, scope_params = _scope_sql("f.project_id", project_id)
+    memory_scope_sql, memory_scope_params = _scope_sql(
+        "m.project_id", project_id
+    )
 
     # Find all files that share a memory with any scoped row of this path.
     #
-    # THE SHARED MEMORY CAN BE STALE. A link left on the start row by another
-    # project's memory still yields that memory's other files — which are not
-    # this project's related files. Confirm each returned file's own stored
-    # project; `project_id=None` keeps the whole-store meaning, and an empty
-    # scope has already returned above.
+    # THE SHARED MEMORY MUST BE CONFIRMED TOO, not only the returned file. A
+    # link left on the start row by another project's memory still yields that
+    # memory's other files; when those files happen to sit in this scope (a
+    # path tracked under both buckets is exactly what a union makes normal)
+    # they were reported as "memory-related" although no visible memory links
+    # them. Confirm BOTH joining rows, the same rule `get_memories_for_file`
+    # applies to the memory and `get_graph_stats` applies to both endpoints.
+    # `project_id=None` keeps this seam's existing meaning: the START resolves
+    # through `get_file_ids`, where None names the NULL-project row rather than
+    # "no filter", and both scope clauses are then omitted. An empty scope has
+    # already returned above.
     cursor = conn.execute(
         f"""
         SELECT DISTINCT f.path
         FROM files f
         JOIN memory_files mf ON f.id = mf.file_id
+        JOIN memories m ON m.id = mf.memory_id
         WHERE mf.memory_id IN (
             SELECT memory_id FROM memory_files
             WHERE file_id IN ({placeholders})
         )
         AND f.id NOT IN ({placeholders})
         {scope_sql}
+        {memory_scope_sql}
         """,
-        (*file_ids, *file_ids, *scope_params)
+        (*file_ids, *file_ids, *scope_params, *memory_scope_params)
     )
 
-    return [row["path"] for row in cursor.fetchall()]
+    return sorted(row["path"] for row in cursor.fetchall())
 
 
 # =============================================================================

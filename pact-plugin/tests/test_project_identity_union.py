@@ -12,9 +12,13 @@ query), which returns the whole store instead of one project.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 import struct
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -917,6 +921,339 @@ class TestReviewB2Seams:
                 )
                 == []
             ), "G5 served a foreign bucket's memory"
+
+
+class TestReviewDbConfirmationCap:
+    """`vector_search` returns AT MOST `limit`, and the cap can make it short.
+
+    Pinned so the documented trade cannot be "fixed" into an unbounded fetch
+    or into a silent `limit` guarantee. The docstring states it; these arms
+    hold the behaviour.
+    """
+
+    def _store(self, env, stale, valid):
+        from helpers import create_test_schema
+
+        conn = db_sqlite3.connect(str(env.store))
+        conn.row_factory = db_sqlite3.Row
+        create_test_schema(conn)
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_memories USING vec0("
+            "memory_id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, "
+            "embedding float[3])"
+        )
+
+        def add(memory_id, stored_project, partition, embedding):
+            conn.execute(
+                "INSERT INTO memories (id, context, project_id, session_id, "
+                "created_at, updated_at) VALUES (?, 'ctx', ?, 's', "
+                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (memory_id, stored_project),
+            )
+            conn.execute(
+                "INSERT INTO vec_memories (memory_id, project_id, embedding) "
+                "VALUES (?, ?, ?)",
+                (memory_id, partition, struct.pack("3f", *embedding)),
+            )
+
+        # STALE: the partition is in scope, the row's stored project is not.
+        for index in range(stale):
+            add(f"stale{index}", FOREIGN, CANONICAL, (0.1, 0.2, 0.3))
+        # VALID: in scope, ranked worse than every stale row.
+        for index in range(valid):
+            add(f"valid{index}", CANONICAL, CANONICAL, (0.9, 0.9, 0.9))
+        conn.commit()
+        return conn
+
+    def test_a_capped_window_returns_fewer_than_limit(
+        self, union_env, monkeypatch
+    ):
+        """The measured construction: 200 stale rows (partition in scope,
+        stored project FOREIGN) at distance ~0, and 10 valid in-scope rows
+        behind the cap at a worse distance. The confirmation widens to
+        CONFIRMATION_FETCH_CAP, never sees a confirmable hit, and returns
+        FEWER THAN `limit` — here none — while the store holds ten valid
+        matches. That is the documented cost bound, pinned so it cannot drift
+        into either an unbounded fetch or a `limit` guarantee.
+
+        RED WHEN: the widening stops honouring the cap, or the return claims
+        rows it did not confirm.
+        """
+        monkeypatch.setattr(
+            search_mod, "generate_embedding", lambda query: [0.1, 0.2, 0.3]
+        )
+        limit = 5
+        conn = self._store(union_env, stale=200, valid=10)
+        try:
+            valid_in_store = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?",
+                (CANONICAL,),
+            ).fetchone()[0]
+            rows = vector_search(
+                conn, "q", project_id=(CANONICAL,), limit=limit
+            )
+        finally:
+            conn.close()
+        assert valid_in_store == 10, (
+            "fixture control: the store must hold ten confirmable in-scope "
+            f"rows, found {valid_in_store}"
+        )
+        assert len(rows) < limit, (
+            "the capped call returned the full limit, so this arm did not "
+            f"exercise the cap: {rows}"
+        )
+        assert rows == [], (
+            "an unconfirmed id survived the cap exit: "
+            f"{rows}"
+        )
+
+    def test_an_exhausted_store_returns_what_exists(
+        self, union_env, monkeypatch
+    ):
+        """Positive control: no stale rows, so the same limit-5 call returns
+        five of the ten valid rows. The short result above is the cap, not a
+        broken fixture."""
+        monkeypatch.setattr(
+            search_mod, "generate_embedding", lambda query: [0.1, 0.2, 0.3]
+        )
+        conn = self._store(union_env, stale=0, valid=10)
+        try:
+            rows = vector_search(conn, "q", project_id=(CANONICAL,), limit=5)
+        finally:
+            conn.close()
+        assert len(rows) == 5, f"an exhausted store returned {len(rows)} rows"
+        assert all(memory_id.startswith("valid") for memory_id, _ in rows)
+
+
+class TestReviewDbSearchByFileOrder:
+    def test_the_subset_does_not_depend_on_set_order(self, union_env):
+        """More related memories than `limit`, so WHICH ones the window
+        returns is visible. `list(set)` made that subset change with the
+        process hash seed; sorted ids make it reproducible.
+
+        RED WHEN: the ordered list is `list(memory_ids)` again — this
+        assertion then needs the hash order to be ascending, a 1-in-720
+        accident for these six ids.
+        """
+        rows = [
+            (
+                f"m{index}",
+                f"ctx {index}",
+                CANONICAL if index % 2 == 0 else LEGACY,
+                "2026-01-01T00:00:00+00:00",
+            )
+            for index in range(6)
+        ]
+        _seed(union_env, rows, files=[("f1", "src/x.py", CANONICAL)])
+        with db_connection(union_env.store) as conn:
+            for index in range(6):
+                conn.execute(
+                    "INSERT INTO memory_files (memory_id, file_id) "
+                    "VALUES (?, 'f1')",
+                    (f"m{index}",),
+                )
+            conn.commit()
+
+        memory = _memory(union_env)
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(memory_api, "_ensure_ready", lambda: None)
+            limited = _ids(memory.search_by_file("src/x.py", limit=3))
+            full = _ids(memory.search_by_file("src/x.py", limit=6))
+
+        assert full == sorted(full), (
+            "search_by_file returned a set-ordered list; the same store and "
+            f"query answer differently per process: {full}"
+        )
+        assert limited == full[:3], (
+            "the limit-3 window is not the deterministic prefix of the "
+            f"relation set: {limited} vs {full}"
+        )
+
+    def test_the_subset_is_identical_across_hash_seeds(self, union_env, tmp_path):
+        """The cross-process statement of the same contract: two child
+        processes with different PYTHONHASHSEED values must return the same
+        ids, and they must be the sorted prefix.
+
+        RED WHEN: the window is sliced from `list(set)` — the children then
+        disagree with each other and with the sorted prefix.
+        """
+        rows = [
+            (
+                f"m{index}",
+                f"ctx {index}",
+                CANONICAL if index % 2 == 0 else LEGACY,
+                "2026-01-01T00:00:00+00:00",
+            )
+            for index in range(6)
+        ]
+        _seed(union_env, rows, files=[("f1", "src/x.py", CANONICAL)])
+        with db_connection(union_env.store) as conn:
+            for index in range(6):
+                conn.execute(
+                    "INSERT INTO memory_files (memory_id, file_id) "
+                    "VALUES (?, 'f1')",
+                    (f"m{index}",),
+                )
+            conn.commit()
+
+        scripts_parent = str(
+            Path(__file__).resolve().parent.parent / "skills" / "pact-memory"
+        )
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from scripts.config import store_scope\n"
+            "from scripts.search import search_by_file\n"
+            "with store_scope(sys.argv[2]):\n"
+            "    found = search_by_file(\n"
+            "        sys.argv[3], project_id=tuple(sys.argv[4].split(',')),\n"
+            "        limit=int(sys.argv[5]))\n"
+            "print(','.join(m.id for m in found))\n"
+        )
+        outputs = []
+        for seed in ("0", "1"):
+            out = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    scripts_parent,
+                    str(union_env.store),
+                    "src/x.py",
+                    f"{CANONICAL},{LEGACY}",
+                    "3",
+                ],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PYTHONHASHSEED": seed,
+                    "HOME": str(tmp_path / "home"),
+                    "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+                },
+                check=True,
+            )
+            outputs.append(out.stdout.strip())
+        assert outputs == ["m0,m1,m2", "m0,m1,m2"], (
+            "search_by_file's subset depends on the process hash seed: "
+            f"{outputs}"
+        )
+
+
+class TestReviewDbGateWorktreeRoots:
+    """S2: the legacy gate must accept every checkout of the repository.
+
+    `main_repo_root()` deliberately answers the MAIN checkout for a linked
+    worktree, so a bucket whose only absolute rows were written from the
+    worktree verified against the main root alone would be EXCLUDED — reads
+    collapse to the canonical id and the operator is told to rekey their own
+    rows. `checkout_roots()` is the existing source for the set.
+    """
+
+    def _seed_row(self, env, file_id, path, project):
+        with db_connection(env.store) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                (file_id, path, project),
+            )
+            conn.commit()
+
+    def test_the_gate_accepts_every_checkout_and_nothing_else(self, union_env):
+        from scripts.database import (
+            LEGACY_PLAUSIBLE_EXCLUDED,
+            LEGACY_PLAUSIBLE_UNVERIFIED,
+            LEGACY_PLAUSIBLE_VERIFIED,
+            legacy_candidate_plausibility,
+        )
+
+        main_root = union_env.repo
+        worktree = union_env.tmp_path / "feature-wt"
+        linked = union_env.tmp_path / "linked"
+        (worktree / "src").mkdir(parents=True, exist_ok=True)
+        (main_root / "src").mkdir(parents=True, exist_ok=True)
+        linked.symlink_to(worktree, target_is_directory=True)
+
+        self._seed_row(
+            union_env, "f-main", str(main_root / "src" / "m.py"),
+            "legacy-main",
+        )
+        self._seed_row(
+            union_env, "f-wt", str(worktree / "src" / "x.py"), LEGACY
+        )
+        self._seed_row(
+            union_env, "f-foreign",
+            str(union_env.tmp_path / "elsewhere" / "src" / "z.py"),
+            "legacy-foreign",
+        )
+        self._seed_row(
+            union_env, "f-relative", "src/rel.py", "legacy-relative"
+        )
+        # STORED through the symlink, VERIFIED against the resolved root.
+        self._seed_row(
+            union_env, "f-linked", str(linked / "src" / "y.py"),
+            "legacy-linked",
+        )
+
+        with db_connection(union_env.store) as conn:
+            main_only = legacy_candidate_plausibility(
+                conn, "legacy-main", [main_root]
+            )
+            only_main_against_worktree_row = legacy_candidate_plausibility(
+                conn, LEGACY, main_root
+            )
+            checkout_set = legacy_candidate_plausibility(
+                conn, LEGACY, [main_root, worktree]
+            )
+            single_path = legacy_candidate_plausibility(conn, LEGACY, worktree)
+            as_string = legacy_candidate_plausibility(
+                conn, LEGACY, str(worktree)
+            )
+            foreign = legacy_candidate_plausibility(
+                conn, "legacy-foreign", [main_root, worktree]
+            )
+            relative_only = legacy_candidate_plausibility(
+                conn, "legacy-relative", [main_root, worktree]
+            )
+            through_link = legacy_candidate_plausibility(
+                conn, "legacy-linked", [main_root, worktree]
+            )
+
+        assert main_only[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+            f"a row under the main root did not verify: {main_only}"
+        )
+        assert only_main_against_worktree_row[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
+            "the single-main-root control did not reproduce S2: "
+            f"{only_main_against_worktree_row}"
+        )
+        assert checkout_set[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+            "a row written from the linked worktree did not verify against "
+            f"the checkout set: {checkout_set}"
+        )
+        assert single_path[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+            "a single Path root is no longer accepted as a one-element set"
+        )
+        assert as_string[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+            "a single STRING root was not treated as one root; it must not "
+            "be iterated as characters"
+        )
+        assert foreign[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
+            f"a row outside every root was called plausible: {foreign}"
+        )
+        assert relative_only[0] == LEGACY_PLAUSIBLE_UNVERIFIED, (
+            "a bucket with no absolute row must be unverified, never "
+            f"excluded: {relative_only}"
+        )
+        assert through_link[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+            "a row written through a symlinked spelling did not resolve to "
+            f"the real worktree root: {through_link}"
+        )
+        assert checkout_set[1]["contained_rows"] == 1
+        assert checkout_set[1]["roots"] == 2
 
 
 class TestReviewQuoting:
