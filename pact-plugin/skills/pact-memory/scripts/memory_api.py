@@ -750,14 +750,20 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         return None
 
 
-def _listed_worktree_toplevels(start) -> Optional[set]:
+def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Optional[set]:
     """Every toplevel `git worktree list` reports for `start`'s repository.
+
+    With `git_dir`, the listing is of THAT repository (`--git-dir`), which is
+    the only form that reaches a submodule's own worktrees: run from a
+    directory, git discovers the enclosing repository instead.
 
     `None` when git cannot enumerate — a failed ANSWER, not a failed
     verification, so callers must not treat it as proof of a redirect.
     """
     command = ["git"]
-    if start is not None:
+    if git_dir is not None:
+        command += ["--git-dir", str(git_dir)]
+    elif start is not None:
         command += ["-C", str(start)]
     command += ["worktree", "list", "--porcelain"]
     from shared.project_scope import git_env_without_location
@@ -812,7 +818,10 @@ def _worktree_redirect(asked_root, common_dir) -> bool:
         return False
     if git_dir == common_path:
         return False
-    listed = _listed_worktree_toplevels(common_path.parent)
+    # LISTED BY THE REPOSITORY THE COMMON DIR BELONGS TO: a submodule's
+    # admin dir sits inside the superproject's `.git`, so a listing run from
+    # a directory would report the SUPERPROJECT's worktrees.
+    listed = _listed_worktree_toplevels(None, git_dir=common_path)
     if listed is None:
         return False
     toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
@@ -984,6 +993,23 @@ def main_repo_root(
             git_dir = git_dir.resolve()
             common_path = common.resolve()
             main_git = (common_path.parent / ".git").resolve()
+            # ANY LINKED WORKTREE IS VERIFIED, not only one of a main
+            # checkout: a forged `.git` FILE naming a SUBMODULE's worktree
+            # admin dir (`<super>/.git/modules/<name>/worktrees/<wt>`) also
+            # makes every git answer agree, and it binds that submodule's
+            # id unless the listing refuses it.
+            if git_dir != common_path and main_git != common_path:
+                asked = Path(start) if start is not None else Path.cwd()
+                if _worktree_redirect(asked, common_path):
+                    logger.warning(
+                        "the directory %r resolves to another repository's "
+                        "worktree admin dir but is not one of its listed "
+                        "worktrees, so no project id was derived from it. Run "
+                        "the `project-id show` verb to inspect the detected "
+                        "identity.",
+                        str(asked),
+                    )
+                    return None
             if git_dir != common_path and main_git == common_path:
                 # LINKED WORKTREE: per-worktree git dir, shared main `.git`.
                 # VERIFY IT IS LISTED before trusting the shape: a forged

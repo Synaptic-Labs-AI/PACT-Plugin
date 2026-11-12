@@ -466,3 +466,44 @@ class TestAnUnparseableScpRemoteStillDeclines:
     @pytest.mark.parametrize("url", ["/srv/a\\b:c", "..\\rel\\repo", "/srv/team@a@b"])
     def test_a_local_path_with_a_backslash_or_two_ats_stays_local(self, url):
         assert pi.classify_remote_origin(url) == (NO_PORTABLE, None)
+
+
+class TestAPointerAtASubmoduleWorktreeAdminDirIsRefused:
+    """A `.git` FILE naming a submodule's LINKED-WORKTREE admin dir makes git
+    answer for the victim submodule (its common dir, its origin) although the
+    asking folder is not one of its worktrees. Only git's worktree listing
+    tells the two apart, as it does for a superproject's worktree."""
+
+    def _victim(self, tmp_path):
+        superproject = _superproject_with_submodule(tmp_path)
+        submodule = superproject / "vendor" / "lib"
+        run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN, cwd=submodule)
+        worktree = tmp_path / "libwt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "libwt", cwd=submodule)
+        admin = superproject / ".git" / "modules" / "vendor" / "lib"
+        return worktree, admin
+
+    def test_the_forged_pointer_binds_no_id_and_reads_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts.memory_api import _worktree_redirect
+
+        _worktree, admin = self._victim(tmp_path)
+        forged = _forged_checkout(tmp_path, admin / "worktrees" / "libwt")
+        store = tmp_path / "m.db"
+        _seed_relative_bucket(store, SUBMODULE_ID)
+
+        assert _worktree_redirect(forged, admin) is True
+        memory = _memory_in(monkeypatch, forged, store)
+        assert memory.project_id is None
+        assert memory.list(limit=10) == []
+
+    def test_the_genuine_worktree_still_resolves(self, tmp_path, monkeypatch):
+        from scripts.memory_api import _worktree_redirect
+
+        worktree, admin = self._victim(tmp_path)
+
+        assert _worktree_redirect(worktree, admin) is False
+        assert _memory_in(monkeypatch, worktree, tmp_path / "m.db").project_id == (
+            SUBMODULE_ID
+        )
