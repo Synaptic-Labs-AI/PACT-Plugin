@@ -75,6 +75,18 @@ SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
 SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
 SESSION_BANNER = re.compile(r"=+ test session starts =+")
 SECTION_SEPARATOR = re.compile(r"[=_-]{3,}( .*)?")
+# The header line each census's finish() writes when it fails the session.
+# Under xdist the controller writes it straight after the last progress
+# marker, on the same line, so an optional progress prefix is allowed.
+_PROGRESS_PREFIX = r"(?:[^\[]*\[ *[0-9]{1,3}%\])?"
+CENSUS_HEADERS = {
+    "child_pytest": re.compile(
+        _PROGRESS_PREFIX + r"CHILD PYTEST CENSUS: ([0-9]{1,9}) pytest child\(ren\) "
+        r"started without blocking pytest-randomly"),
+    "clock_shift": re.compile(
+        _PROGRESS_PREFIX + r"clock-shift census: ([0-9]{1,9}) problem\(s\); "
+        r"this run did not shift every clock"),
+}
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
 # the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
@@ -232,14 +244,16 @@ def _command_argv(lines: list[str]) -> list[str]:
     return argv
 
 
-def _session_header(lines: list[str]) -> list[str]:
-    """The full-suite step's pytest report header.
+def _session_spans(lines: list[str]) -> tuple[list[str], list[str]]:
+    """The full-suite step's pytest report header and its session-finish span.
 
-    It starts after the first session-start banner that follows the step's
-    echoed run command, so a banner from an earlier step cannot anchor it, and
-    ends at the first blank line or section separator, before any test result
-    or captured output. A missing banner is refused: reading no seed would look
-    like a valid ordered run.
+    The header starts after the first session-start banner that follows the
+    step's echoed run command, so a banner from an earlier step cannot anchor
+    it, and ends at the first blank line or section separator. The
+    session-finish span runs from there to the next section separator: it holds
+    the progress lines and what pytest_sessionfinish writes, and no test's
+    captured output, which pytest prints only inside a later section. A missing
+    banner is refused: reading no seed would look like a valid ordered run.
     """
     commands = [index for index, line in enumerate(lines)
                 if _command_text(line) is not None]
@@ -249,15 +263,39 @@ def _session_header(lines: list[str]) -> list[str]:
         raise EvidenceError(
             "no pytest session-start banner follows the full-suite run command; "
             "the run's seed header cannot be located")
-    header = []
-    for line in lines[start + 1:]:
-        if not line.strip() or SECTION_SEPARATOR.fullmatch(line):
-            break
-        header.append(line)
-    return header
+    end = start + 1
+    while (end < len(lines) and lines[end].strip()
+           and not SECTION_SEPARATOR.fullmatch(lines[end])):
+        end += 1
+    finish = end
+    while finish < len(lines) and not SECTION_SEPARATOR.fullmatch(lines[finish]):
+        finish += 1
+    return lines[start + 1:end], lines[end:finish]
 
 
-def _shuffle_seed(lines: list[str]) -> int | None:
+def _census_failures(finish_span: list[str]) -> list[dict]:
+    """Every census that failed the session, with its problem lines.
+
+    Read from the session-finish span only, so a census-shaped line in a test's
+    captured output is never counted.
+    """
+    failures = []
+    for index, line in enumerate(finish_span):
+        for name, pattern in CENSUS_HEADERS.items():
+            match = pattern.fullmatch(line)
+            if match is None:
+                continue
+            problems = []
+            for detail in finish_span[index + 1:]:
+                if not detail.startswith("  "):
+                    break
+                problems.append(detail.strip())
+            failures.append({"census": name, "problems": int(match.group(1)),
+                             "lines": problems})
+    return sorted(failures, key=lambda failure: failure["census"])
+
+
+def _shuffle_seed(header: list[str]) -> int | None:
     """The pytest-randomly seed from the report header, or None for an ordered run.
 
     Only header lines count, so a seed line a test prints in its captured output
@@ -265,7 +303,7 @@ def _shuffle_seed(lines: list[str]) -> int | None:
     ASCII digits, or a second seed line, is refused.
     """
     seeds = []
-    for line in _session_header(lines):
+    for line in header:
         match = SEED_LINE.fullmatch(line)
         if match is None and SEED_LIKE_LINE.fullmatch(line):
             raise EvidenceError(
@@ -758,24 +796,36 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
 
 
 def _validate_run_outcomes(record: dict, metadata: dict, lines: list[str],
-                           overall_conclusion: str) -> tuple[str, list[str], bool]:
-    """Reconcile exit status, verifier disposition, and the workflow conclusion."""
+                           overall_conclusion: str,
+                           census_failures: list[dict]) -> tuple[str, list[str], str]:
+    """Reconcile exit status, verifier disposition, and the workflow conclusion.
+
+    A green run that a census failed is a census outcome, checked like a red
+    run: the censuses raise only a clean status, so its exit status must be 1.
+    """
     full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
     verifier_state, verifier_failures = _full_run_verifier(
         metadata, lines, bool(full_run_ok))
     red = record["failed"] > 0 or record["errors"] > 0
-    if red and overall_conclusion != "failure":
-        raise EvidenceError("red test outcomes have an inconsistent overall conclusion")
-    if not red and overall_conclusion != "success":
+    census = not red and bool(census_failures) and record["exitstatus"] == 1
+    failing = red or census
+    if failing and overall_conclusion != "failure":
+        raise EvidenceError(
+            "red test outcomes have an inconsistent overall conclusion" if red
+            else "a census failure has an inconsistent overall conclusion")
+    if not failing and overall_conclusion != "success":
         raise EvidenceError("green test outcomes have an inconsistent overall conclusion")
-    if red and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
-        raise EvidenceError("red outcomes lack consistent exit and verifier evidence")
-    if not red and record["exitstatus"] != 0:
+    if failing and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
+        raise EvidenceError(
+            "red outcomes lack consistent exit and verifier evidence" if red
+            else "a census failure lacks consistent exit and verifier evidence")
+    if not failing and record["exitstatus"] != 0:
         raise EvidenceError("nonzero exit without a test outcome is invalid infrastructure")
-    clean = not red and record["exitstatus"] == 0
+    clean = not failing and record["exitstatus"] == 0
     if clean and (len(full_run_ok) != 1 or record["passed"] <= 0 or verifier_failures):
         raise EvidenceError("a clean run needs positive passes and one FULL-RUN-OK")
-    return verifier_state, verifier_failures, clean
+    validity = "clean" if clean else "census_outcome" if census else "test_outcome"
+    return verifier_state, verifier_failures, validity
 
 
 def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
@@ -787,7 +837,9 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     collected, terminal = _validate_records(metadata, record, collection, expected_sha)
     lines, argv, summary, environment_passes = _validate_log(
         directory, record, expected_sha)
-    shuffle_seed = _shuffle_seed(lines)
+    header, finish_span = _session_spans(lines)
+    shuffle_seed = _shuffle_seed(header)
+    census_failures = _census_failures(finish_span)
     if shuffle_seed is not None and len(argv) == 9:
         raise EvidenceError(
             "a pytest-randomly seed line sits beside the 9-token run line, "
@@ -795,11 +847,11 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
         record, lines, terminal, artifact)
-    verifier_state, verifier_failures, clean = _validate_run_outcomes(
-        record, metadata, lines, overall_conclusion)
+    verifier_state, verifier_failures, validity = _validate_run_outcomes(
+        record, metadata, lines, overall_conclusion, census_failures)
     return {
         "logical_name": logical, "raw_paths": RAW_PATHS, "evidence_errors": [],
-        "validity": "clean" if clean else "test_outcome",
+        "validity": validity,
         "identity": {"database_id": metadata["databaseId"],
                      "workflow_database_id": metadata["workflowDatabaseId"],
                      "attempt": 1, "head_sha": expected_sha,
@@ -808,6 +860,8 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
         # Beside identity, never in environment: a seed is the variable under
         # test, so it must not make a delta unattributable.
         "shuffle_seed": shuffle_seed,
+        # Outcome evidence, not environment: a census failure is a suite failure.
+        "census_failures": census_failures,
         "argv": argv,
         "environment": {
             "overall_conclusion": overall_conclusion,
@@ -985,6 +1039,11 @@ def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
             comparison["deltas"].append({"type": "skip_sites", "run": label,
                                          "before": reference["collection_skip_sites"],
                                          "after": run["collection_skip_sites"]})
+        census_before = sorted({failure["census"] for failure in reference["census_failures"]})
+        census_after = sorted({failure["census"] for failure in run["census_failures"]})
+        if census_after != census_before:
+            comparison["deltas"].append({"type": "census", "run": label,
+                                         "before": census_before, "after": census_after})
         if run["argv"] != reference["argv"]:
             comparison["observations"].append({"type": "argv", "run": label})
         duration_changes = _material_duration_changes(reference_durations, run)

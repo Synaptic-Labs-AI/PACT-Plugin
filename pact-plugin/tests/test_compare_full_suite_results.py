@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import types
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -95,7 +96,8 @@ def environment_steps():
 def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
              record_updates=None, collection_updates=None, metadata_updates=None,
              teardown_after_pass=(), collection_skips=(), command=None, seeds=(),
-             header_lines=(), captured=(), banner=True):
+             header_lines=(), captured=(), banner=True, finish_lines=(),
+             census_failed=False):
     directory = root / name
     artifact = directory / "artifact"
     artifact.mkdir(parents=True)
@@ -114,12 +116,14 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
               "xfailed": counts["xfail"], "xpassed": counts["xpass"]}
     summary = summary_for(totals)
     red = totals["failed"] or totals["errors"]
+    # A census fails a green session with exit 1: the job and verifier read red.
+    failing = red or census_failed
     skip_counts = Counter((item["node_id"].split("::", 1)[0], item["reason"] or "")
                           for item in cases if item["outcome"] == "skip")
     for file, reason in collection_skips:
         skip_counts[(file, reason)] += 1
     record = {"schema_version": 3, "collected": len(nodes), **totals,
-              "deselected": 0, "exitstatus": int(bool(red)), "summary_line": summary,
+              "deselected": 0, "exitstatus": int(bool(failing)), "summary_line": summary,
               "terminal_node_ids": nodes, "items_before_modifyitems": len(nodes),
               "items_after_modifyitems": len(nodes), "run_id": str(run_id),
               "run_attempt": "1", "owner_pid": 123,
@@ -137,10 +141,10 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
                 "workflowDatabaseId": comparator.WORKFLOW_DATABASE_ID,
                 "displayTitle": name, "event": "workflow_dispatch", "headSha": SHA,
                 "headBranch": "issue-1714", "status": "completed",
-                "conclusion": "failure" if red else "success",
+                "conclusion": "failure" if failing else "success",
                 "url": f"https://example.invalid/runs/{run_id}",
                 "jobs": [{"name": "full-suite",
-                          "conclusion": "failure" if red else "success",
+                          "conclusion": "failure" if failing else "success",
                           "steps": environment_steps()}]}
     metadata.update(metadata_updates or {})
     write_json(directory / "metadata.json", metadata)
@@ -184,7 +188,9 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
     # The report header mirrors a real full-suite step: one banner after the
     # echoed command, the header block, then a blank line before the results.
     # `seeds=` and `header_lines=` add lines inside that block; `captured=`
-    # adds lines to a failing test's captured stdout, outside it.
+    # adds lines to a failing test's captured stdout, outside it. `finish_lines=`
+    # adds lines to the session-finish span after the header, where a census
+    # writes.
     header = [SESSION_BANNER_TEXT] if banner else []
     header += ["platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0",
                *(f"Using --randomly-seed={seed}" for seed in seeds), *header_lines,
@@ -195,6 +201,7 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
         actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
         *map(actions_line, header),
+        *map(actions_line, finish_lines),
         actions_line("CI environment matches constraints-ci.txt."),
         actions_line(f"FULL-COLLECTION-OK 1 test files and {len(nodes)} items match discovery; subject={SHA}"),
     ]
@@ -206,7 +213,7 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
                               (f" - {item['reason']}" if item["reason"] else ""))
                  for item in cases if item["outcome"] == "xpass")
     lines.append(actions_line(f"===== {summary} ====="))
-    if red:
+    if failing:
         lines.append(actions_line("RUN-VERIFY-FAILURE FAILED: synthetic test outcome"))
     else:
         lines.append(actions_line(
@@ -531,6 +538,163 @@ def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
     assert comparison["evidence_errors"] == [
         {"run": "one", "error": "no pytest session-start banner follows the "
          "full-suite run command; the run's seed header cannot be located"}]
+
+
+CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 pytest child(ren) started without "
+                       "blocking pytest-randomly")
+CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
+
+
+@pytest.mark.parametrize("finish, name", [
+    ((CHILD_CENSUS_HEADER, "  [gw0] test_x (call): pytest child [python -m pytest]"),
+     "child_pytest"),
+    ((CLOCK_CENSUS_HEADER, "  the shim did not load in children"), "clock_shift"),
+    (("." * 40 + " [100%]" + CHILD_CENSUS_HEADER, "  [gw1] test_y (call): child"),
+     "child_pytest"),
+], ids=["child", "clock", "child-after-xdist-progress"])
+def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=finish)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["status"] == "different"
+    assert comparison["deltas"] == [
+        {"type": "census", "run": "two", "before": [], "after": [name]}]
+    assert [run["validity"] for run in comparison["input_runs"]] == [
+        "clean", "census_outcome"]
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": name, "problems": 1, "lines": [finish[1].strip()]}]
+
+
+def test_a_census_line_only_in_captured_output_does_not_explain_the_exit(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      captured=(CHILD_CENSUS_HEADER,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "green test outcomes have an inconsistent overall conclusion"}]
+
+
+def test_a_census_line_beside_a_non_census_exit_status_stays_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CHILD_CENSUS_HEADER,),
+                      record_updates={"exitstatus": 2})
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "green test outcomes have an inconsistent overall conclusion"}]
+
+
+def test_a_red_run_records_its_census_and_ignores_a_captured_one(tmp_path):
+    first = make_run(tmp_path, "one")
+    captured_shape = CHILD_CENSUS_HEADER.replace(": 1 ", ": 9 ")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      finish_lines=(CLOCK_CENSUS_HEADER, "  the shim did not load"),
+                      captured=(captured_shape,))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert sorted(delta["type"] for delta in comparison["deltas"]) == ["census", "outcome"]
+    assert read_runs(output)[1]["validity"] == "test_outcome"
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": "clock_shift", "problems": 1, "lines": ["the shim did not load"]}]
+
+
+def test_the_census_comparison_is_by_name_not_by_count(tmp_path):
+    first = make_run(tmp_path, "one", census_failed=True,
+                     finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),))
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 3 "),))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["deltas"] == []
+
+
+@pytest.mark.parametrize("module_name", ["child_pytest_census", "clock_shift_census"])
+def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_name):
+    """The comparator's census patterns match the line each real finish() writes."""
+    if module_name == "child_pytest_census":
+        import child_pytest_census as census
+        name = "child_pytest"
+        monkeypatch.setitem(census._state, "misses", ["a miss"])
+        monkeypatch.setitem(census._state, "forwarded", [])
+    else:
+        from clock_shift import clock_shift_census as census
+        name = "clock_shift"
+        monkeypatch.setitem(census._state, "installed", True)
+        monkeypatch.setitem(census._state, "misses", ["a miss"])
+        monkeypatch.setitem(census._state, "workers", [])
+        monkeypatch.setitem(census._state, "python_children", 0)
+    written = []
+    reporter = types.SimpleNamespace(write_line=written.append)
+    session = types.SimpleNamespace(
+        exitstatus=0, config=types.SimpleNamespace(
+            pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
+    census.finish(session)
+    assert session.exitstatus == 1
+    assert comparator._census_failures(written) == [
+        {"census": name, "problems": 1, "lines": ["a miss"]}]
+
+
+RIG_CONFTEST = """\
+import child_pytest_census
+
+
+def pytest_configure(config):
+    child_pytest_census.install()
+
+
+def pytest_testnodedown(node, error):
+    child_pytest_census.collect(node)
+
+
+def pytest_sessionfinish(session):
+    child_pytest_census.finish(session)
+"""
+RIG_TESTS = """\
+import subprocess
+import sys
+
+
+def test_starts_an_unblocked_child():
+    try:
+        subprocess.run([sys.executable, "-m", "pytest", "--version"], check=False)
+    except Exception:
+        pass
+
+
+def test_prints_a_census_shaped_line():
+    print({shape!r})
+    assert False
+"""
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_census_output_lands_in_the_session_finish_span(tmp_path, parallel):
+    """Real pytest output: the census header is read where pytest writes it, and a
+    census-shaped line a failing test prints is not."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "conftest.py").write_text(RIG_CONFTEST, encoding="utf-8")
+    shape = CHILD_CENSUS_HEADER.replace(": 1 ", ": 9 ")
+    (rig / "test_rig.py").write_text(RIG_TESTS.format(shape=shape), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parent)}
+    env.pop("PYTEST_ADDOPTS", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", *parallel],
+        cwd=rig, env=env, capture_output=True, text=True, check=False)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert shape in completed.stdout  # the decoy reached the captured output
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    _header, finish_span = comparator._session_spans(lines)
+    failures = comparator._census_failures(finish_span)
+    assert [(failure["census"], failure["problems"]) for failure in failures] == [
+        ("child_pytest", 1)], completed.stdout
 
 
 def test_two_seed_lines_are_refused(tmp_path):
