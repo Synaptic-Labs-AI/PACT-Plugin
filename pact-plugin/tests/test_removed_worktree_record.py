@@ -42,7 +42,7 @@ from unittest.mock import patch
 import pytest
 
 from fixtures.project_dir import write_session_context
-from fixtures.session_marker import fresh_session_id
+from fixtures.session_marker import fresh_session_id, importer_session_id
 from fixtures.role_frames import teammate_frame
 from scripts import memory_api, pact_session
 from scripts.database import db_connection
@@ -68,11 +68,11 @@ from helpers import known_root  # noqa: E402
 pytestmark = pytest.mark.claude_md_ambient
 
 # Importers (test_project_dir_resolution, test_memory_project_scope_disclosure)
-# use this fixed value through the helpers below and never reach a memory save's
-# embedding marker. Inside this module _per_test_session_id rebinds SID for each
-# test, because several saves here reach /tmp/pact_embedding_attempted_<SID>.
-# Read SID at call time only.
-SID = "aabb1122-0000-0000-0000-00000000c0de"
+# use this value through the helpers below and must never reach a memory save's
+# embedding marker under it; conftest fails a test that does. Inside this module
+# _per_test_session_id rebinds SID for each test, because several saves here
+# reach /tmp/pact_embedding_attempted_<SID>. Read SID at call time only.
+SID = importer_session_id()
 _SEEN_SIDS: set[str] = set()
 # A parametrize row is built at import, before SID is rebound; this stands in
 # for "the current test's SID" and is replaced inside the test.

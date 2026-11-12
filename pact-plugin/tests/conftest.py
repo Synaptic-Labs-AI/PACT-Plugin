@@ -101,6 +101,7 @@ from fixtures.claude_md_seed import seed_claude_md  # noqa: E402
 from fixtures.hf_cache import hf_cache_env  # noqa: E402
 from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
 from fixtures.root_guard import non_root_skip_reason  # noqa: E402
+from fixtures.session_marker import remove_importer_markers  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -914,6 +915,25 @@ def _scrub_session_id_from_test_env(monkeypatch):
     upgrade rather than a safety guarantee.
     """
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _refuse_a_marker_under_an_importer_session_id():
+    """Fail a test after which an importer session id's embedding marker exists.
+
+    A module constant from `fixtures.session_marker.importer_session_id()` is
+    bound once by every module that imports it, so a save that reaches
+    `maybe_embed_pending()` under it would leave a marker shared by every later
+    test in the process. The id is unique to this process, so the marker is
+    this process's own: remove it, then fail with the remedy.
+    """
+    yield
+    removed = remove_importer_markers()
+    assert not removed, (
+        f"a save reached the embedding marker under an importer session id "
+        f"({', '.join(str(path) for path in removed)}). Give the test its own "
+        f"session id with fixtures.session_marker.fresh_session_id."
+    )
 
 
 @pytest.fixture(autouse=True)
