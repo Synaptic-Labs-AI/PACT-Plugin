@@ -827,7 +827,7 @@ class TestCwdSubdirectoryDetection:
     """
 
     def test_cwd_from_subdirectory_under_a_broken_marker_declines(
-        self, clean_env_no_claude_project_dir, tmp_path, caplog
+        self, clean_env_no_claude_project_dir, tmp_path, caplog, monkeypatch
     ):
         """A `.git` marker git cannot answer for DECLINES, naming the marker.
 
@@ -836,11 +836,27 @@ class TestCwdSubdirectoryDetection:
         folder name nobody can re-derive. The plain-marker basename shape is
         held by `test_cwd_from_nested_subdirectory` (a CLAUDE.md marker) and
         `test_cwd_no_markers_falls_back_to_cwd_basename`.
+
+        ORDER-ROBUST BY CONSTRUCTION. Every higher rung is neutralised here,
+        not inherited from whatever ran before this test: a session record
+        enabled by an earlier module, a user-scope setting, or a
+        `GIT_CEILING_DIRECTORIES` value (which `_unanswerable_repository`
+        honours and which stops the marker walk) would otherwise change the
+        cwd rung's answer and make this arm depend on the run's order.
         """
         project = tmp_path / "my-real-project"
         subdir = project / ".claude"
         subdir.mkdir(parents=True)
         (project / ".git").mkdir()
+
+        monkeypatch.setattr(
+            "scripts.memory_api.get_project_dir_from_session_record", lambda: ""
+        )
+        monkeypatch.setattr(
+            "scripts.memory_api.read_user_setting", lambda *a, **k: None
+        )
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
 
         with caplog.at_level(logging.WARNING), \
              patch("subprocess.run", side_effect=FileNotFoundError()), \
