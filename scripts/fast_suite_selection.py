@@ -25,8 +25,8 @@ WHAT THIS MUST NEVER DO
 PATH DOMAINS (the single easiest thing to get wrong)
   Manifest paths, discovered corpus paths, and Selection members are
   PLUGIN-RELATIVE (relative to pact-plugin/).
-  selection_machinery, value_inert_keys, constraints-ci.txt and pyproject.toml
-  are REPO-RELATIVE, because git reports repo-relative paths.
+  selection_machinery, value_inert_keys, constraints-ci.txt, constraints-ci.in
+  and pyproject.toml are REPO-RELATIVE, because git reports repo-relative paths.
   repo_to_plugin() is the only conversion, and it is table-tested.
 """
 
@@ -95,7 +95,7 @@ EXPECTED_GUARD_FILES = frozenset({
 
 EXPECTED_EXCLUSION_COUNT = 24
 
-_DEPENDENCY_PINS = ("constraints-ci.txt", "pyproject.toml")
+_DEPENDENCY_PINS = ("constraints-ci.txt", "constraints-ci.in", "pyproject.toml")
 # The files every PR's version bump touches. A broad exclusion ignores a
 # change to them unless its closure names one or scans a tree.
 BUMP_TRIO = ("CHANGELOG.md", "README.md", ".claude-plugin/marketplace.json")

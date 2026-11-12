@@ -42,6 +42,7 @@ SELECTION_MACHINERY = (
     "scripts/fast_suite_exclusions.json",
     ".github/workflows/fast-tests.yml",
     "constraints-ci.txt",
+    "constraints-ci.in",
     "pyproject.toml",
 )
 BASELINE = {

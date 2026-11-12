@@ -479,10 +479,9 @@ class TestDependencyDriftIsDetectable:
     Not covered:
     - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
     - an unpinned package installed and then removed between two checks, by a route other than `pip uninstall` (removing a pinned package, or a package the pins require, is reported as MISSING);
-    - integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
+    - integrity: the hashes in constraints-ci.txt are checked by pip at install time (`--require-hashes`), not by the runtime check, which checks names and versions only;
     - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
-    - vendored code without distribution metadata;
-    - transitive versions, which float by design (only pinned names are version-checked).
+    - vendored code without distribution metadata.
     """
 
     # The verify step's command as tests.yml runs it: ENFORCING (no
@@ -703,6 +702,36 @@ class TestDependencyDriftIsDetectable:
             f"NOWHERE (it is deliberately silent — the CLI's stderr is a JSON "
             f"contract). Pin them in constraints-ci.txt, or remove them here."
         )
+
+    def test_the_shipped_lock_is_hashed_and_follows_its_input(self):
+        """constraints-ci.txt is the hashed lock of constraints-ci.in.
+
+        Every lock pin carries a sha256 hash, so `--require-hashes` never
+        meets an unhashed line; every input pin, pip included, appears in the
+        lock at the same version; and the lock header names the same pinned
+        refresh command the input documents, so a refresh by another uv
+        version is visible as a header diff. No arm runs the refresh tool."""
+        root = self._require_root("the hashed CI lock")
+        verify = self._verify_script(self._real_repo_root())
+        lock = verify.read_lock(root / "constraints-ci.txt")
+        unhashed = sorted(name for name, (_, hashes) in lock.items() if not hashes)
+        assert not unhashed, f"constraints-ci.txt pins without a hash: {unhashed}"
+        wanted = verify.read_pins(root / "constraints-ci.in")
+        assert "pip" in wanted, "constraints-ci.in does not pin pip"
+        drift = sorted(
+            f"{name}: in {version}, lock {lock.get(name, ('absent',))[0]}"
+            for name, version in wanted.items()
+            if lock.get(name, (None,))[0] != version)
+        assert not drift, (
+            f"constraints-ci.txt does not follow constraints-ci.in: {drift}. "
+            "Refresh the lock with the command in constraints-ci.in.")
+        header = (root / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()[:2]
+        command = re.search(r"uvx uv@\S+ pip compile constraints-ci\.in\b.*", header[-1])
+        assert command, f"the lock header names no pinned refresh command: {header}"
+        assert command.group(0) in " ".join(
+            (root / "constraints-ci.in").read_text(encoding="utf-8").split()), (
+            "the lock header's refresh command is not the one constraints-ci.in "
+            f"documents: {command.group(0)!r}")
 
     def _diagnostic_upload_problems(self, rel, jid, steps):
         """Placement and fail-closed shape of the full-suite evidence upload."""
@@ -983,7 +1012,7 @@ class TestDependencyDriftIsDetectable:
     )
     # Exact line (stripped) -> the reason it is accepted. Empty today.
     _ACCEPTED_TRIPWIRE_LINES = {}
-    _CANONICAL_INSTALL_LINE = "python -m pip install -r constraints-ci.txt"
+    _CANONICAL_INSTALL_LINE = "python -m pip install --require-hashes -r constraints-ci.txt"
 
     @staticmethod
     def _tracked_shell_and_make_files(root):
@@ -1576,12 +1605,14 @@ class TestDependencyDriftIsDetectable:
         """MUTATION ARM: a memory_init package missing from the pins reddens."""
         root = self._require_root("memory_init's pins")
         pins = (root / "constraints-ci.txt").read_text(encoding="utf-8")
-        line = next(ln for ln in pins.splitlines()
-                    if ln.lower().startswith("model2vec=="))
+        # The pin and its hash continuation lines, so the mutant stays a
+        # well-formed lock that merely lacks model2vec.
+        block = re.search(r"(?m)^model2vec==\S+ \\\n(?:    --hash=\S+(?: \\)?\n)+", pins)
+        assert block, "constraints-ci.txt has no hashed model2vec block"
         self._shape_reddens(
             tmp_path, monkeypatch, "model2vec-unpinned",
             "test_memory_init_packages_are_pinned", r"DEPENDENCY DRIFT: \['model2vec'\]",
-            extra_files={"constraints-ci.txt": pins.replace(line + "\n", "", 1)})
+            extra_files={"constraints-ci.txt": pins.replace(block.group(0), "", 1)})
 
     def test_verify_placement_mutations_redden(self, tmp_path, monkeypatch):
         """MUTATION ARM: every way the verify steps can stop
@@ -1755,7 +1786,7 @@ class TestDependencyDriftIsDetectable:
         # ruff's --target-version (the shipped lint legs use it too).
         self._shape_stays_green(
             tmp_path, monkeypatch, "faithful", arm, workflow_text=in_block(
-                "pip list; python -m pip install -r constraints-ci.txt; "
+                "pip list; python -m pip install --require-hashes -r constraints-ci.txt; "
                 "ruff check --target-version py312 pact-plugin/"))
 
     def test_unvetted_actions_redden(self, tmp_path, monkeypatch):
@@ -1924,9 +1955,10 @@ class TestVerifyCiEnvironmentScript:
         assert pins == {"foo-bar": "1.0"}
         assert self._check(verify, pins, tmp_path).ok
 
-    def test_pip_is_exempt_from_the_version_check(self, verify, tmp_path):
+    def test_pip_is_version_checked_like_any_pin(self, verify, tmp_path):
         self._dist(tmp_path, "pip", "99.0")
-        assert self._check(verify, {"pip": "1.0"}, tmp_path).ok
+        verdict = self._check(verify, {"pip": "1.0"}, tmp_path)
+        assert verdict.wrong_version == {"pip": ("99.0", "1.0")}
 
     @pytest.mark.parametrize("line", [
         "ruff==0.17.*",
@@ -1954,6 +1986,39 @@ class TestVerifyCiEnvironmentScript:
         constraints.write_text(
             "# header\n\nruff==0.17.3  # the linter\n", encoding="utf-8")
         assert verify.read_pins(constraints) == {"ruff": "0.17.3"}
+
+    _HASH_A = "--hash=sha256:" + "a" * 64
+    _HASH_B = "--hash=sha256:" + "b" * 64
+
+    def test_read_lock_reads_hash_continuations(self, verify, tmp_path):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(
+            f"# generated\nruff==0.17.3 \\\n    {self._HASH_A} \\\n"
+            f"    {self._HASH_B}\npytest==9.2.0 \\\n    {self._HASH_A}\n",
+            encoding="utf-8")
+        assert verify.read_lock(constraints) == {
+            "ruff": ("0.17.3", ("a" * 64, "b" * 64)),
+            "pytest": ("9.2.0", ("a" * 64,)),
+        }
+        assert verify.read_pins(constraints) == {"ruff": "0.17.3", "pytest": "9.2.0"}
+
+    @pytest.mark.parametrize("body, where", [
+        ("ruff==0.17.3\n    {a}\n", ":2: a hash line that no pin"),
+        ("ruff==0.17.3 \\\n", "ends inside a continued pin"),
+        ("ruff==0.17.3 \\\n    {a} \\\n", "ends inside a continued pin"),
+        ("ruff==0.17.3 \\\n\n    {a}\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n# note\n    {a}\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    --hash=sha256:ABC\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    --hash=md5:" + "a" * 32 + "\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    {a} {a}\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    {a}\nRuff==0.17.3\n", ":3: 'Ruff' is pinned twice"),
+        ("ruff==0.17.3 # c \\\n    {a}\n", ":1: not an exact"),
+    ])
+    def test_read_lock_refuses_a_malformed_continuation(self, verify, tmp_path, body, where):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(body.format(a=self._HASH_A), encoding="utf-8")
+        with pytest.raises(verify.ConstraintsError, match=re.escape(where)):
+            verify.read_lock(constraints)
 
     def test_interpreter_mismatch_reports_the_unresolved_pair(self, verify, tmp_path, monkeypatch):
         """A `python3` on PATH in another DIRECTORY than sys.executable

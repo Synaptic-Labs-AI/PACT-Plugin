@@ -38,6 +38,7 @@ SELECTION_MACHINERY = (
     "scripts/fast_suite_exclusions.json",
     ".github/workflows/fast-tests.yml",
     "constraints-ci.txt",
+    "constraints-ci.in",
     "pyproject.toml",
 )
 # The exact ten discovery/isolation guards the manifest pins. The loader
@@ -218,6 +219,8 @@ class TestAddBacks:
          "selection-machinery"),
         ("constraints-pin", ("constraints-ci.txt",), "ok",
          "selection-machinery"),
+        ("constraints-input", ("constraints-ci.in",), "ok",
+         "selection-machinery"),
         ("pyproject-pin", ("pyproject.toml",), "ok", "selection-machinery"),
         # A changed conftest with no classification cannot be cleared.
         ("conftest-without-verdict", ("pact-plugin/tests/conftest.py",), "ok",
@@ -254,11 +257,12 @@ def test_changed_test_wins_over_changed_seam(core):
     assert result.added_back[0].reason == "changed_test"
 
 
-@pytest.mark.parametrize("pin", ["constraints-ci.txt", "pyproject.toml"])
+@pytest.mark.parametrize("pin", ["constraints-ci.txt", "constraints-ci.in", "pyproject.toml"])
 def test_the_dependency_pins_select_all_without_a_machinery_entry(core, pin):
     """The hard-coded pin rule fires on its own, not via the manifest list."""
     machinery = tuple(path for path in SELECTION_MACHINERY
-                      if path not in ("constraints-ci.txt", "pyproject.toml"))
+                      if path not in ("constraints-ci.txt", "constraints-ci.in",
+                                      "pyproject.toml"))
     result = _select(core, changed=[pin], machinery=machinery)
     assert result.select_all_reason == "selection-machinery"
     _assert_select_all(result)

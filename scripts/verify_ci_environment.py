@@ -4,7 +4,7 @@
 Compares the distributions this interpreter can import (along its own
 sys.path) with constraints-ci.txt at the repository root:
 
-- every pinned name is installed at its pinned version (pip exempt), and
+- every pinned name, pip included, is installed at its pinned version, and
   every package the pins require is installed;
 - nothing is installed outside the pins' Requires-Dist closure, plus pip
   and RUNNER_BASELINE;
@@ -21,14 +21,17 @@ the plugin.
 Not covered:
 - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
 - an unpinned package installed and then removed between two checks, by a route other than `pip uninstall` (removing a pinned package, or a package the pins require, is reported as MISSING);
-- integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
+- integrity: the hashes in constraints-ci.txt are checked by pip at install time (`--require-hashes`), not here; this script checks names and versions only;
 - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
-- vendored code without distribution metadata;
-- transitive versions, which float by design (only pinned names are version-checked).
+- vendored code without distribution metadata.
+
+constraints-ci.txt is a lock generated from constraints-ci.in: every
+distribution of the closure is pinned, so the closure equals the pin set and
+every installed distribution is version-checked.
 
 Usage: python scripts/verify_ci_environment.py [--report] [--constraints PATH]
 Exit codes: 0 ok (always 0 under --report), 1 drift, 2 a constraints line
-that is not an exact pin, or a usage error (2 even under --report).
+that is not an exact pin or its hash, or a usage error (2 even under --report).
 
 Import-time dependencies are stdlib only; `packaging` is imported inside
 functions, falling back to pip's vendored copy.
@@ -61,12 +64,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_CONSTRAINTS = REPO_ROOT / "constraints-ci.txt"
 
 _PIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+")
+_HASH_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")
+_CONTINUATION = " \\"
 _TRAILING_COMMENT_RE = re.compile(r"\s+#.*$")
 _NO_PYTHON3 = "<no python3 on PATH>"
 
 
 class ConstraintsError(ValueError):
-    """constraints-ci.txt has a line that is not an exact pin."""
+    """constraints-ci.txt has a line that is not an exact pin or its hash."""
 
 
 def normalize(name: str) -> str:
@@ -74,28 +79,68 @@ def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def read_pins(path: pathlib.Path) -> dict[str, str]:
-    """Normalized name -> exact version, one `name==version` per line.
+def read_lock(path: pathlib.Path) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Normalized name -> (exact version, its sha256 hashes).
 
-    Blank and full-line-comment lines are skipped and a trailing ` # comment`
-    is stripped. Any other line (a wildcard, marker, extras, URL, option such
-    as `-r` or `-i`) raises ConstraintsError naming its line number, and so
-    does a name pinned twice.
+    A pin is `name==version`, alone or with a trailing ` # comment`, or ending
+    in ` \\` to continue onto hash lines. A continuation line holds exactly
+    one `--hash=sha256:<64 lowercase hex>`, itself ending in ` \\` when another
+    follows. Blank and full-line-comment lines are skipped outside a
+    continuation. Anything else raises ConstraintsError naming its line: a
+    wildcard, marker, extras, URL or option line; a hash line that no pin
+    continues onto; a continuation that reaches a blank line, a comment or the
+    end of the file; and a name pinned twice. A pin with no hash lines is
+    accepted here; the shipped file's hashes are pinned by a test and enforced
+    by `--require-hashes` at install time.
     """
-    pins: dict[str, str] = {}
+    pins: dict[str, tuple[str, tuple[str, ...]]] = {}
+    current: tuple[str, str, list[str]] | None = None
+    continued = False
+    number = 0
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        line = _TRAILING_COMMENT_RE.sub("", raw).strip()
-        if not line or line.startswith("#"):
+        stripped = raw.strip()
+        if continued:
+            line = stripped
+            continued = line.endswith(_CONTINUATION)
+            if continued:
+                line = line[:-len(_CONTINUATION)].rstrip()
+            if not _HASH_RE.fullmatch(line):
+                raise ConstraintsError(
+                    f"{path}:{number}: a continued pin must be followed by a "
+                    f"`--hash=sha256:<64 hex>` line: {stripped!r}")
+            current[2].append(line.partition(":")[2])
             continue
+        if current is not None:
+            name, version, hashes = current
+            pins[normalize(name)] = (version, tuple(hashes))
+            current = None
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("--hash"):
+            raise ConstraintsError(
+                f"{path}:{number}: a hash line that no pin continues onto: {stripped!r}")
+        continued = stripped.endswith(_CONTINUATION)
+        line = (stripped[:-len(_CONTINUATION)].rstrip() if continued
+                else _TRAILING_COMMENT_RE.sub("", stripped).strip())
         if not _PIN_RE.fullmatch(line):
             raise ConstraintsError(
-                f"{path}:{number}: not an exact `name==version` pin: {raw.strip()!r}")
+                f"{path}:{number}: not an exact `name==version` pin: {stripped!r}")
         name, version = line.split("==", 1)
-        key = normalize(name)
-        if key in pins:
+        if normalize(name) in pins:
             raise ConstraintsError(f"{path}:{number}: {name!r} is pinned twice")
-        pins[key] = version
+        current = (name, version, [])
+    if continued:
+        raise ConstraintsError(
+            f"{path}:{number}: the file ends inside a continued pin")
+    if current is not None:
+        name, version, hashes = current
+        pins[normalize(name)] = (version, tuple(hashes))
     return pins
+
+
+def read_pins(path: pathlib.Path) -> dict[str, str]:
+    """Normalized name -> exact version; see read_lock for the accepted lines."""
+    return {name: version for name, (version, _) in read_lock(path).items()}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,13 +170,13 @@ class Verdict:
             out += [f"  {n}" for n in self.missing]
         if self.wrong_version or self.missing:
             remedies.append(
-                "install the pinned set: python -m pip install -r constraints-ci.txt")
+                "install the pinned set: python -m pip install --require-hashes -r constraints-ci.txt")
         if self.unexpected:
             out.append("UNEXPECTED (installed, outside the pinned set's dependency closure):")
             out += [f"  {n}" for n in self.unexpected]
             remedies.append(
-                "an unpinned package: pin it in constraints-ci.txt (refresh procedure "
-                "in its header) or remove the install that added it")
+                "an unpinned package: pin it in constraints-ci.in and refresh the lock "
+                "(command in its header), or remove the install that added it")
             remedies.append(
                 "a distribution that ships with the runner image: add it to "
                 "RUNNER_BASELINE in scripts/verify_ci_environment.py with a reason")
@@ -248,8 +293,6 @@ def check_environment(
     wrong_version: dict[str, tuple[str, str]] = {}
     missing = {n for n in required if n not in effective}
     for name, pinned in sorted(pins.items()):
-        if name == "pip":
-            continue
         dist = effective.get(name)
         if dist is None:
             missing.add(name)

@@ -1,0 +1,58 @@
+# The CI requirement set, as the hand-edited input. constraints-ci.txt is the
+# lock generated from it: every distribution of the closure pinned with a
+# sha256 hash for each file the index serves at that version. CI installs the
+# lock with `python -m pip install --require-hashes -r constraints-ci.txt`
+# (.github/workflows/tests.yml, .github/workflows/fast-tests.yml and
+# .cursor/install.sh); scripts/verify_ci_environment.py checks the installed
+# environment against it at runtime.
+#
+# The names below are the suite's direct dependencies plus pip, pinned to the
+# TEST-phase-verified versions. Merge-time resolution is code execution in CI,
+# so a version change is a reviewed change to this file and its lock, never
+# merge-time weather. Transitive versions are fixed by the lock and change only
+# through a refresh.
+# Exact pins only (`name==version`, optional trailing comment).
+#
+# pip IS pinned. The install upgrades or downgrades pip to the pinned version
+# inside the same hash-checked install. Measured 2026-11-12 on aarch64 Linux,
+# CPython 3.12.3: 24.0 -> 26.3 and 26.2.2 -> 26.3 upgrade, and 26.3 -> 26.2.2
+# downgrade, each rc 0 with every other package installed. The ubuntu-latest
+# runner's setup-python shipped pip 26.2.2 at that date, below this pin.
+#
+# REFRESH, from the repository root, with the uv version the lock header names
+# (a different uv version may write different bytes):
+#   uvx uv@0.13.6 pip compile constraints-ci.in --generate-hashes \
+#     --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+#     --no-annotate --custom-compile-command \
+#     "uvx uv@0.13.6 pip compile constraints-ci.in --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-annotate -o constraints-ci.txt" \
+#     -o constraints-ci.txt
+# A refresh keeps every version the lock already holds. To move a transitive,
+# add `--upgrade-package <name>`; to move everything, add `--upgrade`. Then run
+# the suite green under the new lock and commit the .in and lock diff together.
+# Measured 2026-11-12 with uv 0.13.6: a second compile of the same input is
+# byte-identical, and the lock is byte-identical for Python 3.12, 3.13 and 3.14
+# and for x86_64 and aarch64 Linux and both macOS targets. Every pinned
+# version has an x86_64 manylinux wheel for CPython 3.12, 3.13 and 3.14, so CI
+# builds nothing from source. Windows adds colorama and is not a CI platform.
+#
+# Incident path, a COMPROMISED TRANSITIVE: pin it here at a safe version and
+# refresh; the lock and the verify script then hold it there.
+#
+# What CI does NOT certify: consumers never read this file. pact-memory's
+# runtime install (skills/pact-memory/scripts/memory_init.py) runs a bare
+# `pip install <pkg>`, so a consumer resolves the newest pysqlite3,
+# sqlite-vec and model2vec the index serves. A breaking upstream release
+# therefore reaches consumers while CI stays green on these pins; a refresh
+# is the step that would surface it.
+pip==26.3
+pytest==9.2.0
+hypothesis==6.170.14
+httpx==0.28.1
+pytest-asyncio==1.4.1
+pytest-xdist==3.8.0
+pyyaml==6.0.3
+pysqlite3==0.6.1
+sqlite-vec==0.1.9
+model2vec==0.10.0
+ruff==0.17.3
+pytest-randomly==5.1.0

@@ -338,6 +338,41 @@ class TestFastWorkflowHygiene:
             "verify_ci_environment.py requires the pins' closure"
         )
 
+
+_LOCK_INSTALL = "python -m pip install --require-hashes -r constraints-ci.txt"
+
+
+class TestHashCheckedInstall:
+    """Every install of the CI set is the one hash-checked lock install."""
+
+    @staticmethod
+    def _install_lines(text):
+        return [line.strip() for line in text.splitlines()
+                if "pip install" in line and not line.strip().startswith(("#", "printf"))]
+
+    @pytest.mark.parametrize("source", ["tests.yml", "fast-tests.yml", ".cursor/install.sh"])
+    def test_the_only_install_is_the_hash_checked_lock(self, source):
+        root = ci_contract.require_root("the hash-checked install")
+        if source == ".cursor/install.sh":
+            text = (root / source).read_text(encoding="utf-8")
+        else:
+            doc = ci_contract.load_workflow(root, f".github/workflows/{source}")
+            text = "\n".join(
+                run for job in ci_contract.jobs_of(doc).values()
+                for run in ci_contract.run_texts(ci_contract.steps_of(job)))
+        assert self._install_lines(text) == [_LOCK_INSTALL], (
+            f"{source} installs {self._install_lines(text)!r}; the CI set is "
+            f"installed only by `{_LOCK_INSTALL}`, which moves pip to its "
+            "pinned version too. A `-c constraints-ci.txt` install fails under "
+            "hashes, and dropping --require-hashes lets a lock without hashes "
+            "install unchecked.")
+
+    def test_the_lint_gate_remedy_installs_the_lock(self):
+        root = ci_contract.require_root("the lint gate remedy")
+        text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
+        assert "python3 -m pip install --require-hashes -r constraints-ci.txt" in text
+        assert "-c constraints-ci.txt" not in text
+
     def test_checkout_uses_full_history(self):
         root = ci_contract.require_root("the fast checkout depth")
         steps = ci_contract.steps_of(
