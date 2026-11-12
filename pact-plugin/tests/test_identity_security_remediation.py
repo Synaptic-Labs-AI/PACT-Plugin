@@ -432,6 +432,120 @@ class TestTheGateDoesNotRaiseOnAReadPath:
 
 
 # ---------------------------------------------------------------------------
+# GIT_DISCOVERY_ACROSS_FILESYSTEM must parse like git, not like Python
+# ---------------------------------------------------------------------------
+
+class TestGitEnvBoolMatchesGit:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("1", True),
+            ("true", True),
+            ("YES", True),
+            ("on", True),
+            ("2", True),
+            ("0", False),
+            ("false", False),
+            ("NO", False),
+            ("off", False),
+            ("", False),
+            ("maybe", False),
+            (" true", False),
+        ],
+    )
+    def test_boolean_values(self, value, expected, monkeypatch):
+        """Catches Python truthiness: bool("0") is True, git reads FALSE."""
+        from scripts.memory_api import _git_env_bool
+
+        monkeypatch.setenv("PACT_PROBE_BOOL", value)
+        assert _git_env_bool("PACT_PROBE_BOOL") is expected
+
+    def test_unset_is_false(self, monkeypatch):
+        from scripts.memory_api import _git_env_bool
+
+        monkeypatch.delenv("PACT_PROBE_BOOL", raising=False)
+        assert _git_env_bool("PACT_PROBE_BOOL") is False
+
+    def test_a_device_boundary_stops_the_walk_unless_git_would_cross(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end: a false value must NOT cross a st_dev boundary.
+
+        Before the fix `bool("0")` was True, so the walk crossed and found a
+        marker git would never have found — a false decline.
+        """
+        from scripts import memory_api
+
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+
+        real_stat = os.stat
+
+        def fake_stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            device = 1 if str(path).endswith("inner") else 2
+            return os.stat_result(
+                (result.st_mode, result.st_ino, device, result.st_nlink,
+                 result.st_uid, result.st_gid, result.st_size,
+                 result.st_atime, result.st_mtime, result.st_ctime)
+            )
+
+        monkeypatch.setattr(memory_api.os, "stat", fake_stat)
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+        assert memory_api._unanswerable_repository(inner) is None
+
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+        assert memory_api._unanswerable_repository(inner) == outer / ".git"
+
+        for false_value in ("0", "false", "no", "off", "maybe"):
+            monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", false_value)
+            assert memory_api._unanswerable_repository(inner) is None, false_value
+
+
+# ---------------------------------------------------------------------------
+# project-id show: repo_root must BE the identity root
+# ---------------------------------------------------------------------------
+
+class TestProjectIdShowRoots:
+    def test_repo_root_is_the_identity_root_and_the_process_root_is_named(
+        self, tmp_path
+    ):
+        """Catches a primary field named `repo_root` that names the PROCESS's
+        repository: in a declared-repo session that is a different tree from
+        the one the legacy gate used, and it was the misdirection the finding
+        was about."""
+        cli = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts" / "cli.py"
+        process_repo = _repo(tmp_path / "process-repo", "https://github.com/owner/process")
+        declared_repo = _repo(tmp_path / "declared-repo", "https://github.com/owner/declared")
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        env = dict(
+            os.environ,
+            PACT_TEST_MEMORY_DIR=str(store.parent),
+            CLAUDE_PROJECT_DIR=str(declared_repo),
+        )
+
+        from scripts.database import db_connection
+
+        with db_connection(str(store)):
+            pass
+
+        show = subprocess.run(
+            [sys.executable, str(cli), "project-id", "show", "--db-path", str(store)],
+            capture_output=True, text=True, env=env, cwd=str(process_repo),
+        )
+        assert show.returncode == 0, show.stderr
+        payload = json.loads(show.stdout)["result"]
+
+        assert payload["repo_root"] == str(declared_repo.resolve())
+        assert payload["process_repo_root"] == str(process_repo.resolve())
+        assert "identity_root" not in payload
+
+
+# ---------------------------------------------------------------------------
 # B1, THE DELIVERABLE: the printed remedy must execute
 # ---------------------------------------------------------------------------
 

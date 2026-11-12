@@ -486,6 +486,44 @@ def _cwd_or_none() -> Optional[Path]:
         return None
 
 
+_GIT_ENV_TRUE = frozenset({"true", "yes", "on"})
+_GIT_ENV_FALSE = frozenset({"false", "no", "off"})
+
+
+def _git_env_bool(name: str) -> bool:
+    """A git boolean environment variable, parsed the way git parses it.
+
+    Python truthiness is WRONG here: `bool("0")`, `bool("false")`, `bool("no")`
+    and `bool("off")` are all True, while git reads each as FALSE. A value of
+    "0" therefore crossed a filesystem boundary git would have stopped at, and
+    the walk found a marker git would never have found — a false decline.
+
+    Accepted, case-insensitively: `true`/`yes`/`on` and any non-zero decimal;
+    false for `false`/`no`/`off`/`0`/empty. An UNSET variable is the default,
+    which is 0 for this one. Git treats anything else as a fatal config error;
+    here it is FALSE, which is the direction that keeps the walk inside one
+    filesystem.
+
+    The empty string is FALSE and whitespace is NOT stripped, both MEASURED
+    against git's own parser (`git -c probe.bool=<v> config --type=bool`):
+    `""` answers false, and both `" "` and `" true"` answer
+    `fatal: bad boolean config value`. `git_parse_maybe_bool_text` returns 1
+    for a NULL pointer, not for an empty string — the NULL case is the
+    variable being absent, which is the default above.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    value = raw.lower()
+    if not value or value in _GIT_ENV_FALSE:
+        return False
+    if value in _GIT_ENV_TRUE:
+        return True
+    if value.isascii() and value.isdigit():
+        return int(value) != 0
+    return False
+
+
 def _unanswerable_repository(start) -> Optional[Path]:
     """The `.git` marker proving `start` sits in a repository git could not answer for.
 
@@ -519,7 +557,7 @@ def _unanswerable_repository(start) -> Optional[Path]:
             ceilings.add(Path(entry).resolve())
         except (OSError, RuntimeError, ValueError):
             continue
-    cross_filesystem = bool(os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM"))
+    cross_filesystem = _git_env_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM")
 
     try:
         device = os.stat(level).st_dev

@@ -1026,23 +1026,23 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
     if action == "show":
         memory = PACTMemory(db_path=db_path)
         read_scope = memory._read_project_scopes()
-        # TWO ROOTS, REPORTED SIDE BY SIDE AND NAMED FOR WHAT THEY ARE.
-        # `repo_root` is the PROCESS's repository; `identity_root` is the root
-        # the winning rung resolved and the one the plausibility gate compared
-        # legacy rows against. In a declared-repo session they differ, and an
-        # operator deciding whether to paste the suggested rekey command needs
-        # the second one.
-        repo_root = main_repo_root()
+        # `repo_root` IS THE IDENTITY ROOT: the root the winning rung resolved
+        # and the one the plausibility gate compared legacy rows against. A
+        # primary field named `repo_root` that named the PROCESS's repository
+        # would be the misdirection this field exists to remove, and the field
+        # is new in this PR so nothing depends on the older meaning.
+        # `process_repo_root` keeps the process location under a name that
+        # says what it is; in a declared-repo session the two differ.
+        identity_root = memory._project_identity_root
+        process_root = main_repo_root()
         _success({
             "project_id": memory._project_id_for_envelope(),
             "id_shape": memory._project_id_shape,
             "source": memory._project_id_source,
             "override_ignored": memory._override_ignored,
-            "repo_root": str(repo_root) if repo_root is not None else None,
-            "identity_root": (
-                str(memory._project_identity_root)
-                if memory._project_identity_root is not None
-                else None
+            "repo_root": str(identity_root) if identity_root is not None else None,
+            "process_repo_root": (
+                str(process_root) if process_root is not None else None
             ),
             "read_scope": list(read_scope) if read_scope is not None else None,
             "legacy_scope": memory._legacy_scope_state,
