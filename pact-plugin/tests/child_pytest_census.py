@@ -12,8 +12,9 @@ plugin itself; none may load it. The repo config is not consulted.
 
 A pytest child is deterministic when the LAST randomly flag it is given is
 `-p no:randomly` (or `-pno:randomly`). The flags are read from PYTEST_ADDOPTS
-first and the argv after it, as pytest reads them, and the argv stops at a bare
-`--`, after which pytest takes words as positional arguments. `-p randomly` and
+first and the argv after it, as pytest reads them. A bare `--` does not end
+them: pytest reads every `-p` in its argv before it parses options, so a `-p`
+after `--` loads or blocks the plugin like any other. `-p randomly` and
 `-p pytest_randomly` load the plugin, so a child whose last randomly flag is one
 of them is refused even with autoload disabled. `-p no:pytest_randomly` blocks
 nothing: the plugin's entry point is named `randomly`. With no randomly flag at
@@ -27,23 +28,38 @@ bare `-` empty it, `-u NAME`, `-uNAME` and `--unset=NAME` remove a name, and its
 NAME=VALUE words set one. `sudo` starts from an empty environment unless it is
 given `-E` or `--preserve-env`, or `--preserve-env=NAMES` for those names.
 
-A pytest child is a command that runs pytest by any of these routes:
-- its program is pytest's own: `pytest` or `py.test`, by path or not, with a
-  distro version suffix (`pytest-3`, `pytest3`, `py.test-3`) or `.exe`, or the
-  package's `pytest/__main__.py`;
-- its program is `coverage run` (any `coverage`, `coverage3` or `coverage-3.12`)
-  given `-m pytest`, `-m pytest.__main__`, `--module pytest`, or pytest's program
-  or `__main__.py` as its script;
-- its first Python interpreter word runs `-m pytest`, `-m pytest.__main__`, the
-  same `-m coverage run ...` forms, or pytest's program or `__main__.py` as its
-  script (`python /venv/bin/pytest`). An interpreter word is a basename starting
-  with `python` or `pypy`, the Windows launcher `py` or `pyw`, any of these with
-  `.exe`, or sys.executable. Its short and long options before `-m` or the script
-  are stepped over, including the values of `-W`, `-X` and
-  `--check-hash-based-pycs`, and the launcher's `-3`, `-3.12` and `-V:3.12`.
-A word that only names an interpreter followed by one of these, as in
-`echo python -m pytest` or `echo py -m pytest`, is refused too. `-m py.test` and
-`-m _pytest` start no pytest session and are not pytest children.
+THE CENSUS REFUSES THESE LAUNCH FAMILIES, AND ONLY THESE. A launch in one of
+them that does not block pytest-randomly is refused:
+- [program] The program is pytest's own: `pytest` or `py.test`, by path or not,
+  with a distro version suffix (`pytest-3`, `pytest3`, `py.test-3`), `.exe`, or a
+  tool runner's `@version` pin (`pytest@8.3.0`); or the package's
+  `pytest/__main__.py`.
+- [coverage] The program is `coverage run` (`coverage`, `coverage3`,
+  `coverage-3.12`) given `-m pytest`, `-m pytest.__main__`, `--module pytest`, or
+  pytest's program or `__main__.py` as its script.
+- [module] An interpreter runs `-m pytest`, `-m pytest.__main__`, or the same
+  `-m coverage run ...` forms. An interpreter is a word named `python`, `pypy`,
+  `ipython`, `graalpy` or `pyston`, each optionally with a version and one letter
+  (`python3`, `python3.12`, `python3.12t`, `pythonw`, `pypy3.10`, `ipython3`),
+  the Windows launcher `py` or `pyw`, any of these with `.exe`, or
+  sys.executable. Its short and long options before `-m` are stepped over,
+  including the values of `-W`, `-X` and `--check-hash-based-pycs`, and the
+  launcher's `-3`, `-3.12` and `-V:3.12`.
+- [mention] A word naming an interpreter anywhere in a command is read as the
+  [module] family, so `echo python -m pytest` is refused too.
+- [script] The program is an interpreter that runs pytest's program or
+  `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
+  position counts here: in `pip install python-dateutil pytest` or
+  `echo python /venv/bin/pytest` no interpreter runs a script.
+- [wrapper] Any family above behind NAME=VALUE words, the shell's reserved words
+  or the listed wrappers and tool runners (below).
+- [shell] Any family above inside the command text of a shell run with `-c`
+  (below).
+`-m py.test` and `-m _pytest` start no pytest session and are no family.
+
+EVERY OTHER LAUNCH FORM IS OUTSIDE THE CENSUS, whether or not it starts pytest:
+the census does not claim to see it, refuse it, or list it. The blind spots at
+the end are examples of that rule, not a complete list.
 
 The program is the first word past NAME=VALUE words, the shell's own
 `{ } ! if then elif else fi do done while until`, and the listed wrappers with
@@ -78,7 +94,7 @@ the session, when any of its words names pytest (`pytest` or `py.test`). A
 malformed launch that names neither is left to the launcher's own error. The
 launch itself is never aborted for a fault.
 
-Blind spots:
+Blind spots, examples of launches outside the census:
 1. A pytest started by a shell script file or another program the census does
    not parse (`bash run.sh`, `make`). verify-gate-tree.sh is covered by the
    args its tests pass.
@@ -106,6 +122,8 @@ Blind spots:
     `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
     plugin's own entry point). The census judges a launch by its words, not by
     what the named file does.
+11. An interpreter not named above: `jython` (which cannot run current
+    pytest), a custom-named or embedded interpreter, or one renamed on disk.
 """
 import os
 import re
@@ -125,6 +143,9 @@ _PYTEST_MODULES = frozenset({"pytest", "pytest.__main__"})
 # The Windows launcher's names; any basename starting with python or pypy is an
 # interpreter too.
 _LAUNCHERS = frozenset({"py", "pyw"})
+# An interpreter's name, after _command_name: one of these, optionally with a
+# version and one letter (python3, python3.12t, pythonw, pypy3.10, graalpy-24.1).
+_INTERPRETER = re.compile(r"(?:python|pypy|ipython|graalpy|pyston)(?:-?[0-9]+(?:\.[0-9]+)*)?[a-z]?\Z")
 _PYTEST_MENTION = re.compile(r"py\.?test")
 _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
 _BLOCKING = "no:randomly"
@@ -411,9 +432,10 @@ def _shell_command(part, program):
 
 
 def _command_name(word):
-    """A program word's name: its basename, lower-cased, without `.exe` and
-    without a hatch environment prefix (`test:pytest`)."""
-    name = os.path.basename(word).lower()
+    """A program word's name: its basename, lower-cased, without a tool runner's
+    `@version` pin (`pytest@8.3.0`), without `.exe` and without a hatch
+    environment prefix (`test:pytest`)."""
+    name = os.path.basename(word).lower().split("@", 1)[0]
     if name.endswith(".exe"):
         name = name[:-4]
     prefix = _ENVIRONMENT_PREFIX.match(name)
@@ -427,13 +449,14 @@ def _is_pytest_script(word):
     return bool(_PYTEST_PROGRAM.match(_command_name(word))) or parts[-2:] == ["pytest", "__main__.py"]
 
 
+def _is_interpreter(word):
+    name = _command_name(word)
+    return bool(_INTERPRETER.match(name)) or name in _LAUNCHERS or word == sys.executable
+
+
 def _interpreter(tokens):
     """Index of the first Python interpreter word, or None."""
-    for i, word in enumerate(tokens):
-        name = _command_name(word)
-        if name.startswith(("python", "pypy")) or name in _LAUNCHERS or word == sys.executable:
-            return i
-    return None
+    return next((i for i, word in enumerate(tokens) if _is_interpreter(word)), None)
 
 
 def _module(words, i):
@@ -501,7 +524,10 @@ def _pytest_args(part, program):
         return after
     if module == "coverage":
         return _coverage_run(part, after)
-    if module is None and after < len(part) and _is_pytest_script(part[after]):
+    # The script route needs the interpreter in the program position: a word
+    # after an interpreter mentioned elsewhere (`pip install python-x pytest`)
+    # is no script of it.
+    if module is None and at == program and after < len(part) and _is_pytest_script(part[after]):
         return after + 1  # the interpreter runs pytest's script file
     return None
 
@@ -514,14 +540,12 @@ def _split(text):
 
 
 def _randomly_flag(words):
-    """The last randomly flag in `words` before a bare `--`: "blocked", "loaded"
-    or None."""
+    """The last randomly flag anywhere in `words`, a bare `--` included, as
+    pytest's -p preparse reads them: "blocked", "loaded" or None."""
     state = None
     i = 0
     while i < len(words):
         word = words[i]
-        if word == "--":
-            break
         if word == "-p":
             value = words[i + 1] if i + 1 < len(words) else None
             i += 2

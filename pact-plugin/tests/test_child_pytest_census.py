@@ -7,6 +7,7 @@ Used by: the suite; the census itself is tests/child_pytest_census.py, wired in
          tests/conftest.py.
 """
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +58,9 @@ def test_an_unblocked_pytest_child_is_refused(argv):
     ["-pno:randomly"],
     # The last randomly flag wins, as in pytest's own -p handling.
     ["-p", "randomly", "-p", "no:randomly"],
+    # pytest reads every -p, a bare `--` included, so a block after it counts.
+    ["--", "-p", "no:randomly"],
+    ["-p", "randomly", "--", "-p", "no:randomly"],
 ])
 def test_each_blocking_flag_is_accepted(extra):
     assert census._miss([PY, "-m", "pytest", "-q", *extra], None, {}) is None
@@ -69,8 +73,9 @@ def test_each_blocking_flag_is_accepted(extra):
     # The last randomly flag wins, so a later load undoes an earlier block.
     ["-p", "no:randomly", "-p", "randomly"],
     ["-pno:randomly", "-prandomly"],
-    # After a bare `--` the words are positional arguments, not options.
-    ["--", "-p", "no:randomly"],
+    # pytest reads every -p, a bare `--` included, so a load after it counts.
+    ["-p", "no:randomly", "--", "-p", "randomly"],
+    ["-pno:randomly", "--", "-prandomly"],
 ])
 def test_a_child_that_loads_randomly_or_does_not_block_it_is_refused(extra):
     assert census._miss([PY, "-m", "pytest", "-q", *extra], None, {}) is not None, extra
@@ -327,6 +332,18 @@ _LAUNCHER_FORMS = [
     # The same forms inside a shell command.
     ["bash", "-c", "py -3 -m pytest"],
     ["bash", "-c", "cd x && uvx pytest"],
+    # An interpreter in the program position, after a wrapper or in a shell,
+    # running pytest's script.
+    ["env", "A=1", "python3", "/venv/bin/pytest"],
+    ["bash", "-c", "python3 /venv/bin/pytest"],
+    # A tool runner's version pin on pytest's program.
+    ["uvx", "pytest@8.3.0"],
+    ["uv", "tool", "run", "pytest@8.3.0", "-q"],
+    # Interpreters other than CPython and PyPy that run -m pytest.
+    ["ipython", "-m", "pytest"],
+    ["ipython3", "-m", "pytest", "--", "-q"],
+    ["graalpy", "-m", "pytest"],
+    ["pyston3", "-m", "pytest"],
 ]
 
 
@@ -359,9 +376,50 @@ def test_each_launcher_form_is_accepted_with_the_flag(argv):
     ["conda", "run", "-n", "dev", "python", "script.py"],
     ["coverage", "run", "/venv/bin/pip"],
     ["pytest-cov-report"],
+    # A python-named package or file is not an interpreter, so the word after it
+    # is not pytest's script.
+    ["pip", "install", "python-dateutil", "pytest"],
+    ["uv", "pip", "install", "python-dotenv", "pytest"],
+    ["bash", "-c", "pip install python-dateutil pytest"],
+    ["git", "add", "python_helpers.py", "tests/pytest"],
+    ["pip", "install", "pythonnet", "pytest-xdist", "pytest"],
+    # An interpreter word in a non-program position starts no script of its own.
+    ["echo", "python", "/venv/bin/pytest"],
+    ["which", "python3", "pytest"],
 ])
 def test_a_neighbouring_form_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None, argv
+
+
+# THE ENUMERATED FAMILIES. The census docstring lists the launch families it
+# refuses, each under a [label]; this map holds at least one refused row per
+# label, and the two sets must be equal, so neither can change alone.
+_FAMILY_ROWS = {
+    "program": [["pytest"], ["/venv/bin/py.test", "-q"], ["pytest-3"]],
+    "coverage": [["coverage", "run", "-m", "pytest"], ["coverage", "run", "/venv/bin/pytest"]],
+    "module": [[PY, "-m", "pytest"], ["py", "-3", "-m", "pytest.__main__"],
+               ["ipython", "-m", "pytest"], [PY, "-m", "coverage", "run", "-m", "pytest"]],
+    "mention": [["echo", "python", "-m", "pytest"], ["echo", "python3", "-mpytest.__main__"]],
+    "script": [[PY, "/venv/bin/pytest"], [PY, "-I", "/x/pytest/__main__.py"]],
+    "wrapper": [["timeout", "60", "pytest"], ["uvx", "pytest@8.3.0"], ["A=1", PY, "-m", "pytest"]],
+    "shell": [["bash", "-c", "cd x && pytest"], ["sh", "-ec", "python3 -m pytest"]],
+}
+
+
+def _documented_families():
+    return re.findall(r"^- \[([a-z]+)\] ", census.__doc__, re.MULTILINE)
+
+
+def test_every_documented_family_has_a_refused_row_and_no_other_family_exists():
+    documented = _documented_families()
+    assert len(documented) == len(set(documented)), documented
+    assert sorted(documented) == sorted(_FAMILY_ROWS), (documented, sorted(_FAMILY_ROWS))
+
+
+@pytest.mark.parametrize("family, argv", [
+    (family, argv) for family, rows in sorted(_FAMILY_ROWS.items()) for argv in rows])
+def test_each_documented_family_is_refused(family, argv):
+    assert census._miss(argv, None, {}) is not None, (family, argv)
 
 
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):
