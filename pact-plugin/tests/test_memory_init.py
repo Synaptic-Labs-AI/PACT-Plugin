@@ -2026,6 +2026,11 @@ class TestCIEnvironmentBinding:
         r"effective distributions=\d+ closure=\d+ ok=(True|False)$", re.M)
 
     def _stub(self, verdict_ok, verdict=None):
+        """A stand-in verify module. BUILD IT IN THE TEST BODY, before the
+        gate is set: `_verify_script` skips outside a source checkout, and the
+        binding only calls the loader when it finds a repository root. A stub
+        built lazily inside the patched loader is then never built, so the
+        skip never fires and the arm fails for the layout, not the binding."""
         verify = TestDependencyDriftIsDetectable._verify_script()
         if verdict is None:
             verdict = (verify.Verdict({}, (), (), {}, None) if verdict_ok
@@ -2041,9 +2046,9 @@ class TestCIEnvironmentBinding:
         return Stub
 
     def test_gate_on_and_passing_proceeds(self, binding, monkeypatch, capsys):
+        stub = self._stub(True)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(True))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
         # The status line carries the CLI's first-line fields (spec section 8).
         assert self._STATUS_FIELDS_RE.search(capsys.readouterr().out)
@@ -2065,9 +2070,9 @@ class TestCIEnvironmentBinding:
         assert "scripts/verify_ci_environment.py" in str(exc.value)
 
     def test_gate_on_and_failing_exits_3_with_the_heading(self, binding, monkeypatch):
+        stub = self._stub(False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(False))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         with pytest.raises(pytest.exit.Exception) as exc:
             binding.CIEnvironmentBinding().pytest_sessionstart(None)
         assert exc.value.returncode == 3
@@ -2166,9 +2171,9 @@ class TestCIEnvironmentBinding:
         """N10-1: drift found at session END sets exit status 3 with the
         end heading and the full report, even over a run that already
         failed, and then says so, so test failures are not hidden."""
+        stub = self._stub(False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(False))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         clean = self._Session(0)
         binding.CIEnvironmentBinding().pytest_sessionfinish(clean, 0)
         assert clean.exitstatus == 3
