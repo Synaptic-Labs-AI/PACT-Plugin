@@ -426,6 +426,26 @@ def _is_live_decline(detected: "_DetectedIdentity") -> bool:
     return detected.project_id is None and reason not in (None, "declaration_unresolved")
 
 
+def _is_home(root: Path) -> bool:
+    """Whether `root` is the user's home directory."""
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return os.path.normcase(str(root)) == os.path.normcase(str(home))
+
+
+def _warn_home_landing(root: Path) -> None:
+    """The HOME-landing warning, shared by every rung that can land there."""
+    logger.warning(
+        "project_id resolved to the HOME directory (%r); memories "
+        "will be scoped to user scope %r, not a project. Run from "
+        "the project directory or set CLAUDE_PROJECT_DIR.",
+        root,
+        root.name,
+    )
+
+
 def _suppression_record() -> dict:
     """The record for a SUPPRESSED legacy candidate. Not a decline.
 
@@ -1752,6 +1772,23 @@ class PACTMemory:
                         "describe its working tree"
                     ),
                 )
+            if _is_home(repo_root):
+                # A HOME LANDING BY THE GIT ROUTE. A home directory that is
+                # itself a repository (dotfiles) would otherwise give every
+                # non-repository directory under it that repository's id. It
+                # is the cwd rung's HOME landing reached another way, so it
+                # warns the same way and keeps the folder name.
+                _warn_home_landing(repo_root)
+                return _DetectedIdentity(
+                    project_id=repo_root.name,
+                    source="git root",
+                    legacy_basename=PACTMemory._legacy_project_name(
+                        cwd_common_dir, repo_root
+                    ),
+                    override_ignored=None,
+                    identity_root=repo_root,
+                    pre_change_name=git_pre_change,
+                )
             detected = PACTMemory._identity_at_root(
                 repo_root,
                 cwd_common_dir,
@@ -1856,18 +1893,8 @@ class PACTMemory:
             cwd_root = PACTMemory._find_project_root(cwd_start)
             cwd_name = cwd_root.name
             if cwd_name:
-                try:
-                    home = Path.home().resolve()
-                except (OSError, RuntimeError):
-                    home = None
-                if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):
-                    logger.warning(
-                        "project_id resolved to the HOME directory (%r); memories "
-                        "will be scoped to user scope %r, not a project. Run from "
-                        "the project directory or set CLAUDE_PROJECT_DIR.",
-                        cwd_root,
-                        cwd_name,
-                    )
+                if _is_home(cwd_root):
+                    _warn_home_landing(cwd_root)
                     return _DetectedIdentity(
                         project_id=cwd_name, source="cwd", legacy_basename=cwd_name,
                         override_ignored=None, identity_root=cwd_root,

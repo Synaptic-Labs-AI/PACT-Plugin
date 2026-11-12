@@ -457,6 +457,38 @@ class TestThePreChangeName:
         assert len(calls) == 1
 
 
+class TestAHomeRepositoryIsAHomeLanding:
+    """A home directory that is a git repository does not lend its id.
+
+    Catches every non-repository directory under a dotfiles HOME being filed
+    under `github.com/me/dotfiles` with no warning, the HOME landing the cwd
+    rung already refuses to canonicalise, reached through the git rung.
+    """
+
+    def test_a_dotfiles_home_warns_and_keeps_the_folder_name(
+        self, identity_env, monkeypatch, caplog
+    ):
+        # `Path.home()` is redirected to a per-test directory by the suite.
+        home = make_repo(Path.home().resolve(), remote="https://github.com/me/dotfiles.git")
+        (home / "notes").mkdir()
+        monkeypatch.chdir(home / "notes")
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id == home.name
+        assert detected.source == "git root"
+        assert any("HOME directory" in record.getMessage() for record in caplog.records)
+
+    def test_a_repository_below_home_still_canonicalises(
+        self, identity_env, monkeypatch
+    ):
+        """Control: only the home landing itself is refused."""
+        home = make_repo(Path.home().resolve(), remote="https://github.com/me/dotfiles.git")
+        project = make_repo(home / "src" / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(project)
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id == "github.com/o/proj"
+
+
 class TestACeilingStartDirectoryIsExamined:
     """A broken `.git` marker AT a ceiling start directory still declines.
 
