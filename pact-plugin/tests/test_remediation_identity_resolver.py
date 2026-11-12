@@ -8,11 +8,29 @@ origin URL: the seam under test is what git answers, not what a mock says.
 from __future__ import annotations
 
 import ast
+import logging
 from pathlib import Path
+
+import pytest
+from fixtures.identity_git import (
+    assert_outside_repository,
+    make_repo,
+    make_worktree,
+    run_git,
+)
+from scripts.memory_api import PACTMemory
 
 from scripts import memory_api
 
 MEMORY_API = Path(memory_api.__file__)
+
+
+@pytest.fixture
+def identity_env(monkeypatch, tmp_path):
+    """A tmp root outside any repository, with no ambient declaration."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    return tmp_path
 
 
 def _module_tree() -> ast.Module:
@@ -99,3 +117,71 @@ class TestOneDeclineRecord:
             and node.func.id == "_DetectedIdentity"
         ]
         assert len(calls) >= 3
+
+
+class TestTheGitRungNamesARedirect:
+    """A forged worktree pointer reached through the cwd is a REDIRECT.
+
+    Catches the git rung reporting a `.git` file that names another
+    repository's worktree admin dir as a bare repository: the operator is
+    then sent to look for a missing working tree instead of at the forged
+    marker.
+    """
+
+    def _victim(self, root: Path) -> Path:
+        victim = make_repo(root / "victim", remote="https://github.com/victim/secret-lib.git")
+        make_worktree(victim, root / "victim-wt")
+        return victim
+
+    def test_a_forged_worktree_pointer_declines_as_a_redirect(
+        self, identity_env, monkeypatch, caplog
+    ):
+        victim = self._victim(identity_env)
+        forged = identity_env / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(
+            f"gitdir: {victim / '.git' / 'worktrees' / 'victim-wt'}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(forged)
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id is None
+        assert detected.decline_reason["reason"] == "gitfile_redirect"
+        assert detected.decline_reason["source"] == "git root"
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "no working tree" not in messages and "bare" not in messages
+
+    def test_a_forged_submodule_worktree_pointer_declines_as_a_redirect(
+        self, identity_env, monkeypatch
+    ):
+        """The same refusal for a pointer at a SUBMODULE's worktree admin dir."""
+        source = make_repo(identity_env / "subsrc")
+        superproject = make_repo(identity_env / "super")
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "vendor/lib", cwd=superproject,
+        )
+        lib = superproject / "vendor" / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/victim/lib.git", cwd=lib)
+        make_worktree(lib, identity_env / "libwt")
+        admin = superproject / ".git" / "modules" / "vendor" / "lib" / "worktrees" / "libwt"
+        assert admin.is_dir()
+        forged = identity_env / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        monkeypatch.chdir(forged)
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id is None
+        assert detected.decline_reason["reason"] == "gitfile_redirect"
+
+    def test_a_bare_repository_still_has_no_working_tree(
+        self, identity_env, monkeypatch
+    ):
+        """Control: the redirect arm does not swallow the real bare case."""
+        bare = identity_env / "bare.git"
+        run_git("init", "-q", "--bare", str(bare), cwd=identity_env)
+        monkeypatch.chdir(bare)
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id is None
+        assert detected.decline_reason["reason"] == "no_working_tree"

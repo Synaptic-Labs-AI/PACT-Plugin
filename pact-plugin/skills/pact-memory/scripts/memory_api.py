@@ -1111,42 +1111,21 @@ def main_repo_root(
             git_dir = git_dir.resolve()
             common_path = common.resolve()
             main_git = (common_path.parent / ".git").resolve()
-            # ANY LINKED WORKTREE IS VERIFIED, not only one of a main
-            # checkout: a forged `.git` FILE naming a SUBMODULE's worktree
-            # admin dir (`<super>/.git/modules/<name>/worktrees/<wt>`) also
-            # makes every git answer agree, and it binds that submodule's
-            # id unless the listing refuses it.
-            if git_dir != common_path and main_git != common_path:
+            if git_dir != common_path:
+                # ANY LINKED WORKTREE IS VERIFIED, of a main checkout or of a
+                # submodule: a forged `.git` FILE naming another
+                # repository's worktree admin dir makes every git answer
+                # agree, and a genuine linked worktree is listed. The caller
+                # reports the refusal: every resolver rung names it as
+                # `gitfile_redirect` through its own guard, so a warning here
+                # would log the one cause twice.
                 asked = Path(start) if start is not None else Path.cwd()
                 if _worktree_redirect(asked, common_path):
-                    logger.warning(
-                        "the directory %r resolves to another repository's "
-                        "worktree admin dir but is not one of its listed "
-                        "worktrees, so no project id was derived from it. Run "
-                        "the `project-id show` verb to inspect the detected "
-                        "identity.",
-                        str(asked),
-                    )
                     return None
-            if git_dir != common_path and main_git == common_path:
-                # LINKED WORKTREE: per-worktree git dir, shared main `.git`.
-                # VERIFY IT IS LISTED before trusting the shape: a forged
-                # `.git` FILE naming another repository's worktree admin dir
-                # passes every check above (SEC-1), and this is the only
-                # branch that can be forged this way. A genuine linked
-                # worktree is listed.
-                asked = Path(start) if start is not None else Path.cwd()
-                if _worktree_redirect(asked, common_path):
-                    logger.warning(
-                        "the directory %r resolves to another repository's "
-                        "worktree admin dir but is not one of its listed "
-                        "worktrees, so no project id was derived from it. Run "
-                        "the `project-id show` verb to inspect the detected "
-                        "identity.",
-                        str(asked),
-                    )
-                    return None
-                return common_path.parent
+                if main_git == common_path:
+                    # LINKED WORKTREE of a main checkout: the main checkout
+                    # is the identity.
+                    return common_path.parent
         except (OSError, RuntimeError):
             # A path that will not resolve cannot prove the worktree shape;
             # the toplevel is the safe answer.
@@ -1620,21 +1599,13 @@ class PACTMemory:
                 )
             recorded_label = "worktree identity record"
             recorded_common_dir = main_repo_common_dir(str(recorded_root))
-            if recorded_common_dir is None and _unanswerable_repository(
-                recorded_root
-            ) is not None:
-                # Same rule again: a `.git` marker with no git answer is a
-                # broken repository, not an umbrella folder.
-                return _decline(
-                    recorded_label,
-                    "broken_git_marker",
-                    label=recorded_label,
-                    root=recorded_root,
-                    detail=(
-                        f"the recorded main checkout {str(recorded_root)!r} for "
-                        f"the directory declared via {source}"
-                    ),
-                )
+            # The same guards as every other rung, on the recorded checkout.
+            guarded = _root_guard(
+                recorded_root, recorded_common_dir, recorded_label,
+                label=recorded_label, root=recorded_root,
+            )
+            if guarded is not None:
+                return guarded
             # The record's own label is disclosed; a decline's record names the
             # rung that asked, as it always has.
             return PACTMemory._identity_at_root(
@@ -1744,8 +1715,13 @@ class PACTMemory:
         if cwd_common_dir is not None:
             repo_root = main_repo_root(common=cwd_common_dir)
             if repo_root is None:
-                # A bare repository has no working tree, so it has no root to
-                # name. Decline rather than inventing a directory.
+                # NO ROOT: a forged worktree pointer, or a bare repository.
+                # The guard tells them apart, so a redirect is reported as a
+                # redirect and only a real bare repository as having no
+                # working tree.
+                guarded = _root_guard(_cwd_or_none(), cwd_common_dir, "git root")
+                if guarded is not None:
+                    return guarded
                 return _decline(
                     "git root",
                     "no_working_tree",
