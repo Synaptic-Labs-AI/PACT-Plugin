@@ -93,6 +93,47 @@ def test_a_launch_that_is_not_a_pytest_child_is_ignored(argv):
     assert census._miss(argv, None, {}) is None
 
 
+@pytest.mark.parametrize("argv", [
+    ["timeout", "60", PY, "-m", "pytest"],
+    ["timeout", "-s", "KILL", "1.5m", PY, "-m", "pytest"],
+    ["nice", "-n", "10", PY, "-m", "pytest"],
+    ["nohup", PY, "-m", "pytest"],
+    ["sudo", "-u", "bob", PY, "-m", "pytest"],
+    ["stdbuf", "-oL", PY, "-m", "pytest"],
+    ["xvfb-run", "-a", PY, "-m", "pytest"],
+    ["uv", "run", "python", "-m", "pytest"],
+    ["poetry", "run", "python", "-m", "pytest"],
+    ["pypy3", "-m", "pytest"],
+    ["/opt/pypy/bin/pypy", "-I", "-m", "pytest"],
+    [PY, "--check-hash-based-pycs", "always", "-m", "pytest"],
+    [PY, "-X", "dev", "--check-hash-based-pycs", "never", "-Wd", "-m", "pytest"],
+    # A long option CPython may add later is stepped over, not taken as a script.
+    [PY, "--a-future-flag", "-m", "pytest"],
+    # An unlisted wrapper still exposes the interpreter form.
+    ["hatch", "run", "python", "-m", "pytest"],
+    ["chrt", "-f", "10", PY, "-m", "pytest"],
+    ["uv", "run", "pytest"],
+    ["uv", "run", "--with", "x", "pytest", "-q"],
+    ["poetry", "run", "pytest"],
+    ["timeout", "60", "pytest"],
+    ["nice", "py.test"],
+    ["env", "-u", "HOME", "pytest"],
+    ["timeout", "60", "nice", "-n", "5", "pytest"],
+])
+def test_a_wrapped_or_unusual_interpreter_launch_is_refused(argv):
+    assert census._miss(argv, None, {}) is not None, argv
+
+
+@pytest.mark.parametrize("argv", [
+    ["git", "grep", "pytest"],
+    ["pip", "install", "pytest"],
+    ["timeout", "60", "git", "grep", "pytest"],
+    ["uv", "run", "python", "script.py", "-m", "pytest"],
+])
+def test_a_mention_of_pytest_that_launches_no_pytest_is_ignored(argv):
+    assert census._miss(argv, None, {}) is None
+
+
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):
     assert census.installed(), "tests/conftest.py did not install the census"
     before = len(census_state["misses"])

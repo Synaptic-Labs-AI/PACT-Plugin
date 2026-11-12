@@ -14,11 +14,17 @@ carries `-p no:randomly` (or `-pno:randomly`), when it opts in visibly with
 PYTEST_DISABLE_PLUGIN_AUTOLOAD. The repo config is not consulted: every pytest
 child carries the flag itself.
 
-A pytest child is an argv whose program is `pytest` or `py.test`, or a Python
-interpreter run with `-m pytest`. Leading NAME=VALUE words and a leading `env`
-are skipped, and `sh|bash|zsh|dash -c "<command>"` is judged on each part of its
-command between the operators `&&`, `||`, `;`, `|` and `&` written as separate
-words.
+A pytest child is an argv whose program is `pytest` or `py.test`, or one whose
+first Python interpreter word (a basename starting with `python` or `pypy`, or
+sys.executable) runs `-m pytest`; the interpreter's short and long options before
+`-m` are stepped over, including the value of `--check-hash-based-pycs`. The
+program is the first word past NAME=VALUE words and the listed wrappers
+(`timeout`, `nice`, `nohup`, `stdbuf`, `sudo`, `env`, `xvfb-run`, `uv run`,
+`poetry run`) with their options, option values and numeric arguments.
+`sh|bash|zsh|dash -c "<command>"` is judged on each part of its command between
+the operators `&&`, `||`, `;`, `|` and `&` written as separate words. A word that
+only names an interpreter followed by `-m pytest`, as in `echo python -m pytest`,
+is refused too.
 
 On a pytest child that is not deterministic the census records a line naming
 PYTEST_CURRENT_TEST, the argv and the cwd, then raises ChildPytestCensusError,
@@ -31,8 +37,8 @@ controller's finish() reports and fails.
 
 Blind spots:
 1. A pytest started by a shell script or another program the census does not
-   parse (a `.sh` file, `make`, `uv run`). verify-gate-tree.sh is covered by the
-   args its tests pass.
+   parse (a `.sh` file, `make`). verify-gate-tree.sh is covered by the args its
+   tests pass.
 2. A pytest started by a Python intermediary that does not load this census (a
    script run in a rig). verify_full_collection.py carries the flag itself.
 3. `python -c "...pytest.main(...)"` and in-process pytest.main.
@@ -42,8 +48,13 @@ Blind spots:
    load this census.
 7. A worker that crashes before its finish() runs sends no lines; xdist reports
    the crash itself.
+8. A bare `pytest` program behind a wrapper not in the list (`hatch run pytest`,
+   `pdm run pytest`), or behind a listed wrapper's option whose separate value
+   the list does not name. The interpreter form (`<wrapper> python -m pytest`) is
+   still caught.
 """
 import os
+import re
 import shlex
 import sys
 
@@ -53,6 +64,23 @@ AUTOLOAD_ENV = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _PYTEST_PROGRAMS = frozenset({"pytest", "py.test"})
 _OPERATORS = frozenset({"&&", "||", ";", "|", "&"})
+# Programs that run the command after them, each with its options that take a
+# separate value.
+_WRAPPERS = {
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "nohup": frozenset(),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "xvfb-run": frozenset({"-n", "-s", "-f", "-e", "-p", "--server-num", "--server-args",
+                           "--auth-file", "--error-file", "--xauth-protocol"}),
+    "uv run": frozenset({"--with", "--python", "-p", "--project", "--directory", "--package",
+                         "--extra", "--group", "--env-file", "--with-requirements"}),
+    "poetry run": frozenset({"-C", "--directory", "-P", "--project"}),
+}
+_TWO_WORD_WRAPPERS = frozenset({("uv", "run"), ("poetry", "run")})
+_DURATION = re.compile(r"\d+(\.\d+)?[smhd]?\Z")
 
 _state = {"installed": False, "misses": [], "forwarded": []}
 
@@ -132,44 +160,73 @@ def _commands(tokens):
     yield part
 
 
+def _is_assignment(word):
+    name, eq, _ = word.partition("=")
+    return bool(eq) and name.isidentifier()
+
+
 def _program(tokens):
-    """Index of the program word after leading NAME=VALUE words and `env`."""
-    i, in_env = 0, False
+    """Index of the program word, past NAME=VALUE words and the listed wrappers
+    with their options, option values and numeric arguments."""
+    i = 0
     while i < len(tokens):
-        word = tokens[i]
-        if not in_env and os.path.basename(word) == "env":
-            in_env = True
-        elif not (word.split("=", 1)[0].isidentifier() and "=" in word) and not (
-                in_env and word.startswith("-")):
+        word = os.path.basename(tokens[i])
+        if _is_assignment(tokens[i]):
+            i += 1
+            continue
+        pair = tuple(tokens[i:i + 2])
+        if pair in _TWO_WORD_WRAPPERS:
+            name, i = " ".join(pair), i + 2
+        elif word in _WRAPPERS:
+            name, i = word, i + 1
+        else:
             return i
-        i += 1
+        takes_value = _WRAPPERS.get(name, frozenset())
+        while i < len(tokens):
+            arg = tokens[i]
+            if arg in takes_value:
+                i += 2
+            elif (arg.startswith("-") and arg != "-") or _DURATION.match(arg) or _is_assignment(arg):
+                i += 1
+            else:
+                break
     return i
+
+
+def _interpreter(tokens):
+    """Index of the first Python interpreter word, or None."""
+    for i, word in enumerate(tokens):
+        base = os.path.basename(word)
+        if base.startswith(("python", "pypy")) or word == sys.executable:
+            return i
+    return None
 
 
 def _is_pytest(tokens):
     start = _program(tokens)
-    if start >= len(tokens):
-        return False
-    program = os.path.basename(tokens[start])
-    if program in _PYTEST_PROGRAMS:
+    if start < len(tokens) and os.path.basename(tokens[start]) in _PYTEST_PROGRAMS:
         return True
-    if not (program.startswith("python") or tokens[start] == sys.executable):
+    at = _interpreter(tokens)
+    if at is None:
         return False
-    rest = tokens[start + 1:]
+    rest = tokens[at + 1:]
     i = 0
     while i < len(rest):
         word = rest[i]
-        if word in ("-W", "-X"):
+        if word in ("-W", "-X", "--check-hash-based-pycs"):
             i += 2
             continue
-        if not word.startswith("-") or word == "-" or word.startswith("--"):
-            return False  # a script, stdin, or a long option: not `-m pytest`
+        if word.startswith("--") and word != "--":
+            i += 1  # a long option without a value
+            continue
+        if not word.startswith("-") or word in ("-", "--"):
+            return False  # a script, stdin, or the end of options: not `-m pytest`
         letters = word[1:]
-        for at, letter in enumerate(letters):
+        for at_letter, letter in enumerate(letters):
             if letter == "c":
                 return False
             if letter == "m":
-                module = letters[at + 1:] or (rest[i + 1] if i + 1 < len(rest) else "")
+                module = letters[at_letter + 1:] or (rest[i + 1] if i + 1 < len(rest) else "")
                 return module == "pytest"
             if letter in "WX":
                 break  # its value is the rest of this word
