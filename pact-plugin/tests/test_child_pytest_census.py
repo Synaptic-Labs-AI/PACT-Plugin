@@ -386,6 +386,12 @@ def test_each_launcher_form_is_accepted_with_the_flag(argv):
     # An interpreter word in a non-program position starts no script of its own.
     ["echo", "python", "/venv/bin/pytest"],
     ["which", "python3", "pytest"],
+    # A word that only starts with an interpreter's name is no interpreter, so
+    # its `-m pytest` names no module run: only the exact names count.
+    ["python-config", "-m", "pytest"],
+    ["bash", "-c", "python-config -m pytest"],
+    ["pythonista", "-m", "pytest"],
+    ["pypy-helper", "-m", "pytest.__main__"],
 ])
 def test_a_neighbouring_form_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None, argv
