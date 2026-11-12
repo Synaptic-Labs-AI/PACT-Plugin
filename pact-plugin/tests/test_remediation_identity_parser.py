@@ -240,3 +240,201 @@ class TestRelativeAndAbsoluteScpPathsShareAnId:
         assert {pi.classify_remote_origin(url) for url in spellings} == {
             (CANONICAL, "host/srv/repo")
         }
+
+
+# ---------------------------------------------------------------------------
+# Submodule admin-dir shapes at any depth
+# ---------------------------------------------------------------------------
+
+SUBMODULE_ORIGIN = "https://github.com/victim/lib.git"
+SUBMODULE_ID = "github.com/victim/lib"
+
+
+def _git_file_allowed(*args: str, cwd: Path) -> str:
+    return run_git("-c", "protocol.file.allow=always", *args, cwd=cwd)
+
+
+def _superproject_with_submodule(tmp_path: Path) -> Path:
+    """`super` with a submodule at `vendor/lib`, whose admin dir is
+    `super/.git/modules/vendor/lib` (a two-segment name). Its origin is the
+    local source path until a test sets a network url."""
+    assert_outside_repository(tmp_path)
+    source = make_repo(tmp_path / "libsrc")
+    superproject = make_repo(tmp_path / "super")
+    _git_file_allowed("submodule", "add", "-q", str(source), "vendor/lib",
+                      cwd=superproject)
+    run_git("commit", "-qm", "add submodule", cwd=superproject)
+    return superproject
+
+
+def _superproject_worktree(superproject: Path, path: Path) -> Path:
+    """A linked worktree of the superproject, with its submodule checked out
+    under `<super>/.git/worktrees/<wt>/modules/vendor/lib`."""
+    run_git("worktree", "add", "-q", str(path), "-b", path.name, cwd=superproject)
+    _git_file_allowed("submodule", "update", "-q", "--init", cwd=path)
+    return path
+
+
+def _seed_relative_bucket(store: Path, bucket: str) -> None:
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, session_id, "
+            "created_at, updated_at) VALUES ('seeded', 'seeded row', ?, 's', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            (bucket,),
+        )
+        conn.execute(
+            "INSERT INTO files (id, path, project_id) VALUES ('f', 'src/a.py', ?)",
+            (bucket,),
+        )
+        conn.commit()
+
+
+def _memory_in(monkeypatch, checkout: Path, store: Path):
+    from scripts import memory_api
+    from scripts.memory_api import PACTMemory
+
+    monkeypatch.chdir(checkout)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    return PACTMemory(session_id="s", db_path=store)
+
+
+def _forged_checkout(tmp_path: Path, admin_dir: Path) -> Path:
+    """A folder whose `.git` FILE points at somebody else's admin dir."""
+    forged = tmp_path / "delivered" / "lib"
+    forged.mkdir(parents=True)
+    (forged / ".git").write_text(f"gitdir: {admin_dir}\n", encoding="utf-8")
+    return forged
+
+
+class TestASubmoduleInsideASuperprojectWorktreeIsASubmodule:
+    @pytest.mark.parametrize("where", ["main", "worktree"])
+    def test_a_local_origin_submodule_declines(self, tmp_path, monkeypatch, where):
+        superproject = _superproject_with_submodule(tmp_path)
+        root = superproject
+        if where == "worktree":
+            root = _superproject_worktree(superproject, tmp_path / "wt")
+        memory = _memory_in(monkeypatch, root / "vendor" / "lib", tmp_path / "m.db")
+
+        assert memory.project_id is None
+        assert memory._decline_reason["reason"] == "submodule_checkout"
+
+    @pytest.mark.parametrize("where", ["main", "worktree"])
+    def test_a_canonical_submodule_reads_only_its_canonical_bucket(
+        self, tmp_path, monkeypatch, where
+    ):
+        superproject = _superproject_with_submodule(tmp_path)
+        root = superproject
+        if where == "worktree":
+            root = _superproject_worktree(superproject, tmp_path / "wt")
+        checkout = root / "vendor" / "lib"
+        run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN, cwd=checkout)
+        store = tmp_path / "m.db"
+        _seed_relative_bucket(store, "vendor")
+        memory = _memory_in(monkeypatch, checkout, store)
+
+        assert memory.project_id == SUBMODULE_ID
+        assert tuple(memory._read_project_scopes()) == (SUBMODULE_ID,)
+        assert memory.list(limit=10) == []
+
+
+class TestARedirectAtANestedSubmoduleAdminDirIsRefused:
+    def _network_submodule(self, tmp_path) -> Path:
+        superproject = _superproject_with_submodule(tmp_path)
+        run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN,
+                cwd=superproject / "vendor" / "lib")
+        return superproject
+
+    def test_a_pointer_at_a_two_segment_admin_dir_declines(self, tmp_path, monkeypatch):
+        superproject = self._network_submodule(tmp_path)
+        forged = _forged_checkout(
+            tmp_path, superproject / ".git" / "modules" / "vendor" / "lib"
+        )
+
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        memory = _memory_in(monkeypatch, forged, tmp_path / "m.db")
+        assert memory.project_id is None
+        assert memory._decline_reason["reason"] == "gitfile_redirect"
+
+    def test_a_pointer_at_a_superproject_worktree_admin_dir_declines(
+        self, tmp_path, monkeypatch
+    ):
+        superproject = self._network_submodule(tmp_path)
+        worktree = _superproject_worktree(superproject, tmp_path / "wt")
+        run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN,
+                cwd=worktree / "vendor" / "lib")
+        forged = _forged_checkout(
+            tmp_path,
+            superproject / ".git" / "worktrees" / "wt" / "modules" / "vendor" / "lib",
+        )
+
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        memory = _memory_in(monkeypatch, forged, tmp_path / "m.db")
+        assert memory.project_id is None
+        assert memory._decline_reason["reason"] == "gitfile_redirect"
+
+    def test_a_pointer_at_a_one_segment_admin_dir_still_declines(self, tmp_path):
+        """Control: the shape that was already recognised."""
+        assert_outside_repository(tmp_path)
+        source = make_repo(tmp_path / "solosrc")
+        superproject = make_repo(tmp_path / "super")
+        _git_file_allowed("submodule", "add", "-q", str(source), "solo",
+                          cwd=superproject)
+        forged = _forged_checkout(tmp_path, superproject / ".git" / "modules" / "solo")
+
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+
+    @pytest.mark.parametrize("where", ["main", "worktree"])
+    def test_the_genuine_slash_named_submodule_still_resolves(
+        self, tmp_path, monkeypatch, where
+    ):
+        superproject = self._network_submodule(tmp_path)
+        root = superproject
+        if where == "worktree":
+            root = _superproject_worktree(superproject, tmp_path / "wt")
+            run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN,
+                    cwd=root / "vendor" / "lib")
+        checkout = root / "vendor" / "lib"
+
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert _memory_in(monkeypatch, checkout, tmp_path / "m.db").project_id == (
+            SUBMODULE_ID
+        )
+
+
+class TestAWorktreeOfASubmodule:
+    def _submodule_worktree(self, tmp_path) -> Path:
+        superproject = _superproject_with_submodule(tmp_path)
+        worktree = tmp_path / "libwt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "libwt",
+                cwd=superproject / "vendor" / "lib")
+        return worktree
+
+    def test_its_gitfile_is_not_a_redirect(self, tmp_path):
+        """Its admin dir `<super>/.git/modules/vendor/lib/worktrees/libwt`
+        has the submodule shape, and its shared `core.worktree` names the
+        submodule's main checkout. git's `commondir` mark tells it apart."""
+        worktree = self._submodule_worktree(tmp_path)
+
+        assert pi._gitfile_points_at_foreign_gitdir(worktree) is False
+
+    def test_a_network_origin_worktree_canonicalises(self, tmp_path, monkeypatch):
+        worktree = self._submodule_worktree(tmp_path)
+        run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN, cwd=worktree)
+
+        assert _memory_in(monkeypatch, worktree, tmp_path / "m.db").project_id == (
+            SUBMODULE_ID
+        )
+
+    def test_a_local_origin_worktree_declines_instead_of_binding_its_folder(
+        self, tmp_path, monkeypatch
+    ):
+        worktree = self._submodule_worktree(tmp_path)
+        memory = _memory_in(monkeypatch, worktree, tmp_path / "m.db")
+
+        assert memory.project_id is None
+        assert memory._decline_reason["reason"] == "submodule_checkout"

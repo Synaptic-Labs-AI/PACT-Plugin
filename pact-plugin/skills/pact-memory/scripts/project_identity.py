@@ -721,16 +721,19 @@ def read_user_setting(config_path: Path) -> Optional[str]:
 
 
 def _submodule_admin_dir(path: Optional[Path]) -> bool:
-    """Whether `path` is a submodule admin dir: `<super>/.git/modules/<name>`.
+    """Whether `path` is a submodule admin dir, at any depth.
 
-    THE CONDITION IS THE PATH SHAPE — a `.git` component immediately followed
-    by a `modules` component — NOT a slash or a derived name. Measured: a
-    genuine submodule reports the SAME directory as `--git-dir` and
-    `--git-common-dir`, under `.git/modules/`; an ordinary local repository is
-    `<root>/.git` (no `modules` component after `.git`), a linked worktree has
-    `--git-dir != --git-common-dir`, and a `--separate-git-dir` checkout is an
-    arbitrary external directory. None of the last three match, so none is
-    suppressed.
+    THE CONDITION IS THE PATH SHAPE — a `.git` component followed by
+    `modules`, either directly or after `worktrees/<one name>` — NOT a slash
+    or a derived name. Measured: a genuine submodule reports the SAME
+    directory as `--git-dir` and `--git-common-dir`, under `.git/modules/`
+    (`<super>/.git/modules/<name>`, with `<name>` one or more segments, and
+    `.../modules/<a>/modules/<b>` when nested); a submodule inside a linked
+    worktree of its superproject lives under
+    `<super>/.git/worktrees/<wt>/modules/<name>`. An ordinary local
+    repository is `<root>/.git`, a linked worktree's common dir is its main
+    repository's `.git`, and a `--separate-git-dir` checkout is an arbitrary
+    external directory. None of the last three match, so none is suppressed.
 
     shortcut: a checkout whose own path sits under a literal `.git/modules`
     directory reads as a submodule admin dir; declining there is the safe
@@ -742,10 +745,15 @@ def _submodule_admin_dir(path: Optional[Path]) -> bool:
         parts = Path(path).resolve().parts
     except (OSError, RuntimeError, ValueError):
         parts = Path(path).parts
-    return any(
-        component == ".git" and following == "modules"
-        for component, following in zip(parts, parts[1:])
-    )
+    for index, component in enumerate(parts):
+        if component != ".git":
+            continue
+        following = parts[index + 1:]
+        if following[:1] == ("modules",):
+            return True
+        if following[:1] == ("worktrees",) and following[2:3] == ("modules",):
+            return True
+    return False
 
 
 def _resolved_git_dir(asked_root: Path) -> Optional[Path]:
@@ -789,10 +797,12 @@ def _submodule_checkout(
     A basename-derived id is refused only when ALL THREE hold, because any
     one alone is also true of a shape that must keep its name:
 
-    1. the resolved common dir contains an adjacent `.git`/`modules`
-       component pair (the admin-dir path shape);
-    2. `git-dir == common-dir` for the asked directory (rules out a linked
-       worktree, whose per-worktree git dir differs);
+    1. the resolved common dir has the submodule admin-dir path shape
+       (`_submodule_admin_dir`);
+    2. `git-dir == common-dir` for the asked directory, OR the git dir is
+       `<common-dir>/worktrees/<name>`: a linked worktree OF THE SUBMODULE,
+       whose folder name is no more the user's choice than the submodule's.
+       Any other git dir is ruled out;
     3. the identity root's `.git` is a FILE (rules out an ordinary checkout,
        whose `.git` is a directory, and a `--separate-git-dir` store, which
        has no `.git` marker at the root at all).
@@ -814,9 +824,10 @@ def _submodule_checkout(
     if git_dir is None:
         return False
     try:
-        return git_dir == Path(common_dir).resolve()
+        common = Path(common_dir).resolve()
     except (OSError, RuntimeError, ValueError):
         return False
+    return git_dir == common or git_dir.parent == common / "worktrees"
 
 
 def filesystem_case_insensitive(root: Optional[Path]) -> bool:
@@ -1049,18 +1060,26 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
             return False
         if resolved.name == ".git":
             return True
-        # `<other>/.git/modules/<name>`: the submodule-admin redirect, whose
-        # git dir EQUALS its common dir, so only the recorded checkout can
-        # tell a genuine submodule from a pointer at somebody else's.
+        # A submodule admin dir at any depth (`_submodule_admin_dir`): the
+        # submodule-admin redirect, whose git dir EQUALS its common dir, so
+        # only the recorded checkout can tell a genuine submodule from a
+        # pointer at somebody else's.
         #
         # THE SHAPE IS CHECKED FIRST, so a linked-worktree marker
         # (`.../.git/worktrees/<name>`) never reaches the git subprocess —
-        # that call is unaffordable on every detection and its answer there is
-        # always "not recorded", since `core.worktree` is unset for a worktree
-        # admin dir.
-        if (
-            resolved.parent.name == "modules"
-            and resolved.parent.parent.name == ".git"
+        # that call is unaffordable on every detection.
+        #
+        # A LINKED-WORKTREE ADMIN DIR IS EXCLUDED BY GIT'S OWN MARK, its
+        # `commondir` file, which a submodule admin dir never holds. A
+        # worktree OF a submodule has its admin dir at
+        # `<super>/.git/modules/<name>/worktrees/<wt>`, which has the
+        # submodule shape, but its `core.worktree` is read from the shared
+        # submodule config and names the submodule's MAIN checkout, so the
+        # comparison below would refuse the genuine worktree. A name test
+        # cannot replace the mark: a submodule may itself be named
+        # `x/worktrees/y`.
+        if _submodule_admin_dir(resolved) and not os.path.exists(
+            resolved / "commondir"
         ):
             return _admin_dir_names_another_checkout(resolved, marker_root)
         return False
