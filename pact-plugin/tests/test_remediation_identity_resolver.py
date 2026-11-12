@@ -522,3 +522,68 @@ class TestACeilingStartDirectoryIsExamined:
         assert memory_api._unanswerable_repository(broken / "sub") is None
         # Control: the same marker is found from its own directory.
         assert memory_api._unanswerable_repository(broken) == broken / ".git"
+
+
+class TestADeclaredHomeIsAHomeLanding:
+    """A DECLARED home directory is a HOME landing too, repository or not.
+
+    Catches the dominant route into HOME: Claude Code sets CLAUDE_PROJECT_DIR
+    to the launch directory, so a session started in a dotfiles home would
+    bind `github.com/me/dotfiles` with no warning, and a plain home would be
+    filed under its folder name silently.
+    """
+
+    @staticmethod
+    def _home(dotfiles):
+        # `Path.home()` is redirected to a per-test directory by the suite.
+        home = Path.home().resolve()
+        if dotfiles:
+            make_repo(home, remote="https://github.com/me/dotfiles.git")
+        else:
+            home.mkdir(parents=True, exist_ok=True)
+        (home / "notes").mkdir(exist_ok=True)
+        return home
+
+    def _assert_home_landing(self, detected, home, caplog):
+        assert detected.project_id == home.name
+        assert detected.source == "CLAUDE_PROJECT_DIR"
+        assert detected.pre_change_name == home.name
+        assert any("HOME directory" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.parametrize("cwd", ["home", "home/notes"])
+    def test_a_declared_dotfiles_home(self, identity_env, monkeypatch, caplog, cwd):
+        home = self._home(dotfiles=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(home))
+        monkeypatch.chdir(home if cwd == "home" else home / "notes")
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        self._assert_home_landing(detected, home, caplog)
+
+    def test_a_declared_plain_home(self, identity_env, monkeypatch, caplog):
+        home = self._home(dotfiles=False)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(home))
+        monkeypatch.chdir(home)
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        self._assert_home_landing(detected, home, caplog)
+
+    def test_a_declared_subdirectory_of_a_dotfiles_home(
+        self, identity_env, monkeypatch, caplog
+    ):
+        home = self._home(dotfiles=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(home / "notes"))
+        monkeypatch.chdir(home / "notes")
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id == home.name
+        assert any("HOME directory" in record.getMessage() for record in caplog.records)
+
+    def test_a_declared_repository_below_home_still_canonicalises(
+        self, identity_env, monkeypatch
+    ):
+        """Control: only the home landing itself is refused."""
+        home = self._home(dotfiles=True)
+        project = make_repo(home / "src" / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        monkeypatch.chdir(project)
+        assert PACTMemory._detect_project_identity_with_legacy().project_id == "github.com/o/proj"

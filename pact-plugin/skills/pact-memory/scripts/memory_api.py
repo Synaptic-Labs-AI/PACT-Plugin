@@ -1667,8 +1667,22 @@ class PACTMemory:
         `label` is the disclosed source when an id is found (an override pin
         discloses `override file` instead); `decline_label` is the disclosed
         source when the root declines (defaults to `label`).
+
+        A ROOT THAT IS THE USER'S HOME IS A HOME LANDING on every rung that
+        reaches it, declared or discovered, repository or not: it warns and
+        keeps the folder name, and is never canonicalised. A dotfiles home
+        would otherwise give every directory under it that repository's id.
         """
         legacy_name = PACTMemory._legacy_project_name(common_dir, root)
+        if _is_home(root):
+            _warn_home_landing(root)
+            return _DetectedIdentity(
+                project_id=root.name,
+                source=label,
+                legacy_basename=legacy_name,
+                override_ignored=None,
+                identity_root=root,
+            )
         identity = detect_id_for_root(root, common_dir, asked_root=asked_root)
         PACTMemory._warn_override_ignored(identity)
         if identity.project_id is not None:
@@ -1771,23 +1785,6 @@ class PACTMemory:
                         "the process's repository is bare, or git cannot "
                         "describe its working tree"
                     ),
-                )
-            if _is_home(repo_root):
-                # A HOME LANDING BY THE GIT ROUTE. A home directory that is
-                # itself a repository (dotfiles) would otherwise give every
-                # non-repository directory under it that repository's id. It
-                # is the cwd rung's HOME landing reached another way, so it
-                # warns the same way and keeps the folder name.
-                _warn_home_landing(repo_root)
-                return _DetectedIdentity(
-                    project_id=repo_root.name,
-                    source="git root",
-                    legacy_basename=PACTMemory._legacy_project_name(
-                        cwd_common_dir, repo_root
-                    ),
-                    override_ignored=None,
-                    identity_root=repo_root,
-                    pre_change_name=git_pre_change,
                 )
             detected = PACTMemory._identity_at_root(
                 repo_root,
