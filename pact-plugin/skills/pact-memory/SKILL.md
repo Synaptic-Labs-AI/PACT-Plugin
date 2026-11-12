@@ -384,7 +384,10 @@ Two operator surfaces answer, and they are deliberately ordered:
   `project-id rekey --from=<old> --to=<canonical>`. It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
   without it.
-- `<memory_dir>/config.json` → `"project_id"` — a USER-scoped setting. It
+- `config.json` → `"project_id"` in the user memory directory, the directory
+  that holds the default `memory.db` named under Storage — a USER-scoped
+  setting, read there whatever store a command names: `--db-path` does not
+  move it. It
   answers ONLY when no declaration was present and no repository resolved, so
   a repository pin always outranks it. Use it for a non-repository working
   directory that should share one identity.

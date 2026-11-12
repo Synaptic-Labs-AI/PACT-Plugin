@@ -39,7 +39,7 @@ except ImportError:
 
 from .config import (
     DERIVED_STORE_ORIGINS,
-    get_memory_dir,
+    get_user_memory_dir,
     read_only_scope,
     resolve_db_path,
     store_path_origin,
@@ -2160,7 +2160,7 @@ class PACTMemory:
         # declaration was present and no repository answered. A repo-scoped
         # override and this setting can therefore never disagree within one
         # resolution — that is why there is no disagreement warning to emit.
-        user_setting = read_user_setting(get_memory_dir() / "config.json")
+        user_setting = read_user_setting(get_user_memory_dir() / "config.json")
         if user_setting is not None:
             # THE PRE-CHANGE VALUE IS STILL COMPUTABLE, so it must be carried.
             # Dropping it would silently strand every row filed under the

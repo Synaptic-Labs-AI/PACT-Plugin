@@ -862,6 +862,57 @@ class TestNoticesQuoteWhatTheyLog:
         assert any("legacy project bucket 'unp'" in m for m in messages)
 
 
+class TestTheUserSettingIsUserScoped:
+    """The user-scope `project_id` setting is read from the USER's directory.
+
+    Catches a setting read beside whatever store a command names: a
+    `--db-path` pointing at a scratch store would then change the identity a
+    session resolves.
+    """
+
+    def _umbrella(self, root, monkeypatch):
+        umbrella = root / "workspace"
+        umbrella.mkdir()
+        monkeypatch.chdir(umbrella)
+        return umbrella
+
+    def test_the_setting_in_the_user_directory_answers(
+        self, identity_env, monkeypatch
+    ):
+        from scripts.config import store_scope
+
+        self._umbrella(identity_env, monkeypatch)
+        user_dir = identity_env / "user-memory"
+        user_dir.mkdir()
+        (user_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(user_dir))
+        store_dir = identity_env / "elsewhere"
+        store_dir.mkdir()
+        with store_scope(store_dir / "memory.db"):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id == "user.example.com/me/pinned"
+        assert detected.source == "user setting"
+
+    def test_a_setting_beside_a_named_store_does_not(self, identity_env, monkeypatch):
+        from scripts.config import store_scope
+
+        self._umbrella(identity_env, monkeypatch)
+        user_dir = identity_env / "user-memory"
+        user_dir.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(user_dir))
+        store_dir = identity_env / "scratch-store"
+        store_dir.mkdir()
+        (store_dir / "config.json").write_text(
+            '{"project_id": "scratch.example.com/x/y"}', encoding="utf-8"
+        )
+        with store_scope(store_dir / "memory.db"):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id != "scratch.example.com/x/y"
+        assert detected.source == "cwd"
+
+
 class TestACeilingStartDirectoryIsExamined:
     """A broken `.git` marker AT a ceiling start directory still declines.
 

@@ -290,7 +290,7 @@ class TestOverrideLocation:
             json.dumps({"project_id": "user.example.com/me/pinned"}),
             encoding="utf-8",
         )
-        monkeypatch.setattr(memory_api, "get_memory_dir", lambda: config_root)
+        monkeypatch.setattr(memory_api, "get_user_memory_dir", lambda: config_root)
         monkeypatch.chdir(umbrellas)
         assert PACTMemory._detect_project_id_with_source() == (
             "user.example.com/me/pinned",
@@ -315,7 +315,7 @@ class TestOverrideLocation:
             json.dumps({"project_id": "user.example.com/me/pinned"}),
             encoding="utf-8",
         )
-        monkeypatch.setattr(memory_api, "get_memory_dir", lambda: config_root)
+        monkeypatch.setattr(memory_api, "get_user_memory_dir", lambda: config_root)
         monkeypatch.chdir(repo)
         assert PACTMemory._detect_project_id_with_source() == (
             OVERRIDE,

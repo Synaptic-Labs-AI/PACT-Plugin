@@ -217,6 +217,22 @@ def get_memory_dir() -> Path:
     return Path.home() / ".claude" / "pact-memory"
 
 
+def get_user_memory_dir() -> Path:
+    """The USER's memory directory, whatever store a block has bound.
+
+    `get_memory_dir` with the store scope set aside: the test variable when
+    set, else the default root. A user-scoped setting is read from here,
+    because `get_memory_dir` follows a `--db-path`, and a setting read
+    through it would change which identity a session resolves whenever a
+    command names a different store. Creates nothing.
+    """
+    token = _STORE_DB_PATH.set(None)
+    try:
+        return get_memory_dir()
+    finally:
+        _STORE_DB_PATH.reset(token)
+
+
 def resolve_db_path() -> Path:
     """Return the memory database file path. THE ONE COMPOSING EXPRESSION.
 

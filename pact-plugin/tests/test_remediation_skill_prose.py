@@ -440,3 +440,31 @@ class TestCalibrationCountReadsTheWholeScope:
             "read_scope lists every project id the records were read under, "
             "and is [] when no identity resolves"
         ) in row
+
+
+class TestUserSettingIsReadFromTheUserScope:
+    """The user `project_id` setting lives in the user memory directory."""
+
+    def test_the_bullet_names_the_user_directory_and_not_the_store(self):
+        assert (
+            "config.json → \"project_id\" in the user memory directory, the "
+            "directory that holds the default memory.db named under Storage — "
+            "a USER-scoped setting, read there whatever store a command names: "
+            "--db-path does not move it."
+        ) in _body(SKILL)
+
+    def test_the_store_relative_location_is_gone(self):
+        assert "<memory_dir>/config.json" not in _body(SKILL)
+
+    def test_the_code_reads_the_user_directory_under_a_store_scope(
+        self, monkeypatch, tmp_path
+    ):
+        from pathlib import Path as _Path
+
+        from scripts import config
+
+        monkeypatch.delenv("PACT_TEST_MEMORY_DIR", raising=False)
+        with config.store_scope(tmp_path / "elsewhere" / "memory.db"):
+            assert config.get_user_memory_dir() == (
+                _Path.home() / ".claude" / "pact-memory"
+            )
