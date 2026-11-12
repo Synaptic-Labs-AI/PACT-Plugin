@@ -1117,10 +1117,10 @@ class PACTMemory:
                     "via %s has a remote that could not be read or represented as a "
                     "project id; no id was derived. Run the "
                     "`project-id show` verb to inspect the detected identity, or "
-                    "write an operator-chosen canonical id to %s.",
+                    "write an operator-chosen canonical id to %r.",
                     str(recorded_root),
                     source,
-                    (
+                    str(
                         recorded_common_dir / "pact-project-id"
                         if recorded_common_dir is not None
                         else "<git-common-dir>/pact-project-id"
