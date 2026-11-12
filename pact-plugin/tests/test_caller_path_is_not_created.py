@@ -322,17 +322,13 @@ class TestAPresentButUnreadableStoreIsAnError:
 
     _VERBS = (("list",), ("status",), ("project-id", "show"))
 
+    @pytest.mark.requires_non_root
     @pytest.mark.parametrize(
         "argv", _VERBS, ids=["list", "status", "project-id-show"]
     )
     def test_an_unreadable_store_reports_an_error_naming_the_fault(
         self, argv, tmp_path
     ):
-        if os.geteuid() == 0:
-            pytest.skip(
-                "chmod 000 does not block root, so the arm cannot stage the "
-                "unreadable store"
-            )
         store = _make_store(tmp_path / "valid.db")
         os.chmod(store, 0)
         try:

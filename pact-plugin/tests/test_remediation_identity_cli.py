@@ -759,7 +759,11 @@ class TestAStoreFaultNamesItsRemedyOnce:
     @pytest.mark.parametrize(
         "kind, command, where",
         [
-            (kind, command, where)
+            # The mode-000 store is unreadable only to a non-root process.
+            pytest.param(
+                kind, command, where,
+                marks=[pytest.mark.requires_non_root] if kind == "mode000" else [],
+            )
             for kind in ("garbage", "mode000")
             for command in STORE_FAULT_COMMANDS
             for where in ("repository", "outside")
