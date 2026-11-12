@@ -414,14 +414,14 @@ class TestBrokenRepositoryDeclines:
 
 
 # ---------------------------------------------------------------------------
-# The legacy gate must not RAISE on a read path (S2 integration)
+# The legacy gate must not RAISE on a read path (integration)
 # ---------------------------------------------------------------------------
 
 class TestTheGateDoesNotRaiseOnAReadPath:
     def test_a_user_setting_identity_widens_instead_of_raising(
         self, tmp_path, monkeypatch
     ):
-        """End-to-end S2 shape: canonical id from config.json, no
+        """End-to-end: canonical id from config.json, no
         CLAUDE_PROJECT_DIR, no session record, cwd outside any repository, and
         a populated legacy bucket.
 
@@ -1201,14 +1201,14 @@ class TestExclusionWarningHedgesTheLocation:
 
 
 # ---------------------------------------------------------------------------
-# B1, THE DELIVERABLE: the printed remedy must execute
+# THE DELIVERABLE: the printed remedy must execute
 # ---------------------------------------------------------------------------
 
 class TestTheRenderedCommandExecutes:
     def test_the_printed_remedy_runs_against_the_store_it_names(self, tmp_path):
         """Takes the string a real surface printed and RUNS it.
 
-        Catches both halves of B1: the bare `pact-memory` verb (argparse exit
+        Catches both halves of an unrunnable remedy: the bare `pact-memory` verb (argparse exit
         2) and the missing `--db-path` (a success envelope reporting 0 moved
         from the DEFAULT store while the real bucket sat untouched).
         """
@@ -1253,7 +1253,7 @@ class TestTheRenderedCommandExecutes:
 
 
 # ---------------------------------------------------------------------------
-# S1: the user-setting rung must keep the pre-change basename
+# The user-setting rung must keep the pre-change basename
 # ---------------------------------------------------------------------------
 
 class TestUserSettingRungCarriesTheLegacyCandidate:

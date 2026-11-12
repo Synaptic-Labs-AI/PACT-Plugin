@@ -1718,9 +1718,10 @@ class TestBug1LegacyRowGracefulDegradation:
         should fire for the legacy item so the merge succeeds and the new
         item is appended.
 
-        Fixture choice (post-R2-5): we use a non-dict, non-str item (a raw
-        integer) to defeat BOTH strict AND lenient canonicalization. R2-5
-        added a lenient path that drops unknown keys on legacy dicts, so a
+        Fixture choice (after the lenient fallback): we use a non-dict,
+        non-str item (a raw integer) to defeat BOTH strict AND lenient
+        canonicalization. The lenient fallback in _merge_with_dedup is a
+        path that drops unknown keys on legacy dicts, so a
         plain stray-key dict no longer triggers the safety valve — the
         lenient path succeeds and no WARNING fires. A non-dict/non-str
         item hits the TypeError branch of _canonicalize_dict_item in
@@ -2032,7 +2033,8 @@ class TestBug1EmptyListBranches:
 
 
 class TestBug1ContentNoopSuppressesUpdatedAt:
-    """Content no-op suppresses updated_at bump (#374 R2-4).
+    """Content no-op suppresses updated_at bump (the content no-op
+    short-circuit in update_memory).
 
     When an additive update's incoming items are ALL already-present
     duplicates, the content-hash dedup reduces the merge result to the
@@ -2045,7 +2047,7 @@ class TestBug1ContentNoopSuppressesUpdatedAt:
     so updated_at stays stable.
 
     If task #10 has not yet landed, this test WILL fail. That's expected —
-    it's the red-before-green for R2-4.
+    it's the red-before-green for the content no-op short-circuit.
     """
 
     def _get_updated_at(self, db_conn, mem_id):

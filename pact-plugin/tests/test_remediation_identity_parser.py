@@ -10,6 +10,7 @@ Used by: pytest. Shares the real-git helpers in `fixtures/identity_git.py`.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -836,3 +837,51 @@ class TestARedirectDeclineNamesNoOverridePath:
 
         assert identity.project_id is None
         assert identity.decline_reason == pi.decline_record("gitfile_redirect", None)
+
+
+class TestCeilingEntriesAreParsedAsGitParsesThem:
+    """Differential against real git: the walk stops exactly where git does.
+
+    After the first EMPTY entry git keeps an entry as written, without
+    resolving symlinks, and a relative entry is dropped."""
+
+    @staticmethod
+    def _git_finds_repo(start: Path) -> bool:
+        import subprocess
+
+        from shared.project_scope import git_env_without_location
+
+        return subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--git-dir"],
+            capture_output=True, timeout=30, env=git_env_without_location(),
+        ).returncode == 0
+
+    @pytest.mark.parametrize(
+        "ceiling",
+        ["{a}", "{link}", ":{link}", ":{a}", "{link}:", "a", "", ":", "{other}:{link}"],
+    )
+    def test_find_git_marker_agrees_with_git(self, tmp_path, monkeypatch, ceiling):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "a")
+        (repo / "sub").mkdir()
+        (tmp_path / "link").symlink_to(repo)
+        (tmp_path / "other").mkdir()
+        value = ceiling.format(
+            a=repo, link=tmp_path / "link", other=tmp_path / "other"
+        ).replace(":", os.pathsep)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", value)
+
+        found = pi.find_git_marker(repo / "sub") is not None
+
+        assert found == self._git_finds_repo(repo / "sub"), value
+
+    def test_a_symlinked_entry_after_an_empty_one_does_not_stop_the_walk(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / "a" / "sub").mkdir(parents=True)
+        (tmp_path / "a" / ".git").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "a")
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep + str(tmp_path / "link"))
+
+        assert pi.find_git_marker(tmp_path / "a" / "sub") is not None

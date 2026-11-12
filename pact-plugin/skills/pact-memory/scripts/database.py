@@ -690,12 +690,12 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
 
 
 # =============================================================================
-# Column allow-list (issue #374 — bug 2 fix)
+# Column allow-list
 # =============================================================================
 #
 # The `memories` table allows the following columns in write paths. Any unknown
 # key passed to save_memory() or update_memory() raises ValueError instead of
-# being silently dropped (which was the old bug 2 behavior). This matters
+# being silently dropped (the old behavior). This matters
 # because typos in payloads — especially sub-object keys that looked like
 # top-level keys (`description` instead of `notes`) — used to disappear with
 # no warning, causing silent data loss.
@@ -764,8 +764,8 @@ def _reject_unknown_columns(
 
     The error message lists both the unknown keys (for debugging) and the
     allowed-field set (for discoverability). This is the primary public
-    contract for bug 2 — callers rely on the message shape in the JSON
-    error envelope rendered by cli.py::cmd_update.
+    contract for the unknown-key refusal — callers rely on the message
+    shape in the JSON error envelope rendered by cli.py::cmd_update.
 
     The prose list is DERIVED from `allowed` by subtracting the server-owned
     fields, and THE SAME DERIVED LIST IS ATTACHED TO THE RAISED EXCEPTION as
@@ -788,7 +788,7 @@ def _reject_unknown_columns(
     same call depending on which half a caller read.
     """
     # The allowed_fields list is intentionally exposed in error envelopes —
-    # it is the primary public contract for bug-2 discoverability.
+    # it is how a caller discovers which keys are allowed.
     unknown = sorted(set(updates) - allowed)
     if not unknown:
         return
@@ -819,10 +819,10 @@ def _reject_unknown_columns(
 
 
 # =============================================================================
-# Bug 1 fix (#374) — additive list-field merge with content-hash dedup
+# Additive list-field merge with content-hash dedup
 # =============================================================================
 #
-# Before PR #374, update_memory() replaced list fields wholesale: passing
+# update_memory() used to replace list fields wholesale: passing
 # {"lessons_learned": ["c"]} to a memory whose lessons_learned was ["a", "b"]
 # would overwrite it to ["c"], silently losing the two existing items. The
 # pinned "snapshot the current get(); read-merge-write-back with the FULL
@@ -878,12 +878,12 @@ def _canonicalize_dict_item(
     """
     Round-trip a dict list item through its dataclass to produce a canonical
     shape for content hashing. Also provides the write-path strict validation
-    hook for bug 3 (unknown sub-object keys → ValueError) when strict=True.
+    hook (unknown sub-object keys → ValueError) when strict=True.
 
     - A string input is treated as the primary field value (Entity("X") etc.).
     - A dict input is validated with strict=<flag>; strict=True raises on
       unknown keys (write path), strict=False drops them (read/hash path for
-      legacy rows — see R2-5 in _merge_with_dedup).
+      legacy rows — see the lenient fallback in _merge_with_dedup).
     - Anything else raises TypeError to avoid silent data loss.
     """
     cls = _get_dict_field_class(field)
@@ -952,7 +952,8 @@ def _merge_with_dedup(
     Incoming dict items are canonicalized via _canonicalize_dict_item so the
     OUTPUT list contains the canonical (round-tripped) form. This matters
     because write-path strict validation happens inside _canonicalize_dict_item
-    — we get the bug-3 enforcement "for free" as a side effect of dedup.
+    — we get the unknown-sub-object-key refusal "for free" as a side
+    effect of dedup.
     """
     seen: Set[str] = set()
     out: List[Any] = []
@@ -975,7 +976,7 @@ def _merge_with_dedup(
             # (legacy stray key, unusual shape). Do NOT raise on the read
             # side — that would brick updates to legacy rows.
             #
-            # R2-5: before falling back to repr(), try lenient
+            # LENIENT FALLBACK: before falling back to repr(), try lenient
             # canonicalization (strict=False drops unknown sub-object keys).
             # This makes existing legacy items hash-compatible with incoming
             # items that pass strict validation — preventing asymmetric
@@ -1139,7 +1140,7 @@ def _unusable_identifier(value: object) -> bool:
 
 
 # =============================================================================
-# Project identity: canonical grammar (R1) and write ingress (R2)
+# Project identity: the canonical grammar and the write-ingress rule
 # =============================================================================
 #
 # ONE DEFINITION EACH, in this module, because the write ingress
@@ -1147,7 +1148,7 @@ def _unusable_identifier(value: object) -> bool:
 # on what an identifier is. `project_identity` imports these; this module does
 # not import `project_identity`, so there is no cycle.
 #
-# R1 DESCRIBES A CANONICAL ID; it does not parse a remote URL. The
+# THE CANONICAL GRAMMAR DESCRIBES AN ID; it does not parse a remote URL. The
 # remote-to-canonical canonicaliser lives in `project_identity`, and the shape
 # below is what it must produce: `host[:port]/<segment>[/<segment>...]`.
 #
@@ -1178,7 +1179,7 @@ CANONICAL_ID_RE = re.compile(
 
 
 def is_canonical_id(value: object) -> bool:
-    """R1: whether `value` is a canonical `host[:port]/owner/repo` id.
+    """Whether `value` is a canonical `host[:port]/owner/repo` id.
 
     Pure and total: any object is accepted and answers False rather than
     raising, because this runs on values that arrived from a remote, an
@@ -1206,7 +1207,7 @@ def is_canonical_id(value: object) -> bool:
 
 
 def validate_identifier_for_write(value: object) -> None:
-    """R2: the write-ingress rule for project ids, session ids and ids.
+    """The write-ingress rule for project ids, session ids and ids.
 
     `_unusable_identifier` plus a 255-character cap. NO printable-ASCII
     restriction: a non-Latin directory name is a legitimate project basename,
@@ -1858,7 +1859,7 @@ def create_memory(
     Returns:
         The ID of the created memory.
     """
-    # R2 IS THE SHARED WRITE-INGRESS RULE AND INCLUDES THE 255 CAP. A
+    # THE WRITE-INGRESS RULE IS SHARED AND INCLUDES THE 255 CAP. A
     # payload-supplied project id reaches the TEXT binding below, so the cap
     # is applied HERE, before any store work. Only a supplied VALUE is
     # validated: an absent id keeps its existing meaning (the NULL bucket)
@@ -1888,7 +1889,7 @@ def create_memory(
             )
     memory_id = supplied_id or generate_id()
 
-    # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
+    # STRICT validation — unknown keys raise before any DB write.
     # ALLOWED_CREATE_COLUMNS includes 'id' and 'created_at' so create payloads
     # may pass them through; ALLOWED_UPDATE_COLUMNS does not, so update_memory
     # rejects them. Splitting the allowlists keeps both call sites honest about
@@ -1898,7 +1899,7 @@ def create_memory(
     )
 
     # STRICT sub-object validation — symmetric with update_memory's merge path
-    # (bug 3 part 2, #374). The first bug-3 fix wired strict=True into
+    # (the save-ingress half). An earlier fix wired strict=True into
     # _canonicalize_dict_item, but that hook only fires from _merge_with_dedup
     # inside update_memory. The save ingress bypassed it, so create_memory
     # silently stored dict-list items with unknown sub-object keys (e.g.
@@ -1910,7 +1911,7 @@ def create_memory(
     # shorthand (e.g. entities=["Redis"]) still works — _canonicalize_dict_item
     # routes str inputs through the non-strict cls.from_dict(str) path.
     #
-    # Within-batch dedup (M6, #374 remediation): create_memory previously
+    # Within-batch dedup: create_memory previously
     # canonicalized each item but did not deduplicate within the incoming
     # batch. update_memory dedupes even on replace=True, so the same payload
     # behaves differently at the create and update ingresses. We now run
@@ -2151,7 +2152,7 @@ def update_memory(
         memory_id: The unique memory identifier.
         updates: Dictionary of fields to update.
         replace: If True, list-valued fields are replaced wholesale (the
-            legacy pre-#374 behavior). If False (the default), list-valued
+            legacy behavior). If False (the default), list-valued
             fields are appended to the existing values with content-hash
             deduplication — repeat calls are idempotent and never clobber
             history. Scalar fields (context, goal, project_id, session_id)
@@ -2166,7 +2167,7 @@ def update_memory(
             unknown keys. Validation happens BEFORE any DB write, so a
             rejected update leaves the row unchanged.
     """
-    # SAME R2 INGRESS AS create_memory, FOR THE SAME REASON: a supplied
+    # THE WRITE-INGRESS RULE AGAIN, AS IN create_memory: a supplied
     # project id replaces the stored TEXT and must obey the 255 cap and the
     # control/surrogate rule. An explicit None keeps its de-key meaning at
     # THIS layer; the API layer refuses it upstream, so a library
@@ -2212,7 +2213,7 @@ def update_memory(
                 # additive merge path below, so we skip adding to it here.
                 normalized[key] = _merge_with_dedup(key, [], list_value)
             else:
-                # F6 (#374 remediation): on the additive path, an empty
+                # On the additive path, an empty
                 # incoming list is a no-op (existing items + zero new items
                 # = existing items). Skip the SELECT + UPDATE entirely.
                 if not list_value:
@@ -2237,7 +2238,8 @@ def update_memory(
     needs_merge = bool(touched_lists)
     # Scalar fields the caller explicitly set. Even if they happen to equal
     # the current DB value, we still bump updated_at — scalar equality checks
-    # are out of scope for R2-4 (only content-no-op list merges are covered).
+    # are out of scope for the content no-op short-circuit below (only
+    # content-no-op list merges are covered).
     scalar_fields_present = bool(
         set(normalized.keys()) - touched_lists
     )
@@ -2272,7 +2274,7 @@ def update_memory(
                 if merged != existing:
                     changed_lists.add(key)
 
-            # R2-4: content no-op short-circuit. If no list field actually
+            # CONTENT NO-OP SHORT-CIRCUIT: if no list field actually
             # changed AND no scalar fields were set, the UPDATE would write
             # identical data and bump updated_at pointlessly. Close the
             # transaction and return without touching the row — extends the

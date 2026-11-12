@@ -186,7 +186,7 @@ class TestOverrideReadIsBounded:
         assert read.reason is None
 
 class TestExclusionDisclosureIsQuoted:
-    """S2-sec: the exclusion warning is a render surface like the others.
+    """The exclusion warning is a render surface like the others.
 
     A bucket id is store-influenced, and this warning hands the reader a
     command to paste. An unquoted `--from <id>` there is a command-injection

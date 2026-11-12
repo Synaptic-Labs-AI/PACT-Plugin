@@ -15,8 +15,8 @@ Used by:
   one-way.
 - cli.py — `project-id show` reports the detected identity and its provenance.
 
-`database.py` owns the canonical-id grammar (R1, `is_canonical_id`) and the
-write-ingress rule (R2, `validate_identifier_for_write`); this module consumes
+`database.py` owns the canonical-id grammar (`is_canonical_id`) and the
+write-ingress rule (`validate_identifier_for_write`); this module consumes
 both at function level and never defines a second copy of either rule.
 """
 
@@ -33,8 +33,9 @@ from typing import NamedTuple, Optional
 # Accepted remote schemes. The same set `hooks/shared/backlog.py` already
 # ships, plus `ssh+git`, an alias git itself still honours (it connects over
 # ssh exactly as for `git+ssh`). Two parsers in one repo that disagree about
-# which schemes are remotes would be the defect, not the fix. `file` and every other scheme is
-# handled as its own outcome rather than being silently accepted.
+# which schemes are remotes would be the defect, not the fix. `file` and
+# every other scheme is handled as its own outcome rather than being silently
+# accepted.
 _ACCEPTED_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+git"})
 
 # Schemes that are NOT network remotes: a local path written in URL form. They
@@ -240,6 +241,30 @@ def _git_env_bool(name: str) -> bool:
     return False
 
 
+def _git_ceiling_directories() -> set:
+    """`GIT_CEILING_DIRECTORIES` parsed exactly as git parses it.
+
+    Split on `os.pathsep`. An empty entry is dropped, and every entry AFTER
+    the first empty one is kept AS WRITTEN, without resolving symlinks (git
+    documents an empty entry as the way to skip that cost); entries before
+    it are resolved. A relative entry is dropped. Measured: with
+    `:<symlink to a>`, git keeps walking from `a/sub` into `a`.
+    """
+    ceilings = set()
+    after_empty = False
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            after_empty = True
+            continue
+        if not os.path.isabs(entry):
+            continue
+        try:
+            ceilings.add(Path(entry) if after_empty else Path(entry).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return ceilings
+
+
 def find_git_marker(start) -> Optional[Path]:
     """The `.git` marker (file or directory) git's discovery would reach, or None.
 
@@ -248,7 +273,7 @@ def find_git_marker(start) -> Optional[Path]:
     - the START directory is always examined, even when it is itself a
       `GIT_CEILING_DIRECTORIES` entry;
     - a PARENT equal to a ceiling entry stops the walk before it is examined
-      (entries split on `os.pathsep`, empty ones ignored, each resolved);
+      (entries parsed as `_git_ceiling_directories` does);
     - the walk stops when the device changes, unless
       `GIT_DISCOVERY_ACROSS_FILESYSTEM` is true (`_git_env_bool`);
     - it stops at the filesystem root.
@@ -263,14 +288,7 @@ def find_git_marker(start) -> Optional[Path]:
         level = Path(start).resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    ceilings = set()
-    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
-        if not entry:
-            continue
-        try:
-            ceilings.add(Path(entry).resolve())
-        except (OSError, RuntimeError, ValueError):
-            continue
+    ceilings = _git_ceiling_directories()
     cross_filesystem = _git_env_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM")
     try:
         device = os.stat(level).st_dev
@@ -308,7 +326,7 @@ def _max_id_length() -> int:
 
 
 def is_canonical(value: object) -> bool:
-    """Whether `value` is a canonical repository id (R1).
+    """Whether `value` is a canonical repository id.
 
     Delegates to `database.is_canonical_id` so there is one implementation of
     the grammar. A legacy basename is NOT canonical — no POSIX basename can
@@ -543,7 +561,7 @@ def _git_reads_as_scp(value: str) -> bool:
 
 
 def _has_control_character(value: str) -> bool:
-    """Whether `value` holds a C0 control character or DEL."""
+    """Whether `value` holds an ASCII control character (below 0x20) or DEL."""
     return any(char < "\x20" or char == "\x7f" for char in value)
 
 
@@ -645,10 +663,9 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if not segments:
             return None
         # ONE SEGMENT IS ENOUGH. `git@host:repo` and `https://host/repo` name
-        # the same endpoint, and R1 allows a single segment; declining the
-        # scp spelling while accepting the URL spelling would split one
-        # repository into two ids. (The PREPARE corpus's U45 row said decline;
-        # that row is superseded here.)
+        # the same endpoint, and the grammar allows a single segment;
+        # declining the scp spelling while accepting the URL spelling would
+        # split one repository into two ids.
         identifier = _identifier(host, "", segments)
 
     if len(identifier) > _max_id_length():
@@ -672,8 +689,7 @@ def _is_network_shaped(url: object) -> bool:
     `file://` and bare local paths are NOT network-shaped. Every other
     `scheme://` IS - including schemes outside the accepted set, because a
     present network remote we cannot represent must not be silently
-    downgraded to a folder name. That ruling supersedes the PREPARE corpus's
-    U58 (`ftp://` as basename).
+    downgraded to a folder name, so `ftp://` declines too.
 
     A scheme-less value whose PRE-SLASH prefix holds BOTH `@` and `:` is
     ALSO network-shaped. git's own scp heuristic reads the first `:` as the
@@ -720,7 +736,7 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     Returns `(outcome, project_id)` where outcome is OUTCOME_CANONICAL,
     OUTCOME_NO_PORTABLE_ORIGIN or OUTCOME_DECLINE.
 
-    - canonical: a network remote that parses under R1.
+    - canonical: a network remote that parses under the canonical grammar.
     - no_portable_origin: no origin, an empty value, a local path or
       `file://`. The caller falls through to the basename.
     - decline: a NETWORK remote that was present but cannot be a canonical id
@@ -729,7 +745,7 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
       produced and no basename is used; the override is the remedy.
 
     This exists because a single Optional cannot carry the distinction, and
-    because R1 only judges a FINISHED string — it cannot see whether a remote
+    because the grammar only judges a FINISHED string — it cannot see whether a remote
     was present at all.
     """
     if not url or not url.strip():
@@ -873,9 +889,9 @@ def read_override(common_dir: Path) -> OverrideRead:
     if len(raw) > _MAX_OVERRIDE_BYTES:
         return OverrideRead(None, path, "too_long")
     try:
-        # `utf-8-sig` drops an encoding BOM. R2 does not reject U+FEFF (it is
-        # not a control character), so a decoded BOM would otherwise become an
-        # invisible first character of the id.
+        # `utf-8-sig` drops an encoding BOM. `validate_identifier_for_write`
+        # does not reject U+FEFF (it is not a control character), so a decoded
+        # BOM would otherwise become an invisible first character of the id.
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         return OverrideRead(None, path, "not_utf8")
@@ -1264,7 +1280,7 @@ def detect_id_for_root(
       submodule-controlled basename DECLINES and names the override as the
       remedy. An ordinary local repository still basenames by ruling;
     - the origin is UNAVAILABLE (git cannot answer, unreadable config) ->
-      DECLINE. This is the #1699 rule: a broken repository must not fall back
+      DECLINE: a broken repository must not fall back
       to a folder name, because that files it in a silently different bucket.
 
     An UNUSABLE override is carried in `override_ignored` and resolution

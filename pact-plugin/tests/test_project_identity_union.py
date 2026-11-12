@@ -1,4 +1,4 @@
-"""Derived read union, disclosure and read purity (P0 matrix B1-B19).
+"""Derived read union, disclosure and read purity.
 
 The model: read scope starts at `(canonical,)` and widens to
 `(canonical, legacy_basename)` when the legacy bucket has rows; writes bind
@@ -210,7 +210,7 @@ def _seed_hostile(store, bucket, path):
 
 
 # ---------------------------------------------------------------------------
-# B1-B4: the widening and its negative controls
+# The widening and its negative controls
 # ---------------------------------------------------------------------------
 
 class TestUnionWidening:
@@ -266,7 +266,7 @@ class TestUnionWidening:
         assert sorted(_ids(memory.list(limit=10))) == ["c1"]
 
     def test_both_buckets_are_merged(self, union_env):
-        """B3: both populated is NORMAL under the union, not a conflict."""
+        """Both populated is NORMAL under the union, not a conflict."""
         _seed(
             union_env,
             [
@@ -280,7 +280,7 @@ class TestUnionWidening:
         assert sorted(_ids(memory.list(limit=10))) == ["c1", "l1", "l2"]
 
     def test_writes_bind_canonical_while_reads_widen(self, union_env):
-        """B8: a save in a widened session must not add a legacy row.
+        """A save in a widened session must not add a legacy row.
 
         Catches a write seam that follows the widening, which would make the
         union permanent and the rekey powerless.
@@ -302,7 +302,7 @@ class TestUnionWidening:
 
 
 # ---------------------------------------------------------------------------
-# B13, B16, B17: merged limit, deterministic order, post-rekey collapse
+# Merged limit, deterministic order, post-rekey collapse
 # ---------------------------------------------------------------------------
 
 class TestMergeSemantics:
@@ -325,7 +325,7 @@ class TestMergeSemantics:
         assert len(merged) == 3, f"got {len(merged)} rows; per-bucket limit returns 6"
 
     def test_ordering_is_deterministic_across_the_union(self, union_env):
-        """B16: ties are broken by the table-global rowid, so two buckets cannot
+        """Ties are broken by the table-global rowid, so two buckets cannot
         interleave arbitrarily between runs."""
         tied = "2026-03-01T00:00:00+00:00"
         _seed(
@@ -344,7 +344,7 @@ class TestMergeSemantics:
         assert first == ["c2", "l1", "c1"]
 
     def test_the_widening_collapses_after_a_rekey(self, union_env):
-        """B17: once the legacy bucket is empty, the scope must be canonical
+        """Once the legacy bucket is empty, the scope must be canonical
         alone. Catches a cached/sticky widening."""
         _seed(
             union_env,
@@ -368,7 +368,7 @@ class TestMergeSemantics:
 
 
 # ---------------------------------------------------------------------------
-# B18: the empty-scope trap
+# The empty-scope trap
 # ---------------------------------------------------------------------------
 
 class TestEmptyScopeNeverSelectsTheStore:
@@ -410,7 +410,7 @@ class TestEmptyScopeNeverSelectsTheStore:
 
 
 # ---------------------------------------------------------------------------
-# B4/B7/B12: the plausibility gate and the disclosure
+# The plausibility gate and the disclosure
 # ---------------------------------------------------------------------------
 
 class TestDisclosure:
@@ -449,7 +449,7 @@ class TestDisclosure:
         # hands the reader no command to paste here.
         assert "project-id rekey" not in caplog.text
         assert state["rekey"] is None
-        # B5: the warning carries the file count §5 requires, so the operator
+        # The warning carries the file count the disclosure requires, so the operator
         # can judge the loss (2 memories and 1 file row in this fixture).
         assert re.search(r"holds 2 memories and 1 file path", caplog.text), (
             f"the exclusion warning omitted the file count: {caplog.text!r}"
@@ -510,7 +510,7 @@ class TestDisclosure:
         assert "matches" in caplog.text and "none is used" in caplog.text
 
     def test_status_counts_the_union_and_names_the_command(self, union_env):
-        """R7: an empty/partial status is the user-visible incident shape."""
+        """An empty/partial status is the user-visible incident shape."""
         _seed(
             union_env,
             [
@@ -533,7 +533,7 @@ class TestDisclosure:
 
 
 # ---------------------------------------------------------------------------
-# B14: reads never write
+# Reads never write
 # ---------------------------------------------------------------------------
 
 class TestReadsNeverWrite:
@@ -649,7 +649,7 @@ class TestReadsNeverWrite:
 
 class TestFileSeams:
     def test_get_file_ids_none_is_the_null_project_row_only(self, union_env):
-        """G2's explicit exception. Catches a 'cleanup' that routes None
+        """The NULL-project exception of `get_file_ids`. Catches a 'cleanup' that routes None
         through the scope builder and returns every project's row."""
         _seed(
             union_env,
@@ -672,7 +672,7 @@ class TestFileSeams:
 
 
 # ---------------------------------------------------------------------------
-# B5: the remaining read seams use the union
+# The remaining read seams use the union
 # ---------------------------------------------------------------------------
 
 class TestPerSeamUnion:
@@ -745,7 +745,7 @@ class TestReviewB1GateVerified:
     def test_the_gate_verifies_against_the_declared_identity_root(
         self, tmp_path, monkeypatch
     ):
-        """B1-T: the `verified` branch of the plausibility gate.
+        """The `verified` branch of the plausibility gate.
 
         The identity root is the DECLARED repo (A), while the process cwd is
         a different repo (B). A bucket with an absolute file row under A must
@@ -797,7 +797,7 @@ class TestReviewB1GateVerified:
 
 class TestReviewB3EmptyScope:
     def test_scope_or_none_keeps_the_empty_sequence_empty(self):
-        """B3-T: `_scope_or_none` must not fold `()` to None.
+        """`_scope_or_none` must not fold `()` to None.
 
         A truthiness implementation (`tuple(project_id) or None`) turns an
         empty scope into the whole store, which is the empty-set trap the
@@ -811,7 +811,7 @@ class TestReviewB3EmptyScope:
         assert _scope_or_none((CANONICAL, LEGACY)) == (CANONICAL, LEGACY)
 
     def test_get_graph_stats_empty_scope_is_all_zeros_not_the_store(self, union_env):
-        """B3-T: `get_graph_stats(conn, [])` must not fall through to the
+        """`get_graph_stats(conn, [])` must not fall through to the
         whole store. The populated `None` call is the positive control."""
         _seed(
             union_env,
@@ -828,7 +828,7 @@ class TestReviewB3EmptyScope:
                 "memories": 0,
                 "memory_file_links": 0,
                 "file_relations": 0,
-                # G11's distinct-path total joined the envelope with the
+                # The distinct-path total joined the envelope with the
                 # store fix; it is part of the zeros contract too.
                 "file_paths": 0,
             }, "an empty graph scope returned the store"
@@ -849,7 +849,7 @@ class TestReviewB3EmptyScope:
 
 class TestReviewB4FoldedCandidate:
     def test_an_exact_case_match_wins_over_a_case_variant(self):
-        """F4: EXACT case first, the fold only as a fallback.
+        """EXACT case first, the fold only as a fallback.
 
         A folded-first implementation passes on a case-insensitive filesystem
         and loses the bucket on a case-sensitive one: with an exact bucket and
@@ -872,7 +872,7 @@ class TestReviewB4FoldedCandidate:
         assert ambiguous == [], "an exact match must not report ambiguity"
 
     def test_a_unique_case_folded_candidate_is_the_raw_stored_spelling(self):
-        """B4-T: the unique folded fallback, as a PURE-STRING surrogate.
+        """The unique folded fallback, as a PURE-STRING surrogate.
 
         The real filesystem shape is macOS-APFS-only and unreproducible
         locally; this arm reddens on any OS if the fold starts guessing or
@@ -932,7 +932,7 @@ class TestReviewB2Seams:
     def test_the_vector_seam_resolves_the_union_and_rejects_a_foreign_bucket(
         self, union_env, monkeypatch
     ):
-        """B2-T (S1): one KNN per scope across the union.
+        """One KNN per scope across the union.
 
         RED WHEN: the vector seam uses only the first/canonical id, drops a
         scope, or serves a foreign partition's hit.
@@ -968,7 +968,8 @@ class TestReviewB2Seams:
     def test_two_graph_seams_resolve_the_union_and_reject_a_foreign_bucket(
         self, union_env
     ):
-        """B2-T (G4/G5): two graph seams across the union, with a foreign
+        """Two graph seams across the union (`get_files_for_memory` and
+        `get_memories_for_file`), with a foreign
         negative. RED WHEN either seam ignores the sequence and binds one id.
         """
         _seed(
@@ -1000,7 +1001,7 @@ class TestReviewB2Seams:
             assert (
                 get_files_for_memory(conn, "m-legacy", project_id=(CANONICAL,))
                 == []
-            ), "G4 did not apply the scope to the legacy file row"
+            ), "get_files_for_memory did not apply the scope to the legacy file row"
 
             assert get_memories_for_file(
                 conn, "f-legacy", project_id=(CANONICAL, LEGACY)
@@ -1008,20 +1009,20 @@ class TestReviewB2Seams:
             assert (
                 get_memories_for_file(conn, "f-legacy", project_id=(CANONICAL,))
                 == []
-            ), "G5 did not apply the scope to the legacy memory row"
+            ), "get_memories_for_file did not apply the scope to the legacy memory row"
 
             assert (
                 get_memories_for_file(
                     conn, "f-foreign", project_id=(CANONICAL, LEGACY)
                 )
                 == []
-            ), "G5 served a foreign bucket's memory"
+            ), "get_memories_for_file served a foreign bucket's memory"
 
 
     def test_search_by_file_resolves_the_union_and_rejects_a_foreign_bucket(
         self, union_env
     ):
-        """F5: the SECOND belt comparison (search.py's `search_by_file`).
+        """The SECOND belt comparison (search.py's `search_by_file`).
 
         `graph_enhanced_search`'s belt is live through
         `test_search_reaches_the_legacy_bucket`; this sibling belt had no
@@ -1285,7 +1286,7 @@ class TestReviewDbSearchByFileOrder:
 
 
 class TestReviewDbGateWorktreeRoots:
-    """S2: the legacy gate must accept every checkout of the repository.
+    """The legacy gate must accept every checkout of the repository.
 
     `main_repo_root()` deliberately answers the MAIN checkout for a linked
     worktree, so a bucket whose only absolute rows were written from the
@@ -1477,7 +1478,7 @@ class TestReviewDbGateWorktreeRoots:
             f"a row under the main root did not verify: {main_only}"
         )
         assert only_main_against_worktree_row[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
-            "the single-main-root control did not reproduce S2: "
+            "the single-main-root control did not reproduce the linked-worktree exclusion: "
             f"{only_main_against_worktree_row}"
         )
         assert checkout_set[0] == LEGACY_PLAUSIBLE_VERIFIED, (
@@ -1575,11 +1576,11 @@ class TestReviewQuoting:
 
 
 # ---------------------------------------------------------------------------
-# B14 (first-use half): a ZERO-BYTE store must stay zero bytes on a read
+# Reads never write, at first use: a ZERO-BYTE store must stay zero bytes on a read
 # ---------------------------------------------------------------------------
 
 class TestZeroByteStoreStaysEmptyOnRead:
-    """The P0 "reads never write" clause at FIRST USE, every shape.
+    """The "reads never write" rule at FIRST USE, every shape.
 
     The existing spy arms SEED a store, so `ensure_initialized` finds its
     schema already present and sees no DDL; they cover an EXISTING store's

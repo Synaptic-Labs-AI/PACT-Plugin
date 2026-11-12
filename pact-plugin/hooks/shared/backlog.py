@@ -1481,7 +1481,7 @@ def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str
 def _is_github_url(url: Any) -> bool:
     """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE).
 
-    A backslash or an `@` is refused outright, as for remotes (S-F6): GitHub's
+    A backslash or an `@` is refused outright, as for remotes: GitHub's
     web URL never carries userinfo, and `urlsplit` reads
     `https://evil.com@github.com/...` as github.com.
     """

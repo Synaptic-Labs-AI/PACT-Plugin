@@ -1023,7 +1023,7 @@ def _content_fields_changed(
 ) -> bool:
     """Return True if any of ``keys`` differs between ``before`` and ``after``.
 
-    Used by ``PACTMemory.update`` (M7, #374 remediation) to skip embedding
+    Used by ``PACTMemory.update`` to skip embedding
     regeneration when an additive merge produces no actual change. Values are
     compared via canonical JSON serialization so that dict/list ordering and
     non-JSON-native types (e.g. datetimes) compare deterministically.
@@ -1120,7 +1120,7 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
             return None
         # os.fsdecode, never subprocess's locale decoding: a path may contain
         # bytes invalid in the locale, and UnicodeDecodeError would escape this
-        # reader (#1653 F1 twin site).
+        # reader.
         common = Path(os.fsdecode(result.stdout).strip())
         if not common.is_absolute():
             # git returns this path RELATIVE TO THE DIRECTORY IT RAN IN, at any
@@ -1272,7 +1272,8 @@ def _worktree_redirect(asked_root, common_dir) -> bool:
     A `.git` FILE naming another repository's WORKTREE ADMIN dir makes every
     git answer agree — `--git-dir`, `--git-common-dir` and `--show-toplevel`
     all describe that other repository — while `asked_root` is not a checkout
-    of it at all ("SEC-1" in `shared/project_scope.py`). A genuine linked
+    of it at all (the forged-pointer shape `shared/project_scope.py` names).
+    A genuine linked
     worktree IS listed by `git worktree list`, so the listing test separates
     them.
 
@@ -3287,7 +3288,7 @@ class PACTMemory:
         with db_connection() as conn:
             ensure_initialized(conn)
 
-            # SURFACE 4's evidence, computed BEFORE the write: "no prior rows"
+            # The save envelope's evidence, computed BEFORE the write: "no prior rows"
             # must be the state the save FOUND, not the state it created.
             # `_read_project_scopes` records the legacy candidate, whether it
             # was admitted, and the canonical bucket's prior count.
@@ -3441,7 +3442,7 @@ class PACTMemory:
             ),
             "cwd_repo": self._cwd_repo_id,
             "override_ignored": self._override_ignored,
-            # SURFACE 4: the legacy candidate, its admission state and the
+            # The legacy candidate, its admission state and the
             # canonical bucket's PRIOR count. Present on every save, so a
             # caller never has to read an absent field as "nothing to say".
             "legacy_scope": self._legacy_scope_state,
@@ -3759,7 +3760,7 @@ class PACTMemory:
                 memory_ids = [r.id for r in results]
                 # graph_enhanced_search doesn't return scores, so pass None
                 #
-                # KEEP THE RESULT (F5). This call used to discard it, so the
+                # KEEP THE RESULT. This call used to discard it, so the
                 # reason it produced -- including ROOT_UNKNOWN, "git could not
                 # answer, so the project memory target is unknown" -- reached
                 # no reader.
@@ -4099,7 +4100,7 @@ class PACTMemory:
                         f"bucket {stored.get('project_id')!r} was refused"
                     )
 
-            # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
+            # Snapshot CONTENT_FIELDS before the
             # update so we can detect whether the merge actually changed
             # any embedding-relevant value. update_memory's additive merge
             # is idempotent for repeat calls — without this snapshot we'd
@@ -4485,7 +4486,7 @@ class PACTMemory:
         if project_scope is None:
             return []
         # THIS READ BINDS THE SESSION ID ONLY WHEN `session_only` IS ASKED
-        # FOR, and an unusable DETECTED id must not gate it (F10). No row can
+        # FOR, and an unusable DETECTED id must not gate it. No row can
         # carry such a value — every write validates it before binding — so
         # the empty answer is the correct one, and it is returned before
         # _ensure_ready() so a no-op read does no store work.
@@ -4626,7 +4627,7 @@ class PACTMemory:
             # STRUCTURED DECLINE REASON, beside the override it names.
             "decline_reason": self._decline_reason,
             "project_candidates": [],
-            # A2: ALWAYS PRESENT, null when no candidate exists. An
+            # ALWAYS PRESENT, null when no candidate exists. An
             # envelope consumer must be able to tell that a bucket was
             # dropped without reading a warning it may never see.
             "legacy_scope": self._legacy_scope_state,
@@ -4720,7 +4721,7 @@ class PACTMemory:
             project_scopes = self._read_project_scopes(conn)
             memory_count = get_memory_count(conn, project_scopes)
             graph_stats = get_graph_stats(conn, project_scopes)
-            # SURFACE 2: every populated bucket, with the literal command that
+            # Every populated bucket, with the literal command that
             # moves it. This is the report a reader lands on after an empty
             # search, so it must name the remedy rather than only the counts.
             project_candidates = project_candidate_rows(

@@ -1,4 +1,4 @@
-"""Arms for four guards the repository-identity suite left unexercised.
+"""Arms for guards the repository-identity suite left unexercised.
 
 Each class pins one guard that a deliberate mutation of production code could
 remove while every other test stayed green:
@@ -12,6 +12,8 @@ remove while every other test stayed green:
   so no CLI arm reaches the library refusal);
 - the test-data copies of the working-memory comment equal the shipped
   constants, so a copy cannot drift from the string it stands for.
+- the shipped memory scripts and this change's own test modules carry no
+  planning labels.
 
 Every fixture is a real repository and a real on-disk store under tmp_path.
 """
@@ -19,7 +21,9 @@ Every fixture is a real repository and a real on-disk store under tmp_path.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 from fixtures.identity_git import assert_outside_repository, make_repo
@@ -48,6 +52,7 @@ CANONICAL = "github.com/syn-labs/pact-plugin"
 LEGACY = "PACT-prompt"
 OTHER = "github.com/other-owner/other-repo"
 STAMP = "2026-01-01T00:00:00+00:00"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -217,3 +222,134 @@ class TestCommentCopiesEqualTheShippedConstants:
         assert size_rows.WM == HOOK_WORKING_MEMORY_COMMENT
         assert size_rows.RC == SCRIPT_RETRIEVED_COMMENT
         assert size_rows.RC == HOOK_RETRIEVED_COMMENT
+
+
+class TestIdentityFilesCarryNoPlanningLabels:
+    """The shipped memory scripts and this change's own test modules carry no
+    planning labels.
+
+    A label such as an issue number, a review-finding id, a corpus-row id or a
+    test-matrix tag points at a tracker or a document the reader of the file
+    does not have, so it explains nothing and goes stale silently. The
+    behavioural sentence beside it is what stays.
+    """
+
+    SCRIPTS = (
+        "skills/pact-memory/scripts/memory_api.py",
+        "skills/pact-memory/scripts/project_identity.py",
+        "skills/pact-memory/scripts/cli.py",
+        "skills/pact-memory/scripts/database.py",
+    )
+    # The test modules this change added, by the prefixes it introduced. A
+    # later module with one of these prefixes is scanned too.
+    TEST_GLOBS = (
+        "tests/test_project_identity_*.py",
+        "tests/test_identity_*_remediation.py",
+        "tests/test_remediation_*.py",
+        "tests/test_remote_parser_agreement.py",
+        "tests/fixtures/identity_git.py",
+        "tests/fixtures/zero_create_worker.py",
+    )
+    # The added modules at the time this arm was written. The glob may grow;
+    # it must never match fewer, or the scan has silently lost its subject.
+    MIN_TEST_MODULES = 17
+
+    LABELS = (
+        (re.compile(r"#\d{3,4}\b"), "issue or PR number"),
+        (re.compile(r"\bSURFACE \d"), "design surface tag"),
+        (re.compile(r"\bSEC-\d"), "security finding id"),
+        (re.compile(r"\bPREPARE\b"), "planning phase name"),
+        (re.compile(r"\bP0\b"), "test-matrix priority tag"),
+        # One capital letter and one or two digits, which also catches the
+        # first id of a range or a suffixed id. NOT after `%`, `+`, `-` or a
+        # word character, and not before `:<digit>`, so a percent-escape, a
+        # code point, an ISO timestamp and `UTF-8` never match.
+        (re.compile(r"(?<![%+\w-])[A-Z]\d{1,2}(?![\w+])(?!:\d)"),
+         "finding, corpus-row or design id"),
+    )
+    # The Unicode control-set names are terms, not labels. (`[C]` keeps this
+    # pattern's own source text from reading as a label to the scan.)
+    CONTROL_SET = re.compile(
+        r"\bC0\b|\bC1(?= controls?\b)|(?<=/)[C]1\b|\bC1(?=/DEL)"
+    )
+
+    @classmethod
+    def _hits(cls, text):
+        found = []
+        for number, line in enumerate(text.splitlines(), start=1):
+            scrubbed = cls.CONTROL_SET.sub("", line)
+            starts = set()
+            for pattern, kind in cls.LABELS:
+                for match in pattern.finditer(scrubbed):
+                    if match.start() not in starts:
+                        starts.add(match.start())
+                        found.append((number, kind, match.group(0)))
+        return found
+
+    @classmethod
+    def _test_modules(cls):
+        return sorted({
+            path for pattern in cls.TEST_GLOBS for path in PLUGIN_ROOT.glob(pattern)
+        })
+
+    # Each planted label is ASSEMBLED, so this source file never contains the
+    # label itself and the scan of this module stays meaningful.
+    PLANTED = (
+        ("# see " + "#" + "1699", "issue or PR number"),
+        ("# " + "SURFACE" + " 4: the candidate", "design surface tag"),
+        ('("' + "SEC" + "-1" + '")', "security finding id"),
+        ("# the " + "PREP" + "ARE corpus", "planning phase name"),
+        ("(" + "P" + "0 matrix)", "test-matrix priority tag"),
+        ("# " + "U" + "45 row", "finding, corpus-row or design id"),
+        ("# " + "A" + "0-" + "A" + "13: cases", "finding, corpus-row or design id"),
+        ('"""' + "B" + "6-T: flow", "finding, corpus-row or design id"),
+        ('"""' + "S" + "2-sec: surface", "finding, corpus-row or design id"),
+        ("see " + "R" + "2-5 in merge", "finding, corpus-row or design id"),
+        ('"""' + "A" + "4/" + "S" + "1: read", "finding, corpus-row or design id"),
+        ("(" + "G" + "4/" + "G" + "5): seams", "finding, corpus-row or design id"),
+        ("parses under " + "R" + "1.", "finding, corpus-row or design id"),
+    )
+    CLEAN = (
+        "# Reject C0, DEL and C1 controls and lone surrogates",
+        "# Characters that must not reach a rendered envelope raw: C0/DEL/C1 controls",
+        '("https://host/owner/r%C3%A9po", "host/owner/r%C3%A9po")',
+        "`utf-8-sig` drops an encoding BOM (U+FEFF)",
+        'f"2026-01-0{i + 1}T00:00:00+00:00"',
+        "an ISO-8601 stamp read as UTF-8 by sha256",
+        "the 255-byte cap",
+        "_R1_GRAMMAR = re.compile(CANONICAL_ID_RE)",
+        "SELECT r1.id FROM memories AS r1 JOIN files AS f2 ON f2.id = r1.id",
+    )
+
+    @pytest.mark.parametrize(("line", "kind"), PLANTED)
+    def test_each_label_shape_is_flagged(self, line, kind):
+        """POSITIVE CONTROL: every shape the scan claims to catch is caught."""
+        assert [hit_kind for _n, hit_kind, _t in self._hits(line)][:1] == [kind]
+
+    @pytest.mark.parametrize("line", CLEAN)
+    def test_real_terms_are_not_flagged(self, line):
+        """NEGATIVE CONTROL: control-set names, percent-escapes, code points,
+        timestamps and encodings are not labels."""
+        assert self._hits(line) == []
+
+    def test_the_scan_population_is_whole(self):
+        """The glob still finds every module it was written for."""
+        modules = self._test_modules()
+        assert len(modules) >= self.MIN_TEST_MODULES, modules
+        assert all((PLUGIN_ROOT / relpath).is_file() for relpath in self.SCRIPTS)
+
+    @pytest.mark.parametrize(
+        "relpath",
+        SCRIPTS + tuple(TEST_GLOBS),
+    )
+    def test_the_files_carry_no_planning_label(self, relpath):
+        paths = sorted(PLUGIN_ROOT.glob(relpath)) if "*" in relpath else [PLUGIN_ROOT / relpath]
+        assert paths, f"{relpath} matched no file"
+        found = {}
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            assert len(text) > 200, f"{path} read as empty; the scan would pass vacuously"
+            hits = self._hits(text)
+            if hits:
+                found[str(path.relative_to(PLUGIN_ROOT))] = hits
+        assert found == {}, f"planning labels: {found}"

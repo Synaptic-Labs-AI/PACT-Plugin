@@ -1,4 +1,4 @@
-"""The one-shot rekey: atomicity, collisions, vectors and CLI (P0 C1-C12).
+"""The one-shot rekey: atomicity, collisions, vectors and CLI.
 
 The rekey is the ONLY row-rewriting surface. Its dangerous states are a
 PARTIAL move (k rows moved, N-k left) and a committed move whose auxiliary
@@ -110,7 +110,7 @@ def _rows(store):
 
 
 # ---------------------------------------------------------------------------
-# C1-C3: dry-run, apply, no-op
+# Dry-run, apply, no-op
 # ---------------------------------------------------------------------------
 
 class TestRekeyLifecycle:
@@ -162,7 +162,7 @@ class TestRekeyLifecycle:
         assert second["files_conflicted"] == 0
 
     def test_rekeying_into_a_populated_target_is_not_an_error(self, rekey_env):
-        """F10: both buckets populated is a NORMAL state, not a conflict.
+        """Both buckets populated is a NORMAL state, not a conflict.
 
         The union serves a store holding canonical rows beside a legacy bucket
         every day; the rekey must sum them, not refuse. RED WHEN the target's
@@ -212,7 +212,7 @@ class TestRekeyLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# C12: one transaction, never a partial move
+# One transaction, never a partial move
 # ---------------------------------------------------------------------------
 
 class TestRekeyAtomicity:
@@ -278,7 +278,7 @@ class TestRekeyAtomicity:
 
 
 # ---------------------------------------------------------------------------
-# C7: the UNIQUE(path, project_id) collision
+# The UNIQUE(path, project_id) collision
 # ---------------------------------------------------------------------------
 
 class TestFilesCollision:
@@ -312,7 +312,7 @@ class TestFilesCollision:
 
 
 # ---------------------------------------------------------------------------
-# C8: vectors follow the rekey, or are reported pending
+# Vectors follow the rekey, or are reported pending
 # ---------------------------------------------------------------------------
 
 def _vec_store(env, monkeypatch_query_only=False):
@@ -375,7 +375,7 @@ class TestVectorMove:
     def test_a_memory_without_a_vector_row_is_skipped_not_pending(
         self, rekey_env, monkeypatch
     ):
-        """F3: a MISSING vector is a skip, never a pending repair.
+        """A MISSING vector is a skip, never a pending repair.
 
         The catch-up repairs a row that exists but could not be moved; it
         cannot repair one that never existed. Counting a skip as pending
@@ -617,14 +617,14 @@ class TestCliSurface:
         assert code == 2
 
 # ---------------------------------------------------------------------------
-# Review finding B6-T: the incident flow, end to end
+# The reported incident flow, end to end
 # ---------------------------------------------------------------------------
 
 class TestReviewB6IncidentFlow:
     def test_show_candidates_then_rekey_makes_the_old_name_rows_reachable(
         self, tmp_path, monkeypatch, capfd
     ):
-        """B6-T: the reported incident as an end-to-end flow.
+        """The reported incident as an end-to-end flow.
 
         Rows live under the OLD folder name (`PACT-prompt`) while the current
         checkout is `PACT-Plugin`, so the derived read union cannot reach
@@ -696,7 +696,7 @@ class TestReviewB6IncidentFlow:
 
 
 # ---------------------------------------------------------------------------
-# C13: the two counters no other arm asserts
+# The two counters no other arm asserts
 # ---------------------------------------------------------------------------
 
 class TestRekeyCounterMeaning:

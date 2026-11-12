@@ -1,13 +1,12 @@
-"""Repository-identity canonicaliser and origin reader (P0 matrix A0-A13).
+"""Repository-identity canonicaliser and origin reader.
 
 Each arm names the defect it would catch. The classifier is the load-bearing
 surface: it must keep THREE outcomes distinct (canonical / no_portable_origin /
 decline). Collapsing decline into basename reintroduces the silent-mis-scope
 defect; collapsing no_portable_origin into decline breaks non-git folders.
 
-Corpus rows U45 (`git@host:repo` is CANONICAL) and U58 (an unsupported
-network scheme is DECLINE) are superseded by ruling and asserted here as
-ruled, not as the older corpus said.
+`git@host:repo` is CANONICAL and an unsupported network scheme DECLINES;
+both are asserted here as ruled.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ DECLINE = pi.OUTCOME_DECLINE
 
 
 # ---------------------------------------------------------------------------
-# A8-A13: normalization equivalence classes. Only ONE literal is pinned.
+# Normalization equivalence classes. Only ONE literal is pinned.
 # ---------------------------------------------------------------------------
 
 class TestNormalizationEquivalence:
@@ -55,7 +54,7 @@ class TestNormalizationEquivalence:
             "https://user@github.com/owner/repo.git",
         ]
         outputs = {pi.normalize_remote_url(url) for url in urls}
-        # N4: a set-of-one arm also passes when EVERY spelling returns None,
+        # A set-of-one arm also passes when EVERY spelling returns None,
         # which is the shape of a canonicaliser that stopped working. Assert
         # the value is real before asserting the spellings agree.
         assert None not in outputs, (
@@ -123,7 +122,7 @@ class TestNormalizationEquivalence:
         assert "SECRET-TOKEN" not in identifier
 
     def test_the_scp_one_segment_form_is_canonical_not_a_decline(self):
-        """U45, superseded to CANONICAL. Catches the old corpus ruling.
+        """Catches the one-segment scp form being declined.
 
         `git@host:repo` and `https://host/repo` name one endpoint; declining
         one spelling splits the repository.
@@ -205,8 +204,8 @@ class TestClassifierOutcomes:
         )
 
     def test_an_unsupported_network_scheme_declines(self):
-        """U58, superseded to DECLINE. Catches a basename fallback for a real
-        remote we cannot represent — the defect this ticket removes."""
+        """Catches a basename fallback for a real remote we cannot
+        represent."""
         assert pi.classify_remote_origin("ftp://host/owner/repo") == (DECLINE, None)
 
     @pytest.mark.parametrize(
@@ -262,7 +261,7 @@ class TestClassifierOutcomes:
 
 
 # ---------------------------------------------------------------------------
-# R1: the canonical-id grammar (acceptance/rejection corpus)
+# The canonical-id grammar (acceptance/rejection corpus)
 # ---------------------------------------------------------------------------
 
 class TestCanonicalGrammar:
@@ -430,7 +429,7 @@ class TestDetectIdForRoot:
         assert identity.source == "declined"
 
     def test_an_unavailable_origin_declines(self, tmp_path, monkeypatch):
-        """#1699: a broken repository must not fall back to a folder name."""
+        """A broken repository must not fall back to a folder name."""
         repo = make_repo(tmp_path / "broken")
         monkeypatch.setattr(
             pi,
@@ -442,7 +441,7 @@ class TestDetectIdForRoot:
         assert identity.source == "declined"
 
     def test_the_override_follows_the_identity_root(self, tmp_path, monkeypatch):
-        """A4/S1: the override is read at the ROOT's common dir, not the
+        """The override is read at the ROOT's common dir, not the
         process cwd's.
 
         The review corrected the original "rung 0 owns it" split: reading
