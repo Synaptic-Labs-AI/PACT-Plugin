@@ -225,8 +225,8 @@ class TestCommentCopiesEqualTheShippedConstants:
 
 
 class TestIdentityFilesCarryNoPlanningLabels:
-    """The shipped memory scripts and this change's own test modules carry no
-    planning labels.
+    """The shipped memory scripts, the backlog resolver that derives the same
+    identity, and this change's own test modules carry no planning labels.
 
     A label such as an issue number, a review-finding id, a corpus-row id or a
     test-matrix tag points at a tracker or a document the reader of the file
@@ -239,6 +239,7 @@ class TestIdentityFilesCarryNoPlanningLabels:
         "skills/pact-memory/scripts/project_identity.py",
         "skills/pact-memory/scripts/cli.py",
         "skills/pact-memory/scripts/database.py",
+        "hooks/shared/backlog.py",
     )
     # The test modules this change added, by the prefixes it introduced. A
     # later module with one of these prefixes is scanned too.
