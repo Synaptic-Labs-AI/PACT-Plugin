@@ -438,3 +438,31 @@ class TestAWorktreeOfASubmodule:
 
         assert memory.project_id is None
         assert memory._decline_reason["reason"] == "submodule_checkout"
+
+
+class TestAnUnparseableScpRemoteStillDeclines:
+    """A value git reads as scp but our grammar cannot split (more than one
+    `@`, or a backslash) is a present network remote: it must DECLINE, never
+    fall through to the folder name. The shared corpus is the set both
+    remote parsers refuse."""
+
+    @pytest.mark.parametrize("os_name", ["posix", "nt"])
+    def test_every_shared_refusal_declines(self, monkeypatch, os_name):
+        from test_remote_parser_agreement import SHARED_REFUSALS
+
+        monkeypatch.setattr(pi.os, "name", os_name)
+        outcomes = {url: pi.classify_remote_origin(url) for url, _rule in SHARED_REFUSALS}
+
+        assert outcomes == {url: (DECLINE, None) for url, _rule in SHARED_REFUSALS}
+
+    @pytest.mark.parametrize(
+        "url",
+        ["a@b@github.com:o/n", "git@a@b:owner/repo", "git@a@b@github.com:o/n",
+         "host:owner\\repo", "a@b@host:"],
+    )
+    def test_a_multi_at_or_backslash_scp_value_declines(self, url):
+        assert pi.classify_remote_origin(url) == (DECLINE, None)
+
+    @pytest.mark.parametrize("url", ["/srv/a\\b:c", "..\\rel\\repo", "/srv/team@a@b"])
+    def test_a_local_path_with_a_backslash_or_two_ats_stays_local(self, url):
+        assert pi.classify_remote_origin(url) == (NO_PORTABLE, None)

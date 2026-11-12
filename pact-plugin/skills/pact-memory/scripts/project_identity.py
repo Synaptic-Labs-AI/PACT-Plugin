@@ -350,6 +350,22 @@ def _scp_match(value: str) -> Optional["re.Match[str]"]:
     return match
 
 
+def _git_reads_as_scp(value: str) -> bool:
+    """Whether git would read `value` as scp syntax, by its rule alone.
+
+    `:` present and no `/` before the first `:`, except the Windows drive
+    path `_scp_match` also excludes. Unlike `_scp_match` this never parses a
+    host or user, so it still answers for a value our stricter grammar
+    cannot split, such as `git@a@b:owner/repo`.
+    """
+    prefix, colon, _ = value.partition(":")
+    if not colon or "/" in prefix:
+        return False
+    return not (
+        os.name == "nt" and len(prefix) == 1 and prefix.isascii() and prefix.isalpha()
+    )
+
+
 def _has_control_character(value: str) -> bool:
     """Whether `value` holds a C0 control character or DEL."""
     return any(char < "\x20" or char == "\x7f" for char in value)
@@ -511,7 +527,11 @@ def _is_network_shaped(url: object) -> bool:
     # decline-versus-basename, never acceptance.
     value = value.lstrip("\ufeff").lstrip()
     if "\\" in value or value.count("@") > 1:
-        return "://" in value or _scp_match(value) is not None
+        # git's rule, not our grammar: the grammar refuses this value
+        # outright, so asking it whether the value is scp would always say
+        # no and send a network remote such as `a@b@github.com:o/n` to the
+        # basename.
+        return "://" in value or _git_reads_as_scp(value)
     scheme_match = _SCHEME_PREFIX_RE.match(value)
     if scheme_match is not None:
         return scheme_match.group("scheme").lower() not in _LOCAL_SCHEMES
