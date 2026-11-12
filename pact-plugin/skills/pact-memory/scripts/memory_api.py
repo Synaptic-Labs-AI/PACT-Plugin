@@ -264,8 +264,21 @@ _DECLINE_CAUSES = {
     "declaration_unresolved": "the declared directory could not be resolved",
 }
 
-# Causes with no repository to pin: the override is not offered for them.
-_NO_OVERRIDE_CAUSES = frozenset({"declaration_unresolved", "no_working_tree"})
+# THE REMEDY FOR A DECLINE NO PIN CAN FIX. A pin is offered only when the
+# decline names the override file that would fix it; every other cause names
+# its own remedy, so an unworkable `<git-common-dir>` pin is never printed.
+_UNPINNABLE_REMEDIES = {
+    "broken_git_marker": (
+        "Repair or remove the broken `.git` marker, or check that git is "
+        "installed and can read it."
+    ),
+    "no_working_tree": (
+        "Run from a checkout with a working tree; a bare repository has none."
+    ),
+    "declaration_unresolved": (
+        "Set CLAUDE_PROJECT_DIR to an existing project root."
+    ),
+}
 
 # THE REDIRECT'S REMEDY IS THE MARKER, NEVER A PIN. The override path a
 # redirect could name belongs to the repository the `.git` file points AT:
@@ -305,22 +318,22 @@ def _warn_declined(
             _REDIRECT_REMEDY,
         )
         return
-    if token in _NO_OVERRIDE_CAUSES:
+    override_path = (record or {}).get("override_path")
+    if override_path is None:
+        remedy = _UNPINNABLE_REMEDIES.get(token, "")
         logger.warning(
-            "%s, so no project id was derived. Run the `project-id show` verb "
-            "to inspect the detected identity.",
+            "%s, so no project id was derived.%s Run the `project-id show` "
+            "verb to inspect the detected identity.",
             cause,
+            f" {remedy}" if remedy else "",
         )
         return
-    override_path = (record or {}).get("override_path")
     logger.warning(
         "%s, so no project id was derived. Run the `project-id show` verb to "
         "inspect the detected identity, or write an operator-chosen canonical "
         "id to %r.",
         cause,
-        str(override_path)
-        if override_path is not None
-        else "<git-common-dir>/pact-project-id",
+        str(override_path),
     )
 
 
@@ -2052,11 +2065,14 @@ class PACTMemory:
             return store_path_origin() in DERIVED_STORE_ORIGINS
         return _store_schema_present(str(store))
 
-    def _read_project_scopes(self, conn: Any = None) -> Optional[tuple]:
+    def _read_project_scopes(self, conn: Any = None) -> tuple:
         """The project ids a READ may bind: the canonical id plus its legacy bucket.
 
-        Returns None when `_project_scope()` is None — callers treat that as
-        NO RECORDS, exactly today's semantics. A NON-canonical id (a supplied
+        Returns `()` when `_project_scope()` is None: an EMPTY scope, which
+        every store, graph and search seam treats as no rows. It is never
+        None, because None is the library's whole-store value and a read with
+        no identity must not reach a query as an unscoped filter. A
+        NON-canonical id (a supplied
         value, or a legacy basename) is a one-element scope: there is no
         canonical/legacy split to reconcile.
 
@@ -2070,9 +2086,6 @@ class PACTMemory:
         the two spellings are two different projects. The value returned is
         the STORED spelling, byte for byte — folding finds a candidate, it
         never produces one.
-
-        An empty sequence is unreachable. `None` keeps its "no identity"
-        meaning, which every caller already treats as no records.
 
         READS NEVER WRITE. An absent store returns the canonical scope alone
         rather than being created, and when `conn` is not supplied the probe
@@ -2094,7 +2107,7 @@ class PACTMemory:
         self._legacy_scope_state = None
         scope = self._project_scope()
         if scope is None:
-            return None
+            return ()
         if not is_canonical(scope):
             return (scope,)
         legacy = self._legacy_project_basename

@@ -1051,7 +1051,7 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
             "process_repo_root": (
                 str(process_root) if process_root is not None else None
             ),
-            "read_scope": list(read_scope) if read_scope is not None else None,
+            "read_scope": list(read_scope),
             "legacy_scope": memory._legacy_scope_state,
             "candidates": _project_candidates(db_path),
         })

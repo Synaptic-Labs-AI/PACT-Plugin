@@ -26,6 +26,7 @@ from shared import backlog
 from scripts import memory_api
 
 MEMORY_API = Path(memory_api.__file__)
+CREATED_AT = "2026-01-01T00:00:00+00:00"
 
 
 @pytest.fixture
@@ -489,6 +490,80 @@ class TestAHomeRepositoryIsAHomeLanding:
         assert detected.project_id == "github.com/o/proj"
 
 
+
+def _populated_store(path: Path) -> Path:
+    """Rows in a named bucket and in the NULL bucket, one file linked to each."""
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(path) as conn:
+        ensure_initialized(conn)
+        for memory_id, project in (("aaaa1111", "github.com/o/a"), ("bbbb2222", None)):
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, 'populated', ?, 's', ?, ?)",
+                (memory_id, project, CREATED_AT, CREATED_AT),
+            )
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                ("file-" + memory_id, "/abs/shared.py", project),
+            )
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id) VALUES (?, ?)",
+                (memory_id, "file-" + memory_id),
+            )
+        conn.commit()
+    return path
+
+
+class TestTheReadScopeIsNeverNone:
+    """No identity reads as the EMPTY scope, never as the whole store.
+
+    Catches `_read_project_scopes` returning None: None is the library's
+    whole-store value, so one caller that forgets its pre-check would read
+    every project's memories for a session that has no identity at all.
+    """
+
+    def test_no_identity_is_the_empty_scope(self, identity_env, monkeypatch):
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(
+                    project_id=None, source="unresolved", legacy_basename=None,
+                    override_ignored=None, identity_root=None,
+                )
+            ),
+        )
+        memory = PACTMemory(session_id="s", db_path=identity_env / "absent.db")
+        assert memory._read_project_scopes() == ()
+
+    def test_every_seam_reads_no_rows_for_the_empty_scope(self, identity_env):
+        from scripts.config import store_scope
+        from scripts.database import (
+            db_connection,
+            get_memory_count,
+            list_memories,
+            resolve_memory_id_prefix,
+        )
+        from scripts.graph import get_graph_stats
+        from scripts.search import search_by_file, vector_search
+
+        store = _populated_store(identity_env / "populated.db")
+        with db_connection(store) as conn:
+            # Controls: the whole-store reads see both rows.
+            assert get_memory_count(conn, None) == 2
+            assert len(list_memories(conn, None)) == 2
+            assert resolve_memory_id_prefix(conn, "aaaa111") == "aaaa1111"
+            assert list_memories(conn, ()) == []
+            assert get_memory_count(conn, ()) == 0
+            assert resolve_memory_id_prefix(conn, "aaaa111", project_id=()) is None
+            assert not any(get_graph_stats(conn, ()).values())
+            assert vector_search(conn, "populated", ()) == []
+        with store_scope(store):
+            assert search_by_file("/abs/shared.py", ()) == []
+
+
 class TestACeilingStartDirectoryIsExamined:
     """A broken `.git` marker AT a ceiling start directory still declines.
 
@@ -587,3 +662,57 @@ class TestADeclaredHomeIsAHomeLanding:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
         monkeypatch.chdir(project)
         assert PACTMemory._detect_project_identity_with_legacy().project_id == "github.com/o/proj"
+
+
+class TestAnUnpinnableDeclineOffersNoPin:
+    """A decline with no override path never prints a pin as its remedy.
+
+    Catches a warning that falls back to "write an id to
+    <git-common-dir>/pact-project-id" for a cause no pin can fix: the
+    operator writes a file that changes nothing, or one that belongs to
+    another repository.
+    """
+
+    def _rig(self, identity_env, monkeypatch, reason):
+        if reason == "broken_git_marker":
+            broken = identity_env / "broken"
+            broken.mkdir()
+            (broken / ".git").write_text("gitdir: /nonexistent/admin\n", encoding="utf-8")
+            monkeypatch.chdir(broken)
+        elif reason == "no_working_tree":
+            bare = identity_env / "bare.git"
+            run_git("init", "-q", "--bare", str(bare), cwd=identity_env)
+            monkeypatch.chdir(bare)
+        elif reason == "declaration_unresolved":
+            plain = identity_env / "plain"
+            plain.mkdir()
+            monkeypatch.chdir(plain)
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(identity_env / "gone"))
+        else:
+            victim = make_repo(
+                identity_env / "victim", remote="https://github.com/victim/secret.git"
+            )
+            make_worktree(victim, identity_env / "victim-wt")
+            forged = identity_env / "forged"
+            forged.mkdir()
+            (forged / ".git").write_text(
+                f"gitdir: {victim / '.git' / 'worktrees' / 'victim-wt'}\n",
+                encoding="utf-8",
+            )
+            monkeypatch.chdir(forged)
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["broken_git_marker", "no_working_tree", "declaration_unresolved", "gitfile_redirect"],
+    )
+    def test_no_pin_is_offered(self, identity_env, monkeypatch, caplog, reason):
+        self._rig(identity_env, monkeypatch, reason)
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.decline_reason["reason"] == reason
+        assert detected.decline_reason["override_path"] is None
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages, "no decline warning was logged"
+        for message in messages:
+            assert "pact-project-id" not in message, message
+            assert "<git-common-dir>" not in message, message
