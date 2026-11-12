@@ -64,9 +64,15 @@ ACTIONS_ENVELOPE = re.compile(
     r"^[^\t\r\n]*\t[^\t\r\n]*\t" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 # The run line's unexpanded `${SEED:+-p randomly --randomly-seed="$SEED"}`, as
-# shlex splits it, and pytest-randomly's own report-header line.
+# shlex splits it, and pytest-randomly's own report-header line. SEED_LINE is
+# the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed.
+# SEED_LIKE_LINE is the same line with any run of Unicode digits; a header line
+# that matches it but not SEED_LINE is refused rather than read.
 _SEED_ARGV = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED}"]
-SEED_LINE = re.compile(r"Using --randomly-seed=(\d+)")
+SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
+SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
+SESSION_BANNER = re.compile(r"=+ test session starts =+")
+SECTION_SEPARATOR = re.compile(r"[=_-]{3,}( .*)?")
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
 # the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
@@ -185,15 +191,21 @@ def _junit_key(node_id: str) -> tuple[str, str]:
     return ".".join(parts[:-1]), parts[-1]
 
 
+def _command_text(line: str) -> str | None:
+    """The echoed pytest command on this line, or None when it carries none."""
+    stripped = line.strip()
+    if stripped.startswith("##[group]Run "):
+        stripped = stripped[len("##[group]Run "):]
+    return stripped if stripped.startswith("python -m pytest ") else None
+
+
 def _command_argv(lines: list[str]) -> list[str]:
     candidates = []
     for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("##[group]Run "):
-            stripped = stripped[len("##[group]Run "):]
-        if stripped.startswith("python -m pytest "):
+        command = _command_text(line)
+        if command is not None:
             try:
-                candidates.append(shlex.split(stripped))
+                candidates.append(shlex.split(command))
             except ValueError as exc:
                 raise EvidenceError(f"unparseable pytest command: {exc}") from exc
     if (len(candidates) not in (1, 2)
@@ -217,13 +229,46 @@ def _command_argv(lines: list[str]) -> list[str]:
     return argv
 
 
-def _shuffle_seed(lines: list[str]) -> int | None:
-    """The pytest-randomly seed from its header line, or None for an ordered run.
+def _session_header(lines: list[str]) -> list[str]:
+    """The full-suite step's pytest report header.
 
-    The line is matched as-is, so an indented traceback or quoted line cannot
-    supply a seed. Two seed lines cannot be attributed to one run.
+    It starts after the first session-start banner that follows the step's
+    echoed run command, so a banner from an earlier step cannot anchor it, and
+    ends at the first blank line or section separator, before any test result
+    or captured output. A missing banner is refused: reading no seed would look
+    like a valid ordered run.
     """
-    seeds = [match.group(1) for match in map(SEED_LINE.fullmatch, lines) if match]
+    commands = [index for index, line in enumerate(lines)
+                if _command_text(line) is not None]
+    start = next((index for index in range(commands[-1] + 1, len(lines))
+                  if SESSION_BANNER.fullmatch(lines[index])), None)
+    if start is None:
+        raise EvidenceError(
+            "no pytest session-start banner follows the full-suite run command; "
+            "the run's seed header cannot be located")
+    header = []
+    for line in lines[start + 1:]:
+        if not line.strip() or SECTION_SEPARATOR.fullmatch(line):
+            break
+        header.append(line)
+    return header
+
+
+def _shuffle_seed(lines: list[str]) -> int | None:
+    """The pytest-randomly seed from the report header, or None for an ordered run.
+
+    Only header lines count, so a seed line a test prints in its captured output
+    is ignored. Each line is matched as-is. A seed-like line that is not 1 to 10
+    ASCII digits, or a second seed line, is refused.
+    """
+    seeds = []
+    for line in _session_header(lines):
+        match = SEED_LINE.fullmatch(line)
+        if match is None and SEED_LIKE_LINE.fullmatch(line):
+            raise EvidenceError(
+                "pytest-randomly seed line is not 1 to 10 ASCII digits")
+        if match is not None:
+            seeds.append(match.group(1))
     if len(seeds) > 1:
         raise EvidenceError("more than one pytest-randomly seed line")
     return int(seeds[0]) if seeds else None

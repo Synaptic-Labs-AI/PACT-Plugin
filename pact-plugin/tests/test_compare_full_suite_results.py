@@ -38,6 +38,9 @@ BETA = "tests/test_example.py::test_beta"
 GAMMA = "tests/test_example.py::test_gamma"
 
 
+SESSION_BANNER_TEXT = "=" * 29 + " test session starts " + "=" * 30
+
+
 def case(node_id, outcome="pass", reason=None, duration=0.01):
     classname, name = comparator._junit_key(node_id)
     return {"node_id": node_id, "classname": classname, "name": name,
@@ -91,7 +94,8 @@ def environment_steps():
 
 def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
              record_updates=None, collection_updates=None, metadata_updates=None,
-             teardown_after_pass=(), collection_skips=(), command=None, seeds=()):
+             teardown_after_pass=(), collection_skips=(), command=None, seeds=(),
+             header_lines=(), captured=(), banner=True):
     directory = root / name
     artifact = directory / "artifact"
     artifact.mkdir(parents=True)
@@ -177,14 +181,27 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
         command = (ci_contract.WORKFLOW_TEST_CMD if dist is None
                    else f'python -m pytest -ra -n 4 --dist "{dist}" '
                         '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+    # The report header mirrors a real full-suite step: one banner after the
+    # echoed command, the header block, then a blank line before the results.
+    # `seeds=` and `header_lines=` add lines inside that block; `captured=`
+    # adds lines to a failing test's captured stdout, outside it.
+    header = [SESSION_BANNER_TEXT] if banner else []
+    header += ["platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0",
+               *(f"Using --randomly-seed={seed}" for seed in seeds), *header_lines,
+               "rootdir: /home/runner/work/PACT-Plugin/PACT-Plugin",
+               "configfile: pyproject.toml", "plugins: xdist-3.8.0",
+               "created: 4/4 workers", f"4 workers [{len(nodes)} items]", ""]
     lines = [
         actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
-        actions_line("platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0"),
+        *map(actions_line, header),
         actions_line("CI environment matches constraints-ci.txt."),
         actions_line(f"FULL-COLLECTION-OK 1 test files and {len(nodes)} items match discovery; subject={SHA}"),
     ]
-    lines[3:3] = [actions_line(f"Using --randomly-seed={seed}") for seed in seeds]
+    if captured:
+        lines.extend(map(actions_line, [
+            "=" * 35 + " FAILURES " + "=" * 35, "_" * 30 + " test_beta " + "_" * 30,
+            "-" * 29 + " Captured stdout call " + "-" * 29, *captured]))
     lines.extend(actions_line(f"XPASS {item['node_id']}" +
                               (f" - {item['reason']}" if item["reason"] else ""))
                  for item in cases if item["outcome"] == "xpass")
@@ -449,14 +466,70 @@ def test_shuffled_run_with_a_real_delta_is_different_not_invalid(tmp_path):
     "Using --randomly-seed=nine",
 ])
 def test_only_a_whole_seed_header_line_is_a_seed(tmp_path, decoy):
-    first = make_run(tmp_path, "one")
+    first = make_run(tmp_path, "one", header_lines=(decoy,))
     second = make_run(tmp_path, "two", 101)
-    log = first / "run.log"
-    log.write_text(log.read_text(encoding="utf-8") + actions_line(decoy) + "\n",
-                   encoding="utf-8")
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, (decoy, comparison)
     assert comparison["input_runs"][0]["shuffle_seed"] is None
+
+
+@pytest.mark.parametrize("seed_text, expected", [
+    ("4294967295", 4294967295),          # the largest 32-bit seed, 10 digits
+    ("12345678901", "refused"),          # 11 digits
+    ("1" * 5000, "refused"),             # past int()'s default digit limit
+    ("١٢٣", "refused"),   # Arabic-Indic digits
+    ("７", "refused"),               # a fullwidth digit
+], ids=["10-digits", "11-digits", "5000-digits", "arabic-indic", "fullwidth"])
+def test_seed_line_must_be_one_to_ten_ascii_digits(tmp_path, seed_text, expected):
+    first = make_run(tmp_path, "one",
+                     header_lines=(f"Using --randomly-seed={seed_text}",))
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    if expected == "refused":
+        assert completed.returncode == 2, comparison
+        assert comparison["evidence_errors"] == [
+            {"run": "one",
+             "error": "pytest-randomly seed line is not 1 to 10 ASCII digits"}]
+        return
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == expected
+
+
+@pytest.mark.parametrize("seeds, captured, expected", [
+    ((), ("Using --randomly-seed=99",), None),
+    ((3,), ("Using --randomly-seed=99",), 3),
+    ((), ("Using --randomly-seed=" + "1" * 5000,), None),
+], ids=["captured-only", "header-and-captured", "captured-hostile"])
+def test_a_seed_in_captured_output_is_not_the_runs_seed(tmp_path, seeds, captured,
+                                                        expected):
+    first = make_run(tmp_path, "one", seeds=seeds, captured=captured)
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == expected
+
+
+def test_a_banner_from_an_earlier_step_does_not_anchor_the_header(tmp_path):
+    first = make_run(tmp_path, "one", seeds=(6,))
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    earlier = [actions_line(text) for text in (
+        SESSION_BANNER_TEXT, "Using --randomly-seed=1", "")]
+    log.write_text("\n".join(earlier) + "\n" + log.read_text(encoding="utf-8"),
+                   encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == 6
+
+
+def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
+    first = make_run(tmp_path, "one", banner=False)
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "one", "error": "no pytest session-start banner follows the "
+         "full-suite run command; the run's seed header cannot be located"}]
 
 
 def test_two_seed_lines_are_refused(tmp_path):
@@ -1185,6 +1258,11 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
         cwd=child, env=env, capture_output=True, text=True, check=False)
     assert completed.returncode == 1, (
         completed.stdout + completed.stderr + "\n" + where)
+    stdout_lines = completed.stdout.splitlines()
+    banner_index = next(index for index, line in enumerate(stdout_lines)
+                        if comparator.SESSION_BANNER.fullmatch(line))
+    header_end = stdout_lines.index("", banner_index)
+    real_header = stdout_lines[banner_index:header_end + 1]
     record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
     assert (record["collected"], record["passed"], record["failed"],
             record["errors"], record["skipped"], record["skipped_at_collection"],
@@ -1262,7 +1340,9 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
                       "conclusion": "failure", "steps": environment_steps()}]})
         (directory / "run.log").write_text("\n".join([
             actions_line(ci_contract.WORKFLOW_TEST_CMD),
-            actions_line("platform linux -- Python 3.12.3"),
+            # The real child's own banner and report header, so the header
+            # anchor is exercised against pytest's actual output.
+            *map(actions_line, real_header),
             actions_line("CI environment matches constraints-ci.txt."),
             actions_line(f"FULL-COLLECTION-OK 2 test files and "
                          f"{run_record['collected']} items match discovery; subject={SHA}"),
