@@ -21,6 +21,7 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILL = PLUGIN_ROOT / "skills" / "pact-memory" / "SKILL.md"
+SECRETARY = PLUGIN_ROOT / "agents" / "pact-secretary.md"
 SCRIPTS = PLUGIN_ROOT / "skills" / "pact-memory" / "scripts"
 
 # The decline causes `project-id show` and `status` can carry in
@@ -116,3 +117,23 @@ class TestExitCodeThreeCoversBothVerbs:
             "project-id rekey exits 1 when --to is omitted and no canonical "
             "identity resolves, and 2 for bad input"
         ) in _body(SKILL)
+
+
+class TestSecretaryProjectionKey:
+    """The secretary's Working Memory step names the key the store uses."""
+
+    def test_the_projection_is_keyed_by_repository_identity(self):
+        assert (
+            "The projection is keyed by the repository identity "
+            "(host/owner/repo from the origin remote) when the checkout has a "
+            "parseable one, and by the project root's folder name otherwise."
+        ) in _body(SECRETARY)
+
+    def test_the_legacy_bucket_is_named_as_read_beside_it(self):
+        assert (
+            "A legacy folder-name bucket is read beside the repository "
+            "identity until it is rekeyed"
+        ) in _body(SECRETARY)
+
+    def test_the_retired_folder_name_key_is_gone(self):
+        assert "keyed by the basename of the project root" not in _body(SECRETARY)
