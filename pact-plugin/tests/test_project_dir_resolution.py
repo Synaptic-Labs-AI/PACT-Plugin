@@ -628,6 +628,29 @@ class TestWorkingMemoryDisagreementGuard:
 # Cross-process: the CLI envelope carries the refusal on stderr
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("nosystem", [True, False], ids=["child_env", "control"])
+def test_a_child_env_child_ignores_the_system_git_config(tmp_path, nosystem):
+    """A child built by child_env must not read the machine's system git config.
+
+    The system file is pointed at a tmp file holding a marker key. The control
+    row drops GIT_CONFIG_NOSYSTEM from the same env and must read the marker,
+    so a git that ignored GIT_CONFIG_SYSTEM cannot make the first row pass."""
+    system_config = tmp_path / "system-gitconfig"
+    system_config.write_text("[pact]\n\tmarker = system\n", encoding="utf-8")
+    env = child_env(tmp_path / "config", home=tmp_path)
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    env["GIT_CONFIG_SYSTEM"] = str(system_config)
+    if not nosystem:
+        del env["GIT_CONFIG_NOSYSTEM"]
+    proc = subprocess.run(["git", "config", "--get", "pact.marker"],
+                          capture_output=True, text=True, env=env, cwd=str(tmp_path),
+                          timeout=30)
+    if nosystem:
+        assert (proc.returncode, proc.stdout) == (1, ""), proc
+    else:
+        assert (proc.returncode, proc.stdout.strip()) == (0, "system"), proc
+
+
 class TestCliRefusalEnvelope:
     def test_memory_save_cli_envelopes_the_refusal_on_stderr(self, tmp_path):
         """The full boundary: a child process with a constructed env discovers

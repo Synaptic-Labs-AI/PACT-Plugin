@@ -607,6 +607,23 @@ def test_a_census_line_beside_an_exit_status_a_census_cannot_set_is_refused(
                   f"set the exit status"}]
 
 
+@pytest.mark.parametrize("exitstatus", [1, 2, 3])
+def test_a_red_run_with_a_census_line_keeps_its_test_outcome(tmp_path, exitstatus):
+    """The census-status refusal is for green runs: a red run's exit status has a
+    test failure behind it, so any status beside a census line is consistent."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      finish_lines=(CHILD_CENSUS_HEADER,),
+                      record_updates={"exitstatus": exitstatus})
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == []
+    run = read_runs(output)[1]
+    assert run["validity"] == "test_outcome"
+    assert [failure["census"] for failure in run["census_failures"]] == ["child_pytest"]
+
+
 def test_every_output_carries_schema_version_2(tmp_path):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101)
