@@ -32,12 +32,14 @@ from sys.modules -- sibling test files import + reload them and would break if
 they vanished). Mirrors test_pact_config_gate_migration.
 (TestTeardownRestoresAmbientModes pins the restore.)
 """
+import ast
 import contextlib
 import importlib
 import io
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -196,6 +198,47 @@ class TestInvalidModeStdoutStaysClean:
         )
 
 
+def _restore_fixture(tree):
+    return next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_restore_gate_modules")
+
+
+def _environ_writes(tree, fixture):
+    """Line numbers where ``fixture`` writes os.environ, under any name the
+    module binds it to: ``import os as o``, ``from os import environ [as e]``,
+    or a plain assignment such as ``env = os.environ``."""
+    os_names = {"os"} | {alias.asname for node in ast.walk(tree)
+                         if isinstance(node, ast.Import)
+                         for alias in node.names if alias.name == "os" and alias.asname}
+    environ_names = {alias.asname or alias.name for node in ast.walk(tree)
+                     if isinstance(node, ast.ImportFrom) and node.module == "os"
+                     for alias in node.names if alias.name == "environ"}
+
+    def is_environ(node):
+        return (isinstance(node, ast.Name) and node.id in environ_names) or (
+            isinstance(node, ast.Attribute) and node.attr == "environ"
+            and isinstance(node.value, ast.Name) and node.value.id in os_names)
+
+    while True:
+        rebound = {target.id for node in ast.walk(tree)
+                   if isinstance(node, ast.Assign) and is_environ(node.value)
+                   for target in node.targets if isinstance(target, ast.Name)}
+        if rebound <= environ_names:
+            break
+        environ_names |= rebound
+
+    return [node.lineno for node in ast.walk(fixture) if (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("pop", "popitem", "clear", "update", "setdefault")
+        and is_environ(node.func.value)
+    ) or (
+        isinstance(node, (ast.Assign, ast.Delete))
+        and any(isinstance(target, ast.Subscript) and is_environ(target.value)
+                for target in getattr(node, "targets", []))
+    )]
+
+
 class TestTeardownRestoresAmbientModes:
     """The module teardown helper puts each mode variable back as it found it.
 
@@ -221,17 +264,8 @@ class TestTeardownRestoresAmbientModes:
         """Both module fixtures yield inside the helper and never write
         os.environ themselves, so a body reverted to popping the mode
         variables fails here even though no test observes a module teardown."""
-        import ast
-        from pathlib import Path
-
         tree = ast.parse((Path(__file__).parent / module_file).read_text(encoding="utf-8"))
-        fixture = next(node for node in ast.walk(tree)
-                       if isinstance(node, ast.FunctionDef)
-                       and node.name == "_restore_gate_modules")
-
-        def is_environ(node):
-            return (isinstance(node, ast.Attribute) and node.attr == "environ"
-                    and isinstance(node.value, ast.Name) and node.value.id == "os")
+        fixture = _restore_fixture(tree)
 
         yields_inside_helper = any(
             isinstance(node, ast.With)
@@ -244,16 +278,30 @@ class TestTeardownRestoresAmbientModes:
             for node in ast.walk(fixture))
         assert yields_inside_helper, f"{module_file}: the fixture must yield inside restored_env_and_reloaded"
 
-        writes = [node.lineno for node in ast.walk(fixture) if (
-            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr in ("pop", "popitem", "clear", "update", "setdefault")
-            and is_environ(node.func.value)
-        ) or (
-            isinstance(node, (ast.Assign, ast.Delete))
-            and any(isinstance(target, ast.Subscript) and is_environ(target.value)
-                    for target in getattr(node, "targets", []))
-        )]
+        writes = _environ_writes(tree, fixture)
         assert not writes, f"{module_file}: the fixture writes os.environ at lines {writes}"
+
+    @pytest.mark.parametrize("source", [
+        "from os import environ\n"
+        "def _restore_gate_modules():\n    yield\n    environ.pop('X', None)\n",
+        "from os import environ as env\n"
+        "def _restore_gate_modules():\n    yield\n    env['X'] = 'warn'\n",
+        "import os as o\n"
+        "def _restore_gate_modules():\n    yield\n    del o.environ['X']\n",
+        "import os\n"
+        "def _restore_gate_modules():\n    env = os.environ\n    env.update(X='warn')\n    yield\n",
+    ], ids=["from-import", "from-import-as", "import-as", "local-rebinding"])
+    def test_the_write_check_sees_an_aliased_environ(self, source):
+        """The pin above must not be evaded by reaching os.environ under
+        another name."""
+        tree = ast.parse(source)
+        assert _environ_writes(tree, _restore_fixture(tree)) == [4]
+
+    def test_the_write_check_ignores_a_read(self):
+        source = ("from os import environ\n"
+                  "def _restore_gate_modules():\n    environ.get('X')\n    yield\n")
+        tree = ast.parse(source)
+        assert _environ_writes(tree, _restore_fixture(tree)) == []
 
     def test_an_absent_value_set_inside_is_removed(self, monkeypatch):
         monkeypatch.delenv(INLINE_ENV, raising=False)
