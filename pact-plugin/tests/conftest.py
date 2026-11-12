@@ -47,6 +47,9 @@ _SESSION_HOME_DIR = tempfile.mkdtemp(prefix="pact-home-suite-")
 os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
 os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
+# The sandbox HOME drops the operator's global git config; this drops the
+# machine's system file, the remaining git config a test or child could read.
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 
 # NO HYPOTHESIS EXAMPLE DATABASE, AND NO HYPOTHESIS STORAGE IN THE TREE.
 # Hypothesis otherwise saves failing examples under .hypothesis/ in the working

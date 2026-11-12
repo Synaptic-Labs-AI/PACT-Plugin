@@ -6,6 +6,7 @@ Summary: Pins the session-wide isolation tests/conftest.py sets up so that one
 Used by: the suite; the settings under test live in tests/conftest.py.
 """
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -39,3 +40,20 @@ def test_the_merge_guard_git_caches_start_empty(request, tmp_path, round_):
     merge_guard_common._git_config_aliases(str(tmp_path))
     merge_guard_common._git_commands(str(tmp_path))
     assert all(cache.cache_info().currsize for cache in caches)
+
+
+def test_git_ignores_the_machine_system_config(tmp_path, monkeypatch):
+    assert os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
+    # A system file with a value in it: a child git that inherits this session's
+    # environment does not read it, and one without the variable does (the control).
+    system = tmp_path / "gitconfig"
+    system.write_text("[pact]\n\tprobe = system\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system))
+
+    def probe(env):
+        return subprocess.run(["git", "config", "--get", "pact.probe"], cwd=tmp_path, env=env,
+                              capture_output=True, text=True, timeout=30).stdout.strip()
+
+    assert probe(None) == ""
+    control = {k: v for k, v in os.environ.items() if k != "GIT_CONFIG_NOSYSTEM"}
+    assert probe(control) == "system"

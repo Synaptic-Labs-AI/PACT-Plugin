@@ -32,6 +32,7 @@ The full suite can now be run in a shuffled order on demand, and only on demand:
 - `scripts/compare_full_suite_results.py` accepts the seeded run line and records each run's pytest-randomly seed from its own header line, beside the run identity and outside the environment, so a shuffled run compared with an ordered one reports a real test difference as a delta, never as unattributable evidence. A log with two seed lines is refused.
 - The test suite runs hypothesis with no example database, and keeps hypothesis's storage in the session's sandbox HOME instead of `.hypothesis/` in the tree, so no run replays or reads what an earlier run left behind.
 - The merge guard's cached git alias and git command lookups are cleared around every test, so the first test in a worker no longer fixes the answer for the tests after it.
+- The test suite sets `GIT_CONFIG_NOSYSTEM=1` for itself and every child, so the machine's system git config no longer reaches any test.
 - Teammates and the cold reviewer record the HEAD and the worktree status immediately before and after each test run they report. If either changed during the run, the result is re-run or reported as unattributable, not as a pass or a failure of the change.
 - The embedding catch-up test loader no longer evicts the real `scripts.embeddings` and `scripts.embedding_catchup` modules, so a test that runs after it on the same worker patches the same module object the code under test uses.
 
