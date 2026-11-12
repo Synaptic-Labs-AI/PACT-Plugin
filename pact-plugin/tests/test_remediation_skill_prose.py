@@ -160,3 +160,39 @@ class TestOverrideAcceptsCanonicalIdsOnly:
     def test_the_documented_reason_is_one_the_reader_emits(self):
         source = (SCRIPTS / "project_identity.py").read_text(encoding="utf-8")
         assert '"not_canonical"' in source
+
+
+class TestPercentEncodedIdsAreDocumented:
+    """The percent-encoded and Azure DevOps forms the canonicaliser produces."""
+
+    EXAMPLE = "dev.azure.com/fabrikam/My%20Project/_git/repo"
+
+    def test_the_note_names_the_percent_encoded_form(self):
+        assert (
+            "A project id keeps its remote's percent-encoding, so it can "
+            "contain an uppercase %XX, for example " + self.EXAMPLE
+        ) in _body(SKILL)
+
+    def test_the_example_is_a_canonical_id(self):
+        from scripts.project_identity import is_canonical
+
+        assert is_canonical(self.EXAMPLE)
+
+    def test_the_azure_spellings_share_one_id(self):
+        assert (
+            "all of them resolve to that one "
+            "dev.azure.com/<org>/<project>/_git/<repo> id"
+        ) in _body(SKILL)
+
+    @pytest.mark.parametrize(
+        "url",
+        (
+            "https://dev.azure.com/fabrikam/My%20Project/_git/repo",
+            "git@ssh.dev.azure.com:v3/fabrikam/My%20Project/repo",
+            "https://fabrikam.visualstudio.com/My%20Project/_git/repo",
+        ),
+    )
+    def test_each_azure_spelling_canonicalises_to_the_documented_id(self, url):
+        from scripts.project_identity import normalize_remote_url
+
+        assert normalize_remote_url(url) == self.EXAMPLE

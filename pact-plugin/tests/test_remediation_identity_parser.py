@@ -677,3 +677,134 @@ class TestGitDiscoveryHonoursACeilingAsGitDoes:
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(forged))
 
         assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+
+
+# ---------------------------------------------------------------------------
+# Percent-encoded and non-ASCII paths, `ssh+git`, Azure DevOps Services
+# ---------------------------------------------------------------------------
+
+NFC_CAFE = "café"
+NFD_CAFE = "café"
+
+
+class TestPercentEncodingIsNormalisedNotDecoded:
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://host/o/caf%C3%A9", "host/o/caf%C3%A9"),
+            ("https://host/o/caf%c3%a9", "host/o/caf%C3%A9"),
+            ("https://host/o/" + NFC_CAFE, "host/o/caf%C3%A9"),
+            ("https://host/o/" + NFD_CAFE, "host/o/cafe%CC%81"),
+            ("https://host/o/%41bc", "host/o/Abc"),
+            ("https://host/o/%7Euser", "host/o/~user"),
+            ("https://host/o/re%2Fpo", "host/o/re%2Fpo"),
+            ("https://host/o/a%21b", "host/o/a%21b"),
+            ("https://host/o/a!b", "host/o/a!b"),
+            ("https://host/owner/répo", "host/owner/r%C3%A9po"),
+            ("git@host:o/My%20Project.git", "host/o/My%20Project"),
+        ],
+    )
+    def test_a_segment_is_put_in_rfc3986_normal_form(self, url, expected):
+        assert pi.classify_remote_origin(url) == (CANONICAL, expected)
+
+    def test_nfc_and_nfd_spellings_stay_two_ids(self):
+        nfc = pi.normalize_remote_url("https://host/o/" + NFC_CAFE)
+        nfd = pi.normalize_remote_url("https://host/o/" + NFD_CAFE)
+        assert nfc is not None and nfd is not None and nfc != nfd
+
+    def test_an_encoded_slash_stays_inside_one_segment(self):
+        assert pi.normalize_remote_url("https://host/o/re%2Fpo").count("/") == 2
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://host/o/%2E%2E",
+            "https://host/o/%2e",
+            "https://host/o/re%ZZpo",
+            "https://host/o/re%4",
+            "https://host/o/re%",
+            "https://host/o/re po",
+            "https://host/o/re%20po ",
+            "https://host/o/a@b",
+        ],
+    )
+    def test_an_unrepresentable_segment_still_declines(self, url):
+        assert pi.classify_remote_origin(url) == (DECLINE, None)
+
+    def test_an_undecodable_byte_still_declines(self):
+        assert pi.classify_remote_origin("https://host/o/re\udcffpo") == (DECLINE, None)
+
+    @pytest.mark.parametrize(
+        "value,accepted",
+        [
+            ("host/o/caf%C3%A9", True),
+            ("host/o/My%20Project", True),
+            ("host/o/caf%c3%a9", False),
+            ("host/o/%G1", False),
+            ("host/o/%4", False),
+            ("host/o/100%", False),
+        ],
+    )
+    def test_the_grammar_admits_only_uppercase_percent_triples(self, value, accepted):
+        assert pi.is_canonical(value) is accepted
+
+
+class TestTheSshPlusGitAlias:
+    @pytest.mark.parametrize(
+        "url",
+        ["ssh+git://git@host/o/r", "ssh+git://git@host:22/o/r", "git+ssh://git@host/o/r"],
+    )
+    def test_it_is_the_same_remote_as_ssh(self, url):
+        assert pi.classify_remote_origin(url) == (CANONICAL, "host/o/r")
+
+    def test_a_non_default_port_is_kept(self):
+        assert pi.normalize_remote_url("ssh+git://git@host:2222/o/r") == "host:2222/o/r"
+
+
+AZURE_ID = "dev.azure.com/fabrikam/My%20Project/_git/repo"
+
+
+class TestAzureDevOpsServicesSpellingsShareOneId:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://dev.azure.com/fabrikam/My%20Project/_git/repo",
+            "https://fabrikam@dev.azure.com/fabrikam/My%20Project/_git/repo",
+            "git@ssh.dev.azure.com:v3/fabrikam/My%20Project/repo",
+            "ssh://git@ssh.dev.azure.com/v3/fabrikam/My%20Project/repo",
+            "https://fabrikam.visualstudio.com/My%20Project/_git/repo",
+            "https://fabrikam.visualstudio.com/DefaultCollection/My%20Project/_git/repo",
+            "fabrikam@vs-ssh.visualstudio.com:v3/fabrikam/My%20Project/repo",
+        ],
+    )
+    def test_every_services_spelling_maps_to_one_id(self, url):
+        assert pi.classify_remote_origin(url) == (CANONICAL, AZURE_ID)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://dev.azure.com/Fabrikam/My%20Project/_git/repo",
+            "git@ssh.dev.azure.com:v3/FABRIKAM/My%20Project/repo",
+            "https://Fabrikam.visualstudio.com/My%20Project/_git/repo",
+        ],
+    )
+    def test_the_organisation_is_case_insensitive(self, url):
+        assert pi.classify_remote_origin(url) == (CANONICAL, AZURE_ID)
+
+    def test_project_and_repository_keep_their_case(self):
+        assert pi.normalize_remote_url(
+            "https://dev.azure.com/fabrikam/my%20project/_git/Repo"
+        ) == "dev.azure.com/fabrikam/my%20project/_git/Repo"
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://tfs.example.com/Coll/P/_git/R", "tfs.example.com/Coll/P/_git/R"),
+            ("ssh://git@ssh.dev.azure.com:2222/v3/o/p/r", "ssh.dev.azure.com:2222/v3/o/p/r"),
+            ("git@ssh.dev.azure.com:v2/o/p/r", "ssh.dev.azure.com/v2/o/p/r"),
+            ("https://dev.azure.com/o/p/r", "dev.azure.com/o/p/r"),
+            ("https://a.b.visualstudio.com/p/_git/r", "a.b.visualstudio.com/p/_git/r"),
+        ],
+    )
+    def test_any_other_shape_keeps_the_generic_id(self, url, expected):
+        assert pi.normalize_remote_url(url) == expected

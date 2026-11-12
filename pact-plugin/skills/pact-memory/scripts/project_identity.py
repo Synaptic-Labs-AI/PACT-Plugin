@@ -30,15 +30,15 @@ import stat
 import subprocess
 from pathlib import Path
 from typing import NamedTuple, Optional
-from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
 # Accepted remote schemes. The same set `hooks/shared/backlog.py` already
-# ships, because two parsers in one repo that disagree about which schemes are
-# remotes would be the defect, not the fix. `file` and every other scheme is
+# ships, plus `ssh+git`, an alias git itself still honours (it connects over
+# ssh exactly as for `git+ssh`). Two parsers in one repo that disagree about
+# which schemes are remotes would be the defect, not the fix. `file` and every other scheme is
 # handled as its own outcome rather than being silently accepted.
-_ACCEPTED_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh"})
+_ACCEPTED_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+git"})
 
 # Schemes that are NOT network remotes: a local path written in URL form. They
 # fall through to the basename; every OTHER unsupported scheme DECLINES,
@@ -55,6 +55,7 @@ _DEFAULT_PORTS = {
     "ssh": 22,
     "git": 9418,
     "git+ssh": 22,
+    "ssh+git": 22,
 }
 
 # `scheme://` — the scheme is matched here and validated against the accepted
@@ -74,7 +75,13 @@ _SCP_FORM_RE = re.compile(
 )
 
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-")
-_PATH_BANNED_CHARS = frozenset("@?#%")
+# RFC 3986 unreserved characters: a `%XX` naming one of these is decoded.
+_UNRESERVED_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+# Characters a segment keeps raw: unreserved plus the RFC 3986 sub-delimiters.
+_SEGMENT_RAW_CHARS = _UNRESERVED_CHARS | frozenset("!$&'()*+,;=")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 # A hard cap on the override file we are willing to read. The value itself is
 # capped at the canonical length, so anything larger is unusable by definition.
@@ -340,24 +347,54 @@ def _valid_port(port: str) -> bool:
     return 1 <= int(port) <= 65535
 
 
-def _valid_segment(segment: str) -> bool:
-    """Whether one decoded path segment may appear in an id.
+def _normalize_segment(raw: str) -> Optional[str]:
+    """One path segment in RFC 3986 normal form, or None to decline.
 
-    Banned: the empty segment, `.` and `..` (path traversal in an id that
-    reaches SQL and log lines), the reserved characters, whitespace and
-    anything outside printable ASCII. Non-ASCII DECLINES rather than being
-    transliterated, because an NFC/NFD rewrite makes two distinct paths
-    collide. `/` is checked on the DECODED value so `%2F` cannot manufacture
-    a separator after the split has already happened.
+    - `%XX` has its hex upper-cased, and is decoded only when it names an
+      unreserved character: `%41` becomes `A`, `%2F` stays `%2F`. The path
+      was split on `/` before this runs, so an encoded `/` never becomes a
+      separator.
+    - A `%` not followed by two hex digits declines.
+    - A raw unreserved or sub-delimiter character is kept.
+    - A raw non-ASCII character is encoded as its UTF-8 bytes, `%XX` each,
+      with NO Unicode normalisation: NFC and NFD spellings stay two ids, a
+      split `project-id rekey` can undo, where merging them could not be.
+    - Anything else (whitespace, `@`, `?`, `#`, a control character)
+      declines.
+
+    The finished segment must be non-empty and not `.` or `..`, so `%2E%2E`
+    is still refused as traversal. Ids therefore stay printable ASCII.
     """
+    out = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "%":
+            hex_pair = raw[index + 1:index + 3]
+            if len(hex_pair) != 2 or not all(h in _HEX_DIGITS for h in hex_pair):
+                return None
+            decoded = chr(int(hex_pair, 16))
+            out.append(
+                decoded if decoded in _UNRESERVED_CHARS else "%" + hex_pair.upper()
+            )
+            index += 3
+            continue
+        if char in _SEGMENT_RAW_CHARS:
+            out.append(char)
+        elif ord(char) > 0x7F:
+            try:
+                encoded = char.encode("utf-8")
+            except UnicodeEncodeError:
+                # A lone surrogate: an undecodable byte from `os.fsdecode`.
+                return None
+            out.append("".join(f"%{byte:02X}" for byte in encoded))
+        else:
+            return None
+        index += 1
+    segment = "".join(out)
     if segment in ("", ".", ".."):
-        return False
-    for char in segment:
-        if char == "/" or char in _PATH_BANNED_CHARS or char.isspace():
-            return False
-        if not ("\x21" <= char <= "\x7e"):
-            return False
-    return True
+        return None
+    return segment
 
 
 def _strip_path_suffixes(path: str) -> str:
@@ -378,23 +415,74 @@ def _strip_path_suffixes(path: str) -> str:
     return path
 
 
-def _decode_path(path: str) -> Optional[list]:
-    """Percent-decode a path into validated segments, or None.
+def _split_path(path: str) -> Optional[list]:
+    """The path's segments in normal form (`_normalize_segment`), or None.
 
-    Decoding happens PER SEGMENT, after splitting: decoding first would let
-    `%2F` manufacture a separator, so `owner/re%2Fpo` would silently become a
-    three-segment path rather than being rejected.
+    Split FIRST, then normalise each segment: normalising first would let
+    an encoded `/` manufacture a separator.
     """
     segments = []
     for raw_segment in path.split("/"):
-        try:
-            segment = unquote(raw_segment, errors="strict")
-        except UnicodeDecodeError:
-            return None
-        if not _valid_segment(segment):
+        segment = _normalize_segment(raw_segment)
+        if segment is None:
             return None
         segments.append(segment)
     return segments
+
+
+# Azure DevOps Services spells one repository five ways (two ssh hosts, the
+# `dev.azure.com` url and two legacy `{org}.visualstudio.com` urls). Each is
+# mapped to `dev.azure.com/{org}/{project}/_git/{repo}`. The rule is bounded
+# to these hosts and path shapes; Azure DevOps Server, on a customer's own
+# host, keeps the generic id.
+_AZURE_SSH_HOSTS = frozenset({"ssh.dev.azure.com", "vs-ssh.visualstudio.com"})
+_AZURE_LEGACY_SUFFIX = ".visualstudio.com"
+
+
+def _azure_devops_services_id(host: str, port: str, segments: list) -> Optional[list]:
+    """`[org, project, "_git", repo]` for an Azure DevOps Services spelling,
+    or None to keep the generic id.
+
+    Recognised, each with no explicit non-default port:
+    - `ssh.dev.azure.com` or `vs-ssh.visualstudio.com`, path
+      `v3/{org}/{project}/{repo}`;
+    - `{org}.visualstudio.com`, path `{project}/_git/{repo}` or
+      `DefaultCollection/{project}/_git/{repo}`;
+    - `dev.azure.com`, path `{org}/{project}/_git/{repo}`.
+
+    The ORGANISATION is lower-cased in every spelling: Azure DevOps
+    organisation names are case-insensitive, and the legacy spelling carries
+    it in the (already lower-cased) host. Project and repository segments
+    keep their case, as every generic path segment does.
+    """
+    if port:
+        return None
+    if host in _AZURE_SSH_HOSTS:
+        if len(segments) == 4 and segments[0] == "v3":
+            org, project, repo = segments[1:]
+            return [org.lower(), project, "_git", repo]
+        return None
+    if host == "dev.azure.com":
+        if len(segments) == 4 and segments[2] == "_git":
+            org, project, _, repo = segments
+            return [org.lower(), project, "_git", repo]
+        return None
+    if host.endswith(_AZURE_LEGACY_SUFFIX):
+        org = host[: -len(_AZURE_LEGACY_SUFFIX)]
+        if not org or "." in org:
+            return None
+        rest = segments[1:] if segments[:1] == ["DefaultCollection"] else segments
+        if len(rest) == 3 and rest[1] == "_git":
+            return [org, rest[0], "_git", rest[2]]
+    return None
+
+
+def _identifier(host: str, port: str, segments: list) -> str:
+    """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule."""
+    azure = _azure_devops_services_id(host, port, segments)
+    if azure is not None:
+        host, segments = "dev.azure.com", azure
+    return f"{host}:{port}/{'/'.join(segments)}" if port else f"{host}/{'/'.join(segments)}"
 
 
 def _strip_one_terminator(url: str) -> str:
@@ -516,14 +604,10 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if not _valid_host(host):
             return None
         path = _strip_path_suffixes(path)
-        segments = _decode_path(path)
+        segments = _split_path(path)
         if not segments:
             return None
-        identifier = (
-            f"{host}:{port}/{'/'.join(segments)}"
-            if port
-            else f"{host}/{'/'.join(segments)}"
-        )
+        identifier = _identifier(host, port, segments)
     else:
         scp_match = _scp_match(value)
         if scp_match is None:
@@ -554,7 +638,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if scp_path.startswith("/"):
             scp_path = scp_path[1:]
         path = _strip_path_suffixes(scp_path)
-        segments = _decode_path(path)
+        segments = _split_path(path)
         if not segments:
             return None
         # ONE SEGMENT IS ENOUGH. `git@host:repo` and `https://host/repo` name
@@ -562,7 +646,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # scp spelling while accepting the URL spelling would split one
         # repository into two ids. (The PREPARE corpus's U45 row said decline;
         # that row is superseded here.)
-        identifier = f"{host}/{'/'.join(segments)}"
+        identifier = _identifier(host, "", segments)
 
     if len(identifier) > _max_id_length():
         return None

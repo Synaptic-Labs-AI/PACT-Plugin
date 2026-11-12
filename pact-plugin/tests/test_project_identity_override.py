@@ -360,11 +360,12 @@ class TestBadOverride:
         assert memory._override_ignored["reason"] == "empty"
 
 
-class TestNonAsciiRemoteRemedy:
+class TestUnrepresentableRemoteRemedy:
     def test_the_decline_message_names_the_override_and_the_inspection_verb(
         self, identity_env, monkeypatch, caplog
     ):
-        """A non-ASCII remote path is DECLINED, and the remedy must be
+        """An unrepresentable remote path (an interior space) is DECLINED,
+        and the remedy must be
         actionable. Catches a decline that leaves the user with a folder-name
         fallback or no way to recover.
 
@@ -376,12 +377,12 @@ class TestNonAsciiRemoteRemedy:
         """
         repo = make_repo(
             identity_env / "checkout",
-            remote="https://github.com/o/répo.git",
+            remote="https://github.com/o/re po.git",
         )
         monkeypatch.chdir(repo)
         with caplog.at_level(logging.WARNING):
             memory = _memory(identity_env)
-        assert memory._project_id is None, "a non-ASCII remote did not decline"
+        assert memory._project_id is None, "an unrepresentable remote did not decline"
         text = caplog.text
         assert "pact-project-id" in text, (
             "the decline did not name the override path"

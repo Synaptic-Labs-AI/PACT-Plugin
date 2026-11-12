@@ -217,10 +217,8 @@ class TestClassifierOutcomes:
             ("https://host/owner/../repo", "dot-dot segment"),
             ("https://host/owner/./repo", "dot segment"),
             ("https://host/owner//repo", "empty segment"),
-            ("https://host/owner/re%2Fpo", "encoded separator"),
             ("https://host/owner/repo#frag", "fragment character"),
             ("https://host/owner/repo?x=1", "query character"),
-            ("https://host/owner/répo", "non-ASCII path"),
             ("https://host:0/owner/repo", "port zero"),
             ("https://host:65536/owner/repo", "port above range"),
             ("https://host:022/owner/repo", "leading-zero port"),
@@ -242,6 +240,20 @@ class TestClassifierOutcomes:
         """Catches each refusal collapsing into a basename. Each row names the
         rule; the override is the operator's remedy."""
         assert pi.classify_remote_origin(url) == (DECLINE, None), rule
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://host/owner/re%2Fpo", "host/owner/re%2Fpo"),
+            ("https://host/owner/répo", "host/owner/r%C3%A9po"),
+        ],
+    )
+    def test_an_encoded_separator_and_a_non_ascii_path_keep_their_encoding(
+        self, url, expected
+    ):
+        """An encoded `/` stays inside its segment, and a non-ASCII character
+        becomes its UTF-8 `%XX` bytes, so the id stays printable ASCII."""
+        assert pi.classify_remote_origin(url) == (CANONICAL, expected)
 
     def test_an_over_length_path_declines(self):
         """Catches a silently truncated id (two projects could collide)."""

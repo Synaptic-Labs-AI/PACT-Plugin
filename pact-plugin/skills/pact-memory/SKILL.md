@@ -354,6 +354,12 @@ Two operator surfaces answer, and they are deliberately ordered:
   a repository pin always outranks it. Use it for a non-repository working
   directory that should share one identity.
 
+A project id keeps its remote's percent-encoding, so it can contain an
+uppercase `%XX`, for example `dev.azure.com/fabrikam/My%20Project/_git/repo`.
+Azure DevOps Services spells one repository several ways (https, ssh, and the
+older `visualstudio.com` hosts), and all of them resolve to that one
+`dev.azure.com/<org>/<project>/_git/<repo>` id.
+
 On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 
 ### A Short Search Is Not an Empty Project

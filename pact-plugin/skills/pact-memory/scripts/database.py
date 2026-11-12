@@ -1168,10 +1168,12 @@ CANONICAL_ID_MAX_LENGTH = 255
 # also matches just BEFORE a trailing newline, so `host/owner/repo\n` would
 # pass an anchored pattern. The newline is git's record terminator and is
 # dropped by the parser; a value that still carries one is not an id.
+# An uppercase `%XX` is an RFC 3986 percent-encoding of a byte outside the
+# unreserved and sub-delimiter set.
 CANONICAL_ID_RE = re.compile(
     r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
     r"(?::([1-9][0-9]{0,4}))?"
-    r"(?:/[A-Za-z0-9._~!$&'()*+,;=-]+)+"
+    r"(?:/(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-F]{2})+)+"
 )
 
 
