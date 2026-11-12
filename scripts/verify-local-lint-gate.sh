@@ -18,9 +18,9 @@
 #   2. Stamps the resolved `ruff --version` and the linted root into the
 #      output. CI installs ruff from the hashed lock in constraints-ci.txt,
 #      but nothing makes a LOCAL environment install it, so the resolved
-#      version is part of what a run certifies: a local green that disagrees with a CI red needs both
-#      versions before it can be attributed, and this stamp is the local
-#      half of that comparison.
+#      version is part of what a run certifies: a local green that
+#      disagrees with a CI red needs both versions before it can be
+#      attributed, and this stamp is the local half of that comparison.
 #   3. REFUSES, loudly and before linting anything, when ruff is not on PATH.
 #      A missing linter must not read as a pass, and a bare command-not-found
 #      exit teaches the operator nothing.
@@ -75,11 +75,13 @@ fi
 
 if ! command -v ruff >/dev/null 2>&1; then
     printf 'GATE REFUSED: ruff is not available, so the lint legs cannot run.\n' >&2
-    printf '  A missing linter must not read as a pass. Install the CI lock, which holds the ruff version CI\n' >&2
-    printf '  pins and the rest of the CI set (40 distributions), from the repo root. This is the local\n' >&2
-    printf '  install (.cursor/install.sh), not the CI one: it accepts source builds, whose build dependencies\n' >&2
-    printf '  are not hash-checked.\n' >&2
-    printf '    python3 -m pip install --require-hashes -r constraints-ci.txt\n' >&2
+    printf '  A missing linter must not read as a pass. From the repo root, these three commands create the\n' >&2
+    printf '  repository venv (.venv), install the CI lock into it (all 40 locked packages, ruff at the version\n' >&2
+    printf '  CI pins among them) and put it first on PATH, as .cursor/install.sh does. This is the local\n' >&2
+    printf '  install, not the CI one: it accepts source builds, whose build dependencies are not hash-checked.\n' >&2
+    printf '    python3 -m venv .venv\n' >&2
+    printf '    .venv/bin/python -m pip install --require-hashes -r constraints-ci.txt\n' >&2
+    printf '    . .venv/bin/activate\n' >&2
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
     printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/ scripts/\n' >&2
     printf '    ruff check --select F821 --target-version py312 pact-plugin/ scripts/\n' >&2

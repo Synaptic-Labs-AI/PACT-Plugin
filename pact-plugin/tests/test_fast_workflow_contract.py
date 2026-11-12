@@ -425,15 +425,31 @@ class TestHashCheckedInstall:
 
     def test_the_lint_gate_remedy_is_the_local_install(self):
         """The remedy runs on a developer's machine, so it prints the local
-        install (.cursor/install.sh's line), not CI's, and says so."""
+        install exactly as .cursor/install.sh runs it: create .venv, install the
+        lock into it, activate it. It says what it installs, where, and that it
+        is not CI's install."""
         root = ci_contract.require_root("the lint gate remedy")
         text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
-        printed = [line for line in text.splitlines()
-                   if line.strip().startswith("printf") and "pip install" in line]
-        assert len(printed) == 1, printed
-        command = printed[0].split("'")[1].strip().removesuffix("\\n").strip()
-        assert command.split(" ", 1)[1] == _LOCAL_LOCK_INSTALL.split(" ", 1)[1], command
-        assert "not the CI one" in text
+        block = text[text.index("GATE REFUSED: ruff is not available"):]
+        block = block[:block.index("exit 2")]
+        printed = [line.split("'")[1].removesuffix("\\n").strip()
+                   for line in block.splitlines() if line.strip().startswith("printf")]
+        commands = [line for line in printed if line.startswith(("python3 ", ".venv/", ". "))]
+        assert commands == [
+            "python3 -m venv .venv",
+            ".venv/bin/python " + _LOCAL_LOCK_INSTALL.split(" ", 1)[1],
+            ". .venv/bin/activate",
+        ], commands
+        cursor = [line.strip() for line in
+                  (root / ".cursor" / "install.sh").read_text(encoding="utf-8").splitlines()]
+        assert commands[0] in cursor and commands[2] in cursor, (
+            "the remedy's venv and activate lines are not .cursor/install.sh's")
+        prose = " ".join(printed)
+        for phrase in ("repository venv (.venv)", "not the CI one"):
+            assert phrase in prose, phrase
+        pins = re.findall(r"(?m)^[A-Za-z0-9][A-Za-z0-9._-]*==",
+                          (root / "constraints-ci.txt").read_text(encoding="utf-8"))
+        assert f"all {len(pins)} locked packages" in prose, (len(pins), prose)
         assert "-c constraints-ci.txt" not in text
 
     def test_the_environment_check_remedy_is_the_local_install(self):
@@ -799,6 +815,14 @@ def _seed_guard_run(root):
     return guards[0]
 
 
+# Which locale legs the seed-guard rows run under, decided by PLATFORM, never
+# by tool availability: on Linux (glibc, where CI runs) the range-widening leg
+# always runs and a missing localedef fails loudly; on other platforms glibc's
+# locales do not exist, so only the ASCII leg applies.
+_GLIBC_LOCALES = sys.platform.startswith("linux")
+_LOCALE_LEGS = ("ascii", "range-widening") if _GLIBC_LOCALES else ("ascii",)
+
+
 @pytest.fixture(scope="module")
 def range_widening_locale(tmp_path_factory):
     """An en_US.UTF-8 locale built into a tmp LOCPATH, independent of which
@@ -843,16 +867,25 @@ class TestSeedGuardBehaviour:
             capture_output=True, text=True, timeout=30)
         return proc, output.read_text(encoding="utf-8")
 
-    @pytest.fixture(params=["ascii", "range-widening"])
+    @pytest.fixture(params=_LOCALE_LEGS)
     def locale(self, request, tmp_path_factory):
         """C.UTF-8 is built into glibc, so an empty LOCPATH leaves it intact."""
         if request.param == "ascii":
             return {"LC_ALL": "C.UTF-8", "LOCPATH": str(tmp_path_factory.mktemp("no-locales"))}
         return request.getfixturevalue("range_widening_locale")
 
-    def test_the_widening_locale_widens_a_range(self, tmp_path, range_widening_locale):
-        """CONTROL: the non-ASCII digit rows can only catch a `[0-9]` guard
-        under a locale where `[0-9]` matches U+0663, so prove this one does."""
+    def test_the_locale_legs_match_the_platform(self, tmp_path, request):
+        """CONTROL. On Linux the non-ASCII digit rows run under a built
+        en_US.UTF-8 and can only catch a `[0-9]` guard if `[0-9]` matches
+        U+0663 there, so prove it does; a missing localedef fails here and in
+        every widening row, never skips. Elsewhere glibc's locales do not exist,
+        the widening leg is not generated, and the static no-range arm is the
+        only check of the digit classes."""
+        if not sys.platform.startswith("linux"):
+            assert _LOCALE_LEGS == ("ascii",), _LOCALE_LEGS
+            return
+        assert _LOCALE_LEGS == ("ascii", "range-widening"), _LOCALE_LEGS
+        range_widening_locale = request.getfixturevalue("range_widening_locale")
         home = tmp_path / "home"
         home.mkdir()
         probe = subprocess.run(

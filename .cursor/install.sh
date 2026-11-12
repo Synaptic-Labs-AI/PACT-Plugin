@@ -6,8 +6,9 @@
 # installs the same lock with `--require-hashes -r` and refuses any
 # interpreter below the floor. A local green matches CI only on the floor
 # version itself: a newer interpreter is allowed but CI does not test it. The
-# lock is the same for Python 3.12, 3.13 and 3.14 (see constraints-ci.in). Installs into a repo-local venv (.venv) to
-# keep the system interpreter clean. Safe to run repeatedly.
+# lock is the same for Python 3.12, 3.13 and 3.14 (see constraints-ci.in).
+# Installs into a repo-local venv (.venv) to keep the system interpreter
+# clean. Safe to run repeatedly.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
