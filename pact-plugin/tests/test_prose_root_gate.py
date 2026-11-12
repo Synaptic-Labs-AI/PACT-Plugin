@@ -12,9 +12,12 @@ appears to work, an interactive shell function may be rewriting `grep` to
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 # claude_md_ambient (module-wide): the prose-root refusal is this module's
 # subject and is orthogonal to the CLAUDE.md resolution redirect; marked so
@@ -138,9 +141,15 @@ ARM2_ALLOWLIST = [
 ]
 
 
+def _tracked_census_files(subdir):
+    directory = PLUGIN_ROOT / subdir
+    relative = directory.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted(_tracked_files(PLUGIN_ROOT.parent, relative))
+
+
 def _scanned_files():
     for subdir in CENSUS_DIRS:
-        for path in sorted((PLUGIN_ROOT / subdir).rglob("*")):
+        for path in _tracked_census_files(subdir):
             if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
                 continue
             rel = path.relative_to(PLUGIN_ROOT).as_posix()
@@ -289,8 +298,8 @@ def test_arm2_finds_no_unallowlisted_home_join():
     declared = {(p, ln) for p, ln, _ in ARM2_ALLOWLIST}
     found = set()
     for subdir in CENSUS_DIRS:
-        for path in sorted((PLUGIN_ROOT / subdir).rglob("*.py")):
-            if "__pycache__" in path.parts:
+        for path in _tracked_census_files(subdir):
+            if path.suffix != ".py" or "__pycache__" in path.parts:
                 continue
             rel = path.relative_to(PLUGIN_ROOT).as_posix()
             if rel in SELF_EXCLUDED_FILES:
@@ -433,3 +442,59 @@ def test_control_scan_population_is_non_empty():
     assert any(ARM1_KEY.search(t) for _, t in files), (
         "no allowlisted site was reached; the walk or the pattern is dead"
     )
+
+
+def test_control_tracked_census_population_excludes_untracked_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    known_members = (
+        ("agents", "pact-orchestrator.md"),
+        ("agents", "known_module.py"),
+        ("commands", "orchestrate.md"),
+        ("protocols", "pact-protocols.md"),
+        ("skills", "pact-handoff-harvest/SKILL.md"),
+    )
+    for subdir, known in known_members:
+        path = plugin / subdir / known
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    # The synthetic tree cannot hold the real declared sites, and the oracle
+    # also rejects a stale entry, so the arm judges only the found half.
+    monkeypatch.setitem(globals(), "ARM2_ALLOWLIST", [])
+
+    for subdir, known in known_members:
+        assert plugin / subdir / known in _tracked_census_files(subdir)
+    before = _tracked_census_files("protocols")
+    stray = plugin / "protocols" / "000_backend_prose_root_issue1714_probe.md"
+    stray.write_text("~/.claude/backend-issue1714\n", encoding="utf-8")
+    try:
+        assert _tracked_census_files("protocols") == before
+    finally:
+        stray.unlink()
+
+    # The probe carries the literal ARM 2 matches, so under the old working-tree
+    # walk it enters the judged population and reddens the oracle.
+    home_site = plugin / "protocols" / "000_issue1714_probe.py"
+    home_site.write_text(
+        'from pathlib import Path\nHOME = Path.home() / ".claude"\n',
+        encoding="utf-8",
+    )
+    try:
+        assert home_site not in _tracked_census_files("protocols")
+        test_arm2_finds_no_unallowlisted_home_join()
+    finally:
+        home_site.unlink()
+
+
+def test_control_tracked_census_population_omits_a_deleted_member(monkeypatch):
+    known = PLUGIN_ROOT / "protocols" / "pact-protocols.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _tracked_census_files("protocols")

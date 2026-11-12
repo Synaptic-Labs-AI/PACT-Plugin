@@ -38,6 +38,7 @@ import io
 import json
 import os
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,8 @@ import pytest
 import bootstrap_marker_writer  # noqa: E402
 import session_init  # noqa: E402
 import shared.pact_context as pact_context  # noqa: E402
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 from shared.pact_context import _build_session_path, project_slug  # noqa: E402
 
 _PLUGIN = Path(__file__).resolve().parent.parent
@@ -59,6 +62,14 @@ _PATH_BUILDER = "build_context_cache"
 _PATH_ACCESSORS = frozenset({"_get_context_file_path", "_context_file_path"})
 _TRACKED_APIS = _WRITE_APIS | {_PATH_BUILDER} | _PATH_ACCESSORS
 _CONTEXT_MODULE = "hooks/shared/pact_context.py"
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str) -> list[Path]:
+    """Keep deleted index entries visible to failure assertions."""
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=True
+    )
+
 
 # Relocation and link calls: module functions, Path's link methods, Path.rename,
 # and Path.replace, which takes one argument where str.replace takes two.
@@ -345,16 +356,49 @@ class _Census(ast.NodeVisitor):
 def _shipped(root, pattern):
     """Shipped files under ``root``. The tests/ and __pycache__ exclusions read
     the path BELOW ``root``, so a checkout under a directory named tests is
-    still scanned."""
-    for path in sorted(root.rglob(pattern)):
-        parts = path.relative_to(root).parts
+    still scanned. Repository-backed inputs exclude untracked files; synthetic
+    and gitless inputs keep their filesystem population and may be empty.
+    """
+    for path in _shared_tracked_files(root.parent, root.name, allow_empty=True):
+        relative = path.relative_to(root)
         if (
-            path.is_file()
-            and "__pycache__" not in parts
-            and "tests" not in parts
+            relative.match(pattern)
+            and "__pycache__" not in relative.parts
+            and "tests" not in relative.parts
             and not path.name.startswith("test_")
         ):
             yield path
+
+
+def test_shipped_census_drops_a_locally_deleted_file(tmp_path):
+    """The text census reads existing files, so a deleted tracked file is dropped.
+
+    This population is a content consumer: it already enumerates with the
+    default ``keep_deleted`` false, so a local deletion cannot reach the
+    ``read_text`` below. Pinning it keeps a future ``keep_deleted=True`` from
+    turning one deletion into a FileNotFoundError from the census reader.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    hooks = plugin / "hooks"
+    hooks.mkdir(parents=True)
+    known = hooks / "known.py"
+    known.write_text("KNOWN = 1\n", encoding="utf-8")
+    doomed = hooks / "doomed.py"
+    doomed.write_text("DOOMED = 2\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    files = list(_shipped(hooks, "*.py"))
+
+    assert known in files
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the text census "
+        "population; the census reader would raise FileNotFoundError instead "
+        "of a named missing-file failure")
+    for path in files:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
 
 
 def _python_census(plugin):
@@ -424,18 +468,45 @@ def _shipped_text_census():
 
 
 def _code_bearing_dirs(plugin):
-    """Top-level plugin dirs, other than tests/, holding Python or an executable."""
+    """Top-level plugin dirs, other than tests/, holding tracked Python or an executable."""
     dirs = set()
-    for child in plugin.iterdir():
-        if not child.is_dir() or child.name in ("tests", "__pycache__") or child.name.startswith("."):
+    tracked = _tracked_glob(
+        plugin.parent, f"{plugin.name}/**/*", f"{plugin.name}/hooks/session_init.py",
+    )
+    for path in tracked:
+        parts = path.relative_to(plugin).parts
+        if len(parts) < 2:
             continue
-        for path in child.rglob("*"):
-            if path.is_file() and "__pycache__" not in path.relative_to(child).parts and (
-                path.suffix == ".py" or os.access(path, os.X_OK)
-            ):
-                dirs.add(child.name)
-                break
+        child = parts[0]
+        if child in ("tests", "__pycache__") or child.startswith(".") or "__pycache__" in parts:
+            continue
+        if path.suffix == ".py" or os.access(path, os.X_OK):
+            dirs.add(child)
     return dirs
+
+
+class TestTrackedPopulation:
+    def test_untracked_is_excluded_and_deleted_tracked_stays_visible(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "hooks" / "tracked.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        (tracked.parent / "untracked.py").write_text("untracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/hooks/tracked.py"], cwd=repo, check=True)
+        pattern = "pact-plugin/hooks/*.py"
+        assert _tracked_glob(repo, pattern, "pact-plugin/hooks/tracked.py") == [tracked]
+        tracked.unlink()
+        assert _tracked_glob(repo, pattern, "pact-plugin/hooks/tracked.py") == [tracked]
+
+    def test_empty_and_wrong_roots_refuse(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(repo, "pact-plugin/hooks/*.py", "pact-plugin/hooks/tracked.py")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(repo, "pact-plugin/hooks/*.py", "pact-plugin/hooks/tracked.py")
 
 
 class TestCensus:
@@ -614,6 +685,41 @@ class TestCensus:
         assert ("hooks/session_init.py", "main", "persist_context") in found["write_calls"], (
             "the census cannot see session_init's writer, so it cannot see a new one"
         )
+
+    def test_untracked_file_under_existing_root_cannot_change_shipped_census(self, tmp_path):
+        plugin = tmp_path / "plugin"
+        hooks = plugin / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "tracked.py").write_text(
+            "def tracked(session_dir):\n"
+            "    return session_dir + '/pact-session-context.json'\n",
+            encoding="utf-8",
+        )
+        (hooks / "tracked.sh").write_text(
+            "echo 'pact-session-context.json'\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "init", "-q"], cwd=plugin, check=True)
+        subprocess.run(["git", "add", "hooks/tracked.py", "hooks/tracked.sh"], cwd=plugin, check=True)
+        before_python = _python_census(plugin)
+        before_text = _text_census(plugin)
+        # THE ARM'S OWN PRECONDITION. With an empty population both equality
+        # assertions below hold while proving nothing, so the sibling control
+        # was the only thing keeping this arm honest. Assert the seeded files
+        # were enumerated before the untracked ones exist.
+        assert before_python["scanned"]["hooks"] == 1, before_python["scanned"]
+        assert before_python["name_sites"] == Counter(
+            {("hooks/tracked.py", "tracked"): 1}), before_python["name_sites"]
+        assert before_text[0]["hooks"] == 1, before_text[0]
+        (hooks / "untracked.py").write_text(
+            "def untracked(session_dir):\n"
+            "    return session_dir + '/pact-session-context.json'\n",
+            encoding="utf-8",
+        )
+        (hooks / "untracked.sh").write_text(
+            "echo 'pact-session-context.json'\n", encoding="utf-8"
+        )
+        assert _python_census(plugin) == before_python
+        assert _text_census(plugin) == before_text
 
     def test_every_directory_of_shipped_code_is_scanned(self):
         """A scan root that is dropped or misspelled would blind the census."""

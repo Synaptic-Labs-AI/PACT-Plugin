@@ -26,6 +26,7 @@ import pytest
 import yaml
 
 import ci_contract
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 
 class TestEnsureMemoryReady:
@@ -411,6 +412,38 @@ class TestCheckAndInstallDependencies:
             assert result['failed'] == []
 
 
+_SYNTHETIC_CI_WORKFLOW = """\
+name: tests
+on: [push]
+permissions:
+  contents: read
+jobs:
+  full-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the CI environment (before tests)
+        run: python scripts/verify_ci_environment.py
+      - name: Run test suite
+        run: {test_cmd}
+      - name: Verify the certifying run
+        run: python scripts/verify_full_run.py
+      - name: Verify the CI environment (after tests)
+        if: always()
+        run: python scripts/verify_ci_environment.py
+      - name: Upload full-suite diagnostic evidence
+        if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}
+          path: |
+            .full-suite-results.xml
+            .full-run-record.json
+            .full-collection-record.json
+          if-no-files-found: error
+          include-hidden-files: true
+"""
+
+
 class TestDependencyDriftIsDetectable:
     """The `skipped_ci` branch is SILENT. This class is why that is safe.
 
@@ -436,7 +469,7 @@ class TestDependencyDriftIsDetectable:
     Hence drift is caught by TESTS, not log lines. What CI actually installs
     is no longer inferred from CI text: scripts/verify_ci_environment.py
     compares the INSTALLED environment with constraints-ci.txt in CI (a step
-    before every test run and as each job's last step) and inside the pytest
+    before every test run and as each job's last command step) and inside the pytest
     process itself (tests/ci_environment_binding.py). This class keeps the
     bounded STATIC checks that complement it: memory_init's packages are
     pinned, the verify steps sit around every test run, a word tripwire for
@@ -456,9 +489,10 @@ class TestDependencyDriftIsDetectable:
     # `--report`), so a drifted environment fails the step. A report-only
     # form would print the verdict and exit 0, and is refused here.
     VERIFY_CMD = "python scripts/verify_ci_environment.py"
-    # The test step's command, exactly: the placement arm pins it so the
-    # tested process is the process the verify steps checked.
+    # The test step's commands: the dynamic full-suite form and the static
+    # default every generic profile retains.
     TEST_CMD = ci_contract.TEST_CMD
+    WORKFLOW_TEST_CMD = ci_contract.WORKFLOW_TEST_CMD
     # A job is GOVERNED when any step's run text names one of these.
     _GOVERNED_RE = re.compile(r"\b(pytest|python3?|pip3?|ruff)\b")
     _PYTEST_RE = re.compile(r"\bpytest\b")
@@ -469,7 +503,7 @@ class TestDependencyDriftIsDetectable:
     # exemption for a narrowed suite.
     _PROFILES = {
         (".github/workflows/tests.yml", "full-suite"): [
-            ("^" + re.escape(TEST_CMD) + "$", 1),
+            ("^" + re.escape(WORKFLOW_TEST_CMD) + "$", 1),
         ],
         (".github/workflows/fast-tests.yml", "fast-suite"): [
             (r'^python \.\./scripts/run_fast_suite\.py --base-sha '
@@ -560,21 +594,61 @@ class TestDependencyDriftIsDetectable:
 
     @staticmethod
     def _workflow_files(root):
-        """Every `.yml`/`.yaml` under `.github/workflows/`."""
+        """Every TRACKED `.yml`/`.yaml` under `.github/workflows/`.
+
+        The placement oracle claims to judge the shipped workflows. A
+        working-tree walk lets an untracked workflow enter the judged
+        population and redden a green checkout; the tracked member is the
+        positive control that the index walk still reaches the tree.
+        """
         workflows = root / ".github" / "workflows"
         if not workflows.is_dir():
             return []
-        return sorted(p for p in workflows.iterdir()
-                      if p.is_file() and p.suffix in (".yml", ".yaml"))
+        return [p for p in _tracked_files(
+                    root, ".github/workflows",
+                    known_member=".github/workflows/tests.yml")
+                if p.suffix in (".yml", ".yaml")]
+
+    @staticmethod
+    def _synthetic_ci_repo(tmp_path):
+        """A git repo whose only CI surfaces are the tracked contract files.
+
+        The isolation arm plants its needles HERE, never in the live checkout:
+        under `--dist load` another worker still walks the real `.github/`
+        tree, and an untracked probe visible there can redden its workflow or
+        action scan.
+        """
+        root = tmp_path / "repo"
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "marketplace.json").write_text(
+            "{}", encoding="utf-8")
+        workflows = root / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "tests.yml").write_text(
+            _SYNTHETIC_CI_WORKFLOW.replace(
+                "{test_cmd}", ci_contract.WORKFLOW_TEST_CMD),
+            encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=arm@example.invalid",
+             "-c", "user.name=arm", "commit", "-qm", "seed"],
+            cwd=root, check=True)
+        return root
 
     @staticmethod
     def _action_files(root):
-        """Every `action.yml`/`action.yaml` under `.github/actions/`."""
+        """Every TRACKED `action.yml`/`action.yaml` under `.github/actions/`.
+
+        An absent or wholly untracked actions directory is a legitimate empty
+        population, so this walk allows it; an untracked action must not enter
+        the allowlist oracle.
+        """
         actions = root / ".github" / "actions"
         if not actions.is_dir():
             return []
-        return sorted(p for p in actions.rglob("*")
-                      if p.is_file() and p.name in ("action.yml", "action.yaml"))
+        return [p for p in _tracked_files(root, ".github/actions", allow_empty=True)
+                if p.name in ("action.yml", "action.yaml")]
 
     @staticmethod
     def _verify_script(root=None):
@@ -630,12 +704,55 @@ class TestDependencyDriftIsDetectable:
             f"contract). Pin them in constraints-ci.txt, or remove them here."
         )
 
+    def _diagnostic_upload_problems(self, rel, jid, steps):
+        """Placement and fail-closed shape of the full-suite evidence upload."""
+        if (rel, jid) != (".github/workflows/tests.yml", "full-suite"):
+            return []
+        where = f"{rel} job {jid}"
+        uploads = [
+            (index, step) for index, step in enumerate(steps)
+            if step.get("name") == "Upload full-suite diagnostic evidence"
+        ]
+        if len(uploads) != 1:
+            return [f"{where}: expected one diagnostic evidence upload, "
+                    f"found {len(uploads)}"]
+        index, step = uploads[0]
+        problems = []
+        if (index != len(steps) - 1
+                or steps[index - 1].get("name")
+                != "Verify the CI environment (after tests)"):
+            problems.append(
+                f"{where}: diagnostic upload must be the LAST step, after run "
+                "verification and the final environment check, so a failure in "
+                "that check still uploads the evidence")
+        if step.get("uses") != ci_contract.UPLOAD_ARTIFACT_ACTION:
+            problems.append(f"{where}: diagnostic upload action/ref drift")
+        if str(step.get("if", "")).strip() != (
+                "always() && (failure() || cancelled() || "
+                "github.event_name == 'workflow_dispatch')"):
+            problems.append(f"{where}: diagnostic upload condition drift")
+        with_block = step.get("with") or {}
+        if with_block.get("name") != ci_contract.UPLOAD_ARTIFACT_NAME:
+            problems.append(f"{where}: diagnostic artifact name drift")
+        if (with_block.get("path") or "").splitlines() != [
+                ".full-suite-results.xml", ".full-run-record.json",
+                ".full-collection-record.json"]:
+            problems.append(f"{where}: diagnostic artifact paths drift")
+        if with_block.get("if-no-files-found") != "error":
+            problems.append(f"{where}: missing diagnostic evidence must error")
+        if with_block.get("include-hidden-files") is not True:
+            problems.append(f"{where}: dotfile evidence needs hidden inclusion")
+        return problems
+
     def test_ci_environment_is_verified_around_every_test_run(self):
         """The runtime check runs in the SAME place as the tests.
 
         For every GOVERNED job (any step whose `run` names pytest, python,
         pip or ruff) in every workflow under .github/workflows/:
-          (i) its LAST step runs VERIFY_CMD with `if: always()`;
+          (i) its last COMMAND step (one carrying `run:`) runs VERIFY_CMD
+              with `if: always()`; only the pinned diagnostic upload of the
+              `full-suite` job may follow it — every other governed job must
+              end at the after-check;
           (ii) every TEST STEP is IMMEDIATELY preceded by VERIFY_CMD. A
                TEST STEP is one whose `run` names pytest OR matches the
                pinned fast runner path. In a profiled job (exactly one
@@ -671,13 +788,35 @@ class TestDependencyDriftIsDetectable:
                     continue
                 governed_jobs += 1
                 where = f"{rel} job {jid}"
-                last = steps[-1] if steps else {}
-                if runs[-1].strip() != self.VERIFY_CMD or str(
-                        last.get("if", "")).strip() not in (
-                        "always()", "${{ always() }}"):
+                problems.extend(self._diagnostic_upload_problems(rel, jid, steps))
+                # THE AFTER-CHECK MUST BE THE JOB'S FINAL COMMAND, and only
+                # the pinned diagnostic upload of the `full-suite` job may
+                # follow it. Any other trailing `uses:` step can change what
+                # the check certified, which is the state it exists to see.
+                last_run = next(
+                    (n for n in range(len(steps) - 1, -1, -1)
+                     if isinstance(steps[n].get("run"), str)), None)
+                last = steps[last_run] if last_run is not None else {}
+                if (last_run is None
+                        or runs[last_run].strip() != self.VERIFY_CMD
+                        or str(last.get("if", "")).strip() not in (
+                            "always()", "${{ always() }}")):
                     problems.append(
-                        f"{where}: the LAST step must run "
+                        f"{where}: the LAST command step must run "
                         f"`{self.VERIFY_CMD}` with `if: always()`")
+                trailing = steps[last_run + 1:] if last_run is not None else []
+                pinned_tail = (
+                    (rel, jid) == (".github/workflows/tests.yml", "full-suite")
+                    and len(trailing) == 1
+                    and trailing[0].get("name")
+                    == "Upload full-suite diagnostic evidence"
+                    and trailing[0].get("uses")
+                    == ci_contract.UPLOAD_ARTIFACT_ACTION)
+                if trailing and not pinned_tail:
+                    problems.append(
+                        f"{where}: steps follow the LAST command step; only "
+                        f"the pinned diagnostic upload of the `full-suite` "
+                        f"job may follow the after-check")
                 profile = self._PROFILES.get((rel, jid))
                 if profile is not None:
                     for pattern, expected_count in profile:
@@ -786,9 +925,9 @@ class TestDependencyDriftIsDetectable:
             "different environment than the one it checked:\n"
             + "\n".join(f"  {p}" for p in problems)
             + "\nPut a step running the verify command immediately before "
-            "each pytest step and as the job's last step with if: always(), "
-            "keep the pytest command exactly as pinned, and move env/shell "
-            "settings off those steps."
+            "each pytest step and as the job's last command step with "
+            "if: always(), keep the pytest command exactly as pinned, and "
+            "move env/shell settings off those steps."
         )
 
     def test_the_fast_lane_is_present_or_wholly_absent(self):
@@ -848,24 +987,27 @@ class TestDependencyDriftIsDetectable:
 
     @staticmethod
     def _tracked_shell_and_make_files(root):
-        """Every git-tracked *.sh, *.bash, Makefile and Makefile.* file;
-        globbed from the root when git cannot list them (a rig copy)."""
-        patterns = ("*.sh", "*.bash", "Makefile", "Makefile.*")
-        try:
-            listed = subprocess.run(
-                ["git", "-C", str(root), "ls-files", "-z", "--",
-                 *patterns, *(f"**/{p}" for p in patterns)],
-                capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            listed = None
-        if listed is not None and listed.returncode == 0 and listed.stdout:
-            names = [n for n in listed.stdout.split("\0") if n]
-            return sorted({root / n for n in names if (root / n).is_file()})
-        found = set()
-        for pattern in patterns:
-            found |= {p for p in root.rglob(pattern) if p.is_file()
-                      and ".git" not in p.relative_to(root).parts}
-        return sorted(found)
+        """Every git-tracked *.sh, *.bash, Makefile and Makefile.* file.
+
+        The index is the population, so an untracked scratch script cannot
+        join the tripwire. The shared helper keeps the gitless-export fallback
+        and refuses to widen when a checkout's index cannot be read; the
+        `.git` filter stays for that filesystem fallback.
+        """
+        found: set[Path] = set()
+        for pattern in ("**/*.sh", "**/*.bash", "**/Makefile", "**/Makefile.*"):
+            # Only the .sh pattern has a tracked member in this repository; a
+            # pattern with no member is a legitimate empty population.
+            found |= set(_tracked_files(
+                root, ".", pattern,
+                # The local bootstrap script is tracked AND present in every
+                # rig copy the mutation arms build, so it is the control that
+                # survives both the source checkout and a rig.
+                known_member=(".cursor/install.sh"
+                              if pattern == "**/*.sh" else None),
+                allow_empty=True))
+        return sorted(p for p in found
+                      if ".git" not in p.relative_to(root).parts)
 
     def _tripwire_hits(self, root):
         texts, env_hits = [], []
@@ -955,6 +1097,7 @@ class TestDependencyDriftIsDetectable:
         "actions/setup-python",
         "actions/cache/restore",
         "actions/cache/save",
+        "actions/upload-artifact",
     })
 
     def test_every_third_party_action_is_allowlisted(self):
@@ -1001,6 +1144,9 @@ class TestDependencyDriftIsDetectable:
             if uses.startswith("docker://")
             or uses.split("@")[0].rstrip("/").lower()
             not in self._ALLOWED_THIRD_PARTY_ACTIONS
+            or (uses.split("@")[0].rstrip("/").lower()
+                == "actions/upload-artifact"
+                and uses != ci_contract.UPLOAD_ARTIFACT_ACTION)
         ]
         assert not offenders, (
             f"ACTION ALLOWLIST DRIFT: {offenders} are not on the vetted "
@@ -1010,6 +1156,81 @@ class TestDependencyDriftIsDetectable:
             f"action.yml and what it runs), then add `owner/repo[/path]` to "
             f"_ALLOWED_THIRD_PARTY_ACTIONS in the same change."
         )
+
+    def test_control_untracked_ci_surfaces_stay_out_of_the_judged_population(
+            self, tmp_path, monkeypatch):
+        """Untracked CI surfaces must not enter the placement or allowlist oracles.
+
+        The workflow probe carries a pytest step outside the verify bracket and
+        the action probe an unvetted `uses:`, so a reverted working-tree walk
+        reddens HERE with each probe named rather than passing quietly. The
+        needles live in a synthetic repo, never the live checkout, so no
+        parallel worker's `.github/` scan can see them.
+        """
+        root = self._synthetic_ci_repo(tmp_path)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: root)
+        assert root / ".github" / "workflows" / "tests.yml" in \
+            self._workflow_files(root)
+        workflow_probe = root / ".github" / "workflows" / "zzprobe1714.yml"
+        workflow_probe.write_text(
+            "name: zzprobe1714\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  zzprobe:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Run tests\n"
+            "        run: python -m pytest -q\n",
+            encoding="utf-8")
+        actions_root = root / ".github" / "actions"
+        action_dir = actions_root / "zzprobe1714"
+        action_dir.mkdir(parents=True)
+        action_probe = action_dir / "action.yml"
+        action_probe.write_text(
+            "name: zzprobe1714\n"
+            "runs:\n"
+            "  using: composite\n"
+            "  steps:\n"
+            "    - uses: evil/repo@v1\n",
+            encoding="utf-8")
+        assert workflow_probe not in self._workflow_files(root)
+        assert action_probe not in self._action_files(root)
+        self.test_ci_environment_is_verified_around_every_test_run()
+        self.test_every_third_party_action_is_allowlisted()
+
+    def test_control_untracked_scripts_stay_out_of_the_tripwire_population(
+            self, tmp_path):
+        """Untracked scripts must not enter the pip-install tripwire.
+
+        The tracked script is the positive control: without it the arm would
+        pass on an empty population. The probe carries a tripwire token, so a
+        reverted filesystem walk reddens with the probe named rather than
+        passing quietly.
+        """
+        root = tmp_path / "repo"
+        tracked = root / ".cursor" / "install.sh"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("#!/bin/sh\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+
+        assert tracked in self._tracked_shell_and_make_files(root), (
+            "positive control: the tracked script is missing from the "
+            "tripwire population"
+        )
+        probe = root / "zzprobe1714.sh"
+        probe.write_text("uvx some-tool\n", encoding="utf-8")
+        try:
+            assert probe not in self._tracked_shell_and_make_files(root), (
+                "an untracked script joined the tripwire population; "
+                "_tracked_shell_and_make_files is not reading the git index"
+            )
+            assert not self._tripwire_hits(root), (
+                "an untracked script reached the tripwire judgement: "
+                f"{self._tripwire_hits(root)}"
+            )
+        finally:
+            probe.unlink()
 
     def _repo_copy_carrying(self, tmp_path, workflow_text=None,
                             script_text=None, extra_files=None):
@@ -1380,24 +1601,33 @@ class TestDependencyDriftIsDetectable:
             f"test_ci_environment_is_verified_around_every_test_run), so "
             f"these mutations would start from a red tree")
         before_name = before["name"]
-        after_name = steps[-1]["name"]
+        after_name = next(
+            s["name"] for s in reversed(steps)
+            if isinstance(s.get("run"), str))
         before_block = (f"      - name: {before_name}\n"
                         f"        run: {self.VERIFY_CMD}\n")
         after_block = (f"      - name: {after_name}\n"
                        f"        if: always()\n"
                        f"        run: {self.VERIFY_CMD}\n")
-        assert before_block in real and real.endswith(after_block), (
+        assert before_block in real and after_block in real, (
             f"the shipped verify steps are no longer written as the exact "
             f"blocks these mutations edit (before-check: {before_block!r}; "
-            f"after-check, which must END tests.yml: {after_block!r}), so a "
-            f"mutation would not land; rebuild the blocks from the new "
-            f"spelling in this arm")
-        test_line = f"        run: {self.TEST_CMD}\n"
+            f"after-check: {after_block!r}), so a mutation would not land; "
+            f"rebuild the blocks from the new spelling in this arm")
+        test_line = f"        run: {self.WORKFLOW_TEST_CMD}\n"
         assert real.count(test_line) == 1, (
-            f"tests.yml runs {self.TEST_CMD!r} {real.count(test_line)} times, "
+            f"tests.yml runs {self.WORKFLOW_TEST_CMD!r} "
+            f"{real.count(test_line)} times, "
             f"not once, so the test-step mutations below are ambiguous")
         arm = "test_ci_environment_is_verified_around_every_test_run"
         install = "      - name: Install test dependencies\n"
+        upload_start = real.index(
+            "      - name: Upload full-suite diagnostic evidence\n")
+        # THE UPLOAD ENDS tests.yml, on purpose: the after-check is the last
+        # COMMAND step and this `uses:`-only step follows it.
+        upload_block = real[upload_start:]
+        without_upload = real[:upload_start]
+        assert "          include-hidden-files: true\n" in upload_block
         for name, text in [
             ("before-removed", real.replace(before_block, "", 1)),
             ("before-earlier", real.replace(before_block, "", 1).replace(
@@ -1430,13 +1660,40 @@ class TestDependencyDriftIsDetectable:
                 before_block, before_block.replace(
                     "        run: ", "        if: github.event_name == 'push'\n"
                     "        run: "), 1)),
+            ("upload-condition", real.replace(
+                "        if: always() && (failure() || cancelled() || "
+                "github.event_name == 'workflow_dispatch')\n",
+                "        if: always() && github.event_name == 'workflow_dispatch'\n",
+                1)),
+            ("upload-cancelled-leg", real.replace(
+                "        if: always() && (failure() || cancelled() || "
+                "github.event_name == 'workflow_dispatch')\n",
+                "        if: always() && (failure() || "
+                "github.event_name == 'workflow_dispatch')\n", 1)),
+            ("upload-before-run-verifier", without_upload.replace(
+                "      - name: Verify the certifying run\n",
+                upload_block + "      - name: Verify the certifying run\n", 1)),
+            ("upload-before-after-check", without_upload.replace(
+                after_block, upload_block + after_block, 1)),
+            ("upload-removed", without_upload),
+            ("upload-missing-hidden", real.replace(
+                "          include-hidden-files: true\n", "", 1)),
+            ("upload-missing-path", real.replace(
+                "            .full-run-record.json\n", "", 1)),
             ("second-pytest-step", real.replace(
                 after_block,
                 "      - name: Again\n        working-directory: pact-plugin\n"
-                f"        run: {self.TEST_CMD}\n" + after_block, 1)),
+                f"        run: {self.WORKFLOW_TEST_CMD}\n" + after_block, 1)),
         ]:
             self._shape_reddens(tmp_path, monkeypatch, name, arm,
                                 "VERIFY PLACEMENT DRIFT", workflow_text=text)
+        # CONTROL: the shipped order — the `uses:`-only upload AFTER the
+        # after-check — is the faithful shape. It was a red mutation while the
+        # upload sat between the verifier and the check; the placement property
+        # still reddens when the upload moves back before the check (above).
+        self._shape_stays_green(
+            tmp_path, monkeypatch, "upload-last", arm,
+            workflow_text=without_upload + upload_block)
         # CONTROL: `continue-on-error: false` is the default spelled out and
         # changes nothing, so it is accepted.
         self._shape_stays_green(
@@ -1516,6 +1773,12 @@ class TestDependencyDriftIsDetectable:
                 install, "      - uses: pre-commit/action@v3.0.1\n" + install, 1))),
             ("docker-image", dict(workflow_text=real.replace(
                 install, "      - uses: docker://python:3.12-slim\n" + install, 1))),
+            ("upload-moving-tag", dict(workflow_text=real.replace(
+                ci_contract.UPLOAD_ARTIFACT_ACTION,
+                "actions/upload-artifact@v7", 1))),
+            ("upload-unpinned", dict(workflow_text=real.replace(
+                ci_contract.UPLOAD_ARTIFACT_ACTION,
+                "actions/upload-artifact", 1))),
             ("reusable-workflow", dict(extra_files={
                 ".github/workflows/reuse.yml":
                     "name: reuse\non: [pull_request]\njobs:\n  r:\n"

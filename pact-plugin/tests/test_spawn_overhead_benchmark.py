@@ -17,9 +17,24 @@ introduce the per-teammate-spawn cost the v4.0.0 cutover eliminated.
 """
 
 import json
+import subprocess
 from pathlib import Path
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 _REPO_ROOT = Path(__file__).parent.parent
+
+
+def _tracked_agents():
+    """Agent markdown from the git index, with the sentinel as the control.
+
+    An untracked note under agents/ must not enter the spawn-surface scan; the
+    sentinel teammate is the known member that keeps an empty or misnamed root
+    from passing.
+    """
+    return _shared_tracked_glob(
+        _REPO_ROOT.parent, f"{_REPO_ROOT.name}/agents/*.md",
+        f"{_REPO_ROOT.name}/agents/{SENTINEL_TEAMMATE}")
 
 # Sentinel teammate for the regression check. backend-coder is one of the
 # larger teammate bodies; if it stays under THRESHOLD_BYTES the rest do
@@ -96,14 +111,13 @@ class TestSpawnOverheadRegression:
         would carry the orchestrator's body — the exact cost the v4.0.0
         cutover eliminated.
         """
-        agents_dir = _REPO_ROOT / "agents"
         offenders = []
         forbidden_substrings = (
             "pact-orchestrator.md",
             "PACT:pact-orchestrator",
             "../agents/pact-orchestrator",
         )
-        for agent_path in sorted(agents_dir.glob("*.md")):
+        for agent_path in _tracked_agents():
             if agent_path.name == "pact-orchestrator.md":
                 continue  # the orchestrator file itself may self-reference
             text = agent_path.read_text(encoding="utf-8")
@@ -117,6 +131,31 @@ class TestSpawnOverheadRegression:
             "spawn-path-loaded surface (frontmatter or body):\n"
             + "\n".join(offenders)
         )
+
+    def test_untracked_agent_cannot_join_the_spawn_surface(
+            self, tmp_path, monkeypatch):
+        """The scan reads the index; an untracked agent cannot redden it.
+
+        Reverting ``_tracked_agents`` to ``agents_dir.glob("*.md")`` keeps the
+        clean tree green; this arm drives the scan and reddens naming the
+        untracked file. The sentinel teammate is the positive control.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        agents = plugin / "agents"
+        agents.mkdir(parents=True)
+        known = agents / SENTINEL_TEAMMATE
+        known.write_text("clean teammate body\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        monkeypatch.setitem(globals(), "_REPO_ROOT", plugin)
+
+        assert known in _tracked_agents(), (
+            "positive control: the sentinel teammate is missing from the scan")
+        (agents / "pact-zzprobe.md").write_text(
+            "See pact-orchestrator.md for the dispatch rules.\n", encoding="utf-8")
+
+        self.test_orchestrator_body_not_in_spawn_path()
 
     def test_peer_inject_prelude_plus_agent_body_under_threshold(self, tmp_path):
         """The full per-teammate spawn-time delivery (peer_inject prelude +

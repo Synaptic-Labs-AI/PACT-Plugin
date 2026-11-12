@@ -15,7 +15,10 @@ unambiguously in CI logs and align with how plugin docs cite code.
 import re
 from pathlib import Path
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent  # pact-plugin/
@@ -41,9 +44,7 @@ _ALLOWLIST = (
 
 
 def _iter_scan_files(root: Path):
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in _tracked_glob(root, "**/*", allow_empty=True):
         if path.suffix not in _SCAN_SUFFIXES:
             continue
         # Skip hidden directories anywhere in the path (.git, .venv,
@@ -165,3 +166,25 @@ class TestNoBroadcastAddressing:
             assert not _BROADCAST_RE.search(sample), (
                 f"_BROADCAST_RE incorrectly matched non-broadcast shape: {sample!r}"
             )
+
+
+def test_an_untracked_file_cannot_join_the_broadcast_scan(tmp_path):
+    """An untracked scratch file must not join the plugin-source scan."""
+    root = tmp_path / "plugin"
+    (root / "commands").mkdir(parents=True)
+    body = 'SendMessage(to="*")\n'
+    tracked = root / "commands" / "tracked.md"
+    tracked.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+    needle = root / "commands" / "zzprobe.md"
+    needle.write_text(body, encoding="utf-8")
+
+    population = list(_iter_scan_files(root))
+
+    assert tracked in population, "the tracked control is missing from the population"
+    assert needle not in population, (
+        f"untracked needle entered the broadcast scan: {needle}")
+    assert [hit[0] for hit in _scan_for_broadcast(root)] == ["commands/tracked.md"], (
+        "the oracle over the population changed")

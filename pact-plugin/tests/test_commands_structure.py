@@ -21,10 +21,49 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
 from shared.intentional_wait import KNOWN_RESOLVERS
 
-COMMANDS_DIR = Path(__file__).parent.parent / "commands"
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+COMMANDS_DIR = PLUGIN_ROOT / "commands"
+REPO_ROOT = PLUGIN_ROOT.parent
+
+
+def _tracked_files(repo_root, relative_dir, pattern=None):
+    """Exercise the helper's keep_deleted option; content consumers use false."""
+    return _shared_tracked_files(
+        repo_root, relative_dir, pattern, keep_deleted=True
+    )
+
+
+def _shipped_population(relative_dir, pattern=None):
+    """Tracked population under the plugin, named by the directory's own name.
+
+    A CONTENT consumer: deleted index entries are dropped (``keep_deleted``
+    false), because every caller reads the file. Keeping a deleted entry here
+    turns one local deletion into FileNotFoundError from each scan instead of
+    the named missing-file failure the consumers already report.
+
+    An installed plugin cache places the plugin under a version directory
+    (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
+    nothing. An install that genuinely omits the artifact skips the asking
+    test by name instead of raising through it.
+
+    Only the helper's empty-population shape is a layout omission. Its
+    fail-closed refusals (unavailable git, an unsafe root) fail in every
+    layout rather than skipping as though the artifact were absent.
+    """
+    try:
+        return _shared_tracked_files(REPO_ROOT, relative_dir, pattern)
+    except AssertionError as exc:
+        if "empty tracked population" not in str(exc):
+            raise
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no {relative_dir!r}; "
+            "the command-structure claims are about the dev checkout")
 
 # The shutdown loop's call AS IT APPEARS INSIDE THE FENCED BLOCK.
 #
@@ -88,8 +127,199 @@ EXPECTED_COMMANDS = {
 
 @pytest.fixture
 def command_files():
-    """Load all command markdown files."""
-    return list(COMMANDS_DIR.glob("*.md"))
+    """Load tracked command markdown files."""
+    files = _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md")
+    assert COMMANDS_DIR / "refresh.md" in files
+    return files
+
+
+class TestTrackedCommandPopulation:
+    @staticmethod
+    def _git(root, *args):
+        subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, check=True
+        )
+
+    def test_untracked_is_invisible_and_tracked_deletion_stays(self, tmp_path):
+        commands = tmp_path / "pact-plugin" / "commands"
+        nested = commands / "nested"
+        nested.mkdir(parents=True)
+        tracked = commands / "refresh.md"
+        deep_tracked = nested / "deep.py"
+        tracked.write_text("tracked\n", encoding="utf-8")
+        deep_tracked.write_text("tracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "add", "-A")
+        untracked = commands / "000_untracked_probe.md"
+        deep_untracked = nested / "untracked.py"
+        untracked.write_text("untracked\n", encoding="utf-8")
+        deep_untracked.write_text("untracked\n", encoding="utf-8")
+
+        direct = _tracked_files(tmp_path, "pact-plugin/commands", "*.md")
+        tree = _tracked_files(tmp_path, "pact-plugin/commands")
+        assert tracked in direct
+        assert untracked not in direct
+        assert deep_tracked in tree
+        assert deep_untracked not in tree
+
+        tracked.unlink()
+        deep_tracked.unlink()
+        tree_after_deletion = _tracked_files(tmp_path, "pact-plugin/commands")
+        assert tracked in tree_after_deletion
+        assert deep_tracked in tree_after_deletion
+
+    def test_gitless_fallback_is_nonempty_or_loud(self, tmp_path):
+        commands = tmp_path / "pact-plugin" / "commands"
+        commands.mkdir(parents=True)
+        tracked = commands / "refresh.md"
+        tracked.write_text("exported\n", encoding="utf-8")
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/commands", "*.md"
+        )
+
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_layout_guard_classifies_by_failure_shape(
+            self, tmp_path, monkeypatch):
+        """Outside the dev checkout, only an EMPTY population is a layout gap.
+
+        The helper's fail-closed refusals are failures in every layout; a
+        blanket catch would relabel broken git as an installed layout that
+        ships no commands. The skip reason must name the layout omission, and
+        the refusal must surface with its own message.
+        """
+        install = tmp_path / "PACT" / "4.8.34"
+        commands = install / "commands"
+        commands.mkdir(parents=True)
+        (commands / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", install)
+
+        with pytest.raises(pytest.skip.Exception, match="installed layout"):
+            _shipped_population(f"{install.name}/commands", "*.md")
+
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        try:
+            _shipped_population(f"{install.name}/commands", "*.md")
+        except AssertionError as exc:
+            assert "Refusing to widen" in str(exc), exc
+        except pytest.skip.Exception as exc:
+            # A skip here means the guard swallowed the refusal as a layout
+            # omission; that is the defect this arm exists to catch.
+            raise AssertionError(
+                f"the layout guard swallowed a refusal as a skip: {exc}"
+            ) from exc
+        else:
+            raise AssertionError("the refusal did not surface at all")
+
+
+def test_command_files_fixture_excludes_untracked_commands(tmp_path, monkeypatch, request):
+    """The FIXTURE, not only the helper, must read the git index.
+
+    Reverting ``command_files`` to ``COMMANDS_DIR.glob("*.md")`` keeps every
+    helper arm green; this arm resolves the fixture itself and reddens, because
+    a valid-shaped untracked command then joins the population.
+    """
+    repo = tmp_path / "repo"
+    commands = repo / "pact-plugin" / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("---\ndescription: known\n---\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", "--", "pact-plugin/commands/refresh.md"], cwd=repo, check=True)
+    probe = commands / "000_untracked_probe.md"
+    probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    # PLUGIN_ROOT too: the population name is derived from it, so a patched
+    # REPO_ROOT alone would keep looking for the real directory's name.
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+    files = request.getfixturevalue("command_files")
+
+    assert known in files
+    assert probe not in files, (
+        "an untracked command joined the shipped population; command_files is "
+        "not reading the git index"
+    )
+
+
+def test_xref_scan_population_excludes_untracked_sources(tmp_path, monkeypatch):
+    """The SCAN, not only the helper, must read the git index.
+
+    Reverting ``_candidate_files`` to ``root.rglob("*")`` keeps every helper arm
+    green; this arm drives the scan and reddens, because an untracked source
+    file then enters the set the xref oracle judges.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    tracked = commands / "refresh.md"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    probe = commands / "000_untracked_probe.md"
+    probe.write_text("clean\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+    monkeypatch.setattr(
+        TestNoDanglingOrchestrationSkillRefs, "PLUGIN_ROOT", plugin)
+    monkeypatch.setattr(
+        TestNoDanglingOrchestrationSkillRefs, "SCAN_DIRS", ("commands",))
+
+    candidates = TestNoDanglingOrchestrationSkillRefs._candidate_files()
+
+    assert tracked in candidates
+    assert probe not in candidates, (
+        f"untracked {probe.name} joined the xref scan population; "
+        "_candidate_files is not reading the git index")
+
+
+def test_deleted_tracked_command_is_a_named_missing_failure(
+        tmp_path, monkeypatch, request):
+    """A deleted tracked command must leave the content population, not crash it.
+
+    With ``keep_deleted=True`` the fixture keeps the path, every scan raises
+    FileNotFoundError, and one deletion surfaces as a storm of errors instead of
+    the named ``Missing command:`` failure the oracle already provides.
+    """
+    repo = tmp_path / "repo"
+    commands = repo / "pact-plugin" / "commands"
+    commands.mkdir(parents=True)
+    for name in sorted(EXPECTED_COMMANDS):
+        (commands / f"{name}.md").write_text(
+            "---\ndescription: fixture\n---\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed = commands / "orchestrate.md"
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+    files = request.getfixturevalue("command_files")
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the content population; "
+        "every scan would raise FileNotFoundError instead of naming it")
+    with pytest.raises(AssertionError, match="Missing command: orchestrate"):
+        TestCommandFilesExist().test_all_expected_commands_present(files)
 
 
 class TestCommandFilesExist:
@@ -789,26 +1019,30 @@ class TestNoDanglingOrchestrationSkillRefs:
     SCAN_SUFFIXES = (".md", ".py", ".json")
     SCAN_DIRS = ("agents", "commands", "protocols", "skills", "hooks", "tests")
 
+    @classmethod
+    def _candidate_files(cls):
+        files = []
+        for subdir in cls.SCAN_DIRS:
+            for path in _shipped_population(f"{cls.PLUGIN_ROOT.name}/{subdir}"):
+                if path.suffix not in cls.SCAN_SUFFIXES:
+                    continue
+                if path.relative_to(cls.PLUGIN_ROOT) in cls.IGNORED_PATHS:
+                    continue
+                files.append(path)
+        return files
+
     def test_no_plugin_file_references_deleted_orchestration_skill(self):
+        candidates = self._candidate_files()
+        assert self.PLUGIN_ROOT / "commands" / "refresh.md" in candidates
         offenders = []
-        for subdir in self.SCAN_DIRS:
-            root = self.PLUGIN_ROOT / subdir
-            if not root.is_dir():
+        for path in candidates:
+            rel = path.relative_to(self.PLUGIN_ROOT)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
                 continue
-            for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                if path.suffix not in self.SCAN_SUFFIXES:
-                    continue
-                rel = path.relative_to(self.PLUGIN_ROOT)
-                if rel in self.IGNORED_PATHS:
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
-                    continue
-                if self.FORBIDDEN_REF in text:
-                    offenders.append(str(rel))
+            if self.FORBIDDEN_REF in text:
+                offenders.append(str(rel))
         assert not offenders, (
             f"Files contain dangling xref to deleted {self.FORBIDDEN_REF!r}:\n"
             + "\n".join(f"  - {f}" for f in offenders)
@@ -976,7 +1210,7 @@ class TestPerLoopDispatchSites:
         # sole-row files (peer-review, plan-mode, rePACT) all survived.
         # Globbing also covers a command file that has no row at all.
         found = {}
-        for path in sorted(COMMANDS_DIR.glob("*.md")):
+        for path in _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md"):
             count = sum(
                 1 for line in path.read_text(encoding="utf-8").splitlines()
                 if self.LEAD_IN in line
@@ -1729,7 +1963,7 @@ def test_no_undeclared_teammate_stopping_command():
     declared = set(TERMINATION_SKELETON_SURFACES)
     found = [
         f"commands/{p.name}"
-        for p in sorted(COMMANDS_DIR.glob("*.md"))
+        for p in _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md")
         if "TaskStop(" in p.read_text(encoding="utf-8")
     ]
     # Non-vacuity control: an empty scan would make the assertion below pass
@@ -1795,15 +2029,12 @@ class TestResolverVocabularyIsSingleSourced:
         """Return [(relpath, lineno, value)] for every assignment found."""
         found = []
         for subdir in self.SCAN_DIRS:
-            root = self.PLUGIN_ROOT / subdir
-            if not root.is_dir():
-                continue
-            for path in sorted(root.rglob("*")):
-                if not path.is_file() or path.suffix not in self.SCAN_SUFFIXES:
+            for path in _shipped_population(f"{self.PLUGIN_ROOT.name}/{subdir}"):
+                if path.suffix not in self.SCAN_SUFFIXES:
                     continue
                 try:
                     text = path.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
+                except UnicodeDecodeError:
                     continue
                 rel = path.relative_to(self.PLUGIN_ROOT)
                 for lineno, line in enumerate(text.splitlines(), 1):
@@ -2207,7 +2438,7 @@ def _expected_write_guard(filename):
 @pytest.fixture(scope="module")
 def journal_site_map():
     sites = []
-    for path in sorted(COMMANDS_DIR.glob("*.md")):
+    for path in _shipped_population(f"{PLUGIN_ROOT.name}/commands", "*.md"):
         sites.extend(_parse_journal_sites(path.name, path.read_text(encoding="utf-8")))
     return {(site.filename, site.ordinal): site for site in sites}
 

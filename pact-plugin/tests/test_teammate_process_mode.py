@@ -34,8 +34,16 @@ from fixtures.role_frames import (
     captured_pretooluse_teammate_inprocess_subagent,
     captured_pretooluse_teammate_tmux,
 )
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
+
+
+def _tracked_hook_python_files() -> list[Path]:
+    repo_root = HOOKS.parent.parent
+    relative = HOOKS.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
 GATE = HOOKS / "wait_filler_gate.py"
 TEAM = "session-procmode"
 PROJECT_DIR = "/procmode/project"
@@ -317,7 +325,40 @@ def test_role_split_layers_use_the_one_backend_helper():
         ]
         assert calls, f"{name} does not call teammate_is_separate_process"
     readers = sorted(
-        path.relative_to(HOOKS).as_posix() for path in HOOKS.rglob("*.py")
+        path.relative_to(HOOKS).as_posix() for path in _tracked_hook_python_files()
         if "__pycache__" not in path.parts and "backendType" in path.read_text(encoding="utf-8")
     )
     assert readers == ["shared/background_work.py"], readers
+
+
+def test_tracked_hook_population_ignores_an_untracked_backend_reader(tmp_path, monkeypatch):
+    """The needle reads backendType; under the old rglob it joins the readers."""
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    layer = plugin / "hooks" / "layer.py"
+    layer.parent.mkdir(parents=True)
+    layer.write_text(
+        "def f():\n    return teammate_is_separate_process(member)\n",
+        encoding="utf-8")
+    tracked_reader = plugin / "hooks" / "shared" / "background_work.py"
+    tracked_reader.parent.mkdir(parents=True)
+    tracked_reader.write_text(
+        'MARKER = {"backendType": "tmux"}\n', encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "HOOKS", plugin / "hooks")
+    monkeypatch.setitem(globals(), "LAYER_HOOKS", ("layer.py",))
+
+    assert tracked_reader in _tracked_hook_python_files()
+    test_role_split_layers_use_the_one_backend_helper()
+
+    stray = plugin / "hooks" / "zzprobe.py"
+    stray.write_text('MARKER = {"backendType": "other"}\n', encoding="utf-8")
+    try:
+        test_role_split_layers_use_the_one_backend_helper()
+        assert stray not in _tracked_hook_python_files()
+    finally:
+        stray.unlink()

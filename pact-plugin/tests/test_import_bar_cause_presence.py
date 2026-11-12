@@ -31,8 +31,8 @@ WHAT A GREEN HERE DOES NOT MEAN. Read this before you trust it.
   * THE REFUTED-SPELLING ARMS REACH THE PLUGIN TREE AND NO FURTHER. They walk
     `PLUGIN_DIR`, so a refuted spelling written above that directory, at the
     repository root, is outside the scan.
-  * A NEW FILE THAT SAYS NOTHING IS REACHED INSIDE THE PACKAGE, AND NOT
-    OUTSIDE IT. The population rule fails on a new .py in the package that does
+  * A NEW TRACKED FILE THAT SAYS NOTHING IS REACHED INSIDE THE PACKAGE, AND NOT
+    OUTSIDE IT. The population rule fails on a new tracked .py in the package that does
     not state the bar. The same file elsewhere in the tree is invisible here.
 
 THE POPULATION HAS THREE PARTS, AND EACH COVERS A FAILURE THE OTHERS MISS.
@@ -84,9 +84,12 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent / "scripts" / "memory_repair"
 
@@ -325,19 +328,20 @@ SPELLING_EXCLUSIONS: dict = {
 
 
 def files_scanned_for_refuted_spellings() -> list[Path]:
-    """Return the plugin-tree files the refuted-spelling arms read.
+    """Return the tracked plugin-tree files the refuted-spelling arms read.
 
-    THIS WALK RETURNS EVERY FILE AND FILTERS NOTHING. The per-spelling
-    exclusion runs at the arm instead. `test_each_exclusion_is_still_necessary`
-    DEPENDS ON THAT PLACEMENT: it asks whether an exclusion key is in this
-    population, and a key excluded HERE would fail that test while doing its
-    job correctly. Move the filter into this walk and that arm breaks without
-    anybody editing it.
+    THIS WALK RETURNS EVERY TRACKED FILE AND FILTERS NOTHING BY SPELLING. The
+    per-spelling exclusion runs at the arm instead.
+    `test_each_exclusion_is_still_necessary` DEPENDS ON THAT PLACEMENT: it asks
+    whether an exclusion key is in this population, and a key excluded HERE
+    would fail that test while doing its job correctly. Move the filter into
+    this walk and that arm breaks without anybody editing it.
     """
-    found: list[Path] = []
-    for suffix in SCANNED_SUFFIXES:
-        found.extend(PLUGIN_DIR.rglob(f"*{suffix}"))
-    return sorted(found)
+    repo_root = PLUGIN_DIR.parent
+    relative = PLUGIN_DIR.relative_to(repo_root).as_posix()
+    return sorted(
+        path for path in _tracked_files(repo_root, relative)
+        if path.suffix in SCANNED_SUFFIXES)
 
 
 def spelling_is_excluded_for(path: Path, spelling: str) -> bool:
@@ -374,11 +378,39 @@ def carries(text: str, sentence: str) -> bool:
     return sentence.casefold() in flatten(text).casefold()
 
 
+def _synthetic_tracked_package(tmp_path: Path) -> Path:
+    package = tmp_path / "repo" / "pact-plugin" / "scripts" / "memory_repair"
+    package.mkdir(parents=True)
+    text = f'"""Names the {BAR_SUBJECT}. {REQUIRED_CAUSE_CLAUSE}"""\n'
+    for name in MINIMUM_CARRIERS:
+        (package / name).write_text(text, encoding="utf-8")
+    repo = package.parents[2]
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    return package
+
+
+def _tracked_package_python_files() -> list[Path]:
+    repo_root = PACKAGE_DIR.parents[2]
+    relative = PACKAGE_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
+
+
+def _python_files(package_dir: Path) -> list[Path]:
+    if package_dir.resolve() == PACKAGE_DIR:
+        return _tracked_package_python_files()
+    return sorted(package_dir.rglob("*.py"))
+
+
 def modules_stating_the_bar(package_dir: Path) -> list[Path]:
-    """Return each .py file in `package_dir` whose text names the guarded package."""
+    """Return each tracked or synthetic .py file naming the guarded package."""
     return sorted(
         path
-        for path in package_dir.rglob("*.py")
+        for path in _python_files(package_dir)
         if carries(path.read_text(encoding="utf-8"), BAR_SUBJECT)
     )
 
@@ -423,7 +455,7 @@ def modules_neither_stating_nor_exempt(
     package_dir: Path, exempt: frozenset
 ) -> list[str]:
     """Files on disk that do not state the bar and are not declared exempt."""
-    on_disk = {relative_name(p, package_dir) for p in package_dir.rglob("*.py")}
+    on_disk = {relative_name(p, package_dir) for p in _python_files(package_dir)}
     stating = {
         relative_name(p, package_dir) for p in modules_stating_the_bar(package_dir)
     }
@@ -478,7 +510,7 @@ class TestThePopulationRules:
         """The population covers files nobody has written yet.
 
         MINIMUM_CARRIERS holds fixed paths, so it cannot reach a carrier added
-        later. This reaches it: a new .py file must state the bar, or take a
+        later. This reaches it: a new tracked .py file must state the bar, or take a
         line in EXEMPT_MODULES. AGAINST A RENAME, a file then leaves THIS RULE
         only by a visible declaration. A DELETED file leaves by a second exit
         and takes no declaration, and the floor above covers that for the paths
@@ -504,10 +536,38 @@ class TestTheInstrumentIsLive:
 
     def test_package_dir_holds_python_files(self):
         assert PACKAGE_DIR.is_dir(), f"package directory absent: {PACKAGE_DIR}"
-        assert list(PACKAGE_DIR.rglob("*.py")), (
-            f"no .py files below {PACKAGE_DIR}. The walk broke, and each "
+        tracked = _tracked_package_python_files()
+        assert tracked, (
+            f"no tracked .py files below {PACKAGE_DIR}. The walk broke, and each "
             f"per-module assertion then passes over an empty set."
         )
+        assert PACKAGE_DIR / "__init__.py" in tracked
+
+    def test_tracked_package_population_controls_untracked_and_synthetic(
+        self, tmp_path, monkeypatch
+    ):
+        package = _synthetic_tracked_package(tmp_path)
+        monkeypatch.setitem(globals(), "PACKAGE_DIR", package)
+        before = _tracked_package_python_files()
+        assert package / "__init__.py" in before
+        stray = package / "000_backend_issue1714_probe.py"
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert _python_files(package) == before
+        finally:
+            stray.unlink()
+        synthetic = tmp_path / "package"
+        synthetic.mkdir()
+        member = synthetic / "member.py"
+        member.write_text("", encoding="utf-8")
+        assert member in _python_files(synthetic)
+
+    def test_tracked_package_population_omits_a_deleted_member(self, monkeypatch):
+        known = PACKAGE_DIR / "__init__.py"
+        is_file = Path.is_file
+        monkeypatch.setattr(
+            Path, "is_file", lambda path: False if path == known else is_file(path))
+        assert known not in _tracked_package_python_files()
 
     def test_the_comparison_survives_a_wrap_and_a_recapitalisation(self):
         """A control on the matcher itself, not on the files it reads.
@@ -623,7 +683,11 @@ class TestTheFloorEarnsItsPlace:
     @staticmethod
     def _copy(tmp_path: Path) -> Path:
         target = tmp_path / "memory_repair"
-        shutil.copytree(PACKAGE_DIR, target)
+        target.mkdir()
+        for source in _tracked_package_python_files():
+            destination = target / source.relative_to(PACKAGE_DIR)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         return target
 
     @staticmethod
@@ -652,6 +716,21 @@ class TestTheFloorEarnsItsPlace:
         )
         assert renamed != text, "the mutation changed nothing, so the arm proves nothing"
         path.write_text(renamed, encoding="utf-8")
+
+    def test_the_copy_excludes_untracked_source_files(self, tmp_path, monkeypatch):
+        source_package = _synthetic_tracked_package(tmp_path)
+        monkeypatch.setitem(globals(), "PACKAGE_DIR", source_package)
+        expected = {path.relative_to(source_package)
+                    for path in _tracked_package_python_files()}
+        stray = source_package / "000_backend_import_bar_copy_issue1714_probe.py"
+        stray.write_text("", encoding="utf-8")
+        try:
+            package = self._copy(tmp_path)
+            copied = {path.relative_to(package) for path in _python_files(package)}
+            assert copied == expected
+            assert self._arms_pass(package, MINIMUM_CARRIERS, EXEMPT_MODULES)
+        finally:
+            stray.unlink()
 
     def test_a_plain_rename_is_caught_without_the_floor(self, tmp_path):
         """The condition the OLD stated cause named, and it is not unique."""
@@ -843,3 +922,32 @@ class TestTheRefutedCauseStaysOut:
                     f"REFUTED_SPELLINGS, and do not add an entry to "
                     f"SPELLING_EXCLUSIONS to quiet it."
                 )
+
+    def test_untracked_carrier_is_outside_the_scanned_population(
+            self, tmp_path, monkeypatch):
+        """The probe carries a refuted spelling, so the old walk would redden."""
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        tracked = plugin / "scripts" / "known.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("clean\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        monkeypatch.setitem(globals(), "PLUGIN_DIR", plugin)
+
+        scanned = files_scanned_for_refuted_spellings()
+        assert tracked in scanned
+        self.test_a_refuted_spelling_does_not_return("an import is a write")
+
+        stray = plugin / "scripts" / "000_issue1714_probe.py"
+        stray.write_text("an import is a write\n", encoding="utf-8")
+        try:
+            # The oracle must be unchanged by the untracked carrier, and the
+            # carrier must not enter the scanned population.
+            self.test_a_refuted_spelling_does_not_return("an import is a write")
+            assert stray not in files_scanned_for_refuted_spellings()
+        finally:
+            stray.unlink()

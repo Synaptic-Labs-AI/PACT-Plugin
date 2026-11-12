@@ -36,11 +36,21 @@ aligned it with paths.py's canonical structure; the allowlist-rot test below
 prunes-by-failing if a residual ever vanishes, which is what dropped it here.)
 """
 import ast
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _tracked_files
+
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+
+
+def _tracked_hook_python_files() -> list[Path]:
+    repo_root = HOOKS_DIR.parent.parent
+    relative = HOOKS_DIR.relative_to(repo_root).as_posix()
+    return sorted(path for path in _tracked_files(repo_root, relative)
+                  if path.suffix == ".py")
 
 # (basename, exact unparsed construction) pairs that are legitimate residuals.
 ALLOWLIST = {
@@ -73,7 +83,7 @@ def _hardcoded_home_claude(tree: ast.AST, basename: str) -> list[tuple[str, int,
 
 def _scan_hooks() -> list[tuple[str, int, str]]:
     violations: list[tuple[str, int, str]] = []
-    for path in sorted(HOOKS_DIR.rglob("*.py")):
+    for path in _tracked_hook_python_files():
         if "__pycache__" in str(path):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -89,6 +99,34 @@ def _unallowlisted(violations: list[tuple[str, int, str]]) -> list[tuple[str, in
         if (basename, unparsed) not in ALLOWLIST:
             out.append((rel, ln, unparsed))
     return out
+
+
+def test_tracked_hook_population_ignores_an_untracked_home_site(tmp_path, monkeypatch):
+    """The needle is a hardcoded home site; under the old rglob it is a violation."""
+    plugin = tmp_path / "repo" / "pact-plugin"
+    hooks = plugin / "hooks"
+    known = hooks / "clean.py"
+    known.parent.mkdir(parents=True)
+    known.write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(plugin.parent)], check=True,
+        capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(plugin.parent), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "HOOKS_DIR", hooks)
+
+    assert known in _tracked_hook_python_files()
+    assert _scan_hooks() == []
+
+    stray = hooks / "zzprobe.py"
+    stray.write_text(
+        'from pathlib import Path\nX = Path.home() / ".claude"\n',
+        encoding="utf-8")
+    try:
+        assert _scan_hooks() == []
+    finally:
+        stray.unlink()
 
 
 class TestNoHardcodedStatePathDrift:

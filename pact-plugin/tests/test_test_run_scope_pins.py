@@ -138,12 +138,30 @@ from __future__ import annotations
 
 import collections
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 PLUGIN = Path(__file__).resolve().parents[1]
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = False) -> list[Path]:
+    """Deleted index entries are opt-in; the default is the safe direction.
+
+    A population read as TEXT must not keep deleted entries: the census reader
+    would raise FileNotFoundError on the deleted path instead of the named
+    missing-surface failure the enumeration arm reports. Only a structural
+    assertion that must still SEE a deleted member passes True.
+    """
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=keep_deleted
+    )
+
 
 SURFACE_GLOBS = (
     "commands/*.md",
@@ -162,6 +180,17 @@ SURFACE_GLOBS = (
     "templates/*.md",
     "protocols/*.md",
 )
+
+SURFACE_KNOWN_MEMBERS = {
+    "commands/*.md": "commands/refresh.md",
+    "agents/*.md": "agents/pact-orchestrator.md",
+    "skills/*/SKILL.md": "skills/pact-agent-teams/SKILL.md",
+    "skills/*/references/*.md": "skills/pact-testing-strategies/references/test-pyramid.md",
+    "skills/*/*.md": "skills/n8n-code-javascript/BUILTIN_FUNCTIONS.md",
+    "reference/*.md": "reference/config.md",
+    "templates/*.md": "templates/environment-model.md",
+    "protocols/*.md": "protocols/pact-protocols.md",
+}
 
 KNOWN_SITE_FILES = (
     "commands/orchestrate.md",
@@ -716,11 +745,85 @@ BASELINE_BY_FILE = {
 BASELINE_CANDIDATES = sum(BASELINE_BY_FILE.values())
 
 
+def test_tracked_population_excludes_untracked_and_keeps_deleted(tmp_path):
+    repo = tmp_path / "repo"
+    tracked = repo / "pact-plugin" / "agents" / "tracked.md"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked")
+    (tracked.parent / "untracked.md").write_text("untracked")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/agents/tracked.md"], cwd=repo, check=True)
+    pattern = "pact-plugin/agents/*.md"
+    assert _tracked_glob(
+        repo, pattern, "pact-plugin/agents/tracked.md",
+        keep_deleted=True) == [tracked]
+    tracked.unlink()
+    assert _tracked_glob(
+        repo, pattern, "pact-plugin/agents/tracked.md",
+        keep_deleted=True) == [tracked]
+
+
+def test_tracked_population_refuses_empty_and_wrong_roots(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(repo, "pact-plugin/agents/*.md", "pact-plugin/agents/tracked.md")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(repo, "pact-plugin/agents/*.md", "pact-plugin/agents/tracked.md")
+
+
+def test_deleted_tracked_surface_is_not_read_back(tmp_path, monkeypatch):
+    """A locally deleted tracked surface must leave the text census population.
+
+    With ``keep_deleted=True`` the deleted path stays in ``_surfaces`` and
+    ``_candidates`` raises FileNotFoundError; the enumeration arm's named
+    ``missing from the enumerated surfaces`` failure never gets to report it.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("known\n", encoding="utf-8")
+    doomed = commands / "wrap-up.md"
+    doomed.write_text("doomed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "SURFACE_GLOBS", ("commands/*.md",))
+    monkeypatch.setitem(globals(), "SURFACE_KNOWN_MEMBERS",
+                        {"commands/*.md": "commands/refresh.md"})
+
+    surfaces = _surfaces()
+
+    assert known in surfaces
+    assert doomed not in surfaces, (
+        f"the deleted tracked {doomed.name} stayed in the text census "
+        "population; the census reader would raise FileNotFoundError instead "
+        "of the named missing-surface failure")
+    for path in surfaces:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
+
+
 def _surfaces() -> list[Path]:
     found: list[Path] = []
     for pattern in SURFACE_GLOBS:
-        matches = sorted(PLUGIN.glob(pattern))
-        assert matches, f"surface glob {pattern!r} matched no files"
+        # The directory name is READ, not hardcoded: an installed cache places
+        # the plugin under a version directory (.../PACT/4.8.34).
+        try:
+            matches = _tracked_glob(
+                PLUGIN.parent, f"{PLUGIN.name}/{pattern}",
+                f"{PLUGIN.name}/{SURFACE_KNOWN_MEMBERS[pattern]}",
+                keep_deleted=False,
+            )
+        except AssertionError:
+            if PLUGIN.name == "pact-plugin":
+                raise
+            pytest.skip(
+                f"installed layout {PLUGIN} ships no {PLUGIN.name}/{pattern}; "
+                "the run-scope claims are about the dev checkout")
         found.extend(matches)
     return sorted(set(found))
 

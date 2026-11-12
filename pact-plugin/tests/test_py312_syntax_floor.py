@@ -43,9 +43,12 @@ wrong, and nothing here demands or forbids them.
 import ast
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 from typing import Iterable, Iterator, List
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 
@@ -71,11 +74,28 @@ class Violation:
 # File discovery
 # ---------------------------------------------------------------------------
 
+KNOWN_TRACKED_MEMBERS = {
+    "hooks": "hooks/handoff_ordering_gate.py",
+    "skills/pact-memory/scripts": "skills/pact-memory/scripts/memory_init.py",
+    "scripts": "scripts/archive_pin.py",
+}
+
+
+def _tracked_python_files(root: Path) -> list[Path]:
+    relative = root.relative_to(PLUGIN_ROOT.parent).as_posix()
+    return sorted(path for path in _tracked_files(PLUGIN_ROOT.parent, relative)
+                  if path.suffix == ".py")
+
+
 def iter_python_files(roots: Iterable[Path] = SCANNED_ROOTS) -> Iterator[Path]:
-    """Yield every .py file under the given roots, sorted for stable ids."""
+    """Yield tracked shipped files; synthetic roots keep their disk population."""
     for root in roots:
-        for path in sorted(root.rglob("*.py")):
-            yield path
+        try:
+            root.relative_to(PLUGIN_ROOT)
+        except ValueError:
+            yield from sorted(root.rglob("*.py"))
+        else:
+            yield from _tracked_python_files(root)
 
 
 def _relpath(path: Path) -> str:
@@ -138,10 +158,10 @@ class TestDiscoveryFloor:
         # skills/pact-memory/scripts 14 + scripts 6).
         #
         # COUNTING RULE, so the next reader RE-DERIVES instead of inheriting a
-        # number: _SCANNED_FILES is every *.py that Path.rglob finds under
-        # each entry of SCANNED_ROOTS. Measure it; never carry a figure
-        # forward from this comment. Any count written here is true only on
-        # the day it was written.
+        # number: _SCANNED_FILES is every tracked *.py that git ls-files finds
+        # under each entry of SCANNED_ROOTS, with working-tree deletions filtered
+        # out. Measure it; never carry a figure forward from this comment. Any
+        # count written here is true only on the day it was written.
         #
         # SLACK IS NOT A PROPERTY THIS COMMENT CAN PIN: it is today's count
         # minus 106, and it WIDENS on its own as files are added. The wider
@@ -161,6 +181,41 @@ class TestDiscoveryFloor:
         # Reuses iter_python_files so the guard and the scan cannot drift.
         for root in SCANNED_ROOTS:
             assert any(iter_python_files((root,))), root
+    def test_tracked_discovery_controls_untracked_files(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        for relative in KNOWN_TRACKED_MEMBERS.values():
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+            check=True, capture_output=True)
+        roots = tuple(plugin / relative for relative in KNOWN_TRACKED_MEMBERS)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        monkeypatch.setitem(globals(), "SCANNED_ROOTS", roots)
+
+        root = roots[0]
+        before = list(iter_python_files((root,)))
+        for scanned_root in roots:
+            relative = scanned_root.relative_to(plugin).as_posix()
+            assert plugin / KNOWN_TRACKED_MEMBERS[relative] in list(
+                iter_python_files((scanned_root,)))
+        stray = root / "000_backend_issue1714_probe.py"
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert list(iter_python_files((root,))) == before
+        finally:
+            stray.unlink()
+
+    def test_tracked_discovery_omits_a_deleted_member(self, monkeypatch):
+        known = PLUGIN_ROOT / KNOWN_TRACKED_MEMBERS["hooks"]
+        is_file = Path.is_file
+        monkeypatch.setattr(
+            Path, "is_file", lambda path: False if path == known else is_file(path))
+        assert known not in list(iter_python_files((SCANNED_ROOTS[0],)))
 
 
 class TestPy312SyntaxFloor:

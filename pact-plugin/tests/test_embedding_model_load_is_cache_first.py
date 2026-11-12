@@ -30,7 +30,10 @@ import ast
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import subprocess
 import pytest
+
+from fixtures.tracked_files import tracked_glob as _tracked_glob
 
 from scripts.embeddings import EmbeddingService
 
@@ -240,7 +243,7 @@ _FIXTURE_CALL_SITE = "tests/test_memory_layer_composition.py"
 _KNOWN_CALL_SITES = (_PRODUCTION_CALL_SITE, _FIXTURE_CALL_SITE)
 
 
-def _scan():
+def _scan(root=_PLUGIN_ROOT):
     """Walk the tree once; return (call_sites, unparseable_paths).
 
     Matches `ast.Call` nodes whose callee attribute is `from_pretrained`, which
@@ -271,13 +274,13 @@ def _scan():
     """
     found = []
     skipped = []
-    for path in sorted(_PLUGIN_ROOT.rglob("*.py")):
+    for path in sorted(_tracked_glob(root, "**/*.py", allow_empty=True)):
         if "__pycache__" in path.parts:
             continue
         try:
             tree = ast.parse(path.read_text())
         except (SyntaxError, UnicodeDecodeError, OSError) as exc:
-            skipped.append((str(path.relative_to(_PLUGIN_ROOT)), type(exc).__name__))
+            skipped.append((str(path.relative_to(root)), type(exc).__name__))
             continue
         handled = set()
         for node in ast.walk(tree):
@@ -292,7 +295,7 @@ def _scan():
                 kwargs = {k.arg: ast.unparse(k.value) for k in node.keywords}
                 found.append(
                     (
-                        str(path.relative_to(_PLUGIN_ROOT)),
+                        str(path.relative_to(root)),
                         node.lineno,
                         kwargs.get("force_download"),
                         id(node) in handled,
@@ -443,3 +446,26 @@ def test_the_except_discriminator_tells_the_two_positions_apart():
         "Line 2 is bare, line 5 is inside the `try` (NOT the handler), and only "
         "line 7 is inside the `except`."
     )
+
+
+def test_an_untracked_module_cannot_join_the_cache_first_scan(tmp_path):
+    """A scratch module must not join the scan or its skipped list."""
+    root = tmp_path / "plugin"
+    (root / "hooks").mkdir(parents=True)
+    tracked = root / "hooks" / "tracked.py"
+    tracked.write_text(
+        "from transformers import AutoModel\n"
+        "AutoModel.from_pretrained('m', force_download=True)\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"],
+                   check=True, capture_output=True)
+
+    needle = root / "hooks" / "zzprobe.py"
+    needle.write_text("def broken(:\n", encoding="utf-8")
+
+    found, skipped = _scan(root)
+
+    assert [site[0] for site in found] == ["hooks/tracked.py"], (
+        "the tracked control is missing from the scan")
+    assert skipped == [], f"untracked needle was scanned: {needle}"

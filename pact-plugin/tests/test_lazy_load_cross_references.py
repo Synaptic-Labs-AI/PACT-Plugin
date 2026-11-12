@@ -19,12 +19,22 @@ test_every_expected_agent_file_is_present pins the agent file set by name, and
 the others check the cross-references and @-refs in whichever agent bodies exist.
 """
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
+
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 
 
 
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
 PLUGIN_ROOT = Path(__file__).parent.parent
+
+
+def _tracked_glob(directory, pattern):
+    """Return current tracked files only, excluding deleted index entries."""
+    return _shared_tracked_files(directory, ".", pattern)
 
 EXPECTED_AGENT_FILES = {
     "pact-architect.md",
@@ -56,11 +66,60 @@ def _resolve(agent_path: Path, href: str) -> Path:
 
 def test_every_expected_agent_file_is_present():
     """Every file in EXPECTED_AGENT_FILES exists, and no other agent file does."""
-    actual = {p.name for p in AGENTS_DIR.glob("*.md")}
+    files = _tracked_glob(AGENTS_DIR, "*.md")
+    assert AGENTS_DIR / "pact-devops-engineer.md" in files
+    actual = {p.name for p in files}
     missing = EXPECTED_AGENT_FILES - actual
     extra = actual - EXPECTED_AGENT_FILES
     assert not missing, f"missing agent files: {missing}"
     assert not extra, f"unexpected agent files: {extra}"
+
+
+def test_agent_population_consumer_excludes_untracked_agents(tmp_path, monkeypatch):
+    """The CONSUMER, not only the helper, must read the git index.
+
+    Reverting the five ``_tracked_glob(AGENTS_DIR, ...)`` call sites to
+    ``AGENTS_DIR.glob("*.md")`` keeps the helper arm green; this arm drives
+    ``test_every_expected_agent_file_is_present`` and reddens, because an
+    untracked agent file then joins the population the oracle judges.
+    """
+    repo = tmp_path / "repo"
+    agents = repo / "pact-plugin" / "agents"
+    agents.mkdir(parents=True)
+    for name in sorted(EXPECTED_AGENT_FILES):
+        (agents / name).write_text("body\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    probe = agents / "000_untracked_probe.md"
+    probe.write_text("body\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "AGENTS_DIR", agents)
+
+    test_every_expected_agent_file_is_present()
+
+    # Positive control for the arm itself: the needle is on disk, so a green
+    # consumer above means the consumer ignored it rather than never seeing it.
+    assert probe.is_file()
+
+
+def test_tracked_glob_excludes_untracked_and_detects_deletion(tmp_path):
+    directory = tmp_path / "agents"
+    directory.mkdir()
+    keep = directory / "keep.md"
+    removed = directory / "removed.md"
+    nested = directory / "nested" / "nested.md"
+    nested.parent.mkdir()
+    for path in (keep, removed, nested, directory / "other.txt"):
+        path.write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    (directory / "untracked.md").write_text("scratch", encoding="utf-8")
+
+    assert _tracked_glob(directory, "*.md") == [keep, removed]
+    removed.unlink()
+    assert _tracked_glob(directory, "*.md") == [keep]
+    keep.unlink()
+    with pytest.raises(AssertionError, match="empty tracked population"):
+        _tracked_glob(directory, "*.md")
 
 
 def test_protocol_cross_references_resolve():
@@ -69,7 +128,7 @@ def test_protocol_cross_references_resolve():
     Invariant guard — must hold at every commit.
     """
     failures = []
-    for agent_path in sorted(AGENTS_DIR.glob("*.md")):
+    for agent_path in sorted(_tracked_glob(AGENTS_DIR, "*.md")):
         text = agent_path.read_text()
         for m in LINK_PATTERN.finditer(text):
             href = m.group("href")
@@ -87,7 +146,7 @@ def test_skill_cross_references_resolve():
     Invariant guard — must hold at every commit.
     """
     failures = []
-    for agent_path in sorted(AGENTS_DIR.glob("*.md")):
+    for agent_path in sorted(_tracked_glob(AGENTS_DIR, "*.md")):
         text = agent_path.read_text()
         for m in LINK_PATTERN.finditer(text):
             href = m.group("href")
@@ -109,7 +168,7 @@ def test_imperative_protocols_referenced_by_at_least_one_agent():
         "pact-completion-authority.md",
     ]
     bodies = {
-        p.name: p.read_text() for p in AGENTS_DIR.glob("*.md")
+        p.name: p.read_text() for p in _tracked_glob(AGENTS_DIR, "*.md")
     }
     unreferenced = []
     for protocol in imperative:
@@ -128,7 +187,7 @@ def test_no_at_ref_in_agent_bodies_for_protocol_or_skill_paths():
     """
     at_ref_pattern = re.compile(r"@(?:~/.claude/plugins|\.\./protocols|\.\./skills)\S*\.md")
     failures = []
-    for agent_path in sorted(AGENTS_DIR.glob("*.md")):
+    for agent_path in sorted(_tracked_glob(AGENTS_DIR, "*.md")):
         text = agent_path.read_text()
         for m in at_ref_pattern.finditer(text):
             failures.append(f"{agent_path.name}: forbidden @-ref → {m.group()}")

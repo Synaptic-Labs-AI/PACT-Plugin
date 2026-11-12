@@ -10,13 +10,55 @@ Tests cover:
 6. Agent body contains expected sections
 """
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import frontmatter_block, parse_frontmatter
 
-AGENTS_DIR = Path(__file__).parent.parent / "agents"
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+AGENTS_DIR = PLUGIN_ROOT / "agents"
+REPO_ROOT = PLUGIN_ROOT.parent
+
+
+def _tracked_files(repo_root, relative_dir, pattern):
+    """Exercise the helper's keep_deleted option; content consumers use false."""
+    return _shared_tracked_files(
+        repo_root, relative_dir, pattern, keep_deleted=True
+    )
+
+
+def _shipped_agents():
+    """Tracked agent markdown, named by the plugin directory's own name.
+
+    A CONTENT consumer: deleted index entries are dropped (``keep_deleted``
+    false), because every caller reads the file. Keeping a deleted entry here
+    turns one local deletion into a FileNotFoundError from each reader instead
+    of the single named ``Missing agent:`` failure the oracle already reports.
+
+    An installed plugin cache places the plugin under a version directory
+    (``.../PACT/4.8.34``), where a literal ``pact-plugin/`` prefix matches
+    nothing. An install that genuinely omits the agents skips each requesting
+    test by name instead of erroring through all of them.
+
+    Only the helper's empty-population shape is a layout omission. Its
+    fail-closed refusals (unavailable git, an unsafe root) fail in every
+    layout rather than skipping as though the agents were absent.
+    """
+    relative = f"{PLUGIN_ROOT.name}/agents"
+    try:
+        return _shared_tracked_files(REPO_ROOT, relative, "*.md")
+    except AssertionError as exc:
+        if "empty tracked population" not in str(exc):
+            raise
+        if PLUGIN_ROOT.name == "pact-plugin":
+            raise
+        pytest.skip(
+            f"installed layout {PLUGIN_ROOT} ships no {relative!r}; "
+            "the agent-structure claims are about the dev checkout")
+
 
 # Expected agent files
 EXPECTED_AGENTS = {
@@ -40,8 +82,10 @@ REQUIRED_FRONTMATTER_KEYS = {"name", "description"}
 
 @pytest.fixture
 def agent_files():
-    """Load all agent markdown files (orchestrator + 12 teammates)."""
-    return list(AGENTS_DIR.glob("*.md"))
+    """Load tracked agent markdown files (orchestrator + 12 teammates)."""
+    files = _shipped_agents()
+    assert AGENTS_DIR / "pact-devops-engineer.md" in files
+    return files
 
 
 # Subset of agent files that are TEAMMATES — i.e., spawned via Agent() with
@@ -52,11 +96,237 @@ TEAMMATE_AGENT_NAMES = EXPECTED_AGENTS - {"pact-orchestrator"}
 
 @pytest.fixture
 def teammate_agent_files():
-    """Load only teammate agent files (excludes pact-orchestrator)."""
+    """Load only tracked teammate agent files (excludes pact-orchestrator)."""
     return [
-        p for p in AGENTS_DIR.glob("*.md")
+        p
+        for p in _shipped_agents()
         if p.stem in TEAMMATE_AGENT_NAMES
     ]
+
+
+class TestTrackedAgentPopulation:
+    @staticmethod
+    def _git(root, *args):
+        subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, check=True
+        )
+
+    def test_untracked_is_invisible_and_tracked_deletion_stays(self, tmp_path):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        tracked = agents / "pact-devops-engineer.md"
+        tracked.write_text("tracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "add", "-A")
+        untracked = agents / "000_untracked_probe.md"
+        untracked.write_text("untracked\n", encoding="utf-8")
+
+        files = _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+        assert tracked in files
+        assert untracked not in files
+
+        tracked.unlink()
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/agents", "*.md"
+        )
+
+    def test_nonzero_git_result_never_falls_back(self, tmp_path, monkeypatch):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(AssertionError, match="Refusing to widen"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    @pytest.mark.parametrize("command", ["ls-files", "rev-parse"])
+    def test_other_spawn_errors_never_fall_back(self, tmp_path, monkeypatch, command):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", command]:
+                raise PermissionError("synthetic spawn denial")
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: not a git repository"
+                )
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(PermissionError, match="spawn denial"):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_non_git_filename_error_never_falls_back(self, tmp_path, monkeypatch):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+
+        def fake_run(args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", str(tmp_path))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(FileNotFoundError):
+            _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_layout_guard_classifies_by_failure_shape(
+            self, tmp_path, monkeypatch):
+        """Outside the dev checkout, only an EMPTY population is a layout gap.
+
+        The helper's fail-closed refusals are failures in every layout; a
+        blanket catch would relabel broken git as an installed layout that
+        ships no agents. The skip reason must name the layout omission, and
+        the refusal must surface with its own message.
+        """
+        install = tmp_path / "PACT" / "4.8.34"
+        agents = install / "agents"
+        agents.mkdir(parents=True)
+        (agents / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        self._git(tmp_path, "init", "-q")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", install)
+
+        with pytest.raises(pytest.skip.Exception, match="installed layout"):
+            _shipped_agents()
+
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        try:
+            _shipped_agents()
+        except AssertionError as exc:
+            assert "Refusing to widen" in str(exc), exc
+        except pytest.skip.Exception as exc:
+            # A skip here means the guard swallowed the refusal as a layout
+            # omission; that is the defect this arm exists to catch.
+            raise AssertionError(
+                f"the layout guard swallowed a refusal as a skip: {exc}"
+            ) from exc
+        else:
+            raise AssertionError("the refusal did not surface at all")
+
+    def test_absent_git_binary_keeps_gitless_fallback(self, tmp_path, monkeypatch):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        tracked = agents / "pact-devops-engineer.md"
+        tracked.write_text("exported\n", encoding="utf-8")
+
+        def fake_run(args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert tracked in _tracked_files(tmp_path, "pact-plugin/agents", "*.md")
+
+    def test_pathspec_cannot_escape_the_root(self, tmp_path):
+        with pytest.raises(ValueError, match="escapes the repository"):
+            _tracked_files(tmp_path, "../outside", "*.md")
+
+    def test_gitless_fallback_is_nonempty_or_loud(self, tmp_path):
+        agents = tmp_path / "pact-plugin" / "agents"
+        agents.mkdir(parents=True)
+        tracked = agents / "pact-devops-engineer.md"
+        tracked.write_text("exported\n", encoding="utf-8")
+        assert tracked in _tracked_files(
+            tmp_path, "pact-plugin/agents", "*.md"
+        )
+
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_files(tmp_path, "pact-plugin/commands", "*.md")
+
+
+def test_agent_fixtures_exclude_untracked_agents(tmp_path, monkeypatch, request):
+    """The FIXTURES, not only the helper, must read the git index.
+
+    Reverting ``agent_files`` or ``teammate_agent_files`` to
+    ``AGENTS_DIR.glob("*.md")`` keeps every helper arm green; this arm resolves
+    both fixtures and reddens, because a valid-shaped untracked agent then joins
+    the judged population.
+    """
+    repo = tmp_path / "repo"
+    agents = repo / "pact-plugin" / "agents"
+    agents.mkdir(parents=True)
+    known = agents / "pact-devops-engineer.md"
+    known.write_text(
+        "---\nname: pact-devops-engineer\ndescription: known\n---\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", "--", "pact-plugin/agents/pact-devops-engineer.md"],
+        cwd=repo, check=True)
+    # An expected teammate name, so the teammate fixture's stem filter does not
+    # hide the probe from its own arm.
+    probe = agents / "pact-auditor.md"
+    probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "AGENTS_DIR", agents)
+
+    files = request.getfixturevalue("agent_files")
+    assert known in files
+    assert probe not in files, (
+        f"untracked {probe.name} joined the agent population; agent_files is "
+        "not reading the git index")
+
+    teammates = request.getfixturevalue("teammate_agent_files")
+    assert known in teammates
+    assert probe not in teammates, (
+        f"untracked {probe.name} joined the teammate population; "
+        "teammate_agent_files is not reading the git index")
+
+
+def test_deleted_tracked_agent_is_a_named_missing_failure(
+        tmp_path, monkeypatch, request):
+    """A deleted tracked agent must leave the content population, not crash it.
+
+    With ``keep_deleted=True`` the fixture keeps the path, every reader raises
+    FileNotFoundError, and one deletion surfaces as a storm of errors instead of
+    the named ``Missing agent:`` failure the oracle already provides.
+    """
+    repo = tmp_path / "repo"
+    agents = repo / "pact-plugin" / "agents"
+    agents.mkdir(parents=True)
+    for name in sorted(EXPECTED_AGENTS):
+        (agents / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: fixture\n---\nbody\n",
+            encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin/agents"],
+                   cwd=repo, check=True)
+    doomed = agents / "pact-architect.md"
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN_ROOT", repo / "pact-plugin")
+    monkeypatch.setitem(globals(), "AGENTS_DIR", agents)
+
+    files = request.getfixturevalue("agent_files")
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the content population; "
+        "every reader would raise FileNotFoundError instead of naming it")
+    with pytest.raises(AssertionError, match=r"Missing agent: pact-architect"):
+        TestAgentFilesExist().test_all_expected_agents_present(files)
 
 
 class TestAgentFilesExist:

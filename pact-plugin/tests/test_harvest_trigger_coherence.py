@@ -60,10 +60,13 @@ inside the same command changes nothing here.
 """
 
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 PLUGIN = Path(__file__).resolve().parent.parent
 COMMANDS = PLUGIN / "commands"
@@ -92,6 +95,13 @@ _CONSOLIDATION_CLAIMS = {
 }
 
 
+def _command_files():
+    """Tracked shipped commands, excluding untracked and deleted files."""
+    relative = COMMANDS.relative_to(PLUGIN.parent).as_posix()
+    return sorted(path for path in _tracked_files(PLUGIN.parent, relative)
+                  if path.parent == COMMANDS and path.suffix == ".md")
+
+
 def _dispatched():
     """(command stem, variant) for every harvest dispatch under commands/.
 
@@ -101,7 +111,7 @@ def _dispatched():
     """
     return [
         (path.stem, variant)
-        for path in sorted(COMMANDS.glob("*.md"))
+        for path in _command_files()
         for variant in _DISPATCH.findall(path.read_text(encoding="utf-8"))
     ]
 
@@ -169,14 +179,14 @@ class TestHarvestTriggersAgreeAcrossSurfaces:
 
 
 def _command_stems():
-    return {path.stem for path in COMMANDS.glob("*.md")}
+    return {path.stem for path in _command_files()}
 
 
 def _consolidation_dispatchers():
     """Commands with a Consolidation Harvest dispatch site."""
     return {
         path.stem
-        for path in sorted(COMMANDS.glob("*.md"))
+        for path in _command_files()
         if "Consolidation" in _DISPATCH.findall(path.read_text(encoding="utf-8"))
     }
 
@@ -246,3 +256,36 @@ class TestConsolidationClaimsMatchTheDispatchSites:
             f"Every boundary that runs a Consolidation Harvest belongs in this "
             f"paragraph. Update whichever side you did not just edit."
         )
+
+
+def test_tracked_command_population_controls_untracked_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("Follow the Consolidation Harvest workflow\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", "pact-plugin"],
+        check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "COMMANDS", commands)
+
+    before = _command_files()
+    assert known in before
+    stray = commands / "000_backend_harvest_issue1714_probe.md"
+    stray.write_text("Follow the Consolidation Harvest workflow\n", encoding="utf-8")
+    try:
+        assert _command_files() == before
+    finally:
+        stray.unlink()
+
+
+def test_tracked_command_population_omits_a_deleted_member(monkeypatch):
+    known = COMMANDS / "refresh.md"
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if path == known else is_file(path))
+    assert known not in _command_files()

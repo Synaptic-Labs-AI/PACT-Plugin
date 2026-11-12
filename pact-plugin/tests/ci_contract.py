@@ -14,6 +14,7 @@ selection options.
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,52 @@ FAST_WORKFLOW = Path(".github") / "workflows" / "fast-tests.yml"
 
 VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
+WORKFLOW_TEST_CMD = (
+    "python -m pytest -ra -n 4 --dist \"$DIST\" "
+    "--junitxml=\"$GITHUB_WORKSPACE/.full-suite-results.xml\""
+)
+UPLOAD_ARTIFACT_ACTION = (
+    "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+)
+# The name expression admits only the two declared dispatch values, so the
+# filename sink is enum-constrained like the shell sink is by `DIST`.
+UPLOAD_ARTIFACT_NAME = (
+    "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+    "-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}"
+)
+_DIST_VARIABLE = "$DIST"
+_JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
+
+
+def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
+    """Resolve the exact diagnostic command to its static default argv.
+
+    The workflow passes the dispatch value through the job-level `DIST`
+    environment key and never embeds an expression in the `run:` text, so
+    shlex sees a shell variable, not a space-bearing expression. Any spelling
+    or argument drift is a parse failure: a normalizer that accepted more than
+    the reviewed command could hide a scope regression, and an expression
+    reintroduced into the run text is drift too.
+    """
+    try:
+        words = shlex.split(command)
+    except ValueError as exc:
+        raise AssertionError(f"PARSE FAILURE: {command!r} does not tokenize: {exc}") from exc
+    assert words == shlex.split(WORKFLOW_TEST_CMD), (
+        f"PARSE FAILURE: {command!r} is not the exact diagnostic workflow "
+        f"command {WORKFLOW_TEST_CMD!r}; refusing to pass expression fragments "
+        "or unreviewed arguments to local pytest."
+    )
+    normalized = [
+        "loadfile" if word == _DIST_VARIABLE else word
+        for word in words
+        if word != _JUNIT_ARGUMENT
+    ]
+    assert normalized == TEST_CMD.split(), (
+        f"PARSE FAILURE: normalized argv {normalized!r} differs from the "
+        f"static default {TEST_CMD.split()!r}."
+    )
+    return normalized
 
 # The files that together make up the fast lane. Used to distinguish a
 # WHOLLY deleted lane (a loud skip) from a half-deleted one (a failure).

@@ -38,9 +38,12 @@ from __future__ import annotations
 
 import ast
 import functools
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from fixtures.tracked_files import tracked_files as _tracked_files
 
 HOOKS = (Path(__file__).parent.parent / "hooks").resolve()
 
@@ -664,12 +667,50 @@ def _is_refresh_edge_line(line: str) -> bool:
     return bool(_re.search(r"\b(?:from|import)\s+\.?refresh\b", s))
 
 
+def _synthetic_hook_repo(tmp_path):
+    """A git repo holding the tracked hooks the scan judges.
+
+    The arm plants its needle HERE, never in the live checkout: under
+    `--dist load` another worker still walks the real hooks tree, and a probe
+    visible there for even a moment can redden its hygienic or schema scan.
+    """
+    repo = tmp_path / "repo"
+    hooks = repo / "pact-plugin" / "hooks"
+    (hooks / "shared").mkdir(parents=True)
+    (hooks / "bootstrap_gate.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (hooks / "shared" / "hook_infra_classifier.py").write_text(
+        "VALUE = 2\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=arm@example.invalid", "-c", "user.name=arm",
+         "commit", "-qm", "seed"], cwd=repo, check=True)
+    return hooks
+
+
+def _tracked_hook_modules() -> tuple[list[Path], list[Path]]:
+    """The SHIPPED hook modules, from the git index, top level and shared.
+
+    The scan claims to judge the hooks tree the oracle derives its closure
+    from. A working-tree walk lets an untracked file enter that population;
+    each set carries a tracked known member as the positive control.
+    """
+    plugin_root = HOOKS.parent
+    top = _tracked_files(
+        plugin_root, "hooks", "*.py", known_member="hooks/bootstrap_gate.py")
+    shared = _tracked_files(
+        plugin_root, "hooks/shared", "*.py",
+        known_member="hooks/shared/hook_infra_classifier.py")
+    return top, shared
+
+
 def _scan_hook_modules(predicate) -> list[tuple[str, int, str]]:
     """Run `predicate(line)` over every line of hooks/*.py + hooks/shared/*.py;
     return (filename, lineno, line) hits. Mirrors the oracle's module-set scope."""
     hits: list[tuple[str, int, str]] = []
-    for d in (HOOKS, HOOKS / "shared"):
-        for p in sorted(d.glob("*.py")):
+    top, shared = _tracked_hook_modules()
+    for files in (top, shared):
+        for p in files:
             for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
                 if predicate(line):
                     hits.append((p.name, i, line.strip()))
@@ -712,6 +753,25 @@ class TestOracleStaticImportBoundBackstop:
             "legit non-hook dynamic import) allowlist this exact line + extend the "
             f"oracle. Offending: {hits}"
         )
+
+    def test_control_untracked_hook_module_stays_out_of_the_scan(
+            self, tmp_path, monkeypatch):
+        """An untracked hook must not enter the scanned population.
+
+        The probe carries the dynamic-import idiom the scan matches, so a
+        reverted working-tree walk reddens HERE with the probe named. The
+        tracked-member assertion is the positive control, and the needle lives
+        in a synthetic repo so no parallel worker's walk of the live hooks
+        tree can see it.
+        """
+        hooks = _synthetic_hook_repo(tmp_path)
+        monkeypatch.setitem(globals(), "HOOKS", hooks)
+        probe = hooks / "shared" / "zzprobe1714_dyn.py"
+        probe.write_text("import importlib.util\n", encoding="utf-8")
+        _, shared = _tracked_hook_modules()
+        assert hooks / "shared" / "hook_infra_classifier.py" in shared
+        assert probe not in shared
+        self.test_no_dynamic_import_of_hook_modules()
 
     @pytest.mark.parametrize(
         "helper",

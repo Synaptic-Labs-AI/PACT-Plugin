@@ -6,11 +6,42 @@ Every pin reads the LLM-loaded markdown directly. Each docstring names the
 mutation that reddens it.
 """
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
+
+from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
+
 PLUGIN = Path(__file__).parent.parent
+REPO_ROOT = PLUGIN.parent
 COMMANDS_DIR = PLUGIN / "commands"
 PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
+
+
+def _tracked_glob(repo: Path, pattern: str, known_member: str, *,
+                  keep_deleted: bool = False) -> list[Path]:
+    """Deleted index entries are opt-in; the default is the safe direction.
+
+    A population read as TEXT must not keep deleted entries: every reader would
+    raise FileNotFoundError on the deleted path instead of the named
+    missing-population failure the checkpoints already report. Only a
+    structural assertion that must still SEE a deleted member passes True.
+    """
+    return _shared_tracked_glob(
+        repo, pattern, known_member, keep_deleted=keep_deleted
+    )
+
+
+def _command_files() -> list[Path]:
+    # The plugin directory name is READ, not hardcoded: an installed cache
+    # layout puts it under a version directory (.../PACT/4.8.34), where a
+    # literal ``pact-plugin/`` prefix matches nothing.
+    return _tracked_glob(
+        REPO_ROOT, f"{PLUGIN.name}/commands/*.md",
+        f"{PLUGIN.name}/commands/refresh.md", keep_deleted=False,
+    )
+
 
 _PACT_COMMAND_RE = re.compile(r"/PACT:[A-Za-z][A-Za-z-]*")
 _EXPLICIT_RETURN_RE = re.compile(r"(?:return|go) to step \d+|stay in this workflow", re.IGNORECASE)
@@ -62,6 +93,137 @@ def _next_top_level_step(text, offset):
     """The bold heading of the first top-level numbered step after `offset`."""
     m = _TOP_LEVEL_STEP_RE.search(text, offset)
     return m.group(2) if m else None
+
+
+class TestTrackedPopulation:
+    def test_untracked_is_excluded_and_deleted_tracked_stays_visible(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "commands" / "tracked.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        (tracked.parent / "untracked.md").write_text("untracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/commands/tracked.md"], cwd=repo, check=True)
+        pattern = "pact-plugin/commands/*.md"
+        assert _tracked_glob(
+            repo, pattern, "pact-plugin/commands/tracked.md",
+            keep_deleted=True) == [tracked]
+        tracked.unlink()
+        assert _tracked_glob(
+            repo, pattern, "pact-plugin/commands/tracked.md",
+            keep_deleted=True) == [tracked]
+
+    def test_nonzero_git_result_never_falls_back(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "commands" / "untracked.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("untracked")
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="fatal: synthetic index failure"
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(AssertionError, match="Refusing to widen"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
+
+    def test_known_member_must_be_present(self, tmp_path):
+        repo = tmp_path / "repo"
+        tracked = repo / "pact-plugin" / "commands" / "tracked.md"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/commands/tracked.md"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="known member missing"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/missing.md")
+
+    def test_empty_and_wrong_roots_refuse(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with pytest.raises(AssertionError, match="empty tracked population"):
+            _tracked_glob(repo, "pact-plugin/commands/*.md", "pact-plugin/commands/tracked.md")
+
+    def test_the_command_census_reads_the_index_not_a_glob(self, tmp_path, monkeypatch):
+        """The CONSUMER, not only the helper, must exclude untracked commands.
+
+        Reverting ``_command_files`` to ``sorted(COMMANDS_DIR.glob("*.md"))``
+        keeps every helper arm green; this arm drives ``_command_files`` itself
+        and reddens, because the untracked command then joins the population.
+        ``known in files`` is the positive control: without it the arm would
+        pass on an empty population, which proves only that nothing is there.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        commands = plugin / "commands"
+        commands.mkdir(parents=True)
+        known = commands / "refresh.md"
+        known.write_text("---\ndescription: known\n---\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin/commands/refresh.md"],
+            cwd=repo, check=True,
+        )
+        probe = commands / "000_untracked_probe.md"
+        probe.write_text(known.read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+        monkeypatch.setitem(globals(), "PLUGIN", plugin)
+        # COMMANDS_DIR is derived from PLUGIN at import, so a reverted
+        # ``COMMANDS_DIR.glob`` would read the REAL tree and the mutual
+        # assertion below would fail for the wrong reason.
+        monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+        files = _command_files()
+
+        assert known in files, (
+            "the tracked command is missing from the population; the control "
+            "failed, so the exclusion below would prove nothing"
+        )
+        assert probe not in files, (
+            "an untracked command joined the shipped population; "
+            "_command_files is not reading the git index"
+        )
+
+    def test_deleted_tracked_command_is_not_read_back(self, tmp_path, monkeypatch):
+        """A locally deleted tracked command must leave the text population.
+
+        With ``keep_deleted=True`` the deleted path stays in ``_command_files``
+        and every pin that reads it raises FileNotFoundError; the checkpoints'
+        named missing-command failure never gets to report it.
+        """
+        repo = tmp_path / "repo"
+        plugin = repo / "pact-plugin"
+        commands = plugin / "commands"
+        commands.mkdir(parents=True)
+        known = commands / "refresh.md"
+        known.write_text("---\ndescription: known\n---\n", encoding="utf-8")
+        doomed = commands / "wrap-up.md"
+        doomed.write_text("---\ndescription: doomed\n---\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin/commands"],
+                       cwd=repo, check=True)
+        doomed.unlink()  # the index entry stays; the disk entry is gone
+        monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+        monkeypatch.setitem(globals(), "PLUGIN", plugin)
+        monkeypatch.setitem(globals(), "COMMANDS_DIR", commands)
+
+        files = _command_files()
+
+        assert known in files
+        assert doomed not in files, (
+            f"the deleted tracked {doomed.name} stayed in the text population; "
+            "every pin that reads it would raise FileNotFoundError instead of "
+            "the named missing-command failure")
+        for path in files:  # the population is readable; that is the contract
+            path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +304,7 @@ class TestEndOfFlowCheckpoints:
     def test_every_command_is_classified(self):
         """Reddens when a command file is added without being listed in
         CHECKPOINTS or EXEMPT, or when one is listed in both."""
-        on_disk = {p.name for p in COMMANDS_DIR.glob("*.md")}
+        on_disk = {p.name for p in _command_files()}
         checked = {c[0] for c in CHECKPOINTS if "/" not in c[0]}
         assert not checked & set(EXEMPT), sorted(checked & set(EXEMPT))
         assert on_disk == checked | set(EXEMPT), (
@@ -155,7 +317,7 @@ class TestEndOfFlowCheckpoints:
         matching the command files."""
         total = sum(
             len(_OPTION_BULLET_RE.findall(p.read_text(encoding="utf-8")))
-            for p in COMMANDS_DIR.glob("*.md")
+            for p in _command_files()
         )
         assert total >= OPTION_BULLET_FLOOR, total
 
@@ -277,7 +439,7 @@ class TestMergeHandsOffToWrapUp:
         name `/PACT:wrap-up`. Mutation: append ", then invoke `/PACT:wrap-up`"
         to the merge option, or delete peer-review step 8."""
         found = 0
-        for path in sorted(COMMANDS_DIR.glob("*.md")):
+        for path in sorted(_command_files()):
             text = path.read_text(encoding="utf-8")
             for m in _OPTION_BULLET_RE.finditer(text):
                 clause = m.group(1)
@@ -341,6 +503,58 @@ class TestMergeHandsOffToWrapUp:
 # ---------------------------------------------------------------------------
 
 _LLM_LOADED_GLOBS = ("commands/*.md", "agents/*.md", "protocols/*.md", "skills/*/SKILL.md")
+_LLM_KNOWN_MEMBERS = {
+    "commands/*.md": "commands/refresh.md",
+    "agents/*.md": "agents/pact-orchestrator.md",
+    "protocols/*.md": "protocols/pact-protocols.md",
+    "skills/*/SKILL.md": "skills/pact-agent-teams/SKILL.md",
+}
+
+
+def _llm_loaded_files() -> list[Path]:
+    return [
+        path
+        for pattern in _LLM_LOADED_GLOBS
+        for path in _tracked_glob(
+            REPO_ROOT, f"{PLUGIN.name}/{pattern}",
+            f"{PLUGIN.name}/{_LLM_KNOWN_MEMBERS[pattern]}",
+            keep_deleted=False,
+        )
+    ]
+
+
+def test_deleted_tracked_llm_surface_is_not_read_back(tmp_path, monkeypatch):
+    """The LLM-loaded population is read as text; a deleted member must drop.
+
+    With ``keep_deleted=True`` the deleted path stays in ``_llm_loaded_files``
+    and every pin that reads it raises FileNotFoundError.
+    """
+    repo = tmp_path / "repo"
+    plugin = repo / "pact-plugin"
+    commands = plugin / "commands"
+    commands.mkdir(parents=True)
+    known = commands / "refresh.md"
+    known.write_text("known\n", encoding="utf-8")
+    doomed = commands / "wrap-up.md"
+    doomed.write_text("doomed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+    doomed.unlink()  # the index entry stays; the disk entry is gone
+    monkeypatch.setitem(globals(), "REPO_ROOT", repo)
+    monkeypatch.setitem(globals(), "PLUGIN", plugin)
+    monkeypatch.setitem(globals(), "_LLM_LOADED_GLOBS", ("commands/*.md",))
+    monkeypatch.setitem(globals(), "_LLM_KNOWN_MEMBERS",
+                        {"commands/*.md": "commands/refresh.md"})
+
+    files = _llm_loaded_files()
+
+    assert known in files
+    assert doomed not in files, (
+        f"the deleted tracked {doomed.name} stayed in the LLM-loaded text "
+        "population; every pin that reads it would raise FileNotFoundError")
+    for path in files:  # the population is readable; that is the contract
+        path.read_text(encoding="utf-8")
+
 
 # A merge and `/PACT:wrap-up` joined by "or", in either order: the two offered
 # as alternative end points ("until after PR merge or `/PACT:wrap-up`").
@@ -362,7 +576,7 @@ class TestShutdownOwner:
         """Reddens when any LLM-loaded file offers a merge and `/PACT:wrap-up`
         as alternatives. Mutation: restore the persona's "Teammates persist
         until after PR merge or `/PACT:wrap-up`."."""
-        files = [p for g in _LLM_LOADED_GLOBS for p in sorted(PLUGIN.glob(g))]
+        files = _llm_loaded_files()
         assert files, "no LLM-loaded files found"
         hits = []
         for path in files:
@@ -410,7 +624,7 @@ class TestTeammateLifecycleNotKeyedOnMerge:
         alive or persists teammates until a merge without naming
         `/PACT:wrap-up` as the owner. Mutation: restore peer-review's "Teammates
         persist until after user-authorized merge."."""
-        files = [p for g in _LLM_LOADED_GLOBS for p in sorted(PLUGIN.glob(g))]
+        files = _llm_loaded_files()
         assert files, "no LLM-loaded files found"
         hits = []
         for path in files:
@@ -467,9 +681,9 @@ _CHAIN_RE = re.compile(r"^\*\*Chain\*\*: (.+?)\.(?: |$)", re.MULTILINE)
 def _successor_graph():
     """{command stem: set of command stems it imperatively invokes}. A target
     that is a skill rather than a command (worktree-setup) is not a node."""
-    stems = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+    stems = {p.stem for p in _command_files()}
     graph = {}
-    for path in COMMANDS_DIR.glob("*.md"):
+    for path in _command_files():
         targets = set(_EDGE_RE.findall(path.read_text(encoding="utf-8")))
         graph[path.stem] = targets & stems
     return graph
@@ -492,10 +706,19 @@ class TestWorkflowChain:
     def test_every_named_successor_exists(self):
         """Reddens when a command invokes `/PACT:x` and x is neither a command
         nor a skill. Mutation: rename a target to `/PACT:wrapup`."""
-        stems = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+        stems = {p.stem for p in _command_files()}
+        # THE POPULATION HERE IS DELIBERATELY THE WORKING TREE, not the git
+        # index. The class closed in this file is SPURIOUS REDDENING: this
+        # walk feeds a UNION, so an extra untracked member can only make the
+        # assertion more permissive and can never turn it red from ambient
+        # content. That is also its limit, and it is not the same property:
+        # a permissive union can MASK a missing tracked successor (a
+        # false-green), and masking is a separate concern this arm does not
+        # claim. Do not "fix" it to tracked enumeration for the reddening
+        # class; if masking is the concern, that needs its own arm.
         skills = {p.name for p in (PLUGIN / "skills").iterdir() if p.is_dir()}
         missing = []
-        for path in COMMANDS_DIR.glob("*.md"):
+        for path in _command_files():
             for target in _EDGE_RE.findall(path.read_text(encoding="utf-8")):
                 if target not in stems | skills:
                     missing.append((path.name, target))
@@ -866,8 +1089,7 @@ class TestCallerCheckNamesTheCurrentReview:
         """Reddens when a caller check appears outside the listed sites, so
         the per-site arm above cannot miss a new one."""
         found = set()
-        for g in _LLM_LOADED_GLOBS:
-            for path in PLUGIN.glob(g):
-                if _caller_checks(path.read_text(encoding="utf-8")):
-                    found.add(str(path.relative_to(PLUGIN)))
+        for path in _llm_loaded_files():
+            if _caller_checks(path.read_text(encoding="utf-8")):
+                found.add(str(path.relative_to(PLUGIN)))
         assert found == set(_CALLER_CHECK_SITES), sorted(found ^ set(_CALLER_CHECK_SITES))

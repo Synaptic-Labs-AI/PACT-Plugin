@@ -45,8 +45,9 @@ before the assertions.
 
 TIMED ON CPU TIME (``time.process_time``), NOT WALL CLOCK. Wall clock also
 counts time waiting for a core, which concurrent suites needlessly include.
-``best-of-K`` minimum timing suppresses upward scheduler/GC noise because a
-slow sample never lowers the minimum.
+Normalized cost uses the best-of-K per-pair minimum to suppress upward
+scheduler/GC noise. Raw scaling ratios use the median target at each size, so
+one anomalously fast size cannot invert a linear doubling into a false quadratic.
 
 The push-flag-walk cases retain their bounded absolute CPU-time ceiling.
 They are single-anchor linear witnesses, so restoring the global-prefix bound
@@ -64,6 +65,7 @@ module runs them. The measured values are beside ``NORMALIZED_ABSOLUTE_CEILING``
 
 import time
 from pathlib import Path
+from statistics import median
 
 import pytest
 
@@ -112,6 +114,91 @@ def _best_time(fn, arg, k=_K):
         if dt < best:
             best = dt
     return best
+
+
+def _best_paired_times(fn, arg, k=_K, reference_fn=str.split, target_aggregate=min):
+    """Aggregate target, best reference, and best per-pair normalized cost."""
+    targets = []
+    best_reference = best_normalized = float("inf")
+    for _ in range(k):
+        t0 = time.process_time()
+        fn(arg)
+        target = time.process_time() - t0
+        t0 = time.process_time()
+        reference_fn(arg)
+        reference = time.process_time() - t0
+        targets.append(target)
+        best_reference = min(best_reference, reference)
+        best_normalized = min(best_normalized, target / reference)
+    return target_aggregate(targets), best_reference, best_normalized
+
+
+def _measure_paired_scaling(fn, build, sizes):
+    """Measure target/reference adjacently at each size, avoiding block bias."""
+    fn(build(100))
+    return tuple(_best_paired_times(fn, build(n), target_aggregate=median) for n in sizes)
+
+
+# MEDIAN-OF-LADDERS. Measured flake at 460c8726 (binding matrix run
+# 43054046846, loadfile, the only failure of 14 parallel runs): the
+# small-to-intermediate ratio read 3.40 against the 3.0 ceiling with
+# t_small=90.3 ms, t_intermediate=306.7 ms — while the 13 sibling runs on the
+# same tree passed the same arm. Contention inflates the two arms UNEQUALLY
+# and a ratio cannot subtract that (the asymmetry lands entirely in the
+# quotient); a median-of-5 within one ladder cannot remove a burst that
+# pollutes most of one size's samples. The statistical fix: repeat the WHOLE
+# ladder and take the median ratio per label. Contention asymmetry is random
+# across ladders, so one polluted ladder drops out; a real quadratic
+# regression inflates EVERY ladder systematically, so the median stays at/above
+# the ceiling and the arm stays red. Further ladders are measured only after a
+# ratio reads at/above the ceiling, so a green quiet run pays nothing extra.
+_RATIO_LADDERS = 3
+
+
+def _ratio_ladder(fn, build, sizes):
+    """One ladder: per-size times, the doubling ratios, reference and normalized."""
+    paired = _measure_paired_scaling(fn, build, sizes)
+    times = tuple(row[0] for row in paired)
+    reference_times = tuple(row[1] for row in paired)
+    normalized = tuple(row[2] for row in paired)
+    ratios = tuple(
+        (times[index + 1] / times[index]) if times[index] > 0 else float("inf")
+        for index in range(len(times) - 1)
+    )
+    return times, reference_times, normalized, ratios
+
+
+def test_measure_paired_scaling_uses_paired_median_samples(monkeypatch):
+    """The PRODUCTION sampler, not only the helper, must pair and take the median.
+
+    Reverting ``_measure_paired_scaling`` to separate target/reference blocks,
+    or its median aggregate to the minimum, changes the returned tuple and
+    reddens this arm. The clock is synthetic, so the result does not depend on
+    machine load: every ``process_time`` call advances by ``1 + tick % 5``
+    milliseconds, and only the call sequence decides the measured durations.
+    It pins the call sequence on purpose; a refactor that changes how many
+    times the clock is read must re-derive these three numbers.
+    """
+    now = 0.0
+    tick = 0
+
+    def process_time():
+        nonlocal now, tick
+        tick += 1
+        now += 0.001 * (1 + tick % 5)
+        return now
+
+    def target(_arg):
+        return None
+
+    monkeypatch.setattr(time, "process_time", process_time)
+
+    (target_cost, reference_cost, normalized), = _measure_paired_scaling(
+        target, lambda n: "x " * n, sizes=(1,))
+
+    assert target_cost == pytest.approx(0.003)
+    assert reference_cost == pytest.approx(0.001)
+    assert normalized == pytest.approx(1 / 3)
 
 
 # Push-flag-walk is a single-anchor linear witness. Keep its absolute CPU-time
@@ -186,29 +273,35 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
         return
 
     sizes = (N_MULTI_SMALL, N_SMALL, N_LARGE)
-    t_small, t_intermediate, t_large = _measure_scaling(fn, build, sizes=sizes)
-    reference_times = tuple(_best_time(str.split, build(n)) for n in sizes)
-    normalized = tuple(t / r for t, r in zip(
-        (t_small, t_intermediate, t_large), reference_times))
-    first_ratio = (t_intermediate / t_small) if t_small > 0 else float("inf")
-    second_ratio = (t_large / t_intermediate) if t_intermediate > 0 else float("inf")
+    ladders = [_ratio_ladder(fn, build, sizes)]
+    if any(ratio >= ratio_ceiling for ratio in ladders[0][3]):
+        while len(ladders) < _RATIO_LADDERS:
+            ladders.append(_ratio_ladder(fn, build, sizes))
+    times, reference_times, normalized, _ = ladders[0]
+    t_small, t_intermediate, t_large = times
+    median_ratios = tuple(
+        median(ladder[3][index] for ladder in ladders)
+        for index in range(len(ladders[0][3]))
+    )
     print(
         f"{fn.__name__} on {witness!r}: "
         f"t_small={t_small * 1000:.1f} ms, "
         f"t_intermediate={t_intermediate * 1000:.1f} ms, "
         f"t_large={t_large * 1000:.1f} ms, "
-        f"ratio_small_to_intermediate={first_ratio:.2f}, "
-        f"ratio_intermediate_to_large={second_ratio:.2f}, "
+        f"ladder_ratios={[tuple(round(r, 2) for r in ladder[3]) for ladder in ladders]}, "
+        f"median_ratios={tuple(round(r, 2) for r in median_ratios)}, "
         f"reference_times_ms={tuple(round(v * 1000, 3) for v in reference_times)}, "
         f"normalized={tuple(round(v, 1) for v in normalized)}, "
         f"normalized_ceiling={abs_ceiling:.1f}"
     )
-    for label, ratio in (("small-to-intermediate", first_ratio),
-                         ("intermediate-to-large", second_ratio)):
+    for label, ratio in zip(
+            ("small-to-intermediate", "intermediate-to-large"), median_ratios):
         assert ratio < ratio_ceiling, (
-            f"{fn.__name__} on {witness!r}: {label} ratio {ratio:.2f} "
-            f">= {ratio_ceiling} — quadratic scaling regression "
-            f"(t_small={t_small * 1000:.1f} ms, "
+            f"{fn.__name__} on {witness!r}: {label} median ratio {ratio:.2f} "
+            f">= {ratio_ceiling} over {len(ladders)} ladders — quadratic "
+            f"scaling regression (per-ladder ratios "
+            f"{[tuple(round(r, 2) for r in ladder[3]) for ladder in ladders]}, "
+            f"t_small={t_small * 1000:.1f} ms, "
             f"t_intermediate={t_intermediate * 1000:.1f} ms, "
             f"t_large={t_large * 1000:.1f} ms)?"
         )
@@ -218,6 +311,140 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
         f"quadratic regression (target={t_large:.6f}s, "
         f"reference={reference_times[-1]:.6f}s)?"
     )
+
+
+def test_paired_samples_remove_cross_block_normalized_bias(monkeypatch):
+    """A slow target block must not be normalized by a later fast reference block."""
+    now = 0.0
+    factor = 1.0
+
+    def process_time():
+        return now
+
+    def target(_):
+        nonlocal now
+        now += 0.001 * factor
+
+    def reference(_):
+        nonlocal now
+        now += 0.0000005 * factor
+
+    monkeypatch.setattr(time, "process_time", process_time)
+    factor = 2.5
+    old_target = _best_time(target, None)
+    factor = 1.0
+    old_reference = _best_time(reference, None)
+    old_normalized = old_target / old_reference
+    assert old_normalized > NORMALIZED_ABSOLUTE_CEILING
+
+    pair = 0
+    factors = (2.5, 1.0, 2.5, 1.0, 2.5)
+
+    def paired_target(_):
+        nonlocal now
+        now += 0.001 * factors[pair]
+
+    def paired_reference(_):
+        nonlocal now, pair
+        now += 0.0000005 * factors[pair]
+        pair += 1
+
+    now = 0.0
+    new_target, new_reference, new_normalized = _best_paired_times(
+        paired_target, None, reference_fn=paired_reference)
+    assert new_target == pytest.approx(0.001)
+    assert new_reference == pytest.approx(0.0000005)
+    assert new_normalized == pytest.approx(2000.0)
+    assert new_normalized < NORMALIZED_ABSOLUTE_CEILING < old_normalized
+
+
+def test_median_raw_scaling_rejects_size_outlier_but_not_quadratic(monkeypatch):
+    """One fast size cannot create a false quadratic; true quadratic stays red."""
+    now = 0.0
+    costs = {"small": [1, 2, 2, 2, 2], "intermediate": [4, 4, 4, 4, 4]}
+    calls = {"small": 0, "intermediate": 0}
+
+    def process_time():
+        return now
+
+    def target(size):
+        nonlocal now
+        index = calls[size]
+        calls[size] += 1
+        now += costs[size][index] * 0.001
+
+    def reference(_):
+        nonlocal now
+        now += 0.0000005
+
+    monkeypatch.setattr(time, "process_time", process_time)
+    old_small = _best_time(target, "small")
+    old_intermediate = _best_time(target, "intermediate")
+    assert old_intermediate / old_small > RATIO_CEILING
+
+    calls = {"small": 0, "intermediate": 0}
+    new_small, _, _ = _best_paired_times(
+        target, "small", reference_fn=reference, target_aggregate=median)
+    new_intermediate, _, _ = _best_paired_times(
+        target, "intermediate", reference_fn=reference, target_aggregate=median)
+    assert new_intermediate / new_small == pytest.approx(2.0)
+    assert new_intermediate / new_small < RATIO_CEILING
+
+    costs = {"small": [2, 2, 2, 2, 2], "intermediate": [8, 8, 8, 8, 8]}
+    calls = {"small": 0, "intermediate": 0}
+    quadratic_small, _, _ = _best_paired_times(
+        target, "small", reference_fn=reference, target_aggregate=median)
+    quadratic_intermediate, _, _ = _best_paired_times(
+        target, "intermediate", reference_fn=reference, target_aggregate=median)
+    assert quadratic_intermediate / quadratic_small > RATIO_CEILING
+
+
+def test_ratio_verdict_is_the_median_over_ladders(monkeypatch):
+    """The ARM-LEVEL verdict: one polluted ladder drops out; all-red stays red.
+
+    The sampler arms above pin ``_best_paired_times`` and
+    ``_measure_paired_scaling``; this control scripts whole ladders (the
+    measured flake shape: first ladder 3.40 under contention, siblings ~2.0)
+    and asserts the verdict layer that sits between them and the assertion.
+    """
+    ladder_times = []
+
+    def scripted(_fn, _build, _sizes):
+        times = ladder_times.pop(0)
+        return tuple((t, 0.05, t / 0.05) for t in times)
+
+    monkeypatch.setitem(globals(), "_measure_paired_scaling", scripted)
+
+    def run_arm():
+        test_global_flag_prefix_scaling_is_subquadratic(
+            is_dangerous_command, lambda n: "git x " * n,
+            NORMALIZED_ABSOLUTE_CEILING, RATIO_CEILING)
+
+    # The measured flake: one polluted ladder (ratio 3.41), then two clean
+    # ladders (ratio 2.0) — the median is 2.0 and the arm passes.
+    ladder_times[:] = [
+        (0.0903, 0.3067, 0.6493),
+        (0.13, 0.26, 0.52),
+        (0.13, 0.26, 0.52),
+    ]
+    run_arm()
+    assert not ladder_times, "a polluted first ladder must consume all three"
+
+    # A green first ladder consumes exactly one: the quiet run pays nothing.
+    ladder_times[:] = [(0.13, 0.26, 0.52)]
+    run_arm()
+    assert not ladder_times
+
+    # A systematic regression is red in EVERY ladder, so the median stays red
+    # and the failure names each ladder's ratios.
+    ladder_times[:] = [
+        (0.09, 0.36, 1.44),
+        (0.09, 0.36, 1.44),
+        (0.09, 0.36, 1.44),
+    ]
+    with pytest.raises(AssertionError, match="median ratio"):
+        run_arm()
+    assert not ladder_times
 
 
 # ---------------------------------------------------------------------------
