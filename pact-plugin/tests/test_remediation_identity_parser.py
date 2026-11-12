@@ -808,3 +808,31 @@ class TestAzureDevOpsServicesSpellingsShareOneId:
     )
     def test_any_other_shape_keeps_the_generic_id(self, url, expected):
         assert pi.normalize_remote_url(url) == expected
+
+
+class TestARedirectDeclineNamesNoOverridePath:
+    """The common dir git reports for a redirected `.git` file belongs to the
+    repository it points at, so naming that repository's override file as the
+    remedy would send the operator to re-pin the other repository."""
+
+    def test_the_record_refuses_an_override_path_for_a_redirect(self):
+        with pytest.raises(ValueError):
+            pi.decline_record("gitfile_redirect", "/victim/.git/pact-project-id")
+        assert pi.decline_record("gitfile_redirect", None)["override_path"] is None
+
+    def test_other_reasons_still_carry_their_override_path(self):
+        assert pi.decline_record("origin_unreadable", "/r/.git/pact-project-id")[
+            "override_path"
+        ] == "/r/.git/pact-project-id"
+
+    def test_a_forged_pointer_declines_with_no_override_path(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        victim = make_repo(tmp_path / "victim", remote="https://github.com/v/p.git")
+        forged = tmp_path / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+
+        identity = pi.detect_id_for_root(forged, common_dir(victim), forged)
+
+        assert identity.project_id is None
+        assert identity.decline_reason == pi.decline_record("gitfile_redirect", None)

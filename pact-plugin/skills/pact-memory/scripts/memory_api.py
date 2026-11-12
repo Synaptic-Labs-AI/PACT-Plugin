@@ -76,7 +76,6 @@ from .project_identity import (
     detect_id_for_root,
     find_git_marker,
     is_canonical,
-    read_override,
     read_user_setting,
 )
 if TYPE_CHECKING:
@@ -268,6 +267,14 @@ _DECLINE_CAUSES = {
 # Causes with no repository to pin: the override is not offered for them.
 _NO_OVERRIDE_CAUSES = frozenset({"declaration_unresolved", "no_working_tree"})
 
+# THE REDIRECT'S REMEDY IS THE MARKER, NEVER A PIN. The override path a
+# redirect could name belongs to the repository the `.git` file points AT:
+# writing it leaves this checkout declined and re-pins that other
+# repository and every genuine checkout of it.
+_REDIRECT_REMEDY = (
+    "Fix or remove the `.git` file, or run from the repository it points at."
+)
+
 
 def _warn_declined(
     record: Optional[dict], root: Any = None, detail: Optional[str] = None
@@ -290,6 +297,14 @@ def _warn_declined(
         )
     if detail:
         cause = f"{cause} ({detail})"
+    if token == "gitfile_redirect":
+        logger.warning(
+            "%s, so no project id was derived. %s Run the `project-id show` "
+            "verb to inspect the detected identity.",
+            cause,
+            _REDIRECT_REMEDY,
+        )
+        return
     if token in _NO_OVERRIDE_CAUSES:
         logger.warning(
             "%s, so no project id was derived. Run the `project-id show` verb "
@@ -398,11 +413,11 @@ def _root_guard(
             )
         return None
     if asked_root is not None and _worktree_redirect(asked_root, common_dir):
+        # No override path: the common dir is the TARGET repository's.
         return _decline(
             source,
             "gitfile_redirect",
             label=label,
-            override_path=str(common_dir / "pact-project-id"),
             root=root,
             detail=(
                 f"{source}: {str(asked_root)!r} resolves to another "
@@ -2666,23 +2681,17 @@ class PACTMemory:
     def _unresolved_identity_message(self) -> str:
         """Explain a refusal caused by NO project identity resolving.
 
-        Re-derived at raise time from BOTH declarations, deliberately without
-        short-circuiting: when the env var is set the session record may still
-        name a second declaration that ALSO failed, and the message must be
-        able to name every declaration that was present. The resolver keeps no
-        state for this; nothing here is cached.
+        THE CAUSE IS THE RESOLVER'S OWN DECISION, carried from this instance's
+        detection pass (`_decline_reason`, `_override_ignored`), never
+        re-derived from the process's location: a re-derivation reads the
+        cwd's repository, which in a declared session is not the one that
+        declined, and invents a cause the resolver did not reach.
 
-        The wording reports causes it OBSERVED. It never claims the two
-        sources disagree — that is a different refusal with a different remedy
-        — and it never advises re-exporting the recorded value, because the
-        recorded directory may not exist.
+        The declarations are still listed from BOTH sources, without
+        short-circuiting, so a session record that also failed is named. The
+        wording reports what was observed; it never claims the two sources
+        disagree, which is a different refusal with a different remedy.
         """
-        # THE DISPATCHER IS THE AUTHORITY for which declarations exist and in
-        # what order: `_detect_project_id_with_source` reads the same two
-        # sources to decide precedence. This method re-reads them because the
-        # message must name every declaration that was PRESENT, not only the
-        # first one tried. A THIRD declared rung added to the dispatcher must
-        # be added here too, or the refusal message will silently omit it.
         env_dir = os.environ.get("CLAUDE_PROJECT_DIR") or ""
         record_dir = get_project_dir_from_session_record() or ""
         declarations = []
@@ -2690,42 +2699,44 @@ class PACTMemory:
             declarations.append(f"declared via CLAUDE_PROJECT_DIR: {env_dir!r}")
         if record_dir:
             declarations.append(f"declared via the session record: {record_dir!r}")
-        # THE OVERRIDE IS A THIRD DECLARATION, and the one the remedy names.
-        # It is a literal id rather than a directory, so it never joins the
-        # env/record disagreement machinery — but a refusal the override could
-        # have prevented must say the override exists and was unusable, or the
-        # reader would not know the remedy was already present and broken.
-        override_note = ""
-        common_dir = main_repo_common_dir()
-        if common_dir is not None:
-            override = read_override(common_dir)
-            if override.reason is not None and override.path is not None:
-                override_note = (
-                    f"An override file at {str(override.path)!r} was present "
-                    f"but unusable ({override.reason}). "
-                )
+        reason = self._decline_reason or {}
+        ignored = self._override_ignored or {}
+        parts = []
+        if reason.get("reason"):
+            cause = _DECLINE_CAUSES.get(reason["reason"], reason["reason"])
+            parts.append(f"The {reason.get('source') or 'resolver'} rung declined: {cause}.")
         if declarations:
-            # OBSERVATION, never a comparison: the message names what was
-            # present and what could not be verified, and does not imply the
-            # declarations caused each other to fail or that they disagree.
-            cause = (
-                "Declarations present — "
-                + "; ".join(declarations)
-                + ". None could be verified against a repository. "
+            parts.append("Declarations present: " + "; ".join(declarations) + ".")
+        elif not reason.get("reason"):
+            parts.append(
+                "No project directory was declared (CLAUDE_PROJECT_DIR is unset "
+                "and the session record names none), and no repository answered."
+            )
+        if ignored.get("path"):
+            parts.append(
+                f"An override file at {str(ignored['path'])!r} was present but "
+                f"unusable ({ignored.get('reason')})."
+            )
+        override_path = reason.get("override_path") or ignored.get("path")
+        if reason.get("reason") == "gitfile_redirect":
+            remedy = _REDIRECT_REMEDY
+        elif override_path:
+            remedy = (
+                "Write an operator-chosen canonical id to "
+                f"{str(override_path)!r}, or set CLAUDE_PROJECT_DIR to another "
+                "project root."
             )
         else:
-            cause = (
-                "No project directory was declared (CLAUDE_PROJECT_DIR is "
-                "unset and the session record names none). "
+            remedy = (
+                "Run from inside the project directory, or set "
+                "CLAUDE_PROJECT_DIR to an existing project root."
             )
         return (
             "no project identity could be resolved, so the write was refused "
             "rather than filed under an unknown project. Nothing was written. "
-            f"{cause}{override_note}"
-            "Run from inside the project directory, set CLAUDE_PROJECT_DIR "
-            "to an existing project root, or write an operator-chosen "
-            "canonical id to <git-common-dir>/pact-project-id. Run "
-            "the `project-id show` verb to inspect the detected identity."
+            + " ".join(parts)
+            + f" {remedy} Run the `project-id show` verb to inspect the "
+            "detected identity."
         )
 
     @_with_store_scope

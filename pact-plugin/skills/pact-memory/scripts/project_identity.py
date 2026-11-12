@@ -182,12 +182,18 @@ def decline_record(
 
     `reason` must be one of `DECLINE_REASONS` (ValueError otherwise).
     `override_path` is the `<git-common-dir>/pact-project-id` file that would
-    remedy the decline, or None when no repository was found. `source` is the
+    remedy the decline, or None when no repository was found. It is ALWAYS
+    None for `gitfile_redirect` (ValueError otherwise): the common dir git
+    reports there belongs to the repository the `.git` file points at, so a
+    pin written to it would re-pin that other repository. The remedy is the
+    `.git` file itself. `source` is the
     rung that declined; this module leaves it None, and the resolver in
     memory_api, the only layer that knows the rung, fills it in.
     """
     if reason not in DECLINE_REASONS:
         raise ValueError(f"unknown decline reason: {reason!r}")
+    if reason == "gitfile_redirect" and override_path is not None:
+        raise ValueError("a gitfile_redirect decline names no override path")
     return {"source": source, "reason": reason, "override_path": override_path}
 
 
@@ -1316,7 +1322,7 @@ def detect_id_for_root(
             None,
             "declined",
             override_ignored,
-            decline_record("gitfile_redirect", override_path),
+            decline_record("gitfile_redirect", None),
         )
 
     # A SUBMODULE'S CHECKOUT PATH IS REPOSITORY-CHOSEN, so a basename derived

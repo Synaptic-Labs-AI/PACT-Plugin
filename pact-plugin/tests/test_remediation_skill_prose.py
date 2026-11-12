@@ -196,3 +196,38 @@ class TestPercentEncodedIdsAreDocumented:
         from scripts.project_identity import normalize_remote_url
 
         assert normalize_remote_url(url) == self.EXAMPLE
+
+
+class TestOverridePathIsNullWhenNoPinCanRemedy:
+    """The `override_path` clause names every cause where a pin cannot help."""
+
+    NULL_CAUSES = (
+        "gitfile_redirect",
+        "no_working_tree",
+        "broken_git_marker",
+        "declaration_unresolved",
+    )
+
+    def _clause(self) -> str:
+        row = _table_row(SKILL, "project-id show")
+        start = row.index("override_path is the")
+        return row[start:start + 600]
+
+    def test_null_means_no_override_file_can_remedy(self):
+        assert (
+            "or null when no override file can remedy the decline"
+        ) in self._clause()
+
+    @pytest.mark.parametrize("cause", NULL_CAUSES)
+    def test_each_null_cause_is_named_in_the_clause(self, cause):
+        assert cause in self._clause()
+
+    def test_the_retired_condition_is_gone(self):
+        assert "null when no repository was found" not in _body(SKILL).lower()
+
+    def test_the_redirect_remedy_is_the_code_remedy_and_never_a_pin(self):
+        from scripts.memory_api import _REDIRECT_REMEDY
+
+        clause = self._clause()
+        assert "For gitfile_redirect, never write an override:" in clause
+        assert _flatten(_REDIRECT_REMEDY) in clause
