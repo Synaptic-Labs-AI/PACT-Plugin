@@ -22,7 +22,7 @@ import pytest
 
 import session_init
 from pin_caps_gate import gate_decision
-from shared import claude_md_markers
+from shared import claude_md_manager, claude_md_markers
 from shared.claude_md_markers import Cause, State, parse
 from shared.session_resume import update_session_info
 from staleness import locate_pinned
@@ -128,6 +128,16 @@ MEMORY_COMMENTS = (
     "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
     "Keyed by repository identity when the checkout has a parseable origin, otherwise by folder name. -->",
 )
+
+
+def test_the_memory_comments_are_the_shipped_constants():
+    """The two comments above are literal copies of the shipped strings, so the
+    documents built here look like real ones. RED WHEN the shipped comment
+    changes and this copy does not."""
+    assert MEMORY_COMMENTS == (
+        claude_md_manager.RETRIEVED_CONTEXT_COMMENT,
+        claude_md_manager.WORKING_MEMORY_COMMENT,
+    )
 
 
 def _pin(n):

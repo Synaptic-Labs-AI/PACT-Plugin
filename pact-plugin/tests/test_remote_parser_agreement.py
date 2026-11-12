@@ -29,6 +29,11 @@ SHARED_REFUSALS = (
     ("git@host:owner\\repo", "a backslash in the path"),
     ("https://a@b@host/owner/repo", "more than one @"),
     ("git@a@b:owner/repo", "more than one @ in scp form"),
+    # THE TWO ROWS THE BACKLOG PARSER'S `@` RULE ALONE REFUSES. The two rows
+    # above name a non-github host, so the backlog parser's host filter would
+    # refuse them even without the `@` rule. These name github.com.
+    ("https://a@b@github.com/o/n", "more than one @, github.com host"),
+    ("git@a@b@github.com:o/n", "more than one @ in scp form, github.com host"),
 )
 
 

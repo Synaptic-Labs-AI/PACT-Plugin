@@ -197,6 +197,37 @@ def _extract_method_body(source_path, method_name):
     return segment.strip() if segment is not None else None
 
 
+def _function_code(source_path, function_name):
+    """One function's CODE, without its docstring or comments.
+
+    `_extract_method_body` returns the source segment, docstring and comments
+    included, so a marker the docstring happens to mention satisfies a
+    presence assertion even when the code no longer carries it. This returns
+    `ast.unparse` of the function with its leading docstring removed: only
+    statements the interpreter runs can satisfy an assertion on it.
+    """
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    wanted = function_name.split(".")
+    matches = [
+        node
+        for node, qualified in _walk_qualified_functions(tree)
+        if qualified[-len(wanted):] == wanted
+    ]
+    assert len(matches) == 1, (
+        f"{function_name!r}: expected one definition, found {len(matches)}"
+    )
+    node = matches[0]
+    body = node.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return ast.unparse(ast.Module(body=body, type_ignores=[]))
+
+
 class TestMethodBodyExtractor:
     """The instrument's own controls.
 
@@ -305,12 +336,17 @@ class TestSourceEquivalence:
         test_detect_project_id_still_delegates_with_its_signature.
 
         Verifies key implementation markers are present AND ordered correctly:
-        the repository override before Strategy 1 (env var) before Strategy 1.5
-        (session record) before Strategy 2 (git) before Strategy 3 (cwd). This
-        catches accidental strategy reordering that substring checks alone
-        miss. The 1.5 position is load-bearing: BELOW env and ABOVE git,
-        because in a multi-repo workspace the cwd's git root can be the wrong
-        scope.
+        Strategy 1 (env var) before Strategy 1.5 (session record) before
+        Strategy 2 (git) before Strategy 3 (cwd). This catches accidental
+        strategy reordering that substring checks alone miss. The 1.5 position
+        is load-bearing: BELOW env and ABOVE git, because in a multi-repo
+        workspace the cwd's git root can be the wrong scope.
+
+        The repository override is NOT a rung and has no position in this
+        order: it follows the identity root, so each rung's root reads its own
+        `<git-common-dir>/pact-project-id` inside `detect_id_for_root`. The
+        assertions below pin that the resolver does not pre-read the cwd
+        repository's override.
         """
         real_source = _extract_method_body(
             _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
@@ -408,18 +444,22 @@ class TestSourceEquivalence:
         assert helper_body is not None, "main_repo_common_dir must exist in memory_api.py"
         assert '"rev-parse", "--git-common-dir"' in helper_body
         assert "timeout=5" in helper_body
-        # ValueError joined the tuple with the #1653 path-byte fix: an
-        # undecodable git answer is "could not answer", not a crash.
+        # ValueError is in the tuple because an undecodable git answer is
+        # "could not answer", not a crash.
         assert (
             "(subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError)"
             in helper_body
         )
         assert "if not common.is_absolute():" in helper_body
-        # The root is the common dir's parent, in the delegating wrapper.
-        root_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_root")
-        assert root_body is not None, "main_repo_root must survive as a delegate"
-        assert "main_repo_common_dir(start)" in root_body
-        assert "common.parent" in root_body
+        # THE WRAPPER'S CODE, NOT ITS SOURCE TEXT. Its docstring explains why
+        # `common.parent` is NOT always the root, so a presence check on the
+        # source segment was satisfied by that sentence. The root is
+        # `--show-toplevel`, except in a linked worktree, where it is the
+        # main checkout: the common dir's parent.
+        root_code = _function_code(_MEMORY_API_PATH, "main_repo_root")
+        assert "main_repo_common_dir(start)" in root_code
+        assert "'--show-toplevel'" in root_code
+        assert "return common_path.parent" in root_code
 
     def test_main_repo_root_bases_a_relative_result_on_its_start_argument(self):
         """A relative git result resolves against `start`, not unconditionally

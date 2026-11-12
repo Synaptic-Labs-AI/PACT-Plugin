@@ -1,4 +1,4 @@
-"""Override precedence and the resolver rungs (P0 matrix O1-O13).
+"""Override precedence and the resolver rungs.
 
 The override location is the contract: `<git-common-dir>/pact-project-id`,
 resolved through `git rev-parse --git-common-dir` — never a literal `.git`
@@ -47,7 +47,7 @@ def _memory(tmp_path: str, **kwargs) -> PACTMemory:
 
 
 # ---------------------------------------------------------------------------
-# O1-O6, O11-O12: where the override lives
+# Where the override lives
 # ---------------------------------------------------------------------------
 
 class TestOverrideLocation:
@@ -220,7 +220,7 @@ class TestOverrideLocation:
         so the origin is read at the wrong path and the id collapses to
         'vendor'. Expected: the submodule's own canonical id.
 
-        ALSO PINS THE LEGACY-CANDIDATE SUPPRESSION (F2, SUPERSEDED). The
+        ALSO PINS THE LEGACY-CANDIDATE SUPPRESSION. The
         PRE-change resolver derived the legacy bucket from
         `common_dir.resolve().parent.name` — 'vendor' for this fixture — but a
         submodule admin dir's parent name comes from the repository's own
@@ -364,7 +364,7 @@ class TestNonAsciiRemoteRemedy:
     def test_the_decline_message_names_the_override_and_the_inspection_verb(
         self, identity_env, monkeypatch, caplog
     ):
-        """A34: a non-ASCII remote path is DECLINED, and the remedy must be
+        """A non-ASCII remote path is DECLINED, and the remedy must be
         actionable. Catches a decline that leaves the user with a folder-name
         fallback or no way to recover.
 
@@ -395,9 +395,9 @@ class TestDeclaredDirectoryDecline:
     def test_an_unrepresentable_remote_on_a_declared_repo_declines(
         self, identity_env, monkeypatch, caplog
     ):
-        """F1: the DECLARED rung's split, not only the git rung's.
+        """The DECLARED rung's split, not only the git rung's.
 
-        The plan's P0 names three declared-dir outcomes: canonical, basename
+        The ruled plan names three declared-dir outcomes: canonical, basename
         with no portable origin, and DECLINE for a present network remote that
         cannot be represented. Only the canonical one had an arm; the other
         two were reachable only through `detect_id_for_root`'s unit tests,
@@ -450,7 +450,7 @@ class TestLegacyBasenameOverridePin:
     def test_a_basename_override_is_an_explicit_operator_pin(
         self, identity_env, monkeypatch
     ):
-        """F7: the manual bridge for a copied db.
+        """The manual bridge for a copied db.
 
         `rekey --candidates` cannot name a bucket the new path cannot derive;
         an operator who knows the old id writes it into the common dir. The
@@ -511,7 +511,7 @@ class TestPrecedence:
     def test_the_legacy_basename_is_the_checkout_folder_not_the_remote_repo(
         self, identity_env, monkeypatch
     ):
-        """B7. Catches re-deriving the legacy id from the canonical id.
+        """Catches re-deriving the legacy id from the canonical id.
 
         The union can only find the old bucket if this value is the FOLDER
         name the pre-change resolver used.
@@ -520,11 +520,11 @@ class TestPrecedence:
         monkeypatch.chdir(repo)
         memory = _memory(identity_env)
         assert memory._project_id == CANONICAL
-        # COMPUTED BY THE OLD LOGIC, not hand-written: the pre-change resolver
-        # used the main repo root's basename. A hand-written literal would test
-        # the new code against the test author's assumption.
-        expected = main_repo_common_dir(str(repo)).parent.name
-        assert memory._legacy_project_basename == expected
+        # A LITERAL, NOT A RE-COMPUTATION. The pre-change resolver returned the
+        # checkout folder's name, and that name is fixed by the fixture above.
+        # Deriving the expectation with production's own formula would make
+        # this arm follow any change to that formula instead of catching it.
+        assert memory._legacy_project_basename == "PACT-prompt-checkout"
 
     def test_a_worktree_carries_the_main_repo_basename_as_its_legacy(
         self, identity_env, monkeypatch
@@ -547,7 +547,7 @@ class TestPrecedence:
     def test_a_non_git_umbrella_legacy_candidate_is_the_folder_basename(
         self, identity_env, monkeypatch
     ):
-        """B7's other ruled shape: no `.git`, so the old resolver's output is
+        """The other ruled shape: no `.git`, so the old resolver's output is
         the folder basename. Catches a None or a canonicalised legacy there."""
         umbrella = identity_env / "umbrella-workspace"
         umbrella.mkdir()
