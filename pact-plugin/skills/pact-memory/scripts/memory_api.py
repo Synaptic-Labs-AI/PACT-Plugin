@@ -167,8 +167,8 @@ def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
     return "override file" if identity.source == "override file" else rung_label
 
 
-def render_rekey_command(project_id: str) -> str:
-    """The literal, SHELL-QUOTED rekey command for one bucket id.
+def render_rekey_command(project_id: str, db_path: Any = None, prog: Any = None) -> str:
+    """The literal, SHELL-QUOTED AND RUNNABLE rekey command for one bucket id.
 
     ONE HELPER FOR EVERY RENDER SURFACE — the candidate list, the exclusion
     warning, the save-envelope state and the CLI examples — because a bucket
@@ -176,8 +176,28 @@ def render_rekey_command(project_id: str) -> str:
     pastes into a shell. An unquoted id containing a space, `;`, `$` or a
     quote is a copy-paste command-injection surface, and four renderers with
     four spellings is how one of them loses the quoting.
+
+    INTERPRETER-PREFIXED, because there is no `pact-memory` executable: the
+    skill's documented invocation is `python3 <skill>/scripts/cli.py`, and a
+    bare verb exits 2 with argparse's "invalid choice". `cli.py` carries the
+    same reasoning for its own examples.
+
+    `db_path` IS CARRIED WHEN KNOWN. Without it the printed remedy runs
+    against the DEFAULT store, so a bucket reported from `--db-path X` is
+    "moved" in some other file and reports success — a no-op that reads like
+    a completed move.
     """
-    return shlex.join(["pact-memory", "project-id", "rekey", "--from", project_id])
+    argv = [
+        "python3",
+        str(prog) if prog is not None else str(Path(__file__).with_name("cli.py")),
+        "project-id",
+        "rekey",
+        "--from",
+        project_id,
+    ]
+    if db_path is not None:
+        argv += ["--db-path", str(db_path)]
+    return shlex.join(argv)
 
 
 def _store_stat_key(store: str):
@@ -377,6 +397,156 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         return None
 
 
+def _listed_worktree_toplevels(start) -> Optional[set]:
+    """Every toplevel `git worktree list` reports for `start`'s repository.
+
+    `None` when git cannot enumerate — a failed ANSWER, not a failed
+    verification, so callers must not treat it as proof of a redirect.
+    """
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["worktree", "list", "--porcelain"]
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=False, timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    toplevels = set()
+    for line in os.fsdecode(result.stdout).splitlines():
+        if not line.startswith("worktree "):
+            continue
+        try:
+            toplevels.add(Path(line[len("worktree "):]).resolve())
+        except (OSError, RuntimeError):
+            continue
+    return toplevels
+
+
+def _worktree_redirect(asked_root, common_dir) -> bool:
+    """Whether the linked-worktree shape is NOT backed by git's listing.
+
+    A `.git` FILE naming another repository's WORKTREE ADMIN dir makes every
+    git answer agree — `--git-dir`, `--git-common-dir` and `--show-toplevel`
+    all describe that other repository — while `asked_root` is not a checkout
+    of it at all ("SEC-1" in `shared/project_scope.py`). A genuine linked
+    worktree IS listed by `git worktree list`, so the listing test separates
+    them.
+
+    APPLIED ONLY WHEN THE GIT DIR DIFFERS FROM THE COMMON DIR. A submodule and
+    a `--separate-git-dir` checkout report the same directory as both, and
+    `worktree list` there reports the GIT DIR rather than the checkout — they
+    would fail this test (measured). They never reach it.
+    """
+    if asked_root is None or common_dir is None:
+        return False
+    try:
+        git_dir_raw = _git_rev_parse(str(asked_root), "--git-dir")
+        if git_dir_raw is None:
+            return False
+        git_dir = Path(git_dir_raw)
+        if not git_dir.is_absolute():
+            git_dir = Path(asked_root) / git_dir
+        git_dir = git_dir.resolve()
+        common_path = Path(common_dir).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if git_dir == common_path:
+        return False
+    listed = _listed_worktree_toplevels(common_path.parent)
+    if listed is None:
+        return False
+    toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
+    if toplevel_raw is None:
+        return False
+    try:
+        toplevel = Path(toplevel_raw).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return toplevel not in listed
+
+
+def _cwd_or_none() -> Optional[Path]:
+    """`Path.cwd()`, or None when the process cwd no longer exists.
+
+    `Path.cwd()` RAISES FileNotFoundError once the directory is deleted, so it
+    must never be called inline on a path that resolves identity: a deleted
+    cwd is an ordinary state for a long-lived process and the resolver's job
+    is to decline, not to crash.
+    """
+    try:
+        return Path.cwd()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _unanswerable_repository(start) -> Optional[Path]:
+    """The `.git` marker proving `start` sits in a repository git could not answer for.
+
+    Returns the marker path, or None when no marker is reachable. The walk
+    honours the SAME boundaries git does, so a directory git would not treat
+    as inside a repository is never declined for that reason:
+
+    - a `.git` FILE counts (a submodule and a linked worktree both use one),
+      tested with `lexists` so a broken marker still marks a repository;
+    - the walk stops at the filesystem root;
+    - it stops when the device changes, unless
+      `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy;
+    - it stops at a `GIT_CEILING_DIRECTORIES` ancestor (split on `os.pathsep`,
+      empty entries ignored, each resolved), and does not inspect the ceiling
+      directory itself — git refuses to use one as a repository.
+
+    Never raises: an unreadable path or environment answers None.
+    """
+    if start is None:
+        return None
+    try:
+        level = Path(start).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    ceilings = set()
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            ceilings.add(Path(entry).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    cross_filesystem = bool(os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM"))
+
+    try:
+        device = os.stat(level).st_dev
+    except OSError:
+        return None
+
+    while True:
+        if level in ceilings:
+            return None
+        try:
+            marker = level / ".git"
+            if os.path.lexists(marker):
+                return marker
+        except (OSError, ValueError):
+            return None
+        parent = level.parent
+        if parent == level:
+            return None
+        if not cross_filesystem:
+            try:
+                if os.stat(parent).st_dev != device:
+                    return None
+            except OSError:
+                return None
+        level = parent
+
+
 def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
     """One `git rev-parse` answer, decoded, or None.
 
@@ -463,6 +633,22 @@ def main_repo_root(
             main_git = (common_path.parent / ".git").resolve()
             if git_dir != common_path and main_git == common_path:
                 # LINKED WORKTREE: per-worktree git dir, shared main `.git`.
+                # VERIFY IT IS LISTED before trusting the shape: a forged
+                # `.git` FILE naming another repository's worktree admin dir
+                # passes every check above (SEC-1), and this is the only
+                # branch that can be forged this way. A genuine linked
+                # worktree is listed.
+                asked = Path(start) if start is not None else Path.cwd()
+                if _worktree_redirect(asked, common_path):
+                    logger.warning(
+                        "the directory %r resolves to another repository's "
+                        "worktree admin dir but is not one of its listed "
+                        "worktrees, so no project id was derived from it. Run "
+                        "`pact-memory project-id show` to inspect the detected "
+                        "identity.",
+                        str(asked),
+                    )
+                    return None
                 return common_path.parent
         except (OSError, RuntimeError):
             # A path that will not resolve cannot prove the worktree shape;
@@ -817,7 +1003,7 @@ class PACTMemory:
         produced; see `_legacy_project_name`.
 
         A declared directory that no longer exists declines. A declaration
-        whose repository has a remote that cannot be represented also
+        whose repository has a remote that could not be read or represented also
         declines: never a basename for a real but unrepresentable remote,
         because a basename there is a silently different bucket.
         """
@@ -858,9 +1044,10 @@ class PACTMemory:
                 )
             logger.warning(
                 "the repository at %r (declared via %s) has a remote that "
-                "cannot be represented as a project id, so no id was derived. "
+                "could not be read or represented as a project id, so no id "
+                "was derived. "
                 "Run `pact-memory project-id show` to inspect the detected "
-                "identity, or write an operator-chosen canonical id to %s.",
+                "identity, or write an operator-chosen canonical id to %r.",
                 str(declared_main_root),
                 source,
                 declared_common_dir / "pact-project-id",
@@ -892,6 +1079,19 @@ class PACTMemory:
                 recorded_root = None
             if recorded_root is not None:
                 recorded_common_dir = main_repo_common_dir(str(recorded_root))
+                if recorded_common_dir is None and _unanswerable_repository(
+                    recorded_root
+                ) is not None:
+                    # Same rule again: a `.git` marker with no git answer is a
+                    # broken repository, not an umbrella folder.
+                    logger.warning(
+                        "the recorded main checkout %r for the directory "
+                        "declared via %s carries a `.git` marker but git could "
+                        "not answer for it, so no project id was derived.",
+                        str(recorded_root),
+                        source,
+                    )
+                    return None, "worktree identity record", None, recorded_root, None
                 legacy_name = PACTMemory._legacy_project_name(
                     recorded_common_dir, recorded_root
                 )
@@ -914,7 +1114,7 @@ class PACTMemory:
                     )
                 logger.warning(
                     "the recorded main checkout %r for the directory declared "
-                    "via %s has a remote that cannot be represented as a "
+                    "via %s has a remote that could not be read or represented as a "
                     "project id; no id was derived. Run `pact-memory "
                     "project-id show` to inspect the detected identity, or "
                     "write an operator-chosen canonical id to %s.",
@@ -942,6 +1142,21 @@ class PACTMemory:
             )
             return None, source, None, None, None
         live_root = declared_main_root or declared_root or Path(declared_dir)
+        # A DECLARED DIRECTORY THAT IS `.git`-MARKED BUT UNANSWERABLE BY GIT
+        # declines for the same reason as the git rung. A non-git declared path
+        # has no marker and keeps the designed basename.
+        if declared_common_dir is None and _unanswerable_repository(
+            live_root
+        ) is not None:
+            logger.warning(
+                "the directory declared via %s is inside a git work tree whose "
+                "repository git could not answer for, so no project id was "
+                "derived. Run `pact-memory project-id show` to inspect the "
+                "detected identity, or write an operator-chosen canonical id "
+                "to <git-common-dir>/pact-project-id.",
+                source,
+            )
+            return None, source, None, live_root, None
         legacy_name = PACTMemory._legacy_project_name(declared_common_dir, live_root)
         # A non-git declared path has no common dir, so `detect_id_for_root`
         # returns the designed basename without shelling to git.
@@ -959,13 +1174,14 @@ class PACTMemory:
                 identity.override_ignored,
             )
         logger.warning(
-            "the repository at %r (declared via %s) has a remote that cannot "
-            "be represented as a project id, so no id was derived. Run "
+            "the repository at %r (declared via %s) has a remote that could "
+            "not be read or represented as a project id, so no id was "
+            "derived. Run "
             "`pact-memory project-id show` to inspect the detected identity, "
-            "or write an operator-chosen canonical id to %s.",
+            "or write an operator-chosen canonical id to %r.",
             str(live_root),
             source,
-            declared_common_dir / "pact-project-id"
+            str(declared_common_dir / "pact-project-id")
             if declared_common_dir is not None
             else "<git-common-dir>/pact-project-id",
         )
@@ -1064,10 +1280,11 @@ class PACTMemory:
                 # from the one its remote names, which is the defect this
                 # change exists to remove.
                 logger.warning(
-                    "the repository at %r has an origin remote that cannot be "
-                    "represented as a project id, so no id was derived. Run "
+                    "the repository at %r has an origin remote that could not "
+                    "be read or represented as a project id, so no id was "
+                    "derived. Run "
                     "`pact-memory project-id show` to inspect the detected "
-                    "identity, or write an operator-chosen canonical id to %s.",
+                    "identity, or write an operator-chosen canonical id to %r.",
                     str(repo_root),
                     cwd_common_dir / "pact-project-id",
                 )
@@ -1078,6 +1295,21 @@ class PACTMemory:
                     identity.override_ignored,
                     repo_root,
                 )
+        # A `.git`-MARKED DIRECTORY WHERE GIT CANNOT ANSWER DECLINES. Falling
+        # through to a folder name here files the project in a silently
+        # different bucket — the #1699 rule this change exists to enforce.
+        # git absent from PATH, a corrupted or partial `.git`, or a timeout all
+        # take this arm; a genuinely non-git umbrella has no marker and keeps
+        # its designed basename fallback.
+        if _unanswerable_repository(_cwd_or_none()) is not None:
+            logger.warning(
+                "the working directory is inside a git work tree whose "
+                "repository git could not answer for, so no project id was "
+                "derived from it. Run `pact-memory project-id show` to inspect "
+                "the detected identity, or write an operator-chosen canonical "
+                "id to <git-common-dir>/pact-project-id."
+            )
+            return _DetectedIdentity(None, "unresolved", None, None, None)
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
 
@@ -1099,12 +1331,29 @@ class PACTMemory:
         # resolution — that is why there is no disagreement warning to emit.
         user_setting = read_user_setting(get_memory_dir() / "config.json")
         if user_setting is not None:
-            return _DetectedIdentity(user_setting, "user setting", None, None, None)
+            # THE PRE-CHANGE VALUE IS STILL COMPUTABLE, so it must be carried.
+            # Dropping it would silently strand every row filed under the
+            # folder name (the union has no legacy candidate to widen to) and
+            # would make `_detect_project_basename()` return None, which makes
+            # the backlog writer refuse to write at all. `_find_project_root`
+            # falls back to the cwd itself, which is exactly the value the
+            # pre-change resolver produced for this location.
+            setting_root = PACTMemory._find_project_root(Path.cwd())
+            return _DetectedIdentity(
+                user_setting,
+                "user setting",
+                setting_root.name if setting_root is not None else None,
+                None,
+                setting_root,
+            )
 
         # Strategy 3: Current working directory — walk UP to nearest project
         # marker. A walk that lands on HOME WARNS and never canonicalises.
         try:
-            cwd_root = PACTMemory._find_project_root(Path.cwd())
+            cwd_start = _cwd_or_none()
+            if cwd_start is None:
+                return _DetectedIdentity(None, "unresolved", None, None, None)
+            cwd_root = PACTMemory._find_project_root(cwd_start)
             cwd_name = cwd_root.name
             if cwd_name:
                 try:
@@ -1113,7 +1362,7 @@ class PACTMemory:
                     home = None
                 if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):
                     logger.warning(
-                        "project_id resolved to the HOME directory (%s); memories "
+                        "project_id resolved to the HOME directory (%r); memories "
                         "will be scoped to user scope %r, not a project. Run from "
                         "the project directory or set CLAUDE_PROJECT_DIR.",
                         cwd_root,
@@ -1121,6 +1370,30 @@ class PACTMemory:
                     )
                     return _DetectedIdentity(cwd_name, "cwd", cwd_name, None, cwd_root)
                 cwd_common_dir = main_repo_common_dir(str(cwd_root))
+                if cwd_common_dir is None and _unanswerable_repository(
+                    cwd_root
+                ) is not None:
+                    # Same rule as the git rung: a marker without a git answer
+                    # DECLINES rather than basenaming the folder.
+                    logger.warning(
+                        "the project root %r carries a `.git` marker but git "
+                        "could not answer for it, so no project id was "
+                        "derived. Run `pact-memory project-id show` to inspect "
+                        "the detected identity, or write an operator-chosen "
+                        "canonical id to <git-common-dir>/pact-project-id.",
+                        str(cwd_root),
+                    )
+                    return _DetectedIdentity(None, "unresolved", None, None, cwd_root)
+                if _worktree_redirect(cwd_root, cwd_common_dir):
+                    # The forged worktree-admin shape. `main_repo_root` is not
+                    # called on this rung, so the check is repeated here.
+                    logger.warning(
+                        "the project root %r resolves to another repository's "
+                        "worktree admin dir but is not one of its listed "
+                        "worktrees, so no project id was derived from it.",
+                        str(cwd_root),
+                    )
+                    return _DetectedIdentity(None, "unresolved", None, None, cwd_root)
                 legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, cwd_root)
                 identity = detect_id_for_root(cwd_root, cwd_common_dir)
                 PACTMemory._warn_override_ignored(identity)
@@ -1136,8 +1409,9 @@ class PACTMemory:
                         cwd_root,
                     )
                 logger.warning(
-                    "the repository at %r has an origin remote that cannot be "
-                    "represented as a project id, so no id was derived.",
+                    "the repository at %r has an origin remote that could not "
+                    "be read or represented as a project id, so no id was "
+                    "derived.",
                     str(cwd_root),
                 )
                 return _DetectedIdentity(
@@ -1283,7 +1557,12 @@ class PACTMemory:
         if stat_key is None:
             # Absent store: nothing to reconcile and nothing to create.
             return (scope,)
-        cache_key = (store, stat_key, scope, legacy)
+        # THE IDENTITY ROOT IS THE THIRD INPUT TO THE DECISION, so it belongs
+        # in the key: the plausibility verdict is computed against it, and two
+        # same-named checkouts of one repository share store, scope and legacy
+        # while gating against DIFFERENT roots. Omitting it serves one root's
+        # include/exclude verdict for the other.
+        cache_key = (store, stat_key, str(self._project_identity_root), scope, legacy)
         cached = _LEGACY_SCOPE_CACHE.get(cache_key)
         if cached is not None:
             self._legacy_scope_state = cached[1]
@@ -1318,14 +1597,16 @@ class PACTMemory:
             # second one free.
             canonical_count = count_project_memories(connection, scope)
             candidate, ambiguous = _match_legacy_candidate(legacy, buckets)
-            # THE FILE COUNT IS MEASURED ONLY WHERE SURFACE 4 NEEDS IT. The
-            # save path already pays two indexed COUNTs; a third query on
-            # every resolution would be a new cost on the hottest write for a
-            # value only the zero-prior-rows disclosure uses. `None` means
-            # "not measured on this path", never zero.
+            # MEASURED WHENEVER A CANDIDATE EXISTS, not only when the canonical
+            # bucket is empty. Gating on `canonical_count == 0` made the field
+            # null on every operator surface for any repo with canonical rows,
+            # i.e. after its first canonical save — exactly the dangerous case
+            # (a few canonical rows hiding a large legacy bucket) where the
+            # file count is how the loss is judged. `None` still means "no
+            # candidate", never zero.
             file_paths = (
                 count_project_file_paths(connection, candidate)
-                if candidate is not None and canonical_count == 0
+                if candidate is not None
                 else None
             )
             if candidate is None:
@@ -1344,8 +1625,25 @@ class PACTMemory:
                     "detail": None,
                 }
             else:
+                # A SET OF ROOTS, NOT ONE. The identity root of a linked
+                # worktree is the MAIN checkout (by design), while a row saved
+                # from the worktree records the WORKTREE's absolute path, so
+                # gating on the main checkout alone excludes the operator's own
+                # pre-upgrade bucket. `git worktree list` from the identity root
+                # yields every checkout of THIS repository; `checkout_roots()`
+                # resolves against the process instead, which in a declared
+                # session can be a different repository.
+                gate_roots = []
+                if repo_root is not None:
+                    gate_roots.append(str(Path(repo_root).resolve()))
+                    for listed in sorted(
+                        _listed_worktree_toplevels(repo_root) or ()
+                    ):
+                        entry = str(listed)
+                        if entry not in gate_roots:
+                            gate_roots.append(entry)
                 outcome, detail = legacy_candidate_plausibility(
-                    connection, candidate, repo_root
+                    connection, candidate, gate_roots or None
                 )
                 included = outcome != "excluded"
                 state = {
@@ -1359,7 +1657,7 @@ class PACTMemory:
                     # each bucket of a union, and `graph_stats` reports rows
                     # and paths separately for the same reason.
                     "file_paths": file_paths,
-                    "rekey": render_rekey_command(candidate),
+                    "rekey": render_rekey_command(candidate, db_path=store),
                     "included": included,
                     "verified": outcome == "verified",
                     # A3: the gate cannot discriminate in practice — the live
@@ -1394,14 +1692,14 @@ class PACTMemory:
                         logger.warning(
                             "legacy project bucket %r holds %d memories and %d "
                             "file path%s, but none of its absolute file rows "
-                            "lies under %s, so it is NOT in this read scope. "
+                            "lies under %r, so it is NOT in this read scope. "
                             "Move it explicitly with: %s",
                             candidate,
                             buckets.get(candidate, 0),
                             excluded_file_paths,
                             "" if excluded_file_paths == 1 else "s",
                             repo_root,
-                            render_rekey_command(candidate),
+                            render_rekey_command(candidate, db_path=store),
                         )
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
@@ -1410,7 +1708,7 @@ class PACTMemory:
         # behind and the dict would grow for the process's lifetime.
         for stale in [
             key for key in _LEGACY_SCOPE_CACHE
-            if key != cache_key and key[:1] == (store,) and key[2:] == (scope, legacy)
+            if key != cache_key and key[:1] == (store,) and key[3:] == (scope, legacy)
         ]:
             _LEGACY_SCOPE_CACHE.pop(stale, None)
         _LEGACY_SCOPE_CACHE[cache_key] = (result, state)
@@ -2165,8 +2463,14 @@ class PACTMemory:
             # canonical bucket's PRIOR count. Present on every save, so a
             # caller never has to read an absent field as "nothing to say".
             "legacy_scope": self._legacy_scope_state,
+            # SILENT ON AN UNKNOWN, exactly as the warning above is: when the
+            # cwd repository's identity did not resolve, there is no second id
+            # to disagree with, and `None != filed_under` is not a divergence.
             "location_divergence": bool(
-                filed_under and cwd_repo is not None and self._cwd_repo_id != filed_under
+                filed_under
+                and cwd_repo is not None
+                and self._cwd_repo_id is not None
+                and self._cwd_repo_id != filed_under
             ),
         }
 
@@ -3252,12 +3556,13 @@ class PACTMemory:
         # first and may do store work itself, including a whole-store
         # embedding catch-up on the process's first memory surface.
         #
-        # WHAT ZERO HERE GUARANTEES: `memory_count`, `graph_stats["files"]` and
-        # `graph_stats["memories"]` — the three project-scoped counters.
-        # `graph_stats["memory_file_links"]` and `graph_stats["file_relations"]`
-        # are UNCONDITIONAL global counts even when a real project id is passed;
-        # they are not project-scoped, are pre-existing, and are not part of
-        # this fix. They read 0 here only because the guard performs no query —
+        # WHAT ZERO HERE GUARANTEES: EVERY counters in `graph_stats`.
+        # All four are project-scoped — `graph.get_graph_stats` applies the
+        # same scope predicate to `memory_file_links` and `file_relations` as
+        # to `files` and `memories`. The earlier wording here called those two
+        # "UNCONDITIONAL global counts"; that was false, and a reader who
+        # trusted it would write a global-count arm (red) or revert the
+        # scoping. They read 0 here only because the guard performs no query —
         # an implementation choice, not a guarantee.
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
@@ -3326,7 +3631,9 @@ class PACTMemory:
                     # was the fifth renderer and the one that made "one
                     # helper" false: a mutation of the helper left it green
                     # because it hand-rolled the join.
-                    "rekey": render_rekey_command(bucket_id),
+                    "rekey": render_rekey_command(
+                        bucket_id, db_path=str(resolve_db_path())
+                    ),
                 }
                 for bucket_id, count in sorted(
                     project_bucket_counts(conn).items(),

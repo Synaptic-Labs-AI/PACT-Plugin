@@ -69,10 +69,8 @@ _SCP_FORM_RE = re.compile(r"^[^@\s/:\\]+@(?P<host>[^:/\s\\]+):(?P<path>.+)$")
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-")
 _PATH_BANNED_CHARS = frozenset("@?#%")
 
-_MAX_ID_LENGTH = 255
-
 # A hard cap on the override file we are willing to read. The value itself is
-# capped at 255 characters, so anything larger is unusable by definition.
+# capped at the canonical length, so anything larger is unusable by definition.
 _MAX_OVERRIDE_BYTES = 4096
 
 _OVERRIDE_FILENAME = "pact-project-id"
@@ -83,8 +81,11 @@ class OverrideRead(NamedTuple):
 
     `value` is the usable first line, or None. `path` is the file consulted
     (None when it is absent). `reason` is a fixed token naming why a PRESENT
-    file was unusable — "not_utf8", "empty", "control_chars", "too_long" or
-    "unreadable". Absence is `value=None, path=None`, never a reason.
+    file was unusable — "not_regular", "not_utf8", "empty", "control_chars",
+    "too_long" or "unreadable". Absence is `value=None, path=None`, never a
+    reason. "not_regular" covers a FIFO, a device node and a SYMLINK: none is
+    read, because a FIFO in this position would block every memory operation
+    that resolves an identity.
     """
 
     value: Optional[str]
@@ -149,6 +150,18 @@ def _server_identity_impl() -> tuple:
     from .database import is_canonical_id, validate_identifier_for_write
 
     return is_canonical_id, validate_identifier_for_write
+
+
+def _max_id_length() -> int:
+    """The identifier length cap, from database.py (ONE definition).
+
+    Imported at call time for the same reason `_server_identity_impl` is: the
+    memory scripts load both as a package and by direct `sys.path` insertion,
+    so a module-level relative import would break the second form.
+    """
+    from .database import CANONICAL_ID_MAX_LENGTH
+
+    return CANONICAL_ID_MAX_LENGTH
 
 
 def is_canonical(value: object) -> bool:
@@ -281,6 +294,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
     # so neither reading is trusted. This is the rule `backlog.py` already
     # ships; a second parser with a laxer rule would be the defect. The
     # cross-parser corpus test pins that both refuse the same inputs.
+    # A leading BOM is not part of a URL. Reject it HERE rather than letting
+    # the scp form absorb it into the userinfo: `_is_network_shaped` classifies
+    # a BOM-prefixed value as a present network remote that cannot be
+    # represented, so accepting it in one spelling and refusing it in the other
+    # would make that rule false. One rule, both spellings.
+    if value.startswith("\ufeff"):
+        return None
+
     if "\\" in value or value.count("@") > 1:
         return None
 
@@ -337,7 +358,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # that row is superseded here.)
         identifier = f"{host}/{'/'.join(segments)}"
 
-    if len(identifier) > _MAX_ID_LENGTH:
+    if len(identifier) > _max_id_length():
         return None
 
     # The grammar's single authority. If `database.is_canonical_id` is ever
@@ -356,23 +377,37 @@ def _is_network_shaped(url: object) -> bool:
     local-path form is a legitimate basename fallback.
 
     `file://` and bare local paths are NOT network-shaped. Every other
-    `scheme://` IS — including schemes outside the accepted set, because a
+    `scheme://` IS - including schemes outside the accepted set, because a
     present network remote we cannot represent must not be silently
     downgraded to a folder name. That ruling supersedes the PREPARE corpus's
     U58 (`ftp://` as basename).
+
+    A scheme-less value whose PRE-SLASH prefix holds BOTH `@` and `:` is
+    ALSO network-shaped. git's own scp heuristic reads the first `:` as the
+    host/path separator, so `deploy-token:<token>@host/owner/repo` names a
+    network host to git even though our stricter scp form rejects it (its
+    user class excludes `:`). Downgrading that to a folder basename is the
+    silent mis-scope this change exists to remove, so it DECLINES and names
+    the override remedy instead. A user-less `host:path` and a drive path
+    keep the ruled no-portable-origin narrowing.
     """
     if not isinstance(url, str):
         return False
-    # A leading BOM is a present network remote that cannot be represented.
-    # Strip it for CLASSIFICATION only: the canonicaliser still refuses the
-    # value, so this decides decline-versus-basename, never acceptance.
-    value = _strip_one_terminator(url).lstrip("\ufeff")
+    # A leading BOM or leading WHITESPACE is a present network remote that
+    # cannot be represented. Both are stripped for CLASSIFICATION only: the
+    # canonicaliser refuses the value outright, so this decides
+    # decline-versus-basename, never acceptance.
+    value = _strip_one_terminator(url).lstrip("\ufeff").lstrip()
     if "\\" in value or value.count("@") > 1:
         return "://" in value or _SCP_FORM_RE.match(value) is not None
     scheme_match = _SCHEME_PREFIX_RE.match(value)
     if scheme_match is not None:
         return scheme_match.group("scheme").lower() not in _LOCAL_SCHEMES
-    return _SCP_FORM_RE.match(value) is not None
+    if _SCP_FORM_RE.match(value) is not None:
+        return True
+    first_slash = value.find("/")
+    prefix = value if first_slash == -1 else value[:first_slash]
+    return "@" in prefix and ":" in prefix
 
 
 def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
@@ -511,7 +546,7 @@ def read_override(common_dir: Path) -> OverrideRead:
         candidate = line.strip()
         if not candidate or candidate.startswith("#"):
             continue
-        if len(candidate) > _MAX_ID_LENGTH:
+        if len(candidate) > _max_id_length():
             return OverrideRead(None, path, "too_long")
         try:
             validate_identifier_for_write(candidate)
@@ -535,7 +570,7 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
     value = payload.get("project_id")
-    if not isinstance(value, str) or not value or len(value) > _MAX_ID_LENGTH:
+    if not isinstance(value, str) or not value or len(value) > _max_id_length():
         return None
     try:
         _, validate_identifier_for_write = _server_identity_impl()
@@ -543,6 +578,54 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     except (ImportError, ValueError):
         return None
     return value
+
+
+def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
+    """Whether `<root>/.git` is a FILE redirecting at another repo's git dir.
+
+    A genuine submodule points at `<super>/.git/modules/<name>`, a genuine
+    linked worktree at `<main>/.git/worktrees/<name>`, and a genuine
+    `--separate-git-dir` at an arbitrary path. The ONE shape whose target is
+    a directory named exactly `.git` is a checkout redirecting at another
+    repository's git dir: git then reports that repository's git dir, common
+    dir and origin as if the asking directory were its checkout, so a write
+    would file into a project nobody named.
+
+    Read straight from the file rather than through git: a comparison of git
+    answers cannot see this (every answer agrees), and the check must run
+    BEFORE the override and origin reads, because both would otherwise be
+    taken from the foreign repository.
+
+    MEASURED EXCEPTION, and the reason the caller suppresses only the ORIGIN:
+    a legitimate `git init --separate-git-dir=<dir>/.git` names its store
+    directory literally `.git`, so it takes this same shape. It therefore
+    cannot derive an id from its own remote, but it is RECOVERABLE — the
+    override is read first, so one pin at `<common-dir>/pact-project-id`
+    restores it. A forgery can likewise bind a pin, but only one the victim
+    deliberately wrote, never its remote.
+    """
+    dotgit = Path(root) / ".git"
+    try:
+        if not dotgit.is_file():
+            return False
+        text = dotgit.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if not line.startswith("gitdir:"):
+            continue
+        target = line.split(":", 1)[1].strip()
+        if not target:
+            return False
+        resolved = Path(target)
+        if not resolved.is_absolute():
+            resolved = Path(root) / resolved
+        try:
+            resolved = resolved.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return resolved.name == ".git"
+    return False
 
 
 def detect_id_for_root(
@@ -588,6 +671,17 @@ def detect_id_for_root(
         )
     if override.reason is not None and override.path is not None:
         override_ignored = {"path": str(override.path), "reason": override.reason}
+
+    # A REDIRECTED CHECKOUT SUPPRESSES THE ORIGIN READ, AND ONLY THAT.
+    # The override above still answers first, deliberately: a legitimate
+    # `--separate-git-dir=<dir>/.git` checkout takes this same shape, and
+    # refusing before the pin would make it permanently unusable. What is
+    # refused is the ORIGIN, which belongs to the other repository — so a
+    # forgery can at most bind a pin the victim deliberately wrote, which is
+    # strictly narrower than binding its remote. See
+    # `_gitfile_points_at_foreign_gitdir`.
+    if _gitfile_points_at_foreign_gitdir(Path(root)):
+        return RootIdentity(None, None, "declined", override_ignored)
 
     origin = read_origin(root)
     if origin.state == ORIGIN_UNAVAILABLE:

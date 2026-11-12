@@ -319,12 +319,30 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 
 WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
 anything, and follow the candidate it names. It reports the identity this
-session resolved, how it was decided, and every populated bucket with the
-literal `pact-memory project-id rekey --from <id>` command. A bucket can hold
+session resolved, how it was decided, and every populated bucket with a
+literal, runnable rekey command — interpreter-prefixed
+(`python3 "<skill>/scripts/cli.py" project-id rekey --from <id> --db-path <store>`),
+because there is no `pact-memory` executable on PATH. A bucket can hold
 thousands of records that this session's read scope does not include — an
 identity it cannot derive, or a legacy bucket the plausibility gate excluded —
 and an empty result never means those records do not exist. A full id still
 resolves by id, so `get <id>` is a way to check one record when you know it.
+
+### Choosing a Project Identity
+
+Two operator surfaces answer, and they are deliberately ordered:
+
+- `<git-common-dir>/pact-project-id` — a REPOSITORY-scoped pin. It follows the
+  repository that won resolution (the identity root), not the process's
+  working directory. Its first non-blank, non-`#` line is the id; a canonical
+  `host/owner/repo` id and a legacy folder name are both accepted. It must be
+  a regular file: a FIFO or a symlink in that position is refused, and an
+  unusable file is reported as `override_ignored` and resolution continues
+  without it.
+- `<memory_dir>/config.json` → `"project_id"` — a USER-scoped setting. It
+  answers ONLY when no declaration was present and no repository resolved, so
+  a repository pin always outranks it. Use it for a non-repository working
+  directory that should share one identity.
 
 On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 

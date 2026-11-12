@@ -1007,7 +1007,7 @@ def _project_candidates(db_path) -> list:
             # space, a semicolon, a dollar sign or a quote. This string is
             # presented as a runnable command, so an unquoted id is a
             # copy-paste command-injection surface.
-            "rekey": render_rekey_command(bucket_id),
+            "rekey": render_rekey_command(bucket_id, db_path=store),
         }
         for bucket_id, count in sorted(
             buckets.items(), key=lambda item: (-item[1], item[0])
@@ -1026,12 +1026,23 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
     if action == "show":
         memory = PACTMemory(db_path=db_path)
         read_scope = memory._read_project_scopes()
-        repo_root = main_repo_root()
+        # THE ROOT THE WINNING RUNG RESOLVED FIRST; the process cwd only when
+        # no rung resolved one.
+        repo_root = memory._project_identity_root
+        if repo_root is None:
+            repo_root = main_repo_root()
         _success({
             "project_id": memory._project_id_for_envelope(),
             "id_shape": memory._project_id_shape,
             "source": memory._project_id_source,
             "override_ignored": memory._override_ignored,
+            # THE IDENTITY ROOT, NOT THE PROCESS ROOT. `repo_root` promises
+            # the root behind `project_id` and `legacy_scope`, and the gate
+            # compared legacy rows against the IDENTITY root; in a
+            # declared-repo session the process cwd is a different repository,
+            # and reporting it showed the operator the wrong tree while
+            # offering a rekey command. Fall back to the cwd root only when no
+            # rung resolved one (nothing was gated in that case).
             "repo_root": str(repo_root) if repo_root is not None else None,
             "read_scope": list(read_scope) if read_scope is not None else None,
             "legacy_scope": memory._legacy_scope_state,
@@ -1237,11 +1248,11 @@ def build_parser():
         "sync": f'python3 "{prog}" sync',
         "project-file": f'python3 "{prog}" project-file',
         "project-id": f'python3 "{prog}" project-id show',
-        "project-id-rekey": (
-            f'python3 "{prog}" '
-            + render_rekey_command("<id>")
-            + " --dry-run"
-        ),
+        # THE HELPER ALREADY CARRIES THE INTERPRETER AND THE CLI PATH.
+        # Prefixing `python3 "<prog>"` here made the example
+        # `python3 cli.py pact-memory project-id rekey ...`, which exits 2
+        # with argparse's "invalid choice: 'pact-memory'".
+        "project-id-rekey": render_rekey_command("<id>") + " --dry-run",
     }
 
     parser = _TeachParser(
