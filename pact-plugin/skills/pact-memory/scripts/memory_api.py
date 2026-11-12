@@ -1713,17 +1713,18 @@ class PACTMemory:
             self._session_id = self._detect_session_id()
         self._db_path = db_path
 
-        # Cache for the cwd's main repo root, resolved lazily by
-        # _project_scope_warning. One git subprocess per instance rather than
-        # per save: the working directory does not move under a live instance,
-        # and the CLI builds a fresh instance per invocation anyway. `False`
-        # means "not yet resolved" — None is a real answer (not in a repo).
+        # Cache for the cwd's main repo root and its canonical identity, read
+        # by the location-divergence check on every save. `False` means "not
+        # yet resolved"; None is a real answer (not in a repo). BOTH ARE
+        # KEYED ON `_cwd_cache_dir`, the working directory they were derived
+        # for: a process that changes directory after construction gets them
+        # derived again (`_refresh_cwd_cache`), so a save from another
+        # repository still warns. While the directory is unchanged the seed
+        # and the cached answers stand, and no git call repeats.
+        self._cwd_cache_dir: Optional[Path] = _cwd_or_none()
         self._cwd_repo_root: Any = (
             self._git_rung_root if self._git_rung_root is not None else False
         )
-        # The working directory's canonical identity, cached beside the root
-        # for the same reason: `_location_divergence_warning` runs on every
-        # save and must not shell to git twice for one answer.
         self._cwd_repo_id: Any = False
         # Set by `_read_project_scopes` when it decides whether a populated
         # legacy bucket joins this read. Process state, not a store write.
@@ -2914,6 +2915,18 @@ class PACTMemory:
         """Clear the list of tracked files."""
         self._session_files.clear()
 
+    def _refresh_cwd_cache(self) -> None:
+        """Drop the cached cwd root and identity if the directory moved.
+
+        One `getcwd` per call and no git call: the cached answers are reused
+        only while the working directory is the one they were derived for.
+        """
+        current = _cwd_or_none()
+        if current != self._cwd_cache_dir:
+            self._cwd_cache_dir = current
+            self._cwd_repo_root = False
+            self._cwd_repo_id = False
+
     def _current_repo_identity(self) -> Optional[str]:
         """The identity of the repository this PROCESS is in, override included.
 
@@ -2927,6 +2940,7 @@ class PACTMemory:
         the folder name is then the honest answer, and a divergence warning
         from a non-repository location is not a divergence at all.
         """
+        self._refresh_cwd_cache()
         if self._cwd_repo_id is not False:
             return self._cwd_repo_id
         if self._cwd_repo_root is False:
@@ -2984,6 +2998,7 @@ class PACTMemory:
         """
         if not project_id:
             return None
+        self._refresh_cwd_cache()
         if self._cwd_repo_root is False:
             self._cwd_repo_root = main_repo_root()
         root = self._cwd_repo_root

@@ -972,6 +972,57 @@ class TestOneDetectionAsksGitEachQuestionOnce:
         assert calls and self._repeats(calls) == {}
 
 
+class TestTheDivergenceCheckFollowsTheWorkingDirectory:
+    """A save after a change of directory compares against the new directory.
+
+    Catches the cwd repository cached at construction being reused after the
+    process moved into another repository: the save is filed under the first
+    repository's id from inside the second, and the divergence warning that
+    names exactly that is lost.
+    """
+
+    OTHER = "https://github.com/o/other.git"
+
+    def _memory(self, identity_env):
+        return PACTMemory(session_id="s", db_path=identity_env / "store.db")
+
+    def test_a_save_after_moving_into_another_repository_warns(
+        self, identity_env, monkeypatch, caplog
+    ):
+        from unittest.mock import patch
+
+        _fresh_scope_state()
+        first = make_repo(identity_env / "proj", remote=REMOTE)
+        second = make_repo(identity_env / "other", remote=self.OTHER)
+        monkeypatch.chdir(first)
+        with patch("scripts.memory_api._ensure_ready"):
+            memory = self._memory(identity_env)
+            assert memory.project_id == CANONICAL
+            monkeypatch.chdir(second)
+            caplog.clear()
+            memory.save({"context": "x"}, sync_to_claude=False)
+        warnings = [
+            record.getMessage() for record in caplog.records
+            if record.getMessage().startswith("location divergence")
+        ]
+        assert len(warnings) == 1, caplog.text
+        assert "github.com/o/other" in warnings[0]
+        assert memory._last_project_scope["location_divergence"] is True
+
+    def test_without_a_move_the_check_asks_git_nothing(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """Control: the cached answers stand, so the check costs no git call
+        and finds no divergence."""
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        memory = self._memory(identity_env)
+        calls = TestOneDetectionAsksGitEachQuestionOnce._spy(monkeypatch)
+        assert memory._location_divergence_warning(CANONICAL) is None
+        assert calls == []
+
+
 class TestACeilingStartDirectoryIsExamined:
     """A broken `.git` marker AT a ceiling start directory still declines.
 
