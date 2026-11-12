@@ -1092,10 +1092,16 @@ class TestR5EnvFileSeam:
         self, tmp_path
     ):
         sid5 = f"r5-env-file-{uuid.uuid4().hex}"
+        marker = embedding_marker(sid5)
         try:
             self._r5_body(tmp_path, sid5)
+            assert marker.exists(), (
+                "session_init did not reach the embedding marker for this "
+                "test's session id, so the cleanup below is not exercised"
+            )
         finally:
-            embedding_marker(sid5).unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
+        assert not marker.exists(), f"the test left its marker behind: {marker}"
 
     def _r5_body(self, tmp_path, sid5):
         umbrella = make_umbrella(tmp_path)
