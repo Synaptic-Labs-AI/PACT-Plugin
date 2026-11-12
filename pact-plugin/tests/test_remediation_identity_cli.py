@@ -534,6 +534,65 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         assert not untouched
 
 
+def _not_a_database(path: Path, kind: str) -> Path:
+    """A present store file sqlite cannot read: random bytes, or a real
+    store whose pages past the header were overwritten."""
+    if kind == "garbage":
+        path.write_bytes(b"not a sqlite store, " * 8)
+        return path
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE memories (id TEXT)")
+    conn.executemany(
+        "INSERT INTO memories VALUES (?)", [(str(i) * 50,) for i in range(200)]
+    )
+    conn.commit()
+    conn.close()
+    data = bytearray(path.read_bytes())
+    data[100:4096] = b"\xff" * (4096 - 100)
+    path.write_bytes(bytes(data))
+    return path
+
+
+class TestAStoreThatIsNotADatabaseNamesItsRemedy:
+    """Each read-only verb names the remedy for a store sqlite cannot read.
+
+    Catches the bare `SYSTEM_ERROR: file is not a database` (or `database
+    disk image is malformed`): the operator sees sqlite's words and no check
+    to make, while an unopenable store already names one.
+    """
+
+    @pytest.mark.parametrize("kind", ["garbage", "corrupt"])
+    @pytest.mark.parametrize("argv, code, error", [
+        (["project-id", "show"], 2, "SYSTEM_ERROR"),
+        (["status"], 2, "SYSTEM_ERROR"),
+        (["project-id", "rekey", "--candidates"], 2, "SYSTEM_ERROR"),
+        (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3, "REKEY_FAILED"),
+    ], ids=["show", "status", "candidates", "rekey-dry-run"])
+    @pytest.mark.parametrize("where", ["no-repository", "repository"])
+    def test_the_refusal_names_the_check(
+        self, identity_env, monkeypatch, capfd, argv, code, error, kind, where
+    ):
+        """In a repository the legacy-bucket probe reads the store first."""
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        store = _not_a_database(identity_env / "store.db", kind)
+        before = store.read_bytes()
+        monkeypatch.chdir(
+            make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+            if where == "repository"
+            else identity_env
+        )
+        got, envelope = _cli([*argv, "--db-path", str(store)], capfd)
+        assert got == code, envelope
+        assert envelope["error"] == error
+        message = envelope["message"]
+        assert "exists but cannot be opened" in message, message
+        assert "names a PACT memory store" in message, message
+        assert "the store was not modified" in message, message
+        assert store.read_bytes() == before
+
+
 class TestRekeyInputAndStoreEdges:
     def test_candidates_takes_no_other_option(self, identity_env, store, capfd):
         code, envelope = _cli(

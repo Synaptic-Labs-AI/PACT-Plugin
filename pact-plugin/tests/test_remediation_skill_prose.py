@@ -468,3 +468,18 @@ class TestUserSettingIsReadFromTheUserScope:
             assert config.get_user_memory_dir() == (
                 _Path.home() / ".claude" / "pact-memory"
             )
+
+
+class TestUpdateCascadeQuarantineIsDocumented:
+    """A re-key that cannot move a link reports it instead of aborting."""
+
+    def test_the_quarantine_sentence_is_present(self):
+        assert (
+            "A file link whose recorded path cannot be re-tracked stays on the "
+            "old project, is counted in the update envelope's "
+            "last_cascade_skipped, and does not stop the rest of the re-key."
+        ) in _body(SKILL)
+
+    def test_the_field_is_on_the_update_envelope(self):
+        cli = (SCRIPTS / "cli.py").read_text(encoding="utf-8")
+        assert '"last_cascade_skipped": memory.last_cascade_skipped' in cli

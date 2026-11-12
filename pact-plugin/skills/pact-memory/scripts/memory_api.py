@@ -832,7 +832,7 @@ def _store_schema_present(store: str) -> bool:
             return False
         with closing(_read_only_connection(store)) as connection:
             return _connection_has_memories_table(connection)
-    except sqlite3.OperationalError as exc:
+    except sqlite3.DatabaseError as exc:
         if _read_only_store_unavailable(exc, store):
             return False
         raise
@@ -850,8 +850,41 @@ def _connection_has_memories_table(conn: Any) -> bool:
     ).fetchone() is not None
 
 
+def present_store_fault(exc: Exception, store: str) -> Optional[str]:
+    """The remedy for a store that EXISTS and cannot serve a read, or None.
+
+    Two causes, each with its own check: the file cannot be opened
+    (SQLITE_CANTOPEN: permissions or a parent directory that cannot be
+    traversed), or it opens but is not a usable SQLite database
+    (SQLITE_NOTADB, SQLITE_CORRUPT). None for an absent path and for every
+    other failure, which the caller reports as it would have.
+    """
+    if not Path(store).exists():
+        return None
+    errorname = getattr(exc, "sqlite_errorname", "")
+    text = str(exc).lower()
+    if errorname == "SQLITE_CANTOPEN" or (
+        not errorname and "unable to open database file" in text
+    ):
+        check = "that this process can read the file and traverse its parent directory"
+    elif errorname in ("SQLITE_NOTADB", "SQLITE_CORRUPT") or (
+        not errorname
+        and ("file is not a database" in text or "disk image is malformed" in text)
+    ):
+        check = (
+            "that --db-path names a PACT memory store, or restore the file "
+            "from a backup"
+        )
+    else:
+        return None
+    return (
+        f"the store at {store!r} exists but cannot be opened ({exc}). Check "
+        f"{check}; the store was not modified."
+    )
+
+
 def _read_only_store_unavailable(
-    exc: "sqlite3.OperationalError", store: str
+    exc: "sqlite3.DatabaseError", store: str
 ) -> bool:
     """Whether a read-only probe failure is the DEGRADED state, not a fault.
 
@@ -860,10 +893,10 @@ def _read_only_store_unavailable(
     (SQLITE_READONLY) and the caller narrows to the canonical scope.
 
     SQLITE_CANTOPEN IS DEGRADED ONLY WHEN THE PATH IS ABSENT — a race after
-    the presence check. A store that EXISTS and cannot be opened is a FAULT:
-    reporting "no memories" for an unreadable store is a loud-to-silent
-    regression, so this RAISES with the remedy named. Any other
-    OperationalError raises unchanged.
+    the presence check. A store that EXISTS and cannot be opened, or is not
+    a database, is a FAULT: reporting "no memories" for it is a loud-to-silent
+    regression, so this RAISES `present_store_fault`'s remedy. Any other
+    failure raises unchanged.
     """
     errorname = getattr(exc, "sqlite_errorname", "")
     text = str(exc).lower()
@@ -872,18 +905,13 @@ def _read_only_store_unavailable(
     )
     if readonly:
         return True
+    remedy = present_store_fault(exc, store)
+    if remedy is not None:
+        raise sqlite3.OperationalError(remedy) from exc
     cantopen = errorname == "SQLITE_CANTOPEN" or (
         not errorname and "unable to open database file" in text
     )
-    if cantopen:
-        if Path(store).exists():
-            raise sqlite3.OperationalError(
-                f"the store at {store!r} exists but cannot be opened "
-                f"({exc}). Check that this process can read the file and "
-                "traverse its parent directory; the store was not modified."
-            ) from exc
-        return True
-    return False
+    return cantopen
 
 
 @contextmanager
@@ -916,7 +944,7 @@ def _legacy_probe_context(store: str, conn):
         if not _connection_has_memories_table(connection):
             connection.close()
             degraded = "no schema"
-    except sqlite3.OperationalError as exc:
+    except sqlite3.DatabaseError as exc:
         if not _read_only_store_unavailable(exc, store):
             raise
         degraded = str(exc)
@@ -933,10 +961,12 @@ def _legacy_probe_context(store: str, conn):
 def read_project_bucket_census(store: str) -> Dict[str, int]:
     """Every NON-EMPTY project bucket in `store`, read READ-ONLY.
 
-    The `project-id show` / `rekey --candidates` census. It returns `{}` for
-    an absent, uninitialized or unreadable store: a REPORT must not create a
-    store or its schema, and a census is the right place to degrade rather
-    than answer SYSTEM_ERROR for the whole verb. Any other failure raises.
+    The `project-id show` / `rekey --candidates` census. An ABSENT or
+    SCHEMA-LESS store answers `{}`: a report must not create a store or its
+    schema. A store that is PRESENT but cannot be opened, or is not a
+    readable SQLite database, RAISES with the remedy named
+    (`present_store_fault`), which the CLI reports as exit 2: "no buckets"
+    for an unreadable store would hide its rows.
     """
     if not Path(store).exists():
         return {}
@@ -949,7 +979,7 @@ def read_project_bucket_census(store: str) -> Dict[str, int]:
             if not _connection_has_memories_table(connection):
                 return {}
             return project_bucket_counts(connection)
-    except sqlite3.OperationalError as exc:
+    except sqlite3.DatabaseError as exc:
         if not _read_only_store_unavailable(exc, store):
             raise
         return {}
@@ -4301,9 +4331,11 @@ class PACTMemory:
         moved, the link stranded under the old project — and re-issuing the
         update would hit the same row and fail identically forever. The row is
         SKIPPED (left where it is, never deleted), every other link still
-        moves, and one warning names the memory and the stranded file ids. No
-        scoped read serves the stranded link, because every read confirms the
-        row's stored project.
+        moves, and one warning names the memory and the stranded file ids. The
+        number of links left behind is `last_cascade_skipped`, which the
+        `update` envelope carries; zero is the normal answer. No scoped read
+        serves the stranded link, because every read confirms the row's
+        stored project.
 
         Vector: vec0 partitions by project_id, so a vector left in the old
         partition is invisible to the new project's semantic search — and,

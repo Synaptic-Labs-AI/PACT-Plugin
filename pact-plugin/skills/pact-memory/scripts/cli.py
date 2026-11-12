@@ -63,6 +63,7 @@ from scripts.memory_api import (
     ProjectScopeDisagreementError,
     _invalidate_legacy_scope_cache,
     main_repo_root,
+    present_store_fault,
     project_candidate_rows,
     read_project_bucket_census,
     render_rekey_command,
@@ -1002,7 +1003,9 @@ def _project_candidates(memory, db_path) -> list:
     rendered only for the rows `project_candidate_rows` can defend. The store
     is read READ-ONLY (`read_project_bucket_census`), so an absent or
     schema-less store answers an empty list and is NEVER created or given a
-    schema by this report; a present store that cannot be opened raises.
+    schema by this report; a present store that cannot be opened, or is not
+    a readable SQLite database, raises, and the CLI reports exit 2 with the
+    remedy named.
     `memory` must already have computed its read scope, which is what names
     the legacy candidate.
     """
@@ -1151,7 +1154,16 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             **{key: 0 for key in _REKEY_ZERO_COUNTERS},
         })
 
-    memory._read_project_scopes()
+    try:
+        memory._read_project_scopes()
+    except db_sqlite3.DatabaseError as exc:
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(
+                _scrub(present_store_fault(exc, str(store)) or str(exc))
+            ),
+            exit_code=3,
+        )
     state = memory._legacy_scope_state or {}
     own_legacy = from_id == memory._legacy_project_basename
     if state.get("candidate") is not None and from_id == state["candidate"]:
@@ -1243,9 +1255,12 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     except db_sqlite3.DatabaseError as exc:
         # OPERATIONAL FAILURE, NOT BAD INPUT: a locked store, an integrity
         # error or an I/O fault says nothing about the caller's arguments.
+        # A present store that cannot be opened names its remedy.
         _error(
             "REKEY_FAILED",
-            escape_for_envelope(_scrub(str(exc))),
+            escape_for_envelope(
+                _scrub(present_store_fault(exc, str(store)) or str(exc))
+            ),
             exit_code=3,
         )
     if args.apply:
