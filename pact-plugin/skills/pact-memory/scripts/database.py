@@ -243,7 +243,12 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         db_path: Optional custom database path. Uses default if not provided.
 
     Returns:
-        SQLite connection configured with WAL mode and foreign keys.
+        SQLite connection with foreign keys and a busy timeout set. The
+        journal mode is WAL when this call CREATES the store or opens one that
+        already holds data; an EMPTY store is left for `init_schema` to switch,
+        because the pragma writes the database header and a read that returns
+        nothing must not leave one behind. A connection opened inside a read
+        scope never switches an existing store's journal mode.
 
     `db_path` IS AN INPUT TO THE RESOLVER, NOT A RIVAL OF IT. This used to read
     `db_path or get_db_path()`, which was a second rule for the same question:
@@ -292,28 +297,44 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         empty_store = path.stat().st_size == 0
     except OSError:
         empty_store = False
-    # A READ NEVER SWITCHES AN EXISTING STORE'S JOURNAL MODE. Inside a read
-    # scope the pragma is skipped even for a data-bearing store, so a read
-    # cannot convert a DELETE-mode store (which would be a write); the next
-    # write path switches it. On an already-WAL store the pragma was a no-op,
-    # so this changes nothing for the normal case.
-    if not empty_store and not read_only_scope_active():
+    # A READ NEVER SWITCHES AN EXISTING STORE'S JOURNAL MODE, and an EMPTY
+    # store is left for `init_schema` (the pragma writes the header, so a read
+    # that returns nothing must not leave a database behind). A store THIS
+    # call creates, or one that already holds data, is switched here as
+    # before; only a read scope is exempt, so a read cannot convert a
+    # DELETE-mode store. On an already-WAL store the pragma is a no-op.
+    if (is_new or not empty_store) and not read_only_scope_active():
         # Enable WAL mode for corruption prevention and better concurrency
         conn.execute("PRAGMA journal_mode=WAL")
 
-    # Harden WAL sidecar files only on first creation (avoids redundant
-    # syscall on every connection). WAL sidecars are created by the
-    # PRAGMA journal_mode=WAL statement above.
+
+    # Harden WAL sidecar files on first creation (avoids a redundant syscall
+    # on every connection). For a NEW store the WAL pragma above is what will
+    # create them on the first write; `init_schema` also hardens after its own
+    # WAL switch, because an existing 0-byte store is switched there instead.
     if is_new:
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(path) + suffix)
-            if sidecar.exists():
-                try:
-                    os.chmod(str(sidecar), 0o600)
-                except OSError:
-                    pass
+        _harden_sidecars(path)
 
     return conn
+
+
+def _harden_sidecars(path) -> None:
+    """chmod `-wal` and `-shm` to 0600 where they exist. Never raises.
+
+    ONE HELPER FOR EVERY SITE that switches a store to WAL: `get_connection`
+    for a new store and `init_schema` for an existing empty one. A sidecar
+    can already hold memory content, so a mode inherited from the process
+    umask is a disclosure, not a cosmetic difference.
+    """
+    if path is None:
+        return
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        try:
+            if sidecar.exists():
+                os.chmod(str(sidecar), 0o600)
+        except OSError:
+            pass
 
 
 @contextmanager
@@ -474,6 +495,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # concurrent conversion contend. A read-only connection has already raised
     # on the CREATEs, so this line is only reached on a create path.
     conn.execute("PRAGMA journal_mode=WAL")
+    # HARDEN THE SIDECARS THE SWITCH MAY HAVE CREATED. `get_connection` cannot
+    # do it for an existing 0-byte store (it deliberately leaves an empty
+    # store alone), so the create point must. The store path comes from the
+    # connection: row_factory is not guaranteed for a raw test connection, so
+    # the file column is read by position.
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        _harden_sidecars(row[2] if row is not None else None)
+    except (sqlite3.Error, IndexError, TypeError):
+        pass
 
     conn.commit()
     logger.info("Database schema initialized successfully")

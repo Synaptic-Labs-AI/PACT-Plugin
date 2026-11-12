@@ -330,6 +330,12 @@ identity it cannot derive, or a legacy bucket the plausibility gate excluded —
 and an empty result never means those records do not exist. A full id still
 resolves by id, so `get <id>` is a way to check one record when you know it.
 
+A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. When a legacy bucket's file rows
+carry no usable location the gate includes the bucket as UNVERIFIED, so a
+result can contain rows from another checkout that happened to share the
+folder name. Treat an unverified inclusion as a discovery to review, not as
+proof that every row belongs here.
+
 ### Choosing a Project Identity
 
 Two operator surfaces answer, and they are deliberately ordered:

@@ -74,6 +74,11 @@ _MODULE_ALLOWLIST = {
     "tests/test_task_claim_gate.py",
     "tests/test_task_utils.py",
     "tests/test_working_memory_concurrency.py",
+    # A FRESH-SUBPROCESS WORKER: it runs WITHOUT pytest's conftest (the arm
+    # spawns it once per verb, so `memory_init._initialized` starts clean), so
+    # it must locate the plugin root and put `scripts.*` on the path itself at
+    # module level. This entry reaches `_KEEP_SET` through the union below.
+    "tests/fixtures/zero_create_worker.py",
 }
 
 _KEEP_SET = _MODULE_ALLOWLIST | {

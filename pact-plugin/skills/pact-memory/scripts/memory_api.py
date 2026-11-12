@@ -445,7 +445,7 @@ def _store_schema_present(store: str) -> bool:
         with closing(_read_only_connection(store)) as connection:
             return _connection_has_memories_table(connection)
     except sqlite3.OperationalError as exc:
-        if _read_only_store_unavailable(exc):
+        if _read_only_store_unavailable(exc, store):
             return False
         raise
 
@@ -462,22 +462,40 @@ def _connection_has_memories_table(conn: Any) -> bool:
     ).fetchone() is not None
 
 
-def _read_only_store_unavailable(exc: "sqlite3.OperationalError") -> bool:
+def _read_only_store_unavailable(
+    exc: "sqlite3.OperationalError", store: str
+) -> bool:
     """Whether a read-only probe failure is the DEGRADED state, not a fault.
 
-    TWO sqlite conditions are the fail-soft the architecture record promises:
-    the store has no schema yet (the DDL is refused read-only —
-    SQLITE_READONLY) and the file cannot be opened (SQLITE_CANTOPEN). ANY
-    OTHER OperationalError is a real fault and must still raise.
+    ONE sqlite condition is the fail-soft the architecture record promises:
+    the store EXISTS but has no schema yet, so the DDL is refused read-only
+    (SQLITE_READONLY) and the caller narrows to the canonical scope.
+
+    SQLITE_CANTOPEN IS DEGRADED ONLY WHEN THE PATH IS ABSENT — a race after
+    the presence check. A store that EXISTS and cannot be opened is a FAULT:
+    reporting "no memories" for an unreadable store is a loud-to-silent
+    regression, so this RAISES with the remedy named. Any other
+    OperationalError raises unchanged.
     """
     errorname = getattr(exc, "sqlite_errorname", "")
-    if errorname:
-        return errorname in ("SQLITE_READONLY", "SQLITE_CANTOPEN")
     text = str(exc).lower()
-    return (
-        ("readonly" in text and "database" in text)
-        or "unable to open database file" in text
+    readonly = errorname == "SQLITE_READONLY" or (
+        not errorname and "readonly" in text and "database" in text
     )
+    if readonly:
+        return True
+    cantopen = errorname == "SQLITE_CANTOPEN" or (
+        not errorname and "unable to open database file" in text
+    )
+    if cantopen:
+        if Path(store).exists():
+            raise sqlite3.OperationalError(
+                f"the store at {store!r} exists but cannot be opened "
+                f"({exc}). Check that this process can read the file and "
+                "traverse its parent directory; the store was not modified."
+            ) from exc
+        return True
+    return False
 
 
 @contextmanager
@@ -507,7 +525,7 @@ def _legacy_probe_context(store: str, conn):
         # 0-byte store degrades BEFORE any of the body's work.
         ensure_initialized(connection)
     except sqlite3.OperationalError as exc:
-        if not _read_only_store_unavailable(exc):
+        if not _read_only_store_unavailable(exc, store):
             raise
         yield None, str(exc)
         return
@@ -531,7 +549,7 @@ def read_project_bucket_census(store: str) -> Dict[str, int]:
         with closing(_read_only_connection(store)) as connection:
             return project_bucket_counts(connection)
     except sqlite3.OperationalError as exc:
-        if not _read_only_store_unavailable(exc):
+        if not _read_only_store_unavailable(exc, store):
             raise
         return {}
 
@@ -1634,6 +1652,11 @@ class PACTMemory:
         # answers. First non-None wins: the env declaration outranks the
         # session record.
         declined_reason: Optional[dict] = None
+        # THE ROOT A DECLINED DECLARATION NAMED, carried so the folder-name
+        # fallback (`_detect_project_basename`) derives from the winning
+        # rung's location rather than the process cwd. First non-None wins
+        # for the same reason the reason does.
+        declined_root: Optional[Path] = None
 
         # Strategy 1: Environment variable (original behavior)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -1648,6 +1671,7 @@ class PACTMemory:
                     name, label, legacy, ignored, root, decline_reason
                 )
             declined_reason = declined_reason or decline_reason
+            declined_root = declined_root or root
             declined_declaration = True
 
         # Strategy 1.5: session record (inert under pytest — the discovery
@@ -1665,6 +1689,7 @@ class PACTMemory:
                     name, label, legacy, ignored, root, decline_reason
                 )
             declined_reason = declined_reason or decline_reason
+            declined_root = declined_root or root
             declined_declaration = True
 
         # Strategy 2: Git repository root (worktree-safe)
@@ -1761,7 +1786,7 @@ class PACTMemory:
                 "so Strategy 3 is skipped and no project scope was derived."
             )
             return _DetectedIdentity(
-                None, "unresolved", None, None, None, declined_reason
+                None, "unresolved", None, None, declined_root, declined_reason
             )
 
         # Strategy 2.5: the USER-SCOPE setting. Reached only when NO
@@ -1908,11 +1933,21 @@ class PACTMemory:
         legacy basename, while the pre-change resolver returned the marker
         directory's name. Returning None there made the backlog file writer
         refuse to write at all, in a state its remedy text did not describe.
-        The marker walk IS the pre-change derivation, so it is the fallback.
+
+        THE FALLBACK WALKS THE WINNING RUNG'S ROOT, NOT THE PROCESS CWD. In a
+        declared-repo session (`CLAUDE_PROJECT_DIR` at A, process sitting in
+        B) the cwd walk names the backlog file after B — a file the operator
+        never sees, created beside an unrelated checkout. The identity root is
+        where the winning rung actually looked, so the pre-change derivation
+        is applied there; the cwd walk runs only when no rung produced a root.
         """
-        detected = PACTMemory._detect_project_identity_with_legacy().legacy_basename
-        if detected is not None:
-            return detected
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        if detected.legacy_basename is not None:
+            return detected.legacy_basename
+        if detected.identity_root is not None:
+            name = PACTMemory._find_project_root(detected.identity_root).name
+            if name:
+                return name
         start = _cwd_or_none()
         if start is None:
             return None

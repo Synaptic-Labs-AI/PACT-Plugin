@@ -268,6 +268,102 @@ class TestTheCreatingRouteKeepsItsHardening:
             # not vacuous. WAL mode creates them on the first write.
             assert hardened > 0
 
+    def test_a_new_store_made_through_the_schema_factory_hardens_file_and_sidecars(
+        self, tmp_path, monkeypatch
+    ):
+        """THE SHAPE THE DEFERRED-WAL REGRESSION SLIPPED THROUGH.
+
+        The arm above hand-rolls `get_connection` + `CREATE TABLE`, so it can
+        only observe sidecars that some earlier step happened to create. This
+        one goes through the SCHEMA FACTORY the production create path uses
+        (`init_schema`), and names EACH artifact and its mode: the store file,
+        `-wal` and `-shm` must all exist and be 0600. A deferred WAL switch
+        leaves the sidecars absent, which the presence check catches before
+        the mode check can be satisfied vacuously.
+        """
+        derived_root = tmp_path / "factory" / "pact-memory"
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(derived_root))
+        store = derived_root / "memory.db"
+
+        from scripts.database import init_schema
+
+        with get_connection() as conn:
+            init_schema(conn)
+
+            assert stat.S_IMODE(store.stat().st_mode) == 0o600, (
+                "a brand-new store created through the schema factory is not "
+                "0600"
+            )
+            hardened = 0
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(store) + suffix)
+                assert sidecar.exists(), (
+                    f"the new store has no {suffix} sidecar, so the creating "
+                    "path never switched to WAL and the hardening ran against "
+                    "artifacts that did not exist"
+                )
+                assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600, (
+                    f"the {suffix} sidecar is not 0600"
+                )
+                hardened += 1
+            assert hardened == 2, "both WAL sidecars must be asserted"
+
+
+class TestAPresentButUnreadableStoreIsAnError:
+    """A store that EXISTS but cannot be read must not answer as a success.
+
+    MEASURED at 3ac1d896: `chmod 000` on a valid store made `cli list` return
+    `{"ok": true, "result": []}` with exit 0, and `status` a zeroed envelope
+    with no degraded marker. Before the read-purity arc the same fault raised
+    `SYSTEM_ERROR`. An empty success is the silent-loss shape this whole arc
+    exists to remove: a permission fault is not "this project has no
+    memories", and the operator is told nothing.
+    """
+
+    _VERBS = (("list",), ("status",), ("project-id", "show"))
+
+    @pytest.mark.parametrize(
+        "argv", _VERBS, ids=["list", "status", "project-id-show"]
+    )
+    def test_an_unreadable_store_reports_an_error_naming_the_fault(
+        self, argv, tmp_path
+    ):
+        if os.geteuid() == 0:
+            pytest.skip(
+                "chmod 000 does not block root, so the arm cannot stage the "
+                "unreadable store"
+            )
+        store = _make_store(tmp_path / "valid.db")
+        os.chmod(store, 0)
+        try:
+            proc = _run(*argv, "--db-path", str(store))
+        finally:
+            # Restore before any assertion can abort, so tmp cleanup is clean.
+            os.chmod(store, 0o600)
+
+        assert proc.returncode != 0, (
+            f"{' '.join(argv)} answered successfully on a store it could not "
+            f"read: rc={proc.returncode} stdout={proc.stdout!r}"
+        )
+        payload = _envelope(proc)
+        assert payload.get("ok") is False, payload
+        # THE MESSAGE FIELD ONLY, AND TOKENS THE TMP PATH CANNOT SMUGGLE.
+        # Searching the whole JSON was a false green: the tmp directory is
+        # named after this test, and "unreadable" contains "readable", so the
+        # token matched inside the echoed store path while the message said
+        # nothing about the fault. These tokens do not occur in the path.
+        message = str(payload.get("message", "")).lower()
+        assert str(store) in payload.get("message", ""), (
+            f"the error does not name the store: {payload!r}"
+        )
+        assert any(
+            token in message
+            for token in ("permission", "chmod", "denied", "traverse")
+        ), (
+            "the error names neither the fault nor a remedy the operator can "
+            f"act on: {payload!r}"
+        )
+
 
 class TestTheOrderOfTheBoundaryCheck:
     def test_an_absent_path_is_reported_before_malformed_input(self, tmp_path):
