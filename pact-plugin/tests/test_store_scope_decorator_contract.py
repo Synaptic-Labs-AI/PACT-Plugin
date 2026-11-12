@@ -68,6 +68,10 @@ EXEMPT = {
     "session_id": "a read of instance state bound at construction",
     "last_embedding_status": "a read of the status left by the last save",
     "last_sync_status": "a read of the status left by the last save",
+    "last_cascade_skipped": (
+        "reads the per-call cascade-skip counter left by the last update; it "
+        "opens no store"
+    ),
     "last_project_scope": "a read of the scope disclosure left by the last save",
     "db_path": (
         "binds the instance's own store scope with store_scope(self._db_path) "

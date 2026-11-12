@@ -97,6 +97,8 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_pin_marker_writer_adversarial.py",
     "tests/test_pinned_section_parser_migration.py",
     "tests/test_project_dir_resolution.py",
+    # embeds a sys.path line in a child-script codegen fixture
+    "tests/test_project_identity_union.py",
     "tests/test_sync_result_contract.py",
     # classifier input data: path-mutation sources it parses, never runs
     "tests/test_fast_suite_selection.py",
