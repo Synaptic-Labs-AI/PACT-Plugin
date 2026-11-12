@@ -62,6 +62,7 @@ from scripts.memory_api import (
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
     main_repo_root,
+    read_project_bucket_census,
     render_rekey_command,
 )
 from scripts.project_identity import is_canonical
@@ -903,7 +904,14 @@ def cmd_update(args, db_path=None):
     # would either be absent or -- on a reused instance -- carry a PREVIOUS
     # save's outcome and misreport it as this update's. If `update` ever gains
     # a sync, add the field here rather than letting it inherit one.
-    result = {"memory_id": resolved_id}
+    result = {
+        "memory_id": resolved_id,
+        # THE QUARANTINE COUNT BELONGS IN THE ENVELOPE, not only in a stderr
+        # warning: it is the machine-readable half of "N links could not be
+        # re-tracked and stayed on their old project". Zero is the normal
+        # answer, so the field is always present.
+        "last_cascade_skipped": memory.last_cascade_skipped,
+    }
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
         result["embedding_status"] = embedding_status
@@ -983,19 +991,13 @@ def _project_candidates(db_path) -> list:
 
     A census, not a filtered list: only the operator can decide which legacy
     bucket belongs to this repository, and hiding the ambiguous ones is what
-    leaves thousands of memories unreachable with no notice. An absent store
-    returns an empty list and is NOT created by this read.
+    leaves thousands of memories unreachable with no notice. The store is
+    read READ-ONLY (`read_project_bucket_census`), so an absent, 0-byte or
+    unreadable store answers an empty list and is NEVER created or given a
+    schema by this report.
     """
-    from scripts.database import db_connection, project_bucket_counts
-
     store = Path(db_path) if db_path else resolve_db_path()
-    if not store.exists():
-        return []
-    # The path is passed EXPLICITLY: a pathless connection inherits an
-    # enclosing scope, and a direct caller outside one would read the default
-    # store while this function reported a caller's.
-    with db_connection(store) as conn:
-        buckets = project_bucket_counts(conn)
+    buckets = read_project_bucket_census(str(store))
     return [
         {
             "id": bucket_id,
@@ -1040,6 +1042,11 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
             "id_shape": memory._project_id_shape,
             "source": memory._project_id_source,
             "override_ignored": memory._override_ignored,
+            # STRUCTURED DECLINE REASON, not just the warning. A repository
+            # chose the name a basename id would have used, so the refusal
+            # names the cause and the override file that is its remedy; a
+            # caller parsing this envelope never has to read stderr.
+            "decline_reason": memory._decline_reason,
             "repo_root": str(identity_root) if identity_root is not None else None,
             "process_repo_root": (
                 str(process_root) if process_root is not None else None
@@ -1064,11 +1071,14 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     so the reported counters are what an apply would produce rather than a
     second estimate. `--from == --to` is a no-op success.
 
-    Exit codes follow the module's existing channels: 0 for a clean plan or an
-    applied move, 1 for an identity that cannot be resolved (the
-    PROJECT_IDENTITY_UNRESOLVED class), 2 for bad input.
+    Exit codes: 0 for a clean plan or an applied move, 1 for an identity that
+    cannot be resolved (the PROJECT_IDENTITY_UNRESOLVED class), 2 for BAD
+    INPUT only, and 3 for an OPERATIONAL failure (a locked store, an integrity
+    error, an I/O fault). An operational failure is not the caller's input
+    being wrong, so it must not share the bad-input channel.
     """
     from scripts.database import db_connection, rekey_project
+    from scripts.database import sqlite3 as db_sqlite3
 
     if getattr(args, "candidates", False):
         _success({"candidates": _project_candidates(db_path)})
@@ -1137,6 +1147,16 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             "INVALID_INPUT",
             escape_for_envelope(str(exc)),
             exit_code=2,
+        )
+    except db_sqlite3.DatabaseError as exc:
+        # OPERATIONAL FAILURE, NOT BAD INPUT. A locked store, an integrity
+        # error or an I/O fault says nothing about the caller's arguments;
+        # reporting it on the bad-input channel sends them to fix a value
+        # that is probably fine. Exit 3 is the operation-failed channel.
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(str(exc))),
+            exit_code=3,
         )
     _success(counters)
 
@@ -1510,9 +1530,10 @@ def build_parser():
         help="Show the detected identity and the bucket census",
         parents=[parent],
         description=(
-            "The detected project id, `source`, `id_shape`, the resolved read "
-            "scope, and every non-empty bucket with its memory count and the "
-            "literal `project-id rekey --from <id>` command."
+            "The detected project id, `source`, `id_shape`, any structured "
+            "`decline_reason` (with the override path that remedies it), the "
+            "resolved read scope, and every non-empty bucket with its memory "
+            "count and the literal `project-id rekey --from <id>` command."
         ),
         formatter_class=fmt,
         epilog=_cli_examples(examples["project-id"]),
@@ -1529,7 +1550,9 @@ def build_parser():
             "project_id) collision), graph links and vector partitions. "
             "`--dry-run` is the default and reports the plan by running it "
             "inside a rolled-back savepoint. `--to` defaults to the detected "
-            "canonical id and refuses when none resolves."
+            "canonical id and refuses when none resolves. Exit codes: 0 for "
+            "a clean plan or an applied move, 1 when no identity resolves, 2 "
+            "for bad input, 3 for an operational failure (nothing moved)."
         ),
         formatter_class=fmt,
         epilog=_cli_examples(examples["project-id-rekey"]),

@@ -220,12 +220,14 @@ class TestOverrideLocation:
         so the origin is read at the wrong path and the id collapses to
         'vendor'. Expected: the submodule's own canonical id.
 
-        ALSO PINS THE LEGACY CANDIDATE (F2). The union's legacy bucket is the
-        PRE-change resolver's output, `common_dir.resolve().parent.name`, which
-        for this fixture is 'vendor' — NOT the identity root's 'sub'. The two
-        derivations agree for a normal checkout, so only this shape can catch
-        a refactor to the identity root's name, and such a refactor would miss
-        every pre-upgrade row in a submodule.
+        ALSO PINS THE LEGACY-CANDIDATE SUPPRESSION (F2, SUPERSEDED). The
+        PRE-change resolver derived the legacy bucket from
+        `common_dir.resolve().parent.name` — 'vendor' for this fixture — but a
+        submodule admin dir's parent name comes from the repository's own
+        tracked `.gitmodules`, so a repository could choose which populated
+        bucket a read unions. No legacy candidate is derived for this shape at
+        all. This supersedes the plan's pin-census line that required 'vendor'
+        here; the derivation is now pinned as ABSENT rather than as a value.
         """
         _, submodule = self._submodule(identity_env)
         monkeypatch.chdir(submodule)
@@ -235,9 +237,10 @@ class TestOverrideLocation:
         ), "a submodule did not keep its own canonical id (common_dir.parent)"
 
         memory = _memory(identity_env)
-        assert memory._legacy_project_basename == "vendor", (
-            "the legacy candidate followed the identity root ('sub') instead "
-            "of the pre-change resolver's output ('vendor')"
+        assert memory._legacy_project_basename is None, (
+            "a submodule admin dir still derives a legacy candidate; its name "
+            "is chosen by the tracked .gitmodules, so the read union must not "
+            "use it (supersedes the plan's 'vendor' census line)"
         )
 
     def test_a_separate_git_dir_repo_keeps_its_own_canonical_id(

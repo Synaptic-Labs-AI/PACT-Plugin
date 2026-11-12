@@ -374,7 +374,12 @@ class TestReadOrigin:
 
 class TestDetectIdForRoot:
     def test_none_root_declines(self):
-        assert pi.detect_id_for_root(None) == (None, None, "declined", None)
+        # FIVE fields: `decline_reason` was added as a defaulted fifth field
+        # so a caller can disclose WHY a root declined (e.g. a refused
+        # submodule basename). The decline itself is unchanged.
+        assert pi.detect_id_for_root(None) == (
+            None, None, "declined", None, None
+        )
 
     def test_no_common_dir_is_the_designed_basename_path(self, tmp_path):
         """Catches treating a non-git umbrella as a broken repository."""
@@ -463,3 +468,50 @@ class TestUserinfoNeverAppearsInLogs:
                 "https://x-access-token:SECRET-TOKEN@github.com/o/r.git"
             )
         assert "SECRET-TOKEN" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The accepted-scheme and default-port TABLES, entry by entry
+# ---------------------------------------------------------------------------
+#
+# The equivalence classes above pin ONE spelling per behaviour, so a table
+# entry can be deleted while every arm stays green: the surviving spellings
+# still answer. These arms pin each entry the production tables claim to
+# support, because narrowing either table is a silent behaviour change — an
+# accepted transport starts DECLINING, or one endpoint splits into two ids.
+
+class TestEveryAcceptedSchemeIsPinned:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://host/owner/repo",
+            "git://host/owner/repo",
+            "git+ssh://git@host/owner/repo",
+        ],
+    )
+    def test_each_accepted_scheme_canonicalises(self, url):
+        """RED WHEN its entry is removed from `_ACCEPTED_SCHEMES`.
+
+        A dropped scheme turns a present network remote into a DECLINE, so a
+        repository cloned over that transport silently stops resolving.
+        """
+        assert pi.normalize_remote_url(url) == "host/owner/repo"
+
+
+class TestEveryDefaultPortIsPinned:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://host:80/owner/repo",
+            "git://host:9418/owner/repo",
+            "git+ssh://git@host:22/owner/repo",
+        ],
+    )
+    def test_each_default_port_is_dropped(self, url):
+        """RED WHEN its entry is removed from `_DEFAULT_PORTS`.
+
+        A kept default port splits `host:80/owner/repo` from
+        `host/owner/repo` — two ids for one endpoint, the split this change
+        exists to remove.
+        """
+        assert pi.normalize_remote_url(url) == "host/owner/repo"

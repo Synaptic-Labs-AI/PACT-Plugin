@@ -4246,14 +4246,20 @@ class TestTheStatusEnvelopeCarriesTheDbPathRaw:
         assert memory.db_path == tmp_path / "store\u202eX.db", (
             "the programmatic accessor must return the RAW path"
         )
-        # ROUND TRIP: the reported path opens the same store.
+        # ROUND TRIP: the reported path opens the same store. The read must
+        # NOT have initialised it (the scoped zero-CREATE rule), so the file
+        # opens with NO tables — that emptiness is what proves both halves:
+        # the raw path reaches this store, and the read left it uninitialised.
         from scripts.database import get_connection
 
         conn = get_connection(Path(status["db_path"]))
         try:
             assert conn.execute(
-                "SELECT COUNT(*) FROM memories"
-            ).fetchone()[0] == 0
+                "SELECT name FROM sqlite_master"
+            ).fetchall() == [], (
+                "a read initialised the store it reported; on an absent "
+                "caller path the zeroed envelope must leave no schema"
+            )
         finally:
             conn.close()
 

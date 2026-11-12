@@ -64,11 +64,13 @@ costs as much as a write that goes incorrectly.
 
 ### What you must not do, and why
 
-- Do not run a pact-memory CLI verb to inspect the store. The CLI opens a
-  read-write connection and runs `PRAGMA journal_mode=WAL` on it, which
-  creates `memory.db-wal` and `memory.db-shm`. A CLI read is thus a write
-  to the store directory. A CLI run also reaches the same functions an import
-  reaches, so it defeats the next rule.
+- Do not run a pact-memory CLI verb to inspect the store. A read does NOT
+  create or migrate the schema of an existing store, but it still opens the
+  store READ-WRITE and, on a store holding data, runs `PRAGMA
+  journal_mode=WAL`, which can create `memory.db-wal` and `memory.db-shm`.
+  That is a write to the store directory even though no row is written. A CLI
+  run also reaches the same functions an import reaches, so it defeats the
+  next rule.
 - Do not import a module below `skills/pact-memory/scripts/`. In that package,
   functions create the live store directory as a side result of a path
   resolution, so an import puts each of them one call away. Do not read an
@@ -314,8 +316,8 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
-| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket with its literal rekey command. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "candidates": [{"id": "...", "memory_count": N, "rekey": "..."}]}` |
-| `project-id rekey --from <id> [--to <id>] [--dry-run] [--apply] [--candidates]` | Move an ENTIRE project bucket to the canonical id in one transaction: memories, file rows, graph links and vector partitions. `--dry-run` is the default posture; `--candidates` lists the buckets | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "vectors_moved": N, ...}` |
+| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket with its literal rekey command. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{reason, override}` when a repository-chosen basename was refused; the override path is the remedy. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "rekey": "..."}]}` |
+| `project-id rekey --from <id> [--to <id>] [--dry-run] [--apply] [--candidates]` | Move an ENTIRE project bucket to the canonical id in one transaction: memories, file rows, graph links and vector partitions. `--dry-run` is the default posture; `--candidates` lists the buckets. Exit codes: 0 clean plan or applied move, 1 no identity resolves, 2 bad input, 3 operational failure (nothing moved). A merged memory link keeps the TARGET's relationship; `links_repointed` counts old links examined and `links_conflicted` counts relationship types dropped | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "links_repointed": N, "links_conflicted": N, "vectors_moved": N, ...}` |
 
 WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
 anything, and follow the candidate it names. It reports the identity this
@@ -486,6 +488,8 @@ Memories are stored in `~/.claude/pact-memory/memory.db` (matches a default-root
 - WAL mode for crash safety
 - Vector extensions for semantic search
 - Graph tables for file relationships
+
+A read verb never initializes an existing store. In a derived location the first memory operation creates the store directory and schema; a `--db-path` you supply must already exist.
 
 ## Command Line Usage
 

@@ -1453,6 +1453,10 @@ class TestRetrievedSyncWarnsUnderDisagreement:
             "scripts.memory_api.graph_enhanced_search",
             lambda *a, **kw: [fake_result],
         )
+        # NO EXPLICIT db_path: this is the DERIVED route, where an absent
+        # store bootstraps on the first memory operation (the pinned
+        # exception), so `search()` reaches the projection and its warning.
+        # A CALLER-NAMED absent path would answer empty by design.
         memory = PACTMemory(project_id="proj")
         with caplog.at_level(logging.WARNING):
             results = memory.search("anything", sync_to_claude=True)
@@ -1728,8 +1732,8 @@ class TestDeclinedDeclaration:
         """Criterion (b), swept across every resolution entry point."""
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
 
-        name, label, _legacy, _root, _ignored = PACTMemory._declared_dir_identity(
-            str(worktree), "probe"
+        name, label, _legacy, _root, _ignored, _reason = (
+            PACTMemory._declared_dir_identity(str(worktree), "probe")
         )
         assert name is None, f"the helper derived {name!r} from a removed path"
         assert label == "probe"
@@ -1862,7 +1866,7 @@ class TestDeclinedDeclaration:
         """
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
         with caplog.at_level(logging.WARNING):
-            name, label, _legacy, _root, _ignored = (
+            name, label, _legacy, _root, _ignored, _reason = (
                 PACTMemory._declared_dir_identity(str(worktree), "probe")
             )
 

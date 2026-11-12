@@ -88,14 +88,22 @@ class _WriteSpy:
     recorded too. A spy that wraps only `execute` reports a clean sweep while
     a batch or cursor write happens.
 
+    THE RULE IS SCOPED TO AN EXISTING STORE: no INSERT/UPDATE/DELETE/CREATE/
+    DROP on a read. There is no `IF NOT EXISTS` allowance — that blanket
+    exemption is what hid first-use DDL from this clause for its whole life,
+    and it would hide the next read-path DDL too. The absent-derived-store
+    bootstrap is a separate, separately asserted exception
+    (`test_the_derived_route_still_creates_the_store`), so a read here never
+    needs to emit schema DDL.
+
     ALTER is deliberately NOT recorded: `_migrate_ct_fields` issues three
     swallowed ADD COLUMN attempts per connection, pre-existing behaviour
-    outside this change. They are no-ops on an initialised store; the
-    contract under test is no DATA write and no unconditional CREATE/DROP
-    on a read.
+    outside this change.
     """
 
-    _WRITE_HEADS = frozenset({"INSERT", "UPDATE", "DELETE", "DROP", "REPLACE"})
+    _WRITE_HEADS = frozenset(
+        {"INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REPLACE"}
+    )
 
     def __init__(self, inner, writes):
         self._inner = inner
@@ -103,9 +111,7 @@ class _WriteSpy:
 
     def _record(self, sql):
         head = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
-        if head in self._WRITE_HEADS or (
-            head == "CREATE" and "IF NOT EXISTS" not in sql.upper()
-        ):
+        if head in self._WRITE_HEADS:
             self._writes.append(sql)
 
     def execute(self, sql, *args, **kwargs):
@@ -440,9 +446,22 @@ class TestDisclosure:
         assert state["excluded"] is False
         assert str(state["candidate"]) == LEGACY
 
-    def test_an_ambiguous_folded_match_is_not_guessed(self, union_env, caplog):
+    def test_an_ambiguous_folded_match_is_not_guessed(
+        self, union_env, caplog, monkeypatch
+    ):
         """Two stored buckets differing only by case must not be merged by a
-        case-insensitive filesystem accident."""
+        case-insensitive filesystem accident.
+
+        THE FOLD IS NOW GATED ON THE ROOT'S FILESYSTEM: on a case-SENSITIVE
+        host the fold never runs, so the ambiguity set is empty and this arm
+        would measure the gate instead of the ambiguity logic. Forcing the
+        predicate to "insensitive" keeps the arm on the behaviour it names.
+        """
+        from scripts import project_identity as pi
+
+        monkeypatch.setattr(
+            pi, "filesystem_case_insensitive", lambda *_a, **_k: True, raising=False
+        )
         _seed(
             union_env,
             [
@@ -506,7 +525,12 @@ class TestReadsNeverWrite:
 
     def test_high_level_reads_issue_no_data_writes(self, union_env):
         """Catches a read path that writes (an alias/repair/backfill sneaking
-        back in). Schema DDL is allowed only with IF NOT EXISTS."""
+        back in), INCLUDING schema DDL.
+
+        THE STORE EXISTS HERE (the fixture seeds it), so the scoped rule is
+        zero INSERT/UPDATE/DELETE/CREATE/DROP — no `IF NOT EXISTS` exemption.
+        The absent-store bootstrap is a different case, asserted by
+        `test_the_derived_route_still_creates_the_store`."""
         _seed(
             union_env,
             [("c1", "canonical", CANONICAL, "2026-01-01T00:00:00+00:00")],
@@ -797,9 +821,15 @@ class TestReviewB4FoldedCandidate:
         a case variant both present, the fold sees two matches and returns
         None. This arm reddens on any OS if the precedence is dropped. RED
         WHEN the `if legacy in buckets` early return is removed.
+
+        `allow_fold=True` IS EXPLICIT: this arm exercises the PURE-STRING
+        matcher's precedence, not the filesystem gate (the gate is pinned by
+        the behavioural arms in test_project_identity_name_provenance.py). The
+        production default is fail-closed, so only a caller that has already
+        established a folding filesystem may ask for the fold.
         """
         candidate, ambiguous = memory_api._match_legacy_candidate(
-            "PACT-prompt", {"PACT-prompt": 1, "PACT-PROMPT": 2}
+            "PACT-prompt", {"PACT-prompt": 1, "PACT-PROMPT": 2}, allow_fold=True
         )
         assert candidate == "PACT-prompt", (
             "the exact-case bucket lost to a case-folded ambiguity"
@@ -812,9 +842,14 @@ class TestReviewB4FoldedCandidate:
         The real filesystem shape is macOS-APFS-only and unreproducible
         locally; this arm reddens on any OS if the fold starts guessing or
         returns the input casing instead of the stored spelling.
+
+        `allow_fold=True` IS EXPLICIT: the caller states the folding fact
+        here, exactly as the production call site does after consulting
+        `project_identity.filesystem_case_insensitive`. The production default
+        is fail-closed, so this arm must not rely on it.
         """
         candidate, ambiguous = memory_api._match_legacy_candidate(
-            "Pact-Prompt", {"PACT-PROMPT": 3, "other": 1}
+            "Pact-Prompt", {"PACT-PROMPT": 3, "other": 1}, allow_fold=True
         )
         assert candidate == "PACT-PROMPT", (
             "the fold did not return the RAW stored spelling"
@@ -1489,3 +1524,128 @@ class TestReviewQuoting:
         )
         # The surface knows the store, so the remedy must name it.
         assert argv[argv.index("--db-path") + 1] == str(store), argv
+
+
+# ---------------------------------------------------------------------------
+# B14 (first-use half): a ZERO-BYTE store must stay zero bytes on a read
+# ---------------------------------------------------------------------------
+
+class TestZeroByteStoreStaysEmptyOnRead:
+    """The P0 "reads never write" clause at FIRST USE, every shape.
+
+    The existing spy arms SEED a store, so `ensure_initialized` finds its
+    schema already present and sees no DDL; they cover an EXISTING store's
+    resolution path, not the first-use case, where the CREATE would actually
+    run. Each arm here runs ONE verb in a FRESH process
+    (`memory_init._initialized` is per-process).
+
+    THE CONTRACT, THREE SHAPES, matching `_schema_present`:
+    - EXISTING store without a schema (0 bytes, truncated): never initialised
+      by a read; the file stays 0.
+    - ABSENT store, CALLER-NAMED: a read answers EMPTY and does not create it.
+    - ABSENT store, DERIVED route: the first memory operation bootstraps the
+      directory + file + schema — the pre-existing initialisation path, a
+      separately asserted exception. This is a REDIRECT, not a refusal: it is
+      what keeps every production caller that passes no path working.
+    THIS CLASS MEASURES ALL THREE: the zero-byte and caller-named absent arms
+    below, and the derived-absent control that proves the bootstrap survives.
+    """
+
+    VERBS = (
+        "list",
+        "search",
+        "search_by_file",
+        "sync",
+        "get_status",
+        "_resolve_id_or_full",
+    )
+
+    def _run(self, verb, target, union_env, *, derived=False):
+        worker = (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "zero_create_worker.py"
+        )
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "CLAUDE_PROJECT_DIR"
+        }
+        argv = [sys.executable, str(worker), verb, str(target)]
+        if derived:
+            argv.append("derived")
+        return subprocess.run(
+            argv,
+            cwd=str(union_env.repo),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    @pytest.mark.parametrize("verb", VERBS)
+    def test_a_zero_byte_store_is_not_initialised_by_a_read(self, verb, union_env):
+        """RED before the fix for every verb that CREATEs on first read.
+
+        The fix belongs to the read-path owner; this arm is the measurement,
+        so a residual red here is the finding, not a flaky test.
+        """
+        store = union_env.tmp_path / f"empty-{verb}.db"
+        store.write_bytes(b"")
+        result = self._run(verb, store, union_env)
+        assert result.returncode == 0, (verb, result.stderr)
+        size = store.stat().st_size
+        assert size == 0, (
+            f"the {verb} read initialised a zero-byte store to {size} bytes; "
+            "a read must not CREATE the schema"
+        )
+
+    @pytest.mark.parametrize("verb", VERBS)
+    def test_an_absent_store_is_not_created_by_a_read(self, verb, union_env):
+        """A CALLER-NAMED absent store answers empty; the file stays ABSENT.
+
+        The worker passes an explicit `db_path`, so this is the caller-named
+        shape only: the DERIVED route bootstraps by ruling and is pinned by
+        `test_the_derived_route_still_creates_the_store`. `_resolve_id_or_full`
+        goes through `get()`, its production surface, so the arm measures the
+        read path's own guard rather than a worker-opened connection.
+        """
+        store = union_env.tmp_path / f"absent-{verb}.db"
+        assert not store.exists()
+        result = self._run(verb, store, union_env)
+        assert result.returncode == 0, (verb, result.stderr)
+        assert not store.exists(), (
+            f"the {verb} read created {store}; a read on an absent store must "
+            "answer empty, not initialise"
+        )
+
+    @pytest.mark.parametrize("verb", VERBS)
+    def test_a_derived_absent_store_bootstraps_on_a_read(self, verb, union_env):
+        """POSITIVE CONTROL: the derived route REDIRECTS, it does not refuse.
+
+        The pre-existing initialisation path creates directory + file + schema
+        on the first memory operation. Without this control a repair could
+        answer empty for EVERY absent store and pass the caller-named arms
+        while breaking every production caller that passes no path.
+        """
+        root = union_env.tmp_path / f"derived-{verb}"
+        store = root / "memory.db"
+        assert not store.exists(), "fixture must start with no derived store"
+        result = self._run(verb, root, union_env, derived=True)
+        assert result.returncode == 0, (verb, result.stderr)
+        assert root.is_dir(), f"the derived read did not create {root}"
+        assert store.exists(), (
+            f"the {verb} read did not bootstrap an absent derived store; the "
+            "derived route is a redirect, not a refusal"
+        )
+        with db_sqlite3.connect(str(store)) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        assert "memories" in tables, (
+            "the derived read created a file without the schema: "
+            f"{sorted(tables)!r}"
+        )

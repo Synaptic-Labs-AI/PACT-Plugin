@@ -668,3 +668,121 @@ class TestReviewB6IncidentFlow:
         assert memory._read_project_scopes() == (CANONICAL,), (
             "the scope did not collapse after the rekey"
         )
+
+
+# ---------------------------------------------------------------------------
+# C13: the two counters no other arm asserts
+# ---------------------------------------------------------------------------
+
+class TestRekeyCounterMeaning:
+    """`links_repointed` and `relations_repointed` have documented meanings.
+
+    A counter nobody asserts is free to drift, and a drifted counter is worse
+    than an absent one: it reports a move that did not happen, or hides one
+    that did.
+    """
+
+    def test_links_repointed_counts_every_examined_memory_link(self, rekey_env):
+        """Two memories linked to the retiring file row.
+
+        `links_repointed` is the number of old links EXAMINED (the documented
+        meaning since `links_conflicted` was added), so with no conflicting
+        target rows both are examined and both are re-pointed. RED WHEN the
+        counter reports the surviving link rows instead of the links moved
+        (e.g. `+= 1`).
+        """
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("m2", LEGACY)],
+            files=[
+                ("f-old", "src/x.py", LEGACY),
+                ("f-new", "src/x.py", CANONICAL),
+            ],
+            links=[("m1", "f-old"), ("m2", "f-old")],
+        )
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["links_repointed"] == 2, counters
+            linked = [
+                row[0]
+                for row in conn.execute("SELECT file_id FROM memory_files")
+            ]
+        assert linked == ["f-new", "f-new"], (
+            "the counter claimed two repointed links but the rows did not "
+            f"follow: {linked!r}"
+        )
+
+    def test_links_conflicted_counts_a_dropped_relationship(self, rekey_env):
+        """The documented loss: the target already names the pair, differently.
+
+        `memory_files` is keyed by `(memory_id, file_id)`, so the target's row
+        wins and the retiring link's RELATIONSHIP is dropped. `INSERT OR
+        IGNORE` used to hide that; `links_conflicted` makes it visible while
+        `links_repointed` still counts the link as examined. RED WHEN the
+        conflict count stays 0 or the target's relationship is overwritten.
+        """
+        _seed(
+            rekey_env,
+            [("m1", LEGACY)],
+            files=[
+                ("f-old", "src/x.py", LEGACY),
+                ("f-new", "src/x.py", CANONICAL),
+            ],
+            links=[("m1", "f-old")],  # default relationship: 'modified'
+        )
+        with db_connection(rekey_env.store) as conn:
+            # The target already names the same pair with a DIFFERENT type.
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id, relationship) "
+                "VALUES ('m1', 'f-new', 'created')"
+            )
+            conn.commit()
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["links_repointed"] == 1, counters
+            assert counters["links_conflicted"] == 1, counters
+            rows = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT file_id, relationship FROM memory_files "
+                    "WHERE memory_id = 'm1'"
+                )
+            ]
+        assert rows == [("f-new", "created")], (
+            "the target's relationship did not win, or the dropped link "
+            f"survived: {rows!r}"
+        )
+
+    def test_relations_repointed_counts_incident_edges_not_insert_rowcounts(
+        self, rekey_env
+    ):
+        """The documented case: two edges COLLAPSE into one row and report 2.
+
+        `f-old` and `f-new` each carry an edge to the other. Re-pointing both
+        ends onto `f-new` yields ONE self-loop row, but TWO edges moved, and
+        the counter must report the edges. Summing the two INSERT rowcounts
+        would report 3 (the second INSERT is `INSERT OR IGNORE`), which is the
+        drift this arm exists to catch.
+        """
+        _seed(
+            rekey_env,
+            [("m1", LEGACY)],
+            files=[
+                ("f-old", "src/x.py", LEGACY),
+                ("f-new", "src/x.py", CANONICAL),
+            ],
+            relations=[("f-old", "f-new"), ("f-new", "f-old")],
+        )
+        with db_connection(rekey_env.store) as conn:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
+            assert counters["relations_repointed"] == 2, counters
+            rows = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT source_file, target_file, relationship "
+                    "FROM file_relations"
+                )
+            ]
+        assert rows == [("f-new", "f-new", "imports")], (
+            "the two edges did not collapse to the single documented self-"
+            f"loop: {rows!r}"
+        )

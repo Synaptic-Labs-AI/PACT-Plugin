@@ -38,6 +38,7 @@ except ImportError:
 
 from .config import (
     DERIVED_STORE_ORIGINS,
+    read_only_scope_active,
     resolve_db_path,
     store_path_origin,
     store_scope,
@@ -272,10 +273,33 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Enable WAL mode for corruption prevention and better concurrency
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # THE TIMEOUT GOES BEFORE ANY JOURNAL-MODE SWITCH. Converting a
+    # delete-mode store to WAL contends for the database; with the timeout
+    # still at sqlite's default ZERO, two concurrent opens can race that
+    # conversion into `database is locked`. The timeout is a connection
+    # setting and costs nothing on the no-op path.
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    # THE WAL SWITCH IS DEFERRED ON AN EMPTY STORE. `PRAGMA journal_mode=WAL`
+    # WRITES the database header (measured: a 0-byte file becomes 4096 bytes),
+    # so running it here makes even a read that returns nothing leave a
+    # database behind. On an uninitialized store the switch moves to
+    # `init_schema`, the shared CREATE point, so every path that creates a
+    # store (`ensure_initialized`, `initialize_database`/`setup`) leaves it in
+    # WAL. A store that already has content switches here as before.
+    try:
+        empty_store = path.stat().st_size == 0
+    except OSError:
+        empty_store = False
+    # A READ NEVER SWITCHES AN EXISTING STORE'S JOURNAL MODE. Inside a read
+    # scope the pragma is skipped even for a data-bearing store, so a read
+    # cannot convert a DELETE-mode store (which would be a write); the next
+    # write path switches it. On an already-WAL store the pragma was a no-op,
+    # so this changes nothing for the normal case.
+    if not empty_store and not read_only_scope_active():
+        # Enable WAL mode for corruption prevention and better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
 
     # Harden WAL sidecar files only on first creation (avoids redundant
     # syscall on every connection). WAL sidecars are created by the
@@ -442,6 +466,15 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # Attempt to create vector table for semantic search
     _init_vector_table(conn)
 
+    # THE SHARED CREATE POINT SETS WAL, AFTER the CREATE statements.
+    # `get_connection` deliberately does not switch an EMPTY store (the pragma
+    # writes the header), so every path that creates the schema must switch
+    # here — otherwise `initialize_database` (and the production `setup` path)
+    # would build a NON-WAL store, losing crash safety and making a later
+    # concurrent conversion contend. A read-only connection has already raised
+    # on the CREATEs, so this line is only reached on a create path.
+    conn.execute("PRAGMA journal_mode=WAL")
+
     conn.commit()
     logger.info("Database schema initialized successfully")
 
@@ -599,8 +632,25 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'"
     )
     if cursor.fetchone() is None:
+        if read_only_scope_active():
+            # A READ MUST NOT CREATE THE SCHEMA. The read verbs refuse a
+            # store without `memories` before opening it, so this is only the
+            # backstop for a store truncated between that guard and this
+            # call; creating it here would be the write the guard exists to
+            # prevent.
+            return
+        # `init_schema` performs the WAL switch itself: it is the shared CREATE
+        # point, so every initializer (this one, `initialize_database`, the
+        # `setup` path) leaves the store in WAL. A read-only connection
+        # raises SQLITE_READONLY there, which the caller's read-side fail-soft
+        # handles.
         init_schema(conn)
     else:
+        if read_only_scope_active():
+            # NO MIGRATIONS ON A READ. `_migrate_ct_fields` issues ALTERs and
+            # `_init_vector_table` issues a CREATE; both are writes, and a
+            # read of an existing store must emit neither.
+            return
         _migrate_ct_fields(conn)
         _init_vector_table(conn)
 
@@ -1392,11 +1442,18 @@ def rekey_project(
     FILES. `UNIQUE(path, project_id)` means a path can already exist under
     both ids. A path present only under `from` is updated in place. A
     CONFLICTING path keeps the target row: its memory links and its file
-    relations are re-pointed with `INSERT OR IGNORE` (the relation PK is
-    `(source_file, target_file, relationship)`, so a duplicate edge collapses)
-    and the old row is then deleted. `relations_repointed` counts the row's
-    own incident edges before and after the move, so a SELF-relation is one
-    edge, not the two INSERT rowcounts it produces.
+    relations are re-pointed and the old row is then deleted. `relations_repointed`
+    counts the row's own incident edges before and after the move, so a
+    SELF-relation is one edge, not the two INSERT rowcounts it produces.
+
+    MEMORY LINKS USE A DETERMINISTIC KEEPER RULE. `memory_files` is keyed
+    `(memory_id, file_id)`, so when the target already carries a link for the
+    same pair, the TARGET's relationship is kept and the moved one is
+    DROPPED. There is no semantic merge and no type precedence. The counters
+    make the outcome visible instead of silent: `links_repointed` is the
+    number of old links EXAMINED, and `links_conflicted` is the number whose
+    relationship was dropped because the target already named that pair
+    differently.
 
     VECTORS. A vec0 partition key cannot be UPDATEd in place, so each moved
     memory's row is read, deleted and re-inserted under the target with the
@@ -1422,6 +1479,17 @@ def rekey_project(
     """
     validate_identifier_for_write(from_id)
     validate_identifier_for_write(to_id)
+    # THE LIBRARY ENFORCES THE CLI'S TARGET RULE: a rekey may move rows only
+    # INTO a canonical bucket. Without this a library caller could create the
+    # basename bucket the CLI refuses, which is the misfile the rekey command
+    # exists to prevent. `from_id` is deliberately NOT required canonical — it
+    # names the legacy bucket being retired. `from_id == to_id` is a no-op
+    # that moves nothing, so it keeps working for a non-canonical id.
+    if from_id != to_id and not is_canonical_id(to_id):
+        raise ValueError(
+            "the rekey target must be a canonical host/owner/repo id; moving "
+            "rows into a non-canonical bucket is refused. Nothing was moved."
+        )
 
     counters: Dict[str, Any] = {
         "from": from_id,
@@ -1431,6 +1499,10 @@ def rekey_project(
         "files_in_place": 0,
         "files_conflicted": 0,
         "links_repointed": 0,
+        # Old links whose target pair already existed with a DIFFERENT
+        # relationship. The target's type is kept and the moved one is
+        # dropped; this counter makes that loss visible.
+        "links_conflicted": 0,
         "relations_repointed": 0,
         "vectors_moved": 0,
         "vectors_pending": 0,
@@ -1489,14 +1561,34 @@ def rekey_project(
             target_id = target["id"]
             counters["files_conflicted"] += 1
 
-            links = conn.execute(
-                "INSERT OR IGNORE INTO memory_files "
-                "(memory_id, file_id, relationship) "
-                "SELECT memory_id, ?, relationship FROM memory_files "
+            # A MEMORY LINK'S PRIMARY KEY IS (memory_id, file_id), so a target link
+            # for the same pair KEEPS ITS OWN RELATIONSHIP and the moved one is
+            # dropped. `INSERT OR IGNORE` did that silently, and counting only
+            # the surviving inserts hid how many links were examined at all.
+            # The keeper rule is deterministic and unchanged — the TARGET's row
+            # wins — and every dropped relationship is visible in
+            # `links_conflicted` instead of vanishing.
+            old_links = conn.execute(
+                "SELECT memory_id, relationship FROM memory_files "
                 "WHERE file_id = ?",
-                (target_id, old_id),
-            )
-            counters["links_repointed"] += links.rowcount
+                (old_id,),
+            ).fetchall()
+            counters["links_repointed"] += len(old_links)
+            for link in old_links:
+                existing = conn.execute(
+                    "SELECT relationship FROM memory_files "
+                    "WHERE memory_id = ? AND file_id = ?",
+                    (link["memory_id"], target_id),
+                ).fetchone()
+                if existing is not None:
+                    if existing["relationship"] != link["relationship"]:
+                        counters["links_conflicted"] += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO memory_files (memory_id, file_id, relationship) "
+                    "VALUES (?, ?, ?)",
+                    (link["memory_id"], target_id, link["relationship"]),
+                )
             conn.execute(
                 "DELETE FROM memory_files WHERE file_id = ?", (old_id,)
             )

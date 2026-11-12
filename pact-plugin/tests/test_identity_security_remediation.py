@@ -1297,5 +1297,14 @@ def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
     with caplog.at_level(logging.WARNING):
         PACTMemory(db_path=tmp_path / "store" / "memory.db")
     records = [r.getMessage() for r in caplog.records]
-    assert any("could not be read or represented" in r for r in records), records
+    # THE SPECIFIC CAUSE, NOT THE GENERIC SENTENCE. The remote here is
+    # present but unrepresentable (`https://github.invalid` has no path), so
+    # the decline token is `origin_unrepresentable` and the warning must name
+    # that cause. The old generic sentence is the fallback for a reason-less
+    # decline and sends the operator to inspect a remote that may be fine.
+    assert any(
+        "origin remote is present but cannot be represented as a project id"
+        in r
+        for r in records
+    ), records
     assert all("\n" not in r for r in records), records

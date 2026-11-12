@@ -27,6 +27,7 @@ import shlex
 import struct
 import subprocess
 import threading
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
@@ -36,7 +37,14 @@ try:
 except ImportError:
     import sqlite3
 
-from .config import get_memory_dir, resolve_db_path, store_scope
+from .config import (
+    DERIVED_STORE_ORIGINS,
+    get_memory_dir,
+    read_only_scope,
+    resolve_db_path,
+    store_path_origin,
+    store_scope,
+)
 from .database import (
     db_connection,
     create_memory,
@@ -61,8 +69,10 @@ from .graph import (
     get_files_for_memory
 )
 from .models import MemoryObject, memory_from_db_row
+from . import project_identity
 from .project_identity import (
     _git_env_bool,
+    _submodule_admin_dir,
     detect_id_for_root,
     is_canonical,
     read_override,
@@ -145,6 +155,12 @@ class _DetectedIdentity(NamedTuple):
     # process's cwd repository: in a declared-repo session the two differ, and
     # gating on the cwd would exclude the declared repo's own legacy bucket.
     identity_root: Optional[Path]
+    # STRUCTURED DECLINE DISCLOSURE — `{reason, override}` when a rung
+    # refused a basename-derived id for a specific, named cause, else None.
+    # `project-id show` reports it; a warning alone is invisible to a caller
+    # that parses the envelope. Defaulted so the rungs that carry no reason
+    # keep their positional shape.
+    decline_reason: Optional[dict] = None
 
 
 # `_read_project_scopes` result cache: (store, mtime_ns, size, canonical,
@@ -155,6 +171,167 @@ _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 # Exclusion notices already emitted, keyed by (store, candidate). A warning
 # repeated on every read is a warning readers learn to ignore.
 _EXCLUSION_WARNED: set = set()
+
+# Case-variant notices already emitted, keyed by (store, variants). The fold
+# suppression is silent loss unless it is reported; reported once per process
+# for the same reason as the exclusion notice.
+_CASE_VARIANT_WARNED: set = set()
+
+# Submodule legacy-suppression notices already emitted, keyed by admin dir.
+# Detection runs on every memory operation, so this disclosure is once per
+# process for the same reason `_EXCLUSION_WARNED` is.
+_SUBMODULE_SUPPRESSED: set = set()
+
+
+def _warn_submodule_legacy_suppressed(common_dir: Path) -> None:
+    """DISCLOSE the suppressed legacy candidate for a submodule checkout.
+
+    The suppression must never be silent: an operator whose pre-upgrade rows
+    live in that bucket would otherwise see them disappear with no notice.
+    The notice names the derived bucket and the explicit rekey route; it does
+    NOT render a runnable command, because the store is not known at
+    detection time and a command against the default store would be wrong.
+    """
+    key = str(common_dir)
+    if key in _SUBMODULE_SUPPRESSED:
+        return
+    _SUBMODULE_SUPPRESSED.add(key)
+    try:
+        derived = common_dir.resolve().parent.name
+    except (OSError, RuntimeError, ValueError):
+        derived = common_dir.parent.name
+    logger.warning(
+        "the repository at %r is a submodule, so the pre-upgrade project "
+        "bucket derived from its admin directory (%r) is NOT admitted to this "
+        "project's read scope: a superproject chooses that name through its "
+        "tracked .gitmodules, so unioning it would let a repository read "
+        "another project's memories. If that bucket holds rows that belong "
+        "to this checkout, list it with `project-id show` and move it with "
+        "`project-id rekey --from <id>`.",
+        str(common_dir),
+        derived,
+    )
+
+
+def _warn_case_variant(store: str, legacy: str, variants: list) -> None:
+    """DISCLOSE a suppressed case-variant candidate, once per process.
+
+    A fold suppression that is not reported is silent loss: the operator's
+    own pre-upgrade bucket can be visible in `project-id show`'s census and
+    absent from every read with no explanation. Naming the bucket and the
+    literal rekey command is the difference between a deliberate non-binding
+    and a lost bucket. The bucket is NEVER read here.
+    """
+    key = (store, tuple(variants))
+    if key in _CASE_VARIANT_WARNED:
+        return
+    _CASE_VARIANT_WARNED.add(key)
+    commands = " ; ".join(
+        render_rekey_command(variant, db_path=store) for variant in variants
+    )
+    logger.warning(
+        "the legacy project basename %r matches stored bucket(s) %s only by "
+        "case, and this filesystem distinguishes case, so none is in this "
+        "read scope: on a case-sensitive filesystem those are different "
+        "projects, not one project spelled differently. If a bucket belongs "
+        "to this project, move its rows explicitly with: %s",
+        legacy,
+        ", ".join(repr(variant) for variant in variants),
+        commands,
+    )
+
+
+_DECLINE_CAUSES = {
+    "gitfile_redirect": (
+        "the `.git` marker redirects at another repository's git directory, "
+        "so its remote belongs to that repository"
+    ),
+    "origin_unreadable": "git could not read the repository's origin remote",
+    "origin_unrepresentable": (
+        "the repository's origin remote is present but cannot be represented "
+        "as a project id"
+    ),
+    "broken_git_marker": (
+        "the directory carries a `.git` marker but git could not answer for it"
+    ),
+    "no_working_tree": "the repository has no working tree to name",
+    "submodule_checkout": (
+        "the checkout is a submodule, so its folder name is chosen by the "
+        "superproject's .gitmodules"
+    ),
+}
+
+
+def _warn_declined(identity: "RootIdentity", root: Any, override_path: Any) -> None:
+    """Log a DECLINE with its real cause, never a generic origin claim.
+
+    The generic sentence ("an origin remote that could not be read or
+    represented") is WRONG for a forged `.git` marker or a broken repository,
+    and sent the operator to inspect a remote that was not the problem. The
+    structured token knows the cause, so the message uses it and falls back
+    to the generic sentence only when no reason was recorded.
+    """
+    token = (identity.decline_reason or {}).get("reason")
+    cause = _DECLINE_CAUSES.get(token) if token else None
+    if cause is None:
+        cause = (
+            "the repository at %r has an origin remote that could not be "
+            "read or represented as a project id" % (str(root),)
+        )
+    logger.warning(
+        "%s, so no project id was derived. Run the `project-id show` verb to "
+        "inspect the detected identity, or write an operator-chosen canonical "
+        "id to %r.",
+        cause,
+        str(override_path)
+        if override_path is not None
+        else "<git-common-dir>/pact-project-id",
+    )
+
+
+def _reason_with_source(reason: Optional[dict], source: str) -> Optional[dict]:
+    """A structured decline reason carrying the RUNG that produced it.
+
+    `detect_id_for_root` does not know which declaration or fallback called
+    it, so it leaves `source` unset; the caller fills it in here, and the
+    show/status envelope then names the remedy AND the rung.
+    """
+    if reason is None:
+        return None
+    return {**reason, "source": source}
+
+
+def _legacy_suppression(
+    identity_root: Optional[Path],
+) -> "tuple[Optional[dict], Optional[str]]":
+    """The structured disclosure for a SUPPRESSED legacy candidate.
+
+    A submodule admin dir supplies a REPOSITORY-CHOSEN bucket name, so the
+    pre-upgrade candidate derived from it is never admitted to the read
+    scope. Returning no name is not enough: the operator must be able to see
+    what was suppressed and why, on the same envelope as every other
+    read-scope field. Returns `(reason, derived_name)` or `(None, None)`.
+    The reason object is the same `{source, reason, override_path}` shape the
+    decline channel uses; `override_path` is None because the remedy here is
+    an explicit rekey, not a pin.
+    """
+    if identity_root is None:
+        return None, None
+    common_dir = main_repo_common_dir(str(identity_root))
+    if common_dir is None or not _submodule_admin_dir(common_dir):
+        return None, None
+    try:
+        derived = common_dir.resolve().parent.name
+    except (OSError, RuntimeError, ValueError):
+        derived = common_dir.parent.name
+    return (
+        {
+            "source": "submodule_admin_dir",
+            "reason": "repository_chosen_name",
+            "override_path": None,
+        },
+        derived,
+    )
 
 
 def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
@@ -227,15 +404,154 @@ def _invalidate_legacy_scope_cache() -> None:
     _LEGACY_SCOPE_CACHE.clear()
 
 
+def _read_only_connection(store: str):
+    """Open `store` READ-ONLY; raises sqlite3.OperationalError on failure.
+
+    A PURE READ MUST NOT CREATE OR MIGRATE THE STORE. `db_connection` opens
+    read-write, and every counter it runs calls `ensure_initialized`, so a
+    `project-id show` against a 0-byte store used to CREATE the full schema —
+    contradicting the verb's own "creates none" contract. The URI form with
+    `mode=ro` refuses those writes instead.
+
+    SQLite may still create the EMPTY `-wal`/`-shm` sidecars when the
+    directory is writable; they carry no schema and no rows. The store file
+    itself is never written.
+    """
+    connection = sqlite3.connect(
+        Path(store).resolve().as_uri() + "?mode=ro", uri=True
+    )
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _store_schema_present(store: str) -> bool:
+    """Whether an EXISTING store carries the `memories` table.
+
+    A READ MUST NOT INITIALISE AN EXISTING STORE IT IS ONLY REPORTING ON, and
+    the guard has to run BEFORE any read-write connection: opening one is
+    already a write, because `get_connection` pre-creates the file and the WAL
+    switch writes the header. So this uses the same read-only URI the identity
+    probe uses and answers False for a store without a schema, creating
+    nothing.
+
+    AN ABSENT STORE IS NOT DECIDED HERE. `_schema_present` treats absence
+    according to the store's ORIGIN: a derived location bootstraps on first
+    use (pre-existing production contract), while a caller-named store must
+    already exist. This function only inspects a store that is present.
+    """
+    try:
+        if not Path(store).exists():
+            return False
+        with closing(_read_only_connection(store)) as connection:
+            return _connection_has_memories_table(connection)
+    except sqlite3.OperationalError as exc:
+        if _read_only_store_unavailable(exc):
+            return False
+        raise
+
+
+def _connection_has_memories_table(conn: Any) -> bool:
+    """Whether an OPEN connection's store carries the `memories` table.
+
+    `sqlite_master` answers on an empty database without creating anything,
+    so this is safe on a connection whose store is 0 bytes. A corrupt store
+    raises, which is the non-transient direction.
+    """
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+    ).fetchone() is not None
+
+
+def _read_only_store_unavailable(exc: "sqlite3.OperationalError") -> bool:
+    """Whether a read-only probe failure is the DEGRADED state, not a fault.
+
+    TWO sqlite conditions are the fail-soft the architecture record promises:
+    the store has no schema yet (the DDL is refused read-only —
+    SQLITE_READONLY) and the file cannot be opened (SQLITE_CANTOPEN). ANY
+    OTHER OperationalError is a real fault and must still raise.
+    """
+    errorname = getattr(exc, "sqlite_errorname", "")
+    if errorname:
+        return errorname in ("SQLITE_READONLY", "SQLITE_CANTOPEN")
+    text = str(exc).lower()
+    return (
+        ("readonly" in text and "database" in text)
+        or "unable to open database file" in text
+    )
+
+
+@contextmanager
+def _legacy_probe_context(store: str, conn):
+    """Yield `(connection, degraded_reason)` for the legacy-scope probe.
+
+    A caller's live connection (the save path) is used UNCHANGED: it is
+    already initialized, and its writes belong to the caller. Otherwise the
+    store is opened READ-ONLY, because this path is reached by PURE READS and
+    must not bring a store, or a schema, into existence.
+
+    When the open or its initialization check is refused for one of the two
+    degraded conditions, yield `(None, reason)` so the caller narrows to the
+    canonical scope and discloses it. Every other failure raises.
+
+    THE `try` WRAPS THE PROBE ONLY, never the yielded connection: an
+    exception raised by the CALLER's body must propagate, not be re-caught
+    here (a generator cannot yield a second time after an exception is
+    thrown into it).
+    """
+    if conn is not None:
+        yield conn, None
+        return
+    try:
+        connection = _read_only_connection(store)
+        # THE SAME initialization check the counters rely on, run here so a
+        # 0-byte store degrades BEFORE any of the body's work.
+        ensure_initialized(connection)
+    except sqlite3.OperationalError as exc:
+        if not _read_only_store_unavailable(exc):
+            raise
+        yield None, str(exc)
+        return
+    with closing(connection):
+        yield connection, None
+
+
+def read_project_bucket_census(store: str) -> Dict[str, int]:
+    """Every NON-EMPTY project bucket in `store`, read READ-ONLY.
+
+    The `project-id show` / `rekey --candidates` census. It returns `{}` for
+    an absent, uninitialized or unreadable store: a REPORT must not create a
+    store or its schema, and a census is the right place to degrade rather
+    than answer SYSTEM_ERROR for the whole verb. Any other failure raises.
+    """
+    if not Path(store).exists():
+        return {}
+    from .database import project_bucket_counts
+
+    try:
+        with closing(_read_only_connection(store)) as connection:
+            return project_bucket_counts(connection)
+    except sqlite3.OperationalError as exc:
+        if not _read_only_store_unavailable(exc):
+            raise
+        return {}
+
+
 def _match_legacy_candidate(
-    legacy: str, buckets: Dict[str, int]
+    legacy: str, buckets: Dict[str, int], allow_fold: bool = False
 ) -> "tuple[Optional[str], list]":
     """The stored bucket spelling that matches `legacy`, or None.
 
-    Exact case first, folded ONLY as a fallback and only when the folded match
-    is unique. A folded-first lookup passes on a case-insensitive filesystem
-    and misses on a case-sensitive one; two folded matches are two different
-    projects on such a filesystem, so guessing would merge them.
+    Exact case first. A folded fallback is used ONLY when `allow_fold` is
+    True — the caller's statement that the filesystem holding the identity
+    root PROVABLY cannot distinguish the two spellings (see
+    `project_identity.filesystem_case_insensitive`). On a case-sensitive
+    filesystem `ForeignProj` and `foreignproj` are two different projects, so
+    folding them is a cross-project disclosure; when the filesystem cannot be
+    determined the answer is False and no fold happens.
+
+    A folded-first lookup passes on a case-insensitive filesystem and misses
+    on a case-sensitive one; two folded matches are two different projects on
+    such a filesystem, so guessing would merge them.
 
     Returns `(candidate, ambiguous)`. `ambiguous` is the sorted list of folded
     matches when more than one bucket differs only by case; it is carried into
@@ -246,12 +562,26 @@ def _match_legacy_candidate(
     live legacy bucket's file rows are all relative, so the plausibility gate
     can only ever call it `unverified`; requiring `verified` here would hide a
     bucket holding thousands of memories on a case-folding path mismatch —
-    silent loss, which is the defect this change exists to remove. The guard
-    that keeps a fold from merging two projects is UNIQUENESS (exactly one
-    folded match), and the inclusion is disclosed as unverified.
+    silent loss, which is the defect this change exists to remove. The guards
+    that keep a fold from merging two projects are the FILESYSTEM CAPABILITY
+    gate and UNIQUENESS (exactly one folded match); the inclusion is disclosed
+    as unverified.
+
+    THE RETURNED VALUE IS THE STORED SPELLING, BYTE FOR BYTE. Folding finds a
+    candidate; it never produces one.
+
+    `allow_fold` DEFAULTS TO FALSE, THE FAIL-CLOSED DIRECTION. A security gate
+    with a permissive default is a footgun for the next call site: a new
+    caller that forgets the argument must lose a fold, never gain one. The
+    production call site passes
+    `project_identity.filesystem_case_insensitive(root)` explicitly, and the
+    pure-string surrogate arms pass True because they exercise the matcher,
+    not the gate.
     """
     if legacy in buckets:
         return legacy, []
+    if not allow_fold:
+        return None, []
     folded = [bucket for bucket in buckets if bucket.casefold() == legacy.casefold()]
     if len(folded) == 1:
         return folded[0], []
@@ -788,6 +1118,9 @@ class PACTMemory:
             # A SUPPLIED id does not widen: there is no legacy candidate and
             # therefore no gate root to carry. PINNED, not coded around.
             self._project_identity_root = None
+            self._decline_reason = None
+            self._legacy_suppressed = None
+            self._legacy_suppressed_name = None
         else:
             detected = self._detect_project_identity_with_legacy()
             self._project_id = detected.project_id
@@ -802,6 +1135,21 @@ class PACTMemory:
             # in a declared-repo session those differ, and gating on the cwd
             # would exclude the declared repo's own legacy bucket.
             self._project_identity_root = detected.identity_root
+            # STRUCTURED DECLINE DISCLOSURE, carried from the same pass. None
+            # on every resolution that produced an id; `{reason, override}`
+            # when a rung refused a repository-chosen basename.
+            self._decline_reason = detected.decline_reason
+            # STRUCTURED SUPPRESSION DISCLOSURE. A submodule admin dir yields
+            # no legacy candidate; carry WHY and WHICH name, once, so every
+            # later read can report it without another git call.
+            if detected.legacy_basename is None:
+                (
+                    self._legacy_suppressed,
+                    self._legacy_suppressed_name,
+                ) = _legacy_suppression(detected.identity_root)
+            else:
+                self._legacy_suppressed = None
+                self._legacy_suppressed_name = None
             self._project_id_shape = (
                 "canonical"
                 if self._project_id is not None and is_canonical(self._project_id)
@@ -967,8 +1315,21 @@ class PACTMemory:
         the common dir outside the working tree. Unioning on the NEW name
         would look for a bucket that never existed and report no candidate at
         all — silent loss of every pre-upgrade row.
+
+        A SUBMODULE ADMIN DIR YIELDS NO CANDIDATE AT ALL. The name there is
+        chosen by the superproject's tracked `.gitmodules` (`modules`,
+        `vendor`, `checks` — whatever path the superproject writes), so it is
+        a REPOSITORY-CHOSEN BUCKET NAME and admitting it to the union would
+        let a checkout read another project's memories. An ordinary
+        `--separate-git-dir` checkout is NOT suppressed: its common dir is an
+        arbitrary external path, not `<...>/.git/modules/<name>`, and it
+        keeps its pre-upgrade name. The suppression is disclosed by
+        `_warn_submodule_legacy_suppressed`.
         """
         if common_dir is not None:
+            if _submodule_admin_dir(common_dir):
+                _warn_submodule_legacy_suppressed(common_dir)
+                return None
             try:
                 return common_dir.resolve().parent.name
             except (OSError, RuntimeError, ValueError):
@@ -993,7 +1354,7 @@ class PACTMemory:
     @staticmethod
     def _declared_dir_identity(
         declared_dir: str, source: str
-    ) -> "tuple[Optional[str], str, Optional[str], Optional[Path], Optional[dict]]":
+    ) -> "tuple[Optional[str], str, Optional[str], Optional[Path], Optional[dict], Optional[dict]]":
         """The project id a DECLARED directory belongs to, its label, the
         legacy basename, the identity root, and any unusable override.
 
@@ -1050,16 +1411,10 @@ class PACTMemory:
                     legacy_name,
                     declared_main_root,
                     identity.override_ignored,
+                    _reason_with_source(identity.decline_reason, source),
                 )
-            logger.warning(
-                "the repository at %r (declared via %s) has a remote that "
-                "could not be read or represented as a project id, so no id "
-                "was derived. "
-                "Run the `project-id show` verb to inspect the detected "
-                "identity, or write an operator-chosen canonical id to %r.",
-                str(declared_main_root),
-                source,
-                declared_common_dir / "pact-project-id",
+            _warn_declined(
+                identity, declared_main_root, declared_common_dir / "pact-project-id"
             )
             return (
                 None,
@@ -1067,6 +1422,7 @@ class PACTMemory:
                 legacy_name,
                 declared_main_root,
                 identity.override_ignored,
+                _reason_with_source(identity.decline_reason, source),
             )
         # A FORGED WORKTREE-ADMIN POINTER DECLINES HERE. `main_repo_root`
         # correctly refuses the redirect and returns None, but the fall-through
@@ -1099,7 +1455,14 @@ class PACTMemory:
                 source,
                 str(declared_common_dir / "pact-project-id"),
             )
-            return None, source, None, None, None
+            return None, source, None, None, None, {
+                "source": source,
+                "reason": "gitfile_redirect",
+                "override_path": (
+                    str(declared_common_dir / "pact-project-id")
+                    if declared_common_dir is not None else None
+                ),
+            }
 
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
         # fire AND the declared path does not resolve to an existing target.
@@ -1133,7 +1496,14 @@ class PACTMemory:
                         str(recorded_root),
                         source,
                     )
-                    return None, "worktree identity record", None, recorded_root, None
+                    return None, "worktree identity record", None, recorded_root, None, {
+                        "source": "worktree identity record",
+                        "reason": "broken_git_marker",
+                        "override_path": (
+                            str(recorded_common_dir / "pact-project-id")
+                            if recorded_common_dir is not None else None
+                        ),
+                    }
                 legacy_name = PACTMemory._legacy_project_name(
                     recorded_common_dir, recorded_root
                 )
@@ -1157,20 +1527,13 @@ class PACTMemory:
                         legacy_name,
                         recorded_root,
                         identity.override_ignored,
+                        _reason_with_source(identity.decline_reason, source),
                     )
-                logger.warning(
-                    "the recorded main checkout %r for the directory declared "
-                    "via %s has a remote that could not be read or represented as a "
-                    "project id; no id was derived. Run the "
-                    "`project-id show` verb to inspect the detected identity, or "
-                    "write an operator-chosen canonical id to %r.",
-                    str(recorded_root),
-                    source,
-                    str(
-                        recorded_common_dir / "pact-project-id"
-                        if recorded_common_dir is not None
-                        else "<git-common-dir>/pact-project-id"
-                    ),
+                _warn_declined(
+                    identity,
+                    recorded_root,
+                    recorded_common_dir / "pact-project-id"
+                    if recorded_common_dir is not None else None,
                 )
                 return (
                     None,
@@ -1178,6 +1541,7 @@ class PACTMemory:
                     legacy_name,
                     recorded_root,
                     identity.override_ignored,
+                    _reason_with_source(identity.decline_reason, source),
                 )
             logger.warning(
                 "the directory declared via %s could not be resolved: %r "
@@ -1186,7 +1550,11 @@ class PACTMemory:
                 source,
                 declared_dir,
             )
-            return None, source, None, None, None
+            return None, source, None, None, None, {
+                "source": source,
+                "reason": "declaration_unresolved",
+                "override_path": None,
+            }
         live_root = declared_main_root or declared_root or Path(declared_dir)
         # A DECLARED DIRECTORY THAT IS `.git`-MARKED BUT UNANSWERABLE BY GIT
         # declines for the same reason as the git rung. A non-git declared path
@@ -1202,7 +1570,11 @@ class PACTMemory:
                 "to <git-common-dir>/pact-project-id.",
                 source,
             )
-            return None, source, None, live_root, None
+            return None, source, None, live_root, None, {
+                "source": source,
+                "reason": "broken_git_marker",
+                "override_path": None,
+            }
         legacy_name = PACTMemory._legacy_project_name(declared_common_dir, live_root)
         # A non-git declared path has no common dir, so `detect_id_for_root`
         # returns the designed basename without shelling to git.
@@ -1220,18 +1592,13 @@ class PACTMemory:
                 legacy_name,
                 live_root,
                 identity.override_ignored,
+                _reason_with_source(identity.decline_reason, source),
             )
-        logger.warning(
-            "the repository at %r (declared via %s) has a remote that could "
-            "not be read or represented as a project id, so no id was "
-            "derived. Run "
-            "the `project-id show` verb to inspect the detected identity, "
-            "or write an operator-chosen canonical id to %r.",
-            str(live_root),
-            source,
-            str(declared_common_dir / "pact-project-id")
-            if declared_common_dir is not None
-            else "<git-common-dir>/pact-project-id",
+        _warn_declined(
+            identity,
+            live_root,
+            declared_common_dir / "pact-project-id"
+            if declared_common_dir is not None else None,
         )
         return (
             None,
@@ -1239,6 +1606,7 @@ class PACTMemory:
             legacy_name,
             live_root,
             identity.override_ignored,
+            _reason_with_source(identity.decline_reason, source),
         )
 
     @staticmethod
@@ -1261,15 +1629,25 @@ class PACTMemory:
         # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
         # instance, module or thread state.
         declined_declaration = False
+        # The STRUCTURED reason from the highest-priority declaration that
+        # declined, so `project-id show` can name it when no later rung
+        # answers. First non-None wins: the env declaration outranks the
+        # session record.
+        declined_reason: Optional[dict] = None
 
         # Strategy 1: Environment variable (original behavior)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            name, label, legacy, root, ignored = PACTMemory._declared_dir_identity(
-                project_dir, "CLAUDE_PROJECT_DIR"
+            name, label, legacy, root, ignored, decline_reason = (
+                PACTMemory._declared_dir_identity(
+                    project_dir, "CLAUDE_PROJECT_DIR"
+                )
             )
             if name:
-                return _DetectedIdentity(name, label, legacy, ignored, root)
+                return _DetectedIdentity(
+                    name, label, legacy, ignored, root, decline_reason
+                )
+            declined_reason = declined_reason or decline_reason
             declined_declaration = True
 
         # Strategy 1.5: session record (inert under pytest — the discovery
@@ -1277,11 +1655,16 @@ class PACTMemory:
         # no record leg to stay equivalent here).
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            name, label, legacy, root, ignored = PACTMemory._declared_dir_identity(
-                record_dir, "session record"
+            name, label, legacy, root, ignored, decline_reason = (
+                PACTMemory._declared_dir_identity(
+                    record_dir, "session record"
+                )
             )
             if name:
-                return _DetectedIdentity(name, label, legacy, ignored, root)
+                return _DetectedIdentity(
+                    name, label, legacy, ignored, root, decline_reason
+                )
+            declined_reason = declined_reason or decline_reason
             declined_declaration = True
 
         # Strategy 2: Git repository root (worktree-safe)
@@ -1296,7 +1679,11 @@ class PACTMemory:
                     "repository, or git cannot describe one), so no project "
                     "id was derived from it."
                 )
-                return _DetectedIdentity(None, "unresolved", None, None, None)
+                return _DetectedIdentity(
+                    None, "unresolved", None, None, None,
+                    {"source": "git root", "reason": "no_working_tree",
+                     "override_path": None},
+                )
             legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, repo_root)
             identity = detect_id_for_root(
                 repo_root, cwd_common_dir, asked_root=_cwd_or_none()
@@ -1323,20 +1710,15 @@ class PACTMemory:
                     legacy_name,
                     identity.override_ignored,
                     repo_root,
+                    _reason_with_source(identity.decline_reason, "git root"),
                 )
             if identity.source == "declined":
                 # A REAL remote that cannot be represented. Falling through to
                 # a basename would file this project under a different bucket
                 # from the one its remote names, which is the defect this
                 # change exists to remove.
-                logger.warning(
-                    "the repository at %r has an origin remote that could not "
-                    "be read or represented as a project id, so no id was "
-                    "derived. Run "
-                    "the `project-id show` verb to inspect the detected "
-                    "identity, or write an operator-chosen canonical id to %r.",
-                    str(repo_root),
-                    str(cwd_common_dir / "pact-project-id"),
+                _warn_declined(
+                    identity, repo_root, cwd_common_dir / "pact-project-id"
                 )
                 return _DetectedIdentity(
                     None,
@@ -1344,6 +1726,7 @@ class PACTMemory:
                     legacy_name,
                     identity.override_ignored,
                     repo_root,
+                    _reason_with_source(identity.decline_reason, "git root"),
                 )
         # A `.git`-MARKED DIRECTORY WHERE GIT CANNOT ANSWER DECLINES. Falling
         # through to a folder name here files the project in a silently
@@ -1359,7 +1742,11 @@ class PACTMemory:
                 "the detected identity, or write an operator-chosen canonical "
                 "id to <git-common-dir>/pact-project-id."
             )
-            return _DetectedIdentity(None, "unresolved", None, None, None)
+            return _DetectedIdentity(
+                None, "unresolved", None, None, None,
+                {"source": "git root", "reason": "broken_git_marker",
+                 "override_path": None},
+            )
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
 
@@ -1373,7 +1760,9 @@ class PACTMemory:
                 "project_id unresolved: the git root did not answer either, "
                 "so Strategy 3 is skipped and no project scope was derived."
             )
-            return _DetectedIdentity(None, "unresolved", None, None, None)
+            return _DetectedIdentity(
+                None, "unresolved", None, None, None, declined_reason
+            )
 
         # Strategy 2.5: the USER-SCOPE setting. Reached only when NO
         # declaration was present and no repository answered. A repo-scoped
@@ -1441,7 +1830,11 @@ class PACTMemory:
                         "canonical id to <git-common-dir>/pact-project-id.",
                         str(cwd_root),
                     )
-                    return _DetectedIdentity(None, "unresolved", None, None, cwd_root)
+                    return _DetectedIdentity(
+                        None, "unresolved", None, None, cwd_root,
+                        {"source": "cwd", "reason": "broken_git_marker",
+                         "override_path": None},
+                    )
                 if _worktree_redirect(cwd_root, cwd_common_dir):
                     # The forged worktree-admin shape. `main_repo_root` is not
                     # called on this rung, so the check is repeated here.
@@ -1451,7 +1844,14 @@ class PACTMemory:
                         "worktrees, so no project id was derived from it.",
                         str(cwd_root),
                     )
-                    return _DetectedIdentity(None, "unresolved", None, None, cwd_root)
+                    return _DetectedIdentity(
+                        None, "unresolved", None, None, cwd_root,
+                        {"source": "cwd", "reason": "gitfile_redirect",
+                         "override_path": (
+                             str(cwd_common_dir / "pact-project-id")
+                             if cwd_common_dir is not None else None
+                         )},
+                    )
                 legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, cwd_root)
                 identity = detect_id_for_root(
                     cwd_root, cwd_common_dir, asked_root=cwd_root
@@ -1468,14 +1868,15 @@ class PACTMemory:
                         identity.override_ignored,
                         cwd_root,
                     )
-                logger.warning(
-                    "the repository at %r has an origin remote that could not "
-                    "be read or represented as a project id, so no id was "
-                    "derived.",
-                    str(cwd_root),
+                _warn_declined(
+                    identity,
+                    cwd_root,
+                    cwd_common_dir / "pact-project-id"
+                    if cwd_common_dir is not None else None,
                 )
                 return _DetectedIdentity(
-                    None, "unresolved", legacy_name, identity.override_ignored, cwd_root
+                    None, "unresolved", legacy_name, identity.override_ignored, cwd_root,
+                    _reason_with_source(identity.decline_reason, "cwd"),
                 )
         except OSError:
             logger.debug("Failed to detect project_id from cwd")
@@ -1500,8 +1901,22 @@ class PACTMemory:
         `/`, so using one as a path component silently nests the file and
         orphans every existing `<basename>.json` — the backlog does exactly
         that, so it asks for this shape explicitly.
+
+        A BROKEN REPOSITORY REPRODUCES THE PRE-CHANGE FOLDER NAME. When a
+        `.git` marker exists but git cannot answer for it (a `.git` file
+        pointing at a missing admin dir), detection declines and carries no
+        legacy basename, while the pre-change resolver returned the marker
+        directory's name. Returning None there made the backlog file writer
+        refuse to write at all, in a state its remedy text did not describe.
+        The marker walk IS the pre-change derivation, so it is the fallback.
         """
-        return PACTMemory._detect_project_identity_with_legacy().legacy_basename
+        detected = PACTMemory._detect_project_identity_with_legacy().legacy_basename
+        if detected is not None:
+            return detected
+        start = _cwd_or_none()
+        if start is None:
+            return None
+        return PACTMemory._find_project_root(start).name or None
 
     @staticmethod
     def _detect_project_id_with_source() -> "tuple[Optional[str], str]":
@@ -1571,6 +1986,29 @@ class PACTMemory:
             return None
         return self._project_id
 
+    def _schema_present(self) -> bool:
+        """Whether this READ may proceed against the store.
+
+        "Zero CREATE" is SCOPED TO AN EXISTING STORE (the accepted ruling).
+        An existing store without a schema (0 bytes, a truncated file) answers
+        the empty result and is never initialised by a read. An ABSENT store
+        is decided by ORIGIN: on the DERIVED route the first memory operation
+        bootstraps directory + file + schema — the pre-existing initialisation
+        path, a separately asserted exception the security change did not take
+        on — while a store the caller NAMED answers empty and is not created.
+        """
+        from .database import get_db_path
+
+        try:
+            # `get_db_path` performs the derived DIRECTORY creation as a path
+            # side effect; the store file/schema decision is separate.
+            store = get_db_path()
+        except (OSError, RuntimeError, ValueError):
+            store = self._db_path or resolve_db_path()
+        if not Path(store).exists():
+            return store_path_origin() in DERIVED_STORE_ORIGINS
+        return _store_schema_present(str(store))
+
     def _read_project_scopes(self, conn: Any = None) -> Optional[tuple]:
         """The project ids a READ may bind: the canonical id plus its legacy bucket.
 
@@ -1582,16 +2020,23 @@ class PACTMemory:
         For a canonical id, the PRE-change basename joins the scope ONLY when
         its bucket has rows and the plausibility gate does not exclude it.
         The candidate is matched exact-case first and folded only as a
-        fallback: a folded-first lookup passes on a case-insensitive
-        filesystem and misses on a case-sensitive one. The value returned is
+        fallback, and only when the identity root's filesystem PROVABLY
+        folds case (`project_identity.filesystem_case_insensitive`): a
+        folded-first lookup passes on a case-insensitive filesystem and
+        misses on a case-sensitive one, and on a case-sensitive filesystem
+        the two spellings are two different projects. The value returned is
         the STORED spelling, byte for byte — folding finds a candidate, it
         never produces one.
 
         An empty sequence is unreachable. `None` keeps its "no identity"
         meaning, which every caller already treats as no records.
 
-        Reads never write: an absent store returns the canonical scope alone
-        rather than being created.
+        READS NEVER WRITE. An absent store returns the canonical scope alone
+        rather than being created, and when `conn` is not supplied the probe
+        opens the store READ-ONLY, so an uninitialized or unreadable store
+        cannot run `init_schema` behind a read. That state is DEGRADED, not
+        fatal: the scope narrows to the canonical id and the degraded state
+        is disclosed in `_legacy_scope_state`; the result is not cached.
 
         THE CACHE KEY STATS BOTH THE DATABASE AND ITS `-wal` SIBLING. The
         store runs in WAL mode, and another process's commit can land only in
@@ -1611,6 +2056,28 @@ class PACTMemory:
             return (scope,)
         legacy = self._legacy_project_basename
         if not legacy or legacy == scope:
+            if self._legacy_suppressed is not None:
+                # STRUCTURED SUPPRESSION DISCLOSURE, mirroring the shape of
+                # every other read-scope field: the operator sees that a
+                # candidate existed, what it was, why it is not read, and (via
+                # the warning + census) how to move it. Nothing is read.
+                self._legacy_scope_state = {
+                    "candidate": None,
+                    "memory_count": 0,
+                    "file_paths": None,
+                    "rekey": None,
+                    "included": False,
+                    "verified": False,
+                    "included_unverified": False,
+                    "excluded": False,
+                    "ambiguous": [],
+                    "canonical_count": None,
+                    "detail": None,
+                    "case_variant": [],
+                    "case_variant_rekey": [],
+                    "suppressed": self._legacy_suppressed,
+                    "suppressed_candidate": self._legacy_suppressed_name,
+                }
             return (scope,)
         store = str(self._db_path or resolve_db_path())
         stat_key = _store_stat_key(store)
@@ -1628,11 +2095,8 @@ class PACTMemory:
             self._legacy_scope_state = cached[1]
             return cached[0]
 
-        from contextlib import nullcontext
-
         from .database import (
             count_project_memories,
-            db_connection,
             legacy_candidate_plausibility,
             project_bucket_counts,
         )
@@ -1647,16 +2111,72 @@ class PACTMemory:
         # is scoped, but a library caller is not) would read the DEFAULT store
         # while the stat above inspected the caller's. The two must be the
         # same file.
-        with (
-            db_connection(Path(store)) if conn is None else nullcontext(conn)
-        ) as connection:
+        with _legacy_probe_context(store, conn) as (connection, degraded_reason):
+            if connection is None:
+                # FAIL-SOFT, DISCLOSED. The read-only probe could not read the
+                # store (uninitialized or unreadable), so the legacy bucket
+                # cannot be judged. Narrow to the canonical scope and say so;
+                # nothing was written and the degraded result is NOT cached,
+                # so repairing the store is observed on the next read.
+                logger.warning(
+                    "the legacy project bucket could not be checked: the store "
+                    "at %r is uninitialized or unreadable (%s). Reads are "
+                    "limited to the canonical project id %r until the store is "
+                    "repaired.",
+                    store,
+                    degraded_reason,
+                    scope,
+                )
+                self._legacy_scope_state = {
+                    "candidate": None,
+                    "memory_count": 0,
+                    "file_paths": None,
+                    "rekey": None,
+                    "included": False,
+                    "verified": False,
+                    "included_unverified": False,
+                    "excluded": False,
+                    "ambiguous": [],
+                    "canonical_count": None,
+                    "detail": None,
+                    "degraded": "store_unreadable",
+                    "case_variant": [],
+                    "case_variant_rekey": [],
+                }
+                return (scope,)
             buckets = project_bucket_counts(connection)
             # The canonical count is what lets a SAVE disclose that it landed
-            # in a bucket with no prior rows. Two indexed COUNTs per process,
-            # which is the budget the design set; the cache key makes the
-            # second one free.
+            # in a bucket with no prior rows. The in-process cache makes a
+            # second READ cheap, but on a saving process every save/update/
+            # delete clears `_LEGACY_SCOPE_CACHE`, so both COUNTs and the
+            # `git worktree list` above re-run after each write — that is the
+            # accepted cost, not a once-per-process constant.
             canonical_count = count_project_memories(connection, scope)
-            candidate, ambiguous = _match_legacy_candidate(legacy, buckets)
+            # THE FOLD IS GATED ON THE FILESYSTEM, NOT ON `verified`: see
+            # `_match_legacy_candidate`. The predicate is called as a module
+            # attribute so a test can substitute it.
+            allow_fold = project_identity.filesystem_case_insensitive(repo_root)
+            candidate, ambiguous = _match_legacy_candidate(
+                legacy, buckets, allow_fold=allow_fold
+            )
+            # THE FOLD SUPPRESSION IS SILENT LOSS UNLESS DISCLOSED. On a
+            # case-sensitive filesystem a bucket that differs from the legacy
+            # basename only by case is never read — and it may be the
+            # operator's own pre-upgrade bucket, filed on a machine whose
+            # filesystem folded case. Report it as PRESENT BUT NOT INCLUDED
+            # with the literal rekey command, exactly like an excluded bucket,
+            # while never reading it. It is NOT the `excluded` state: the
+            # plausibility gate never judged it, so the operator is not told
+            # their bucket was disproved.
+            case_variants = (
+                sorted(
+                    bucket
+                    for bucket in buckets
+                    if bucket.casefold() == legacy.casefold()
+                )
+                if candidate is None and not allow_fold
+                else []
+            )
             # MEASURED WHENEVER A CANDIDATE EXISTS, not only when the canonical
             # bucket is empty. Gating on `canonical_count == 0` made the field
             # null on every operator surface for any repo with canonical rows,
@@ -1683,7 +2203,17 @@ class PACTMemory:
                     "ambiguous": ambiguous,
                     "canonical_count": canonical_count,
                     "detail": None,
+                    # PRESENT BUT NOT INCLUDED: a case-variant bucket the
+                    # suppressed fold would have matched. Never read; the
+                    # command is how the operator moves it deliberately.
+                    "case_variant": case_variants,
+                    "case_variant_rekey": [
+                        render_rekey_command(bucket, db_path=store)
+                        for bucket in case_variants
+                    ],
                 }
+                if case_variants:
+                    _warn_case_variant(store, legacy, case_variants)
             else:
                 # A SET OF ROOTS, NOT ONE, AND ROOTED AT THE IDENTITY ROOT.
                 # A linked worktree's identity root is the MAIN checkout (by
@@ -1767,7 +2297,7 @@ class PACTMemory:
                         logger.warning(
                             "legacy project bucket %r holds %d memories and %d "
                             "file path%s, but none of its absolute file rows "
-                            "could be located under %r, so it is NOT in this "
+                            "could be located under '%s', so it is NOT in this "
                             "read scope. A row the gate could not READ has an "
                             "unknown location, not a known one — check for a "
                             "corrupt or unreadable file row before hunting "
@@ -1776,7 +2306,9 @@ class PACTMemory:
                             buckets.get(candidate, 0),
                             excluded_file_paths,
                             "" if excluded_file_paths == 1 else "s",
-                            repo_root,
+                            # A PLAIN QUOTED PATH, not %r: the operator reads
+                            # this line, and `PosixPath('/...')` is noise.
+                            str(repo_root) if repo_root is not None else "none",
                             render_rekey_command(candidate, db_path=store),
                         )
                 result = (scope, candidate) if included else (scope,)
@@ -1887,15 +2419,27 @@ class PACTMemory:
     def last_project_scope(self) -> Optional[Dict[str, Any]]:
         """How the most recent save resolved its project, and from where.
 
-        Keys: `project_id` (what it was filed under), `source` (which of
-        supplied / CLAUDE_PROJECT_DIR / session record / worktree identity
-        record / git root / cwd decided it), `cwd_repo` (the main repo root of
-        the working directory, or None when not in one) and
-        `location_divergence` (True when those last two name different
-        projects). `unresolved` never appears here: it cannot reach a
-        completed filing, because save() refuses an unresolved instance
-        identity unless the payload itself names the project (which then
-        discloses as `supplied`).
+        Keys, all seven emitted on every completed filing:
+        - `project_id` — what the record was filed under;
+        - `source` — which of supplied / CLAUDE_PROJECT_DIR / session record /
+          worktree identity record / git root / cwd decided it;
+        - `id_shape` — `canonical`, `basename`, or `caller` when the payload
+          supplied the id;
+        - `cwd_repo` — the CANONICAL PROJECT ID of the process's working
+          directory repository, or None when none resolved (NOT the repo
+          root path: the root is `repo_root` on the `project-id show`
+          envelope);
+        - `override_ignored` — `{path, reason}` when a present
+          `<git-common-dir>/pact-project-id` was unusable, else None;
+        - `legacy_scope` — the legacy candidate, its admission state and the
+          canonical bucket's prior count (the same state `project-id show`
+          reports);
+        - `location_divergence` — True when `cwd_repo` and `project_id` name
+          different projects.
+        `unresolved` never appears in `source`: it cannot reach a completed
+        filing, because save() refuses an unresolved instance identity unless
+        the payload itself names the project (which then discloses as
+        `supplied`).
 
         `location_divergence` IS NOT A MISFILE FLAG. It compares where the
         PROCESS was against what the record was filed under. It cannot see
@@ -2863,6 +3407,12 @@ class PACTMemory:
         project_scope = self._project_scope()
         if project_scope is None:
             return []
+        # A READ MUST NOT INITIALISE THE STORE. Checked before
+        # `_ensure_ready()` and before any read-write connection, so a 0-byte
+        # store answers empty instead of being grown by the WAL pragma or the
+        # schema DDL.
+        if not self._schema_present():
+            return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
         # THE UNION, AFTER `_ensure_ready()`: the canonical id plus the
@@ -2871,12 +3421,14 @@ class PACTMemory:
         # does no store work.
         project_scopes = self._read_project_scopes()
 
-        results = graph_enhanced_search(
-            query,
-            current_file=current_file,
-            project_id=project_scopes,
-            limit=limit
-        )
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope():
+            results = graph_enhanced_search(
+                query,
+                current_file=current_file,
+                project_id=project_scopes,
+                limit=limit
+            )
 
         # Sync to CLAUDE.md Retrieved Context section
         if sync_to_claude and results:
@@ -2926,12 +3478,17 @@ class PACTMemory:
         project_scope = self._project_scope()
         if project_scope is None:
             return []
+        # A READ MUST NOT INITIALISE THE STORE (see `search`).
+        if not self._schema_present():
+            return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        return search_by_file(
-            file_path, self._read_project_scopes(), limit
-        )
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope():
+            return search_by_file(
+                file_path, self._read_project_scopes(), limit
+            )
 
     def _resolve_id_or_full(
         self, conn, memory_id: str
@@ -2988,6 +3545,12 @@ class PACTMemory:
         memory_id = memory_id.lower()
         if len(memory_id) >= MEMORY_ID_LENGTH:
             return memory_id
+        # A PREFIX CANNOT MATCH IN A STORE WITH NO SCHEMA. Checked on the
+        # caller's connection (sqlite_master answers without creating), so a
+        # prefix lookup on an empty store returns None instead of letting the
+        # resolver's CREATE-on-read initialize it.
+        if not _connection_has_memories_table(conn):
+            return None
         # `_project_scope()` returns None for an UNUSABLE detected id as well
         # as for an absent one, and the prefix refusal below then applies to
         # both. The full-id return above happens FIRST, which is what keeps
@@ -3030,10 +3593,15 @@ class PACTMemory:
                 detected value that cannot be bound). A full 32-character
                 id still resolves.
         """
+        # A READ MUST NOT INITIALISE THE STORE. A by-id lookup on an empty
+        # store has no row to return, so it answers None without creating one.
+        if not self._schema_present():
+            return None
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        with db_connection() as conn:
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope(), db_connection() as conn:
             ensure_initialized(conn)
 
             resolved = self._resolve_id_or_full(conn, memory_id)
@@ -3592,10 +4160,14 @@ class PACTMemory:
             and _unusable_identifier(self._session_id)
         ):
             return []
+        # A READ MUST NOT INITIALISE THE STORE (see `search`).
+        if not self._schema_present():
+            return []
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        with db_connection() as conn:
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope(), db_connection() as conn:
             ensure_initialized(conn)
 
             session_id = self._session_id if session_only else None
@@ -3670,6 +4242,11 @@ class PACTMemory:
                 raise ProjectScopeDisagreementError(
                     format_project_dir_disagreement(*disagreement)
                 )
+        # A READ MUST NOT INITIALISE THE STORE: an empty store has nothing to
+        # project, and `empty` is the honest outcome.
+        if not self._schema_present():
+            self._last_sync_status = SyncResult.EMPTY
+            return []
         records = self.list(limit=MAX_WORKING_MEMORIES)
         payload = [r.to_dict() for r in records]
         try:
@@ -3689,6 +4266,47 @@ class PACTMemory:
             return []
         return [r.id for r in records]
 
+    def _empty_status_envelope(self) -> Dict[str, Any]:
+        """The zeroed status envelope for NO IDENTITY or NO SCHEMA yet.
+
+        Both states mean "there are no records to report", and neither may
+        initialise the store: the schema guard must run before
+        `_ensure_ready()`, which can CREATE the schema on first use.
+        """
+        return {
+            "project_id": self._project_id_for_envelope(),
+            "session_id": self._session_id_for_envelope(),
+            # PROVENANCE, ALWAYS. `id_shape` says whether the id is a
+            # canonical repository id or a legacy folder name, so a reader
+            # can tell at a glance which population the counts describe.
+            # `override_ignored` is structured, not a warning: an
+            # envelope-parsing caller never sees stderr.
+            "id_shape": self._project_id_shape,
+            "override_ignored": self._override_ignored,
+            # STRUCTURED DECLINE REASON, beside the override it names.
+            "decline_reason": self._decline_reason,
+            "project_candidates": [],
+            # A2: ALWAYS PRESENT, null when no candidate exists. An
+            # envelope consumer must be able to tell that a bucket was
+            # dropped without reading a warning it may never see.
+            "legacy_scope": self._legacy_scope_state,
+            "memory_count": 0,
+            "tracked_files_count": len(self._session_files),
+            "graph_stats": {
+                "files": 0,
+                "file_paths": 0,
+                "memories": 0,
+                "memory_file_links": 0,
+                "file_relations": 0,
+            },
+            "capabilities": get_search_capabilities(),
+            "embedding_catchup": get_embedding_catchup_status(),
+            # A PROCESS fact, like session_id and capabilities, and part of
+            # the envelope every other status call returns. Dropping it on
+            # this arm alone would change the envelope's key set.
+            "db_path": str(resolve_db_path()),
+        }
+
     @_with_store_scope
     def get_status(self) -> Dict[str, Any]:
         """
@@ -3707,6 +4325,11 @@ class PACTMemory:
         Returns:
             Dictionary with database stats and capabilities.
         """
+        # A READ MUST NOT INITIALISE THE STORE. Checked BEFORE
+        # `_ensure_ready()`, which can CREATE the schema on first use; an
+        # uninitialized store has no counts to report.
+        if not self._schema_present():
+            return self._empty_status_envelope()
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
@@ -3741,42 +4364,13 @@ class PACTMemory:
         project_id = self._project_id_for_envelope()
         session_id = self._session_id_for_envelope()
         if project_scope is None:
-            return {
-                "project_id": project_id,
-                "session_id": session_id,
-                # PROVENANCE, ALWAYS. `id_shape` says whether the id is a
-                # canonical repository id or a legacy folder name, so a reader
-                # can tell at a glance which population the counts describe.
-                # `override_ignored` is structured, not a warning: an
-                # envelope-parsing caller never sees stderr.
-                "id_shape": self._project_id_shape,
-                "override_ignored": self._override_ignored,
-                "project_candidates": [],
-                # A2: ALWAYS PRESENT, null when no candidate exists. An
-                # envelope consumer must be able to tell that a bucket was
-                # dropped without reading a warning it may never see.
-                "legacy_scope": self._legacy_scope_state,
-                "memory_count": 0,
-                "tracked_files_count": len(self._session_files),
-                "graph_stats": {
-                    "files": 0,
-                    "file_paths": 0,
-                    "memories": 0,
-                    "memory_file_links": 0,
-                    "file_relations": 0,
-                },
-                "capabilities": get_search_capabilities(),
-                "embedding_catchup": get_embedding_catchup_status(),
-                # A PROCESS fact, like session_id and capabilities, and part of
-                # the envelope every other status call returns. Dropping it on
-                # this arm alone would change the envelope's key set.
-                "db_path": str(resolve_db_path()),
-            }
+            return self._empty_status_envelope()
 
         from .database import get_memory_count, project_bucket_counts
         from .graph import get_graph_stats
 
-        with db_connection() as conn:
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope(), db_connection() as conn:
             ensure_initialized(conn)
 
             # THE UNION: counts report the canonical id TOGETHER with the
@@ -3814,6 +4408,10 @@ class PACTMemory:
             "session_id": session_id,
             "id_shape": self._project_id_shape,
             "override_ignored": self._override_ignored,
+            # STRUCTURED DECLINE REASON: the same field the zeroed arm and
+            # `project-id show` report, so a status consumer never has to read
+            # a warning it may not receive.
+            "decline_reason": self._decline_reason,
             "project_candidates": project_candidates,
             "legacy_scope": self._legacy_scope_state,
             "memory_count": memory_count,

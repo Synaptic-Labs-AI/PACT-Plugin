@@ -23,6 +23,7 @@ both at function level and never defines a second copy of either rule.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -30,6 +31,8 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import unquote
+
+logger = logging.getLogger(__name__)
 
 # Accepted remote schemes. The same set `hooks/shared/backlog.py` already
 # ships, because two parsers in one repo that disagree about which schemes are
@@ -120,12 +123,19 @@ class RootIdentity(NamedTuple):
     decided it. `override_ignored` is a structured {path, reason} when a
     PRESENT override file was unusable and resolution continued without it;
     `detect_id_for_root` sets it, and the caller discloses it.
+    `decline_reason` is a structured {source, reason, override_path} when the
+    decline had a NAMED cause (a repository-chosen basename), so
+    `project-id show` can report it rather than leaving the operator with
+    `declined` and no remedy. `source` names the rung that declined and is
+    filled in by the caller, which is the only layer that knows it. Defaulted
+    so the declines without a named cause keep their positional shape.
     """
 
     project_id: Optional[str]
     id_shape: Optional[str]
     source: str
     override_ignored: Optional[dict]
+    decline_reason: Optional[dict] = None
 
 
 # The three outcomes the classifier distinguishes. Collapsing any two is the
@@ -227,8 +237,16 @@ def _valid_port(port: str) -> bool:
 
     `022` is rejected rather than normalized: the grammar has one spelling per
     port, and accepting both would put two ids on one server.
+
+    THE LENGTH IS BOUNDED BEFORE `int()`. CPython refuses int() on a decimal
+    string longer than `sys.get_int_max_str_digits()` (4300 by default) with
+    a ValueError, and this predicate is documented as pure and total on a
+    port parsed from a remote. A 4301-digit port must DECLINE rather than
+    escape into `PACTMemory.__init__`, where it turns every memory operation
+    in that repository into SYSTEM_ERROR. No port has more than five digits,
+    so the bound is exact rather than a heuristic.
     """
-    if not port.isdigit() or str(int(port)) != port:
+    if len(port) > 5 or not port.isdigit() or str(int(port)) != port:
         return False
     return 1 <= int(port) <= 65535
 
@@ -626,6 +644,172 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     return value
 
 
+def _submodule_admin_dir(path: Optional[Path]) -> bool:
+    """Whether `path` is a submodule admin dir: `<super>/.git/modules/<name>`.
+
+    THE CONDITION IS THE PATH SHAPE — a `.git` component immediately followed
+    by a `modules` component — NOT a slash or a derived name. Measured: a
+    genuine submodule reports the SAME directory as `--git-dir` and
+    `--git-common-dir`, under `.git/modules/`; an ordinary local repository is
+    `<root>/.git` (no `modules` component after `.git`), a linked worktree has
+    `--git-dir != --git-common-dir`, and a `--separate-git-dir` checkout is an
+    arbitrary external directory. None of the last three match, so none is
+    suppressed.
+
+    shortcut: a checkout whose own path sits under a literal `.git/modules`
+    directory reads as a submodule admin dir; declining there is the safe
+    direction, and such a layout has never been observed.
+    """
+    if path is None:
+        return False
+    try:
+        parts = Path(path).resolve().parts
+    except (OSError, RuntimeError, ValueError):
+        parts = Path(path).parts
+    return any(
+        component == ".git" and following == "modules"
+        for component, following in zip(parts, parts[1:])
+    )
+
+
+def _resolved_git_dir(asked_root: Path) -> Optional[Path]:
+    """The resolved `--git-dir` for `asked_root`, or None.
+
+    Used only by the submodule conjunction below, so it runs on the rare
+    admin-dir-shaped repository rather than on every detection. A relative
+    answer is resolved against the directory the command ran in, as git
+    reports it.
+    """
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(asked_root), "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=False,
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    git_dir = Path(os.fsdecode(result.stdout).strip())
+    if not git_dir.is_absolute():
+        git_dir = asked_root / git_dir
+    try:
+        return git_dir.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _submodule_checkout(
+    root: Optional[Path],
+    common_dir: Optional[Path],
+    asked_root: Optional[Path],
+) -> bool:
+    """The three-leg SUBMODULE-CHECKOUT conjunction.
+
+    A basename-derived id is refused only when ALL THREE hold, because any
+    one alone is also true of a shape that must keep its name:
+
+    1. the resolved common dir contains an adjacent `.git`/`modules`
+       component pair (the admin-dir path shape);
+    2. `git-dir == common-dir` for the asked directory (rules out a linked
+       worktree, whose per-worktree git dir differs);
+    3. the identity root's `.git` is a FILE (rules out an ordinary checkout,
+       whose `.git` is a directory, and a `--separate-git-dir` store, which
+       has no `.git` marker at the root at all).
+
+    When the conjunction cannot be established the answer is False: the
+    ordinary basename ruling continues.
+    """
+    if root is None or common_dir is None:
+        return False
+    if not _submodule_admin_dir(common_dir):
+        return False
+    try:
+        if not (Path(root) / ".git").is_file():
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    asked = Path(asked_root) if asked_root is not None else Path(root)
+    git_dir = _resolved_git_dir(asked)
+    if git_dir is None:
+        return False
+    try:
+        return git_dir == Path(common_dir).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def filesystem_case_insensitive(root: Optional[Path]) -> bool:
+    """Whether the filesystem holding `root` PROVABLY folds case.
+
+    The legacy-bucket fold exists for one situation: the bucket was named on
+    a filesystem that cannot tell `foreignproj` from `ForeignProj`, so the
+    two spellings name one directory. On a case-SENSITIVE filesystem they
+    name two projects, and folding merges them.
+
+    The probe toggles the case of the root's own basename and asks whether
+    the toggled path is the SAME file (`os.path.samefile`), which answers the
+    case question without writing anything and without `os.path.normcase`
+    (a no-op on Linux, so a normcase gate would fold on a case-sensitive
+    filesystem and pass on macOS by construction).
+
+    True only on a positive answer. Every other state — no root, a basename
+    with no cased characters, a missing or unreadable path — is
+    UNDETERMINABLE and answers False, which is the safe direction: no fold.
+    """
+    if root is None:
+        return False
+    try:
+        path = Path(root)
+        name = path.name
+        toggled = name.swapcase()
+        if not name or toggled == name:
+            return False
+        return os.path.samefile(path, path.parent / toggled)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _refuse_submodule_basename(
+    root: Path, common_dir: Path, override_ignored: Optional[dict]
+) -> RootIdentity:
+    """Decline a basename-derived id for a submodule-controlled checkout.
+
+    A submodule's CHECKOUT PATH is chosen by the superproject's tracked
+    `.gitmodules`, so using its basename as a project id lets a repository
+    name another project's bucket — and that bucket is then read AND written
+    with no union involved. A canonical origin or an operator override still
+    answers; only the basename fallback is refused. The override is named in
+    the warning because it is the remedy, and it is read BEFORE this point,
+    so a deliberate pin still works.
+    """
+    logger.warning(
+        "the checkout %r is a submodule, so its folder name is chosen by the "
+        "superproject's tracked .gitmodules and is not used as a project id. "
+        "No id was derived. Write an operator-chosen canonical id to %r to "
+        "give this checkout a scope.",
+        str(root),
+        str(common_dir / _OVERRIDE_FILENAME),
+    )
+    return RootIdentity(
+        None,
+        None,
+        "declined",
+        override_ignored,
+        {
+            # `source` is filled by the calling rung, which is the only layer
+            # that knows which declaration or fallback declined.
+            "source": None,
+            "reason": "submodule_checkout",
+            "override_path": str(common_dir / _OVERRIDE_FILENAME),
+        },
+    )
+
+
 def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool:
     """Whether a SUBMODULE admin dir records a checkout other than `asked_root`.
 
@@ -639,8 +823,10 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
 
     MEASURED: a genuine submodule's `core.worktree` is `../../../submod`,
     resolving to the submodule checkout the caller is standing in; a forged
-    pointer's resolves to somebody else's checkout. A bare or unset
-    `core.worktree` answers False — nothing to contradict the pointer.
+    pointer's resolves to somebody else's checkout. A BARE OR UNSET
+    `core.worktree` is UNPROVABLE and answers True (decline): `git submodule
+    deinit` leaves exactly that state while the submodule's origin survives,
+    so treating it as innocent bound another repository's id.
     """
     try:
         from shared.project_scope import git_env_without_location
@@ -653,9 +839,21 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-        return False
+        # UNPROVABLE, so FAIL CLOSED. This function is reached only for the
+        # `<...>/.git/modules/<name>` shape (a submodule admin dir), and git
+        # being unable to answer there says nothing about whether the pointer
+        # is genuine. A live submodule always records `core.worktree`, so
+        # nothing legitimate is refused by answering True here.
+        return True
     if result.returncode != 0 or not result.stdout.strip():
-        return False
+        # AN UNSET `core.worktree` IS UNPROVABLE, NOT PROVEN-INNOCENT, and the
+        # difference was a blocking defect: `git submodule deinit` UNSETS
+        # `core.worktree` while the submodule's origin SURVIVES, so a forged
+        # `.git` file naming that admin dir bound another repository's
+        # canonical id for reads AND writes. A live submodule always records
+        # it (measured: `../../../../checks/ForeignProj`), so failing closed
+        # here refuses only the deinit-ed state that cannot be checked.
+        return True
     recorded = Path(os.fsdecode(result.stdout).strip())
     if not recorded.is_absolute():
         recorded = admin_dir / recorded
@@ -663,8 +861,17 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         recorded = recorded.resolve()
         asked = Path(asked_root).resolve()
     except (OSError, RuntimeError, ValueError):
-        return False
-    return recorded != asked
+        return True
+    try:
+        # SAME INODE, NOT THE SAME SPELLING: on a case-insensitive filesystem
+        # a genuinely recorded `core.worktree` can differ from the checkout
+        # path only by case. `samefile` settles that without folding the
+        # comparison, which would be wrong on a case-sensitive filesystem.
+        return not os.path.samefile(recorded, asked)
+    except OSError:
+        # A recorded path that does not exist cannot be this checkout's
+        # worktree, and the question is unprovable: fail closed.
+        return True
 
 
 def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
@@ -804,7 +1011,11 @@ def detect_id_for_root(
     - the origin is PRESENT and canonicalises -> the canonical id;
     - the origin is PRESENT and cannot be represented -> DECLINE;
     - the origin is ABSENT (none configured, `file://`, a local path) ->
-      the basename, the designed non-git form;
+      the basename, the designed non-git form, EXCEPT in a submodule: there
+      the checkout path is chosen by the superproject's tracked `.gitmodules`,
+      so a basename would let a repository name another project's bucket. A
+      submodule-controlled basename DECLINES and names the override as the
+      remedy. An ordinary local repository still basenames by ruling;
     - the origin is UNAVAILABLE (git cannot answer, unreadable config) ->
       DECLINE. This is the #1699 rule: a broken repository must not fall back
       to a folder name, because that files it in a silently different bucket.
@@ -847,18 +1058,66 @@ def detect_id_for_root(
     # the victim's id. `asked_root` is the directory the caller actually
     # asked about (the cwd, or the declared directory).
     asked = Path(asked_root) if asked_root is not None else Path(root)
+    override_path = str(common_dir / _OVERRIDE_FILENAME)
     if _gitfile_points_at_foreign_gitdir(asked):
-        return RootIdentity(None, None, "declined", override_ignored)
+        # THE REASON NAMES THE REAL CAUSE. Without it the rung's generic
+        # "origin could not be read or represented" warning sends the
+        # operator to inspect a remote when the `.git` marker is the thing
+        # that redirected the answer.
+        return RootIdentity(
+            None,
+            None,
+            "declined",
+            override_ignored,
+            {
+                "source": None,
+                "reason": "gitfile_redirect",
+                "override_path": override_path,
+            },
+        )
+
+    # A SUBMODULE'S CHECKOUT PATH IS REPOSITORY-CHOSEN, so a basename derived
+    # from it must never bind. A canonical origin or the override above still
+    # answers; only the basename fallback is refused. The test is the THREE-LEG
+    # conjunction (admin-dir path shape, git-dir == common-dir, a `.git` FILE
+    # at the identity root), so an ordinary local repository, a linked
+    # worktree and a `--separate-git-dir` checkout each fail a different leg
+    # and keep basenaming by ruling.
+    submodule_controlled = _submodule_checkout(root, common_dir, asked_root)
 
     origin = read_origin(root)
     if origin.state == ORIGIN_UNAVAILABLE:
-        return RootIdentity(None, None, "declined", override_ignored)
+        return RootIdentity(
+            None,
+            None,
+            "declined",
+            override_ignored,
+            {
+                "source": None,
+                "reason": "origin_unreadable",
+                "override_path": override_path,
+            },
+        )
     if origin.state == ORIGIN_ABSENT:
+        if submodule_controlled:
+            return _refuse_submodule_basename(root, common_dir, override_ignored)
         return RootIdentity(name, "basename", "basename", override_ignored)
 
     outcome, identifier = classify_remote_origin(origin.value)
     if outcome == OUTCOME_CANONICAL:
         return RootIdentity(identifier, "canonical", "origin remote", override_ignored)
     if outcome == OUTCOME_DECLINE:
-        return RootIdentity(None, None, "declined", override_ignored)
+        return RootIdentity(
+            None,
+            None,
+            "declined",
+            override_ignored,
+            {
+                "source": None,
+                "reason": "origin_unrepresentable",
+                "override_path": override_path,
+            },
+        )
+    if submodule_controlled:
+        return _refuse_submodule_basename(root, common_dir, override_ignored)
     return RootIdentity(name, "basename", "basename", override_ignored)
