@@ -364,3 +364,27 @@ class TestRekeyRemediesNameTheirTarget:
             "existing target row"
         ) in body
         assert "links_repointed counts old links examined" not in body
+
+
+class TestRepositorySessionsNeverWriteAFolderNameBucket:
+    """The write rule that keeps a legacy bucket's evidence from being made."""
+
+    def test_the_rule_names_both_refused_writes(self):
+        assert (
+            "A session whose detected project id is a repository identity "
+            "never writes into a folder-name bucket: save and update refuse a "
+            "payload project_id that is not a canonical host/owner/repo id, "
+            "and update refuses a session_id change on a row stored under a "
+            "folder-name bucket. Both exit 2 and write nothing."
+        ) in _body(SKILL)
+
+    def test_the_remedy_is_the_one_the_refusal_prints(self):
+        source = (SCRIPTS / "memory_api.py").read_text(encoding="utf-8")
+        remedy = "project-id rekey --from=FOLDER_NAME --to=host/owner/repo"
+        assert (
+            "To move rows, run " + remedy + ", with the folder-name bucket and "
+            "the canonical id filled in; to write a folder-name bucket, save "
+            "from that non-repository folder."
+        ) in _body(SKILL)
+        assert remedy in source.replace("`", "")
+        assert "--to=<canonical id>" not in source

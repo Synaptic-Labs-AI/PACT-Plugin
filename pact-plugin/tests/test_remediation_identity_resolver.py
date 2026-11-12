@@ -1014,3 +1014,227 @@ class TestAnUnpinnableDeclineOffersNoPin:
         for message in messages:
             assert "pact-project-id" not in message, message
             assert "<git-common-dir>" not in message, message
+
+
+# ---------------------------------------------------------------------------
+# A delivered checkout can neither create nor forge legacy-admission evidence
+# ---------------------------------------------------------------------------
+
+LEGACY_ID = "a" * 32
+
+
+def _bucket_counts(store: Path) -> dict:
+    from scripts.database import db_connection
+
+    with db_connection(store) as conn:
+        return dict(
+            conn.execute(
+                "SELECT COALESCE(project_id, ''), COUNT(*) FROM memories GROUP BY 1"
+            ).fetchall()
+        )
+
+
+class TestACanonicalSessionWritesNoFolderNameBucket:
+    """A repository session cannot file into, or relabel, a folder-name bucket.
+
+    Catches the evidence manufacture: a delivered checkout under the user's
+    folder name saves one memory with `project_id` set to that name, and its
+    next session finds its own session id in the user's legacy bucket and is
+    admitted to read it.
+    """
+
+    def _repo(self, identity_env, monkeypatch, name="proj", remote=REMOTE):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / name, remote=remote)
+        monkeypatch.chdir(repo)
+        return repo
+
+    def test_a_save_into_the_legacy_bucket_is_refused_and_writes_nothing(
+        self, identity_env, monkeypatch, capfd
+    ):
+        import json
+        from scripts.cli import main
+
+        self._repo(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj", session_id="user-session")
+        before = _bucket_counts(store)
+        with pytest.raises(SystemExit) as exit_info:
+            main([
+                "save", json.dumps({"context": "x", "project_id": "proj"}),
+                "--db-path", str(store),
+            ])
+        assert exit_info.value.code == 2
+        assert "folder-name bucket" in capfd.readouterr().err
+        assert _bucket_counts(store) == before
+
+    def test_the_refused_save_leaves_the_bucket_unproven(
+        self, identity_env, monkeypatch
+    ):
+        """The auditor's rig end to end: the next session is still not admitted."""
+        self._repo(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj", session_id="user-session")
+        with pytest.raises(ValueError):
+            PACTMemory(session_id="attacker", db_path=store).save(
+                {"context": "x", "project_id": "proj"}, sync_to_claude=False
+            )
+        _fresh_scope_state()
+        memory = PACTMemory(session_id="attacker", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert memory._legacy_scope_state["unproven"] is True
+
+    def test_an_update_into_the_legacy_bucket_is_refused(self, identity_env, monkeypatch):
+        self._repo(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        memory = PACTMemory(session_id="s", db_path=store)
+        memory_id = memory.save({"context": "mine"}, sync_to_claude=False)
+        with pytest.raises(ValueError, match="folder-name bucket"):
+            memory.update(memory_id, {"project_id": "proj"})
+        assert _bucket_counts(store) == {CANONICAL: 1}
+
+    def test_relabelling_a_legacy_rows_session_is_refused(
+        self, identity_env, monkeypatch
+    ):
+        self._repo(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        # A FULL 32-character id resolves by id, outside any read scope.
+        _seed(store, "proj", session_id="user-session", memory_id=LEGACY_ID)
+        memory = PACTMemory(session_id="attacker", db_path=store)
+        with pytest.raises(ValueError, match="folder-name bucket"):
+            memory.update(LEGACY_ID, {"session_id": "attacker"})
+        from scripts.database import db_connection
+
+        with db_connection(store) as conn:
+            assert conn.execute(
+                "SELECT session_id FROM memories WHERE id = ?", (LEGACY_ID,)
+            ).fetchone()[0] == "user-session"
+
+    @pytest.mark.parametrize("argv_tail", [
+        ["save", '{"context": "x", "project_id": "proj"}'],
+        ["update", LEGACY_ID, '{"session_id": "attacker"}'],
+        ["update", "MINE", '{"project_id": "proj"}'],
+    ], ids=["save", "relabel", "update"])
+    def test_the_rendered_refusal_carries_no_escaped_angle_bracket(
+        self, identity_env, monkeypatch, capfd, argv_tail
+    ):
+        """The envelope escaper renders `<` as `<U+003C>`, so a placeholder
+        written with angle brackets reaches the operator mangled."""
+        from scripts.cli import main
+
+        self._repo(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj", session_id="user-session", memory_id=LEGACY_ID)
+        if "MINE" in argv_tail:
+            mine = PACTMemory(session_id="s", db_path=store).save(
+                {"context": "mine"}, sync_to_claude=False
+            )
+            argv_tail = [mine if arg == "MINE" else arg for arg in argv_tail]
+        capfd.readouterr()
+        with pytest.raises(SystemExit) as exit_info:
+            main([*argv_tail, "--db-path", str(store)])
+        captured = capfd.readouterr()
+        rendered = captured.out + captured.err
+        assert exit_info.value.code == 2, rendered
+        assert "--to=host/owner/repo" in rendered, rendered
+        assert "U+003C" not in rendered, rendered
+
+    def test_a_content_update_of_a_legacy_row_still_works(
+        self, identity_env, monkeypatch
+    ):
+        self._repo(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        # A FULL 32-character id resolves by id, outside any read scope.
+        _seed(store, "proj", session_id="user-session", memory_id=LEGACY_ID)
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory.update(LEGACY_ID, {"context": "edited"}) is not None
+
+    def test_a_no_origin_repository_still_writes_its_folder_name_bucket(
+        self, identity_env, monkeypatch
+    ):
+        """Control: a basename-identity session keeps the pre-change behaviour."""
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj")
+        monkeypatch.chdir(repo)
+        store = identity_env / "store.db"
+        memory = PACTMemory(session_id="s", db_path=store)
+        memory.save({"context": "x", "project_id": "proj"}, sync_to_claude=False)
+        assert _bucket_counts(store) == {"proj": 1}
+
+
+class TestTheGateTrustsOnlyLinkedWorktrees:
+    """A worktree widens the gate only when it links back to the repository.
+
+    Catches a delivered `.git` naming the victim's checkout in
+    `.git/worktrees/<x>/gitdir`: that path became a gate root, and the
+    victim's absolute file rows then VERIFIED its bucket with no evidence.
+    """
+
+    def test_a_forged_worktree_entry_adds_no_root(self, identity_env, monkeypatch):
+        _fresh_scope_state()
+        # The victim is a real checkout, so git lists the forged entry as live.
+        victim = make_repo(identity_env / "victim" / "proj", remote="https://github.com/v/proj.git")
+        delivered = make_repo(identity_env / "delivered" / "proj", remote=REMOTE)
+        admin = delivered / ".git" / "worktrees" / "x"
+        admin.mkdir(parents=True)
+        (admin / "gitdir").write_text(f"{victim / '.git'}\n", encoding="utf-8")
+        (admin / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (admin / "commondir").write_text("../..\n", encoding="utf-8")
+        store = identity_env / "store.db"
+        _seed(store, "proj", path=str(victim / "secret.py"))
+        monkeypatch.chdir(delivered)
+        assert memory_api._verified_worktree_roots(
+            delivered, delivered / ".git"
+        ) == [delivered.resolve()]
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        state = memory._legacy_scope_state
+        assert state["verified"] is False and state["included"] is False
+
+    def test_a_genuine_worktree_still_widens_the_gate(self, identity_env, monkeypatch):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        worktree = make_worktree(repo, identity_env / "proj-wt")
+        store = identity_env / "store.db"
+        _seed(store, "proj", path=str(worktree / "a.py"))
+        monkeypatch.chdir(repo)
+        assert worktree.resolve() in memory_api._verified_worktree_roots(
+            repo, repo / ".git"
+        )
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL, "proj")
+        assert memory._legacy_scope_state["verified"] is True
+
+    def test_a_pruned_worktree_adds_no_root(self, identity_env, monkeypatch):
+        import shutil
+
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        worktree = make_worktree(repo, identity_env / "proj-wt")
+        shutil.rmtree(worktree)
+        assert memory_api._verified_worktree_roots(repo, repo / ".git") == [
+            repo.resolve()
+        ]
+
+
+class TestTheLegacyProbeLetsTheCallersErrorThrough:
+    """An error raised inside the probe's block is the caller's, unchanged.
+
+    Catches a yield inside the probe's `try`: the caller's OperationalError is
+    thrown in there, caught by the probe's own handler, and replaced.
+    """
+
+    def test_a_callers_operational_error_propagates(self, identity_env):
+        # THE STORE'S OWN sqlite module (pysqlite3 when installed): a stdlib
+        # OperationalError is a different class and would never reach the
+        # probe's handler at all.
+        sqlite3 = memory_api.sqlite3
+
+        store = identity_env / "zero.db"
+        store.write_bytes(b"")
+        # Shaped like the probe's own degraded-store error, so a handler that
+        # wrongly catches it would treat it as the probe's and yield again.
+        callers = "attempt to write a readonly database (caller)"
+        with pytest.raises(sqlite3.OperationalError, match=r"\(caller\)$"):
+            with memory_api._legacy_probe_context(str(store), None) as (conn, reason):
+                assert conn is None and reason == "no schema"
+                raise sqlite3.OperationalError(callers)

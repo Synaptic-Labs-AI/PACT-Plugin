@@ -907,6 +907,7 @@ def _legacy_probe_context(store: str, conn):
     if conn is not None:
         yield conn, None
         return
+    degraded: Optional[str] = None
     try:
         connection = _read_only_connection(store)
         # A SCHEMA CHECK, NOT THE INITIALISER: a read never runs migrations
@@ -914,12 +915,16 @@ def _legacy_probe_context(store: str, conn):
         # any of the body's work.
         if not _connection_has_memories_table(connection):
             connection.close()
-            yield None, "no schema"
-            return
+            degraded = "no schema"
     except sqlite3.OperationalError as exc:
         if not _read_only_store_unavailable(exc, store):
             raise
-        yield None, str(exc)
+        degraded = str(exc)
+    # EVERY YIELD SITS OUTSIDE THE `try`: an exception the caller's body
+    # raises is thrown in at the yield, and inside the `try` the
+    # OperationalError arm would catch it and yield a second time.
+    if degraded is not None:
+        yield None, degraded
         return
     with closing(connection), read_only_scope():
         yield connection, None
@@ -1178,6 +1183,87 @@ def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Opti
         except (OSError, RuntimeError):
             continue
     return toplevels
+
+
+def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> List[Path]:
+    """The gate roots: the identity root plus every TWO-WAY-LINKED worktree.
+
+    `git worktree list` reports whatever `<common>/worktrees/*/gitdir` names,
+    and a delivered archive with its own `.git` can name ANY directory there,
+    including another project's real checkout, which would then place that
+    project's absolute rows "under" this repository. A listed worktree W is
+    kept only when (a) git does not call it prunable, (b) `W/.git` is a FILE
+    whose `gitdir:` is `<common>/worktrees/<name>`, and (c) that admin dir's
+    `gitdir` names `W/.git` back. Anything else is dropped, which can only
+    narrow the gate; a listing failure narrows it to the identity root.
+    """
+    roots = [Path(repo_root).resolve()]
+    if common_dir is None:
+        return roots
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "list", "--porcelain", "-z"],
+            capture_output=True,
+            text=False,
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return roots
+    if result.returncode != 0:
+        return roots
+    try:
+        admin_parent = (Path(common_dir) / "worktrees").resolve()
+    except (OSError, RuntimeError, ValueError):
+        return roots
+    # `-z`: every field ends in NUL and an empty field ends a record.
+    records, current = [], []
+    for field in os.fsdecode(result.stdout).split("\0"):
+        if field:
+            current.append(field)
+        elif current:
+            records.append(current)
+            current = []
+    if current:
+        records.append(current)
+    for record in records[1:]:  # the first record is the main worktree
+        worktree = next(
+            (f[len("worktree "):] for f in record if f.startswith("worktree ")), None
+        )
+        if worktree is None or any(
+            f == "prunable" or f.startswith("prunable ") for f in record
+        ):
+            continue
+        try:
+            marker = Path(worktree) / ".git"
+            if not marker.is_file():
+                continue
+            line = next(
+                (
+                    entry for entry in marker.read_text(encoding="utf-8").splitlines()
+                    if entry.startswith("gitdir:")
+                ),
+                None,
+            )
+            if line is None:
+                continue
+            admin = Path(line.split(":", 1)[1].strip())
+            if not admin.is_absolute():
+                admin = Path(worktree) / admin
+            admin = admin.resolve()
+            if admin.parent != admin_parent:
+                continue
+            back = Path((admin / "gitdir").read_text(encoding="utf-8").strip())
+            if not back.is_absolute():
+                back = admin / back
+            if back.resolve() != marker.resolve():
+                continue
+            roots.append(Path(worktree).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return list(dict.fromkeys(roots))
 
 
 def _worktree_redirect(asked_root, common_dir) -> bool:
@@ -2446,18 +2532,20 @@ class PACTMemory:
                 # must never escape a read.
                 gate_roots = []
                 if repo_root is not None:
-                    gate_roots.append(str(Path(repo_root).resolve()))
+                    # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
+                    # entry is what the repository's own `.git` CLAIMS, and a
+                    # delivered `.git` can claim another project's checkout.
                     try:
                         gate_roots.extend(
                             str(root)
-                            for root in sorted(
-                                _listed_worktree_toplevels(repo_root) or ()
+                            for root in _verified_worktree_roots(
+                                Path(repo_root), main_repo_common_dir(str(repo_root))
                             )
                         )
                     except Exception:
                         # A listing failure must narrow the gate to the
                         # identity root alone, never fail the read.
-                        pass
+                        gate_roots = [str(Path(repo_root).resolve())]
                 deduped = list(dict.fromkeys(gate_roots))
                 outcome, detail = legacy_candidate_plausibility(
                     connection, candidate, deduped or None
@@ -2525,6 +2613,32 @@ class PACTMemory:
             _LEGACY_SCOPE_CACHE.pop(stale, None)
         _LEGACY_SCOPE_CACHE[cache_key] = (result, state)
         return result
+
+    def _detected_identity_is_canonical(self) -> bool:
+        """Whether this instance DETECTED a canonical id (not a supplied one)."""
+        return (
+            self._project_id_source != "supplied"
+            and self._project_id is not None
+            and is_canonical(self._project_id)
+        )
+
+    def _refuse_legacy_write(self, what: str) -> None:
+        """Refuse a canonical session's write into a non-canonical bucket.
+
+        AFTER THE UPGRADE ONLY A BASENAME-IDENTITY SESSION WRITES A BASENAME
+        BUCKET. A canonical session that filed (or relabelled) a row there
+        could create the session evidence that admits that bucket to its own
+        reads, so a delivered checkout sharing a folder name could read
+        another project's memories.
+        """
+        raise ValueError(
+            f"{what}: this session's project id is {self._project_id!r} (a "
+            "repository identity), and a repository session does not write "
+            "into a folder-name bucket. Nothing was written. To move rows, "
+            "run `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`; "
+            "to write a folder-name bucket, save from that non-repository "
+            "folder."
+        )
 
     def _project_id_for_write(self) -> Optional[str]:
         """The project id a WRITE may bind; ValueError for an unusable one.
@@ -3018,6 +3132,14 @@ class PACTMemory:
                 "control characters (U+0000-U+001F, U+007F-U+009F) or lone "
                 "surrogates (U+D800-U+DFFF); omit it to auto-detect the "
                 "project. Nothing was written."
+            )
+        if (
+            payload_project is not None
+            and self._detected_identity_is_canonical()
+            and not is_canonical(payload_project)
+        ):
+            self._refuse_legacy_write(
+                f"save into project_id {payload_project!r} was refused"
             )
 
         # THE SAME RULE FOR session_id, SAME VERB, SAME SHAPE: a supplied
@@ -3939,6 +4061,15 @@ class PACTMemory:
                     f"{_identity_field} unchanged. Nothing was written."
                 )
 
+        if (
+            "project_id" in updates
+            and self._detected_identity_is_canonical()
+            and not is_canonical(updates["project_id"])
+        ):
+            self._refuse_legacy_write(
+                f"update to project_id {updates['project_id']!r} was refused"
+            )
+
         # NO ADOPTED-SESSION GUARD BELONGS HERE. `update_memory` writes only
         # the fields this payload carries, so update() never binds
         # `self._session_id`: the only session id it can write is a SUPPLIED
@@ -3957,6 +4088,16 @@ class PACTMemory:
             if resolved is None:
                 return None
             memory_id = resolved
+
+            if "session_id" in updates and self._detected_identity_is_canonical():
+                # RELABELLING A LEGACY ROW'S SESSION is the evidence route
+                # without a project change, so it is refused the same way.
+                stored = get_memory(conn, memory_id) or {}
+                if not is_canonical(stored.get("project_id")):
+                    self._refuse_legacy_write(
+                        "update of session_id on a row in the folder-name "
+                        f"bucket {stored.get('project_id')!r} was refused"
+                    )
 
             # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
             # update so we can detect whether the merge actually changed
