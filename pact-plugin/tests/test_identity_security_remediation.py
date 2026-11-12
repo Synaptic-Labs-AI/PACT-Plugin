@@ -686,6 +686,49 @@ class TestProjectIdShowRoots:
 
 
 # ---------------------------------------------------------------------------
+# The exclusion warning must not assert an unread row's location
+# ---------------------------------------------------------------------------
+
+class TestExclusionWarningHedgesTheLocation:
+    def test_the_warning_says_could_be_located_not_lies_under(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Catches a warning that asserts an unverified fact: for a row the
+        gate could not READ, whether it sits under the root is UNKNOWN, and
+        'none ... lies under' sends an operator hunting paths when the cause
+        is a corrupt row."""
+        from scripts.database import create_memory, db_connection
+        from scripts.graph import track_file
+
+        checkout = _repo(
+            tmp_path / "repo" / "PACT-prompt", "https://github.com/o/PACT-prompt"
+        )
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        with db_connection(str(store)) as conn:
+            create_memory(conn, {"project_id": "PACT-prompt", "context": "legacy"})
+            track_file(conn, str(elsewhere / "x.py"), "PACT-prompt")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(checkout))
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(store.parent))
+        import scripts.memory_api as memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory_api._EXCLUSION_WARNED.clear()
+
+        with caplog.at_level(logging.WARNING):
+            memory = memory_api.PACTMemory(db_path=store)
+            memory._read_project_scopes()
+
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "could be located under" in text, text
+        assert "lies under" not in text, text
+        assert "unknown location" in text, text
+
+
+# ---------------------------------------------------------------------------
 # B1, THE DELIVERABLE: the printed remedy must execute
 # ---------------------------------------------------------------------------
 

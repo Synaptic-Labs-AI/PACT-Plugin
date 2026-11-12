@@ -1753,8 +1753,11 @@ class PACTMemory:
                         logger.warning(
                             "legacy project bucket %r holds %d memories and %d "
                             "file path%s, but none of its absolute file rows "
-                            "lies under %r, so it is NOT in this read scope. "
-                            "Move it explicitly with: %s",
+                            "could be located under %r, so it is NOT in this "
+                            "read scope. A row the gate could not READ has an "
+                            "unknown location, not a known one — check for a "
+                            "corrupt or unreadable file row before hunting "
+                            "paths. Move it explicitly with: %s",
                             candidate,
                             buckets.get(candidate, 0),
                             excluded_file_paths,
