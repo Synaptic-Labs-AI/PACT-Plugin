@@ -792,6 +792,64 @@ class TestStatusNeverWritesIntoACorruptStore:
         self._status(store, capfd)
         assert catchup == [], "the catch-up embedded into a store that failed its check"
 
+    def test_a_healthy_vector_store_still_embeds_through_the_real_catch_up(
+        self, identity_env, monkeypatch, capfd
+    ):
+        """Unpatched catch-up on an intact store that already has vec_memories
+        and vectors: the integrity check must pass and the pending memory must
+        gain its vector.
+
+        Catches a check that judges a healthy vec0 store as corrupt (a driver
+        or extension the store's own reads do not use), which would stop every
+        later embedding silently.
+        """
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        import struct
+
+        from scripts import database, embedding_catchup, embeddings, memory_init
+
+        assert database.SQLITE_EXTENSIONS_ENABLED, "no extension loading: nothing to prove"
+        if embeddings.generate_embedding("vector path probe") is None:
+            pytest.skip("no embedding model available, so the catch-up cannot embed")
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path",
+            lambda: identity_env / "catchup-attempted",
+        )
+        monkeypatch.setattr(embedding_catchup, "get_available_ram_mb", lambda: 1e9)
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(repo)
+        store = identity_env / "store.db"
+        assert _cli(["setup", "--db-path", str(store)], capfd)[0] == 0
+        conn = database.sqlite3.connect(str(store))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        dim = embeddings.get_embedding_service().embedding_dimension
+        for memory_id, vector in (("embedded01", True), ("pending001", False)):
+            conn.execute(
+                "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, 'a pending memory to embed', 'github.com/o/proj', 's', ?, ?)",
+                (memory_id, CREATED_AT, CREATED_AT),
+            )
+            if vector:
+                conn.execute(
+                    "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                    (memory_id, "github.com/o/proj", struct.pack(f"{dim}f", *[0.1] * dim)),
+                )
+        conn.commit()
+        conn.close()
+        code, rendered = self._status(store, capfd)
+        assert code == 0, rendered
+        conn = database.sqlite3.connect(str(store))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        try:
+            embedded = {
+                row[0] for row in conn.execute("SELECT memory_id FROM vec_memories")
+            }
+        finally:
+            conn.close()
+        assert embedded == {"embedded01", "pending001"}, embedded
+
     @pytest.mark.parametrize("journal", ["wal", "delete"])
     def test_the_real_pending_query_writes_no_schema(
         self, identity_env, monkeypatch, capfd, journal

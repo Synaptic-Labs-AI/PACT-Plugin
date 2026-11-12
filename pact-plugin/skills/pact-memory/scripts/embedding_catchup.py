@@ -342,6 +342,22 @@ def embed_single_memory(memory_id: str) -> bool:
         return False
 
 
+def _load_vector_extension(connection: Any) -> None:
+    """Load sqlite-vec on `connection` when it can be; never raise.
+
+    A failure to load is not a fault in the store, so it must not read as
+    one: the check then runs without the extension, which `quick_check`
+    does not need (it walks the shadow tables as ordinary b-trees).
+    """
+    try:
+        import sqlite_vec
+
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"sqlite-vec not loaded for the integrity check: {exc}")
+
+
 def _store_integrity_fault() -> Optional[str]:
     """Why the bound store must not be written, or None when it may be.
 
@@ -350,21 +366,27 @@ def _store_integrity_fault() -> Optional[str]:
     pending-work query, and the catch-up's vector inserts would then write
     into it. The check reads the whole file, so it runs only once there is
     work to do, never on the common no-pending path.
-    """
-    import sqlite3 as stdlib_sqlite3
 
+    THE STORE'S OWN DRIVER, WITH ITS OWN EXTENSION. The connection comes from
+    the module `database` reads the store with (pysqlite3 when installed),
+    with sqlite-vec loaded as the pending-work query loads it. A check on a
+    different driver can link a different SQLite library and judge the file
+    differently from the engine that writes it.
+    """
     from .config import resolve_db_path
+    from .database import sqlite3 as store_sqlite3
 
     store = resolve_db_path()
     try:
-        connection = stdlib_sqlite3.connect(
+        connection = store_sqlite3.connect(
             Path(store).resolve().as_uri() + "?mode=ro", uri=True
         )
         try:
+            _load_vector_extension(connection)
             rows = connection.execute("PRAGMA quick_check").fetchall()
         finally:
             connection.close()
-    except stdlib_sqlite3.DatabaseError as exc:
+    except store_sqlite3.DatabaseError as exc:
         return f"the store failed its integrity check ({exc}); catch-up skipped"
     if rows != [("ok",)]:
         first = rows[0][0] if rows and rows[0] else "unknown"
