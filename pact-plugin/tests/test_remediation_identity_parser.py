@@ -222,3 +222,21 @@ class TestAControlCharacterInTheOriginDeclines:
     def test_one_trailing_terminator_is_still_tolerated(self):
         assert pi.classify_remote_origin("https://host/o/r\n") == (CANONICAL, "host/o/r")
         assert pi.classify_remote_origin("/srv/repo\n") == (NO_PORTABLE, None)
+
+
+class TestRelativeAndAbsoluteScpPathsShareAnId:
+    def test_the_relative_absolute_and_url_spellings_are_one_id(self):
+        """Kept equal on purpose. On a forge the leading slash is not
+        meaningful, so splitting would give every forge's scp and https
+        spellings two ids. The accepted cost: on a plain sshd host,
+        `~login/srv/repo` and `/srv/repo` are two repositories that share
+        this id if both are used against one store."""
+        spellings = (
+            "git@host:srv/repo",
+            "git@host:/srv/repo",
+            "ssh://git@host/srv/repo",
+            "https://host/srv/repo",
+        )
+        assert {pi.classify_remote_origin(url) for url in spellings} == {
+            (CANONICAL, "host/srv/repo")
+        }

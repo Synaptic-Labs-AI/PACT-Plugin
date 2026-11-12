@@ -432,15 +432,23 @@ def normalize_remote_url(url: object) -> Optional[str]:
         host = scp_match.group("host").lower()
         if not _valid_host(host):
             return None
-        # AN ABSOLUTE SCP PATH IS THE SAME ENDPOINT AS THE URL FORM.
-        # `git@host:/srv/git/repo.git` and `ssh://host/srv/git/repo.git` name
-        # one repository, but the URL branch's `partition("/")` consumes the
-        # separator while the scp form leaves it in the path, so the leading
-        # slash produced an empty first segment and every absolute scp remote
-        # DECLINED. Exactly ONE slash is removed, mirroring `partition`: a
-        # doubled separator still declines in BOTH spellings (`git@host://a/b`
-        # and `https://host//a/b`), which is the symmetry that stops a typo
-        # from silently naming a different path.
+        # RELATIVE AND ABSOLUTE SCP PATHS ARE DELIBERATELY ONE ID.
+        # `git@host:srv/repo`, `git@host:/srv/repo` and `ssh://git@host/srv/repo`
+        # all become `host/srv/repo`. On a forge the path is virtual and the
+        # leading slash does not matter: `git@github.com:o/r` sends `o/r` and
+        # `ssh://git@github.com/o/r` sends `/o/r` to one repository, so
+        # telling them apart would split every forge's scp and https pair.
+        # The cost is a plain sshd host, where the relative form is resolved
+        # under the login's home: two distinct repositories at `~login/srv/repo`
+        # and `/srv/repo`, both used against one store, share an id. That is
+        # the class the userinfo strip already accepts (`alice@host:repo` and
+        # `bob@host:repo` share one), and nothing in the URL says which kind
+        # of server it is.
+        #
+        # Exactly ONE leading slash is removed, mirroring the URL branch's
+        # `partition("/")`: a doubled separator still declines in BOTH
+        # spellings (`git@host://a/b` and `https://host//a/b`), which stops a
+        # typo from silently naming a different path.
         scp_path = scp_match.group("path")
         if scp_path.startswith("/"):
             scp_path = scp_path[1:]
