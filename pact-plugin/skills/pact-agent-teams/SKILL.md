@@ -195,6 +195,7 @@ When your work is done, you store the HANDOFF and remain `in_progress`. **You do
 - All file edits for the task are complete.
 - All deliverables are staged via `git add`. (`git status` shows your intended changes in "Changes to be committed".)
 - All relevant tests have been run with exit code 0. If no tests apply to your change, you MUST state "no tests applicable" with one-line reasoning in your HANDOFF.
+- For each of those runs, record `git rev-parse HEAD` and `git status --porcelain --untracked-files=all` immediately before and immediately after it. If either output differs, the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`, never as a pass or a failure of your change.
 - The deliverable matches every acceptance criterion in the task description. Tick each one off explicitly before proceeding.
 - The [Boundary-Drain Rule](#boundary-drain-rule) has been executed: your inbox
   file has been read and any mid-turn directives are reconciled into the
