@@ -589,8 +589,137 @@ class TestAStoreThatIsNotADatabaseNamesItsRemedy:
         message = envelope["message"]
         assert "exists but cannot be opened" in message, message
         assert "names a PACT memory store" in message, message
-        assert "the store was not modified" in message, message
+        assert "no memory was written to it" in message, message
         assert store.read_bytes() == before
+
+
+def _page_corrupt_store(path: Path, journal: str = "wal") -> Path:
+    """A store with the real schema whose MIDDLE page is overwritten.
+
+    The schema page is intact, so the store opens and a narrow query can
+    still answer; only a read that reaches the overwritten page fails.
+    `journal="delete"` leaves it in rollback-journal mode, as an older store
+    may be.
+    """
+    conn = sqlite3.connect(str(path))
+    create_test_schema(conn)
+    conn.executemany(
+        "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+        "VALUES (?, ?, 'github.com/o/proj', 's', ?, ?)",
+        [(f"m{i:05d}", "x" * 300, CREATED_AT, CREATED_AT) for i in range(400)],
+    )
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if journal == "delete":
+        conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    data = bytearray(path.read_bytes())
+    page = 4096
+    middle = (len(data) // page // 2) * page
+    data[middle:middle + page] = bytes((i * 37 + 11) % 256 for i in range(page))
+    path.write_bytes(bytes(data))
+    return path
+
+
+class TestStatusNeverWritesIntoACorruptStore:
+    """`status` on a page-corrupt store names the remedy and writes nothing.
+
+    Catches the embedding catch-up inserting vectors into a store whose
+    pending query still answers although its pages are corrupt, and the bare
+    sqlite text in place of the store remedy.
+    """
+
+    @pytest.fixture
+    def catchup(self, tmp_path, monkeypatch):
+        """Let the catch-up run once in this test, with one pending memory,
+        and record each embedding instead of loading a model. The recorder
+        writes a row, as an embedding does."""
+        from scripts import embedding_catchup, memory_init
+
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path",
+            lambda: tmp_path / "catchup-attempted",
+        )
+        monkeypatch.setattr(embedding_catchup, "get_available_ram_mb", lambda: 1e9)
+        monkeypatch.setattr(
+            embedding_catchup, "get_unembedded_memories",
+            lambda project_id=None, limit=20: ["m00001"],
+        )
+        embedded = []
+
+        def record(memory_id):
+            from scripts.config import resolve_db_path
+
+            embedded.append(memory_id)
+            conn = sqlite3.connect(str(resolve_db_path()))
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES ('f-x', 'x.py', 'p')"
+            )
+            conn.commit()
+            conn.close()
+            return True
+
+        monkeypatch.setattr(embedding_catchup, "embed_single_memory", record)
+        return embedded
+
+    def _status(self, store, capfd):
+        from scripts.cli import main
+
+        capfd.readouterr()
+        with pytest.raises(SystemExit) as exit_info:
+            main(["status", "--db-path", str(store)])
+        captured = capfd.readouterr()
+        return exit_info.value.code, captured.out + captured.err
+
+    def test_a_corrupt_store_is_left_byte_identical(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        store = _page_corrupt_store(identity_env / "store.db")
+        before = store.read_bytes()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        assert catchup == [], "the catch-up embedded into a corrupt store"
+        assert store.read_bytes() == before
+        assert code == 2, rendered
+        assert "exists but cannot be opened" in rendered, rendered
+        assert "names a PACT memory store" in rendered, rendered
+
+    # The header fields a read-write open may rewrite: the file-format
+    # versions (WAL), the change counter and the version-valid-for number.
+    HEADER_FIELDS_AN_OPEN_REWRITES = {18, 19, *range(24, 28), *range(92, 100)}
+
+    def test_a_rollback_journal_store_keeps_every_page_and_says_so(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        """Opening a rollback-journal store switches it to WAL in the header,
+        so the remedy may only claim what holds: no memory was written."""
+        store = _page_corrupt_store(identity_env / "store.db", journal="delete")
+        before = store.read_bytes()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        after = store.read_bytes()
+        assert catchup == []
+        assert code == 2, rendered
+        assert "no memory was written to it" in rendered, rendered
+        assert "not modified" not in rendered, rendered
+        assert len(after) == len(before)
+        assert after[100:] == before[100:], "a page past the header changed"
+        changed = {i for i in range(100) if after[i] != before[i]}
+        assert changed <= self.HEADER_FIELDS_AN_OPEN_REWRITES, sorted(changed)
+
+    def test_an_intact_store_still_gets_its_catch_up(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        """Control: the integrity check passes and the pending memory embeds."""
+        store = identity_env / "store.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.close()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        assert code == 0, rendered
+        assert catchup == ["m00001"]
 
 
 class TestRekeyInputAndStoreEdges:

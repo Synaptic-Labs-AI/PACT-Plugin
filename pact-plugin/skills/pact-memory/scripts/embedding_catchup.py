@@ -18,6 +18,7 @@ import logging
 import platform
 import struct
 import subprocess
+from pathlib import Path
 from typing import Any, List, Optional
 
 # Configure logging
@@ -313,6 +314,36 @@ def embed_single_memory(memory_id: str) -> bool:
         return False
 
 
+def _store_integrity_fault() -> Optional[str]:
+    """Why the bound store must not be written, or None when it may be.
+
+    Runs `PRAGMA quick_check` on a READ-ONLY connection, so the check itself
+    writes nothing. A store whose pages are corrupt can still answer the
+    pending-work query, and the catch-up's vector inserts would then write
+    into it. The check reads the whole file, so it runs only once there is
+    work to do, never on the common no-pending path.
+    """
+    import sqlite3 as stdlib_sqlite3
+
+    from .config import resolve_db_path
+
+    store = resolve_db_path()
+    try:
+        connection = stdlib_sqlite3.connect(
+            Path(store).resolve().as_uri() + "?mode=ro", uri=True
+        )
+        try:
+            rows = connection.execute("PRAGMA quick_check").fetchall()
+        finally:
+            connection.close()
+    except stdlib_sqlite3.DatabaseError as exc:
+        return f"the store failed its integrity check ({exc}); catch-up skipped"
+    if rows != [("ok",)]:
+        first = rows[0][0] if rows and rows[0] else "unknown"
+        return f"the store failed its integrity check ({first}); catch-up skipped"
+    return None
+
+
 def embed_pending_memories(
     project_id: Optional[str] = None,
     limit: int = 20,
@@ -375,6 +406,14 @@ def embed_pending_memories(
         result["unembedded_unknown"] = unembedded.reason
         return result
     if not unembedded:
+        return result
+
+    # NO WRITE INTO A CORRUPT STORE. The pending query above can succeed on
+    # a store with corrupt pages, and each embedding below inserts vectors.
+    fault = _store_integrity_fault()
+    if fault is not None:
+        result["failed"] = True
+        result["error"] = fault
         return result
 
     logger.debug(f"Found {len(unembedded)} unembedded memories to process")

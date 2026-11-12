@@ -1901,7 +1901,15 @@ def main(argv=None):
         # the realpath form) from the message so absolute paths
         # (e.g. ~/.claude/pact-memory/... — illustrative example, not a live path) don't leak into stderr for
         # callers piping the JSON envelope into logs.
-        _error("SYSTEM_ERROR", _scrub(str(exc)), exit_code=2)
+        # A store that is present and cannot serve the command names its
+        # remedy here, whichever verb reached the fault.
+        from scripts.database import sqlite3 as db_sqlite3
+
+        message = str(exc)
+        if isinstance(exc, db_sqlite3.DatabaseError):
+            store = db_path if db_path is not None else resolve_db_path()
+            message = present_store_fault(exc, str(store)) or message
+        _error("SYSTEM_ERROR", _scrub(message), exit_code=2)
 
 
 if __name__ == "__main__":

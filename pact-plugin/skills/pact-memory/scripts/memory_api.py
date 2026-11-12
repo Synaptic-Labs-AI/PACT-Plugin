@@ -879,7 +879,7 @@ def present_store_fault(exc: Exception, store: str) -> Optional[str]:
         return None
     return (
         f"the store at {store!r} exists but cannot be opened ({exc}). Check "
-        f"{check}; the store was not modified."
+        f"{check}; no memory was written to it."
     )
 
 

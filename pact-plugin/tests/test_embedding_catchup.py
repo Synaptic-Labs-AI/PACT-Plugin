@@ -81,6 +81,9 @@ def _load_embedding_catchup():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"{pkg_name}.embedding_catchup"] = mod
     spec.loader.exec_module(mod)
+    # The store integrity check is a database dependency like the ones
+    # mocked above: these tests exercise the catch-up loop, not a store.
+    mod._store_integrity_fault = lambda: None
 
     # Cleanup fake package from sys.modules
     for key in [pkg_name, f"{pkg_name}.database",
