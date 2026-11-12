@@ -19,6 +19,7 @@ from fixtures.identity_git import (
     common_dir,
     make_repo,
     run_git,
+    seed_session_evidence,
     write_common_dir_override,
 )
 
@@ -362,6 +363,10 @@ class TestASubmoduleInsideASuperprojectWorktreeIsASubmodule:
         run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN, cwd=checkout)
         store = tmp_path / "m.db"
         _seed_relative_bucket(store, "vendor")
+        # A recorded session of this checkout wrote the `vendor` bucket, so
+        # the session-evidence gate WOULD admit it: only the submodule
+        # suppression keeps the repository-chosen name out of the scope.
+        seed_session_evidence(tmp_path / "home" / ".claude", checkout, "s")
         memory = _memory_in(monkeypatch, checkout, store)
 
         assert memory.project_id == SUBMODULE_ID
