@@ -1634,19 +1634,28 @@ class PACTMemory:
                 # repository's main checkout plus each of its worktrees —
                 # exactly the set the gate needs.
                 #
-                # NOT `backlog.checkout_roots()`, DELIBERATELY: that helper
-                # resolves against the PROCESS, so in a declared-repo session
-                # it appends a DIFFERENT repository's checkouts and a legacy
-                # bucket could be called `verified` from another repo's rows.
-                # It also refuses with a write-oriented BacklogWriteError when
-                # no project dir resolves, which must never escape a read.
+                # NOT `backlog.checkout_roots()`, DELIBERATELY, AND THE REASON
+                # IS MEASURED: that helper resolves against the PROCESS, so in
+                # a declared-repo session (cwd in repo-a, CLAUDE_PROJECT_DIR in
+                # repo-b) it appends repo-a's checkouts to repo-b's gate, and a
+                # legacy bucket can be called `verified` from rows under a
+                # DIFFERENT repository. It also refuses with a write-oriented
+                # BacklogWriteError when no project dir resolves, which must
+                # never escape a read.
                 gate_roots = []
                 if repo_root is not None:
                     gate_roots.append(str(Path(repo_root).resolve()))
-                    gate_roots.extend(
-                        str(root)
-                        for root in sorted(_listed_worktree_toplevels(repo_root) or ())
-                    )
+                    try:
+                        gate_roots.extend(
+                            str(root)
+                            for root in sorted(
+                                _listed_worktree_toplevels(repo_root) or ()
+                            )
+                        )
+                    except Exception:
+                        # A listing failure must narrow the gate to the
+                        # identity root alone, never fail the read.
+                        pass
                 deduped = list(dict.fromkeys(gate_roots))
                 outcome, detail = legacy_candidate_plausibility(
                     connection, candidate, deduped or None
