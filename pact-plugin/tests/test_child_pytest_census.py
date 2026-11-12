@@ -55,12 +55,37 @@ def test_an_unblocked_pytest_child_is_refused(argv):
 @pytest.mark.parametrize("extra", [
     ["-p", "no:randomly"],
     ["-pno:randomly"],
-    ["-p", "randomly"],
-    ["-prandomly"],
+    # The last randomly flag wins, as in pytest's own -p handling.
+    ["-p", "randomly", "-p", "no:randomly"],
 ])
-def test_each_flag_opt_out_is_accepted(extra):
+def test_each_blocking_flag_is_accepted(extra):
     assert census._miss([PY, "-m", "pytest", "-q", *extra], None, {}) is None
     assert census._miss("pytest -q " + " ".join(extra), None, {}) is None
+
+
+@pytest.mark.parametrize("extra", [
+    ["-p", "randomly"],
+    ["-prandomly"],
+    # The last randomly flag wins, so a later load undoes an earlier block.
+    ["-p", "no:randomly", "-p", "randomly"],
+    ["-pno:randomly", "-prandomly"],
+    # After a bare `--` the words are positional arguments, not options.
+    ["--", "-p", "no:randomly"],
+])
+def test_a_child_that_loads_randomly_or_does_not_block_it_is_refused(extra):
+    assert census._miss([PY, "-m", "pytest", "-q", *extra], None, {}) is not None, extra
+    assert census._miss("pytest -q " + " ".join(extra), None, {}) is not None, extra
+
+
+@pytest.mark.parametrize("extra", [
+    ["-p", "randomly"],
+    ["-prandomly"],
+    ["-p", "pytest_randomly"],
+    ["-ppytest_randomly"],
+])
+def test_an_explicit_load_is_refused_even_with_autoload_disabled(extra):
+    env = {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    assert census._miss([PY, "-m", "pytest", *extra], None, env) is not None, extra
 
 
 def test_an_explicit_env_disabling_autoload_is_accepted():
@@ -79,6 +104,54 @@ def test_without_an_explicit_env_the_inherited_env_decides(monkeypatch):
     # An explicit env replaces the inherited one, even when the parent disables it.
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     assert census._miss(argv, None, {}) is not None
+
+
+@pytest.mark.parametrize("argv,env", [
+    ([PY, "-m", "pytest"], {"PYTEST_ADDOPTS": "-p no:randomly"}),
+    ([PY, "-m", "pytest"], {"PYTEST_ADDOPTS": "-q -pno:randomly"}),
+    (["env", "PYTEST_ADDOPTS=-p no:randomly", "pytest"], {}),
+    (["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "pytest"], {}),
+    (["PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", PY, "-m", "pytest"], {}),
+    (["sh", "-c", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest"], {}),
+    (["sh", "-c", "PYTEST_ADDOPTS='-p no:randomly' python3 -m pytest -q"], {}),
+    # An assignment before a shell reaches the commands inside it.
+    (["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "bash", "-c", "cd x && pytest"], {}),
+    # `env -i` empties the environment, then its own assignment applies.
+    (["env", "-i", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "pytest"], {}),
+])
+def test_a_child_blocked_through_its_environment_is_accepted(argv, env):
+    assert census._miss(argv, None, env) is None, argv
+
+
+@pytest.mark.parametrize("argv,env", [
+    # The command line comes after PYTEST_ADDOPTS, so its load wins.
+    ([PY, "-m", "pytest", "-p", "randomly"], {"PYTEST_ADDOPTS": "-p no:randomly"}),
+    # An addopts load wins over a disabled autoload.
+    ([PY, "-m", "pytest"], {"PYTEST_ADDOPTS": "-p randomly",
+                            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}),
+    ([PY, "-m", "pytest"], {"PYTEST_ADDOPTS": "-p no:randomly -p randomly",
+                            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}),
+    # These drop the variable the parent set.
+    (["env", "-i", "pytest"], None),
+    (["env", "-", "pytest"], None),
+    (["env", "-u", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "pytest"], None),
+    (["env", "--unset=PYTEST_DISABLE_PLUGIN_AUTOLOAD", "pytest"], None),
+    (["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=", "pytest"], None),
+    (["sh", "-c", "PYTEST_DISABLE_PLUGIN_AUTOLOAD= pytest"], None),
+    # sudo resets the environment unless asked to keep it.
+    (["sudo", "pytest"], None),
+])
+def test_a_child_whose_environment_does_not_block_is_refused(argv, env, monkeypatch):
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    assert census._miss(argv, None, env) is not None, argv
+
+
+def test_sudo_preserving_the_environment_keeps_the_parents_block(monkeypatch):
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    assert census._miss(["sudo", "-E", "pytest"], None, None) is None
+    assert census._miss(["sudo", "--preserve-env", "pytest"], None, None) is None
+    assert census._miss(
+        ["sudo", "--preserve-env=PYTEST_DISABLE_PLUGIN_AUTOLOAD", "pytest"], None, None) is None
 
 
 @pytest.mark.parametrize("argv", [
@@ -119,9 +192,71 @@ def test_a_launch_that_is_not_a_pytest_child_is_ignored(argv):
     ["nice", "py.test"],
     ["env", "-u", "HOME", "pytest"],
     ["timeout", "60", "nice", "-n", "5", "pytest"],
+    # -W or -X ending a bundle takes the next word as its value.
+    [PY, "-bW", "ignore", "-m", "pytest"],
+    [PY, "-sX", "dev", "-m", "pytest"],
+    # coverage runs pytest as a module, directly or under an interpreter.
+    ["coverage", "run", "-m", "pytest"],
+    ["coverage", "run", "--branch", "--source", "hooks", "-m", "pytest", "-q"],
+    ["coverage", "run", "--module", "pytest"],
+    [PY, "-m", "coverage", "run", "-m", "pytest"],
+    ["timeout", "60", "python3", "-m", "coverage", "run", "--parallel-mode", "-m", "pytest"],
 ])
 def test_a_wrapped_or_unusual_interpreter_launch_is_refused(argv):
     assert census._miss(argv, None, {}) is not None, argv
+
+
+@pytest.mark.parametrize("argv", [
+    ["bash", "-lc", "python -m pytest"],
+    ["bash", "-ec", "pytest -q"],
+    ["sh", "-e", "-c", "pytest"],
+    ["bash", "--noprofile", "--norc", "-c", "pytest"],
+    ["bash", "-o", "pipefail", "-c", "pytest | tee log"],
+    ["zsh", "-fc", "pytest"],
+    # A shell behind a wrapper or an assignment.
+    ["env", "bash", "-c", "pytest"],
+    ["timeout", "60", "bash", "-c", "pytest"],
+    ["nohup", "sh", "-c", "python3 -m pytest"],
+    ["A=1", "sh", "-c", "pytest"],
+    ["/usr/bin/env", "-i", "/bin/bash", "-c", "pytest"],
+    # Separators inside the command text.
+    ["bash", "-c", "cd x\npytest"],
+    ["bash", "-c", "set -e\ncd x\n\npytest tests"],
+    ["bash", "-c", "cd x; pytest"],
+    ["bash", "-c", "cd x;pytest"],
+    ["bash", "-c", "cd x&&pytest"],
+    ["bash", "-c", "false||pytest"],
+    ["bash", "-c", "pytest|tee log"],
+    ["bash", "-c", "true&pytest"],
+    ["bash", "-c", "(pytest)"],
+    ["bash", "-c", "(cd x&&pytest -q)"],
+    ["bash", "-c", "{ pytest; }"],
+    ["bash", "-c", "if true; then pytest; fi"],
+    ["bash", "-c", "for i in 1 2; do pytest; done"],
+    ["bash", "-c", "exec pytest"],
+    ["bash", "-c", "time pytest"],
+    # A redirection target is not a separator; the `;` after it is.
+    ["bash", "-c", "echo start >log;pytest"],
+    # A shell inside a shell.
+    ["bash", "-c", "sh -c 'pytest'"],
+    # A shell command given as text.
+    "bash -lc 'cd x; pytest'",
+])
+def test_a_pytest_child_inside_a_shell_command_is_refused(argv):
+    assert census._miss(argv, None, {}) is not None, argv
+
+
+@pytest.mark.parametrize("argv", [
+    ["bash", "-c", "cd x\npytest -p no:randomly"],
+    ["bash", "-lc", "cd x; python -m pytest -p no:randomly"],
+    ["timeout", "60", "bash", "-c", "(cd x && pytest -pno:randomly) > log 2>&1"],
+    # A redirection does not end the command it belongs to.
+    ["bash", "-c", "pytest > log -p no:randomly"],
+    # A continued line is one command.
+    ["bash", "-c", "pytest \\\n  -p no:randomly"],
+])
+def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
+    assert census._miss(argv, None, {}) is None, argv
 
 
 @pytest.mark.parametrize("argv", [
@@ -129,6 +264,13 @@ def test_a_wrapped_or_unusual_interpreter_launch_is_refused(argv):
     ["pip", "install", "pytest"],
     ["timeout", "60", "git", "grep", "pytest"],
     ["uv", "run", "python", "script.py", "-m", "pytest"],
+    ["bash", "-lc", "echo hi; ls"],
+    ["bash", "-c", "cd x\nls\ngit status"],
+    ["coverage", "run", "script.py", "-m", "pytest"],
+    ["coverage", "report", "-m"],
+    [PY, "-m", "coverage", "run", "-m", "pip"],
+    [PY, "-m", "coverage", "report"],
+    ["bash", "scripts/run.sh", "-c", "pytest"],
 ])
 def test_a_mention_of_pytest_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None
