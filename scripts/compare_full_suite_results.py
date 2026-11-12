@@ -740,6 +740,10 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     lines, argv, summary, environment_passes = _validate_log(
         directory, record, expected_sha)
     shuffle_seed = _shuffle_seed(lines)
+    if shuffle_seed is not None and len(argv) == 9:
+        raise EvidenceError(
+            "a pytest-randomly seed line sits beside the 9-token run line, "
+            "which has no seed option and cannot load pytest-randomly")
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
         record, lines, terminal, artifact)

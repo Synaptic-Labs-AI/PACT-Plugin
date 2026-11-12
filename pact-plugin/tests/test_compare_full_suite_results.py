@@ -406,6 +406,27 @@ def test_ordered_run_line_has_no_seed(tmp_path):
     assert len(read_runs(output)[0]["argv"]) == 9
 
 
+@pytest.mark.parametrize("command, seeds, expected", [
+    (ORDERED_COMMAND, (), None),
+    (ORDERED_COMMAND, (4,), "refused"),
+    (SEEDED_COMMAND, (), None),     # every ordered post-change run logs this
+    (SEEDED_COMMAND, (4,), 4),
+], ids=["9-unseeded", "9-seeded", "12-unseeded", "12-seeded"])
+def test_run_line_shape_and_seed_line_agree(tmp_path, command, seeds, expected):
+    first = make_run(tmp_path, "one", command=command, seeds=seeds)
+    second = make_run(tmp_path, "two", 101, command=command)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    if expected == "refused":
+        assert completed.returncode == 2, comparison
+        assert comparison["evidence_errors"] == [
+            {"run": "one", "error": "a pytest-randomly seed line sits beside the "
+             "9-token run line, which has no seed option and cannot load "
+             "pytest-randomly"}]
+        return
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == expected
+
+
 def test_shuffled_run_with_a_real_delta_is_different_not_invalid(tmp_path):
     """A seed must never make a shuffled-versus-ordered delta unattributable."""
     first = make_run(tmp_path, "one")
