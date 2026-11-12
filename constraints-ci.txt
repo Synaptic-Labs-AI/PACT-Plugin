@@ -37,3 +37,4 @@ pysqlite3==0.6.1
 sqlite-vec==0.1.9
 model2vec==0.10.0
 ruff==0.17.3
+pytest-randomly==5.1.0

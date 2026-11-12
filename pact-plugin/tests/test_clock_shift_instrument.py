@@ -301,6 +301,7 @@ def _run_child(tmp_path, source, shift=TEN_YEARS, shim_on_path=True):
     env["CLOCK_LOW"], env["CLOCK_HIGH"] = str(expected - SLACK), str(expected + SLACK)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly",
          "-o", "pythonpath=%s" % SHIM_DIR, "test_synthetic.py"],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=180,
     )

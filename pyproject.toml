@@ -3,3 +3,6 @@ name = "pact-plugin"
 dynamic = ["version"]
 requires-python = ">=3.12"
 description = "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents"
+
+[tool.pytest.ini_options]
+addopts = "-p no:randomly"

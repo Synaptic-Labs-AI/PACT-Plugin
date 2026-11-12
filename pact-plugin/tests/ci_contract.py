@@ -268,7 +268,7 @@ def probe_options(probe_dir, args=(), timeout=120):
         "def test_second_probe():\n    assert True\n",
         encoding="utf-8")
     command = [sys.executable, "-m", "pytest", "--collect-only", "-q",
-               "-p", "no:cacheprovider", *args]
+               "-p", "no:cacheprovider", "-p", "no:randomly", *args]
     proc = subprocess.run(
         command, cwd=str(probe_dir), capture_output=True, text=True,
         timeout=timeout)

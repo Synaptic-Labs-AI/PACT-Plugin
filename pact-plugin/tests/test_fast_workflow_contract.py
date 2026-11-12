@@ -738,7 +738,8 @@ class TestRemovability:
         # EXECUTE the fast-dependent arms; they must skip loudly.
         arms = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rA",
-             "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
+             "-p", "no:cacheprovider", "-p", "no:randomly",
+             *self._FAST_DEPENDENT_NODE_IDS],
             cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
             timeout=300)
         assert arms.returncode == 0, (
@@ -761,7 +762,8 @@ class TestRemovability:
             "name: fast-tests\non: [pull_request]\n", encoding="utf-8")
         arms = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rA",
-             "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
+             "-p", "no:cacheprovider", "-p", "no:randomly",
+             *self._FAST_DEPENDENT_NODE_IDS],
             cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
             timeout=300)
         assert arms.returncode != 0, (

@@ -91,6 +91,7 @@ def test_a_nested_session_runs_while_the_outer_one_is_open():
         env.pop("{owner}", None)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly",
          str(plugin_root / "inner_case.py")],
         cwd=str(plugin_root), capture_output=True, text=True, env=env,
         timeout=120)
@@ -150,6 +151,7 @@ def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
     env.update(extra_env or {})
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly",
          *args],
         cwd=str(plugin_root), capture_output=True, text=True, env=env,
         timeout=180)

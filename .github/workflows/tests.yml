@@ -124,6 +124,15 @@
 #                          The step's --select still bounds the rule surface,
 #                          which is what makes a deliberate ruff bump in the
 #                          constraints file low-risk rather than an audit.
+#     - pytest-randomly  : shuffled-order DIAGNOSTIC runs only. Installed with
+#                          the rest of the set, so ordered and shuffled runs
+#                          share one environment, and BLOCKED by
+#                          `addopts = "-p no:randomly"` in the root
+#                          pyproject.toml. Only a workflow_dispatch with a
+#                          `shuffle_seed` loads it (`-p randomly` on the run
+#                          line). Child pytest sessions the suite starts must
+#                          block it themselves; tests/child_pytest_census.py
+#                          refuses one that does not.
 #
 #   CONSTRAINTS: constraints-ci.txt at the repo root is the CI requirement set.
 #   The install step installs it with `pip install -r`, so what CI runs is a

@@ -2123,6 +2123,7 @@ class TestCIEnvironmentBinding:
                 f"pytest=={pytest_pin}\n", encoding="utf-8")
             return subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "-p", "no:randomly",
                  "suite"], cwd=rig, env=env, capture_output=True, text=True,
                 timeout=120)
 
@@ -2223,6 +2224,7 @@ class TestCIEnvironmentBinding:
         def run():
             return subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "-p", "no:randomly",
                  "suite"], cwd=rig, env=env, capture_output=True, text=True,
                 timeout=180)
         return rig, run

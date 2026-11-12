@@ -1026,7 +1026,7 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     env.pop("PYTEST_ADDOPTS", None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
-         f"--junitxml={xml}"],
+         "-p", "no:randomly", f"--junitxml={xml}"],
         cwd=child, env=env, capture_output=True, text=True, check=False)
     assert completed.returncode == 1, (
         completed.stdout + completed.stderr + "\n" + where)
@@ -1449,7 +1449,7 @@ def test_module_skips_loudly_outside_the_repo_layout(tmp_path):
     shutil.copy(Path(__file__), copied)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", str(copied), "-q", "-rA",
-         "--noconftest", "-p", "no:cacheprovider"],
+         "--noconftest", "-p", "no:cacheprovider", "-p", "no:randomly"],
         cwd=layout, capture_output=True, text=True, check=False)
     output = completed.stdout + completed.stderr
     # 5 is pytest's "no tests collected": the module skipped instead of failing

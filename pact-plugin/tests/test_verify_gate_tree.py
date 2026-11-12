@@ -79,7 +79,8 @@ def _child_env() -> dict[str, str]:
 def _run(declared: str, capture: str | Path,
          cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", str(_SCRIPT), declared, str(capture), "--collect-only", "-q"],
+        ["bash", str(_SCRIPT), declared, str(capture), "--collect-only", "-q",
+         "-p", "no:randomly"],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -140,7 +141,8 @@ def _run_with_mutation(repo: Path, tmp_path: Path, mutate,
     if child_fail:
         env["PACT_GATE_CHILD_FAIL"] = "1"
     proc = subprocess.Popen(
-        ["bash", str(_SCRIPT), str(repo), str(capture), "-q", "-p", "no:cacheprovider"],
+        ["bash", str(_SCRIPT), str(repo), str(capture), "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly"],
         cwd=str(repo), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
@@ -415,7 +417,7 @@ class TestAmbientPytestAddoptsCannotNarrowTheRun:
 
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture),
-             "-q", "-p", "no:cacheprovider"],
+             "-q", "-p", "no:cacheprovider", "-p", "no:randomly"],
             cwd=str(repo), env=env, capture_output=True, text=True)
 
         assert result.returncode == 1, result.stderr
@@ -486,7 +488,8 @@ class TestTempFileAllocationFailureIsARefusal:
         env["TMPDIR"] = str(tmp_path / "missing-tmpdir")
 
         result = subprocess.run(
-            ["bash", str(_SCRIPT), str(repo), str(capture), "-q"],
+            ["bash", str(_SCRIPT), str(repo), str(capture), "-q",
+             "-p", "no:randomly"],
             cwd=str(repo), env=env, capture_output=True, text=True)
 
         assert result.returncode == _REFUSED, result.stderr
@@ -514,7 +517,7 @@ class TestUnusableInterpreterIsRefused:
         env["PATH"] = os.pathsep.join([str(fake_bin), env["PATH"]])
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture),
-             "--collect-only", "-q"],
+             "--collect-only", "-q", "-p", "no:randomly"],
             cwd=str(repo), env=env, capture_output=True, text=True)
         return result, capture
 
