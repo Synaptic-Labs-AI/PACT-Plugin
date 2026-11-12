@@ -722,6 +722,71 @@ class TestStatusNeverWritesIntoACorruptStore:
         assert catchup == ["m00001"]
 
 
+# Each read-only verb, with the exit code its store fault reports.
+STORE_FAULT_COMMANDS = {
+    "show": (["project-id", "show"], 2),
+    "status": (["status"], 2),
+    "candidates": (["project-id", "rekey", "--candidates"], 2),
+    "rekey-dry-run": (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3),
+    "list": (["list"], 2),
+    "search": (["search", "anything"], 2),
+}
+# A page-corrupt store faults only where a read reaches the overwritten page;
+# these are the verbs that do, from inside the repository.
+CORRUPT_STORE_FAULTS = ("list", "search", "status")
+
+
+class TestAStoreFaultNamesItsRemedyOnce:
+    """Every store-fault message carries the remedy exactly once.
+
+    Catches a wrapper that meets an error whose text already IS the remedy
+    and builds it again, so the operator reads "exists but cannot be opened
+    (... exists but cannot be opened (...) ...)".
+    """
+
+    @staticmethod
+    def _store(path: Path, kind: str) -> Path:
+        if kind == "garbage":
+            return _not_a_database(path, "garbage")
+        if kind == "corrupt":
+            return _page_corrupt_store(path)
+        conn = sqlite3.connect(str(path))
+        create_test_schema(conn)
+        conn.close()
+        path.chmod(0)
+        return path
+
+    @pytest.mark.parametrize(
+        "kind, command, where",
+        [
+            (kind, command, where)
+            for kind in ("garbage", "mode000")
+            for command in STORE_FAULT_COMMANDS
+            for where in ("repository", "outside")
+        ]
+        + [("corrupt", command, "repository") for command in CORRUPT_STORE_FAULTS],
+    )
+    def test_the_remedy_appears_once(
+        self, identity_env, monkeypatch, capfd, kind, command, where
+    ):
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        store = self._store(identity_env / "store.db", kind)
+        monkeypatch.chdir(
+            make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+            if where == "repository"
+            else identity_env
+        )
+        argv, code = STORE_FAULT_COMMANDS[command]
+        try:
+            got, envelope = _cli([*argv, "--db-path", str(store)], capfd)
+        finally:
+            store.chmod(0o600)
+        assert got == code, envelope
+        assert envelope["message"].count("exists but cannot be opened") == 1, envelope
+
+
 class TestRekeyInputAndStoreEdges:
     def test_candidates_takes_no_other_option(self, identity_env, store, capfd):
         code, envelope = _cli(

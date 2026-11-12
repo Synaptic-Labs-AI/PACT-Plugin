@@ -850,6 +850,15 @@ def _connection_has_memories_table(conn: Any) -> bool:
     ).fetchone() is not None
 
 
+class StoreFaultError(sqlite3.OperationalError):
+    """A store fault whose message IS the remedy `present_store_fault` built.
+
+    Still an OperationalError, so every existing handler and exit code
+    applies. Its own class so a wrapper that meets it again passes the
+    message through instead of naming the remedy a second time.
+    """
+
+
 def present_store_fault(exc: Exception, store: str) -> Optional[str]:
     """The remedy for a store that EXISTS and cannot serve a read, or None.
 
@@ -857,8 +866,11 @@ def present_store_fault(exc: Exception, store: str) -> Optional[str]:
     (SQLITE_CANTOPEN: permissions or a parent directory that cannot be
     traversed), or it opens but is not a usable SQLite database
     (SQLITE_NOTADB, SQLITE_CORRUPT). None for an absent path and for every
-    other failure, which the caller reports as it would have.
+    other failure, which the caller reports as it would have. A
+    `StoreFaultError` already carries the remedy and is returned as it is.
     """
+    if isinstance(exc, StoreFaultError):
+        return str(exc)
     if not Path(store).exists():
         return None
     errorname = getattr(exc, "sqlite_errorname", "")
@@ -907,7 +919,7 @@ def _read_only_store_unavailable(
         return True
     remedy = present_store_fault(exc, store)
     if remedy is not None:
-        raise sqlite3.OperationalError(remedy) from exc
+        raise StoreFaultError(remedy) from exc
     cantopen = errorname == "SQLITE_CANTOPEN" or (
         not errorname and "unable to open database file" in text
     )
