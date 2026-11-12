@@ -2832,8 +2832,12 @@ class TestTrackFileAdoptsARaceLoser:
         assert [row["id"] for row in rows] == [seen["winner_id"]]
 
 
-class TestAnEmptyScopeMeansWholeStore:
-    """`project_id=""` is the old whole-store scope, not a filter for ""."""
+class TestAnEmptyStringScopeMatchesNoRows:
+    """`project_id=""` is an EMPTY scope: no rows, never the whole store.
+
+    `None` stays the whole-store scope, so each arm keeps the `None` call as
+    the control that the fixture's rows are reachable at all.
+    """
 
     def _fixture(self, tmp_path):
         # The UNPROJECTED rows: an unscoped call resolves the NULL-project
@@ -2852,7 +2856,7 @@ class TestAnEmptyScopeMeansWholeStore:
         conn.commit()
         return db_path, conn
 
-    def test_search_by_file_treats_an_empty_scope_as_unscoped(self, tmp_path):
+    def test_search_by_file_treats_an_empty_string_as_no_rows(self, tmp_path):
         from scripts import search
         from scripts.config import store_scope
 
@@ -2862,10 +2866,10 @@ class TestAnEmptyScopeMeansWholeStore:
         ), patch("scripts.graph.ensure_initialized"):
             empty = search.search_by_file("/repo/a.py", project_id="")
             absent = search.search_by_file("/repo/a.py", project_id=None)
-        assert [memory.id for memory in empty] == ["m-null"]
+        assert empty == []
         assert [memory.id for memory in absent] == ["m-null"]
 
-    def test_vector_search_treats_an_empty_scope_as_unscoped(self, tmp_path):
+    def test_vector_search_treats_an_empty_string_as_no_rows(self, tmp_path):
         import struct
 
         import sqlite_vec
@@ -2894,20 +2898,18 @@ class TestAnEmptyScopeMeansWholeStore:
         ):
             empty = search.vector_search(conn, "q", "", limit=3)
             absent = search.vector_search(conn, "q", None, limit=3)
-        assert empty == absent == [("m-p1", 0.0)]
+        assert empty == []
+        assert absent == [("m-p1", 0.0)]
 
-    def test_graph_enhanced_search_treats_an_empty_scope_as_unscoped(
+    def test_graph_enhanced_search_treats_an_empty_string_as_no_rows(
         self, tmp_path, monkeypatch
     ):
-        """The public entry whose normalisation was unpinned.
+        """The public entry whose ranking leg adds ids without a project check.
 
-        `graph_enhanced_search` applies the stored-project BELT, which reads
-        the scope by `is not None`: with `""` bound as a filter every real
-        row's project differs from it and the belt drops the lot, so the
-        whole-store search answers empty. Normalise once at the entry (as
-        the other four entries do) and `""` matches `None`. The ranking is
-        stubbed so the arm measures the scope contract, not the embedding
-        backend.
+        The ranking is stubbed to return a NULL-project memory, so only the
+        stored-project belt stands between an empty scope and that row. RED
+        WHEN `""` is folded to `None` (the belt is then skipped and the row is
+        returned) or the belt is dropped.
         """
         from scripts import search
         from scripts.config import store_scope
@@ -2923,13 +2925,10 @@ class TestAnEmptyScopeMeansWholeStore:
         ), patch("scripts.graph.ensure_initialized"):
             empty = search.graph_enhanced_search("q", project_id="")
             absent = search.graph_enhanced_search("q", project_id=None)
-        assert [memory.id for memory in empty] == ["m-null"], (
-            "graph_enhanced_search bound the empty scope as a filter and the "
-            "belt dropped every row"
+        assert empty == [], (
+            "graph_enhanced_search read the empty scope as the whole store"
         )
-        assert [memory.id for memory in empty] == [
-            memory.id for memory in absent
-        ]
+        assert [memory.id for memory in absent] == ["m-null"]
 
 
 class TestTheConfirmationFiltersOverFetch:

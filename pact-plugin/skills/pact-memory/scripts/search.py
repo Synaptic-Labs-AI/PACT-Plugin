@@ -76,23 +76,21 @@ GRAPH_CONFIRMATION_FETCH_CAP = 50
 def _scope_or_none(
     project_id: Optional[Union[str, Sequence[str]]],
 ) -> Optional[Union[str, Tuple[str, ...]]]:
-    """One scope predicate at every public entry: absent and "" both mean ALL.
+    """One scope normalisation at every public entry: only `None` means ALL.
 
-    The SQL legs read the scope by `is not None` (as do the stored-project
-    confirmations), so without this normalisation an empty string would be
-    bound as a filter that matches no row and a whole-store search would
-    answer empty. Normalise ONCE, at each public entry; every later test is
-    `is None`.
+    `None` is the whole store. Every other value is a scope, and an EMPTY
+    one — `""`, `()` or `[]` — is NO ROWS, the same answer
+    `database.normalise_project_scopes` and `graph.get_graph_stats` give.
+    Folding `""` to `None` by truthiness turned an empty scope into a
+    whole-store search, which is the trap this function exists to close.
+    Normalise ONCE, at each public entry; every later test is `is None`.
 
-    A SEQUENCE IS A UNION SCOPE AND IS NEVER FOLDED BY TRUTHINESS: a
-    non-empty sequence is returned as-is, while an EMPTY sequence returns
-    `()` — no rows — NOT `None`, which every leg reads as the whole store.
-    `project_id or None` on a tuple is precisely the empty-set trap.
+    A non-empty string is returned as-is; a sequence is returned as a tuple.
     """
     if project_id is None:
         return None
     if isinstance(project_id, str):
-        return project_id or None
+        return project_id if project_id else ()
     return tuple(project_id)
 
 

@@ -325,8 +325,12 @@ def _harden_sidecars(path) -> None:
     for a new store and `init_schema` for an existing empty one. A sidecar
     can already hold memory content, so a mode inherited from the process
     umask is a disclosure, not a cosmetic difference.
+
+    AN EMPTY PATH IS NO PATH. `PRAGMA database_list` reports `""` for an
+    in-memory or temporary database, and `"" + "-wal"` would name a file in
+    the current directory.
     """
-    if path is None:
+    if not path:
         return
     for suffix in ("-wal", "-shm"):
         sidecar = Path(str(path) + suffix)
@@ -1247,16 +1251,18 @@ def normalise_project_scopes(
     `is None`, never truthiness.
 
     Elements that are not non-empty strings are dropped: no row can carry
-    them, and `IN (NULL)` never matches.
+    them, and `IN (NULL)` never matches. A repeated id is kept once, in
+    first-seen order, because a per-scope loop (one KNN per scope) would
+    otherwise return the same memory twice.
     """
     if project_ids is None:
         return None
     if isinstance(project_ids, str):
         return (project_ids,) if project_ids else ()
-    return tuple(
+    return tuple(dict.fromkeys(
         scope for scope in project_ids
         if isinstance(scope, str) and scope
-    )
+    ))
 
 
 def project_scope_predicate(

@@ -766,13 +766,13 @@ class TestReviewB3EmptyScope:
 
         A truthiness implementation (`tuple(project_id) or None`) turns an
         empty scope into the whole store, which is the empty-set trap the
-        plan names. The `""` arm is the documented ALL spelling and must
-        stay None.
+        plan names. The `""` arm is an empty scope too: no rows, never
+        None.
         """
         assert _scope_or_none(()) == ()
         assert _scope_or_none([]) == ()
         assert _scope_or_none(None) is None
-        assert _scope_or_none("") is None
+        assert _scope_or_none("") == ()
         assert _scope_or_none((CANONICAL, LEGACY)) == (CANONICAL, LEGACY)
 
     def test_get_graph_stats_empty_scope_is_all_zeros_not_the_store(self, union_env):
