@@ -1459,54 +1459,64 @@ def rekey_project(
     anything, and a save binds the canonical id, so a rekey is an explicit
     operator action: `--dry-run` is the default posture.
 
-    ONE TRANSACTION. Apply begins `BEGIN IMMEDIATE` when the caller has not
-    already begun one; if the caller owns the transaction, this function
-    participates and does NOT commit, so the caller's context manager decides.
-    A crash before COMMIT leaves the old bucket intact — never a partial move.
+    THIS FUNCTION OWNS ITS TRANSACTION. A connection with an open transaction
+    is refused with ValueError, because the move must be one unit and a
+    caller's pending writes would otherwise be committed with it or rolled
+    back with it. Apply runs `BEGIN IMMEDIATE ... COMMIT`; a failure before
+    COMMIT leaves the old bucket intact, never a partial move.
 
     DRY RUN IS THE SAME CODE PATH, ROLLED BACK. A SAVEPOINT wraps the work
-    and is rolled back (and released) before returning, so the reported
-    counters are exactly what an apply would produce rather than a second,
-    drifting estimate. The savepoint works inside or outside a caller
-    transaction.
+    and is rolled back and released before returning, so the reported
+    counters are what an apply would produce.
+
+    NO SCHEMA IS EVER CREATED. A store without the `memories` table has
+    nothing to move: the zero counters come back with `schema_absent: True`
+    and no DDL runs, in a dry run or an apply.
 
     FILES. `UNIQUE(path, project_id)` means a path can already exist under
-    both ids. A path present only under `from` is updated in place. A
-    CONFLICTING path keeps the target row: its memory links and its file
-    relations are re-pointed and the old row is then deleted. `relations_repointed`
-    counts the row's own incident edges before and after the move, so a
-    SELF-relation is one edge, not the two INSERT rowcounts it produces.
+    both ids. A path present only under `from` is updated in place, and its
+    links follow the file id unchanged. A CONFLICTING path keeps the target
+    row: its memory links and its file relations are re-pointed and the old
+    row is then deleted. `relations_repointed` counts the row's own incident
+    edges before and after the move, so a SELF-relation is one edge.
 
     MEMORY LINKS USE A DETERMINISTIC KEEPER RULE. `memory_files` is keyed
     `(memory_id, file_id)`, so when the target already carries a link for the
     same pair, the TARGET's relationship is kept and the moved one is
-    DROPPED. There is no semantic merge and no type precedence. The counters
-    make the outcome visible instead of silent: `links_repointed` is the
-    number of old links EXAMINED, and `links_conflicted` is the number whose
-    relationship was dropped because the target already named that pair
-    differently.
+    DROPPED. `links_repointed` counts the links on file rows MERGED into an
+    existing target row (links on files moved in place are not re-pointed and
+    are not counted), and `links_conflicted` counts the ones whose
+    relationship was dropped because the target named that pair differently.
 
     VECTORS. A vec0 partition key cannot be UPDATEd in place, so each moved
     memory's row is read, deleted and re-inserted under the target with the
-    SAME embedding blob (a rekey does not change the text, so re-embedding
-    would be wasted work). A missing vector is skipped. When the vector table
+    SAME embedding blob. A missing vector is skipped. When the vector table
     cannot be OPENED, nothing is touched and `vectors_pending` reports the
-    number of moved memories; the partition-aware catch-up repairs them, and
-    the stored project on every read keeps a stranded vector from being served
-    to the old bucket.
+    number of moved memories; the partition-aware catch-up repairs them.
 
     NULL-PROJECT ROWS ARE NEVER MOVED and are reported in
-    `null_project_rows`: NULL is a real bucket, not a basename, and moving it
-    would change what every scoped read can see.
+    `null_project_memories` and `null_project_files`: NULL is a real bucket,
+    not a basename, and moving it would change what every scoped read sees.
+
+    `from_bucket_empty` is True when no memory and no file row was filed
+    under `from_id` at the start: a typo, or a bucket already moved.
+
+    A FAILURE ALWAYS PROPAGATES AS ITSELF. Cleanup runs only while SQLite
+    still reports an open transaction, so a statement that made SQLite roll
+    back on its own is not masked by a "no such savepoint" from the cleanup.
 
     Args:
-        conn: Active database connection.
+        conn: A database connection with NO open transaction.
         from_id: The entire bucket to retire.
         to_id: The canonical id to move it to.
         dry_run: True computes and rolls back; False commits.
 
     Returns:
-        The counters dict (see the keys assigned below).
+        The counters dict. Every key is always present.
+
+    Raises:
+        ValueError: an id fails the write-ingress rule, the target is not
+            canonical, or `conn` already has an open transaction.
     """
     validate_identifier_for_write(from_id)
     validate_identifier_for_write(to_id)
@@ -1521,6 +1531,11 @@ def rekey_project(
             "the rekey target must be a canonical host/owner/repo id; moving "
             "rows into a non-canonical bucket is refused. Nothing was moved."
         )
+    if conn.in_transaction:
+        raise ValueError(
+            "rekey_project owns its transaction; pass a connection with no "
+            "open transaction. Nothing was moved."
+        )
 
     counters: Dict[str, Any] = {
         "from": from_id,
@@ -1530,34 +1545,48 @@ def rekey_project(
         "files_in_place": 0,
         "files_conflicted": 0,
         "links_repointed": 0,
-        # Old links whose target pair already existed with a DIFFERENT
-        # relationship. The target's type is kept and the moved one is
-        # dropped; this counter makes that loss visible.
         "links_conflicted": 0,
         "relations_repointed": 0,
         "vectors_moved": 0,
         "vectors_pending": 0,
-        "null_project_rows": 0,
+        "null_project_memories": 0,
+        "null_project_files": 0,
+        "from_bucket_empty": True,
+        "schema_absent": False,
     }
 
-    ensure_initialized(conn)
+    # A SCHEMA CHECK, NOT `ensure_initialized`: that initialiser creates the
+    # schema on an empty store and commits as it migrates, and a rekey (a dry
+    # run above all) must do neither.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+    ).fetchone() is None:
+        counters["schema_absent"] = True
+        return counters
+
+    counters["from_bucket_empty"] = (
+        conn.execute(
+            "SELECT 1 FROM memories WHERE project_id = ? LIMIT 1", (from_id,)
+        ).fetchone() is None
+        and conn.execute(
+            "SELECT 1 FROM files WHERE project_id = ? LIMIT 1", (from_id,)
+        ).fetchone() is None
+    )
 
     if from_id == to_id:
         return counters
 
     savepoint = "rekey_project_work"
-    began_transaction = False
     if dry_run:
         conn.execute(f"SAVEPOINT {savepoint}")
-    elif not conn.in_transaction:
+    else:
         conn.execute("BEGIN IMMEDIATE")
-        began_transaction = True
 
     try:
         # Collect the moved memories BEFORE the UPDATE: afterwards they share
         # the target id with rows that were never in `from`.
         moved_ids = [
-            row["id"]
+            row[0]
             for row in conn.execute(
                 "SELECT id FROM memories WHERE project_id = ?", (from_id,)
             ).fetchall()
@@ -1574,11 +1603,10 @@ def rekey_project(
             (from_id,),
         ).fetchall()
 
-        for old in old_files:
-            old_id = old["id"]
+        for old_id, old_path in old_files:
             target = conn.execute(
                 "SELECT id FROM files WHERE path = ? AND project_id = ?",
-                (old["path"], to_id),
+                (old_path, to_id),
             ).fetchone()
 
             if target is None:
@@ -1589,15 +1617,12 @@ def rekey_project(
                 counters["files_in_place"] += 1
                 continue
 
-            target_id = target["id"]
+            target_id = target[0]
             counters["files_conflicted"] += 1
 
-            # A MEMORY LINK'S PRIMARY KEY IS (memory_id, file_id), so a target link
-            # for the same pair KEEPS ITS OWN RELATIONSHIP and the moved one is
-            # dropped. `INSERT OR IGNORE` did that silently, and counting only
-            # the surviving inserts hid how many links were examined at all.
-            # The keeper rule is deterministic and unchanged — the TARGET's row
-            # wins — and every dropped relationship is visible in
+            # A MEMORY LINK'S PRIMARY KEY IS (memory_id, file_id), so a target
+            # link for the same pair KEEPS ITS OWN RELATIONSHIP and the moved
+            # one is dropped; every dropped relationship is counted in
             # `links_conflicted` instead of vanishing.
             old_links = conn.execute(
                 "SELECT memory_id, relationship FROM memory_files "
@@ -1605,20 +1630,20 @@ def rekey_project(
                 (old_id,),
             ).fetchall()
             counters["links_repointed"] += len(old_links)
-            for link in old_links:
+            for link_memory_id, link_relationship in old_links:
                 existing = conn.execute(
                     "SELECT relationship FROM memory_files "
                     "WHERE memory_id = ? AND file_id = ?",
-                    (link["memory_id"], target_id),
+                    (link_memory_id, target_id),
                 ).fetchone()
                 if existing is not None:
-                    if existing["relationship"] != link["relationship"]:
+                    if existing[0] != link_relationship:
                         counters["links_conflicted"] += 1
                     continue
                 conn.execute(
                     "INSERT INTO memory_files (memory_id, file_id, relationship) "
                     "VALUES (?, ?, ?)",
-                    (link["memory_id"], target_id, link["relationship"]),
+                    (link_memory_id, target_id, link_relationship),
                 )
             conn.execute(
                 "DELETE FROM memory_files WHERE file_id = ?", (old_id,)
@@ -1628,10 +1653,7 @@ def rekey_project(
             # rowcounts. A SELF-RELATION is why: the outgoing statement
             # inserts `target -> old`, and the incoming scan then sees that
             # new row and inserts `target -> target`, so summing both
-            # rowcounts reports 2 for one edge. Measuring the row's own
-            # incident edges before and after is the true count and still
-            # keeps the resulting edge set (a self-relation becomes a
-            # self-loop on the target).
+            # rowcounts reports 2 for one edge.
             relations_before = conn.execute(
                 "SELECT COUNT(*) FROM file_relations "
                 "WHERE source_file = ? OR target_file = ?",
@@ -1667,14 +1689,9 @@ def rekey_project(
             ).fetchone()[0]
             counters["relations_repointed"] += relations_before - relations_after
 
-            # Every reference to the old row was re-pointed and deleted
-            # above, so the row is retired unconditionally. A
-            # `residue_files` counter used to sit here; it could never be
-            # non-zero because `files.id` is referenced only by
-            # `memory_files.file_id` and the two `file_relations` endpoints,
-            # all of which this block clears. A counter that is structurally
-            # always 0 reads as evidence it is not, so it is REMOVED rather
-            # than reported.
+            # Every reference to the old row (`memory_files.file_id` and the
+            # two `file_relations` endpoints) was re-pointed and deleted
+            # above, so the row is retired unconditionally.
             conn.execute("DELETE FROM files WHERE id = ?", (old_id,))
 
         # Vectors: delete+insert with the SAME blob, inside this transaction.
@@ -1716,11 +1733,16 @@ def rekey_project(
                     conn.execute(
                         "INSERT INTO vec_memories "
                         "(memory_id, project_id, embedding) VALUES (?, ?, ?)",
-                        (memory_id, to_id, vector["embedding"]),
+                        (memory_id, to_id, vector[0]),
                     )
                     conn.execute("RELEASE rekey_vector")
                     counters["vectors_moved"] += 1
                 except Exception as exc:  # noqa: BLE001 - one row, not the move
+                    # SQLITE ROLLED THE WHOLE TRANSACTION BACK: the move is
+                    # already undone, so continuing would write the remaining
+                    # vectors in autocommit. Propagate the original error.
+                    if not conn.in_transaction:
+                        raise
                     logger.debug(
                         f"rekey_project: vector move failed for {memory_id!r}: {exc}"
                     )
@@ -1732,29 +1754,31 @@ def rekey_project(
             # too. Leave every row where it is; the catch-up repairs them.
             counters["vectors_pending"] = len(moved_ids)
 
-        counters["null_project_rows"] = (
-            conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE project_id IS NULL"
-            ).fetchone()[0]
-            + conn.execute(
-                "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
-            ).fetchone()[0]
-        )
+        counters["null_project_memories"] = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE project_id IS NULL"
+        ).fetchone()[0]
+        counters["null_project_files"] = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
+        ).fetchone()[0]
 
         if dry_run:
             conn.execute(f"ROLLBACK TO {savepoint}")
             conn.execute(f"RELEASE {savepoint}")
-        elif began_transaction:
+        else:
             conn.commit()
 
         return counters
 
-    except Exception:
-        if dry_run:
-            conn.execute(f"ROLLBACK TO {savepoint}")
-            conn.execute(f"RELEASE {savepoint}")
-        elif began_transaction:
-            conn.rollback()
+    except BaseException:
+        # GUARDED ON `in_transaction`: when SQLite has already rolled the
+        # transaction back, the savepoint is gone and cleanup would raise a
+        # second error that replaces the real one.
+        if conn.in_transaction:
+            if dry_run:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+                conn.execute(f"RELEASE {savepoint}")
+            else:
+                conn.rollback()
         raise
 
 

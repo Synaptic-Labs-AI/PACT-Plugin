@@ -191,7 +191,8 @@ class TestRekeyLifecycle:
         assert _rows(rekey_env.store) == before
 
     def test_null_project_rows_are_never_moved_and_are_reported(self, rekey_env):
-        """Catches a rekey that sweeps the NULL bucket into a project."""
+        """Catches a rekey that sweeps the NULL bucket into a project, and a
+        report that sums NULL memories and NULL files into one number."""
         _seed(
             rekey_env,
             [("m1", LEGACY), ("n1", None)],
@@ -199,7 +200,8 @@ class TestRekeyLifecycle:
         )
         with db_connection(rekey_env.store) as conn:
             counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False)
-            assert counters["null_project_rows"] == 2
+            assert counters["null_project_memories"] == 1
+            assert counters["null_project_files"] == 1
             assert conn.execute(
                 "SELECT project_id FROM memories WHERE id = 'n1'"
             ).fetchone()[0] is None
