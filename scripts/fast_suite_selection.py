@@ -867,9 +867,15 @@ def _literal_script(value: str, plugin_root: Path,
 
     Tests that run a hook as a subprocess name it as a string, which no
     import edge sees. Test-tree files and conftests are skipped: a literal
-    there is a fixture file name, not a dependency.
+    there is a fixture file name, not a dependency. A bare "__init__.py" is
+    skipped too: it is the package marker joined onto some directory
+    (`package / "__init__.py"`), and resolved against every root it would
+    match each root's own package marker, never the file the code names.
+    A path that carries its directory ("hooks/__init__.py") still resolves.
     """
     if not value.endswith(".py") or "\n" in value or len(value) > 200:
+        return []
+    if value == "__init__.py":
         return []
     hits: list[Path] = []
     for base in (plugin_root, *roots):

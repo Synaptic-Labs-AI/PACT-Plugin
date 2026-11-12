@@ -1116,6 +1116,28 @@ class TestImportClosure:
         assert "hooks/shared/unrelated.py" not in closure
         assert "tests/helper.py" not in closure
 
+    def test_a_bare_package_marker_literal_is_not_a_script(self, core, tmp_path):
+        """`package / "__init__.py"` names the marker of whatever directory
+        it is joined to. Resolved bare against every root it would match
+        each root's own __init__.py, and with it that package's imports."""
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "__init__.py", "import shared.direct\n")
+        _write(plugin / "tests" / "test_c.py",
+               "from pathlib import Path\n\n"
+               "def marker(package):\n"
+               "    return Path(package) / \"__init__.py\"\n")
+        closure = core.import_closure(plugin, ["tests/test_c.py"])
+        assert closure == {"tests/test_c.py"}, sorted(closure)
+
+    def test_a_package_marker_path_with_its_directory_is_followed(
+            self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "__init__.py", "import shared.direct\n")
+        _write(plugin / "tests" / "test_d.py",
+               'MARKER = "hooks/__init__.py"\n')
+        closure = core.import_closure(plugin, ["tests/test_d.py"])
+        assert {"hooks/__init__.py", "hooks/shared/direct.py"} <= closure
+
 
 class TestScanIndex:
     """What one module contributes to its exclusions' views."""
