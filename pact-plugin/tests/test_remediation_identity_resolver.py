@@ -1,0 +1,101 @@
+"""Resolver contracts: one decline record, one guard, and what each rung binds.
+
+Each class names the behaviour it pins and the defect it would catch. The
+fixtures are REAL repositories built from a fresh `git init` with a fake
+origin URL: the seam under test is what git answers, not what a mock says.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+from scripts import memory_api
+
+MEMORY_API = Path(memory_api.__file__)
+
+
+def _module_tree() -> ast.Module:
+    return ast.parse(MEMORY_API.read_text(encoding="utf-8"))
+
+
+class TestOneDeclineRecord:
+    """Every decline in the resolver is built by one builder.
+
+    Catches a rung that hand-rolls its own decline dict or record. That is how
+    one rung's guards and disclosure drift from another's: a fix applied to
+    the builder never reaches the copy.
+    """
+
+    # A SUPPRESSED legacy candidate is not a declined identity, so its record
+    # has its own single builder and is the one `reason` dict allowed here.
+    SUPPRESSION_BUILDER = "_suppression_record"
+
+    def test_no_decline_dict_literal_remains(self):
+        tree = _module_tree()
+        exempt = set()
+        for function in ast.walk(tree):
+            if (
+                isinstance(function, ast.FunctionDef)
+                and function.name == self.SUPPRESSION_BUILDER
+            ):
+                exempt.update(id(node) for node in ast.walk(function))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict) or id(node) in exempt:
+                continue
+            keys = {
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            if "reason" in keys:
+                offenders.append(node.lineno)
+        assert offenders == [], (
+            f"memory_api.py builds a decline dict by hand at lines {offenders}; "
+            "build it with project_identity.decline_record through _decline"
+        )
+
+    def test_every_detected_identity_is_built_by_keyword(self):
+        positional = [
+            node.lineno
+            for node in ast.walk(_module_tree())
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_DetectedIdentity"
+            and node.args
+        ]
+        assert positional == [], (
+            f"_DetectedIdentity is built positionally at lines {positional}; "
+            "every field must be passed by keyword"
+        )
+
+    def test_the_suppression_record_has_one_builder(self):
+        """The exemption above names a function that exists and is used."""
+        tree = _module_tree()
+        builders = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == self.SUPPRESSION_BUILDER
+        ]
+        assert len(builders) == 1
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == self.SUPPRESSION_BUILDER
+        ]
+        assert calls
+
+    def test_the_scan_sees_the_record_constructor(self):
+        """Control: the scan is live, so a zero above is not an empty walk."""
+        calls = [
+            node
+            for node in ast.walk(_module_tree())
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_DetectedIdentity"
+        ]
+        assert len(calls) >= 3

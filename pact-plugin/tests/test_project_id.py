@@ -373,7 +373,16 @@ class TestSourceEquivalence:
         # repo's override, because that is what let a cwd pin retarget a
         # declared session.
         assert "read_override(cwd_common_dir)" not in real_source
-        assert "detect_id_for_root(" in real_source
+        # Every root rung derives its id through the one root helper, which
+        # is the only caller of `detect_id_for_root` in the resolver. Both
+        # checks read CODE (docstring and comments dropped), so a sentence
+        # naming either call cannot satisfy them once the call is gone.
+        assert "_identity_at_root(" in _function_code(
+            _MEMORY_API_PATH, "PACTMemory._detect_project_identity_with_legacy"
+        )
+        assert "detect_id_for_root(" in _function_code(
+            _MEMORY_API_PATH, "PACTMemory._identity_at_root"
+        )
         # Strategy 2 reaches git through the module-level common-dir helper
         # rather than spawning its own subprocess. The subprocess markers this
         # assertion used to carry moved with it and are pinned on the helper by

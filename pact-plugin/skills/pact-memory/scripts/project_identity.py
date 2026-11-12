@@ -149,9 +149,39 @@ OUTCOME_CANONICAL = "canonical"
 OUTCOME_NO_PORTABLE_ORIGIN = "no_portable_origin"
 OUTCOME_DECLINE = "decline"
 
+# The named causes a resolution can decline for. `decline_reason` is built
+# only by `decline_record`, so a reason outside this set cannot be reported.
+DECLINE_REASONS = frozenset(
+    {
+        "origin_unreadable",
+        "origin_unrepresentable",
+        "gitfile_redirect",
+        "broken_git_marker",
+        "no_working_tree",
+        "submodule_checkout",
+        "declaration_unresolved",
+    }
+)
+
 ORIGIN_PRESENT = "present"
 ORIGIN_ABSENT = "absent"
 ORIGIN_UNAVAILABLE = "unavailable"
+
+
+def decline_record(
+    reason: str, override_path: Optional[str], source: Optional[str] = None
+) -> dict:
+    """The `decline_reason` dict: exactly `{source, reason, override_path}`.
+
+    `reason` must be one of `DECLINE_REASONS` (ValueError otherwise).
+    `override_path` is the `<git-common-dir>/pact-project-id` file that would
+    remedy the decline, or None when no repository was found. `source` is the
+    rung that declined; this module leaves it None, and the resolver in
+    memory_api, the only layer that knows the rung, fills it in.
+    """
+    if reason not in DECLINE_REASONS:
+        raise ValueError(f"unknown decline reason: {reason!r}")
+    return {"source": source, "reason": reason, "override_path": override_path}
 
 
 def _server_identity_impl() -> tuple:
@@ -915,13 +945,9 @@ def _refuse_submodule_basename(
         None,
         "declined",
         override_ignored,
-        {
-            # `source` is filled by the calling rung, which is the only layer
-            # that knows which declaration or fallback declined.
-            "source": None,
-            "reason": "submodule_checkout",
-            "override_path": str(common_dir / _OVERRIDE_FILENAME),
-        },
+        # `source` is filled by the calling rung, which is the only layer
+        # that knows which declaration or fallback declined.
+        decline_record("submodule_checkout", str(common_dir / _OVERRIDE_FILENAME)),
     )
 
 
@@ -1188,11 +1214,7 @@ def detect_id_for_root(
             None,
             "declined",
             override_ignored,
-            {
-                "source": None,
-                "reason": "gitfile_redirect",
-                "override_path": override_path,
-            },
+            decline_record("gitfile_redirect", override_path),
         )
 
     # A SUBMODULE'S CHECKOUT PATH IS REPOSITORY-CHOSEN, so a basename derived
@@ -1211,11 +1233,7 @@ def detect_id_for_root(
             None,
             "declined",
             override_ignored,
-            {
-                "source": None,
-                "reason": "origin_unreadable",
-                "override_path": override_path,
-            },
+            decline_record("origin_unreadable", override_path),
         )
     if origin.state == ORIGIN_ABSENT:
         if submodule_controlled:
@@ -1231,11 +1249,7 @@ def detect_id_for_root(
             None,
             "declined",
             override_ignored,
-            {
-                "source": None,
-                "reason": "origin_unrepresentable",
-                "override_path": override_path,
-            },
+            decline_record("origin_unrepresentable", override_path),
         )
     if submodule_controlled:
         return _refuse_submodule_basename(root, common_dir, override_ignored)

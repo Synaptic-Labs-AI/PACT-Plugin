@@ -73,6 +73,7 @@ from . import project_identity
 from .project_identity import (
     _git_env_bool,
     _submodule_admin_dir,
+    decline_record,
     detect_id_for_root,
     is_canonical,
     read_override,
@@ -155,12 +156,14 @@ class _DetectedIdentity(NamedTuple):
     # process's cwd repository: in a declared-repo session the two differ, and
     # gating on the cwd would exclude the declared repo's own legacy bucket.
     identity_root: Optional[Path]
-    # STRUCTURED DECLINE DISCLOSURE — `{reason, override}` when a rung
-    # refused a basename-derived id for a specific, named cause, else None.
-    # `project-id show` reports it; a warning alone is invisible to a caller
-    # that parses the envelope. Defaulted so the rungs that carry no reason
-    # keep their positional shape.
+    # STRUCTURED DECLINE DISCLOSURE — `{source, reason, override_path}`, built
+    # by `project_identity.decline_record`, when a rung declined for a named
+    # cause, else None. `project-id show` reports it; a warning alone is
+    # invisible to a caller that parses the envelope.
     decline_reason: Optional[dict] = None
+    # WHAT THE PRE-CHANGE RESOLVER PRODUCED for this exact input, or None
+    # where it refused. The backlog file name reads only this.
+    pre_change_name: Optional[str] = None
 
 
 # `_read_project_scopes` result cache: (store, mtime_ns, size, canonical,
@@ -259,25 +262,42 @@ _DECLINE_CAUSES = {
         "the checkout is a submodule, so its folder name is chosen by the "
         "superproject's .gitmodules"
     ),
+    "declaration_unresolved": "the declared directory could not be resolved",
 }
 
+# Causes with no repository to pin: the override is not offered for them.
+_NO_OVERRIDE_CAUSES = frozenset({"declaration_unresolved", "no_working_tree"})
 
-def _warn_declined(identity: "RootIdentity", root: Any, override_path: Any) -> None:
-    """Log a DECLINE with its real cause, never a generic origin claim.
+
+def _warn_declined(
+    record: Optional[dict], root: Any = None, detail: Optional[str] = None
+) -> None:
+    """Log ONE decline warning with its real cause, never a generic origin claim.
 
     The generic sentence ("an origin remote that could not be read or
     represented") is WRONG for a forged `.git` marker or a broken repository,
     and sent the operator to inspect a remote that was not the problem. The
     structured token knows the cause, so the message uses it and falls back
-    to the generic sentence only when no reason was recorded.
+    to the generic sentence only when no reason was recorded. `detail` names
+    the rung's own facts (which declaration, which path).
     """
-    token = (identity.decline_reason or {}).get("reason")
+    token = (record or {}).get("reason")
     cause = _DECLINE_CAUSES.get(token) if token else None
     if cause is None:
         cause = (
             "the repository at %r has an origin remote that could not be "
             "read or represented as a project id" % (str(root),)
         )
+    if detail:
+        cause = f"{cause} ({detail})"
+    if token in _NO_OVERRIDE_CAUSES:
+        logger.warning(
+            "%s, so no project id was derived. Run the `project-id show` verb "
+            "to inspect the detected identity.",
+            cause,
+        )
+        return
+    override_path = (record or {}).get("override_path")
     logger.warning(
         "%s, so no project id was derived. Run the `project-id show` verb to "
         "inspect the detected identity, or write an operator-chosen canonical "
@@ -289,16 +309,124 @@ def _warn_declined(identity: "RootIdentity", root: Any, override_path: Any) -> N
     )
 
 
-def _reason_with_source(reason: Optional[dict], source: str) -> Optional[dict]:
-    """A structured decline reason carrying the RUNG that produced it.
+def _decline(
+    source: str,
+    reason: str,
+    *,
+    label: Optional[str] = None,
+    override_path: Optional[str] = None,
+    root: Optional[Path] = None,
+    legacy: Optional[str] = None,
+    pre_change_name: Optional[str] = None,
+    override_ignored: Optional[dict] = None,
+    detail: Optional[str] = None,
+) -> "_DetectedIdentity":
+    """THE ONE PLACE a resolver decline is built and reported.
 
-    `detect_id_for_root` does not know which declaration or fallback called
-    it, so it leaves `source` unset; the caller fills it in here, and the
-    show/status envelope then names the remedy AND the rung.
+    `source` is the rung token recorded in `decline_reason`; `label` is the
+    `source` the result discloses, `"unresolved"` unless the rung keeps its
+    own label (the declared rungs do). Logs exactly one warning.
     """
-    if reason is None:
+    record = decline_record(reason, override_path, source)
+    _warn_declined(record, root, detail)
+    return _DetectedIdentity(
+        project_id=None,
+        source=label or "unresolved",
+        legacy_basename=legacy,
+        override_ignored=override_ignored,
+        identity_root=root,
+        decline_reason=record,
+        pre_change_name=pre_change_name,
+    )
+
+
+def _decline_detected(
+    identity: "RootIdentity",
+    source: str,
+    *,
+    label: Optional[str] = None,
+    root: Optional[Path] = None,
+    legacy: Optional[str] = None,
+    pre_change_name: Optional[str] = None,
+) -> "_DetectedIdentity":
+    """`_decline` for a decline `detect_id_for_root` already named.
+
+    That layer does not know which rung called it, so its record carries no
+    `source`; the rung supplies it here.
+    """
+    reason = identity.decline_reason or {}
+    return _decline(
+        source,
+        reason.get("reason") or "origin_unrepresentable",
+        label=label,
+        override_path=reason.get("override_path"),
+        root=root,
+        legacy=legacy,
+        pre_change_name=pre_change_name,
+        override_ignored=identity.override_ignored,
+    )
+
+
+def _root_guard(
+    asked_root: Optional[Path],
+    common_dir: Optional[Path],
+    source: str,
+    *,
+    label: Optional[str] = None,
+    root: Optional[Path] = None,
+) -> "Optional[_DetectedIdentity]":
+    """The repository guards every rung runs before it derives an id.
+
+    1. No common dir, but a `.git` marker git could not answer for: a broken
+       repository, not an umbrella folder -> `broken_git_marker`.
+    2. A linked-worktree shape that `git worktree list` does not back: a
+       forged `.git` file naming another repository's worktree admin dir
+       -> `gitfile_redirect`.
+
+    Returns the decline, or None when the root passes. A bare repository is
+    the git rung's own check, because only that rung can reach one with no
+    toplevel.
+    """
+    if common_dir is None:
+        if asked_root is not None and _unanswerable_repository(asked_root) is not None:
+            return _decline(
+                source,
+                "broken_git_marker",
+                label=label,
+                root=root,
+                detail=f"{source}: {str(asked_root)!r}",
+            )
         return None
-    return {**reason, "source": source}
+    if asked_root is not None and _worktree_redirect(asked_root, common_dir):
+        return _decline(
+            source,
+            "gitfile_redirect",
+            label=label,
+            override_path=str(common_dir / "pact-project-id"),
+            root=root,
+            detail=(
+                f"{source}: {str(asked_root)!r} resolves to another "
+                "repository's worktree admin dir but is not one of its "
+                "listed worktrees"
+            ),
+        )
+    return None
+
+
+def _suppression_record() -> dict:
+    """The record for a SUPPRESSED legacy candidate. Not a decline.
+
+    The identity still resolves; only the pre-upgrade bucket derived from a
+    submodule admin dir is kept out of the read scope, so this record never
+    goes through `_decline` and its reason is not a decline token.
+    `override_path` is None because the remedy is an explicit rekey, not a
+    pin.
+    """
+    return {
+        "source": "submodule_admin_dir",
+        "reason": "repository_chosen_name",
+        "override_path": None,
+    }
 
 
 def _legacy_suppression(
@@ -310,10 +438,7 @@ def _legacy_suppression(
     pre-upgrade candidate derived from it is never admitted to the read
     scope. Returning no name is not enough: the operator must be able to see
     what was suppressed and why, on the same envelope as every other
-    read-scope field. Returns `(reason, derived_name)` or `(None, None)`.
-    The reason object is the same `{source, reason, override_path}` shape the
-    decline channel uses; `override_path` is None because the remedy here is
-    an explicit rekey, not a pin.
+    read-scope field. Returns `(record, derived_name)` or `(None, None)`.
     """
     if identity_root is None:
         return None, None
@@ -324,14 +449,7 @@ def _legacy_suppression(
         derived = common_dir.resolve().parent.name
     except (OSError, RuntimeError, ValueError):
         derived = common_dir.parent.name
-    return (
-        {
-            "source": "submodule_admin_dir",
-            "reason": "repository_chosen_name",
-            "override_path": None,
-        },
-        derived,
-    )
+    return _suppression_record(), derived
 
 
 def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
@@ -1400,11 +1518,8 @@ class PACTMemory:
         )
 
     @staticmethod
-    def _declared_dir_identity(
-        declared_dir: str, source: str
-    ) -> "tuple[Optional[str], str, Optional[str], Optional[Path], Optional[dict], Optional[dict]]":
-        """The project id a DECLARED directory belongs to, its label, the
-        legacy basename, the identity root, and any unusable override.
+    def _declared_dir_identity(declared_dir: str, source: str) -> "_DetectedIdentity":
+        """The identity a DECLARED directory belongs to, as one record.
 
         Shared by Strategy 1 (CLAUDE_PROJECT_DIR) and Strategy 1.5 (the
         session record). The identity root is the repository root of the
@@ -1419,7 +1534,8 @@ class PACTMemory:
         A declared directory that no longer exists declines. A declaration
         whose repository has a remote that could not be read or represented also
         declines: never a basename for a real but unrepresentable remote,
-        because a basename there is a silently different bucket.
+        because a basename there is a silently different bucket. A decline
+        keeps the declaration's own label as `source`.
         """
         try:
             declared_root = Path(declared_dir).resolve()
@@ -1438,39 +1554,12 @@ class PACTMemory:
             and os.path.normcase(str(declared_main_root))
             != os.path.normcase(str(declared_root))
         ):
-            legacy_name = PACTMemory._legacy_project_name(
-                declared_common_dir, declared_main_root
-            )
-            identity = detect_id_for_root(
+            return PACTMemory._identity_at_root(
                 declared_main_root,
                 declared_common_dir,
                 asked_root=declared_root or Path(declared_dir),
-            )
-            PACTMemory._warn_override_ignored(identity)
-            if identity.project_id is not None:
-                logger.debug(
-                    "project_id detected from %s worktree main repo: %s",
-                    source,
-                    identity.project_id,
-                )
-                return (
-                    identity.project_id,
-                    _disclosed_source(identity, source),
-                    legacy_name,
-                    declared_main_root,
-                    identity.override_ignored,
-                    _reason_with_source(identity.decline_reason, source),
-                )
-            _warn_declined(
-                identity, declared_main_root, declared_common_dir / "pact-project-id"
-            )
-            return (
-                None,
-                source,
-                legacy_name,
-                declared_main_root,
-                identity.override_ignored,
-                _reason_with_source(identity.decline_reason, source),
+                source=source,
+                label=source,
             )
         # A FORGED WORKTREE-ADMIN POINTER DECLINES HERE. `main_repo_root`
         # correctly refuses the redirect and returns None, but the fall-through
@@ -1486,31 +1575,19 @@ class PACTMemory:
         # the bare path below is untouched. KNOWN LIMITATION, PRE-EXISTING and
         # outside this change: a DECLARED bare repository therefore resolves
         # from its origin or basename here instead of declining the way the
-        # cwd rung does. Recorded, not repaired — do not read this branch as
+        # git rung does. Recorded, not repaired — do not read this branch as
         # treating the two the same.
-        if (
-            declared_main_root is None
-            and declared_common_dir is not None
-            and declared_root is not None
-            and _worktree_redirect(declared_root, declared_common_dir)
-        ):
-            logger.warning(
-                "the directory declared via %s resolves to another "
-                "repository's worktree admin dir but is not one of its listed "
-                "worktrees, so no project id was derived from it. Run the "
-                "`project-id show` verb to inspect the detected identity, or "
-                "write an operator-chosen canonical id to %r.",
-                source,
-                str(declared_common_dir / "pact-project-id"),
+        live_root = declared_main_root or declared_root or Path(declared_dir)
+        if declared_main_root is None and declared_root is not None:
+            # A `.git`-MARKED BUT UNANSWERABLE declared directory declines for
+            # the same reason as the git rung; a non-git declared path has no
+            # marker and keeps the designed basename.
+            guarded = _root_guard(
+                declared_root, declared_common_dir, source, label=source,
+                root=live_root if declared_common_dir is None else None,
             )
-            return None, source, None, None, None, {
-                "source": source,
-                "reason": "gitfile_redirect",
-                "override_path": (
-                    str(declared_common_dir / "pact-project-id")
-                    if declared_common_dir is not None else None
-                ),
-            }
+            if guarded is not None:
+                return guarded
 
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
         # fire AND the declared path does not resolve to an existing target.
@@ -1530,131 +1607,84 @@ class PACTMemory:
                 )
             except (OSError, RuntimeError, ValueError):
                 recorded_root = None
-            if recorded_root is not None:
-                recorded_common_dir = main_repo_common_dir(str(recorded_root))
-                if recorded_common_dir is None and _unanswerable_repository(
-                    recorded_root
-                ) is not None:
-                    # Same rule again: a `.git` marker with no git answer is a
-                    # broken repository, not an umbrella folder.
-                    logger.warning(
-                        "the recorded main checkout %r for the directory "
-                        "declared via %s carries a `.git` marker but git could "
-                        "not answer for it, so no project id was derived.",
-                        str(recorded_root),
-                        source,
-                    )
-                    return None, "worktree identity record", None, recorded_root, None, {
-                        "source": "worktree identity record",
-                        "reason": "broken_git_marker",
-                        "override_path": (
-                            str(recorded_common_dir / "pact-project-id")
-                            if recorded_common_dir is not None else None
-                        ),
-                    }
-                legacy_name = PACTMemory._legacy_project_name(
-                    recorded_common_dir, recorded_root
+            if recorded_root is None:
+                return _decline(
+                    source,
+                    "declaration_unresolved",
+                    label=source,
+                    detail=(
+                        f"declared via {source}: {declared_dir!r} does not exist "
+                        "and no verified worktree identity record names it; no "
+                        "name was derived from the path"
+                    ),
                 )
-                identity = detect_id_for_root(
-                    recorded_root,
-                    recorded_common_dir,
-                    asked_root=Path(declared_dir),
+            recorded_label = "worktree identity record"
+            recorded_common_dir = main_repo_common_dir(str(recorded_root))
+            if recorded_common_dir is None and _unanswerable_repository(
+                recorded_root
+            ) is not None:
+                # Same rule again: a `.git` marker with no git answer is a
+                # broken repository, not an umbrella folder.
+                return _decline(
+                    recorded_label,
+                    "broken_git_marker",
+                    label=recorded_label,
+                    root=recorded_root,
+                    detail=(
+                        f"the recorded main checkout {str(recorded_root)!r} for "
+                        f"the directory declared via {source}"
+                    ),
                 )
-                PACTMemory._warn_override_ignored(identity)
-                if identity.project_id is not None:
-                    logger.debug(
-                        "project_id resolved from the worktree identity record "
-                        "for %r via %s: %s",
-                        declared_dir,
-                        source,
-                        identity.project_id,
-                    )
-                    return (
-                        identity.project_id,
-                        _disclosed_source(identity, "worktree identity record"),
-                        legacy_name,
-                        recorded_root,
-                        identity.override_ignored,
-                        _reason_with_source(identity.decline_reason, source),
-                    )
-                _warn_declined(
-                    identity,
-                    recorded_root,
-                    recorded_common_dir / "pact-project-id"
-                    if recorded_common_dir is not None else None,
-                )
-                return (
-                    None,
-                    "worktree identity record",
-                    legacy_name,
-                    recorded_root,
-                    identity.override_ignored,
-                    _reason_with_source(identity.decline_reason, source),
-                )
-            logger.warning(
-                "the directory declared via %s could not be resolved: %r "
-                "does not exist and no verified worktree identity record "
-                "names it. No name was derived from the path.",
-                source,
-                declared_dir,
+            # The record's own label is disclosed; a decline's record names the
+            # rung that asked, as it always has.
+            return PACTMemory._identity_at_root(
+                recorded_root,
+                recorded_common_dir,
+                asked_root=Path(declared_dir),
+                source=source,
+                label=recorded_label,
             )
-            return None, source, None, None, None, {
-                "source": source,
-                "reason": "declaration_unresolved",
-                "override_path": None,
-            }
-        live_root = declared_main_root or declared_root or Path(declared_dir)
-        # A DECLARED DIRECTORY THAT IS `.git`-MARKED BUT UNANSWERABLE BY GIT
-        # declines for the same reason as the git rung. A non-git declared path
-        # has no marker and keeps the designed basename.
-        if declared_common_dir is None and _unanswerable_repository(
-            live_root
-        ) is not None:
-            logger.warning(
-                "the directory declared via %s is inside a git work tree whose "
-                "repository git could not answer for, so no project id was "
-                "derived. Run the `project-id show` verb to inspect the "
-                "detected identity, or write an operator-chosen canonical id "
-                "to <git-common-dir>/pact-project-id.",
-                source,
-            )
-            return None, source, None, live_root, None, {
-                "source": source,
-                "reason": "broken_git_marker",
-                "override_path": None,
-            }
-        legacy_name = PACTMemory._legacy_project_name(declared_common_dir, live_root)
-        # A non-git declared path has no common dir, so `detect_id_for_root`
-        # returns the designed basename without shelling to git.
-        identity = detect_id_for_root(
-            live_root, declared_common_dir, asked_root=Path(declared_dir)
+        return PACTMemory._identity_at_root(
+            live_root, declared_common_dir, asked_root=Path(declared_dir),
+            source=source, label=source,
         )
+
+    @staticmethod
+    def _identity_at_root(
+        root: Path,
+        common_dir: Optional[Path],
+        *,
+        asked_root: Optional[Path],
+        source: str,
+        label: str,
+        decline_label: Optional[str] = None,
+    ) -> "_DetectedIdentity":
+        """Detect the identity of one established root and wrap it as a record.
+
+        `label` is the disclosed source when an id is found (an override pin
+        discloses `override file` instead); `decline_label` is the disclosed
+        source when the root declines (defaults to `label`).
+        """
+        legacy_name = PACTMemory._legacy_project_name(common_dir, root)
+        identity = detect_id_for_root(root, common_dir, asked_root=asked_root)
         PACTMemory._warn_override_ignored(identity)
         if identity.project_id is not None:
             logger.debug(
                 "project_id detected from %s: %s", source, identity.project_id
             )
-            return (
-                identity.project_id,
-                _disclosed_source(identity, source),
-                legacy_name,
-                live_root,
-                identity.override_ignored,
-                _reason_with_source(identity.decline_reason, source),
+            return _DetectedIdentity(
+                project_id=identity.project_id,
+                source=_disclosed_source(identity, label),
+                legacy_basename=legacy_name,
+                override_ignored=identity.override_ignored,
+                identity_root=root,
             )
-        _warn_declined(
+        return _decline_detected(
             identity,
-            live_root,
-            declared_common_dir / "pact-project-id"
-            if declared_common_dir is not None else None,
-        )
-        return (
-            None,
             source,
-            legacy_name,
-            live_root,
-            identity.override_ignored,
-            _reason_with_source(identity.decline_reason, source),
+            label=decline_label or label,
+            root=root,
+            legacy=legacy_name,
         )
 
     @staticmethod
@@ -1683,25 +1713,18 @@ class PACTMemory:
         # session record.
         declined_reason: Optional[dict] = None
         # THE ROOT A DECLINED DECLARATION NAMED, carried so the folder-name
-        # fallback (`_detect_project_basename`) derives from the winning
-        # rung's location rather than the process cwd. First non-None wins
-        # for the same reason the reason does.
+        # fallback derives from the winning rung's location rather than the
+        # process cwd. First non-None wins for the same reason.
         declined_root: Optional[Path] = None
 
         # Strategy 1: Environment variable (original behavior)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            name, label, legacy, root, ignored, decline_reason = (
-                PACTMemory._declared_dir_identity(
-                    project_dir, "CLAUDE_PROJECT_DIR"
-                )
-            )
-            if name:
-                return _DetectedIdentity(
-                    name, label, legacy, ignored, root, decline_reason
-                )
-            declined_reason = declined_reason or decline_reason
-            declined_root = declined_root or root
+            detected = PACTMemory._declared_dir_identity(project_dir, "CLAUDE_PROJECT_DIR")
+            if detected.project_id:
+                return detected
+            declined_reason = declined_reason or detected.decline_reason
+            declined_root = declined_root or detected.identity_root
             declined_declaration = True
 
         # Strategy 1.5: session record (inert under pytest — the discovery
@@ -1709,17 +1732,11 @@ class PACTMemory:
         # no record leg to stay equivalent here).
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            name, label, legacy, root, ignored, decline_reason = (
-                PACTMemory._declared_dir_identity(
-                    record_dir, "session record"
-                )
-            )
-            if name:
-                return _DetectedIdentity(
-                    name, label, legacy, ignored, root, decline_reason
-                )
-            declined_reason = declined_reason or decline_reason
-            declined_root = declined_root or root
+            detected = PACTMemory._declared_dir_identity(record_dir, "session record")
+            if detected.project_id:
+                return detected
+            declined_reason = declined_reason or detected.decline_reason
+            declined_root = declined_root or detected.identity_root
             declined_declaration = True
 
         # Strategy 2: Git repository root (worktree-safe)
@@ -1729,78 +1746,44 @@ class PACTMemory:
             if repo_root is None:
                 # A bare repository has no working tree, so it has no root to
                 # name. Decline rather than inventing a directory.
-                logger.warning(
-                    "the process's repository has no working tree (a bare "
-                    "repository, or git cannot describe one), so no project "
-                    "id was derived from it."
+                return _decline(
+                    "git root",
+                    "no_working_tree",
+                    detail=(
+                        "the process's repository is bare, or git cannot "
+                        "describe its working tree"
+                    ),
                 )
-                return _DetectedIdentity(
-                    None, "unresolved", None, None, None,
-                    {"source": "git root", "reason": "no_working_tree",
-                     "override_path": None},
-                )
-            legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, repo_root)
-            identity = detect_id_for_root(
-                repo_root, cwd_common_dir, asked_root=_cwd_or_none()
+            detected = PACTMemory._identity_at_root(
+                repo_root,
+                cwd_common_dir,
+                asked_root=_cwd_or_none(),
+                source="git root",
+                label="git root",
+                decline_label="unresolved",
             )
-            PACTMemory._warn_override_ignored(identity)
-            if identity.project_id is not None:
-                # THE DISCLOSURE DECISION LIVES IN ONE PLACE. This rung used
-                # to hand-roll the same "a pin decided it, so say so" test as
-                # `_disclosed_source`, which is the shape that let a fifth
-                # render surface survive a review cycle while its four
-                # siblings stayed green.
-                source = _disclosed_source(
-                    identity,
-                    "origin remote" if identity.id_shape == "canonical" else "git root",
-                )
-                logger.debug(
-                    "project_id detected from git root (%s): %s",
-                    source,
-                    identity.project_id,
-                )
-                return _DetectedIdentity(
-                    identity.project_id,
-                    source,
-                    legacy_name,
-                    identity.override_ignored,
-                    repo_root,
-                    _reason_with_source(identity.decline_reason, "git root"),
-                )
-            if identity.source == "declined":
-                # A REAL remote that cannot be represented. Falling through to
-                # a basename would file this project under a different bucket
-                # from the one its remote names, which is the defect this
-                # change exists to remove.
-                _warn_declined(
-                    identity, repo_root, cwd_common_dir / "pact-project-id"
-                )
-                return _DetectedIdentity(
-                    None,
-                    "unresolved",
-                    legacy_name,
-                    identity.override_ignored,
-                    repo_root,
-                    _reason_with_source(identity.decline_reason, "git root"),
-                )
+            if detected.project_id is not None:
+                # THE DISCLOSURE DECISION LIVES IN ONE PLACE: a canonical id
+                # discloses its remote, a pin discloses the override file,
+                # and anything else is the git root's folder name.
+                if detected.source == "git root" and is_canonical(detected.project_id):
+                    return detected._replace(source="origin remote")
+                return detected
+            # A REAL remote that cannot be represented. Falling through to a
+            # basename would file this project under a different bucket from
+            # the one its remote names, which is the defect this change
+            # exists to remove.
+            return detected
         # A `.git`-MARKED DIRECTORY WHERE GIT CANNOT ANSWER DECLINES. Falling
         # through to a folder name here files the project in a silently
-        # different bucket — the #1699 rule this change exists to enforce.
-        # git absent from PATH, a corrupted or partial `.git`, or a timeout all
-        # take this arm; a genuinely non-git umbrella has no marker and keeps
-        # its designed basename fallback.
+        # different bucket. git absent from PATH, a corrupted or partial
+        # `.git`, or a timeout all take this arm; a genuinely non-git umbrella
+        # has no marker and keeps its designed basename fallback.
         if _unanswerable_repository(_cwd_or_none()) is not None:
-            logger.warning(
-                "the working directory is inside a git work tree whose "
-                "repository git could not answer for, so no project id was "
-                "derived from it. Run the `project-id show` verb to inspect "
-                "the detected identity, or write an operator-chosen canonical "
-                "id to <git-common-dir>/pact-project-id."
-            )
-            return _DetectedIdentity(
-                None, "unresolved", None, None, None,
-                {"source": "git root", "reason": "broken_git_marker",
-                 "override_path": None},
+            return _decline(
+                "git root",
+                "broken_git_marker",
+                detail="the working directory is inside that work tree",
             )
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
@@ -1816,7 +1799,12 @@ class PACTMemory:
                 "so Strategy 3 is skipped and no project scope was derived."
             )
             return _DetectedIdentity(
-                None, "unresolved", None, None, declined_root, declined_reason
+                project_id=None,
+                source="unresolved",
+                legacy_basename=None,
+                override_ignored=None,
+                identity_root=declined_root,
+                decline_reason=declined_reason,
             )
 
         # Strategy 2.5: the USER-SCOPE setting. Reached only when NO
@@ -1842,11 +1830,11 @@ class PACTMemory:
                 else None
             )
             return _DetectedIdentity(
-                user_setting,
-                "user setting",
-                setting_root.name if setting_root is not None else None,
-                None,
-                setting_root,
+                project_id=user_setting,
+                source="user setting",
+                legacy_basename=setting_root.name if setting_root is not None else None,
+                override_ignored=None,
+                identity_root=setting_root,
             )
 
         # Strategy 3: Current working directory — walk UP to nearest project
@@ -1854,7 +1842,10 @@ class PACTMemory:
         try:
             cwd_start = _cwd_or_none()
             if cwd_start is None:
-                return _DetectedIdentity(None, "unresolved", None, None, None)
+                return _DetectedIdentity(
+                    project_id=None, source="unresolved", legacy_basename=None,
+                    override_ignored=None, identity_root=None,
+                )
             cwd_root = PACTMemory._find_project_root(cwd_start)
             cwd_name = cwd_root.name
             if cwd_name:
@@ -1870,73 +1861,32 @@ class PACTMemory:
                         cwd_root,
                         cwd_name,
                     )
-                    return _DetectedIdentity(cwd_name, "cwd", cwd_name, None, cwd_root)
+                    return _DetectedIdentity(
+                        project_id=cwd_name, source="cwd", legacy_basename=cwd_name,
+                        override_ignored=None, identity_root=cwd_root,
+                    )
                 cwd_common_dir = main_repo_common_dir(str(cwd_root))
-                if cwd_common_dir is None and _unanswerable_repository(
-                    cwd_root
-                ) is not None:
-                    # Same rule as the git rung: a marker without a git answer
-                    # DECLINES rather than basenaming the folder.
-                    logger.warning(
-                        "the project root %r carries a `.git` marker but git "
-                        "could not answer for it, so no project id was "
-                        "derived. Run the `project-id show` verb to inspect "
-                        "the detected identity, or write an operator-chosen "
-                        "canonical id to <git-common-dir>/pact-project-id.",
-                        str(cwd_root),
-                    )
-                    return _DetectedIdentity(
-                        None, "unresolved", None, None, cwd_root,
-                        {"source": "cwd", "reason": "broken_git_marker",
-                         "override_path": None},
-                    )
-                if _worktree_redirect(cwd_root, cwd_common_dir):
-                    # The forged worktree-admin shape. `main_repo_root` is not
-                    # called on this rung, so the check is repeated here.
-                    logger.warning(
-                        "the project root %r resolves to another repository's "
-                        "worktree admin dir but is not one of its listed "
-                        "worktrees, so no project id was derived from it.",
-                        str(cwd_root),
-                    )
-                    return _DetectedIdentity(
-                        None, "unresolved", None, None, cwd_root,
-                        {"source": "cwd", "reason": "gitfile_redirect",
-                         "override_path": (
-                             str(cwd_common_dir / "pact-project-id")
-                             if cwd_common_dir is not None else None
-                         )},
-                    )
-                legacy_name = PACTMemory._legacy_project_name(cwd_common_dir, cwd_root)
-                identity = detect_id_for_root(
-                    cwd_root, cwd_common_dir, asked_root=cwd_root
-                )
-                PACTMemory._warn_override_ignored(identity)
-                if identity.project_id is not None:
-                    logger.debug(
-                        "project_id detected from cwd: %s", identity.project_id
-                    )
-                    return _DetectedIdentity(
-                        identity.project_id,
-                        _disclosed_source(identity, "cwd"),
-                        legacy_name,
-                        identity.override_ignored,
-                        cwd_root,
-                    )
-                _warn_declined(
-                    identity,
+                # The same guards as the declared rungs: a marker without a
+                # git answer, and the forged worktree-admin shape
+                # (`main_repo_root` is not called on this rung).
+                guarded = _root_guard(cwd_root, cwd_common_dir, "cwd", root=cwd_root)
+                if guarded is not None:
+                    return guarded
+                return PACTMemory._identity_at_root(
                     cwd_root,
-                    cwd_common_dir / "pact-project-id"
-                    if cwd_common_dir is not None else None,
-                )
-                return _DetectedIdentity(
-                    None, "unresolved", legacy_name, identity.override_ignored, cwd_root,
-                    _reason_with_source(identity.decline_reason, "cwd"),
+                    cwd_common_dir,
+                    asked_root=cwd_root,
+                    source="cwd",
+                    label="cwd",
+                    decline_label="unresolved",
                 )
         except OSError:
             logger.debug("Failed to detect project_id from cwd")
 
-        return _DetectedIdentity(None, "unresolved", None, None, None)
+        return _DetectedIdentity(
+            project_id=None, source="unresolved", legacy_basename=None,
+            override_ignored=None, identity_root=None,
+        )
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:

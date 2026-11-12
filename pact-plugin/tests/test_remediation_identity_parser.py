@@ -559,3 +559,69 @@ class TestTheOverrideAcceptsCanonicalIdsOnly:
             "github.com/me/pinned", "canonical", "override file"
         )
         assert identity.override_ignored is None
+
+
+# ---------------------------------------------------------------------------
+# One decline record
+# ---------------------------------------------------------------------------
+
+DOCUMENTED_DECLINE_REASONS = {
+    "origin_unreadable",
+    "origin_unrepresentable",
+    "gitfile_redirect",
+    "broken_git_marker",
+    "no_working_tree",
+    "submodule_checkout",
+    "declaration_unresolved",
+}
+
+
+class TestOneDeclineRecord:
+    def test_the_reason_set_is_the_seven_documented_causes(self):
+        assert pi.DECLINE_REASONS == DOCUMENTED_DECLINE_REASONS
+
+    def test_the_record_has_exactly_three_keys(self):
+        assert pi.decline_record("submodule_checkout", "/r/.git/pact-project-id") == {
+            "source": None,
+            "reason": "submodule_checkout",
+            "override_path": "/r/.git/pact-project-id",
+        }
+        assert pi.decline_record("origin_unreadable", None, "cwd") == {
+            "source": "cwd", "reason": "origin_unreadable", "override_path": None,
+        }
+
+    @pytest.mark.parametrize("reason", ["repository_chosen_name", "", "Gitfile_Redirect"])
+    def test_an_unknown_reason_is_refused(self, reason):
+        with pytest.raises(ValueError):
+            pi.decline_record(reason, None)
+
+    def test_no_decline_dict_is_built_outside_the_record(self):
+        """Every dict literal carrying a `reason` key, other than the
+        `override_ignored` `{path, reason}` pair, must go through
+        `decline_record`, so its shape and its reason set cannot drift."""
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(pi))
+        builder = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "decline_record"
+        )
+        inside = {id(node) for node in ast.walk(builder)}
+        literals = [
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Dict) and id(node) not in inside
+            and any(isinstance(k, ast.Constant) and k.value == "reason" for k in node.keys)
+            and not any(isinstance(k, ast.Constant) and k.value == "path" for k in node.keys)
+        ]
+        assert literals == []
+
+    def test_a_real_decline_is_built_by_the_record(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo", remote="https://host/owner/re po")
+
+        identity = pi.detect_id_for_root(repo, common_dir(repo))
+
+        assert identity.decline_reason == pi.decline_record(
+            "origin_unrepresentable", str(common_dir(repo) / "pact-project-id")
+        )
