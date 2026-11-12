@@ -506,8 +506,148 @@ class TestGitEnvBoolMatchesGit:
 
 
 # ---------------------------------------------------------------------------
-# project-id show: repo_root must BE the identity root
+# Cold re-check: deleted cwd, submodule-admin redirect, cache-key identity root
 # ---------------------------------------------------------------------------
+
+class TestDeletedCwdDoesNotRaise:
+    def test_the_user_setting_rung_survives_a_deleted_cwd(self, tmp_path, monkeypatch):
+        """Catches `Path.cwd()` raising FileNotFoundError at construction.
+
+        The user-setting rung is reachable with a deleted cwd: no declaration,
+        no repository, and the process's directory has been removed.
+        """
+        memory_dir = tmp_path / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+
+        import scripts.memory_api as memory_api
+
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+
+        previous = os.getcwd()
+        os.chdir(doomed)
+        try:
+            os.rmdir(doomed)
+            memory = memory_api.PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        finally:
+            os.chdir(previous)
+
+        assert memory.project_id == "user.example.com/me/pinned"
+        assert memory._legacy_project_basename is None
+        assert memory._project_identity_root is None
+
+
+class TestSubmoduleAdminRedirect:
+    def _submodule(self, tmp_path):
+        src = _repo(tmp_path / "src", "https://github.com/owner/subsrc")
+        superrepo = _repo(tmp_path / "super", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(src), "submod"],
+            check=True, capture_output=True,
+        )
+        return superrepo, superrepo / "submod", superrepo / ".git" / "modules" / "submod"
+
+    def test_a_genuine_submodule_is_not_a_redirect(self, tmp_path):
+        superrepo, checkout, _admin = self._submodule(tmp_path)
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert pi._admin_dir_names_another_checkout(
+            superrepo / ".git" / "modules" / "submod", checkout
+        ) is False
+
+    def test_a_separate_git_dir_checkout_is_not_a_redirect(self, tmp_path):
+        """POSITIVE CONTROL for the core.worktree discriminator: an external
+        store has no `core.worktree` recorded, so there is nothing to
+        contradict and the layout must resolve normally."""
+        store = tmp_path / "store" / "ext.git"
+        store.parent.mkdir()
+        checkout = tmp_path / "sep"
+        subprocess.run(
+            ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout), "remote", "add", "origin",
+             "https://github.com/owner/sep"],
+            check=True,
+        )
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        identity = pi.detect_id_for_root(checkout, store.resolve())
+        assert identity.project_id == "github.com/owner/sep"
+        assert identity.source == "origin remote"
+
+    def test_a_gitfile_pointing_at_a_submodule_admin_dir_declines(self, tmp_path):
+        """Catches a pointer at `<other>/.git/modules/<name>`: its git dir
+        EQUALS its common dir, so the listing check cannot see it and the
+        basename is `<name>`, not `.git`."""
+        superrepo, checkout, admin = self._submodule(tmp_path)
+        forged = tmp_path / "forged-sub"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        identity = pi.detect_id_for_root(forged, admin.resolve())
+        assert identity.project_id is None
+        assert identity.source == "declined"
+
+
+class TestReadScopeCacheKeyIncludesTheIdentityRoot:
+    def test_two_roots_with_the_same_scope_do_not_share_a_verdict(self, tmp_path):
+        """Catches a cache key without the identity root: the plausibility
+        verdict is computed AGAINST that root, so two same-named checkouts of
+        one repository would serve each other's include/exclude decision."""
+        import scripts.memory_api as memory_api
+        from scripts.database import create_memory, db_connection
+        from scripts.graph import track_file
+
+        # Two checkouts with the SAME folder name and the SAME origin, so the
+        # canonical scope and the legacy basename are identical for both.
+        left = _repo(tmp_path / "left" / "PACT-prompt", "https://github.com/o/PACT-prompt")
+        right = _repo(tmp_path / "right" / "PACT-prompt", "https://github.com/o/PACT-prompt")
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+
+        with db_connection(str(store)) as conn:
+            create_memory(conn, {"project_id": "PACT-prompt", "context": "legacy"})
+            track_file(conn, str(left / "src" / "x.py"), "PACT-prompt")
+
+        # CLEARED ONCE, NEVER BETWEEN THE TWO CALLS: a per-call clear would
+        # make this arm pass even with the identity root missing from the key,
+        # because the second call would recompute instead of hitting.
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory_api._EXCLUSION_WARNED.clear()
+
+        def verdict(checkout):
+            memory = memory_api.PACTMemory(
+                project_id="github.com/o/PACT-prompt", db_path=store
+            )
+            # `project_id` supplied means no detection; pin the root by hand,
+            # which is exactly the input under test.
+            memory._project_identity_root = checkout
+            memory._legacy_project_basename = "PACT-prompt"
+            return memory._read_project_scopes()
+
+        # Warm the cache from the FIRST root, then ask with the second.
+        assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
+        # The identity root is a KEY COMPONENT, not merely used in the verdict:
+        # asserted directly so the arm does not depend on which entry survives.
+        assert any(
+            str(left.resolve()) in key for key in memory_api._LEGACY_SCOPE_CACHE
+        ), memory_api._LEGACY_SCOPE_CACHE
+        assert verdict(right) == ("github.com/o/PACT-prompt",)
+        # SAME-ROOT CONTROL: asking again with the first root must include,
+        # so the exclusion above is the ROOT's verdict and not "the second
+        # call always excludes".
+        assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
+
 
 class TestProjectIdShowRoots:
     def test_repo_root_is_the_identity_root_and_the_process_root_is_named(

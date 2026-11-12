@@ -1376,7 +1376,15 @@ class PACTMemory:
             # the backlog writer refuse to write at all. `_find_project_root`
             # falls back to the cwd itself, which is exactly the value the
             # pre-change resolver produced for this location.
-            setting_root = PACTMemory._find_project_root(Path.cwd())
+            # A DELETED CWD MUST NOT CRASH CONSTRUCTION. `Path.cwd()` raises
+            # FileNotFoundError once the directory is gone, and this rung is
+            # reachable in exactly that state (no declaration, no repository).
+            setting_start = _cwd_or_none()
+            setting_root = (
+                PACTMemory._find_project_root(setting_start)
+                if setting_start is not None
+                else None
+            )
             return _DetectedIdentity(
                 user_setting,
                 "user setting",

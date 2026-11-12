@@ -580,6 +580,47 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     return value
 
 
+def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool:
+    """Whether a SUBMODULE admin dir records a checkout other than `asked_root`.
+
+    A `.git` FILE pointing at `<other>/.git/modules/<name>` makes git report
+    that submodule's git dir and common dir, which are EQUAL — so the
+    linked-worktree listing check cannot see the redirect, and the target's
+    basename is `<name>`, not `.git`, so the direct predicate cannot either.
+    A genuine submodule's admin dir records where its checkout actually is in
+    `core.worktree`, relative to the admin dir; a forged pointer names a
+    directory that is not that checkout.
+
+    MEASURED: a genuine submodule's `core.worktree` is `../../../submod`,
+    resolving to the submodule checkout the caller is standing in; a forged
+    pointer's resolves to somebody else's checkout. A bare or unset
+    `core.worktree` answers False — nothing to contradict the pointer.
+    """
+    try:
+        from shared.project_scope import git_env_without_location
+
+        result = subprocess.run(
+            ["git", "--git-dir", str(admin_dir), "config", "--get", "core.worktree"],
+            capture_output=True,
+            text=False,
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return False
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    recorded = Path(os.fsdecode(result.stdout).strip())
+    if not recorded.is_absolute():
+        recorded = admin_dir / recorded
+    try:
+        recorded = recorded.resolve()
+        asked = Path(asked_root).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return recorded != asked
+
+
 def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     """Whether `<root>/.git` is a FILE redirecting at another repo's git dir.
 
@@ -624,7 +665,12 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
             resolved = resolved.resolve()
         except (OSError, RuntimeError):
             return False
-        return resolved.name == ".git"
+        if resolved.name == ".git":
+            return True
+        # `<other>/.git/modules/<name>`: the submodule-admin redirect, whose
+        # git dir EQUALS its common dir, so only the recorded checkout can
+        # tell a genuine submodule from a pointer at somebody else's.
+        return _admin_dir_names_another_checkout(resolved, Path(root))
     return False
 
 
