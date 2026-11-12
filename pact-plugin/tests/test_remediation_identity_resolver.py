@@ -913,6 +913,65 @@ class TestTheUserSettingIsUserScoped:
         assert detected.source == "cwd"
 
 
+class TestOneDetectionAsksGitEachQuestionOnce:
+    """A detection, and a save after it, ask git each question once.
+
+    Catches identical git subprocesses repeated within one resolution: the
+    divergence check re-resolving the root the resolver just resolved, and
+    the worktree check re-asking for answers its caller already holds. A
+    `-C` naming the working directory is the same question as no `-C`.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch):
+        import os
+        import subprocess
+
+        calls = []
+        real = subprocess.run
+
+        def recording(argv, *args, **kwargs):
+            normalised = list(argv)
+            if normalised[:1] == ["git"] and normalised[1:2] == ["-C"]:
+                try:
+                    if os.path.realpath(normalised[2]) == os.path.realpath(os.getcwd()):
+                        normalised = ["git"] + normalised[3:]
+                except OSError:
+                    pass
+            if normalised[:1] == ["git"]:
+                calls.append(tuple(normalised))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", recording)
+        return calls
+
+    @staticmethod
+    def _repeats(calls):
+        from collections import Counter
+
+        return {argv: n for argv, n in Counter(calls).items() if n > 1}
+
+    def test_a_linked_worktree_detection(self, identity_env, monkeypatch):
+        main = make_repo(identity_env / "main", remote=REMOTE)
+        worktree = make_worktree(main, identity_env / "wt")
+        monkeypatch.chdir(worktree)
+        calls = self._spy(monkeypatch)
+        assert PACTMemory._detect_project_identity_with_legacy().project_id == CANONICAL
+        assert calls and self._repeats(calls) == {}
+
+    def test_a_save_from_inside_the_repository(self, identity_env, monkeypatch):
+        from unittest.mock import patch
+
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        calls = self._spy(monkeypatch)
+        with patch("scripts.memory_api._ensure_ready"):
+            memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+            memory.save({"context": "x"}, sync_to_claude=False)
+        assert calls and self._repeats(calls) == {}
+
+
 class TestACeilingStartDirectoryIsExamined:
     """A broken `.git` marker AT a ceiling start directory still declines.
 

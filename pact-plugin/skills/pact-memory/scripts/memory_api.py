@@ -1266,7 +1266,10 @@ def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> Lis
     return list(dict.fromkeys(roots))
 
 
-def _worktree_redirect(asked_root, common_dir) -> bool:
+def _worktree_redirect(
+    asked_root, common_dir, *, git_dir: Optional[Path] = None,
+    toplevel: Optional[Path] = None,
+) -> bool:
     """Whether the linked-worktree shape is NOT backed by git's listing.
 
     A `.git` FILE naming another repository's WORKTREE ADMIN dir makes every
@@ -1281,17 +1284,21 @@ def _worktree_redirect(asked_root, common_dir) -> bool:
     a `--separate-git-dir` checkout report the same directory as both, and
     `worktree list` there reports the GIT DIR rather than the checkout — they
     would fail this test (measured). They never reach it.
+
+    `git_dir` and `toplevel`, when the caller already holds git's answers
+    for `asked_root`, are used instead of asking git again.
     """
     if asked_root is None or common_dir is None:
         return False
     try:
-        git_dir_raw = _git_rev_parse(str(asked_root), "--git-dir")
-        if git_dir_raw is None:
-            return False
-        git_dir = Path(git_dir_raw)
-        if not git_dir.is_absolute():
-            git_dir = Path(asked_root) / git_dir
-        git_dir = git_dir.resolve()
+        if git_dir is None:
+            git_dir_raw = _git_rev_parse(str(asked_root), "--git-dir")
+            if git_dir_raw is None:
+                return False
+            git_dir = Path(git_dir_raw)
+            if not git_dir.is_absolute():
+                git_dir = Path(asked_root) / git_dir
+        git_dir = Path(git_dir).resolve()
         common_path = Path(common_dir).resolve()
     except (OSError, RuntimeError, ValueError):
         return False
@@ -1303,11 +1310,13 @@ def _worktree_redirect(asked_root, common_dir) -> bool:
     listed = _listed_worktree_toplevels(None, git_dir=common_path)
     if listed is None:
         return False
-    toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
-    if toplevel_raw is None:
-        return False
+    if toplevel is None:
+        toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
+        if toplevel_raw is None:
+            return False
+        toplevel = Path(toplevel_raw)
     try:
-        toplevel = Path(toplevel_raw).resolve()
+        toplevel = Path(toplevel).resolve()
     except (OSError, RuntimeError):
         return False
     return toplevel not in listed
@@ -1442,7 +1451,9 @@ def main_repo_root(
                 # `gitfile_redirect` through its own guard, so a warning here
                 # would log the one cause twice.
                 asked = Path(start) if start is not None else Path.cwd()
-                if _worktree_redirect(asked, common_path):
+                if _worktree_redirect(
+                    asked, common_path, git_dir=git_dir, toplevel=Path(toplevel)
+                ):
                     return None
                 if main_git == common_path:
                     # LINKED WORKTREE of a main checkout: the main checkout
@@ -1585,6 +1596,7 @@ class PACTMemory:
             # A SUPPLIED id does not widen: there is no legacy candidate and
             # therefore no gate root to carry. PINNED, not coded around.
             self._project_identity_root = None
+            self._git_rung_root = None
             self._decline_reason = None
             self._legacy_suppressed = None
             self._legacy_suppressed_name = None
@@ -1602,6 +1614,14 @@ class PACTMemory:
             # in a declared-repo session those differ, and gating on the cwd
             # would exclude the declared repo's own legacy bucket.
             self._project_identity_root = detected.identity_root
+            # THE GIT RUNG RESOLVED FROM THE PROCESS'S OWN LOCATION, so its
+            # identity root IS the working directory's repository root: the
+            # divergence check reuses it instead of asking git again.
+            self._git_rung_root = (
+                detected.identity_root
+                if detected.source in ("origin remote", "git root")
+                else None
+            )
             # STRUCTURED DECLINE DISCLOSURE, carried from the same pass. None
             # on every resolution that produced an id; `{reason, override}`
             # when a rung refused a repository-chosen basename.
@@ -1668,7 +1688,9 @@ class PACTMemory:
         # per save: the working directory does not move under a live instance,
         # and the CLI builds a fresh instance per invocation anyway. `False`
         # means "not yet resolved" — None is a real answer (not in a repo).
-        self._cwd_repo_root: Any = False
+        self._cwd_repo_root: Any = (
+            self._git_rung_root if self._git_rung_root is not None else False
+        )
         # The working directory's canonical identity, cached beside the root
         # for the same reason: `_location_divergence_warning` runs on every
         # save and must not shell to git twice for one answer.
@@ -2883,6 +2905,11 @@ class PACTMemory:
         if root is None:
             self._cwd_repo_id = None
             return None
+        if self._project_identity_root is not None and root == self._project_identity_root:
+            # The resolver already derived this root's identity; asking git
+            # again would answer the same question twice.
+            self._cwd_repo_id = self._project_id
+            return self._cwd_repo_id
         # ASK FOR THIS ROOT'S common dir, not the process cwd's: `main_repo_root`
         # may have been resolved for a different start, and pairing a root with
         # another repository's common dir reads the wrong config. A path that
