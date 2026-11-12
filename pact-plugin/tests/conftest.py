@@ -89,9 +89,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-# The clock-shift and child-pytest censuses; tests/ is on sys.path from the
-# insert above.
+# The clock-shift and child-pytest censuses and the pytest-randomly seed gate;
+# tests/ is on sys.path from the insert above.
 import child_pytest_census  # noqa: E402
+import randomly_seed_gate  # noqa: E402
 from clock_shift import clock_shift_census  # noqa: E402
 
 # Direct-import helpers for the CLAUDE.md redirect fixture below; tests/ is
@@ -157,6 +158,9 @@ def pytest_configure(config):
     count, where a reviewer reading "N skipped" cannot tell an intentional
     environmental exclusion from a test quietly disabled to buy a green.
     """
+    # A loaded pytest-randomly must carry an explicit seed.
+    randomly_seed_gate.refuse_unseeded(config)
+
     config.addinivalue_line(
         "markers",
         "requires_embedding_backend: exercises the real pact-memory CLI "
