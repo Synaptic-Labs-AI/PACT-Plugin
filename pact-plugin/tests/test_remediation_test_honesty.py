@@ -8,6 +8,10 @@ remove while every other test stayed green:
   envelope assertion cannot see the warning channel);
 - the read-scope cache key includes the store's `-wal` sibling, so a commit
   that another connection left only in the WAL is still seen;
+- the same key stamps an empty `-wal` as an absent one, so the read that
+  creates the empty `-wal` does not make the next read decide again, while
+  a checkpoint that empties the `-wal`, and a write landing during a read,
+  still make the next read decide again;
 - `rekey_project` itself refuses a non-canonical target (the CLI checks first,
   so no CLI arm reaches the library refusal);
 - the test-data copies of the working-memory comment equal the shipped
@@ -165,6 +169,136 @@ class TestTheReadScopeCacheSeesAWalOnlyCommit:
 
             assert sorted(m.id for m in memory.list(limit=10)) == ["c1", "l1"], (
                 "a commit that landed only in the -wal file was not seen"
+            )
+        finally:
+            other.close()
+
+
+def _seed_canonical(store):
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        _insert_memory(conn, "c1", CANONICAL)
+        conn.commit()
+
+
+def _commit_verified_legacy_row(other, repo):
+    """Commit a VERIFIED legacy row (an absolute file row under the repo root)
+    through `other`, a separate connection whose autocheckpoint is off, so the
+    commit sits only in the `-wal` file."""
+    other.execute("PRAGMA wal_autocheckpoint=0")
+    _insert_memory(other, "l1", LEGACY)
+    other.execute(
+        "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+        ("f1", str(repo.resolve() / "src" / "a.py"), LEGACY),
+    )
+    other.commit()
+
+
+class TestTheReadScopeCacheServesTheSecondRead:
+    """The read's own read-only connection creates an EMPTY `-wal` beside a
+    store that had none. A key that told an absent `-wal` from an empty one
+    changed across the read it keyed, so the second read missed and re-ran
+    the whole membership decision (the bucket census and the evidence check).
+    An empty `-wal` holds no frames, so it stamps the same as an absent one;
+    a write still moves the key, and is never served from the cache."""
+
+    def _count_decisions(self, monkeypatch):
+        from scripts import database
+
+        decisions = []
+        real = database.project_bucket_counts
+
+        def counting(connection):
+            decisions.append(1)
+            return real(connection)
+
+        monkeypatch.setattr(database, "project_bucket_counts", counting)
+        return decisions
+
+    def test_repeated_reads_decide_the_scope_once(self, repo_env, monkeypatch):
+        """RED WHEN `_store_stat_key` stamps an empty `-wal` apart from an
+        absent one: the second read decides again."""
+        _repo, store = repo_env
+        _seed_canonical(store)
+        wal = Path(str(store) + "-wal")
+        # PRECONDITION, not the subject: the store starts with no `-wal`, so
+        # the first read is the one that creates it.
+        assert not wal.exists(), "the seeded store already has a -wal; the arm would not cross the transition"
+        memory = PACTMemory(session_id="s", db_path=store)
+        decisions = self._count_decisions(monkeypatch)
+        scopes = [memory._read_project_scopes() for _ in range(3)]
+        assert wal.exists() and wal.stat().st_size == 0, (
+            "the read did not leave an empty -wal; the arm would not exercise the empty stamp"
+        )
+        assert scopes == [(CANONICAL,)] * 3, scopes
+        assert len(decisions) == 1, f"3 reads decided the scope {len(decisions)} times"
+
+    def test_a_read_after_a_truncating_checkpoint_decides_again(self, repo_env, monkeypatch):
+        """A TRUNCATE checkpoint after a full backfill empties the `-wal`
+        while the main file's stamp stays where the backfill put it. The read
+        after it must miss (the `-wal` leg moved) and return the backfilled
+        rows. RED WHEN the `-wal` leg is dropped from the key: that read is
+        served from the cache instead of deciding again."""
+        repo, store = repo_env
+        _seed_canonical(store)
+        memory = PACTMemory(session_id="s", db_path=store)
+        decisions = self._count_decisions(monkeypatch)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        other = sqlite3.connect(str(store))
+        try:
+            _commit_verified_legacy_row(other, repo)
+            busy, frames, backfilled = other.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            assert busy == 0 and frames == backfilled > 0, (busy, frames, backfilled)
+            assert memory._read_project_scopes() == (CANONICAL, LEGACY)
+            main_before = store.stat()
+            assert other.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+            main_after = store.stat()
+            wal = Path(str(store) + "-wal")
+            # PRECONDITION, not the subject: the truncate emptied the `-wal`
+            # and left the main file's stamp alone (measured step 10).
+            assert wal.stat().st_size == 0
+            assert (main_after.st_mtime_ns, main_after.st_size) == (
+                main_before.st_mtime_ns, main_before.st_size,
+            ), "the truncate moved the main file; the arm would not isolate the -wal leg"
+            seen = len(decisions)
+            assert memory._read_project_scopes() == (CANONICAL, LEGACY), (
+                "the read after the truncate lost the backfilled rows"
+            )
+            assert len(decisions) == seen + 1, "the read after the truncate was served from the cache"
+        finally:
+            other.close()
+
+    def test_a_write_landing_during_the_read_is_not_served_from_the_cache(
+        self, repo_env, monkeypatch
+    ):
+        """RED WHEN the cache entry is keyed by a stamp taken AFTER the read:
+        a commit landing after the read counted the buckets is then filed
+        under a key that already includes it, and the next read is served the
+        scope decided without it."""
+        from scripts import database
+
+        repo, store = repo_env
+        _seed_canonical(store)
+        memory = PACTMemory(session_id="s", db_path=store)
+        other = sqlite3.connect(str(store))
+        try:
+            landed = []
+            real = database.project_bucket_counts
+
+            def counted_then_written(connection):
+                buckets = real(connection)
+                if not landed:
+                    # The read has counted the buckets; the write lands
+                    # before it finishes and stores its decision.
+                    _commit_verified_legacy_row(other, repo)
+                    landed.append(True)
+                return buckets
+
+            monkeypatch.setattr(database, "project_bucket_counts", counted_then_written)
+            assert memory._read_project_scopes() == (CANONICAL,)
+            assert landed, "the write was never injected; the arm measured nothing"
+            assert memory._read_project_scopes() == (CANONICAL, LEGACY), (
+                "a commit that landed during the read was served from the cache"
             )
         finally:
             other.close()

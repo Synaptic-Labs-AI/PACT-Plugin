@@ -1068,6 +1068,18 @@ def _store_stat_key(store: str):
     cache keyed on the main file alone would keep serving a stale legacy
     membership. `-shm` is deliberately not included — shared-memory churn
     would recompute on every call without any row having changed.
+
+    AN EMPTY `-wal` STAMPS THE SAME AS AN ABSENT ONE. A read-only open of a
+    store with no `-wal` creates an empty one, so a key that told the two
+    apart would change across the very read it keys, and the next read would
+    miss. An empty journal holds no frames: in both states the rows are the
+    main file's alone, and the main file's stamp is already in the key. A
+    checkpoint that empties the journal moves the `-wal` leg, so the next
+    read misses, and the rows it backfilled moved the main file's stamp.
+
+    THE STAMP'S LIMIT: a write to the main file that leaves its
+    `(mtime_ns, size)` unchanged is not seen. Every stamp-keyed read shares
+    that limit; normalising the empty `-wal` does not widen it.
     """
     try:
         main = os.stat(store)
@@ -1075,7 +1087,7 @@ def _store_stat_key(store: str):
         return None
     try:
         wal = os.stat(store + "-wal")
-        wal_key = (wal.st_mtime_ns, wal.st_size)
+        wal_key = (wal.st_mtime_ns, wal.st_size) if wal.st_size else None
     except OSError:
         wal_key = None
     return ((main.st_mtime_ns, main.st_size), wal_key)
@@ -2874,7 +2886,8 @@ class PACTMemory:
         membership after a rekey elsewhere, which is the silent-loss class
         this change exists to remove. `-shm` is deliberately EXCLUDED: it is
         shared-memory churn and would defeat the cache with spurious
-        recomputes. An in-process write clears the cache as well, so a save
+        recomputes. An empty `-wal` stamps as an absent one (see
+        `_store_stat_key`). An in-process write clears the cache as well, so a save
         that changes the bucket set is observed immediately.
         """
         self._legacy_scope_state = None
