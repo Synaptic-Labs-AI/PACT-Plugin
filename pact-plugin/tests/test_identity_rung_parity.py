@@ -45,7 +45,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from fixtures.identity_git import assert_outside_repository, make_repo, run_git
+from fixtures.identity_git import (
+    assert_outside_repository,
+    bindings,
+    import_aliases,
+    make_repo,
+    qualified_name,
+    run_git,
+)
 
 from scripts import memory_api
 from scripts import project_identity as pi
@@ -451,26 +458,58 @@ NO_IDENTITY_BOUND = {
 }
 
 
+def _callee(func, aliases: dict, scope_bindings: dict):
+    """The identity function a call's target names, or None.
+
+    Resolved through the shared scanner resolution: an import, an import-as,
+    a from-import and an attribute chain (`pi.detect_id_for_root`,
+    `from scripts.project_identity import detect_id_for_root as d`), and a
+    plain name assigned from one of those in the same scope (`r =
+    main_repo_root`). An attribute on a call result (`_memory_api().x`)
+    resolves by its attribute name. NOT SEEN: `getattr` with a string, `exec`
+    and `eval`, which no memory script uses to reach these functions.
+    """
+    targets = [func]
+    if isinstance(func, ast.Name) and func.id not in aliases:
+        targets += [
+            value for value in scope_bindings.get(func.id, ())
+            if isinstance(value, (ast.Name, ast.Attribute))
+        ]
+    for target in targets:
+        name = qualified_name(target, aliases)
+        if name is None and isinstance(target, ast.Attribute):
+            name = target.attr
+        leaf = name.rsplit(".", 1)[-1] if name else None
+        if leaf in IDENTITY_FUNCTIONS:
+            return leaf
+    return None
+
+
 def _identity_call_sites() -> set:
     """{(file, enclosing function, callee)} for every call of an identity
-    function in the memory scripts and the backlog writer."""
+    function in the memory scripts and the backlog writer, module-level code
+    included (`<module>`)."""
     sites = set()
     for path in _identity_caller_files():
         rel = path.relative_to(PLUGIN_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = import_aliases(tree)
+        module_bindings = bindings(tree, top_level_only=True)
 
-        def visit(node, function):
+        def visit(node, function, scope_bindings):
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    visit(child, child.name)
+                    scoped = dict(module_bindings)
+                    scoped.update(bindings(child))
+                    visit(child, child.name, scoped)
                     continue
                 if isinstance(child, ast.Call):
-                    func = child.func
-                    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                    if name in IDENTITY_FUNCTIONS:
-                        sites.add((rel, function, name))
-                visit(child, function)
+                    callee = _callee(child.func, aliases, scope_bindings)
+                    if callee is not None:
+                        sites.add((rel, function, callee))
+                visit(child, function, scope_bindings)
 
-        visit(ast.parse(path.read_text(encoding="utf-8")), "<module>")
+        visit(tree, "<module>", module_bindings)
     return sites
 
 
