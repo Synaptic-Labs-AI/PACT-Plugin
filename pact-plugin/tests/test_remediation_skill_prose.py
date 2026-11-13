@@ -1453,148 +1453,244 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
 # --- every route entry condition is a route ---------------------------------
 # The resolver chooses its route from a small set of inputs: an environment
 # variable it reads, a record or setting a helper returns, the working
-# directory. Each one is read here from the code of the detection path, and
-# each must be driven by a route in `identity_routes.ROUTES` (so the matrices
-# above measure it) or be listed in NOT_A_ROUTE with the reason it selects no
-# route. A route added through an EXISTING rung (a new variable handed to the
-# declared rung) adds no rung call site, so only this census sees it.
+# directory. Each one is read here from the code of the detection path,
+# helper modules included, and each must be driven by a route in
+# `identity_routes.ROUTES` (so the matrices above measure it) or be listed in
+# NOT_A_ROUTE with the reason no route needs to set it. A route added through
+# an EXISTING rung (a new variable handed to the declared rung) adds no rung
+# call site, so only this census sees it.
 
 DETECTION_MODULES = ("memory_api", "project_identity")
 DETECTION_ENTRY = ("memory_api", "PACTMemory._detect_project_identity_with_legacy")
+# Where a module the detection path imports is looked up, by dotted name.
+_PROJECT_ROOTS = (SCRIPTS, PLUGIN_ROOT / "hooks")
+# Mapping methods whose first argument names the variable they read.
+_ENV_KEY_METHODS = frozenset({"get", "setdefault", "pop", "__getitem__", "__contains__"})
 
 
-def _detection_defs() -> tuple:
-    """({(module, qualified def): node}, {module: import aliases})."""
-    import ast
+class _DetectionGraph:
+    """The project modules the detection path reaches, parsed on demand: each
+    module's top-level functions and methods, its import aliases and its
+    string constants."""
 
-    from fixtures.identity_git import import_aliases
+    def __init__(self):
+        self.defs, self.aliases, self.constants, self._files = {}, {}, {}, {}
 
-    defs, aliases = {}, {}
-    for module in DETECTION_MODULES:
-        tree = ast.parse((SCRIPTS / f"{module}.py").read_text(encoding="utf-8"))
-        aliases[module] = import_aliases(tree)
+    def load(self, module: str) -> bool:
+        import ast
+
+        from fixtures.identity_git import import_aliases
+
+        if module in self._files:
+            return self._files[module] is not None
+        name = module.lstrip(".")
+        path = next(
+            (root / (name.replace(".", "/") + ".py") for root in _PROJECT_ROOTS
+             if (root / (name.replace(".", "/") + ".py")).is_file()),
+            None,
+        )
+        self._files[module] = path
+        if path is None:
+            return False
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        self.aliases[module] = import_aliases(tree)
+        constants = {}
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                defs[(module, node.name)] = node
+                self.defs[(module, node.name)] = node
             elif isinstance(node, ast.ClassDef):
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        defs[(module, f"{node.name}.{item.name}")] = item
-    return defs, aliases
+                        self.defs[(module, f"{node.name}.{item.name}")] = item
+            elif (
+                isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = node.value.value
+        self.constants[module] = constants
+        return True
+
+    def follow(self, qualified: str, depth: int = 0):
+        """The (module, def) a dotted name refers to, through re-exports."""
+        owner, _, name = qualified.rpartition(".")
+        if not owner or depth > 8 or not self.load(owner):
+            return None
+        if (owner, name) in self.defs:
+            return owner, name
+        again = self.aliases[owner].get(name)
+        return self.follow(again, depth + 1) if again else None
+
+    def target(self, call, module: str):
+        """The (module, def) a call reaches in a project module: a function by
+        name or through an import (re-exports followed), or a method through
+        its class, `self` or `cls`. None for anything else."""
+        import ast
+
+        func = call.func
+        if isinstance(func, ast.Name):
+            if (module, func.id) in self.defs:
+                return module, func.id
+            return self.follow(self.aliases[module].get(func.id, ""))
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            base = func.value.id
+            for (owner, qualified) in list(self.defs):
+                cls, _, method = qualified.partition(".")
+                if owner == module and method == func.attr and base in (cls, "self", "cls"):
+                    return owner, qualified
+            other = self.aliases[module].get(base, "")
+            if other:
+                return self.follow(f"{other}.{func.attr}")
+        return None
 
 
-def _local_target(call, module: str, defs: dict, aliases: dict):
-    """The (module, def) a call reaches inside the detection modules: a
-    module-level function by name or through an import of the other module,
-    or a method through its class, `self` or `cls`. None otherwise."""
+def _env_reads(node, module: str, function: str, graph: "_DetectionGraph"):
+    """Yield (key node or None, description) for every use of the process
+    environment in one function: `os.environ` in any import form, or a
+    `getenv` call. The key node is the variable's name expression when the
+    use names one (a lookup method, a subscript, an `in` test, `getenv`);
+    None for any other use, such as copying or iterating the whole mapping."""
     import ast
-
-    func = call.func
-    if isinstance(func, ast.Name):
-        if (module, func.id) in defs:
-            return module, func.id
-        owner, _, name = aliases[module].get(func.id, "").rpartition(".")
-        other = owner.rpartition(".")[2]
-        return (other, name) if (other, name) in defs else None
-    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        base = func.value.id
-        for (owner, qualified) in defs:
-            cls, _, method = qualified.partition(".")
-            if owner == module and method == func.attr and base in (cls, "self", "cls"):
-                return owner, qualified
-        other = aliases[module].get(base, base).rpartition(".")[2]
-        if (other, func.attr) in defs:
-            return other, func.attr
-    return None
-
-
-def route_entry_conditions() -> dict:
-    """{condition: sorted sites} for every input the detection path reads,
-    from `_detect_project_identity_with_legacy` through every function the two
-    detection modules define that it calls, directly or not.
-
-    A condition is `("env", KEY)` for `os.environ.get`, `os.getenv` or
-    `os.environ[...]` (imported in any form) with a constant key, or with a
-    parameter resolved from the constant arguments at its call sites;
-    `("cwd",)` and `("home",)` for the process directory and the home
-    directory; and `("call", NAME)` for every call of a function defined in
-    another project module (not the standard library). A key that cannot be
-    resolved is `("env", "<unresolved: ...>")`, which nothing classifies, so
-    it fails closed.
-
-    NOT COVERED: a call through a variable holding a function, `getattr` or
-    `exec`, and what a reader reads inside its own module (the reader call is
-    the condition).
-    """
-    import ast
-    import sys
 
     from fixtures.identity_git import qualified_name
 
-    defs, aliases = _detection_defs()
-    reached, pending = set(), [DETECTION_ENTRY]
+    aliases = graph.aliases[module]
+    parents = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and (qualified_name(sub.func, aliases) or "") == "os.getenv":
+            yield (sub.args[0] if sub.args else None), ast.unparse(sub)
+            continue
+        if not (
+            isinstance(sub, (ast.Name, ast.Attribute))
+            and qualified_name(sub, aliases) == "os.environ"
+        ):
+            continue
+        parent = parents.get(id(sub))
+        key = None
+        if isinstance(parent, ast.Attribute) and parent.attr in _ENV_KEY_METHODS:
+            call = parents.get(id(parent))
+            if isinstance(call, ast.Call) and call.func is parent and call.args:
+                key = call.args[0]
+        elif isinstance(parent, ast.Subscript) and parent.value is sub:
+            key = parent.slice
+        elif isinstance(parent, ast.Compare) and sub in parent.comparators and all(
+            isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops
+        ):
+            key = parent.left
+        yield key, ast.unparse(parent if parent is not None else sub)
+
+
+def route_inputs() -> tuple:
+    """({condition: sorted sites}, {call condition: conditions read inside
+    it}) for every input the detection path reads, from
+    `_detect_project_identity_with_legacy` through every function it calls in
+    the project's own modules (the memory scripts and `hooks/`), helpers and
+    re-exports included.
+
+    A condition is `("env", KEY)` for an environment read whose variable is a
+    constant, a module constant, or a parameter resolved from the constant
+    arguments at its call sites; `("cwd",)` and `("home",)` for the process
+    and home directories; and `("call", NAME)` for every call from the two
+    detection modules into another project module, NAME as spelled at the
+    call. ANY other use of the environment (a key that cannot be resolved, a
+    copy, an iteration, the mapping passed along) is `("env", "<...>")`
+    naming the function and the expression, which nothing classifies unless
+    NOT_A_ROUTE names it, so the census fails closed.
+
+    NOT COVERED: a call through a variable holding a function, `getattr` or
+    `exec`; modules outside the plugin (the standard library, third-party
+    packages); and an environment read reached only through such a call.
+    """
+    import ast
+
+    from fixtures.identity_git import qualified_name
+
+    graph = _DetectionGraph()
+    for module in DETECTION_MODULES:
+        graph.load(module)
+    reached, pending, outward = set(), [(DETECTION_ENTRY, None)], {}
+    via = {}
     while pending:
-        key = pending.pop()
+        key, entry = pending.pop()
+        via.setdefault(key, set())
+        if entry is not None:
+            via[key].add(entry)
         if key in reached:
             continue
         reached.add(key)
-        for node in ast.walk(defs[key]):
-            if isinstance(node, ast.Call):
-                target = _local_target(node, key[0], defs, aliases)
-                if target is not None:
-                    pending.append(target)
+        for node in ast.walk(graph.defs[key]):
+            if not isinstance(node, ast.Call):
+                continue
+            target = graph.target(node, key[0])
+            if target is None:
+                continue
+            here = entry
+            if key[0] in DETECTION_MODULES and target[0] not in DETECTION_MODULES:
+                spelled = (qualified_name(node.func, graph.aliases[key[0]]) or "").rpartition(".")[2]
+                here = ("call", spelled)
+                outward.setdefault(here, set()).add(f"{key[0]}.py:{node.lineno}")
+            pending.append((target, here))
 
     def params(node):
         return [arg.arg for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
 
-    found, parameter_keys = {}, {}
+    found, inside, parameter_keys = {}, {}, {}
+
+    def add(condition, site, key):
+        found.setdefault(condition, set()).add(site)
+        for entry in via.get(key, ()):
+            inside.setdefault(entry, set()).add(condition)
+
     for key in sorted(reached):
-        module, names = key[0], aliases[key[0]]
-        for node in ast.walk(defs[key]):
-            condition, read = None, None
-            if isinstance(node, ast.Subscript) and qualified_name(node.value, names) == "os.environ":
-                read = node.slice
-            elif isinstance(node, ast.Call):
-                called = qualified_name(node.func, names) or ""
-                if called in ("os.environ.get", "os.getenv") and node.args:
-                    read = node.args[0]
-                elif called in ("pathlib.Path.cwd", "Path.cwd", "os.getcwd"):
-                    condition = ("cwd",)
-                elif called in ("pathlib.Path.home", "Path.home", "os.path.expanduser"):
-                    condition = ("home",)
-                elif _local_target(node, module, defs, aliases) is None:
-                    head = node.func
-                    while isinstance(head, ast.Attribute):
-                        head = head.value
-                    origin = names.get(head.id, "") if isinstance(head, ast.Name) else ""
-                    if origin and origin.split(".")[0] not in sys.stdlib_module_names:
-                        condition = ("call", called.rpartition(".")[2])
-            if read is not None:
-                if isinstance(read, ast.Constant) and isinstance(read.value, str):
-                    condition = ("env", read.value)
-                elif isinstance(read, ast.Name) and read.id in params(defs[key]):
-                    parameter_keys[key] = params(defs[key]).index(read.id)
-                    continue
-                else:
-                    condition = ("env", f"<unresolved: {ast.unparse(read)}>")
-            if condition is not None:
-                found.setdefault(condition, set()).add(f"{module}.py:{node.lineno}")
-    # A helper reading the key it is handed: every call site in the path names it.
+        module, node = key[0], graph.defs[key]
+        names = graph.aliases[module]
+        site = f"{module}.py"
+        for read, shown in _env_reads(node, module, key[1], graph):
+            if isinstance(read, ast.Constant) and isinstance(read.value, str):
+                add(("env", read.value), f"{site}:{read.lineno}", key)
+            elif isinstance(read, ast.Name) and read.id in graph.constants[module]:
+                add(("env", graph.constants[module][read.id]), f"{site}:{read.lineno}", key)
+            elif isinstance(read, ast.Name) and read.id in params(node):
+                parameter_keys[key] = params(node).index(read.id)
+            else:
+                add(("env", f"<{module}.{key[1]}: {shown}>"), site, key)
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            called = qualified_name(sub.func, names) or ""
+            if called in ("pathlib.Path.cwd", "Path.cwd", "os.getcwd"):
+                add(("cwd",), f"{site}:{sub.lineno}", key)
+            elif called in ("pathlib.Path.home", "Path.home", "os.path.expanduser"):
+                add(("home",), f"{site}:{sub.lineno}", key)
     for key in sorted(reached):
-        for node in ast.walk(defs[key]):
+        for node in ast.walk(graph.defs[key]):
             if not isinstance(node, ast.Call):
                 continue
-            target = _local_target(node, key[0], defs, aliases)
+            target = graph.target(node, key[0])
             if target not in parameter_keys:
                 continue
             position = parameter_keys[target]
             argument = node.args[position] if len(node.args) > position else None
+            constants = graph.constants[key[0]]
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-                condition = ("env", argument.value)
+                add(("env", argument.value), f"{key[0]}.py:{node.lineno}", target)
+            elif isinstance(argument, ast.Name) and argument.id in constants:
+                add(("env", constants[argument.id]), f"{key[0]}.py:{node.lineno}", target)
             else:
-                condition = ("env", f"<unresolved: argument of {target[1]}>")
-            found.setdefault(condition, set()).add(f"{key[0]}.py:{node.lineno}")
-    return {condition: sorted(sites) for condition, sites in found.items()}
+                add(("env", f"<{target[0]}.{target[1]}: argument at {key[0]}.py:{node.lineno}>"),
+                    f"{key[0]}.py:{node.lineno}", target)
+    for condition, sites in outward.items():
+        found.setdefault(condition, set()).update(sites)
+    return {condition: sorted(sites) for condition, sites in found.items()}, inside
+
+
+def route_entry_conditions() -> dict:
+    """{condition: sorted sites}: the first half of `route_inputs`."""
+    return route_inputs()[0]
 
 
 class _RecordingMonkeyPatch(pytest.MonkeyPatch):
@@ -1649,20 +1745,46 @@ class TestEveryRouteEntryConditionIsARoute:
     """Every input that selects a resolver route is a route the matrices
     measure.
 
-    `route_entry_conditions` reads the inputs from the detection path's code;
-    `route_driven_conditions` measures what each route in
-    `identity_routes.ROUTES` sets. Every input must be set by some route or
-    be listed in NOT_A_ROUTE, and every route input must still be read. A
-    new route through any rung, a new reader of a record or setting, or a new
-    environment variable therefore reds an arm here until a route drives it
-    or an exclusion names it. A new rung call site is the rung-parity test's
-    census (every `_root_guard` and `_identity_at_root` call site must run).
+    `route_inputs` reads the inputs from the detection path's code, helper
+    modules included, and fails closed on any use of the environment it
+    cannot resolve to a variable; `route_driven_conditions` measures what
+    each route in `identity_routes.ROUTES` sets. A call into a helper counts
+    as driven when a route replaces it or sets an input read inside it.
+    Every input must be driven or be listed in NOT_A_ROUTE, and every route
+    input must still be read. A new route through any rung, a new reader of
+    a record or setting, or a new environment variable in any form therefore
+    reds an arm here until a route drives it or an exclusion names it. A new
+    rung call site is the rung-parity test's census (every `_root_guard` and
+    `_identity_at_root` call site must run).
     """
 
-    # Inputs the detection path reads that select no route.
+    # Inputs the detection path reads that no route sets, each with the reason
+    # the matrices do not need one to.
     NOT_A_ROUTE = {
         ("env", "GIT_DISCOVERY_ACROSS_FILESYSTEM"): (
-            "git's own discovery bound, honoured so the marker walk stops where git stops"
+            "selects the cwd-marker rung exactly as the driven GIT_CEILING_DIRECTORIES "
+            "does, so the cwd-marker routes measure that rung: both marker walks "
+            "(find_git_marker and project_scope._git_metadata_at_or_above) stop at a "
+            "parent on another filesystem as they stop at a ceiling entry there, and "
+            "with the variable true they walk on as with no ceiling (measured by "
+            "faking a device boundary at each cwd-marker route's ceiling for every "
+            "fixture shape); a real filesystem boundary cannot be built in a test"
+        ),
+        ("env", "CLAUDE_CODE_SESSION_ID"): (
+            "names the session whose record the session-record readers open; the "
+            "session-record and worktree identity record routes replace those "
+            "readers whole, because a test process cannot reach a real record"
+        ),
+        ("env", "PYTEST_CURRENT_TEST"): (
+            "the guard that makes the session record inert in a test process; it "
+            "selects no route outside tests"
+        ),
+        ("env", "PACT_TEST_MEMORY_DIR"): (
+            "where get_user_memory_dir finds the user-scope setting, read with it"
+        ),
+        ("env", "<shared.project_scope.git_env_without_location: os.environ.items>"): (
+            "copies the environment for git subprocesses with the location "
+            "variables removed; it selects nothing"
         ),
         ("home",): "a landing property, measured as the home_root shape",
         ("call", "get_worktree_identity_from_session_record"): (
@@ -1678,11 +1800,19 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "validate_identifier_for_write"): "validates an id value",
     }
 
+    @staticmethod
+    def _covered(driven: dict) -> set:
+        """The driven inputs, plus every helper call an input inside which a
+        route drives."""
+        _conditions, inside = route_inputs()
+        return set(driven) | {call for call, read in inside.items() if read & set(driven)}
+
     def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
         conditions = route_entry_conditions()
+        covered = self._covered(route_driven_conditions)
         unclassified = {
             condition: sites for condition, sites in conditions.items()
-            if condition not in route_driven_conditions and condition not in self.NOT_A_ROUTE
+            if condition not in covered and condition not in self.NOT_A_ROUTE
         }
         assert unclassified == {}, (
             f"the resolver reads an input no route drives and no exclusion names: {unclassified}"
@@ -1700,7 +1830,7 @@ class TestEveryRouteEntryConditionIsARoute:
         conditions = route_entry_conditions()
         stale = set(self.NOT_A_ROUTE) - set(conditions)
         assert stale == set(), f"an exclusion names an input the resolver no longer reads: {stale}"
-        driven = set(self.NOT_A_ROUTE) & set(route_driven_conditions)
+        driven = set(self.NOT_A_ROUTE) & self._covered(route_driven_conditions)
         assert driven == set(), f"an exclusion names an input a route drives: {driven}"
 
     def test_the_census_reads_the_declaration_routes(self, route_driven_conditions):
