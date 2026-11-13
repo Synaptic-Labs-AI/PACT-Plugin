@@ -45,12 +45,17 @@ them that does not block pytest-randomly is refused:
   sys.executable. Its short and long options before `-m` are stepped over,
   including the values of `-W`, `-X` and `--check-hash-based-pycs`, and the
   launcher's `-3`, `-3.12` and `-V:3.12`.
-- [mention] A word naming an interpreter anywhere in a command is read as the
-  [module] family, so `echo python -m pytest` is refused too.
+- [mention] Every word naming an interpreter anywhere in a command is read as
+  the [module] family, not only the first, so `echo python -m pytest` is
+  refused, and a wrapper option's value named like an interpreter
+  (`uv run -p python3 python -m pytest`) does not hide the interpreter after it.
 - [script] The program is an interpreter that runs pytest's program or
   `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
-  `echo python /venv/bin/pytest` no interpreter runs a script.
+  `echo python /venv/bin/pytest` no interpreter runs a script. When the word
+  before the program is an option the wrapper tables below do not list, the
+  program may be that option's value, so each later word that would then be the
+  program is tried too (`uv run --made-up-option python3 python /venv/bin/pytest`).
 - [wrapper] Any family above behind NAME=VALUE words, the shell's reserved words
   or the listed wrappers and tool runners (below).
 - [shell] Any family above inside the command text of a shell run with `-c`
@@ -67,7 +72,11 @@ their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 `stdbuf`, `sudo`, `env`, `exec`, `time`, `xvfb-run`, and the tool runners
 `uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
 (and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
-`micromamba run`, `pipenv run`, `rye run` and `pixi run`.
+`micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
+matrix selectors). Each wrapper's options that take a separate value are in
+_WRAPPERS, read from the tool's own `--help` where it is installed (coreutils,
+xvfb-run, uv 0.13.6, pipx, pdm, hatch, pipenv, poetry) and from its
+documentation otherwise (sudo, GNU time, conda, micromamba, rye, pixi).
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
@@ -111,8 +120,9 @@ Blind spots, examples of launches outside the census:
    task runner (`tox`, `nox`, `make`, `just`), a tool runner whose options come
    before its run verb (`hatch -e test run pytest`, `conda -v run pytest`), and
    process wrappers such as `chrt`, `taskset`, `ionice` or `setsid`; or behind a
-   listed wrapper's option whose separate value the list does not name. The
-   interpreter form (`<wrapper> python -m pytest`) is still caught.
+   listed wrapper's option whose separate value _WRAPPERS does not name, which
+   hides a bare `pytest` program, `coverage run` or a shell after it. The
+   interpreter forms ([module], [mention], [script]) are still caught there.
 9. Shell text the census does not expand or track: `$( )` and backtick
    substitutions, variables (`$PYTEST`), `export`, aliases, functions, `eval`,
    `env -S`, and a script fed to a shell's stdin (`bash <<EOF`, `bash -s`). An
@@ -157,33 +167,58 @@ _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
                        "do", "done", "while", "until"})
 # Programs that run the command after them, each with its options that take a
 # separate value.
+# The option tables come from each wrapper's own `--help`: coreutils timeout,
+# nice, stdbuf and env, xvfb-run, uv 0.13.6 (`uv run`, `uv tool run`), pipx,
+# pdm, hatch, pipenv and poetry. sudo, GNU time, conda, micromamba, rye and pixi
+# come from their documentation.
+_UV_COMMON_VALUE_OPTIONS = frozenset({
+    "-w", "--with", "--with-editable", "--with-requirements", "--env-file",
+    "--python-platform", "--index", "--default-index", "-i", "--index-url",
+    "--extra-index-url", "-f", "--find-links", "--index-strategy", "--keyring-provider",
+    "-P", "--upgrade-package", "--upgrade-group", "--resolution", "--prerelease",
+    "--prerelease-package", "--fork-strategy", "--exclude-newer", "--exclude-newer-package",
+    "--no-sources-package", "--reinstall-package", "--link-mode", "-C", "--config-setting",
+    "--config-settings-package", "--no-build-isolation-package", "--no-build-package",
+    "--no-binary-package", "--cache-dir", "--refresh-package", "-p", "--python", "--color",
+    "--allow-insecure-host", "--directory", "--project", "--config-file",
+})
+_UV_TOOL_RUN_VALUE_OPTIONS = _UV_COMMON_VALUE_OPTIONS | {
+    "--from", "-c", "--constraints", "-b", "--build-constraints", "--overrides",
+    "--torch-backend",
+}
 _WRAPPERS = {
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
     "nice": frozenset({"-n", "--adjustment"}),
     "nohup": frozenset(),
     "exec": frozenset({"-a"}),
     "time": frozenset({"-f", "--format", "-o", "--output"}),
-    "stdbuf": frozenset({"-i", "-o", "-e"}),
-    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"}),
+    "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
+    "sudo": frozenset({"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+                       "-C", "--close-from", "-D", "--chdir", "-R", "--chroot", "-r", "--role",
+                       "-t", "--type", "-U", "--other-user", "-T", "--command-timeout"}),
     "env": frozenset({"-C", "--chdir"}),
     "xvfb-run": frozenset({"-n", "-s", "-f", "-e", "-p", "--server-num", "--server-args",
                            "--auth-file", "--error-file", "--xauth-protocol"}),
-    "uv run": frozenset({"--with", "--python", "-p", "--project", "--directory", "--package",
-                         "--extra", "--group", "--env-file", "--with-requirements"}),
+    "uv run": _UV_COMMON_VALUE_OPTIONS | {
+        "--extra", "--no-extra", "--group", "--no-group", "--only-group",
+        "--no-editable-package", "--package",
+    },
     "poetry run": frozenset({"-C", "--directory", "-P", "--project"}),
-    "uv tool run": frozenset({"--from", "--with", "--python", "-p", "--with-requirements",
-                              "--with-editable", "--index", "--default-index"}),
-    "uvx": frozenset({"--from", "--with", "--python", "-p", "--with-requirements",
-                      "--with-editable", "--index", "--default-index"}),
-    "pipx run": frozenset({"--spec", "--python", "--index-url", "-i", "--pip-args"}),
-    "pdm run": frozenset({"-p", "--project", "--venv"}),
+    "uv tool run": _UV_TOOL_RUN_VALUE_OPTIONS,
+    "uvx": _UV_TOOL_RUN_VALUE_OPTIONS,
+    "pipx run": frozenset({"--spec", "--python", "--python-args", "--with", "-i", "--index-url",
+                           "--pip-args", "--cooldown", "--backend", "--fetch-python"}),
+    "pdm run": frozenset({"-p", "--project", "-k", "--skip", "--venv", "--env", "--env-file",
+                          "--working-dir"}),
     "hatch run": frozenset(),
     "conda run": frozenset({"-n", "--name", "-p", "--prefix", "--cwd"}),
     "micromamba run": frozenset({"-n", "--name", "-p", "--prefix", "-r", "--root-prefix",
-                                 "--cwd"}),
+                                 "--cwd", "-a", "--attach", "--label", "-e", "--env"}),
     "pipenv run": frozenset(),
     "rye run": frozenset({"--pyproject"}),
-    "pixi run": frozenset({"-e", "--environment", "--manifest-path"}),
+    "pixi run": frozenset({"-e", "--environment", "--manifest-path", "--auth-file", "--color",
+                           "--pypi-keyring-provider", "--concurrent-solves",
+                           "--concurrent-downloads"}),
 }
 # Wrappers named by more than one word, longest first.
 _MULTI_WORD_WRAPPERS = tuple(sorted(
@@ -403,6 +438,8 @@ def _wrapper_options(part, i, name, env):
             i += 1
         elif (arg.startswith("-") and arg != "-") or _DURATION.match(arg):
             i += 1
+        elif name == "hatch run" and arg.startswith("+"):
+            i += 1  # a matrix selector, as in `hatch run +py=3.12 test:pytest`
         else:
             break
     return i
@@ -452,11 +489,6 @@ def _is_pytest_script(word):
 def _is_interpreter(word):
     name = _command_name(word)
     return bool(_INTERPRETER.match(name)) or name in _LAUNCHERS or word == sys.executable
-
-
-def _interpreter(tokens):
-    """Index of the first Python interpreter word, or None."""
-    return next((i for i, word in enumerate(tokens) if _is_interpreter(word)), None)
 
 
 def _module(words, i):
@@ -516,20 +548,48 @@ def _pytest_args(part, program):
             return program + 1
         if _COVERAGE_PROGRAM.match(name):
             return _coverage_run(part, program + 1)
-    at = _interpreter(part)
-    if at is None:
-        return None
-    module, after = _module(part, at + 1)
-    if module in _PYTEST_MODULES:
-        return after
-    if module == "coverage":
-        return _coverage_run(part, after)
-    # The script route needs the interpreter in the program position: a word
-    # after an interpreter mentioned elsewhere (`pip install python-x pytest`)
-    # is no script of it.
-    if module is None and at == program and after < len(part) and _is_pytest_script(part[after]):
-        return after + 1  # the interpreter runs pytest's script file
+    # [module] and [mention]: every word naming an interpreter is read for its -m
+    # forms, so a wrapper option's value named like one (`uv run -p python3`)
+    # cannot hide the interpreter after it.
+    for at, word in enumerate(part):
+        if not _is_interpreter(word):
+            continue
+        module, after = _module(part, at + 1)
+        if module in _PYTEST_MODULES:
+            return after
+        if module == "coverage":
+            found = _coverage_run(part, after)
+            if found is not None:
+                return found
+    # [script]: only an interpreter in the program position runs a script; a
+    # word after an interpreter mentioned elsewhere (`pip install python-x
+    # pytest`) is no script of it.
+    for at in _program_candidates(part, program):
+        if _is_interpreter(part[at]):
+            module, after = _module(part, at + 1)
+            if module is None and after < len(part) and _is_pytest_script(part[after]):
+                return after + 1  # the interpreter runs pytest's script file
     return None
+
+
+def _program_candidates(part, program):
+    """The program index, then each later word that is the program if the word
+    before it was the value of an option the wrapper tables do not list
+    (`uv run --made-up-option python3 python ...`). A part with no program word
+    (only assignments or a bare wrapper) has none."""
+    if program >= len(part):
+        return []
+    candidates = [program]
+    i = program
+    while 0 < i < len(part) and part[i - 1].startswith("-") and "=" not in part[i - 1] \
+            and part[i - 1] not in ("-", "--"):
+        i += 1
+        while i < len(part) and part[i].startswith("-") and part[i] not in ("-", "--"):
+            i += 1
+        if i >= len(part):
+            break
+        candidates.append(i)
+    return candidates
 
 
 def _split(text):

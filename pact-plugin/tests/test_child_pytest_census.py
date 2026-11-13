@@ -259,6 +259,9 @@ def test_a_pytest_child_inside_a_shell_command_is_refused(argv):
     ["bash", "-c", "pytest > log -p no:randomly"],
     # A continued line is one command.
     ["bash", "-c", "pytest \\\n  -p no:randomly"],
+    # A command that is only assignments, or only a wrapper, has no program word.
+    ["bash", "-c", "SJ=/x/y.py; A=1\npytest -p no:randomly"],
+    ["bash", "-c", "nohup; uv run -p python3; pytest -pno:randomly"],
 ])
 def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
     assert census._miss(argv, None, {}) is None, argv
@@ -344,6 +347,43 @@ _LAUNCHER_FORMS = [
     ["ipython3", "-m", "pytest", "--", "-q"],
     ["graalpy", "-m", "pytest"],
     ["pyston3", "-m", "pytest"],
+    # A wrapper option's value named like an interpreter does not hide the
+    # interpreter in the program position.
+    ["uv", "run", "-p", "python3", "python", "-m", "pytest"],
+    ["uv", "run", "--python", "python3.12", "python", "-m", "pytest"],
+    ["conda", "run", "-n", "python3", "python", "-m", "pytest"],
+    ["uv", "run", "-p", "python3", "python", "/venv/bin/pytest"],
+    ["pipx", "run", "--python", "python3.12", "--spec", "pytest==9", "pytest"],
+    # An option the tables do not list does not hide an interpreter after it.
+    ["uv", "run", "--made-up-option", "python3", "python", "/venv/bin/pytest"],
+    # Any word naming an interpreter is read for -m pytest, not only the first.
+    ["echo", "python3", "python", "-m", "pytest"],
+    # Each listed wrapper's value-taking options, as read from its interface.
+    ["uv", "run", "--index-url", "https://pypi.example/simple", "pytest"],
+    ["uv", "run", "-w", "pytest-xdist", "--no-group", "lint", "pytest"],
+    ["uv", "run", "-i", "https://pypi.example/simple", "python", "/venv/bin/pytest"],
+    ["uv", "tool", "run", "-c", "constraints.txt", "pytest"],
+    ["uvx", "--exclude-newer", "2026-01-01", "pytest"],
+    ["pipx", "run", "--backend", "uv", "pytest"],
+    ["pipx", "run", "--fetch-python", "always", "pytest"],
+    ["pdm", "run", "-k", "pre_test", "pytest"],
+    ["pdm", "run", "--working-dir", "tests", "pytest"],
+    ["hatch", "run", "+py=3.12", "test:pytest"],
+    ["conda", "run", "--cwd", "work", "pytest"],
+    ["conda", "run", "-p", "/opt/env", "python", "/venv/bin/pytest"],
+    ["micromamba", "run", "-a", "none", "pytest"],
+    ["micromamba", "run", "--label", "dev", "pytest"],
+    ["pixi", "run", "--auth-file", "auth.json", "pytest"],
+    ["poetry", "run", "--directory", "work", "pytest"],
+    ["sudo", "-R", "/chroot", "pytest"],
+    ["sudo", "--user", "bob", "pytest"],
+    ["timeout", "--signal", "KILL", "60", "pytest"],
+    ["nice", "--adjustment", "5", "pytest"],
+    ["stdbuf", "--output", "L", "pytest"],
+    ["env", "--chdir", "/tmp", "pytest"],
+    ["time", "--output", "t.log", "pytest"],
+    ["xvfb-run", "--server-args", "-screen 0 1x1x8", "pytest"],
+    ["bash", "-c", "exec -a name pytest"],
 ]
 
 
@@ -420,6 +460,11 @@ def test_every_documented_family_has_a_refused_row_and_no_other_family_exists():
     documented = _documented_families()
     assert len(documented) == len(set(documented)), documented
     assert sorted(documented) == sorted(_FAMILY_ROWS), (documented, sorted(_FAMILY_ROWS))
+    empty = [family for family in documented if not _FAMILY_ROWS[family]]
+    assert not empty, f"documented families with no refused row: {empty}"
+    unrefused = [(family, argv) for family in documented for argv in _FAMILY_ROWS[family]
+                 if census._miss(argv, None, {}) is None]
+    assert not unrefused, f"family rows the census accepts: {unrefused}"
 
 
 @pytest.mark.parametrize("family, argv", [
