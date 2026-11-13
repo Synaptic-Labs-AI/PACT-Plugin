@@ -1069,25 +1069,48 @@ def _store_stat_key(store: str):
     membership. `-shm` is deliberately not included — shared-memory churn
     would recompute on every call without any row having changed.
 
-    AN EMPTY `-wal` STAMPS THE SAME AS AN ABSENT ONE. A read-only open of a
-    store with no `-wal` creates an empty one, so a key that told the two
-    apart would change across the very read it keys, and the next read would
-    miss. An empty journal holds no frames: in both states the rows are the
-    main file's alone, and the main file's stamp is already in the key. A
-    checkpoint that empties the journal moves the `-wal` leg, so the next
-    read misses, and the rows it backfilled moved the main file's stamp.
+    THE `-wal` LEG IS ITS `(mtime_ns, size)` WHENEVER THE FILE EXISTS, empty
+    or not. A writer's last close checkpoints the journal and deletes it, and
+    a TRUNCATE checkpoint empties it, so the journal appearing, disappearing
+    or being emptied is a change signal even when the main file's stamp did
+    not move (a write inside one timestamp tick that kept the file's size).
 
-    THE STAMP'S LIMIT: a write to the main file that leaves its
-    `(mtime_ns, size)` unchanged is not seen. Every stamp-keyed read shares
-    that limit; normalising the empty `-wal` does not widen it.
+    A read-only open of a store with no `-wal` creates an empty one, so when
+    the `-wal` is absent the key first opens and closes a read-only
+    connection, letting SQLite create it, and stamps after that. The read the
+    key is taken for then finds the `-wal` already there and leaves the key
+    unchanged, so the next read is served from the cache. The absence check
+    on the main file runs first, and the probe is read-only, so it never
+    creates a store. When SQLite cannot create the `-wal` (a read-only
+    directory, a store not in WAL mode) the leg is None, and the read cannot
+    create it either.
+
+    THE STAMP'S LIMIT: a change is missed only when it leaves both legs'
+    `(mtime_ns, size)` unchanged, for example a `-wal` deleted and recreated
+    at its old size within one timestamp tick while the main file's stamp is
+    unchanged too. Every stamp-keyed read shares that limit.
     """
     try:
         main = os.stat(store)
     except OSError:
         return None
+    wal_path = store + "-wal"
+    if not os.path.lexists(wal_path):
+        try:
+            probe = _read_only_connection(store)
+            try:
+                probe.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            finally:
+                probe.close()
+        except (sqlite3.Error, OSError):
+            pass
+        try:
+            main = os.stat(store)
+        except OSError:
+            return None
     try:
-        wal = os.stat(store + "-wal")
-        wal_key = (wal.st_mtime_ns, wal.st_size) if wal.st_size else None
+        wal = os.stat(wal_path)
+        wal_key = (wal.st_mtime_ns, wal.st_size)
     except OSError:
         wal_key = None
     return ((main.st_mtime_ns, main.st_size), wal_key)
@@ -2886,7 +2909,8 @@ class PACTMemory:
         membership after a rekey elsewhere, which is the silent-loss class
         this change exists to remove. `-shm` is deliberately EXCLUDED: it is
         shared-memory churn and would defeat the cache with spurious
-        recomputes. An empty `-wal` stamps as an absent one (see
+        recomputes. When the `-wal` is absent, the key lets a read-only open
+        create it before stamping, so the read itself cannot move the key (see
         `_store_stat_key`). An in-process write clears the cache as well, so a save
         that changes the bucket set is observed immediately.
         """

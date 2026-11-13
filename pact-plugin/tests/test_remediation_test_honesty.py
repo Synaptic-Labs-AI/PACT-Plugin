@@ -8,10 +8,10 @@ remove while every other test stayed green:
   envelope assertion cannot see the warning channel);
 - the read-scope cache key includes the store's `-wal` sibling, so a commit
   that another connection left only in the WAL is still seen;
-- the same key stamps an empty `-wal` as an absent one, so the read that
-  creates the empty `-wal` does not make the next read decide again, while
-  a checkpoint that empties the `-wal`, and a write landing during a read,
-  still make the next read decide again;
+- the same key creates the `-wal` before it stamps, so the read that would
+  create it does not make the next read decide again, while a writer that
+  commits and closes (deleting the `-wal`), a checkpoint that empties it,
+  and a write landing during a read still make the next read decide again;
 - `rekey_project` itself refuses a non-canonical target (the CLI checks first,
   so no CLI arm reaches the library refusal);
 - the test-data copies of the working-memory comment equal the shipped
@@ -197,11 +197,13 @@ def _commit_verified_legacy_row(other, repo):
 
 class TestTheReadScopeCacheServesTheSecondRead:
     """The read's own read-only connection creates an EMPTY `-wal` beside a
-    store that had none. A key that told an absent `-wal` from an empty one
-    changed across the read it keyed, so the second read missed and re-ran
-    the whole membership decision (the bucket census and the evidence check).
-    An empty `-wal` holds no frames, so it stamps the same as an absent one;
-    a write still moves the key, and is never served from the cache."""
+    store that had none. A key stamped before that creation changed across
+    the read it keyed, so the second read missed and re-ran the whole
+    membership decision (the bucket census and the evidence check). The key
+    therefore lets a read-only open create the `-wal` first and stamps after
+    it, keeping the `-wal`'s own stamp, so the journal being deleted,
+    recreated or emptied still moves the key and a write is never served
+    from the cache."""
 
     def _count_decisions(self, monkeypatch):
         from scripts import database
@@ -217,8 +219,9 @@ class TestTheReadScopeCacheServesTheSecondRead:
         return decisions
 
     def test_repeated_reads_decide_the_scope_once(self, repo_env, monkeypatch):
-        """RED WHEN `_store_stat_key` stamps an empty `-wal` apart from an
-        absent one: the second read decides again."""
+        """RED WHEN `_store_stat_key` stamps an absent `-wal` without first
+        letting a read-only open create it: the first read then creates it
+        after the stamp, and the second read decides again."""
         _repo, store = repo_env
         _seed_canonical(store)
         wal = Path(str(store) + "-wal")
@@ -228,13 +231,10 @@ class TestTheReadScopeCacheServesTheSecondRead:
         memory = PACTMemory(session_id="s", db_path=store)
         decisions = self._count_decisions(monkeypatch)
         scopes = [memory._read_project_scopes()]
-        # The first read's read-only connection normally creates the empty
-        # `-wal` (measured with SQLite 3.45.1); whether it does is SQLite's
-        # choice. The arm's subject is the key across that transition, so it
-        # makes the transition certain: the `-wal` is empty before the next
-        # reads, whoever created it.
-        if not wal.exists():
-            wal.touch()
+        # PRECONDITION, not the subject: the first read crossed the
+        # transition (measured with SQLite 3.45.1: a read-only open creates
+        # the empty `-wal`), and the `-wal` holds no frames.
+        assert wal.exists(), "no -wal was created; the arm would not cross the transition"
         assert wal.stat().st_size == 0, "the -wal holds frames; the arm would not exercise the empty stamp"
         scopes += [memory._read_project_scopes() for _ in range(2)]
         assert scopes == [(CANONICAL,)] * 3, scopes
@@ -285,6 +285,48 @@ class TestTheReadScopeCacheServesTheSecondRead:
             assert len(decisions) == seen + 1, "the read after the truncate was served from the cache"
         finally:
             other.close()
+
+    def test_a_writer_that_commits_and_closes_in_one_tick_is_read(self, repo_env, monkeypatch):
+        """A writer's last close checkpoints its commit into the main file and
+        deletes the `-wal`. When the main file's `(mtime_ns, size)` comes out
+        unchanged (a write inside one timestamp tick that kept the size), the
+        `-wal` leg is the only change signal: the key must stamp the `-wal`
+        the read found differently from the absent one the writer left. RED
+        WHEN an empty `-wal` stamps the same as an absent one: the read after
+        the writer is served the scope decided without its row.
+
+        The arm holds the main leg at its pre-write stamp with `os.utime`,
+        standing in for a coarse-timestamp filesystem; the commit, the close
+        and the stat key the production code reads are real."""
+        repo, store = repo_env
+        _seed_canonical(store)
+        memory = PACTMemory(session_id="s", db_path=store)
+        decisions = self._count_decisions(monkeypatch)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        wal = Path(str(store) + "-wal")
+        # PRECONDITION, not the subject: the cached read left an empty `-wal`.
+        assert wal.exists() and wal.stat().st_size == 0
+        main_before = store.stat()
+        other = sqlite3.connect(str(store))
+        try:
+            _commit_verified_legacy_row(other, repo)
+        finally:
+            other.close()
+        # PRECONDITION, not the subject: the last close deleted the `-wal`,
+        # and the row reached the main file without resizing it.
+        assert not wal.exists(), "the writer's close left the -wal; the arm would not cross the deletion"
+        assert store.stat().st_size == main_before.st_size, "the commit resized the main file"
+        # ISOLATION: hold the main leg at its pre-write stamp, so the `-wal`
+        # leg is the only part of the key that can have moved.
+        os.utime(store, ns=(store.stat().st_atime_ns, main_before.st_mtime_ns))
+        assert (store.stat().st_mtime_ns, store.stat().st_size) == (
+            main_before.st_mtime_ns, main_before.st_size,
+        ), "the main file's stamp could not be held; the arm would not isolate the -wal leg"
+        seen = len(decisions)
+        assert memory._read_project_scopes() == (CANONICAL, LEGACY), (
+            "the read after the writer's commit and close was served from the cache"
+        )
+        assert len(decisions) == seen + 1
 
     def test_a_write_landing_during_the_read_is_not_served_from_the_cache(
         self, repo_env, monkeypatch
