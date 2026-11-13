@@ -264,28 +264,18 @@ class TestPercentEncodedIdsAreDocumented:
 
 
 class TestOverridePathIsNullWhenNoPinCanRemedy:
-    """The `override_path` clause names every cause where a pin cannot help."""
-
-    NULL_CAUSES = (
-        "gitfile_redirect",
-        "no_working_tree",
-        "broken_git_marker",
-        "declaration_unresolved",
-    )
+    """The `override_path` clause and the redirect remedy beside it."""
 
     def _clause(self) -> str:
         row = _table_row(SKILL, "project-id show")
         start = row.index("override_path is the")
-        return row[start:start + 900]
+        return row[start:start + 1400]
 
     def test_null_means_no_override_file_can_remedy(self):
         assert (
-            "or null when no override file can remedy the decline"
+            "or null in two cases. First, when no override file can remedy the "
+            "decline"
         ) in self._clause()
-
-    @pytest.mark.parametrize("cause", NULL_CAUSES)
-    def test_each_null_cause_is_named_in_the_clause(self, cause):
-        assert cause in self._clause()
 
     def test_the_retired_condition_is_gone(self):
         assert "null when no repository was found" not in _body(SKILL).lower()
@@ -701,67 +691,235 @@ class TestUpdateCascadeQuarantineIsDocumented:
         assert '"last_cascade_skipped": memory.last_cascade_skipped' in cli
 
 
-class TestDocumentedNullOverrideCausesAreTheCodes:
-    """The documented null-`override_path` causes equal the ones the code builds.
+@pytest.fixture(scope="module")
+def matrix(tmp_path_factory):
+    """{(cause, layout): (emitted reason, emitted override_path)}."""
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
 
-    The set is derived from every decline site in the code, not restated:
-    a site that builds a decline with no override path (or a literal None)
-    makes its reason a null-override cause. A new such cause therefore reds
-    this arm until SKILL.md names it.
+    base = tmp_path_factory.mktemp("null_override_matrix")
+    home, mem = base / "home", base / "mem"
+    home.mkdir()
+    mem.mkdir()
+    store = mem / "memory.db"
+    real_git = shutil.which("git")
+    shim = base / "shim"
+    shim.mkdir()
+    # Only the origin read fails; every other git call is the real one.
+    # No layout makes `git config --get-all remote.origin.url` fail while
+    # `rev-parse` succeeds, so this is the one way to reach that cause.
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *"--get-all remote.origin.url"*) exit 2;; esac\n'
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    os.chmod(shim / "git", 0o755)
+    cli_path = SCRIPTS / "cli.py"
+    plain_path = os.pathsep.join((os.path.dirname(real_git), "/usr/bin", "/bin"))
+
+    def run(argv, cwd, declared, shimmed):
+        env = {
+            "PATH": (str(shim) + os.pathsep + plain_path) if shimmed else plain_path,
+            "HOME": str(home),
+            "PACT_TEST_MEMORY_DIR": str(mem),
+        }
+        if declared is not None:
+            env["CLAUDE_PROJECT_DIR"] = str(declared)
+        return subprocess.run(
+            [sys.executable, str(cli_path), *argv, "--db-path", str(store)],
+            cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
+        )
+
+    run(["setup"], base, None, False)
+    result = {}
+    for (cause, layout), (cwd, declared, shimmed) in TestNullOverridePathIsMeasured._layouts(base).items():
+        out = run(["project-id", "show"], cwd, cwd if declared is None else declared, shimmed)
+        record = json.loads(out.stdout)["result"]["decline_reason"] or {}
+        result[(cause, layout)] = (record.get("reason"), record.get("override_path"))
+    return result
+
+
+
+class TestNullOverridePathIsMeasured:
+    """When `override_path` is null is MEASURED, never restated.
+
+    Every cause the code defines (`DECLINE_REASONS`) is produced in every
+    layout that can produce it, and `project-id show` is run on each. The
+    emitted envelope decides: a cause that is null in every layout belongs in
+    the SKILL's cause list, and a layout that nulls a cause which elsewhere
+    carries a path is a location route the SKILL clause must name. A new
+    null route, a new cause, or a dropped route therefore reds an arm here
+    without anyone editing a list.
     """
 
-    CLAUSE_START = "or null when no override file can remedy the decline: that is the case for"
+    BAD_ORIGIN = "https://host/own%ZZr/repo.git"
+
+    # The phrase the SKILL clause uses for each location route. A measured
+    # route with no phrase here fails `test_every_location_route_is_named`.
+    LAYOUT_PHRASES = {
+        "external": "when the checkout's git directory lies outside it",
+    }
+
+    CLAUSE_START = (
+        "First, when no override file can remedy the decline: that is the case for"
+    )
 
     @staticmethod
-    def _code_null_override_causes() -> tuple:
-        import ast
+    def _git(*args, cwd=None):
+        import subprocess
 
-        null, nonnull, located = set(), set(), set()
-        for name in ("memory_api.py", "project_identity.py"):
-            tree = ast.parse((SCRIPTS / name).read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = ast.unparse(node.func)
-                if func.endswith("decline_record"):
-                    reason_node = node.args[0] if node.args else None
-                    path_node = node.args[1] if len(node.args) > 1 else None
-                elif func == "_decline":
-                    reason_node = node.args[1] if len(node.args) > 1 else None
-                    path_node = next(
-                        (k.value for k in node.keywords if k.arg == "override_path"),
-                        None,
-                    )
-                else:
-                    continue
-                if not (
-                    isinstance(reason_node, ast.Constant)
-                    and isinstance(reason_node.value, str)
-                ):
-                    continue
-                reason = reason_node.value
-                located.add(reason)
-                is_null = path_node is None or (
-                    isinstance(path_node, ast.Constant) and path_node.value is None
-                )
-                (null if is_null else nonnull).add(reason)
-        # A cause with ANY site that names a path is not a null-override cause.
-        return null - nonnull, located
+        subprocess.run(
+            [
+                "git", "-c", "protocol.file.allow=always", "-c", "user.name=x",
+                "-c", "user.email=x@x", *args,
+            ],
+            cwd=cwd, check=True, capture_output=True, timeout=30,
+        )
 
-    def _documented(self) -> set:
+    @classmethod
+    def _repo(cls, path, origin=None, commit=False, bare=False):
+        cls._git("init", "-q", *(["--bare"] if bare else []), str(path))
+        if origin:
+            cls._git("-C", str(path), "remote", "add", "origin", origin)
+        if commit:
+            cls._git("-C", str(path), "commit", "-q", "--allow-empty", "-m", "i")
+        return path
+
+    @classmethod
+    def _layouts(cls, base):
+        """{(cause, layout): (cwd, declared_dir, shim_origin_read_failure)}."""
+        cells = {}
+        bad = cls.BAD_ORIGIN
+        good = "https://github.com/acme/{}.git"
+        own = base / "own"
+        own.mkdir()
+        cells[("origin_unrepresentable", "own")] = (cls._repo(own / "o1", bad), None, False)
+        cells[("origin_unreadable", "own")] = (
+            cls._repo(own / "o2", good.format("o2")), None, True,
+        )
+        (own / "o3").mkdir()
+        (own / "o3" / ".git").write_text("garbage\n", encoding="utf-8")
+        cells[("broken_git_marker", "own")] = (own / "o3", None, False)
+        cells[("no_working_tree", "own")] = (
+            cls._repo(own / "o4.git", good.format("o4"), bare=True), None, False,
+        )
+        (own / "cwd").mkdir()
+        cells[("declaration_unresolved", "own")] = (own / "cwd", own / "missing", False)
+
+        wt = base / "wt"
+        wt.mkdir()
+        main = cls._repo(wt / "main", bad, commit=True)
+        cls._git("-C", str(main), "worktree", "add", "-q", str(wt / "linked"))
+        cells[("origin_unrepresentable", "worktree")] = (wt / "linked", None, False)
+        main2 = cls._repo(wt / "main2", good.format("w2"), commit=True)
+        cls._git("-C", str(main2), "worktree", "add", "-q", str(wt / "linked2"))
+        cells[("origin_unreadable", "worktree")] = (wt / "linked2", None, True)
+
+        sub = base / "sub"
+        sub.mkdir()
+        for name, origin, shim, cause in (
+            ("s1", None, False, "submodule_checkout"),
+            ("s2", bad, False, "origin_unrepresentable"),
+            ("s3", good.format("s3"), True, "origin_unreadable"),
+        ):
+            source = cls._repo(sub / f"{name}src", None, commit=True)
+            superproject = cls._repo(sub / name, good.format(name), commit=True)
+            cls._git("-C", str(superproject), "submodule", "add", "-q", str(source), "mod")
+            if origin:
+                cls._git("-C", str(superproject / "mod"), "remote", "set-url", "origin", origin)
+            cells[(cause, "submodule")] = (superproject / "mod", None, shim)
+
+        red = base / "redirect"
+        red.mkdir()
+        victim = cls._repo(red / "victim", good.format("victim"))
+        (red / "forged").mkdir()
+        (red / "forged" / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        cells[("gitfile_redirect", "redirect")] = (red / "forged", None, False)
+
+        ext = base / "external"
+        (ext / "stores").mkdir(parents=True)
+        for name, origin, shim, cause in (
+            ("e1", bad, False, "origin_unrepresentable"),
+            ("e2", good.format("e2"), True, "origin_unreadable"),
+        ):
+            cls._git("init", "-q", f"--separate-git-dir={ext / 'stores' / (name + '.git')}", str(ext / name))
+            cls._git("-C", str(ext / name), "remote", "add", "origin", origin)
+            cells[(cause, "external")] = (ext / name, None, shim)
+        cls._repo(ext / "stores" / "e3.git", good.format("e3"), bare=True)
+        (ext / "e3").mkdir()
+        (ext / "e3" / ".git").write_text(
+            f"gitdir: {ext / 'stores' / 'e3.git'}\n", encoding="utf-8"
+        )
+        cells[("no_working_tree", "external")] = (ext / "e3", None, False)
+        return cells
+
+    def _clause(self) -> str:
         row = _table_row(SKILL, "project-id show")
-        start = row.index(self.CLAUSE_START) + len(self.CLAUSE_START)
-        end = row.index(".", start)
-        names = row[start:end].replace(" and ", ", ").split(",")
-        return {name.strip() for name in names if name.strip()}
+        start = row.index("override_path is the")
+        return row[start:row.index("For gitfile_redirect:", start)]
 
-    def test_the_documented_set_is_the_code_set(self):
-        null, _ = self._code_null_override_causes()
-        assert self._documented() == null
+    def _documented_causes(self) -> set:
+        clause = self._clause()
+        start = clause.index(self.CLAUSE_START) + len(self.CLAUSE_START)
+        listed = clause[start:clause.index(".", start)]
+        return {n.strip() for n in listed.replace(" and ", ", ").split(",") if n.strip()}
+
+    @staticmethod
+    def _always_null(matrix) -> set:
+        causes = {cause for cause, _ in matrix}
+        return {
+            cause for cause in causes
+            if all(path is None for (c, _), (_, path) in matrix.items() if c == cause)
+        }
+
+    def _location_routes(self, matrix) -> set:
+        always = self._always_null(matrix)
+        return {
+            layout for (cause, layout), (_, path) in matrix.items()
+            if path is None and cause not in always
+        }
+
+    def test_each_cell_declines_for_the_cause_it_was_built_for(self, matrix):
+        wrong = {cell: got for cell, (got, _) in matrix.items() if got != cell[0]}
+        assert wrong == {}, f"a layout builder produced another cause: {wrong}"
+
+    def test_every_cause_the_code_defines_is_measured(self, matrix):
+        from scripts.project_identity import DECLINE_REASONS
+
+        assert {cause for cause, _ in matrix} == set(DECLINE_REASONS)
+
+    def test_the_documented_causes_are_the_always_null_causes(self, matrix):
+        assert self._documented_causes() == self._always_null(matrix)
+
+    def test_every_location_route_is_named(self, matrix):
+        routes = self._location_routes(matrix)
+        unnamed = routes - set(self.LAYOUT_PHRASES)
+        assert unnamed == set(), f"a layout nulls override_path with no SKILL phrase: {unnamed}"
+        clause = self._clause()
+        for layout in routes:
+            assert self.LAYOUT_PHRASES[layout] in clause, layout
+
+    def test_no_unmeasured_location_route_is_claimed(self, matrix):
+        routes = self._location_routes(matrix)
+        clause = self._clause()
+        for layout, phrase in self.LAYOUT_PHRASES.items():
+            if layout not in routes:
+                assert phrase not in clause, f"{layout} is documented but measures no null"
+
+    def test_the_withheld_path_is_the_users_decision(self):
+        assert (
+            "a pin there may remedy the decline, but the path is withheld "
+            "because a forged pointer looks the same, so pinning that git "
+            "directory is the user's decision"
+        ) in self._clause()
 
     DOC_LEAD = "It is None for "
 
-    def test_the_decline_record_docstring_lists_the_code_set(self):
+    def test_the_decline_record_docstring_lists_the_always_null_causes(self, matrix):
         from scripts.project_identity import decline_record
 
         doc = _flatten(decline_record.__doc__ or "")
@@ -769,15 +927,22 @@ class TestDocumentedNullOverrideCausesAreTheCodes:
         start = doc.index(self.DOC_LEAD) + len(self.DOC_LEAD)
         listed = doc[start:doc.index(".", start)]
         names = {n.strip() for n in listed.replace(" and ", ", ").split(",") if n.strip()}
-        null, _ = self._code_null_override_causes()
-        assert names == null
+        assert names == self._always_null(matrix)
         assert "when no repository was found" not in doc
 
-    def test_every_decline_reason_has_a_literal_site(self):
-        from scripts.project_identity import DECLINE_REASONS
+    DOC_LOCATION = (
+        "It is also None for every other cause when the checkout's .git "
+        "points at a git directory outside the checkout"
+    )
 
-        _, located = self._code_null_override_causes()
-        assert located == set(DECLINE_REASONS)
+    def test_the_decline_record_docstring_names_the_location_route(self, matrix):
+        from scripts.project_identity import decline_record
+
+        doc = _flatten(decline_record.__doc__ or "")
+        if "external" in self._location_routes(matrix):
+            assert self.DOC_LOCATION in doc
+        else:
+            assert self.DOC_LOCATION not in doc
 
     def test_a_redirect_decline_can_never_carry_a_path(self):
         from scripts.project_identity import decline_record
