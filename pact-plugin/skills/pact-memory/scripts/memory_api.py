@@ -826,7 +826,17 @@ def _root_guard(
                 detail=f"{source}: {str(asked_root)!r}",
             )
         return None
-    if asked_root is not None and _worktree_redirect(asked_root, common_dir):
+    # ONE TOPLEVEL QUESTION per guard: arm 2 needs it for a linked-worktree
+    # shape and arm 3 needs it always, so it is asked here once and shared.
+    if toplevel is _TOPLEVEL_UNASKED:
+        toplevel = (
+            _git_rev_parse(str(asked_root), "--show-toplevel")
+            if asked_root is not None
+            else None
+        )
+    if asked_root is not None and _worktree_redirect(
+        asked_root, common_dir, toplevel=Path(toplevel) if toplevel else None,
+    ):
         # No override path: the common dir is the TARGET repository's.
         return _decline(
             source,
@@ -838,12 +848,6 @@ def _root_guard(
                 "repository's worktree admin dir but is not one of its "
                 "listed worktrees"
             ),
-        )
-    if toplevel is _TOPLEVEL_UNASKED:
-        toplevel = (
-            _git_rev_parse(str(asked_root), "--show-toplevel")
-            if asked_root is not None
-            else None
         )
     if toplevel is None:
         return _decline(
@@ -1728,6 +1732,10 @@ def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
     Bytes are decoded with `os.fsdecode` (never locale decoding), so a path
     holding bytes invalid in the locale answers rather than raising.
     """
+    if args == ("--git-dir",):
+        # One answer per directory inside a detection pass, shared with the
+        # identity layer's submodule check (`git_dir_answer`).
+        return project_identity.git_dir_answer(start)
     command = ["git"]
     if start is not None:
         command += ["-C", str(start)]
@@ -1913,12 +1921,19 @@ class PACTMemory:
                         file, then its origin), the user-scope setting (only
                         with no declaration and no repository), then the
                         working directory's folder name (home scope warns).
-                        Measured: detection runs 4 git subprocesses (5 in a
-                        linked worktree) and the first legacy-scope read 1
-                        or 2 more (the worktree list, plus the common dir
-                        when detection asked about another directory), with
-                        no call repeated with the same argument; each takes
-                        about 1 ms.
+                        Measured git subprocesses per detection, by layout
+                        and rung, as the fewest to the most over that rung's
+                        routes (each takes about 1 ms):
+                          checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+                          linked worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
+                          submodule: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6.
+                        A submodule asked about from a subdirectory costs the
+                        one more. The cwd marker is reached through a
+                        GIT_CEILING_DIRECTORIES entry above the cwd. The first
+                        legacy-scope read adds up to 2 more (the worktree
+                        list, plus the common dir when detection asked about
+                        another directory). No call is repeated with the same
+                        argument.
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
 
@@ -1976,11 +1991,21 @@ class PACTMemory:
             self._legacy_suppressed_name = None
         else:
             detection_pass = _DETECTION_COMMON_DIRS.set({})
+            git_dir_pass = project_identity.DETECTION_GIT_DIRS.set({})
             try:
                 detected = self._detect_project_identity_with_legacy()
+                # THE SUPPRESSION DISCLOSURE ASKS INSIDE THE SAME PASS: its
+                # common-dir question is the one detection just answered for
+                # the identity root.
+                suppression = (
+                    _legacy_suppression(detected.identity_root)
+                    if detected.legacy_basename is None
+                    else (None, None)
+                )
             finally:
                 self._detection_common_dirs = _DETECTION_COMMON_DIRS.get()
                 _DETECTION_COMMON_DIRS.reset(detection_pass)
+                project_identity.DETECTION_GIT_DIRS.reset(git_dir_pass)
             self._project_id = detected.project_id
             self._project_id_source = detected.source
             # The name the PRE-change resolver produced for this location.
@@ -2010,14 +2035,7 @@ class PACTMemory:
             # STRUCTURED SUPPRESSION DISCLOSURE. A submodule admin dir yields
             # no legacy candidate; carry WHY and WHICH name, once, so every
             # later read can report it without another git call.
-            if detected.legacy_basename is None:
-                (
-                    self._legacy_suppressed,
-                    self._legacy_suppressed_name,
-                ) = _legacy_suppression(detected.identity_root)
-            else:
-                self._legacy_suppressed = None
-                self._legacy_suppressed_name = None
+            self._legacy_suppressed, self._legacy_suppressed_name = suppression
             self._project_id_shape = (
                 "canonical"
                 if self._project_id is not None and is_canonical(self._project_id)

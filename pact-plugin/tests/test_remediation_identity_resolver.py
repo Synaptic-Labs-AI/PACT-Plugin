@@ -2114,7 +2114,9 @@ class TestTheGateProseMatchesTheCode:
         init = PACTMemory.__init__.__doc__
         assert "the user-scope setting (only\n                        with no declaration" in init
         assert "git repo root, or current working" not in init
-        assert "detection runs 4 git subprocesses" in init
+        # The counts themselves are measured against this table by
+        # test_identity_rung_parity.py's TestTheDocumentedGitCallFloor.
+        assert "Measured git subprocesses per detection, by layout" in init
         scopes = PACTMemory._read_project_scopes.__doc__
         assert "An excluded or\n        unproven bucket is not read." in scopes
         assert "the plausibility gate does not exclude it." not in scopes

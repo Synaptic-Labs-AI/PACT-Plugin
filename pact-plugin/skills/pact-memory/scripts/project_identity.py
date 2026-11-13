@@ -22,6 +22,7 @@ both at function level and never defines a second copy of either rule.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -1063,29 +1064,69 @@ def _submodule_admin_dir(path: Optional[Path]) -> bool:
     return False
 
 
-def _resolved_git_dir(asked_root: Path) -> Optional[Path]:
-    """The resolved `--git-dir` for `asked_root`, or None.
+# ONE DETECTION PASS'S `git rev-parse --git-dir` answers, keyed by the
+# resolved start directory. The resolver sets a fresh dict for the length of
+# one construction's detection (beside its common-dir answers), so the root
+# finder, the redirect check and the submodule check ask git once per
+# directory. Outside a pass every call runs git. A ContextVar, so concurrent
+# constructions never share one.
+DETECTION_GIT_DIRS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "DETECTION_GIT_DIRS", default=None
+)
 
-    Used only by the submodule conjunction below, so it runs on the rare
-    admin-dir-shaped repository rather than on every detection. A relative
-    answer is resolved against the directory the command ran in, as git
-    reports it.
-    """
+
+def git_dir_answer(start) -> Optional[str]:
+    """`git [-C start] rev-parse --git-dir`, decoded and stripped, or None;
+    answered once per resolved start inside a detection pass."""
+    memo = DETECTION_GIT_DIRS.get()
+    key = None
+    if memo is not None:
+        try:
+            key = os.path.realpath(str(start) if start is not None else os.getcwd())
+        except (OSError, ValueError):
+            key = None
+        if key is not None and key in memo:
+            return memo[key]
     from shared.project_scope import git_env_without_location
 
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["rev-parse", "--git-dir"]
     try:
         result = subprocess.run(
-            ["git", "-C", str(asked_root), "rev-parse", "--git-dir"],
+            command,
             capture_output=True,
             text=False,
             timeout=5,
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        answer = None
+    else:
+        answer = (
+            os.fsdecode(result.stdout).strip()
+            if result.returncode == 0 and result.stdout.strip()
+            else None
+        )
+    if key is not None:
+        memo[key] = answer
+    return answer
+
+
+def _resolved_git_dir(asked_root: Path) -> Optional[Path]:
+    """The resolved `--git-dir` for `asked_root`, or None.
+
+    Used only by the submodule conjunction below, so it runs on the rare
+    admin-dir-shaped repository rather than on every detection. A relative
+    answer is resolved against the directory the command ran in, as git
+    reports it. Inside a detection pass the root finder's answer for the
+    same directory is reused.
+    """
+    raw = git_dir_answer(asked_root)
+    if raw is None:
         return None
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    git_dir = Path(os.fsdecode(result.stdout).strip())
+    git_dir = Path(raw)
     if not git_dir.is_absolute():
         git_dir = asked_root / git_dir
     try:

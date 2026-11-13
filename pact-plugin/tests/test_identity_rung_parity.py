@@ -29,7 +29,9 @@ What is derived from the code, not typed here:
   _identity_at_root, main_repo_root or main_repo_common_dir in the memory
   scripts and the backlog writer must execute while the routes run, or be
   one of the sites NO_IDENTITY_BOUND counts with the reason it binds no store
-  key.
+  key;
+- the git-call floor: the per-layout, per-rung counts PACTMemory.__init__
+  documents are measured on every real route.
 
 A route reaches a shape when its own rung answers (the decline's `source`,
 or the bound identity's). A route that does not is listed in NOT_REACHED, and
@@ -57,6 +59,7 @@ from fixtures.identity_git import (
     qualified_name,
 )
 from fixtures.identity_routes import (
+    FORCED_ROUTES,
     NOT_REACHED,
     ROUTES,
     SHAPES,
@@ -457,3 +460,135 @@ class TestEveryIdentityCallerIsCovered:
         }
         assert named == {}
 
+
+# --- the documented git-call floor ----------------------------------------
+# PACTMemory.__init__'s docstring states, per layout and rung, how many git
+# subprocesses detection runs, how many the first legacy-scope read adds, and
+# that no call repeats. Every number is measured here on every real route;
+# the forced routes are left out because their stubs replace git answers.
+
+FLOOR_LAYOUTS = {
+    "checkout": "control_own_checkout",
+    "linked worktree": "control_own_linked_worktree",
+    "submodule": "control_own_submodule",
+}
+
+
+def _rung_family(route: str) -> str:
+    """The rung a route name belongs to: the name before its qualifier."""
+    return route.split(" (", 1)[0]
+
+
+def _documented_floor() -> tuple:
+    """({layout: {rung: (fewest, most)}}, first-read maximum) from the
+    docstring, where a rung's count is `N` or `N-M`."""
+    import re
+
+    doc = " ".join(PACTMemory.__init__.__doc__.split())
+    table = {}
+    for layout in FLOOR_LAYOUTS:
+        line = re.search(rf"{layout}: ((?:[A-Za-z_ ]+ \d+(?:-\d+)?(?:, )?)+)[;.]", doc)
+        assert line, f"the docstring states no git-call counts for {layout!r}"
+        table[layout] = {
+            rung.strip(): (int(low), int(high or low))
+            for rung, low, high in re.findall(
+                r"([A-Za-z_ ]+?) (\d+)(?:-(\d+))?(?:, |$)", line.group(1)
+            )
+        }
+    read = re.search(r"first legacy-scope read adds up to (\d+)", doc)
+    assert read, "the docstring states no first-read count"
+    assert "No call is repeated with the same argument." in doc
+    return table, int(read.group(1))
+
+
+def _seed_bucket(store: Path, bucket: str) -> None:
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, session_id, created_at, "
+            "updated_at) VALUES ('m1', 'seeded', ?, 's', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00')",
+            (bucket,),
+        )
+        conn.execute("INSERT INTO files (id, path, project_id) VALUES ('f', 'src/a.py', ?)", (bucket,))
+        conn.commit()
+
+
+def _fresh_scope_state() -> None:
+    for name in (
+        "_LEGACY_SCOPE_CACHE", "_EXCLUSION_WARNED", "_CASE_VARIANT_WARNED",
+        "_UNPROVEN_WARNED", "_SUBMODULE_SUPPRESSED",
+    ):
+        memo = getattr(memory_api, name, None)
+        if memo is not None:
+            memo.clear()
+
+
+@pytest.fixture(scope="module")
+def git_calls(tmp_path_factory):
+    """{(layout, route): (detection calls, first-read calls, repeated calls)}."""
+    import subprocess
+
+    real = subprocess.run
+    measured = {}
+    for layout, shape in FLOOR_LAYOUTS.items():
+        for route, (run, _sources) in ROUTES.items():
+            if route in FORCED_ROUTES:
+                continue
+            base = tmp_path_factory.mktemp("floor")
+            assert_outside_repository(base)
+            target = SHAPES[shape](base)
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            store = elsewhere / "m.db"
+            _seed_bucket(store, target.name)
+            calls = []
+
+            def counting(argv, *args, **kwargs):
+                if argv and Path(str(argv[0])).name == "git":
+                    calls.append((tuple(map(str, argv)), str(kwargs.get("cwd") or Path.cwd())))
+                return real(argv, *args, **kwargs)
+
+            with pytest.MonkeyPatch.context() as cell_patch:
+                _clear(cell_patch)
+                run(cell_patch, target, elsewhere)  # puts the process on this route
+                _fresh_scope_state()
+                cell_patch.setattr(subprocess, "run", counting)
+                memory = PACTMemory(session_id="s", db_path=store)
+                detection = len(calls)
+                memory._read_project_scopes()
+            repeated = sorted(c for c, n in collections.Counter(calls).items() if n > 1)
+            measured[(layout, route)] = (detection, len(calls) - detection, repeated)
+    return measured
+
+
+class TestTheDocumentedGitCallFloor:
+    def test_every_rung_runs_the_documented_detection_counts(self, git_calls):
+        """Each layout and rung's documented (fewest, most) is exactly the
+        measured range over that rung's real routes."""
+        table, _read = _documented_floor()
+        measured = collections.defaultdict(list)
+        for (layout, route), counts in git_calls.items():
+            measured[(layout, _rung_family(route))].append(counts[0])
+        wrong = {
+            key: ((min(values), max(values)), table[key[0]].get(key[1]))
+            for key, values in measured.items()
+            if (min(values), max(values)) != table[key[0]].get(key[1])
+        }
+        assert wrong == {}, f"(measured, documented) detection calls: {wrong}"
+
+    def test_the_first_read_adds_at_most_the_documented_count(self, git_calls):
+        _table, read = _documented_floor()
+        assert max(counts[1] for counts in git_calls.values()) == read
+
+    def test_no_route_repeats_a_git_call(self, git_calls):
+        repeated = {cell: counts[2] for cell, counts in git_calls.items() if counts[2]}
+        assert repeated == {}
+
+    def test_every_documented_rung_has_a_real_route(self):
+        table, _read = _documented_floor()
+        families = {_rung_family(route) for route in ROUTES if route not in FORCED_ROUTES}
+        for layout, rungs in table.items():
+            assert set(rungs) == families, (layout, set(rungs), families)
