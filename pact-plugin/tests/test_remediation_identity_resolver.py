@@ -93,7 +93,11 @@ class TestOneDeclineRecord:
 
         source = textwrap.dedent("""
             import functools
+            import functools as ft
             from functools import partial
+            from scripts.memory_api import _DetectedIdentity as DI
+
+            _DetectedIdentity("module", source="level")  # positional
 
             def build(fields, module):
                 _DetectedIdentity("a", source="b")  # positional
@@ -110,13 +114,18 @@ class TestOneDeclineRecord:
                 module._DetectedIdentity(project_id="a")  # keyword
                 partial(_DetectedIdentity, project_id="a")  # keyword
                 _OtherRecord("a")  # keyword
+                functools.partial(_DetectedIdentity)("a")  # positional
+                functools.partial(_DetectedIdentity)(project_id="a")  # keyword
+                ft.partial(_DetectedIdentity, "a")  # positional
+                DI("a")  # positional
+                DI(project_id="a")  # keyword
         """)
         expected = {
             number: line.rsplit("# ", 1)[1]
             for number, line in enumerate(source.splitlines(), start=1)
             if line.rstrip().endswith(("# positional", "# keyword"))
         }
-        assert len(expected) == 12, expected
+        assert len(expected) == 18, expected
         found = set(positional_constructions(ast.parse(source), "_DetectedIdentity"))
         assert {
             number: ("positional" if number in found else "keyword") for number in expected

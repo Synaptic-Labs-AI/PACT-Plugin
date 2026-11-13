@@ -14,6 +14,16 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.identity_git import bindings as shared_bindings
+from fixtures.identity_git import (
+    call_argument,
+    import_aliases,
+    positional_constructions,
+    qualified_name,
+    reason_dict_sites,
+    scopes,
+)
+
 import scripts.memory_api as memory_api  # noqa: E402
 import scripts.working_memory as wm  # noqa: E402
 import staleness  # noqa: E402
@@ -156,24 +166,6 @@ _GIT_CALL_FLOORS = {
 _SUBPROCESS_CALLS = frozenset({"run", "check_output", "check_call", "call", "Popen"})
 
 
-def _bindings(scope, top_level_only: bool = False) -> dict:
-    """Every value each plain name is assigned inside `scope`, or only in its
-    top-level statements (a module's constants), so a name in one function
-    is never resolved through another function's assignment."""
-    found: dict = {}
-    for node in (scope.body if top_level_only else ast.walk(scope)):
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        else:
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                found.setdefault(target.id, []).append(value)
-    return found
-
-
 def _program(node, bindings: dict, seen: frozenset = frozenset()):
     """The program an argv expression runs, or None when it cannot be
     resolved statically.
@@ -220,25 +212,35 @@ def _program(node, bindings: dict, seen: frozenset = frozenset()):
     return None
 
 
-def _git_calls(function: ast.FunctionDef, module_bindings: dict = None):
+def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
     """Yield (call, passes_location_free_env) for each `subprocess` call
     (`run`, `check_output`, `check_call`, `call` or `Popen`) whose argv runs
     git OR cannot be resolved statically.
 
-    The program is resolved from the argv expression (`_program`), with the
-    function's own bindings taking precedence over the module's. An argv
-    that cannot be resolved FAILS CLOSED: it is treated as git, so it must
-    carry the location-free environment too.
+    `scope` is a function node or a list of nodes (one scope from
+    `fixtures.identity_git.scopes`, module-level code included). The call is
+    recognised through the module's imports (`import subprocess as sp`,
+    `from subprocess import run`), and its argv is read by position or as
+    `args=`. The program is resolved from the argv expression (`_program`);
+    an argv that cannot be resolved, or cannot be read, FAILS CLOSED: it is
+    treated as git, so it must carry the location-free environment too.
     """
-    bindings = dict(module_bindings or {})
-    bindings.update(_bindings(function))
-    for node in ast.walk(function):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in _SUBPROCESS_CALLS
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "subprocess" and node.args):
+    if isinstance(scope, ast.AST):
+        nodes = list(ast.walk(scope))
+        if scope_bindings is None:
+            scope_bindings = shared_bindings(scope)
+    else:
+        nodes = scope
+    scope_bindings = scope_bindings or {}
+    aliases = aliases or {}
+    for node in nodes:
+        if not isinstance(node, ast.Call):
             continue
-        program = _program(node.args[0], bindings)
+        module, _, function = (qualified_name(node.func, aliases) or "").rpartition(".")
+        if module != "subprocess" or function not in _SUBPROCESS_CALLS:
+            continue
+        argv = call_argument(node, 0, "args")
+        program = _program(argv, scope_bindings) if argv is not None else None
         if program is not None and program != "git":
             continue
         passes = any(
@@ -300,18 +302,17 @@ def _function(source: str, name: str) -> ast.FunctionDef:
 
 
 def _module_git_calls(source: str):
-    """Every git call in a module, found function by function, each once.
-
-    A call inside a nested function is reached from both functions' walks, so
-    calls are keyed by their position.
-    """
+    """Every git call in a module, module-level code and every function, each
+    once (`fixtures.identity_git.scopes`). A call inside a nested function is
+    reached from both functions' walks, so calls are keyed by position."""
     tree = ast.parse(source)
-    module_bindings = _bindings(tree, top_level_only=True)
+    aliases = import_aliases(tree)
     seen = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for call, passes in _git_calls(node, module_bindings):
-                seen[(call.lineno, call.col_offset)] = (node.name, call, passes)
+    for nodes, scope_bindings in scopes(tree):
+        owner = nodes[0]
+        name = owner.name if hasattr(owner, "name") else "<module>"
+        for call, passes in _git_calls(nodes, scope_bindings, aliases):
+            seen[(call.lineno, call.col_offset)] = (name, call, passes)
     return list(seen.values())
 
 
@@ -319,11 +320,19 @@ def test_every_resolver_git_call_passes_the_location_free_env():
     """Guard arm: every subprocess call in every memory script whose argv
     runs git, or cannot be resolved statically, passes
     `env=git_env_without_location()` (or an inline key filter of it). The
-    program is resolved from the argv expression whatever its form (a string,
-    a list or tuple, a starred splice, a `+` concatenation, a name bound in
-    the function or the module); an argv that cannot be resolved (a call's
-    return value, an imported constant) is treated as git. A git call added
-    anywhere in that directory without the environment fails here."""
+    call is found in module-level code and in every function, through the
+    module's imports (`import subprocess`, `import subprocess as sp`, `from
+    subprocess import run [as r]`). Its argv is read by position or as
+    `args=`, and the program is resolved from it whatever its form (a
+    string, a list or tuple, a starred splice, a `+` concatenation, a name
+    bound in the function or the module); an argv that cannot be resolved
+    (a call's return value, an imported constant) is treated as git. A git
+    call added in that directory in any of those forms without the
+    environment fails here.
+
+    NOT COVERED: a subprocess function reached through `getattr`, `exec` or
+    a re-export from another module, which only adversarial code would
+    write."""
     missing, counts = [], {}
     for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
         calls = _module_git_calls(path.read_text(encoding="utf-8"))
@@ -349,9 +358,13 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
     would fail closed to `bad` and look like a correct git verdict."""
     source = textwrap.dedent("""
         import sys
+        import subprocess as sp
+        from subprocess import run
+        from subprocess import run as launch
         BASE = ["git"]
         FROZEN = ("git",)
         LISTER = ["ls"]
+        subprocess.run(["git", "status"])  # bad
 
         def resolver(args):
             subprocess.run(["git", "rev-parse"], env=git_env_without_location())  # ok
@@ -384,6 +397,12 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
             subprocess.run([*LISTER, "-l"])  # skip
             lister_alias = listing
             subprocess.run(lister_alias)  # skip
+            subprocess.run(args=["git", "log"])  # bad
+            subprocess.run(args=["ls"])  # skip
+            sp.run(["git", "log"])  # bad
+            sp.run(["ls"])  # skip
+            run(["git", "log"])  # bad
+            launch(("git", "log"))  # bad
     """)
     expected = {
         number: line.rsplit("# ", 1)[1]
@@ -394,10 +413,62 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         call.lineno: ("ok" if passes else "bad")
         for _name, call, passes in _module_git_calls(source)
     }
-    assert len(expected) == 21, expected  # every marked fixture line was read
+    assert len(expected) == 28, expected  # every marked fixture line was read
     got = {number: seen.get(number, "skip") for number in expected}
     assert got == expected
     assert sorted(seen) == sorted(n for n, v in expected.items() if v != "skip")
+
+
+# THE THREE SOURCE SCANNERS GUARD PROPERTIES OVER THE SAME SCRIPTS, so each
+# must read the shapes they share the same way. One snippet per shared shape
+# goes through all three; a shape one scanner reads and another misses fails
+# here by name.
+_PARITY_TARGETS = {
+    "git call": ('subprocess.run(["git", "status"])', "import subprocess as sp", 'sp.run(["git", "status"])'),
+    "reason dict": ('payload = {"reason": "x"}', None, None),
+    "positional identity": (
+        '_DetectedIdentity("a", source="b")',
+        "from scripts.memory_api import _DetectedIdentity as DI",
+        'DI("a", source="b")',
+    ),
+}
+_PARITY_SHAPES = {
+    "module level": "{statement}",
+    "function body": "def f():\n    {statement}",
+    "class body": "class C:\n    {statement}",
+    "nested function": "def f():\n    def g():\n        {statement}",
+}
+
+
+def _parity_lines(scanner: str, source: str) -> list:
+    tree = ast.parse(source)
+    if scanner == "git call":
+        return sorted(call.lineno for _name, call, passes in _module_git_calls(source) if not passes)
+    if scanner == "reason dict":
+        return sorted(line for line, _has_path in reason_dict_sites(tree))
+    return positional_constructions(tree, "_DetectedIdentity")
+
+
+def _parity_cases():
+    for scanner, (statement, alias_import, alias_statement) in _PARITY_TARGETS.items():
+        for shape, template in _PARITY_SHAPES.items():
+            yield scanner, shape, "import subprocess\n" + template.format(statement=statement)
+        if alias_import:
+            yield scanner, "import alias", f"{alias_import}\n{alias_statement}"
+
+
+def test_the_three_scanners_read_every_shared_shape_alike():
+    """Parity arm: every shared shape (module level, function body, class
+    body, nested function, an import alias) is found by each scanner whose
+    target it can hold. RED WHEN one scanner stops reading a shape the
+    others read."""
+    misses = []
+    for scanner, shape, source in _parity_cases():
+        last = len(source.splitlines())
+        if _parity_lines(scanner, source) != [last]:
+            misses.append(f"{scanner} / {shape}: found {_parity_lines(scanner, source)}, expected [{last}]")
+    assert len(list(_parity_cases())) == 14
+    assert misses == []
 
 
 def test_the_scan_accepts_only_an_inline_key_filter_of_the_location_free_env():

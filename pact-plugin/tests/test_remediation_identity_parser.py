@@ -654,7 +654,10 @@ class TestOneDeclineRecord:
         import textwrap
 
         source = textwrap.dedent("""
-            def build(base, reason, items):
+            MODULE_LEVEL = {"reason": "x"}  # decline
+            KEY = "reason"
+
+            def build(base, reason, items, param_key):
                 a = {"reason": reason, "rung": "git"}  # decline
                 b = {**base, "reason": reason}  # decline
                 c = dict(reason=reason, rung="git")  # decline
@@ -667,13 +670,19 @@ class TestOneDeclineRecord:
                 g = {"reasons": reason}  # none
                 h = ["reason", reason]  # none
                 items.update(rung="git")  # none
+                base.update([("reason", reason)])  # decline
+                base[KEY] = reason  # decline
+                key = "reason"
+                base[key] = reason  # decline
+                base[param_key] = reason  # none
+                base.update([("rung", "git")])  # none
         """)
         expected = {
             number: line.rsplit("# ", 1)[1]
             for number, line in enumerate(source.splitlines(), start=1)
             if line.rstrip().endswith(("# decline", "# pair", "# none"))
         }
-        assert len(expected) == 12, expected
+        assert len(expected) == 18, expected
         found = {
             line: ("pair" if has_path else "decline")
             for line, has_path in reason_dict_sites(ast.parse(source))

@@ -152,95 +152,245 @@ def seed_session_evidence(
     return context
 
 
+# ---------------------------------------------------------------------------
+# Source scanners over the memory scripts. They share ONE resolution of the
+# shapes a call or a name can take (imports, aliases, attribute chains,
+# keyword arguments, module-level code), so no scanner reads a shape another
+# one misses.
+# ---------------------------------------------------------------------------
+
+
+def import_aliases(tree: ast.AST) -> dict:
+    """Each local name an import binds, mapped to the qualified name it
+    refers to: `import a.b` binds `a`, `import a.b as c` binds `c` to `a.b`,
+    `from a import b as c` binds `c` to `a.b`. Relative imports keep their
+    module name without the dots."""
+    aliases: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+                else:
+                    head = alias.name.split(".")[0]
+                    aliases[head] = head
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                qualified = f"{node.module}.{alias.name}" if node.module else alias.name
+                aliases[alias.asname or alias.name] = qualified
+    return aliases
+
+
+def qualified_name(node, aliases: dict):
+    """The dotted name an expression refers to through the module's imports
+    (`sp.run` -> `subprocess.run` after `import subprocess as sp`, `run` ->
+    `subprocess.run` after `from subprocess import run`), or None when it is
+    not a plain name or attribute chain."""
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        base = qualified_name(node.value, aliases)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def call_argument(call: ast.Call, position: int, keyword: str):
+    """The argument at `position`, or the keyword argument `keyword` when it
+    was passed by name; None when neither is present."""
+    positional = [argument for argument in call.args if not isinstance(argument, ast.Starred)]
+    if len(positional) > position and len(positional) == len(call.args):
+        return positional[position]
+    return next((kw.value for kw in call.keywords if kw.arg == keyword), None)
+
+
+def bindings(scope, top_level_only: bool = False) -> dict:
+    """Every value each plain name is assigned inside `scope`, or only in its
+    top-level statements (a module's constants), so a name in one function
+    is never resolved through another function's assignment."""
+    found: dict = {}
+    for node in (scope.body if top_level_only else ast.walk(scope)):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                found.setdefault(target.id, []).append(value)
+    return found
+
+
+def scopes(tree: ast.Module):
+    """Yield `(nodes, bindings)` for the module's own code (top-level
+    statements and class bodies, outside every function) and then for each
+    function, so module-level code is scanned like a function body. A
+    function's own bindings take precedence over the module's."""
+    module_bindings = bindings(tree, top_level_only=True)
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+    ]
+    inside = {id(inner) for function in functions for inner in ast.walk(function)}
+    yield [node for node in ast.walk(tree) if id(node) not in inside], module_bindings
+    for function in functions:
+        if isinstance(function, ast.Lambda):
+            continue
+        scoped = dict(module_bindings)
+        scoped.update(bindings(function))
+        yield list(ast.walk(function)), scoped
+
+
+def resolve_constant(node, scope_bindings: dict, seen: frozenset = frozenset()):
+    """The string constant an expression holds, following name bindings
+    through aliases; a name with any binding to the target resolves to it.
+    None when it cannot be resolved statically (a parameter, a call)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id not in seen and node.id in scope_bindings:
+        values = {
+            resolve_constant(value, scope_bindings, seen | {node.id})
+            for value in scope_bindings[node.id]
+        }
+        values.discard(None)
+        return "reason" if "reason" in values else (min(values) if values else None)
+    return None
+
+
 def _is_text(node, value: str) -> bool:
     return isinstance(node, ast.Constant) and node.value == value
 
 
+def _pair_keys(argument) -> list:
+    """The first elements of a list or tuple of pairs (`[("k", v), ...]`)."""
+    if not isinstance(argument, (ast.List, ast.Tuple)):
+        return []
+    return [
+        element.elts[0] for element in argument.elts
+        if isinstance(element, (ast.Tuple, ast.List)) and element.elts
+    ]
+
+
 def reason_dict_sites(tree: ast.AST, exempt: frozenset = frozenset()) -> list:
     """Every place the code puts a `reason` key into a dict, as
-    `(lineno, has_path)`, in each statically visible form.
+    `(lineno, has_path)`, in each statically visible form, in module-level
+    code and in every function alike.
 
     The forms: a dict display (`{"reason": ...}`, beside `**` splices too); a
-    `dict(...)` call with a `reason` keyword or a `("reason", ...)` pair; a
-    subscript store (`d["reason"] = ...`); and `.update(reason=...)` or
-    `.setdefault("reason", ...)`. `has_path` is True when the same construct
-    also sets `path`, so a caller can exempt the `{path, reason}` pair. Nodes
-    whose `id()` is in `exempt` (a builder's own body) are skipped.
+    `dict(...)` call with a `reason` keyword or a `("reason", ...)` pair;
+    `.update(...)` with a `reason` keyword or a list of pairs holding one;
+    `.setdefault("reason", ...)`; and a subscript store whose key is the
+    constant `reason`, written inline or through a name bound to it.
+    `has_path` is True when the same construct also sets `path`, so a caller
+    can exempt the `{path, reason}` pair. Nodes whose `id()` is in `exempt`
+    (a builder's own body) are skipped.
+
+    NOT COVERED: a key or keyword name that cannot be resolved statically (a
+    parameter, a call's result, `**kwargs` built at run time). Flagging every
+    such store would flag ordinary dict code.
     """
-    sites = []
-    for node in ast.walk(tree):
-        if id(node) in exempt:
-            continue
-        if isinstance(node, ast.Dict):
-            keys = node.keys
-            if any(_is_text(k, "reason") for k in keys):
-                sites.append((node.lineno, any(_is_text(k, "path") for k in keys)))
-        elif isinstance(node, ast.Call):
-            func = node.func
-            names = {kw.arg for kw in node.keywords}
-            pairs = [
-                element.elts[0]
-                for argument in node.args
-                if isinstance(argument, (ast.List, ast.Tuple))
-                for element in argument.elts
-                if isinstance(element, ast.Tuple) and element.elts
-            ]
-            if isinstance(func, ast.Name) and func.id == "dict":
-                if "reason" in names or any(_is_text(k, "reason") for k in pairs):
-                    has_path = "path" in names or any(_is_text(k, "path") for k in pairs)
-                    sites.append((node.lineno, has_path))
-            elif isinstance(func, ast.Attribute) and func.attr in ("update", "setdefault"):
-                first = node.args[0] if node.args else None
-                if "reason" in names or (func.attr == "setdefault" and _is_text(first, "reason")):
-                    sites.append((node.lineno, "path" in names))
-        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Subscript) and _is_text(target.slice, "reason"):
-                    sites.append((node.lineno, False))
-    return sites
+    aliases = import_aliases(tree) if isinstance(tree, ast.Module) else {}
+    module = tree if isinstance(tree, ast.Module) else ast.Module(body=[tree], type_ignores=[])
+    sites, seen = [], set()
+    for nodes, scope_bindings in scopes(module):
+        for node in nodes:
+            if id(node) in exempt or id(node) in seen:
+                continue
+            seen.add(id(node))
+            site = _reason_site(node, aliases, scope_bindings)
+            if site is not None:
+                sites.append(site)
+    return sorted(set(sites))
+
+
+def _reason_site(node, aliases: dict, scope_bindings: dict):
+    def is_reason(key):
+        return resolve_constant(key, scope_bindings) == "reason"
+
+    def is_path(key):
+        return resolve_constant(key, scope_bindings) == "path"
+
+    if isinstance(node, ast.Dict):
+        if any(key is not None and is_reason(key) for key in node.keys):
+            return (node.lineno, any(key is not None and is_path(key) for key in node.keys))
+        return None
+    if isinstance(node, ast.Call):
+        names = {kw.arg for kw in node.keywords}
+        pairs = [key for argument in node.args for key in _pair_keys(argument)]
+        target = qualified_name(node.func, aliases)
+        method = node.func.attr if isinstance(node.func, ast.Attribute) else None
+        if target == "dict" or method == "update":
+            if "reason" in names or any(is_reason(key) for key in pairs):
+                return (node.lineno, "path" in names or any(is_path(key) for key in pairs))
+        elif method == "setdefault":
+            first = call_argument(node, 0, "key")
+            if first is not None and is_reason(first):
+                return (node.lineno, False)
+        return None
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(isinstance(t, ast.Subscript) and is_reason(t.slice) for t in targets):
+            return (node.lineno, False)
+    return None
 
 
 def positional_constructions(tree: ast.AST, class_name: str) -> list:
-    """Line numbers where `class_name` is built with a positional field.
+    """Line numbers where `class_name` is built with a positional field, in
+    module-level code and in every function alike.
 
-    The class is recognised by its name, as an attribute (`module.Name`), or
-    through any name bound to it (aliases followed to a fixed point). A
-    construction is positional when it passes a positional argument (a
-    starred one included), when it goes through `_make` (always
-    positional), or when `functools.partial` binds positional arguments to
-    it.
+    The class is recognised through the module's imports (`from m import
+    Name as N`), as an attribute (`module.Name`), or through any name bound to
+    it (aliases followed to a fixed point). A construction is positional when
+    it passes a positional argument (a starred one included), when it goes
+    through `_make` (always positional), when `functools.partial` (imported
+    under any name) binds positional arguments to it, or when the partial's
+    result is called with positional arguments.
+
+    NOT COVERED: a class reached through `getattr`, a registry or a call's
+    result, which only adversarial code would write.
     """
-    aliases = {class_name}
+    imports = import_aliases(tree) if isinstance(tree, ast.Module) else {}
+    names = {name for name, target in imports.items() if target.split(".")[-1] == class_name}
+    names.add(class_name)
     changed = True
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and _is_class(node.value, aliases, class_name):
+            if isinstance(node, ast.Assign) and _is_class(node.value, names, class_name):
                 for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id not in aliases:
-                        aliases.add(target.id)
+                    if isinstance(target, ast.Name) and target.id not in names:
+                        names.add(target.id)
                         changed = True
     lines = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if _is_class(func, aliases, class_name) and node.args:
+        if _is_class(func, names, class_name) and node.args:
             lines.append(node.lineno)
         elif isinstance(func, ast.Attribute) and func.attr == "_make" and _is_class(
-            func.value, aliases, class_name
+            func.value, names, class_name
         ):
             lines.append(node.lineno)
-        elif (
-            (isinstance(func, ast.Name) and func.id == "partial")
-            or (isinstance(func, ast.Attribute) and func.attr == "partial")
-        ) and node.args and _is_class(node.args[0], aliases, class_name) and len(node.args) > 1:
+        elif _is_partial_of(node, imports, names, class_name) and len(node.args) > 1:
             lines.append(node.lineno)
-    return lines
+        elif (
+            isinstance(func, ast.Call) and _is_partial_of(func, imports, names, class_name)
+            and node.args
+        ):
+            lines.append(node.lineno)
+    return sorted(set(lines))
 
 
-def _is_class(node, aliases: set, class_name: str) -> bool:
-    return (isinstance(node, ast.Name) and node.id in aliases) or (
+def _is_partial_of(call, imports: dict, names: set, class_name: str) -> bool:
+    target = qualified_name(call.func, imports) or ""
+    return (
+        target.split(".")[-1] == "partial" and bool(call.args)
+        and _is_class(call.args[0], names, class_name)
+    )
+
+
+def _is_class(node, names: set, class_name: str) -> bool:
+    return (isinstance(node, ast.Name) and node.id in names) or (
         isinstance(node, ast.Attribute) and node.attr == class_name
     )
