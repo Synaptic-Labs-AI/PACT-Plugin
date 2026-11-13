@@ -680,7 +680,10 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
     through either makes both UNKNOWN. os.environ itself becomes UNKNOWN from
     the point os.environ is passed to any call, `os` is passed to setattr or
     delattr (including `monkeypatch.setattr(os, "environ", ...)`), os.putenv
-    or os.unsetenv is called, or os.environ gets any other method call.
+    or os.unsetenv is called, or os.environ gets a method call other than the
+    writes and reads listed above for a name (its writes, such as
+    `os.environ.update(...)`, `.setdefault(...)` and `.clear()`, are judged
+    exactly as they are for a name).
 
     CONDITIONAL CODE. A binding or write counts as definite only when the
     statement body that holds it also holds the call. Anything else is read as
