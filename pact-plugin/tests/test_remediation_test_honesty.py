@@ -25,6 +25,7 @@ Every fixture is a real repository and a real on-disk store under tmp_path.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -226,19 +227,32 @@ class TestTheReadScopeCacheServesTheSecondRead:
         assert not wal.exists(), "the seeded store already has a -wal; the arm would not cross the transition"
         memory = PACTMemory(session_id="s", db_path=store)
         decisions = self._count_decisions(monkeypatch)
-        scopes = [memory._read_project_scopes() for _ in range(3)]
-        assert wal.exists() and wal.stat().st_size == 0, (
-            "the read did not leave an empty -wal; the arm would not exercise the empty stamp"
-        )
+        scopes = [memory._read_project_scopes()]
+        # The first read's read-only connection normally creates the empty
+        # `-wal` (measured with SQLite 3.45.1); whether it does is SQLite's
+        # choice. The arm's subject is the key across that transition, so it
+        # makes the transition certain: the `-wal` is empty before the next
+        # reads, whoever created it.
+        if not wal.exists():
+            wal.touch()
+        assert wal.stat().st_size == 0, "the -wal holds frames; the arm would not exercise the empty stamp"
+        scopes += [memory._read_project_scopes() for _ in range(2)]
         assert scopes == [(CANONICAL,)] * 3, scopes
         assert len(decisions) == 1, f"3 reads decided the scope {len(decisions)} times"
 
     def test_a_read_after_a_truncating_checkpoint_decides_again(self, repo_env, monkeypatch):
-        """A TRUNCATE checkpoint after a full backfill empties the `-wal`
-        while the main file's stamp stays where the backfill put it. The read
-        after it must miss (the `-wal` leg moved) and return the backfilled
-        rows. RED WHEN the `-wal` leg is dropped from the key: that read is
-        served from the cache instead of deciding again."""
+        """A TRUNCATE checkpoint after a full backfill empties the `-wal`.
+        The read after it must miss because the `-wal` leg moved, and return
+        the backfilled rows. RED WHEN the `-wal` leg is dropped from the key:
+        that read is served from the cache instead of deciding again.
+
+        The TRUNCATE may also move the main file's mtime (measured on a CI
+        Linux runner: 3 ms, size unchanged); whether it does is SQLite's and
+        the filesystem's choice. The arm's subject is the `-wal` leg, so it
+        holds the main leg constant: it restores the main file's mtime to its
+        pre-truncate value and checks the size did not change. That is the
+        isolation, not a faked state: the checkpoint and the stat key the
+        production code reads are real, and only the main leg is pinned."""
         repo, store = repo_env
         _seed_canonical(store)
         memory = PACTMemory(session_id="s", db_path=store)
@@ -252,14 +266,18 @@ class TestTheReadScopeCacheServesTheSecondRead:
             assert memory._read_project_scopes() == (CANONICAL, LEGACY)
             main_before = store.stat()
             assert other.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
-            main_after = store.stat()
             wal = Path(str(store) + "-wal")
             # PRECONDITION, not the subject: the truncate emptied the `-wal`
-            # and left the main file's stamp alone (measured step 10).
+            # and changed no row in the main file.
             assert wal.stat().st_size == 0
+            assert store.stat().st_size == main_before.st_size, "the truncate resized the main file"
+            # ISOLATION: hold the main leg at its pre-truncate stamp, so the
+            # `-wal` leg is the only part of the key that can have moved.
+            os.utime(store, ns=(store.stat().st_atime_ns, main_before.st_mtime_ns))
+            main_after = store.stat()
             assert (main_after.st_mtime_ns, main_after.st_size) == (
                 main_before.st_mtime_ns, main_before.st_size,
-            ), "the truncate moved the main file; the arm would not isolate the -wal leg"
+            ), "the main file's stamp could not be held; the arm would not isolate the -wal leg"
             seen = len(decisions)
             assert memory._read_project_scopes() == (CANONICAL, LEGACY), (
                 "the read after the truncate lost the backfilled rows"
