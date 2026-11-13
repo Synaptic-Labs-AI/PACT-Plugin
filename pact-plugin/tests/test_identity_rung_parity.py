@@ -20,7 +20,11 @@ What is derived from the code, not typed here:
 - the identity layer's `.git`-marker predicates: every predicate
   `detect_id_for_root` applies to the asked root must answer True for some
   cell;
-- the reasons: every reason measured must be one the code registers.
+- the reasons: every reason measured must be one the code registers;
+- the identity callers: every call of detect_id_for_root, _identity_at_root,
+  main_repo_root or main_repo_common_dir in the memory scripts and the
+  backlog writer must execute while the routes run, or be listed in
+  NO_IDENTITY_BOUND with the reason it binds no store key.
 
 A route reaches a shape when its own rung answers (the decline's `source`,
 or the bound identity's). A route that does not is listed in NOT_REACHED, and
@@ -404,3 +408,136 @@ class TestTheMatrixCoversTheCode:
         cells, _sites, _fired = matrix
         reasons = {a for a, _r in cells.values() if not a.startswith("bound:")}
         assert reasons <= set(pi.DECLINE_REASONS)
+
+
+# --- every identity caller in the memory scripts ---------------------------
+# The rung list above comes from memory_api's resolver. A new caller of the
+# identity functions anywhere else (another memory script, or the backlog
+# writer) would derive an identity no route here exercises. So every call
+# site of these functions in those files must either execute while the
+# routes run, or be listed with the reason it binds no store key.
+
+IDENTITY_FUNCTIONS = frozenset(
+    {"detect_id_for_root", "_identity_at_root", "main_repo_root", "main_repo_common_dir"}
+)
+
+PLUGIN_ROOT = Path(memory_api.__file__).resolve().parents[3]
+
+
+def _identity_caller_files() -> list:
+    scripts = sorted((PLUGIN_ROOT / "skills" / "pact-memory" / "scripts").glob("*.py"))
+    return scripts + [PLUGIN_ROOT / "hooks" / "shared" / "backlog.py"]
+
+
+# (file relative to the plugin root, enclosing function, callee) -> why the
+# site binds no store key.
+NO_IDENTITY_BOUND = {
+    ("skills/pact-memory/scripts/cli.py", "cmd_project_id", "main_repo_root"): (
+        "display only: the show envelope's process_repo_root"
+    ),
+    ("hooks/shared/backlog.py", "project_root", "main_repo_root"): (
+        "the backlog file's directory; the file is keyed by the pre-change "
+        "folder name by design"
+    ),
+    ("skills/pact-memory/scripts/memory_api.py", "_location_divergence_warning", "main_repo_root"): (
+        "compares the process's repository with the id already bound; binds nothing"
+    ),
+    ("skills/pact-memory/scripts/memory_api.py", "_read_project_scopes", "main_repo_common_dir"): (
+        "the common dir of the root the resolver already chose, for the legacy gate"
+    ),
+    ("skills/pact-memory/scripts/memory_api.py", "_legacy_suppression", "main_repo_common_dir"): (
+        "discloses a suppressed legacy name for the root the resolver already chose"
+    ),
+}
+
+
+def _identity_call_sites() -> set:
+    """{(file, enclosing function, callee)} for every call of an identity
+    function in the memory scripts and the backlog writer."""
+    sites = set()
+    for path in _identity_caller_files():
+        rel = path.relative_to(PLUGIN_ROOT).as_posix()
+
+        def visit(node, function):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    visit(child, child.name)
+                    continue
+                if isinstance(child, ast.Call):
+                    func = child.func
+                    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                    if name in IDENTITY_FUNCTIONS:
+                        sites.add((rel, function, name))
+                visit(child, function)
+
+        visit(ast.parse(path.read_text(encoding="utf-8")), "<module>")
+    return sites
+
+
+def _cwd_repo(monkeypatch, target, elsewhere):
+    """The process cwd's own repository identity (status `cwd_repo`, the
+    divergence check), from inside the target checkout. The session is
+    declared elsewhere, so the cwd's identity is derived on its own rather
+    than reused from the resolver."""
+    monkeypatch.chdir(target)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(elsewhere))
+    memory = PACTMemory(session_id="s", db_path=elsewhere / "m.db")
+    return memory._current_repo_identity()
+
+
+@pytest.fixture(scope="module")
+def identity_callers(tmp_path_factory):
+    """(call sites executed while every route runs, {shape: cwd_repo id})."""
+    files = {str(path): path.relative_to(PLUGIN_ROOT).as_posix() for path in _identity_caller_files()}
+    executed = set()
+
+    def tracer(frame, event, arg):
+        if event == "call" and frame.f_code.co_name in IDENTITY_FUNCTIONS:
+            caller = frame.f_back
+            if caller is not None and caller.f_code.co_filename in files:
+                executed.add((files[caller.f_code.co_filename], caller.f_code.co_name, frame.f_code.co_name))
+        return None
+
+    cwd_ids = {}
+    for shape, build in SHAPES.items():
+        runs = [(route, run) for route, (run, _sources) in ROUTES.items()] + [("cwd_repo", _cwd_repo)]
+        for route, run in runs:
+            base = tmp_path_factory.mktemp("callers")
+            assert_outside_repository(base)
+            target = build(base)
+            (target / "sub").mkdir(exist_ok=True)
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            with pytest.MonkeyPatch.context() as cell_patch:
+                _clear(cell_patch)
+                previous = sys.getprofile()
+                sys.setprofile(tracer)
+                try:
+                    result = run(cell_patch, target, elsewhere)
+                finally:
+                    sys.setprofile(previous)
+            if route == "cwd_repo":
+                cwd_ids[shape] = result
+    return executed, cwd_ids
+
+
+class TestEveryIdentityCallerIsCovered:
+    def test_every_call_site_runs_or_binds_nothing(self, identity_callers):
+        executed, _cwd_ids = identity_callers
+        uncovered = _identity_call_sites() - executed - set(NO_IDENTITY_BOUND)
+        assert uncovered == set(), (
+            "an identity call site no route executes and no reason excuses: "
+            f"{sorted(uncovered)}"
+        )
+
+    def test_every_excused_site_still_exists(self):
+        stale = set(NO_IDENTITY_BOUND) - _identity_call_sites()
+        assert stale == set(), f"an excused call site is gone: {sorted(stale)}"
+
+    def test_the_cwd_repository_never_names_the_victim(self, identity_callers):
+        _executed, cwd_ids = identity_callers
+        named = {
+            shape: found for shape, found in cwd_ids.items()
+            if found == VICTIM_ID and shape not in ACCEPTED_BINDS
+        }
+        assert named == {}
