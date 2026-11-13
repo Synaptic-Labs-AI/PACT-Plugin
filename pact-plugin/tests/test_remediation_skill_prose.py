@@ -1105,6 +1105,18 @@ def override_read_matrix(tmp_path_factory):
         f"gitdir: {victim / '.git' / 'worktrees' / 'victim-wt'}\n", encoding="utf-8"
     )
     add("redirect forged worktree-admin pointer", w / "d_forged")
+    # The same forgery reached through the cwd-marker rung: a ceiling at the
+    # forged checkout stops git's own walk, so only the resolver's marker walk
+    # finds the `.git` file, and its repository guard is the only defence.
+    victim2 = T._repo(w / "victim2", good.format("victim2"), commit=True)
+    T._git("-C", str(victim2), "worktree", "add", "-q", str(w / "victim2-wt"))
+    (w / "ceil_forged" / "proj" / "sub").mkdir(parents=True)
+    (w / "ceil_forged" / "proj" / ".git").write_text(
+        f"gitdir: {victim2 / '.git' / 'worktrees' / 'victim2-wt'}\n", encoding="utf-8"
+    )
+    add("cwd-marker rung forged worktree-admin pointer", w / "ceil_forged" / "proj",
+        cwd=w / "ceil_forged" / "proj" / "sub", declared=None,
+        extra={"GIT_CEILING_DIRECTORIES": str(w / "ceil_forged" / "proj")})
     T._repo(w / "stores" / "ext_bare.git", good.format("extbare"), bare=True)
     (w / "d_extbare").mkdir()
     (w / "d_extbare" / ".git").write_text(
