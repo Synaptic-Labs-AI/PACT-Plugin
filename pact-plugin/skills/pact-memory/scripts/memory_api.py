@@ -1429,6 +1429,36 @@ _DETECTION_COMMON_DIRS: "contextvars.ContextVar[Optional[Dict[str, Optional[Path
     contextvars.ContextVar("_DETECTION_COMMON_DIRS", default=None)
 )
 
+# THE PASS'S OTHER GIT ANSWERS (`rev-parse` questions and worktree listings),
+# keyed by the question and the resolved directory it is asked in. Set beside
+# `_DETECTION_COMMON_DIRS` as a fresh dict for each construction's detection
+# pass and reset when it ends; unlike that memo it is not handed to the first
+# legacy read. A forged worktree pointer is checked twice in one pass, by the
+# root finder and by the rung's guard, and without this each check lists the
+# worktrees and asks the toplevel again.
+_DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "_DETECTION_ANSWERS", default=None
+)
+
+
+def _detection_answer(question: tuple, ask):
+    """`ask()`'s answer, asked once per detection pass for each question.
+    Outside a pass every call asks."""
+    memo = _DETECTION_ANSWERS.get()
+    if memo is None:
+        return ask()
+    if question not in memo:
+        memo[question] = ask()
+    return memo[question]
+
+
+def _where(start) -> str:
+    """The resolved directory a git question is asked in (the cwd for None)."""
+    try:
+        return os.path.realpath(start if start is not None else os.getcwd())
+    except (OSError, ValueError):
+        return str(start)
+
 
 def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
     """Resolve the repository's GIT COMMON DIR via `git rev-parse`.
@@ -1525,6 +1555,13 @@ def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Opti
     `None` when git cannot enumerate — a failed ANSWER, not a failed
     verification, so callers must not treat it as proof of a redirect.
     """
+    target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
+    return _detection_answer(
+        ("worktree list", target), lambda: _ask_worktree_toplevels(start, git_dir)
+    )
+
+
+def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
     command = ["git"]
     if git_dir is not None:
         command += ["--git-dir", str(git_dir)]
@@ -1736,6 +1773,12 @@ def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
         # One answer per directory inside a detection pass, shared with the
         # identity layer's submodule check (`git_dir_answer`).
         return project_identity.git_dir_answer(start)
+    return _detection_answer(
+        ("rev-parse", _where(start), args), lambda: _ask_rev_parse(start, args)
+    )
+
+
+def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
     command = ["git"]
     if start is not None:
         command += ["-C", str(start)]
@@ -1995,6 +2038,7 @@ class PACTMemory:
         else:
             detection_pass = _DETECTION_COMMON_DIRS.set({})
             git_dir_pass = project_identity.DETECTION_GIT_DIRS.set({})
+            answers_pass = _DETECTION_ANSWERS.set({})
             try:
                 detected = self._detect_project_identity_with_legacy()
                 # THE SUPPRESSION DISCLOSURE ASKS INSIDE THE SAME PASS: its
@@ -2009,6 +2053,7 @@ class PACTMemory:
                 self._detection_common_dirs = _DETECTION_COMMON_DIRS.get()
                 _DETECTION_COMMON_DIRS.reset(detection_pass)
                 project_identity.DETECTION_GIT_DIRS.reset(git_dir_pass)
+                _DETECTION_ANSWERS.reset(answers_pass)
             self._project_id = detected.project_id
             self._project_id_source = detected.source
             # The name the PRE-change resolver produced for this location.

@@ -593,8 +593,10 @@ def _fresh_scope_state() -> None:
 
 @pytest.fixture(scope="module")
 def git_calls(tmp_path_factory):
-    """{(layout, route): (detection calls, first-read calls, repeated calls)},
-    and {layout outcome: the layouts that reached it} over the same runs."""
+    """{(layout, route): (detection calls, first-read calls, repeated calls)}
+    over EVERY shape (an own layout keyed by its table row, any other shape by
+    its name), and {layout outcome: the own layouts that reached it} over the
+    same runs."""
     import subprocess
 
     real = subprocess.run
@@ -621,13 +623,19 @@ def git_calls(tmp_path_factory):
             # of a returned `or` made it true; no outside text is evaluated.
             for index, operand in operands[key].items():
                 if eval(operand, frame.f_globals, dict(frame.f_locals)):
-                    reached[(*key, index)].add(current[0])
+                    if current[0] is not None:
+                        reached[(*key, index)].add(current[0])
         elif (*key, None) in outcomes:
-            reached[(*key, None)].add(current[0])
+            if current[0] is not None:
+                reached[(*key, None)].add(current[0])
         return None
 
-    for layout, shape in FLOOR_LAYOUTS.items():
-        current[:] = [layout]
+    own = {shape: layout for layout, shape in FLOOR_LAYOUTS.items()}
+    for shape in SHAPES:
+        # EVERY SHAPE IS RUN, so a declining shape is held to no repeats too;
+        # only the own layouts are counted against the table.
+        layout = own.get(shape, shape)
+        current[:] = [layout if shape in own else None]
         for route, (run, _sources) in ROUTES.items():
             if route in FORCED_ROUTES:
                 continue
@@ -667,8 +675,10 @@ class TestTheDocumentedGitCallFloor:
     """The git-call counts PACTMemory.__init__ documents, measured on every
     own layout the shared fixture builds (FLOOR_LAYOUTS, read from SHAPES)
     and every real route. The forced routes are left out because their stubs
-    replace git answers. The layout set is complete when every truthy
-    outcome of the `.git`-layout predicates is reached by some own layout,
+    replace git answers. Every other shape (a hostile pointer that declines,
+    or the accepted external-store bind) has no documented count but is held
+    to no repeated call on every route too. The layout set is complete when
+    every truthy outcome of the `.git`-layout predicates is reached by some own layout,
     except the outcomes NOT_A_FLOOR_LAYOUT names with its reason."""
 
     def test_every_rung_runs_the_documented_detection_counts(self, git_calls):
@@ -678,7 +688,8 @@ class TestTheDocumentedGitCallFloor:
         table, _read = _documented_floor()
         measured = collections.defaultdict(list)
         for (layout, route), counts in measured_calls.items():
-            measured[(layout, _rung_family(route))].append(counts[0])
+            if layout in FLOOR_LAYOUTS:
+                measured[(layout, _rung_family(route))].append(counts[0])
         wrong = {
             key: ((min(values), max(values)), table[key[0]].get(key[1]))
             for key, values in measured.items()
@@ -689,12 +700,19 @@ class TestTheDocumentedGitCallFloor:
     def test_the_first_read_adds_at_most_the_documented_count(self, git_calls):
         measured_calls, _reached = git_calls
         _table, read = _documented_floor()
-        assert max(counts[1] for counts in measured_calls.values()) == read
+        assert max(
+            counts[1] for (layout, _route), counts in measured_calls.items()
+            if layout in FLOOR_LAYOUTS
+        ) == read
 
     def test_no_route_repeats_a_git_call(self, git_calls):
+        """No git call is repeated with the same argument on any cell: EVERY
+        SHAPES entry (own layouts, declining hostile shapes and accepted binds)
+        on every real route, detection and first read together. The count
+        table covers the own layouts only; this arm covers every shape."""
         measured_calls, _reached = git_calls
         repeated = {cell: counts[2] for cell, counts in measured_calls.items() if counts[2]}
-        assert repeated == {}
+        assert repeated == {}, f"repeated git calls on (shape or layout, route): {sorted(repeated)}"
 
     def test_every_documented_rung_has_a_real_route(self):
         table, _read = _documented_floor()
