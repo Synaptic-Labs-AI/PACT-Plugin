@@ -1238,8 +1238,53 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         return True
 
 
+def _redirect_target_is_foreign(target: Path, marker_root: Path) -> bool:
+    """Whether a `.git` marker's resolved TARGET is another repository's git dir.
+
+    ONE predicate for every route by which `.git` can redirect: a gitfile's
+    `gitdir:` line and a symlinked `.git`, so the routes cannot drift apart.
+
+    - A target named exactly `.git` is another checkout's git dir: a
+      redirect. (A legitimate `--separate-git-dir=<dir>/.git` takes this
+      shape too; see `_gitfile_points_at_foreign_gitdir`.)
+    - A submodule admin dir at any depth (`_submodule_admin_dir`) has its
+      git dir EQUAL to its common dir, so only its recorded `core.worktree`
+      can tell a genuine submodule from a pointer at somebody else's.
+
+      THE SHAPE IS CHECKED FIRST, so a linked-worktree target never reaches
+      that git subprocess, which is unaffordable on every detection.
+
+      A LINKED-WORKTREE ADMIN DIR IS EXCLUDED BY GIT'S OWN MARK, its
+      `commondir` file, which a submodule admin dir never holds. A worktree
+      OF a submodule has its admin dir at
+      `<super>/.git/modules/<name>/worktrees/<wt>`, which has the submodule
+      shape, but its `core.worktree` is read from the shared submodule config
+      and names the submodule's MAIN checkout, so the comparison would refuse
+      the genuine worktree. A name test cannot replace the mark: a submodule
+      may itself be named `x/worktrees/y`.
+    - Anything else is not a redirect here. A linked-worktree admin dir is
+      checked against git's worktree listing by the resolver, and an
+      arbitrary external git dir (a bare clone, a `--separate-git-dir`
+      store, an Android `.repo/projects/<name>.git`) binds its own identity,
+      the accepted residual.
+    """
+    if target.name == ".git":
+        return True
+    if _submodule_admin_dir(target) and not os.path.exists(target / "commondir"):
+        return _admin_dir_names_another_checkout(target, marker_root)
+    return False
+
+
 def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
-    """Whether `<root>/.git` is a FILE redirecting at another repo's git dir.
+    """Whether `<root>/.git` redirects at another repository's git dir.
+
+    Two routes reach the same question, and both answer through
+    `_redirect_target_is_foreign`:
+
+    - a `.git` FILE whose `gitdir:` line names the target (followed, if the
+      file is reached through a symlink, exactly as git reads it);
+    - a `.git` SYMLINK to a directory. `is_dir()` follows the link and would
+      see an ordinary checkout, so the link is resolved to its target first.
 
     A genuine submodule points at `<super>/.git/modules/<name>`, a genuine
     linked worktree at `<main>/.git/worktrees/<name>`, and a genuine
@@ -1249,10 +1294,14 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     dir and origin as if the asking directory were its checkout, so a write
     would file into a project nobody named.
 
-    Read straight from the file rather than through git: a comparison of git
-    answers cannot see this (every answer agrees), and the check must run
-    BEFORE the override and origin reads, because both would otherwise be
-    taken from the foreign repository.
+    Read straight from the marker rather than through git: a comparison of
+    git answers cannot see this (every answer agrees), and the check must
+    run BEFORE the override and origin reads, because both would otherwise
+    be taken from the foreign repository.
+
+    A SYMLINKED PARENT DIRECTORY IS NOT A REDIRECT: the marker is then the
+    real checkout's own `.git` directory (the walk resolves the start), so
+    the asked folder IS that checkout, reached by another path.
 
     MEASURED EXCEPTION, and the reason the caller suppresses only the ORIGIN:
     a legitimate `git init --separate-git-dir=<dir>/.git` names its store
@@ -1266,24 +1315,21 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     # The caller may hand us a SUBDIRECTORY of the redirected checkout (a
     # declared path one level down is the common shape), and `<subdir>/.git`
     # does not exist — so testing only the immediate directory leaves the
-    # subdirectory case open. The `core.worktree` comparison below is
-    # against the MARKER'S directory (the checkout root), never the raw
-    # input, or a legitimate subdirectory of a genuine submodule would be
-    # refused.
+    # subdirectory case open. The `core.worktree` comparison is against the
+    # MARKER'S directory (the checkout root), never the raw input, or a
+    # legitimate subdirectory of a genuine submodule would be refused.
     marker = find_git_marker(root)
     if marker is None:
         return False
+    marker_root = marker.parent
     try:
+        if marker.is_symlink() and marker.is_dir():
+            return _redirect_target_is_foreign(marker.resolve(), marker_root)
         if not marker.is_file():
             # A real `.git` DIRECTORY: an ordinary checkout.
             return False
-    except OSError:
-        return False
-    marker_root = marker.parent
-
-    try:
-        text = (marker_root / ".git").read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        text = marker.read_text(encoding="utf-8", errors="replace")
+    except (OSError, RuntimeError):
         return False
     for line in text.splitlines():
         if not line.startswith("gitdir:"):
@@ -1298,31 +1344,7 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
             resolved = resolved.resolve()
         except (OSError, RuntimeError):
             return False
-        if resolved.name == ".git":
-            return True
-        # A submodule admin dir at any depth (`_submodule_admin_dir`): the
-        # submodule-admin redirect, whose git dir EQUALS its common dir, so
-        # only the recorded checkout can tell a genuine submodule from a
-        # pointer at somebody else's.
-        #
-        # THE SHAPE IS CHECKED FIRST, so a linked-worktree marker
-        # (`.../.git/worktrees/<name>`) never reaches the git subprocess —
-        # that call is unaffordable on every detection.
-        #
-        # A LINKED-WORKTREE ADMIN DIR IS EXCLUDED BY GIT'S OWN MARK, its
-        # `commondir` file, which a submodule admin dir never holds. A
-        # worktree OF a submodule has its admin dir at
-        # `<super>/.git/modules/<name>/worktrees/<wt>`, which has the
-        # submodule shape, but its `core.worktree` is read from the shared
-        # submodule config and names the submodule's MAIN checkout, so the
-        # comparison below would refuse the genuine worktree. A name test
-        # cannot replace the mark: a submodule may itself be named
-        # `x/worktrees/y`.
-        if _submodule_admin_dir(resolved) and not os.path.exists(
-            resolved / "commondir"
-        ):
-            return _admin_dir_names_another_checkout(resolved, marker_root)
-        return False
+        return _redirect_target_is_foreign(resolved, marker_root)
     return False
 
 

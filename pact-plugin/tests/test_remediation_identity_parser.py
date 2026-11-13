@@ -1223,3 +1223,125 @@ class TestAzureDevOpsKeepsItsDecodedScpPath:
         assert pi.normalize_remote_url("git@other.example:v3/o/My%20Project/repo") == (
             "other.example/v3/o/My%2520Project/repo"
         )
+
+
+# ---------------------------------------------------------------------------
+# A symlinked `.git` is judged by the same rule as a gitfile
+# ---------------------------------------------------------------------------
+
+class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
+    """A `.git` SYMLINK reaches the same targets a `gitdir:` file can, and git
+    answers for the target either way. Every symlink route (absolute,
+    relative, a chain) is refused where the gitfile route is refused, and
+    resolves where it resolves."""
+
+    VICTIM = "https://github.com/victim/checkout.git"
+    VICTIM_ID = "github.com/victim/checkout"
+
+    @staticmethod
+    def _link(dotgit: Path, target: Path, route: str) -> None:
+        if route == "absolute":
+            dotgit.symlink_to(target)
+        elif route == "relative":
+            dotgit.symlink_to(os.path.relpath(target, dotgit.parent))
+        else:
+            hop = dotgit.parent.parent / (dotgit.parent.name + "-hop")
+            hop.symlink_to(target)
+            dotgit.symlink_to(hop)
+
+    def _delivered(self, tmp_path, target: Path, route: str) -> Path:
+        delivered = tmp_path / "dl" / "proj"
+        delivered.mkdir(parents=True)
+        self._link(delivered / ".git", target, route)
+        return delivered
+
+    def _assert_refused(self, memory, store, monkeypatch, victim_id):
+        from scripts import memory_api
+        from scripts.database import count_project_memories, db_connection
+        from scripts.memory_api import PACTMemory, ProjectIdentityUnresolvedError
+
+        expected = pi.decline_record("gitfile_redirect", None, "git root")
+        assert memory.project_id is None
+        assert memory._decline_reason == expected
+        assert memory.get_status()["decline_reason"] == expected
+        assert tuple(memory._read_project_scopes()) == ()
+        monkeypatch.setattr(memory_api, "_ensure_ready", lambda: None)
+        monkeypatch.setattr(PACTMemory, "_store_embedding", lambda self, *a, **k: None)
+        with pytest.raises(ProjectIdentityUnresolvedError):
+            memory.save({"context": "from the delivered checkout"}, sync_to_claude=False)
+        with db_connection(store) as conn:
+            assert count_project_memories(conn, victim_id) == 1
+
+    @pytest.mark.parametrize("route", ["absolute", "relative", "chain"])
+    def test_a_link_to_another_checkouts_git_dir_is_refused(
+        self, tmp_path, monkeypatch, route
+    ):
+        assert_outside_repository(tmp_path)
+        victim = make_repo(tmp_path / "work" / "proj", remote=self.VICTIM)
+        delivered = self._delivered(tmp_path, victim / ".git", route)
+        store = tmp_path / "m.db"
+        _seed_relative_bucket(store, self.VICTIM_ID)
+
+        assert pi._gitfile_points_at_foreign_gitdir(delivered) is True
+        memory = _memory_in(monkeypatch, delivered, store)
+        self._assert_refused(memory, store, monkeypatch, self.VICTIM_ID)
+
+    @pytest.mark.parametrize("route", ["absolute", "relative", "chain"])
+    def test_a_link_to_a_submodule_admin_dir_is_refused(
+        self, tmp_path, monkeypatch, route
+    ):
+        superproject = _superproject_with_submodule(tmp_path)
+        run_git("remote", "set-url", "origin", SUBMODULE_ORIGIN,
+                cwd=superproject / "vendor" / "lib")
+        delivered = self._delivered(
+            tmp_path, superproject / ".git" / "modules" / "vendor" / "lib", route
+        )
+        store = tmp_path / "m.db"
+        _seed_relative_bucket(store, SUBMODULE_ID)
+
+        assert pi._gitfile_points_at_foreign_gitdir(delivered) is True
+        memory = _memory_in(monkeypatch, delivered, store)
+        self._assert_refused(memory, store, monkeypatch, SUBMODULE_ID)
+
+    def test_a_link_to_a_bare_repository_is_refused_by_git(self, tmp_path, monkeypatch):
+        """git itself finds no working tree here, for the gitfile and the
+        symlink alike; the arm pins that refusal."""
+        assert_outside_repository(tmp_path)
+        victim = make_repo(tmp_path / "work" / "proj", remote=self.VICTIM)
+        bare = tmp_path / "bare.git"
+        run_git("clone", "-q", "--bare", str(victim), str(bare), cwd=tmp_path)
+        delivered = self._delivered(tmp_path, bare, "absolute")
+
+        assert pi._gitfile_points_at_foreign_gitdir(delivered) is False
+        memory = _memory_in(monkeypatch, delivered, tmp_path / "m.db")
+        assert memory.project_id is None
+        assert memory._decline_reason["reason"] == "no_working_tree"
+
+    def test_a_moved_git_dir_not_named_git_still_resolves(self, tmp_path, monkeypatch):
+        """A git dir relocated under another name (the shape of a
+        `--separate-git-dir` store or an Android `.repo/projects` entry) is
+        the accepted external-git-dir case, for the symlink as for the
+        gitfile: it binds its own origin."""
+        assert_outside_repository(tmp_path)
+        checkout = tmp_path / "proj"
+        checkout.mkdir()
+        (tmp_path / "store").mkdir()
+        run_git("init", "-q", f"--separate-git-dir={tmp_path / 'store' / 'proj.gitdir'}",
+                ".", cwd=checkout)
+        run_git("remote", "add", "origin", "https://github.com/me/moved.git", cwd=checkout)
+        (checkout / ".git").unlink()
+        (checkout / ".git").symlink_to(tmp_path / "store" / "proj.gitdir")
+
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert _memory_in(monkeypatch, checkout, tmp_path / "m.db").project_id == (
+            "github.com/me/moved"
+        )
+
+    def test_a_symlinked_parent_folder_is_the_same_checkout(self, tmp_path, monkeypatch):
+        assert_outside_repository(tmp_path)
+        victim = make_repo(tmp_path / "work" / "proj", remote=self.VICTIM)
+        alias = tmp_path / "alias"
+        alias.symlink_to(victim)
+
+        assert pi._gitfile_points_at_foreign_gitdir(alias) is False
+        assert _memory_in(monkeypatch, alias, tmp_path / "m.db").project_id == self.VICTIM_ID
