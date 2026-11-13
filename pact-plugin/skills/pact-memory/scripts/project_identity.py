@@ -133,7 +133,9 @@ class RootIdentity(NamedTuple):
     `id_shape` is "canonical", "basename" or None. `source` is the rung that
     decided it. `override_ignored` is a structured {path, reason} when a
     PRESENT override file was unusable and resolution continued without it;
-    `detect_id_for_root` sets it, and the caller discloses it. Its `path` is
+    `detect_id_for_root` sets it, and the caller discloses it. Only this
+    function reads the file, so a resolver rung that declines before calling
+    it, or a home-directory root it never reaches, reports none. Its `path` is
     None (the `reason` is kept) when the checkout's `.git` is a redirect, or
     points at a git directory outside the checkout that is neither a linked
     worktree's nor a submodule's admin dir.

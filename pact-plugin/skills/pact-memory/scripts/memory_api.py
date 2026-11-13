@@ -33,7 +33,7 @@ import unicodedata
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, cast
 
 # Use the same sqlite3 module as database.py for type consistency
 try:
@@ -147,8 +147,13 @@ class _DetectedIdentity(NamedTuple):
     derivation would silently stop finding it.
 
     `override_ignored` is a structured {path, reason} when an override file
-    was present but unusable — a stderr warning alone is invisible to a
-    caller that parses the envelope. `path` is None (the reason is kept) when
+    was read and found unusable — a stderr warning alone is invisible to a
+    caller that parses the envelope. It is None, with nothing read, when a
+    rung declines before the identity read (a repository with no working
+    tree, a `.git` naming a linked worktree's admin dir that does not link
+    back, a broken `.git` marker, a declaration that cannot be resolved) and
+    when the root is the user's home directory. `path` is None (the reason is
+    kept) when
     the checkout's `.git` is a redirect, or points at a git directory outside
     the checkout that is neither a linked worktree's nor a submodule's admin
     dir.
@@ -777,6 +782,11 @@ def _decline_detected(
     )
 
 
+# `_root_guard`'s default for `toplevel`: the caller holds no answer, so the
+# guard asks git itself.
+_TOPLEVEL_UNASKED: Any = object()
+
+
 def _root_guard(
     asked_root: Optional[Path],
     common_dir: Optional[Path],
@@ -784,6 +794,8 @@ def _root_guard(
     *,
     label: Optional[str] = None,
     root: Optional[Path] = None,
+    toplevel: Any = _TOPLEVEL_UNASKED,
+    no_working_tree_detail: Optional[str] = None,
 ) -> "Optional[_DetectedIdentity]":
     """The repository guards every rung runs before it derives an id.
 
@@ -792,10 +804,17 @@ def _root_guard(
     2. A linked-worktree shape that `git worktree list` does not back: a
        forged `.git` file naming another repository's worktree admin dir
        -> `gitfile_redirect`.
+    3. A common dir git answers for, but no working tree: a bare repository,
+       or a `.git` file naming one -> `no_working_tree`. Every rung reaches
+       this shape (the cwd-marker rung through a `GIT_CEILING_DIRECTORIES`
+       entry at the checkout root), so it is checked here, not per rung.
 
-    Returns the decline, or None when the root passes. A bare repository is
-    the git rung's own check, because only that rung can reach one with no
-    toplevel.
+    `toplevel` is the caller's `--show-toplevel` answer for `asked_root`,
+    when it holds one (None: git gave none); left out, the guard asks git
+    once, which only the rungs that reach the guard with a common dir pay.
+    `no_working_tree_detail` keeps a rung's own wording for arm 3.
+
+    Returns the decline, or None when the root passes.
     """
     if common_dir is None:
         if asked_root is not None and _unanswerable_repository(asked_root) is not None:
@@ -818,6 +837,23 @@ def _root_guard(
                 f"{source}: {str(asked_root)!r} resolves to another "
                 "repository's worktree admin dir but is not one of its "
                 "listed worktrees"
+            ),
+        )
+    if toplevel is _TOPLEVEL_UNASKED:
+        toplevel = (
+            _git_rev_parse(str(asked_root), "--show-toplevel")
+            if asked_root is not None
+            else None
+        )
+    if toplevel is None:
+        return _decline(
+            source,
+            "no_working_tree",
+            label=label,
+            root=root,
+            detail=no_working_tree_detail or (
+                f"{source}: {str(asked_root)!r} is a bare repository, or git "
+                "cannot describe its working tree"
             ),
         )
     return None
@@ -2262,29 +2298,24 @@ class PACTMemory:
         # subdirectory bound `github.com/victim/secret-lib`.
         #
         # A BARE repository also has `main_repo_root() is None`, but its git
-        # dir EQUALS its common dir, so `_worktree_redirect` answers False; it
-        # declines `no_working_tree` below, exactly as the git rung does.
+        # dir EQUALS its common dir, so `_worktree_redirect` answers False; the
+        # guard declines it `no_working_tree`, exactly as on every rung.
         live_root = declared_main_root or declared_root or Path(declared_dir)
         if declared_main_root is None and declared_root is not None:
             # A `.git`-MARKED BUT UNANSWERABLE declared directory declines for
             # the same reason as the git rung; a non-git declared path has no
-            # marker and keeps the designed basename.
+            # marker and keeps the designed basename. `toplevel=None`:
+            # `main_repo_root` found no root, so git gave none.
             guarded = _root_guard(
                 declared_root, declared_common_dir, source, label=source,
                 root=live_root if declared_common_dir is None else None,
+                toplevel=None,
+                no_working_tree_detail=(
+                    f"declared via {source}: {declared_dir!r} is a bare repository"
+                ),
             )
             if guarded is not None:
                 return done(guarded)
-            if declared_common_dir is not None:
-                # A REPOSITORY WITH NO ROOT that is not a redirect: a BARE
-                # repository. It has no working tree to name, so the
-                # declaration declines exactly as the git rung does.
-                return done(_decline(
-                    source,
-                    "no_working_tree",
-                    label=source,
-                    detail=f"declared via {source}: {declared_dir!r} is a bare repository",
-                ))
 
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
         # fire AND the declared path does not resolve to an existing target.
@@ -2328,11 +2359,14 @@ class PACTMemory:
             if guarded is not None:
                 return done(guarded)
             # The record's own label is disclosed; a decline's record names the
-            # rung that asked, as it always has.
+            # rung that asked, as it always has. The identity read asks about
+            # the recorded checkout, the root the guard just judged: the
+            # declared directory is gone, so a `.git` predicate evaluated on
+            # it sees no marker and passes whatever the recorded root holds.
             return done(PACTMemory._identity_at_root(
                 recorded_root,
                 recorded_common_dir,
-                asked_root=Path(declared_dir),
+                asked_root=recorded_root,
                 source=source,
                 label=recorded_label,
             ))
@@ -2462,19 +2496,17 @@ class PACTMemory:
                 # NO ROOT: a forged worktree pointer, or a bare repository.
                 # The guard tells them apart, so a redirect is reported as a
                 # redirect and only a real bare repository as having no
-                # working tree.
-                guarded = _root_guard(_cwd_or_none(), cwd_common_dir, "git root")
-                if guarded is not None:
-                    return guarded._replace(pre_change_name=git_pre_change)
-                return _decline(
-                    "git root",
-                    "no_working_tree",
-                    pre_change_name=git_pre_change,
-                    detail=(
+                # working tree. With a common dir and `toplevel=None` the
+                # guard always declines, so the result is never None here.
+                guarded = cast("_DetectedIdentity", _root_guard(
+                    _cwd_or_none(), cwd_common_dir, "git root",
+                    toplevel=None,
+                    no_working_tree_detail=(
                         "the process's repository is bare, or git cannot "
                         "describe its working tree"
                     ),
-                )
+                ))
+                return guarded._replace(pre_change_name=git_pre_change)
             detected = PACTMemory._identity_at_root(
                 repo_root,
                 cwd_common_dir,
@@ -2588,8 +2620,9 @@ class PACTMemory:
                     )
                 cwd_common_dir = main_repo_common_dir(str(cwd_root))
                 # The same guards as the declared rungs: a marker without a
-                # git answer, and the forged worktree-admin shape
-                # (`main_repo_root` is not called on this rung). This rung
+                # git answer, the forged worktree-admin shape, and a
+                # repository with no working tree (`main_repo_root` is not
+                # called on this rung, so the guard asks git). This rung
                 # meets a `.git` marker when a `GIT_CEILING_DIRECTORIES` entry
                 # above the cwd hid the checkout from git and from
                 # `find_git_marker`: `_find_project_root` does not stop at a
@@ -3160,8 +3193,10 @@ class PACTMemory:
           directory repository, or None when none resolved (NOT the repo
           root path: the root is `repo_root` on the `project-id show`
           envelope);
-        - `override_ignored` — `{path, reason}` when a present
-          `<git-common-dir>/pact-project-id` was unusable, else None; `path`
+        - `override_ignored` — `{path, reason}` when the identity read found
+          `<git-common-dir>/pact-project-id` unusable, else None (a rung that
+          declines before that read, or a home-directory root, reads none);
+          `path`
           is None when the checkout's `.git` is a redirect or points at an
           outside git dir that is no linked worktree's or submodule's admin
           dir;
