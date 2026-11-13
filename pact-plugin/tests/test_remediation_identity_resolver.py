@@ -119,13 +119,56 @@ class TestOneDeclineRecord:
                 ft.partial(_DetectedIdentity, "a")  # positional
                 DI("a")  # positional
                 DI(project_id="a")  # keyword
+
+            class _DetectedIdentity(NamedTuple):
+                project_id: str
+
+                @classmethod
+                def make(cls, value):
+                    return cls(value)  # positional
+
+                @classmethod
+                def make_named(cls, value):
+                    return cls(project_id=value)  # keyword
+
+                @classmethod
+                def remake(cls, fields):
+                    return cls._make(fields)  # positional
+
+                def copy(self):
+                    return type(self)(*self)  # positional
+
+                def clone(self):
+                    return self.__class__("a")  # positional
+
+                def keyed(self):
+                    return self.__class__(project_id="a")  # keyword
+
+                @staticmethod
+                def unrelated(cls):
+                    return cls("a")  # keyword
+
+            class Narrowed(_DetectedIdentity):
+                @classmethod
+                def make(klass, value):
+                    return klass(value)  # positional
+
+            Narrowed("a")  # positional
+
+            class Other:
+                @classmethod
+                def make(cls, value):
+                    return cls(value)  # keyword
+
+                def copy(self):
+                    return type(self)("a")  # keyword
         """)
         expected = {
             number: line.rsplit("# ", 1)[1]
             for number, line in enumerate(source.splitlines(), start=1)
             if line.rstrip().endswith(("# positional", "# keyword"))
         }
-        assert len(expected) == 18, expected
+        assert len(expected) == 29, expected
         found = set(positional_constructions(ast.parse(source), "_DetectedIdentity"))
         assert {
             number: ("positional" if number in found else "keyword") for number in expected

@@ -676,13 +676,26 @@ class TestOneDeclineRecord:
                 base[key] = reason  # decline
                 base[param_key] = reason  # none
                 base.update([("rung", "git")])  # none
+                inner = lambda: {KEY: "x"}  # decline
+                listed = [{"reason": r} for r in items]  # decline
+
+                def nested(store):
+                    store[key] = "x"  # decline
+
+            built = lambda: dict(reason="x")  # decline
+
+            class Holder:
+                SLOT = "reason"
+                made = lambda: {"reason": "x"}  # decline
+                kept = {SLOT: "x"}  # decline
+                other = {"rung": "x"}  # none
         """)
         expected = {
             number: line.rsplit("# ", 1)[1]
             for number, line in enumerate(source.splitlines(), start=1)
             if line.rstrip().endswith(("# decline", "# pair", "# none"))
         }
-        assert len(expected) == 18, expected
+        assert len(expected) == 25, expected
         found = {
             line: ("pair" if has_path else "decline")
             for line, has_path in reason_dict_sites(ast.parse(source))

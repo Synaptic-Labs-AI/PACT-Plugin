@@ -8,6 +8,8 @@ Summary: The resolvers that pick a CLAUDE.md or a project root run git without
 Used by: pytest.
 """
 import ast
+import collections
+import inspect
 import subprocess
 import textwrap
 from pathlib import Path
@@ -18,10 +20,12 @@ from fixtures.identity_git import bindings as shared_bindings
 from fixtures.identity_git import (
     call_argument,
     import_aliases,
+    is_partial,
     positional_constructions,
     qualified_name,
     reason_dict_sites,
     scopes,
+    SCOPE_KINDS,
 )
 
 import scripts.memory_api as memory_api  # noqa: E402
@@ -163,7 +167,38 @@ _GIT_CALL_FLOORS = {
     "memory_api.py": 4,
     "project_identity.py": 3,
 }
-_SUBPROCESS_CALLS = frozenset({"run", "check_output", "check_call", "call", "Popen"})
+# The public subprocess callables that do NOT run a command. Every other
+# public callable of the module, exception classes aside, is treated as one
+# that does, so a runner a newer Python adds is scanned without an edit here.
+_NOT_A_COMMAND = {
+    "CompletedProcess": "builds the result record of a finished run; runs nothing",
+}
+
+
+def _argv_keyword(function) -> str:
+    """The name a runner's command takes as a keyword: its first parameter,
+    or Popen's when the runner forwards `*popenargs` to Popen."""
+    first = next(iter(inspect.signature(function).parameters.values()))
+    if first.kind is inspect.Parameter.VAR_POSITIONAL:
+        return _argv_keyword(subprocess.Popen)
+    return first.name
+
+
+def _command_runners() -> dict:
+    """{name: argv keyword} for every public subprocess callable that runs a
+    command, read from `subprocess.__all__`."""
+    runners = {}
+    for name in subprocess.__all__:
+        value = getattr(subprocess, name)
+        if not callable(value) or name in _NOT_A_COMMAND:
+            continue
+        if isinstance(value, type) and issubclass(value, BaseException):
+            continue
+        runners[name] = _argv_keyword(value)
+    return runners
+
+
+_SUBPROCESS_CALLS = _command_runners()
 
 
 def _program(node, bindings: dict, seen: frozenset = frozenset()):
@@ -212,18 +247,30 @@ def _program(node, bindings: dict, seen: frozenset = frozenset()):
     return None
 
 
+def _runner(node, aliases: dict):
+    """The argv keyword of the subprocess runner `node` names, or None."""
+    module, _, function = (qualified_name(node, aliases) or "").rpartition(".")
+    return _SUBPROCESS_CALLS.get(function) if module == "subprocess" else None
+
+
 def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
-    """Yield (call, passes_location_free_env) for each `subprocess` call
-    (`run`, `check_output`, `check_call`, `call` or `Popen`) whose argv runs
-    git OR cannot be resolved statically.
+    """Yield (call, passes_location_free_env) for each call of a subprocess
+    runner (`_SUBPROCESS_CALLS`, read from the subprocess module: `run`,
+    `Popen`, the `check_*` and `call` helpers, `getoutput`,
+    `getstatusoutput`) whose argv runs git OR cannot be resolved statically.
 
     `scope` is a function node or a list of nodes (one scope from
-    `fixtures.identity_git.scopes`, module-level code included). The call is
-    recognised through the module's imports (`import subprocess as sp`,
-    `from subprocess import run`), and its argv is read by position or as
-    `args=`. The program is resolved from the argv expression (`_program`);
-    an argv that cannot be resolved, or cannot be read, FAILS CLOSED: it is
-    treated as git, so it must carry the location-free environment too.
+    `fixtures.identity_git.scopes`, module-level code included). The runner
+    is recognised through the module's imports (`import subprocess as sp`,
+    `from subprocess import run`), called directly or wrapped by
+    `functools.partial` (imported under any name), whose bound arguments are
+    read as the call's. The argv is read by position or by the runner's own
+    keyword (`args=`, `cmd=`). The program is resolved from the argv
+    expression (`_program`); an argv that cannot be resolved, or is not
+    passed (a partial that binds none), FAILS CLOSED: it is treated as git,
+    so it must carry the location-free environment too. `getoutput` and
+    `getstatusoutput` take no environment, so a git call through them never
+    passes.
     """
     if isinstance(scope, ast.AST):
         nodes = list(ast.walk(scope))
@@ -236,10 +283,12 @@ def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
     for node in nodes:
         if not isinstance(node, ast.Call):
             continue
-        module, _, function = (qualified_name(node.func, aliases) or "").rpartition(".")
-        if module != "subprocess" or function not in _SUBPROCESS_CALLS:
+        keyword, first = _runner(node.func, aliases), 0
+        if keyword is None and is_partial(node, aliases) and node.args:
+            keyword, first = _runner(node.args[0], aliases), 1
+        if keyword is None:
             continue
-        argv = call_argument(node, 0, "args")
+        argv = call_argument(node, first, keyword)
         program = _program(argv, scope_bindings) if argv is not None else None
         if program is not None and program != "git":
             continue
@@ -317,22 +366,26 @@ def _module_git_calls(source: str):
 
 
 def test_every_resolver_git_call_passes_the_location_free_env():
-    """Guard arm: every subprocess call in every memory script whose argv
-    runs git, or cannot be resolved statically, passes
-    `env=git_env_without_location()` (or an inline key filter of it). The
-    call is found in module-level code and in every function, through the
-    module's imports (`import subprocess`, `import subprocess as sp`, `from
-    subprocess import run [as r]`). Its argv is read by position or as
-    `args=`, and the program is resolved from it whatever its form (a
+    """Guard arm: every call of a subprocess runner (every public
+    subprocess callable that runs a command, `_SUBPROCESS_CALLS`) in every
+    memory script whose argv runs git, or cannot be resolved statically,
+    passes `env=git_env_without_location()` (or an inline key filter of it).
+    The call is found in every scope (`fixtures.identity_git.scopes`: the
+    module, class bodies, functions, lambdas and comprehensions), through
+    the module's imports (`import subprocess`, `import subprocess as sp`,
+    `from subprocess import run [as r]`), called directly or wrapped by
+    `functools.partial`. Its argv is read by position or by the runner's
+    keyword, and the program is resolved from it whatever its form (a
     string, a list or tuple, a starred splice, a `+` concatenation, a name
-    bound in the function or the module); an argv that cannot be resolved
-    (a call's return value, an imported constant) is treated as git. A git
-    call added in that directory in any of those forms without the
-    environment fails here.
+    bound in the scope, an enclosing function or the module); an argv that
+    cannot be resolved (a call's return value, an imported constant) is
+    treated as git. A git call added in that directory in any of those
+    forms without the environment fails here.
 
     NOT COVERED: a subprocess function reached through `getattr`, `exec` or
-    a re-export from another module, which only adversarial code would
-    write."""
+    a re-export from another module, and a call of a partial's RESULT that
+    overrides the environment the partial bound (the partial itself is
+    checked), which only adversarial code would write."""
     missing, counts = [], {}
     for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
         calls = _module_git_calls(path.read_text(encoding="utf-8"))
@@ -361,6 +414,9 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         import subprocess as sp
         from subprocess import run
         from subprocess import run as launch
+        from subprocess import getoutput
+        import functools
+        from functools import partial
         BASE = ["git"]
         FROZEN = ("git",)
         LISTER = ["ls"]
@@ -403,6 +459,33 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
             sp.run(["ls"])  # skip
             run(["git", "log"])  # bad
             launch(("git", "log"))  # bad
+            subprocess.getoutput("git status")  # bad
+            subprocess.getstatusoutput(cmd="git status")  # bad
+            subprocess.getoutput("ls -l")  # skip
+            getoutput("git log")  # bad
+            functools.partial(subprocess.run, ["git", "log"])  # bad
+            functools.partial(subprocess.run, ["git", "log"], env=git_env_without_location())  # ok
+            functools.partial(subprocess.run, ["ls"])  # skip
+            partial(sp.check_output)  # bad
+            near = ["ls", "-l"]
+            far = ["git", "log"]
+            inner = lambda: subprocess.run(near)  # skip
+            inner = lambda: subprocess.run(far)  # bad
+
+            def nested():
+                subprocess.run(near)  # skip
+                subprocess.run(far)  # bad
+
+        lone = lambda: subprocess.run(["git", "status"])  # bad
+        listed = [subprocess.run(["git", "status"]) for _ in ()]  # bad
+
+        class Holder:
+            CMD = ["ls"]
+            probe = lambda: subprocess.run(["git", "status"])  # bad
+            listing = subprocess.run(CMD)  # skip
+
+            async def method(self):
+                subprocess.run(["git", "status"])  # bad
     """)
     expected = {
         number: line.rsplit("# ", 1)[1]
@@ -413,30 +496,59 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         call.lineno: ("ok" if passes else "bad")
         for _name, call, passes in _module_git_calls(source)
     }
-    assert len(expected) == 28, expected  # every marked fixture line was read
+    assert len(expected) == 45, expected  # every marked fixture line was read
     got = {number: seen.get(number, "skip") for number in expected}
     assert got == expected
     assert sorted(seen) == sorted(n for n, v in expected.items() if v != "skip")
 
 
 # THE THREE SOURCE SCANNERS GUARD PROPERTIES OVER THE SAME SCRIPTS, so each
-# must read the shapes they share the same way. One snippet per shared shape
-# goes through all three; a shape one scanner reads and another misses fails
-# here by name.
+# must read the shapes they share the same way. Every target form goes
+# through every scope kind; a shape one scanner reads and another misses
+# fails here by name.
+#
+# The targets, one per scanner, in each form more than one scanner reads (an
+# import alias and a `functools.partial` wrapper are read by the git and the
+# constructor scans; a dict holds no call, so the decline scan has the plain
+# form only).
 _PARITY_TARGETS = {
-    "git call": ('subprocess.run(["git", "status"])', "import subprocess as sp", 'sp.run(["git", "status"])'),
-    "reason dict": ('payload = {"reason": "x"}', None, None),
-    "positional identity": (
-        '_DetectedIdentity("a", source="b")',
-        "from scripts.memory_api import _DetectedIdentity as DI",
-        'DI("a", source="b")',
-    ),
+    "git call": {
+        "plain": ("import subprocess", 'subprocess.run(["git", "status"])'),
+        "import alias": ("import subprocess as sp", 'sp.run(["git", "status"])'),
+        "partial": (
+            "import functools, subprocess",
+            'functools.partial(subprocess.run, ["git", "status"])',
+        ),
+    },
+    "reason dict": {
+        "plain": (None, '{"reason": "x"}'),
+    },
+    "positional identity": {
+        "plain": (None, '_DetectedIdentity("a", source="b")'),
+        "import alias": (
+            "from scripts.memory_api import _DetectedIdentity as DI",
+            'DI("a", source="b")',
+        ),
+        "partial": ("import functools", 'functools.partial(_DetectedIdentity, "a")'),
+    },
 }
-_PARITY_SHAPES = {
-    "module level": "{statement}",
-    "function body": "def f():\n    {statement}",
-    "class body": "class C:\n    {statement}",
-    "nested function": "def f():\n    def g():\n        {statement}",
+# One template per scope the shared helper models: the module, every scope
+# kind it derives from the ast module (`SCOPE_KINDS`), and the nestings that
+# decide which bindings a scope sees. The target is always the last line.
+_PARITY_SCOPES = {
+    "Module": "{target}",
+    "FunctionDef": "def f():\n    {target}",
+    "AsyncFunctionDef": "async def f():\n    {target}",
+    "Lambda": "f = lambda: {target}",
+    "ClassDef": "class C:\n    {target}",
+    "ListComp": "[{target} for _ in ()]",
+    "SetComp": "{{{target} for _ in ()}}",
+    "DictComp": "{{0: {target} for _ in ()}}",
+    "GeneratorExp": "list({target} for _ in ())",
+    "nested function": "def f():\n    def g():\n        {target}",
+    "lambda in a class body": "class C:\n    f = lambda: {target}",
+    "lambda in a function": "def f():\n    g = lambda: {target}",
+    "comprehension in a lambda": "f = lambda: [{target} for _ in ()]",
 }
 
 
@@ -450,24 +562,35 @@ def _parity_lines(scanner: str, source: str) -> list:
 
 
 def _parity_cases():
-    for scanner, (statement, alias_import, alias_statement) in _PARITY_TARGETS.items():
-        for shape, template in _PARITY_SHAPES.items():
-            yield scanner, shape, "import subprocess\n" + template.format(statement=statement)
-        if alias_import:
-            yield scanner, "import alias", f"{alias_import}\n{alias_statement}"
+    for scanner, forms in _PARITY_TARGETS.items():
+        for form, (header, target) in forms.items():
+            for scope, template in _PARITY_SCOPES.items():
+                body = template.format(target=target)
+                yield scanner, f"{form} / {scope}", f"{header}\n{body}" if header else body
+
+
+def test_the_parity_scopes_cover_every_scope_kind():
+    """Every scope kind the shared helper derives from the ast module has a
+    parity template, so a kind a newer Python adds reds here until the
+    scanners are shown to read it."""
+    kinds = {kind.__name__ for kind in SCOPE_KINDS} | {"Module"}
+    assert kinds <= set(_PARITY_SCOPES), sorted(kinds - set(_PARITY_SCOPES))
+    assert {"FunctionDef", "Lambda", "ClassDef", "GeneratorExp"} <= kinds  # known-present control
 
 
 def test_the_three_scanners_read_every_shared_shape_alike():
-    """Parity arm: every shared shape (module level, function body, class
-    body, nested function, an import alias) is found by each scanner whose
-    target it can hold. RED WHEN one scanner stops reading a shape the
-    others read."""
+    """Parity arm: every target form, in every scope (each scope kind and
+    the nestings above), is found by its scanner. RED WHEN one scanner stops
+    reading a shape the others read."""
     misses = []
-    for scanner, shape, source in _parity_cases():
+    cases = list(_parity_cases())
+    for scanner, shape, source in cases:
         last = len(source.splitlines())
-        if _parity_lines(scanner, source) != [last]:
-            misses.append(f"{scanner} / {shape}: found {_parity_lines(scanner, source)}, expected [{last}]")
-    assert len(list(_parity_cases())) == 14
+        found = _parity_lines(scanner, source)
+        if found != [last]:
+            misses.append(f"{scanner} / {shape}: found {found}, expected [{last}]")
+    forms = sum(len(targets) for targets in _PARITY_TARGETS.values())
+    assert len(cases) == forms * len(_PARITY_SCOPES) == 7 * 13
     assert misses == []
 
 
@@ -519,3 +642,71 @@ def test_the_scan_accepts_only_an_inline_key_filter_of_the_location_free_env():
         "i": False,  # a dict display adding a variable
         "j": False,  # a second generator
     }
+
+
+# THE SHARED SCOPE HELPER DECIDES WHAT EVERY SCANNER SEES. Its scope kinds are
+# checked against the compiler's own scope table (`symtable`), over every
+# script the scanners read and every parity source.
+# The symtable kinds that hold statements a scanner reads. The others a
+# Python 3.12+ compiler emits ("type alias", "type parameters", "TypeVar
+# bound", "annotation") hold only annotations and type parameters.
+_STATEMENT_TABLES = {"function", "class"}
+
+
+def _scope_sources():
+    for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
+        yield f"{_SCRIPTS_DIR}/{path.name}", path.read_text(encoding="utf-8")
+    for scanner, shape, source in _parity_cases():
+        yield f"parity {scanner} / {shape}", source
+
+
+def _symtable_scopes(table):
+    for child in table.get_children():
+        if str(child.get_type()) in _STATEMENT_TABLES:
+            yield str(child.get_type()), child.get_lineno()
+        yield from _symtable_scopes(child)
+
+
+def test_every_node_is_in_exactly_one_scope():
+    """Every node of every scanned tree is in exactly one scope the shared
+    helper yields, so no scanner can skip a region of the code."""
+    problems = []
+    for label, source in _scope_sources():
+        tree = ast.parse(source)
+        # Counted, not collected into a set: the parser shares one Load and
+        # one Store instance across the tree, so ids repeat in ast.walk too.
+        yielded = collections.Counter(
+            id(node) for nodes, _bindings in scopes(tree) for node in nodes
+        )
+        if yielded != collections.Counter(id(node) for node in ast.walk(tree)):
+            problems.append(label)
+    assert problems == []
+
+
+def test_every_compiler_scope_is_a_yielded_scope():
+    """Every function, lambda, class and generator scope the compiler builds
+    (`symtable`) is a scope the shared helper yields, at the same line. A
+    scope kind the helper skips, or a newer Python adds, fails here."""
+    import symtable
+
+    missing = []
+    for label, source in _scope_sources():
+        owners = {
+            ("class" if isinstance(nodes[0], ast.ClassDef) else "function", nodes[0].lineno)
+            for nodes, _bindings in scopes(ast.parse(source))
+            if not isinstance(nodes[0], ast.Module)
+        }
+        compiled = set(_symtable_scopes(symtable.symtable(source, label, "exec")))
+        missing += [f"{label}: {kind} at line {line}" for kind, line in sorted(compiled - owners)]
+    assert missing == []
+
+
+def test_the_subprocess_runners_are_read_from_the_module():
+    """The git arm's runners are every public subprocess callable except
+    exception classes and `_NOT_A_COMMAND`; an exclusion the module no
+    longer has, or a runner without a command parameter, fails here."""
+    assert set(_NOT_A_COMMAND) <= set(subprocess.__all__)
+    assert {"run", "Popen", "getoutput"} <= set(_SUBPROCESS_CALLS)  # known-present control
+    for name, keyword in _SUBPROCESS_CALLS.items():
+        parameters = inspect.signature(getattr(subprocess, name)).parameters
+        assert keyword in parameters or keyword in inspect.signature(subprocess.Popen).parameters
