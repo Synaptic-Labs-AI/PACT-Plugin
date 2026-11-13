@@ -116,8 +116,9 @@ class TestExitCodeThreeCoversBothVerbs:
         assert (
             "project-id rekey exits 1 when it refuses — --to is omitted and no "
             "canonical identity resolves, or --to is omitted and --from is not "
-            "this checkout's own non-excluded legacy candidate — and 2 for bad "
-            "input"
+            "this checkout's own legacy candidate that is neither excluded nor "
+            "unproven, or --db-path names a store that is not present — and 2 "
+            "for bad input"
         ) in _body(SKILL)
 
 
@@ -349,15 +350,23 @@ class TestRekeyRemediesNameTheirTarget:
     def test_a_defaulted_target_is_only_for_the_own_candidate(self):
         assert (
             "An omitted --to is accepted only when --from is this checkout's "
-            "own legacy candidate and it is not excluded; otherwise the move "
-            "is refused with REKEY_REFUSED"
+            "own legacy candidate and it is neither excluded nor unproven; "
+            "otherwise the move is refused with REKEY_REFUSED"
         ) in _body(SKILL)
+
+    def test_a_named_absent_store_is_refused_not_reported_absent(self):
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply], or project-id rekey --candidates alone")
+        assert (
+            "DB_PATH_NOT_FOUND when --db-path names a store that is not "
+            "present, and nothing is created"
+        ) in row
+        assert "A store path that does not exist answers store_absent" not in row
 
     def test_the_envelope_field_sentences_are_present(self):
         row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply], or project-id rekey --candidates alone")
         assert (
-            "A store path that does not exist answers store_absent: true and "
-            "creates nothing; a --from bucket with no rows answers "
+            "When the default store does not exist yet, the command answers "
+            "store_absent: true and creates nothing; a --from bucket with no rows answers "
             "from_bucket_empty: true. The envelope also carries "
             "target_defaulted and legacy_verdict."
         ) in row
