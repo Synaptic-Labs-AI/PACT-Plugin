@@ -148,7 +148,8 @@ class _DetectedIdentity(NamedTuple):
 
     `override_ignored` is a structured {path, reason} when an override file
     was present but unusable — a stderr warning alone is invisible to a
-    caller that parses the envelope.
+    caller that parses the envelope. `path` is None when the file sits in a
+    git directory the checkout's `.git` points at; the reason is kept.
     """
 
     project_id: Optional[str]
@@ -2164,6 +2165,17 @@ class PACTMemory:
         ignored = identity.override_ignored
         if not ignored:
             return
+        if ignored.get("path") is None:
+            # THE PATH IS WITHHELD, NOT THE REPORT: the file sits in a git
+            # directory this checkout's `.git` points at.
+            logger.warning(
+                "ignoring an unusable project override (%s) in the git "
+                "directory this checkout's `.git` points at; resolution "
+                "continues without it. Pinning that directory is a user "
+                "decision: see the pact-memory skill.",
+                ignored.get("reason"),
+            )
+            return
         logger.warning(
             "ignoring the project override at %r (%s); resolution continues "
             "without it.",
@@ -3129,7 +3141,8 @@ class PACTMemory:
           root path: the root is `repo_root` on the `project-id show`
           envelope);
         - `override_ignored` — `{path, reason}` when a present
-          `<git-common-dir>/pact-project-id` was unusable, else None;
+          `<git-common-dir>/pact-project-id` was unusable, else None; `path`
+          is None when that git dir is one the checkout's `.git` points at;
         - `legacy_scope` — the legacy candidate, its admission state and the
           canonical bucket's prior count (the same state `project-id show`
           reports);
@@ -3394,6 +3407,11 @@ class PACTMemory:
             parts.append(
                 f"An override file at {str(ignored['path'])!r} was present but "
                 f"unusable ({ignored.get('reason')})."
+            )
+        elif ignored.get("reason"):
+            parts.append(
+                "An override file in the git directory this checkout's `.git` "
+                f"points at was present but unusable ({ignored['reason']})."
             )
         override_path = reason.get("override_path") or ignored.get("path")
         if reason.get("reason") == "gitfile_redirect":

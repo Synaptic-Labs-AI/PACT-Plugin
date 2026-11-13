@@ -133,7 +133,9 @@ class RootIdentity(NamedTuple):
     `id_shape` is "canonical", "basename" or None. `source` is the rung that
     decided it. `override_ignored` is a structured {path, reason} when a
     PRESENT override file was unusable and resolution continued without it;
-    `detect_id_for_root` sets it, and the caller discloses it.
+    `detect_id_for_root` sets it, and the caller discloses it. Its `path` is
+    None (the `reason` is kept) when the file sits in a git directory the
+    checkout's `.git` points at: a redirect, or a git dir outside the checkout.
     `decline_reason` is a structured {source, reason, override_path} built by
     `decline_record` for every decline with a named cause (a
     `DECLINE_REASONS` token), so `project-id show` can report it rather than
@@ -204,7 +206,9 @@ def decline_record(
     `override_path` is the `<git-common-dir>/pact-project-id` file that would
     remedy the decline, or None when no override file can remedy it. It is
     None for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and
-    `declaration_unresolved`.
+    `declaration_unresolved`. It is also None for every other cause when
+    the checkout's `.git` points at a git directory outside the checkout
+    (one that is neither a linked worktree's nor a submodule's admin dir).
     A `gitfile_redirect` given a path raises ValueError: the common dir git
     reports there belongs to the repository the `.git` file points at, so a
     pin written to it would re-pin that other repository. The remedy is the
@@ -1372,6 +1376,13 @@ def _marker_target(root: Path) -> Optional[Tuple[Path, Path]]:
     return None
 
 
+def _without_path(override_ignored: Optional[dict]) -> Optional[dict]:
+    """`override_ignored` with its path withheld and its reason kept."""
+    if not override_ignored:
+        return override_ignored
+    return {"path": None, "reason": override_ignored.get("reason")}
+
+
 def _marker_names_external_git_dir(root: Path) -> bool:
     """Whether the checkout's `.git` points at a git dir outside it that is
     neither a linked worktree's admin dir nor a submodule's.
@@ -1463,12 +1474,12 @@ def detect_id_for_root(
         # that redirected the answer.
         # NOR THE IGNORED OVERRIDE'S PATH: it sits in the repository the
         # marker points at, so printing it invites a write into that
-        # repository.
+        # repository. Its REASON is still reported.
         return RootIdentity(
             None,
             None,
             "declined",
-            None,
+            _without_path(override_ignored),
             decline_record("gitfile_redirect", None),
         )
 
@@ -1476,11 +1487,12 @@ def detect_id_for_root(
     # lives in that external directory, and the user's own store and a forged
     # pointer at another repository's store are the same shape, so a printed
     # path could lead a reader to re-pin a repository it does not own. The
-    # override is still READ above; only the path is withheld from output.
+    # override is still READ above; only the path is withheld from output,
+    # and an unusable file there is still reported by its reason.
     external_detail = None
     if _marker_names_external_git_dir(asked):
         override_path = None
-        override_ignored = None
+        override_ignored = _without_path(override_ignored)
         external_detail = EXTERNAL_GIT_DIR_DETAIL
 
     # A SUBMODULE'S CHECKOUT PATH IS REPOSITORY-CHOSEN, so a basename derived

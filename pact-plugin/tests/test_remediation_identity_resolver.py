@@ -1767,7 +1767,7 @@ class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
 
 
 # ---------------------------------------------------------------------------
-# Remediation cycle 3: update ordering, the evidence scan's cost, and prose
+# Update ordering, the evidence scan's cost, and prose
 # ---------------------------------------------------------------------------
 
 def _insert_row(store: Path, memory_id: str, project_id) -> None:
@@ -2087,7 +2087,8 @@ class TestNoPrintedPinPathInAnotherRepository:
         memory, texts = self._messages(identity_env, monkeypatch, asked, caplog)
         assert memory._decline_reason["reason"] == "gitfile_redirect"
         assert memory._decline_reason["override_path"] is None
-        assert memory._override_ignored is None
+        # The victim's pin is unusable: its REASON is reported, its path is not.
+        assert memory._override_ignored == {"path": None, "reason": "not_canonical"}
         for text in texts:
             assert "pact-project-id" not in text, text
             assert str(victim) not in text, text
@@ -2140,6 +2141,135 @@ class TestNoPrintedPinPathInAnotherRepository:
         memory, texts = self._messages(identity_env, monkeypatch, worktree, caplog)
         assert memory._decline_reason["override_path"] is not None
         assert any("pact-project-id" in text for text in texts), texts
+
+
+class TestAWithheldPinPathStillReportsItsReason:
+    """Wherever the override path is withheld, an unusable pin file there is
+    still reported by its reason.
+
+    Catches a disclosure dropped along with the value it was withholding:
+    the path is held back on the redirect route and on every outcome of the
+    external-git-dir route, and an unusable pin there was then ignored with
+    no warning and no `override_ignored` field. The routes are enumerated
+    from `project_identity`'s own origin states and outcomes, so a state
+    added there without a case here fails the coverage arm.
+    """
+
+    PINS = {"folder-name": "sep\n", "empty": "", "symlink": None}
+
+    @staticmethod
+    def _origin_cases():
+        """One `OriginRead` per origin state, and per classifier outcome for
+        a present origin, keyed by (state, outcome)."""
+        from scripts import project_identity as pi
+
+        return {
+            (pi.ORIGIN_ABSENT, None): pi.OriginRead(pi.ORIGIN_ABSENT, None),
+            (pi.ORIGIN_UNAVAILABLE, None): pi.OriginRead(pi.ORIGIN_UNAVAILABLE, None),
+            (pi.ORIGIN_EMPTY_ENTRY, None): pi.OriginRead(pi.ORIGIN_EMPTY_ENTRY, None),
+            (pi.ORIGIN_PRESENT, pi.OUTCOME_CANONICAL): pi.OriginRead(
+                pi.ORIGIN_PRESENT, "https://github.com/o/sep.git"
+            ),
+            (pi.ORIGIN_PRESENT, pi.OUTCOME_NO_PORTABLE_ORIGIN): pi.OriginRead(
+                pi.ORIGIN_PRESENT, "/srv/local/sep.git"
+            ),
+            (pi.ORIGIN_PRESENT, pi.OUTCOME_DECLINE): pi.OriginRead(
+                pi.ORIGIN_PRESENT, "https://bad host.example/x/y.git"
+            ),
+        }
+
+    def test_every_origin_state_and_outcome_has_a_case(self):
+        from scripts import project_identity as pi
+
+        states = {getattr(pi, n) for n in dir(pi) if n.startswith("ORIGIN_") and n.isupper()}
+        outcomes = {getattr(pi, n) for n in dir(pi) if n.startswith("OUTCOME_") and n.isupper()}
+        cases = self._origin_cases()
+        assert {state for state, _ in cases} == states
+        assert {outcome for state, outcome in cases if state == pi.ORIGIN_PRESENT} == outcomes
+        for (state, outcome), read in cases.items():
+            if outcome is not None:
+                assert pi.classify_remote_origin(read.value)[0] == outcome, read
+
+    def _pin(self, git_dir: Path, kind: str, identity_env: Path) -> None:
+        pin = git_dir / "pact-project-id"
+        if kind == "symlink":
+            target = identity_env / "elsewhere-pin"
+            target.write_text("github.com/o/sep\n", encoding="utf-8")
+            pin.symlink_to(target)
+        else:
+            pin.write_text(self.PINS[kind], encoding="utf-8")
+
+    def _external(self, identity_env):
+        repo = make_separate_git_dir_repo(
+            identity_env / "sep", identity_env / "stores" / "sep.git"
+        )
+        return repo, identity_env / "stores" / "sep.git"
+
+    def _assert_reported(self, identity, git_dir, caplog):
+        from scripts import project_identity as pi
+
+        expected = pi.read_override(git_dir).reason
+        assert expected is not None, "the rig's pin must be unusable"
+        assert identity.override_ignored == {"path": None, "reason": expected}
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            PACTMemory._warn_override_ignored(identity)
+        texts = [record.getMessage() for record in caplog.records]
+        assert any(expected in text for text in texts), texts
+        for text in texts:
+            assert "pact-project-id" not in text and str(git_dir) not in text, text
+
+    @pytest.mark.parametrize("pin", sorted(PINS))
+    @pytest.mark.parametrize(
+        "case", sorted(_origin_cases.__func__().keys(), key=str), ids=str
+    )
+    def test_the_external_route_reports_the_reason(
+        self, identity_env, monkeypatch, caplog, case, pin
+    ):
+        from scripts import project_identity as pi
+
+        repo, git_dir = self._external(identity_env)
+        self._pin(git_dir, pin, identity_env)
+        read = self._origin_cases()[case]
+        monkeypatch.setattr(pi, "read_origin", lambda root: read)
+        identity = pi.detect_id_for_root(repo, git_dir, asked_root=repo)
+        self._assert_reported(identity, git_dir, caplog)
+
+    @pytest.mark.parametrize("pin", sorted(PINS))
+    def test_the_redirect_route_reports_the_reason(
+        self, identity_env, caplog, pin
+    ):
+        from scripts import project_identity as pi
+
+        victim = make_repo(identity_env / "victim", remote=REMOTE)
+        self._pin(victim / ".git", pin, identity_env)
+        asked = identity_env / "forged"
+        asked.mkdir()
+        (asked / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        identity = pi.detect_id_for_root(asked, victim / ".git", asked_root=asked)
+        assert identity.decline_reason["reason"] == "gitfile_redirect"
+        self._assert_reported(identity, victim / ".git", caplog)
+
+    def test_show_status_and_the_save_refusal_carry_the_reason(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """End to end, on a redirect: the envelope field `show` and `status`
+        print, and the save refusal's sentence, carry the reason and no path."""
+        _fresh_scope_state()
+        victim = make_repo(identity_env / "victim", remote=REMOTE)
+        (victim / ".git" / "pact-project-id").write_text("sep\n", encoding="utf-8")
+        asked = identity_env / "forged"
+        asked.mkdir()
+        (asked / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        monkeypatch.chdir(asked)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(asked))
+        memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+        assert memory._override_ignored == {"path": None, "reason": "not_canonical"}
+        with pytest.raises(Exception) as refused:
+            memory.save({"context": "x"})
+        message = str(refused.value)
+        assert "present but unusable (not_canonical)" in message, message
+        assert "pact-project-id" not in message and str(victim) not in message
 
 
 class TestTheGateTrustsOnlyLinkedWorktrees:
