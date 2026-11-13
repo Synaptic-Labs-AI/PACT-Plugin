@@ -276,7 +276,7 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
     def _clause(self) -> str:
         row = _table_row(SKILL, "project-id show")
         start = row.index("override_path is the")
-        return row[start:start + 600]
+        return row[start:start + 900]
 
     def test_null_means_no_override_file_can_remedy(self):
         assert (
@@ -296,16 +296,22 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
         clause = self._clause()
         assert "For gitfile_redirect: " + _flatten(_REDIRECT_REMEDY) in clause
 
-    def test_an_override_is_written_only_in_the_users_own_git_dir(self):
+    def test_only_the_user_writes_the_separate_git_dir_pin(self):
         clause = self._clause()
         assert (
-            "If this checkout is your own git init "
-            "--separate-git-dir=<dir>/.git layout, write its canonical id to "
-            "<dir>/.git/pact-project-id instead. Never write an override "
-            "anywhere else: it would re-pin the repository the .git file "
-            "points at."
+            "Such a layout is recovered by a pin at <dir>/.git/pact-project-id, "
+            "in the git directory its .git file names, but only the user writes "
+            "it, after confirming that directory is theirs."
         ) in clause
-        assert "For gitfile_redirect, never write an override:" not in clause
+
+    def test_an_agent_asks_the_user_instead_of_writing_the_pin(self):
+        clause = self._clause()
+        assert (
+            "An agent never writes this pin and asks the user instead: a forged "
+            ".git file naming another repository's git directory has the same "
+            "shape, and the pin would re-pin that repository."
+        ) in clause
+        assert "write its canonical id to <dir>/.git/pact-project-id instead" not in clause
 
 
 class TestLegacyScopeStatesAreDocumented:
@@ -355,8 +361,9 @@ class TestLegacyScopeStatesAreDocumented:
         assert (
             "A session folder that an earlier version of the plugin removed "
             "left no line, so a project whose writing sessions were all "
-            "removed that way reads as unproven until its rekey command is "
-            "run."
+            "removed that way reads as unproven until its rows are moved with "
+            "that rekey command and --apply, which needs the user's explicit "
+            "approval."
         ) in _body(SKILL)
 
     def test_a_copied_or_recloned_repository_reads_as_unproven(self):
@@ -650,6 +657,20 @@ class TestUserSettingIsReadFromTheUserScope:
 
     def test_the_store_relative_location_is_gone(self):
         assert "<memory_dir>/config.json" not in _body(SKILL)
+
+    def test_only_the_user_sets_the_user_setting(self):
+        assert (
+            "Only the user sets it: it changes the identity of every session "
+            "it answers for, so an agent asks the user instead of writing it."
+        ) in _body(SKILL)
+
+    def test_only_the_user_writes_the_repository_pin(self):
+        assert (
+            "a REPOSITORY-scoped pin. Only the user writes it: it decides which "
+            "bucket every checkout of the repository reads and writes, so an "
+            "agent that meets a remedy naming this file asks the user for the "
+            "id instead of writing it."
+        ) in _body(SKILL)
 
     def test_the_code_reads_the_user_directory_under_a_store_scope(
         self, monkeypatch, tmp_path

@@ -1451,12 +1451,6 @@ class TestAnUnpinnableDeclineOffersNoPin:
         messages = [record.getMessage() for record in caplog.records]
         assert messages, "no decline warning was logged"
         for message in messages:
-            if reason == "gitfile_redirect":
-                # The redirect's remedy names ONE pin, conditional on the
-                # user's own `--separate-git-dir=<dir>/.git` store, which an
-                # override there recovers; no other pin may be offered.
-                assert memory_api._REDIRECT_REMEDY in message, message
-                message = message.replace(memory_api._REDIRECT_REMEDY, "")
             assert "pact-project-id" not in message, message
             assert "<git-common-dir>" not in message, message
 
@@ -2045,18 +2039,107 @@ class TestTheGateProseMatchesTheCode:
         assert "the plausibility gate does not exclude it." not in scopes
         assert "the inclusion is disclosed\n    as unverified" not in MEMORY_API.read_text(encoding="utf-8")
 
-    def test_the_redirect_remedy_names_the_pin_for_an_own_separate_git_dir(self):
-        """A remedy must not forbid the one action that recovers the case: an
-        override pin in the user's own `--separate-git-dir=<dir>/.git` store
-        answers before the redirect check."""
+    def test_the_redirect_remedy_names_no_pin(self):
+        """A forged `.git` pointer looks exactly like a user's own
+        `--separate-git-dir` layout, so the printed remedy names no override
+        path and asks no reader to write one: pinning one's own layout is the
+        user's decision, described in the memory skill."""
         remedy = memory_api._REDIRECT_REMEDY
-        assert remedy.startswith(
-            "Fix or remove the `.git` file, or run from the repository it points at."
+        assert "pact-project-id" not in remedy
+        assert "write" not in remedy.lower()
+        assert "user decision: see the pact-memory skill" in remedy
+
+class TestNoPrintedPinPathInAnotherRepository:
+    """No warning, refusal or decline record prints an override path that
+    lies in a git directory the checkout points at.
+
+    Catches a remedy whose safe use depends on an ownership judgement the
+    reader cannot make: a forged `.git` pointer and a user's own
+    `--separate-git-dir` store are the same shape, so a printed path there
+    can lead an agent to re-pin a repository it does not own. A checkout
+    whose `.git` is its own directory keeps its pin offer.
+    """
+
+    BAD_REMOTE = "https://bad host.example/x/y.git"
+
+    def _messages(self, identity_env, monkeypatch, asked, caplog):
+        _fresh_scope_state()
+        monkeypatch.chdir(asked)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(asked))
+        with caplog.at_level(logging.WARNING):
+            memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+            try:
+                memory.save({"context": "x"})
+                refusal = ""
+            except Exception as exc:
+                refusal = str(exc)
+        texts = [record.getMessage() for record in caplog.records] + [refusal]
+        return memory, texts
+
+    def test_a_forged_redirect_prints_no_path_into_the_victim(
+        self, identity_env, monkeypatch, caplog
+    ):
+        victim = make_repo(identity_env / "victim", remote=REMOTE)
+        (victim / ".git" / "pact-project-id").write_text("not-canonical\n", encoding="utf-8")
+        asked = identity_env / "forged"
+        asked.mkdir()
+        (asked / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        memory, texts = self._messages(identity_env, monkeypatch, asked, caplog)
+        assert memory._decline_reason["reason"] == "gitfile_redirect"
+        assert memory._decline_reason["override_path"] is None
+        assert memory._override_ignored is None
+        for text in texts:
+            assert "pact-project-id" not in text, text
+            assert str(victim) not in text, text
+
+    def test_an_own_separate_git_dir_layout_prints_no_path_either(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """The own-layout route reads the same as the forged one."""
+        asked = make_separate_git_dir_repo(
+            identity_env / "proj", identity_env / "stores" / "proj" / ".git"
         )
-        assert (
-            "If this checkout is your own `git init --separate-git-dir=<dir>/.git` "
-            "layout, write its canonical id to `<dir>/.git/pact-project-id` instead."
-        ) in remedy
+        run_git("remote", "add", "origin", REMOTE, cwd=asked)
+        memory, texts = self._messages(identity_env, monkeypatch, asked, caplog)
+        assert memory._decline_reason["reason"] == "gitfile_redirect"
+        for text in texts:
+            assert "pact-project-id" not in text, text
+
+    def test_an_external_git_dir_with_a_bad_origin_names_the_skill_not_a_path(
+        self, identity_env, monkeypatch, caplog
+    ):
+        asked = make_separate_git_dir_repo(
+            identity_env / "proj", identity_env / "stores" / "store.git"
+        )
+        run_git("remote", "add", "origin", self.BAD_REMOTE, cwd=asked)
+        memory, texts = self._messages(identity_env, monkeypatch, asked, caplog)
+        assert memory._decline_reason["reason"] == "origin_unrepresentable"
+        assert memory._decline_reason["override_path"] is None
+        for text in texts:
+            assert "pact-project-id" not in text, text
+        assert any("pinning it is a user decision" in text for text in texts), texts
+
+    def test_a_checkouts_own_git_dir_keeps_its_pin_offer(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """Control: a `.git` directory at the root is the checkout's own, so
+        its override path is still printed as the remedy."""
+        asked = make_repo(identity_env / "proj", remote=self.BAD_REMOTE)
+        memory, texts = self._messages(identity_env, monkeypatch, asked, caplog)
+        own = str(asked / ".git" / "pact-project-id")
+        assert memory._decline_reason["override_path"] == own
+        assert any(own in text for text in texts), texts
+
+    def test_a_linked_worktree_keeps_its_pin_offer(
+        self, identity_env, monkeypatch, caplog
+    ):
+        """Control: a linked worktree's `.git` file points at its own
+        repository's admin dir, so the shared override path is printed."""
+        main = make_repo(identity_env / "main", remote=self.BAD_REMOTE)
+        worktree = make_worktree(main, identity_env / "wt")
+        memory, texts = self._messages(identity_env, monkeypatch, worktree, caplog)
+        assert memory._decline_reason["override_path"] is not None
+        assert any("pact-project-id" in text for text in texts), texts
 
 
 class TestTheGateTrustsOnlyLinkedWorktrees:

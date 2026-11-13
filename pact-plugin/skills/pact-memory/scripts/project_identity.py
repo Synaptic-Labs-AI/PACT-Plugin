@@ -28,7 +28,7 @@ import re
 import stat
 import subprocess
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Tuple
 
 # Accepted remote schemes. The same set `hooks/shared/backlog.py` already
 # ships, plus `ssh+git`, an alias git itself still honours (it connects over
@@ -159,6 +159,14 @@ EMPTY_URL_ENTRY_DETAIL = (
     "depends on the git version; remove the empty value"
 )
 
+# The `detail` for a decline whose git directory lies outside the checkout.
+# Its override file sits in that external directory, which a forged `.git`
+# pointer can name as easily as the user's own store, so no path is printed.
+EXTERNAL_GIT_DIR_DETAIL = (
+    "this checkout's git directory lies outside it, so pinning it is a user "
+    "decision: see the pact-memory skill"
+)
+
 
 # The three outcomes the classifier distinguishes. Collapsing any two is the
 # likeliest way to write a wrong pin: the basename forms become declines, or
@@ -200,10 +208,10 @@ def decline_record(
     A `gitfile_redirect` given a path raises ValueError: the common dir git
     reports there belongs to the repository the `.git` file points at, so a
     pin written to it would re-pin that other repository. The remedy is the
-    `.git` file itself, except for the user's own
-    `git init --separate-git-dir=<dir>/.git` layout, which a pin at
-    `<dir>/.git/pact-project-id` recovers (the remedy text says so; the
-    record still names no path). `source` is the rung that declined; this module
+    `.git` file itself. A user's own `git init --separate-git-dir=<dir>/.git`
+    layout is recovered by a pin the USER writes after confirming the git
+    directory is theirs (the memory skill describes it); no printed text
+    names that path, because a forged pointer has the same shape. `source` is the rung that declined; this module
     leaves it None, and the resolver in memory_api, the only layer that
     knows the rung, fills it in.
     """
@@ -1321,34 +1329,64 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     # subdirectory case open. The `core.worktree` comparison is against the
     # MARKER'S directory (the checkout root), never the raw input, or a
     # legitimate subdirectory of a genuine submodule would be refused.
+    target = _marker_target(root)
+    if target is None:
+        return False
+    return _redirect_target_is_foreign(*target)
+
+
+def _marker_target(root: Path) -> Optional[Tuple[Path, Path]]:
+    """`(resolved git dir, checkout root)` when `.git` points elsewhere.
+
+    Found by walking up as git does (`find_git_marker`). A `.git` SYMLINK to
+    a directory resolves to its target; a `.git` FILE is read from its
+    `gitdir:` line (relative to the marker's directory, as git reads it).
+    None for a real `.git` directory, no marker, or an unreadable marker.
+    """
     marker = find_git_marker(root)
     if marker is None:
-        return False
+        return None
     marker_root = marker.parent
     try:
         if marker.is_symlink() and marker.is_dir():
-            return _redirect_target_is_foreign(marker.resolve(), marker_root)
+            return marker.resolve(), marker_root
         if not marker.is_file():
             # A real `.git` DIRECTORY: an ordinary checkout.
-            return False
+            return None
         text = marker.read_text(encoding="utf-8", errors="replace")
     except (OSError, RuntimeError):
-        return False
+        return None
     for line in text.splitlines():
         if not line.startswith("gitdir:"):
             continue
         target = line.split(":", 1)[1].strip()
         if not target:
-            return False
+            return None
         resolved = Path(target)
         if not resolved.is_absolute():
             resolved = marker_root / resolved
         try:
-            resolved = resolved.resolve()
+            return resolved.resolve(), marker_root
         except (OSError, RuntimeError):
-            return False
-        return _redirect_target_is_foreign(resolved, marker_root)
-    return False
+            return None
+    return None
+
+
+def _marker_names_external_git_dir(root: Path) -> bool:
+    """Whether the checkout's `.git` points at a git dir outside it that is
+    neither a linked worktree's admin dir nor a submodule's.
+
+    Such a dir is a user's own `--separate-git-dir` store, an Android
+    `.repo/projects/<name>.git`, or a forged pointer at somebody else's: the
+    shapes look the same, so its override path is never printed.
+    """
+    target = _marker_target(root)
+    if target is None:
+        return False
+    git_dir = target[0]
+    if os.path.exists(git_dir / "commondir"):
+        return False
+    return not _submodule_admin_dir(git_dir)
 
 
 def detect_id_for_root(
@@ -1423,13 +1461,27 @@ def detect_id_for_root(
         # "origin could not be read or represented" warning sends the
         # operator to inspect a remote when the `.git` marker is the thing
         # that redirected the answer.
+        # NOR THE IGNORED OVERRIDE'S PATH: it sits in the repository the
+        # marker points at, so printing it invites a write into that
+        # repository.
         return RootIdentity(
             None,
             None,
             "declined",
-            override_ignored,
+            None,
             decline_record("gitfile_redirect", None),
         )
+
+    # A GIT DIR OUTSIDE THE CHECKOUT NAMES NO OVERRIDE PATH. Its override file
+    # lives in that external directory, and the user's own store and a forged
+    # pointer at another repository's store are the same shape, so a printed
+    # path could lead a reader to re-pin a repository it does not own. The
+    # override is still READ above; only the path is withheld from output.
+    external_detail = None
+    if _marker_names_external_git_dir(asked):
+        override_path = None
+        override_ignored = None
+        external_detail = EXTERNAL_GIT_DIR_DETAIL
 
     # A SUBMODULE'S CHECKOUT PATH IS REPOSITORY-CHOSEN, so a basename derived
     # from it must never bind. A canonical origin or the override above still
@@ -1448,6 +1500,7 @@ def detect_id_for_root(
             "declined",
             override_ignored,
             decline_record("origin_unreadable", override_path),
+            external_detail,
         )
     if origin.state == ORIGIN_EMPTY_ENTRY:
         return RootIdentity(
@@ -1456,7 +1509,9 @@ def detect_id_for_root(
             "declined",
             override_ignored,
             decline_record("origin_unrepresentable", override_path),
-            EMPTY_URL_ENTRY_DETAIL,
+            EMPTY_URL_ENTRY_DETAIL
+            if external_detail is None
+            else f"{EMPTY_URL_ENTRY_DETAIL}; {external_detail}",
         )
     if origin.state == ORIGIN_ABSENT:
         if submodule_controlled:
@@ -1473,6 +1528,7 @@ def detect_id_for_root(
             "declined",
             override_ignored,
             decline_record("origin_unrepresentable", override_path),
+            external_detail,
         )
     if submodule_controlled:
         return _refuse_submodule_basename(root, common_dir, override_ignored)

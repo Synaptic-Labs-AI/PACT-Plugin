@@ -633,17 +633,16 @@ _UNPINNABLE_REMEDIES = {
     ),
 }
 
-# THE REDIRECT'S REMEDY IS THE MARKER, AND A PIN ONLY FOR THE USER'S OWN
-# SEPARATE GIT DIR. The decline names no override path: the common dir it
-# would name belongs to the repository the `.git` file points AT, so a pin
-# written there for a forged redirect re-pins that other repository. A
-# `git init --separate-git-dir=<dir>/.git` layout the user owns takes the
-# same shape, and the override is read before the redirect check, so a pin
-# in its own store recovers it.
+# THE REDIRECT'S REMEDY IS THE MARKER, AND IT NAMES NO PIN PATH. The common
+# dir a redirect could name belongs to the repository the `.git` file points
+# AT, and a forged pointer looks exactly like a user's own
+# `--separate-git-dir` layout, so no reader of this text can judge whether a
+# pin there is safe. Pinning one's own layout is the USER's decision,
+# described in the memory skill.
 _REDIRECT_REMEDY = (
     "Fix or remove the `.git` file, or run from the repository it points at. "
-    "If this checkout is your own `git init --separate-git-dir=<dir>/.git` "
-    "layout, write its canonical id to `<dir>/.git/pact-project-id` instead."
+    "A `git init --separate-git-dir` layout of your own is a user decision: "
+    "see the pact-memory skill."
 )
 
 
