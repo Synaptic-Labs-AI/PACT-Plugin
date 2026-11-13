@@ -884,9 +884,12 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
     unpacking, an augmented assignment other than `|=`, and a match capture;
     `del x` unbinds it (a path where it is unbound adds nothing to a join).
     Like Python, a scope that assigns, deletes or `|=`s a name has its own
-    local of that name. Writes: `env["HOME"] = `, `env.update(HOME=...)`,
-    `env.setdefault("HOME", ...)` and a merge of something with HOME
-    (`env.update(x)`, `env.update(**x)`, `env |= x`) make it HAS;
+    local of that name. Unlike Python, which gives a comprehension its own
+    scope, a comprehension's loop variable is treated as binding the enclosing
+    scope's name, which makes that name UNKNOWN there. Writes:
+    `env["HOME"] = `, `env.update(HOME=...)`, `env.setdefault("HOME", ...)`
+    and a merge of something with HOME (`env.update(x)`, `env.update(**x)`,
+    `env |= x`) make it HAS;
     `env.pop("HOME")`, `del env["HOME"]` and `env.clear()` make it LACKS; a
     write or removal with a non-constant key (`env[k] = v`, `env.pop(k)`,
     `env.popitem()`) and a merge of something unjudged make it UNKNOWN unless
@@ -1611,6 +1614,8 @@ def _judge_module(source: str) -> list:
      "    subprocess.run([], env=env)\n", [LACKS]),
     ("def t():\n    env = {'X': '1'}\n"
      "    xs = {env.pop('HOME'): 1 for x in env.update(HOME='/h')}\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'X': '1'}\n    xs = [x for env in ys]\n"
      "    subprocess.run([], env=env)\n", [UNKNOWN]),
     ("def t():\n    env = {'X': '1'}\n    xs = [1 for env in [env.update(HOME='/h')]]\n"
      "    subprocess.run([], env=env)\n", [HAS]),
