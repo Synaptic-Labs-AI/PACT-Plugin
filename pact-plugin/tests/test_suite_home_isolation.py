@@ -92,7 +92,6 @@ def test_the_embedding_cache_is_not_moved_into_the_sandbox_home():
 
 
 HAS, LACKS, UNKNOWN = "has", "lacks", "unknown"
-_ENVIRON = frozenset({"os.environ", "dict(os.environ)", "os.environ.copy()"})
 _RUNNER_ATTRS = frozenset({
     "run", "Popen", "check_output", "check_call", "call",
     "create_subprocess_exec", "create_subprocess_shell",
@@ -128,16 +127,25 @@ JUDGED_SHAPES = (
 )
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_FUNCLIKE = (*_FUNCTIONS, ast.Lambda)
 _SCOPES = (*_FUNCTIONS, ast.ClassDef, ast.Lambda)
 _LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-_REBINDS = frozenset({"bind", "unknown", "unbind", "aug-merge", "aug-add"})
+_REBINDS = frozenset({"bind", "unknown", "unbind", "aug-merge"})
 _WRITES = frozenset({"add", "strip", "maybe-add", "maybe-strip", "merge", "aug-merge",
-                     "aug-add", "escape"})
+                     "escape", "closure"})
 # A pseudo-name: os.environ's own HOME, which this scope may remove or set.
 _OS_ENVIRON = "os.environ"
 # Methods that neither write nor hand the dict to code that might.
 _READ_METHODS = frozenset({"get", "copy", "items", "keys", "values"})
+# Calls that can read or change any name of a scope or module by text or by
+# namespace: a scope that makes one has no name the scan can judge.
+_OPAQUE = frozenset({"exec", "eval", "globals", "locals", "vars"})
+# os.environ changes made in another scope: one that may remove HOME makes
+# os.environ unknown everywhere; one that can only add HOME matters only where
+# the call's own scope has already removed it.
+_ENVIRON_REMOVALS = frozenset({"strip", "maybe-strip", "escape"})
+_ENVIRON_ADDS = frozenset({"add", "maybe-add", "merge"})
 # Calls that copy a dict argument rather than keep it.
 _COPIERS = frozenset({"dict", "carry_clock_shift"})
 
@@ -162,11 +170,62 @@ def _join(a, b):
     return a if a == b else UNKNOWN
 
 
+def _outer_parts(node) -> list:
+    """The expressions of a def, lambda or class that run in the scope around
+    it: decorators, default values, and a class's bases and keywords."""
+    parts = list(getattr(node, "decorator_list", []))
+    if isinstance(node, ast.ClassDef):
+        return parts + node.bases + [keyword.value for keyword in node.keywords]
+    return parts + node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+
+
+# Each node's place in evaluation order, set by _scopes for the module being
+# judged: a node comes after everything it evaluates first. And the first
+# iterable of every comprehension, which runs once in the enclosing code.
+_ORDER: dict = {}
+_FIRST_ITERS: frozenset = frozenset()
+
+
+def _evaluated_children(node) -> list:
+    """A node's children in the order Python evaluates them."""
+    if isinstance(node, ast.Assign):
+        return [node.value, *node.targets]
+    if isinstance(node, ast.AnnAssign):
+        return [part for part in (node.annotation, node.value, node.target) if part]
+    if isinstance(node, ast.Dict):
+        return [part for pair in zip(node.keys, node.values) for part in pair if part]
+    if isinstance(node, ast.DictComp):
+        return [*node.generators, node.key, node.value]
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        return [*node.generators, node.elt]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.iter, node.target, *node.body, *node.orelse]
+    if isinstance(node, _SCOPES):
+        return [*_outer_parts(node), *(node.body if isinstance(node.body, list) else [node.body])]
+    return list(ast.iter_child_nodes(node))
+
+
+def _evaluation_order(tree) -> dict:
+    order: dict = {}
+    stack = [(tree, False)]
+    while stack:
+        node, children_done = stack.pop()
+        if children_done:
+            order[id(node)] = len(order)
+            continue
+        stack.append((node, True))
+        stack.extend((child, False) for child in reversed(_evaluated_children(node)))
+    return order
+
+
 def _walk(node, chain=()):
     """(node, chain) for every node of one scope, not entering a nested
-    function, class or lambda (yielded, not entered). `chain` names every
-    statement body, branch and conditional sub-expression enclosing the node."""
+    function, class or lambda (yielded, not entered; its outer parts are
+    walked). `chain` names every statement body, branch and conditional
+    sub-expression enclosing the node."""
     for field, value in ast.iter_fields(node):
+        if isinstance(node, _SCOPES) and field != "body":
+            continue  # a scope's own walk is its body; the rest runs outside it
         items = value if isinstance(value, list) else [value]
         for index, item in enumerate(items):
             if not isinstance(item, ast.AST):
@@ -181,22 +240,94 @@ def _walk(node, chain=()):
                 sub = chain + ((id(node), index),)
             elif isinstance(node, _COMPREHENSIONS):
                 sub = chain + ((id(node), "comprehension"),)
+            elif isinstance(node, ast.comprehension) and id(item) in _FIRST_ITERS:
+                sub = chain[:-1]  # the first iterable runs once, before the loop
             else:
                 sub = chain
             yield item, sub
-            if not isinstance(item, _SCOPES):
-                yield from _walk(item, sub)
+            for part in _outer_parts(item) if isinstance(item, _SCOPES) else [item]:
+                if part is not item:
+                    yield part, sub
+                yield from _walk(part, sub)
 
 
 def _store_names(target) -> list:
     return [n.id for n in ast.walk(target) if isinstance(n, ast.Name)]
 
 
+# The module's names for os and for os.environ (`import os as o`, `from os
+# import environ as e`), set by _scopes before a module's scopes are built.
+_OS_NAMES: set = {"os"}
+_ENVIRON_NAMES: set = set()
+_ENV_FUNCTION_NAMES: set = set()
+
+
+def _module_aliases(tree):
+    """Record how this module names os, os.environ, os.putenv and os.unsetenv."""
+    _OS_NAMES.clear()
+    _ENVIRON_NAMES.clear()
+    _ENV_FUNCTION_NAMES.clear()
+    _OS_NAMES.add("os")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    _OS_NAMES.add(alias.asname or "os")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                if alias.name == "environ":
+                    _ENVIRON_NAMES.add(alias.asname or alias.name)
+                elif alias.name in ("putenv", "unsetenv"):
+                    _ENV_FUNCTION_NAMES.add(alias.asname or alias.name)
+
+
+def _globals_key(node):
+    """The constant name that `<obj>.setitem(globals(), "NAME", ...)` or
+    `<obj>.delitem(globals(), "NAME")` rebinds, and the globals() call it uses."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("setitem", "delitem") and len(node.args) > 1):
+        target, key = node.args[0], node.args[1]
+        if (isinstance(target, ast.Call) and isinstance(target.func, ast.Name)
+                and target.func.id == "globals" and not target.args and not target.keywords
+                and isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return target, key.value
+
+
+def _imports_os(node, name) -> bool:
+    """Whether `node` is an import that binds `name` to os or to os.environ."""
+    if isinstance(node, ast.Import):
+        return any((alias.asname or alias.name.split(".")[0]) == name
+                   and alias.name.split(".")[0] == "os" for alias in node.names)
+    return isinstance(node, ast.ImportFrom) and node.module == "os" and any(
+        (alias.asname or alias.name) == name and alias.name == "environ"
+        for alias in node.names)
+
+
+def _is_os(node) -> bool:
+    return isinstance(node, ast.Name) and node.id in _OS_NAMES
+
+
+def _is_environ(node) -> bool:
+    """os.environ itself, under any of the module's names for it."""
+    if isinstance(node, ast.Name):
+        return node.id in _ENVIRON_NAMES
+    return isinstance(node, ast.Attribute) and node.attr == "environ" and _is_os(node.value)
+
+
+def _environ_value(node) -> bool:
+    """os.environ or os.environ.copy() (dict(os.environ) is judged as a dict
+    of os.environ)."""
+    return _is_environ(node) or (isinstance(node, ast.Call) and not node.args and not node.keywords
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
+            and _is_environ(node.func.value))
+
+
 def _dict_name(node):
     """The name a write through `node` lands on: a bare name, os.environ, or None."""
+    if _is_environ(node):
+        return _OS_ENVIRON
     if isinstance(node, ast.Name):
         return node.id
-    return _OS_ENVIRON if ast.unparse(node) == "os.environ" else None
 
 
 def _call_name(func) -> str:
@@ -224,9 +355,13 @@ class _Scope:
         self.globals: set = set()
         self.nonlocals: set = set()
         self.aliases: list = []
+        self.opaque = False
+        self.global_items = {id(found[0]): (found[1], n, chain) for n, chain in self.pairs
+                             if (found := _globals_key(n))}
+        self.call_funcs = {id(n.func) for n, _ in self.pairs if isinstance(n, ast.Call)}
         self.loop_bodies = {(id(n), "body") for n, _ in self.pairs if isinstance(n, _LOOPS)}
         self.nodes = {id(n): n for n, _ in self.pairs}
-        if isinstance(node, _FUNCTIONS):
+        if isinstance(node, _FUNCLIKE):
             arguments = node.args
             for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
                         arguments.vararg, arguments.kwarg):
@@ -239,10 +374,27 @@ class _Scope:
         self.locals = {name for name, entries in self.events.items()
                        if any(entry[1] in _REBINDS for entry in entries)} \
             - self.globals - self.nonlocals
+        for key, item, item_chain in self.global_items.values():
+            # A rebind through globals() acts as `global NAME; NAME = ...`, which a
+            # function with its own local of that name cannot be read through.
+            if self is not self.module and key in self.locals:
+                self.opaque = True
+            self._add(key, item, "unknown", None, item_chain)
+            self.events[key].sort(key=lambda entry: entry[0])
+        for first, second, _since, item, item_chain in self.aliases:
+            # A dict shared with a module name or os.environ can be written through
+            # either name from another scope, where this scope's aliases are not seen.
+            if self is self.module or not {first, second} <= self.locals:
+                for name in (first, second):
+                    self._add(name, item, "escape", None, item_chain)
+                    self.events[name].sort(key=lambda entry: entry[0])
 
     def _add(self, name, node, kind, value, chain):
+        if kind in _REBINDS and name in _OS_NAMES | _ENVIRON_NAMES and not _imports_os(
+                node, name):
+            self.opaque = True  # the module's name for os or os.environ means something else
         self.events.setdefault(name, []).append(
-            ((node.lineno, node.col_offset), kind, value, chain))
+            (-1 if node is self.node else _ORDER[id(node)], kind, value, chain))
 
     def _keyed(self, name, node, key, sure, maybe, chain):
         if _is_home_key(key):
@@ -251,21 +403,20 @@ class _Scope:
             self._add(name, node, maybe, None, chain)
 
     def _merged(self, name, node, value, chain, kind="merge"):
-        if isinstance(value, ast.Dict) and any(_is_home_key(k) for k in value.keys):
-            self._add(name, node, "add" if kind == "merge" else "aug-add", None, chain)
-        elif not _home_less_dict(value) or kind == "aug-merge":
+        if not _home_less_dict(value) or kind == "aug-merge":
             self._add(name, node, kind, value, chain)
 
     def _bind(self, target, value, node, chain):
-        source = _unwrap(value) if value is not None else None
+        source = _unwrap(value)
         if isinstance(source, ast.Name) and not isinstance(target, ast.Name):
             # Stored into a container or an attribute: it may change elsewhere.
             self._add(source.id, node, "escape", None, chain)
         if isinstance(target, ast.Name):
-            self._add(target.id, node, "bind" if value is not None else "unknown", value, chain)
-            shared = _dict_name(source) if source is not None else None
+            self._add(target.id, node, "bind", value, chain)  # no value: unjudged
+            shared = _dict_name(source)
             if shared is not None and shared != target.id:
-                self.aliases.append((target.id, shared, (node.lineno, node.col_offset)))
+                self.aliases.append((target.id, shared, _ORDER[id(node)],
+                                     node, chain))
         elif isinstance(target, (ast.Tuple, ast.List)):
             pairable = (value is not None and isinstance(value, (ast.Tuple, ast.List))
                         and len(value.elts) == len(target.elts)
@@ -292,16 +443,19 @@ class _Scope:
                 self._merged(node.target.id, node, node.value, chain, "aug-merge")
             else:
                 self._add(node.target.id, node, "unknown", None, chain)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr) \
+                and _dict_name(node.target) == _OS_ENVIRON:
+            self._merged(_OS_ENVIRON, node, node.value, chain)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             for name in _store_names(node.target):
-                self._add(name, node, "unknown", None, body)
+                self._add(name, node.target, "unknown", None, body)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None:
                     for name in _store_names(item.optional_vars):
-                        self._add(name, node, "unknown", None, body)
+                        self._add(name, item.optional_vars, "unknown", None, body)
         elif isinstance(node, ast.ExceptHandler) and node.name:
-            self._add(node.name, node, "unknown", None, body)
+            self._add(node.name, node.type, "unknown", None, body)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 self._add((alias.asname or alias.name).split(".")[0], node, "unknown",
@@ -326,10 +480,15 @@ class _Scope:
                                 "maybe-strip", chain)
         if isinstance(node, ast.Call):
             self._call(node, chain)
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) \
+                and id(node) not in self.call_funcs and node.attr not in _READ_METHODS \
+                and not _is_environ(node) and not _is_os(node.value):
+            # A bound method or attribute taken off the dict (`f = env.pop`) may
+            # change it wherever it is called.
+            self._add(_dict_name(node.value), node, "escape", None, chain)
         elif isinstance(node, (ast.List, ast.Tuple, ast.Set)) and isinstance(
                 getattr(node, "ctx", ast.Load()), ast.Load):
             for element in node.elts:
-                element = element.value if isinstance(element, ast.Starred) else element
                 if isinstance(element, ast.Name):
                     self._add(element.id, node, "escape", None, chain)
         elif isinstance(node, ast.Dict):
@@ -343,20 +502,24 @@ class _Scope:
         runner = isinstance(func, ast.Attribute) and func.attr in _RUNNER_ATTRS
         for arg in [*node.args, *(k.value for k in node.keywords if k.arg is not None
                                   and not (runner and k.arg == "env"))]:
-            arg = arg.value if isinstance(arg, ast.Starred) else arg
-            if ast.unparse(arg) == "os.environ" or (
-                    ast.unparse(arg) == "os" and _call_name(func) in ("setattr", "delattr")):
+            if (_is_environ(arg) and not copier) or (
+                    _is_os(arg) and _call_name(func) in ("setattr", "delattr")
+                    and not (len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
+                             and node.args[1].value != "environ")):
                 self._add(_OS_ENVIRON, node, "escape", None, chain)
             elif isinstance(arg, ast.Name) and not copier:
                 self._add(arg.id, node, "escape", None, chain)
-        if ast.unparse(func) in ("os.putenv", "os.unsetenv"):
+        if isinstance(func, ast.Name) and func.id in _OPAQUE \
+                and id(node) not in self.global_items:
+            self.opaque = True
+        if (isinstance(func, ast.Attribute) and func.attr in ("putenv", "unsetenv")
+                and _is_os(func.value)) or (isinstance(func, ast.Name)
+                                            and func.id in _ENV_FUNCTION_NAMES):
             self._add(_OS_ENVIRON, node, "escape", None, chain)
-            return
         if isinstance(func, ast.Attribute) and func.attr in ("setenv", "delenv") and node.args:
             sure, maybe = ("add", "maybe-add") if func.attr == "setenv" else ("strip",
                                                                                "maybe-strip")
             self._keyed(_OS_ENVIRON, node, node.args[0], sure, maybe, chain)
-            return
         name = _dict_name(func.value) if isinstance(func, ast.Attribute) else None
         if name is not None:
             method = func.attr
@@ -377,52 +540,73 @@ class _Scope:
                 self._add(name, node, "escape", None, chain)
 
     def mutates(self, name) -> bool:
-        """Whether this scope writes, strips or rebinds a module name it does
-        not own (a write to it, or a rebinding under `global`)."""
-        if name in self.locals or name in self.nonlocals:
+        """Whether this scope writes, strips, rebinds or passes on a name it
+        does not own (a free name, or one under `global` or `nonlocal`)."""
+        if name in self.locals:
             return False
         return bool(self.events.get(name))
 
+    def any_opaque(self) -> bool:
+        """Whether some scope of the module calls exec, eval, globals, locals or vars."""
+        return any(scope.opaque for scope in self.module.all_scopes)
+
+    def environ_changed_elsewhere(self, kinds) -> bool:
+        """Whether another scope of the module changes os.environ in one of `kinds`."""
+        return any(entry[1] in kinds for scope in self.module.all_scopes
+                   if scope is not self for entry in scope.events.get(_OS_ENVIRON, ()))
+
     def verdict(self, node, at, chain, seen=frozenset()) -> str:
-        """Whether `node`, evaluated at position `at` under `chain`, carries HOME."""
+        """Whether `node`, used at `at` (its place in evaluation order) under
+        `chain`, carries HOME. A name or os.environ is read as it stands at
+        `at`; a spread, dict() or `|` copies it when that expression runs."""
         while isinstance(node, ast.Call) and getattr(node.func, "id", "") == "carry_clock_shift" \
                 and node.args:
             node = node.args[0]
         if isinstance(node, ast.NamedExpr):
             node = node.value
         if (isinstance(node, ast.Constant) and node.value is None) \
-                or ast.unparse(node) in _ENVIRON:
+                or _environ_value(node):
+            if self.module.any_opaque() or self.environ_changed_elsewhere(_ENVIRON_REMOVALS):
+                return UNKNOWN
             state = self._name_state(_OS_ENVIRON, at, chain, seen)
-            return UNKNOWN if state is None else state
+            if state != HAS and self.environ_changed_elsewhere(_ENVIRON_ADDS):
+                return UNKNOWN
+            return state
         if isinstance(node, ast.Name):
+            if self.module.any_opaque():
+                return UNKNOWN
             state = self._name_state(node.id, at, chain, seen)
             return UNKNOWN if state is None else state
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-            sides = {self.verdict(node.left, at, chain, seen),
-                     self.verdict(node.right, at, chain, seen)}
+            when = _ORDER[id(node)]
+            sides = {self.verdict(node.left, when, chain, seen),
+                     self.verdict(node.right, when, chain, seen)}
             return HAS if HAS in sides else LACKS if sides == {LACKS} else UNKNOWN
         if isinstance(node, ast.Dict):
             if any(_is_home_key(k) for k in node.keys):
                 return HAS
             if any(k is not None and not isinstance(k, ast.Constant) for k in node.keys):
                 return UNKNOWN
-            parts = [v for k, v in zip(node.keys, node.values) if k is None]
-            return self._parts(parts, at, chain, seen)
+            parts = [(v, _ORDER[id(v)]) for k, v in zip(node.keys, node.values) if k is None]
+            return self._parts(parts, chain, seen)
         if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "dict":
             if any(k.arg == "HOME" for k in node.keywords):
                 return HAS
             parts = [*node.args[:1], *(k.value for k in node.keywords if k.arg is None)]
-            return self._parts(parts, at, chain, seen)
+            return self._parts([(part, _ORDER[id(node)]) for part in parts], chain, seen)
         return UNKNOWN
 
-    def _parts(self, parts, at, chain, seen) -> str:
-        verdicts = {self.verdict(part, at, chain, seen) for part in parts}
+    def _parts(self, parts, chain, seen) -> str:
+        verdicts = {self.verdict(part, when, chain, seen) for part, when in parts}
         return HAS if HAS in verdicts else UNKNOWN if UNKNOWN in verdicts else LACKS
 
     def _name_state(self, name, at, chain, seen):
         if name == _OS_ENVIRON:
             state = HAS
-        elif name in self.nonlocals:
+        elif self is self.module and at != float("inf") and any(
+                scope.mutates(name) for scope in self.all_scopes if scope is not self):
+            # Module code may call a function that writes the name before the call
+            # (module_state, reading the module's end for a function, checks itself).
             return UNKNOWN
         elif name in self.locals:
             state = None
@@ -437,9 +621,9 @@ class _Scope:
         before = [e for e in entries if e[0] < at]
         back = [e for e in entries if e[0] > at and any(loop in e[3] for loop in loops)]
         state = self._apply(name, before, chain, state, seen)
-        if back:
-            state = _join(state, self._apply(name, back, chain, state, seen))
-        if self._alias_written(name, at, loops):
+        state = _join(state, self._apply(name, back, chain, state, seen))
+        if self._alias_written(name, at, loops) or any(
+                entry[1] == "closure" for entry in before + back):
             return UNKNOWN
         return state
 
@@ -455,7 +639,7 @@ class _Scope:
         while index < len(entries):
             entry = entries[index]
             if entry[3] == chain[:len(entry[3])]:
-                state = self._step(name, state, entry, True, seen)
+                state = self._step(name, state, entry, seen)
                 index += 1
                 continue
             depth = next(i for i, key in enumerate(entry[3])
@@ -482,57 +666,50 @@ class _Scope:
     def _alias_written(self, name, at, loops) -> bool:
         """Whether a name sharing this dict (`x = name` or `name = x`) is written
         after the sharing began and before the call (or later in its loop)."""
-        for first, second, since in self.aliases:
-            if since >= at or name not in (first, second):
+        for first, second, since, _node, alias_chain in self.aliases:
+            if name not in (first, second) or (
+                    since >= at and not any(loop in alias_chain for loop in loops)):
                 continue
             partner = second if name == first else first
             for when, kind, _value, chain in self.events.get(partner, ()):
                 if kind in _WRITES and when > since and (
                         when < at or any(loop in chain for loop in loops)):
                     return True
-        return False
 
     def binds_freely(self, name) -> bool:
         """Whether a nested function's free `name` refers to this function
         (or one enclosing it) rather than to the module."""
-        if not isinstance(self.node, _FUNCTIONS):
-            return False
         return name in self.locals or (self.parent is not None and self.parent.binds_freely(name))
 
     def module_state(self, name, user, seen):
-        key = ("module", name)
-        if key in seen:
-            return UNKNOWN
         if any(scope.mutates(name) for scope in self.all_scopes if scope is not user
                and scope is not self):
             return UNKNOWN
-        state = self._name_state(name, (float("inf"), 0), ((id(self.node), "body"),),
-                                 seen | {key})
+        state = self._name_state(name, float("inf"), ((id(self.node), "body"),),
+                                 seen)
         return UNKNOWN if state is None else state
 
-    def _step(self, name, state, entry, definite, seen):
+    def _step(self, name, state, entry, seen):
         at, kind, value, chain = entry
         if kind == "bind":
             key = (id(self.node), name, at)
             new = UNKNOWN if key in seen else self.verdict(value, at, chain, seen | {key})
-        elif kind in ("unknown", "escape"):
+        elif kind in ("unknown", "escape", "closure"):
             new = UNKNOWN
         elif kind == "unbind":
             new = None
-        elif kind in ("add", "aug-add"):
+        elif kind == "add":
             new = HAS
         elif kind == "strip":
             new = LACKS
-        elif kind == "maybe-add":
-            new = HAS if state == HAS else UNKNOWN
         elif kind == "maybe-strip":
             new = LACKS if state == LACKS else UNKNOWN
-        else:  # merge, aug-merge
+        else:  # merge, aug-merge, and maybe-add (a merge of something unjudged)
             merged = self.verdict(value, at, chain, seen)
             current = UNKNOWN if state is None else state
             new = HAS if HAS in (current, merged) else \
                 UNKNOWN if UNKNOWN in (current, merged) else LACKS
-        return new if definite else _join(state, new)
+        return new
 
 
 def _bare_runners(tree) -> set:
@@ -546,20 +723,38 @@ def _bare_runners(tree) -> set:
 
 
 def _scopes(tree) -> list:
-    """The module scope and one scope per function and class, each knowing the
-    function (or module) that encloses it."""
+    """The module scope and one scope per function, lambda and class. Each knows
+    the function (or module) its free names resolve to, and the scope whose
+    body defines it. A name a nested scope writes, strips, rebinds or passes on
+    gets a closure write in the nearest enclosing function that binds it, at
+    the statement that defines the nested scope: UNKNOWN from there on."""
+    _module_aliases(tree)
+    global _ORDER, _FIRST_ITERS
+    _ORDER = _evaluation_order(tree)
+    _FIRST_ITERS = frozenset(id(node.generators[0].iter) for node in ast.walk(tree)
+                             if isinstance(node, _COMPREHENSIONS))
     module = _Scope(tree, None, None)
     scopes = [module]
 
-    def visit(node, parent):
-        for item, _chain in _walk(node):
-            if isinstance(item, (*_FUNCTIONS, ast.ClassDef)):
+    def visit(node, parent, container):
+        for item, chain in _walk(node):
+            if isinstance(item, (*_FUNCLIKE, ast.ClassDef)):
                 scope = _Scope(item, parent, module)
+                scope.container, scope.def_chain = container, chain
                 scopes.append(scope)
-                visit(item, scope if isinstance(item, _FUNCTIONS) else parent)
+                visit(item, scope if isinstance(item, _FUNCLIKE) else parent, scope)
 
-    visit(tree, None)
+    visit(tree, None, module)
     module.all_scopes = scopes
+    for scope in scopes[1:]:
+        for name in [n for n in scope.events if n != _OS_ENVIRON and scope.mutates(n)]:
+            inner = scope
+            while inner.container is not module:
+                outer = inner.container
+                if isinstance(outer.node, _FUNCLIKE) and name in outer.locals:
+                    outer._add(name, inner.node, "closure", None, inner.def_chain)
+                    break
+                inner = outer
     return scopes
 
 
@@ -569,6 +764,8 @@ def _env_judgements(tree) -> list:
     bare = _bare_runners(tree)
     judged = []
     for scope in _scopes(tree):
+        if isinstance(scope.node, ast.Lambda):
+            continue  # calls inside a lambda are unjudged
         for node, chain in scope.pairs:
             if not isinstance(node, ast.Call):
                 continue
@@ -579,7 +776,7 @@ def _env_judgements(tree) -> list:
             for kw in node.keywords:
                 if kw.arg == "env":
                     judged.append((node.lineno, scope.verdict(
-                        kw.value, (node.lineno, node.col_offset), chain)))
+                        kw.value, _ORDER[id(node)], chain)))
     return judged
 
 
@@ -652,20 +849,42 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
     VALUES. os.environ, dict(os.environ), os.environ.copy() and env=None
     (inherit) have HOME, unless this scope removed HOME from os.environ before
     the call (`os.environ.pop("HOME")`, `del os.environ["HOME"]`,
-    `monkeypatch.delenv("HOME")`; `.setenv("HOME", ...)` restores it). A dict
-    literal or dict(...) with a HOME key or keyword has HOME. Otherwise its
-    spreads and its dict() argument decide: HAS if any has HOME, UNKNOWN if any
-    is unjudged, LACKS if all lack it (no spread at all: LACKS). `a | b` is HAS
-    if either side has HOME, LACKS if both lack it, otherwise UNKNOWN.
-    carry_clock_shift(x) and `(n := x)` are judged as x.
+    `monkeypatch.delenv("HOME")`; `.setenv("HOME", ...)` restores it). Another
+    scope of the module (another function, a fixture, a nested function or
+    lambda, a class body, or module-level code) changes the verdict in two
+    ways. A change there that may remove HOME or hands os.environ on (a HOME or
+    non-constant-key pop, del, delenv, clear or popitem, os.environ passed to a
+    call, `setattr(os, "environ", ...)`, os.putenv or os.unsetenv) makes them
+    UNKNOWN in every scope. A change there that can only add (a HOME or
+    non-constant-key setenv or assignment, setdefault, update or `|=`) makes
+    them UNKNOWN only where this scope has already removed HOME, since it might
+    restore it; otherwise they still have HOME. A setenv or delenv of a
+    constant key other than HOME, or an update with a dict literal that has no
+    HOME key, changes nothing anywhere. A dict literal or dict(...) with a HOME
+    key or keyword has HOME; one with a key that is not a constant is UNKNOWN.
+    Otherwise its spreads and its dict() argument decide: HAS if any has HOME,
+    UNKNOWN if any is unjudged, LACKS if all lack it (no spread at all: LACKS).
+    `a | b` is HAS if either side has HOME, LACKS if both lack it, otherwise
+    UNKNOWN. carry_clock_shift(x) and `(n := x)` are judged as x.
+
+    ORDER. Bindings and writes are applied in the order Python evaluates them,
+    not by line and column: an assignment's value before its target, a
+    conditional expression's test before its arms, a comprehension's first
+    iterable once before the loop and the rest of it on every pass, a loop,
+    with or except target before its block, a nested def's decorators before
+    its default values, a call's arguments before the call. A name or
+    os.environ given as env= is read as it stands when the runner is called; a
+    spread is copied where it stands, and dict() and `|` copy when they run.
 
     NAMES. A name bound in the scope is judged from its bindings and writes
-    before the call, in line order. Bindings it can read: `=` (tuple and list
+    before the call (see ORDER). Bindings it can read: `=` (tuple and list
     unpacking paired element by element with a same-length tuple or list),
     `x: T = v` and `(x := v)`. Bindings it cannot read make the name UNKNOWN:
     a for target, a with or except target, an import, a starred or unpaired
     unpacking, an augmented assignment other than `|=`, and a match capture;
-    `del x` unbinds it. Writes: `env["HOME"] = `, `env.update(HOME=...)`,
+    `del x` unbinds it (a path where it is unbound adds nothing to a join).
+    Like Python, a scope that assigns, deletes or `|=`s a name has its own
+    local of that name. Writes: `env["HOME"] = `, `env.update(HOME=...)`,
     `env.setdefault("HOME", ...)` and a merge of something with HOME
     (`env.update(x)`, `env.update(**x)`, `env |= x`) make it HAS;
     `env.pop("HOME")`, `del env["HOME"]` and `env.clear()` make it LACKS; a
@@ -674,16 +893,39 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
     the verdict already rules that out; another constant key, or a merge of a
     dict with no HOME key, changes nothing. A name becomes UNKNOWN from the
     point it is passed to any call other than dict(), carry_clock_shift() or
-    a runner's env=, stored into a container, a dict value or an attribute, or
-    has any method called other than the writes above and get, copy, items,
-    keys and values; and while another name shares its dict (`b = a`), a write
-    through either makes both UNKNOWN. os.environ itself becomes UNKNOWN from
-    the point os.environ is passed to any call, `os` is passed to setattr or
-    delattr (including `monkeypatch.setattr(os, "environ", ...)`), os.putenv
-    or os.unsetenv is called, or os.environ gets a method call other than the
-    writes and reads listed above for a name (its writes, such as
-    `os.environ.update(...)`, `.setdefault(...)` and `.clear()`, are judged
-    exactly as they are for a name).
+    a runner's env= (`*env`, which hands on only its keys, does not count),
+    stored into a container, a dict value or an attribute, or
+    has any method called or taken off it (`f = env.pop`) other than the
+    writes above and get, copy, items, keys and values. While another name
+    shares its dict (`b = a`, `b = (n := a)`, `b = carry_clock_shift(a)`), a
+    write through either makes both UNKNOWN, as does an alias made later in a
+    loop around the call; when
+    the sharing happens at module level, or one of the two is a module name or
+    os.environ, both are UNKNOWN from that point, since either may be written
+    from another scope. os.environ itself becomes UNKNOWN from the point
+    os.environ is passed to any call, `os` is passed to setattr or delattr
+    with an attribute name that is not a constant other than "environ"
+    (including `monkeypatch.setattr(os, "environ", ...)`), os.putenv or
+    os.unsetenv is called, a method is taken off os.environ, or os.environ gets
+    a method call other than the writes and reads listed above for a name (its
+    writes, such as `os.environ.update(...)`, `.setdefault(...)` and
+    `.clear()`, are judged exactly as they are for a name).
+
+    SPELLINGS. The scan sees os only as the name `os` or a name bound by `import
+    os as o`; os.environ only as `<os name>.environ` or a name bound by `from
+    os import environ` (aliases included); and os.putenv and os.unsetenv only
+    as `<os name>.putenv(...)` and `<os name>.unsetenv(...)` or names bound by
+    `from os import putenv, unsetenv`. A module that binds its name for os or
+    os.environ to anything else (a parameter, an assignment, an import of
+    something else) has every name, and os.environ, UNKNOWN.
+
+    TEXT AND NAMESPACES. A module in which any scope calls exec, eval,
+    globals, locals or vars has every name, and os.environ, UNKNOWN, with one
+    exception: `<obj>.setitem(globals(), "NAME", ...)` and
+    `<obj>.delitem(globals(), "NAME")` with a constant NAME count only as a
+    rebind of NAME by the scope that makes them (see MODULE NAMES). A function
+    that also binds its own local NAME makes the module UNKNOWN throughout
+    instead.
 
     CONDITIONAL CODE. A binding or write counts as definite only when the
     statement body that holds it also holds the call. Anything else is read as
@@ -705,18 +947,52 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
     top-level bindings and writes (all of them: module statements run before
     any test, so the last top-level binding counts), then from the function's
     own bindings (under `global`) and writes before the call, unless another
-    function or class body in the module writes, strips, rebinds (including
-    under `global`) or passes it on, in which case
-    it is UNKNOWN. A name an enclosing function binds (a closure) is UNKNOWN.
+    function, lambda or class body in the module writes, strips, rebinds
+    (including under `global`) or passes it on, in which case it is UNKNOWN. A
+    name an enclosing function binds (a closure) is UNKNOWN. Module-level code
+    reads a module name the same way: UNKNOWN when any function, lambda or
+    class body writes it, since module code may call that function first.
+
+    NESTED SCOPES. A name that a nested function, lambda or class body writes,
+    strips, rebinds (including under `nonlocal`) or passes on is UNKNOWN in the
+    nearest enclosing function that binds it, from the statement that defines
+    the nested scope onwards, a later rebinding included (class bodies in
+    between are skipped, as Python skips them for closures; a class body's own
+    names are not seen by its methods). This holds however deep the nesting,
+    and whether or not the nested scope is ever called. A nested scope's
+    decorators, default values and class bases and keywords run in the scope
+    around it and are read there; annotations are not read. A method that
+    changes a module name
+    is covered by MODULE NAMES, and one that changes an attribute of self
+    touches an attribute, which is unjudged.
 
     EVERY OTHER SHAPE IS UNJUDGED AND READ AS UNKNOWN, so it is never flagged.
     Examples: a helper call (`_env(root)`, `world.env()`); a parameter; an
     attribute or subscript (`w.env`, `calls[0][1]["env"]`); a conditional
     expression or `and`/`or` as the value itself (`a if c else b`, `p or {}`);
-    a comprehension (`{k: v for k, v in os.environ.items()}`); a change to
-    os.environ made in another function or at import; calls inside a lambda;
-    and runners taking env positionally (os.execve, os.spawn*e,
+    a comprehension (`{k: v for k, v in os.environ.items()}`); calls inside a
+    lambda; and runners taking env positionally (os.execve, os.spawn*e,
     os.posix_spawn).
+
+    NOT SEEN, and judged as if they never happened (a test that uses one is
+    outside the scan): a change made by code in another module (a conftest
+    fixture, an imported helper) to os.environ, the process environment or
+    this module's names; and os.environ, os or this module's names reached
+    through any spelling not listed above, including:
+    - os.environ through another name made by an expression (`e = os.environ
+      or {}`, `box = [os.environ]`), or replaced or deleted (`os.environ = {}`,
+      `del os.environ`);
+    - os bound by assignment (`o = os`), or os names from `from os import *`;
+    - `getattr(os, "environ")` or `getattr(os, name)`;
+    - `sys.modules["os"]`, `importlib.import_module("os")`, `__import__("os")`;
+    - another module's `.os` attribute (`subprocess.os.environ`);
+    - os.environb, and os.putenv or os.unsetenv taken as values (`f =
+      os.unsetenv`) or imported from another module (`from posix import
+      unsetenv`); `os.__dict__`;
+    - a monkeypatch target given as a string (`monkeypatch.setattr(
+      "os.environ", ...)`, or one naming this module);
+    - this module's names through `__globals__`, `f_globals`, `__dict__`,
+      `sys.modules[__name__]` or an import of the module itself.
     """
     files = _test_source_files()
     misses = []
@@ -755,7 +1031,7 @@ def _verdict(source: str, scope_source: str = "") -> str:
     ("{**param, 'HOME': '/sandbox'}", "", HAS),
     ("dict(param, HOME='/sandbox')", "", HAS),
     # A spread of anything not shown to carry HOME, with no HOME key, lacks it.
-    # A spread of something unjudged makes the verdict unknown (R4-6).
+    # A spread of something unjudged makes the verdict unknown.
     ("{**param}", "", UNKNOWN),
     ("{**param, 'X': '1'}", "", UNKNOWN),
     ("{**helper(), 'X': '1'}", "", UNKNOWN),
@@ -821,7 +1097,7 @@ def _verdict(source: str, scope_source: str = "") -> str:
     ("{'X': '1'} | param", "", UNKNOWN),
     ("env", "env: dict = {'PATH': '/bin'}", LACKS),
     ("env", "env: dict = dict(os.environ)", HAS),
-    # Every binding form rebinds the name (R4-4).
+    # Every binding form rebinds the name.
     ("env", "env = {'PATH': '/bin'}\nfor env in envs:\n    pass", UNKNOWN),
     ("env", "env = dict(os.environ)\nenv, extra = {'PATH': '/bin'}, 1", LACKS),
     ("env", "env = dict(os.environ)\n(env, extra), y = ({'PATH': '/bin'}, 1), 2", LACKS),
@@ -838,13 +1114,14 @@ def _verdict(source: str, scope_source: str = "") -> str:
     ("env", "env = dict(os.environ)\ndel env", UNKNOWN),
     ("env", "env = dict(os.environ)\nenv: dict = {'PATH': '/bin'}", LACKS),
     # A binding or write in a block that does not enclose the call is
-    # conditional: it joins the verdict before it (R4-5).
+    # conditional: it joins the verdict before it.
     ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'", UNKNOWN),
     ("env", "env = dict(os.environ)\nif c:\n    env.pop('HOME')", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nif c:\n    pass\nelse:\n    env['HOME'] = '/h'", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nif c:\n    pass\nelif d:\n    env['HOME'] = '/h'", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nfor x in y:\n    env['HOME'] = '/h'", UNKNOWN),
-    ("env", "env = {'PATH': '/bin'}\nfor x in y:\n    pass\nelse:\n    env['HOME'] = '/h'", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nfor x in y:\n    pass\nelse:\n"
+     "    env['HOME'] = '/h'", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nwhile c:\n    env['HOME'] = '/h'", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\ntry:\n    env['HOME'] = '/h'\nexcept E:\n    pass", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\ntry:\n    pass\nfinally:\n    env['HOME'] = '/h'", UNKNOWN),
@@ -855,19 +1132,35 @@ def _verdict(source: str, scope_source: str = "") -> str:
     ("env", "if c:\n    env = {'PATH': '/bin'}\nelse:\n    env = {'X': '1'}", LACKS),
     ("env", "if c:\n    env = {'PATH': '/bin'}\nelse:\n    env = dict(os.environ)", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nx = 1 if c else env.update(os.environ)", UNKNOWN),
-    # The auditor's battery: rebinds and writes in branches, joined per statement.
+    # Rebinds and writes in branches, joined per statement.
     ("env", "env = dict(os.environ)\nif c:\n    env = {'PATH': '/bin'}", UNKNOWN),
-    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelse:\n    env['HOME'] = '/h'", HAS),
-    ("env", "env = dict(os.environ)\nif c:\n    env.pop('HOME')\nelse:\n    del env['HOME']", LACKS),
-    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelif d:\n    env['HOME'] = '/h'\n"
+    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelse:\n"
+     "    env['HOME'] = '/h'", HAS),
+    ("env", "env = dict(os.environ)\nif c:\n    env.pop('HOME')\nelse:\n"
+     "    del env['HOME']", LACKS),
+    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelif d:\n"
+     "    env['HOME'] = '/h'\n"
             "else:\n    env['HOME'] = '/h'", HAS),
-    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelif d:\n    env['HOME'] = '/h'", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelif d:\n"
+     "    env['HOME'] = '/h'", UNKNOWN),
     ("env", "if c:\n    env = dict(os.environ)\nelse:\n    env = {'HOME': '/h'}", HAS),
     ("env", "x = (env := {'X': '1'}) if c else (env := {'Y': '2'})", LACKS),
     ("env", "env = {'PATH': '/bin'}\nmatch x:\n    case 1:\n        env['HOME'] = '/h'", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nwhile c:\n    env.update(os.environ)", UNKNOWN),
     ("{**helper()}", "", UNKNOWN),
     ("{**b}", "b = {'PATH': '/bin'}", LACKS),
+    # Writes on the right of and/or, in a comprehension, and match captures.
+    ("env", "env = {'PATH': '/bin'}\nok = c and env.update(os.environ)", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nok = c or env.update(os.environ)", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nxs = [env.update(os.environ) for x in ys]", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nxs = {x: env.update(os.environ) for x in ys}", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nxs = {env.update(os.environ) for x in ys}", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nxs = list(env.update(os.environ) for x in ys)", UNKNOWN),
+    # A key that is not a constant may be HOME.
+    ("{k: '1'}", "", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nmatch x:\n    case {'k': env}:\n        pass", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nmatch x:\n    case {**env}:\n        pass", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nmatch x:\n    case [*env]:\n        pass", UNKNOWN),
     # Not judgeable from this scope: passed.
     ("helper()", "", UNKNOWN),
     ("param", "", UNKNOWN),
@@ -992,7 +1285,7 @@ def _judge_module(source: str) -> list:
 
 
 @pytest.mark.parametrize("source, verdicts", [
-    # A name the function never binds resolves through the module (R4-3).
+    # A name the function never binds resolves through the module.
     ("_ENV = {'PATH': '/bin'}\n\n\ndef test_x():\n    subprocess.run([], env=_ENV)\n",
      [LACKS]),
     ("_ENV = dict(os.environ)\n\n\ndef test_x():\n    subprocess.run([], env=_ENV)\n",
@@ -1075,9 +1368,11 @@ def _judge_module(source: str) -> list:
     ("def t(mp):\n    mp.setattr(os, 'environ', {})\n    subprocess.run([], env=None)\n",
      [UNKNOWN]),
     ("def t():\n    os.unsetenv('HOME')\n    subprocess.run([], env=None)\n", [UNKNOWN]),
-    ("def t():\n    os.environ.__delitem__('HOME')\n    subprocess.run([], env=os.environ.copy())\n",
+    ("def t():\n    os.environ.__delitem__('HOME')\n"
+     "    subprocess.run([], env=os.environ.copy())\n",
      [UNKNOWN]),
-    ("def t():\n    e = os.environ\n    e.pop('HOME')\n    subprocess.run([], env=dict(os.environ))\n",
+    ("def t():\n    e = os.environ\n    e.pop('HOME')\n"
+     "    subprocess.run([], env=dict(os.environ))\n",
      [UNKNOWN]),
     ("@pytest.mark.skipif(not hasattr(os, 'geteuid'), reason='x')\ndef t():\n"
      "    subprocess.run([], env=dict(os.environ))\n", [HAS]),
@@ -1087,6 +1382,275 @@ def _judge_module(source: str) -> list:
     ("def t(p):\n    e = p or {'X': '1'}\n    subprocess.run([], env=e)\n", [UNKNOWN]),
     ("def t(c):\n    x = (e := {'X': '1'}) if c else 0\n    subprocess.run([], env=e)\n",
      [LACKS]),
+    # A write made by a nested function, lambda or class body (both directions).
+    ("def t():\n    env = {'X': '1'}\n\n    def fix():\n        env['HOME'] = '/h'\n"
+     "    fix()\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n\n    def strip():\n        env.pop('HOME')\n"
+     "    strip()\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n    cb = lambda: env.pop('HOME')\n    cb()\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("_E = dict(os.environ)\nstrip = lambda: _E.pop('HOME')\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n\n    def g():\n        nonlocal env\n"
+     "        env = {'X': '1'}\n    g()\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n\n    class K:\n        env.pop('HOME')\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n\n    def outer():\n        def inner():\n"
+     "            env.pop('HOME')\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'X': '1'}\n\n    def show():\n        return env.get('X')\n"
+     "    subprocess.run([], env=env)\n", [LACKS]),
+    ("def t():\n    env = {'X': '1'}\n    subprocess.run([], env=env)\n\n    def fix():\n"
+     "        env['HOME'] = '/h'\n", [LACKS]),
+    ("_E = dict(os.environ)\n\n\nclass T:\n    def helper(self):\n        _E.pop('HOME')\n\n"
+     "    def test(self):\n        self.helper()\n        subprocess.run([], env=_E)\n", [UNKNOWN]),
+    # An os.environ change outside the call's own scope.
+    ("@pytest.fixture\ndef f(monkeypatch):\n    monkeypatch.delenv('HOME')\n\n\n"
+     "def t(f):\n    subprocess.run([], env=os.environ.copy())\n", [UNKNOWN]),
+    ("os.environ.pop('HOME')\n\n\ndef t():\n    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("class T:\n    def setup(self):\n        os.environ.pop('HOME')\n\n    def test(self):\n"
+     "        subprocess.run([], env=dict(os.environ))\n", [UNKNOWN]),
+    ("def f(mp, key):\n    mp.delenv(key)\n\n\ndef t():\n    subprocess.run([], env=None)\n",
+     [UNKNOWN]),
+    ("def t():\n    cb = lambda: os.environ.pop('HOME')\n    subprocess.run([], env=None)\n",
+     [UNKNOWN]),
+    ("def f(mp):\n    mp.setenv('X', '1')\n    mp.delenv('Y')\n\n\ndef t():\n"
+     "    subprocess.run([], env=os.environ.copy())\n", [HAS]),
+    ("os.environ.pop('HOME')\nsubprocess.run([], env=None)\n", [LACKS]),
+    # os and os.environ under other names.
+    ("import os as o\n\n\ndef t():\n    o.environ.pop('HOME')\n    subprocess.run([], env=None)\n",
+     [LACKS]),
+    ("from os import environ as E\n\n\ndef t():\n    E.pop('HOME')\n"
+     "    subprocess.run([], env=dict(E))\n", [LACKS]),
+    ("from os import environ\n\n\ndef t():\n    subprocess.run([], env=environ.copy())\n",
+     [HAS]),
+    ("from os import unsetenv\n\n\ndef t():\n    unsetenv('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("import os as o\n\n\ndef f():\n    o.environ.pop('HOME')\n\n\ndef t():\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    # A method taken off the dict, and code that reaches names by text.
+    ("def t():\n    env = dict(os.environ)\n    strip = functools.partial(env.pop, 'HOME')\n"
+     "    strip()\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n    f = env.pop\n    f('HOME')\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    cb = functools.partial(os.environ.pop, 'HOME')\n    cb()\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("def t():\n    env = {'X': '1'}\n    g = env.get\n    subprocess.run([], env=env)\n",
+     [LACKS]),
+    ("def t():\n    env = dict(os.environ)\n    exec(\"env.pop('HOME')\")\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("_E = dict(os.environ)\n\n\ndef t():\n    globals()['_E'].pop('HOME')\n"
+     "    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    ("def f():\n    eval(\"os.environ.pop('HOME')\")\n\n\ndef t():\n"
+     "    subprocess.run([], env=os.environ.copy())\n", [UNKNOWN]),
+    ("def t():\n    subprocess.run([], env={'X': '1'})\n    vars()\n", [LACKS]),
+    # A rebind through globals() under a constant name acts as `global NAME`.
+    ("_E = {'X': '1'}\n\n\ndef f(mp):\n    mp.setitem(globals(), 'Y', 1)\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [LACKS]),
+    ("_E = {'X': '1'}\n\n\ndef f(mp):\n    mp.setitem(globals(), '_E', {})\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    ("_E = {'X': '1'}\n\n\ndef f(mp):\n    mp.delitem(globals(), '_E')\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    ("_E = {'X': '1'}\nmp.setitem(globals(), '_E', {})\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    ("_E = {'X': '1'}\nY = 1\nmp.setitem(globals(), 'Y', 2)\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [LACKS]),
+    ("_E = {'X': '1'}\n\n\ndef f(mp):\n    _E = 1\n    mp.setitem(globals(), '_E', {})\n\n\n"
+     "def t():\n    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    ("_E = {'X': '1'}\nK = '_E'\n\n\ndef f(mp):\n    mp.setitem(globals(), K, {})\n\n\n"
+     "def t():\n    subprocess.run([], env=_E)\n", [UNKNOWN]),
+    # The module's name for os or os.environ bound to something else.
+    ("def t(os):\n    os.environ.pop('HOME')\n    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("import fake as os\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("from mod import os\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("from os import environ\n\n\ndef t():\n    environ = {}\n    environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("import os.path\nimport os as o\nfrom os import environ as e\n\n\ndef t():\n"
+     "    os.environ.pop('HOME')\n    subprocess.run([], env=None)\n", [LACKS]),
+    # A dict shared with a module name or os.environ may be written from any scope.
+    ("e = os.environ\n\n\ndef t():\n    e.pop('HOME')\n    subprocess.run([], env=None)\n",
+     [UNKNOWN]),
+    ("e = os.environ\ne.pop('HOME')\n\n\ndef t():\n    subprocess.run([], env=None)\n",
+     [UNKNOWN]),
+    ("a = {'X': '1'}\nb = a\n\n\ndef f():\n    b['HOME'] = '/h'\n\n\ndef t():\n"
+     "    subprocess.run([], env=a)\n", [UNKNOWN]),
+    ("a = dict(os.environ)\nb = a\n\n\ndef f():\n    b.pop('HOME')\n\n\ndef t():\n"
+     "    subprocess.run([], env=a)\n", [UNKNOWN]),
+    ("a = dict(os.environ)\n\n\ndef f():\n    b = a\n    b.pop('HOME')\n\n\ndef t():\n"
+     "    subprocess.run([], env=a)\n", [UNKNOWN]),
+    ("def t():\n    a = {'X': '1'}\n    b = a\n    subprocess.run([], env=a)\n", [LACKS]),
+    # Every runner the scan reads, by attribute and by bare name.
+    ("def t():\n    subprocess.Popen([], env={'X': '1'})\n    subprocess.call([], env={'X': '1'})\n"
+     "    subprocess.check_call([], env={'X': '1'})\n"
+     "    subprocess.check_output([], env={'X': '1'})\n"
+     "    asyncio.create_subprocess_shell('x', env={'X': '1'})\n", [LACKS] * 5),
+    ("from subprocess import call, check_call, check_output\n\n\ndef t():\n"
+     "    call([], env={'X': '1'})\n    check_call([], env={'X': '1'})\n"
+     "    check_output([], env={'X': '1'})\n", [LACKS] * 3),
+    ("f = lambda: subprocess.run([], env={'X': '1'})\n", []),
+    # Async functions are scopes, and while and async for bodies are loops.
+    ("env = {'X': '1'}\n\n\nasync def t(env):\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n    while c:\n        subprocess.run([], env=env)\n"
+     "        env.pop('HOME')\n", [UNKNOWN]),
+    ("async def t():\n    env = dict(os.environ)\n    async for x in y:\n"
+     "        subprocess.run([], env=env)\n        env.pop('HOME')\n", [UNKNOWN]),
+    # `del NAME` and `NAME |= x` make NAME local, as Python does.
+    ("_E = {'X': '1'}\n\n\ndef f():\n    del _E\n\n\ndef t():\n    subprocess.run([], env=_E)\n",
+     [LACKS]),
+    ("_E = {'X': '1'}\n\n\ndef f(x):\n    _E |= x\n\n\ndef t():\n    subprocess.run([], env=_E)\n",
+     [LACKS]),
+    ("_E = {'X': '1'}\n\n\ndef f():\n    _E = {}\n\n\ndef t():\n    subprocess.run([], env=_E)\n",
+     [LACKS]),
+    # Every kind of write through a name that shares the dict.
+    *[(f"def t():\n    a = {{'X': '1'}}\n    b = a\n    {write}\n    subprocess.run([], env=a)\n",
+       [UNKNOWN]) for write in (
+        "b['HOME'] = '/h'", "b |= x", "f(b)", "b[k] = '1'", "b.pop(k)", "b.update(x)",
+        "def g():\n        b['HOME'] = '/h'")],
+    ("def t():\n    a = {'X': '1'}\n    b = carry_clock_shift(a)\n    b['HOME'] = '/h'\n"
+     "    subprocess.run([], env=a)\n", [UNKNOWN]),
+    ("def t():\n    a = {'X': '1'}\n    b = (n := a)\n    b['HOME'] = '/h'\n"
+     "    subprocess.run([], env=a)\n", [UNKNOWN]),
+    ("def t():\n    a = {}\n    b = a\n    c = {'X': '1'}\n    b['HOME'] = '/h'\n"
+     "    subprocess.run([], env=c)\n", [LACKS]),
+    ("def t():\n    a = {'X': '1'}\n    subprocess.run([], env=a)\n    b = a\n"
+     "    b['HOME'] = '/h'\n",
+     [LACKS]),
+    ("def t():\n    a = {'X': '1'}\n    while c:\n        subprocess.run([], env=a)\n"
+     "        b = a\n"
+     "        b['HOME'] = '/h'\n", [UNKNOWN]),
+    # Reads and copies leave a dict judged; `*env` hands on keys only.
+    *[(f"def t():\n    env = {{'X': '1'}}\n    {read}\n    subprocess.run([], env=env)\n", [LACKS])
+      for read in ("env.copy()", "env.items()", "env.keys()", "env.values()", "env.popitem()",
+                   "f(*env)", "xs = [*env]", "del obj.attr")],
+    ("def t():\n    f(*os.environ)\n    subprocess.run([], env=None)\n", [HAS]),
+    ("def t():\n    env = {'X': '1'}\n    env += {'HOME': '/h'}\n    subprocess.run([], env=env)\n",
+     [UNKNOWN]),
+    # Names read by text.
+    *[(f"def t():\n    env = {{'X': '1'}}\n    {call}()\n    subprocess.run([], env=env)\n",
+       [UNKNOWN]) for call in ("locals", "vars")],
+    # Another scope's os.environ change that cannot remove HOME.
+    ("def f(mp, k):\n    mp.setenv(k, '1')\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("def f():\n    os.environ.update({'X': '1'})\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [LACKS]),
+    # Unbound paths, and merges.
+    ("def t():\n    env = {'X': '1'}\n    if c:\n        del env\n"
+     "    subprocess.run([], env=env)\n",
+     [LACKS]),
+    ("def t():\n    x = {'X': '1'}\n    del x\n    subprocess.run([], env={**x})\n", [UNKNOWN]),
+    ("def t():\n    o = {'X': '1'}\n    env |= o\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'HOME': '/h'}\n    o = {'X': '1'}\n    env.update(o)\n"
+     "    subprocess.run([], env=env)\n", [HAS]),
+    ("def t():\n    env = {'X': '1'}\n    o = {'Y': '1'}\n    env.update(o)\n"
+     "    subprocess.run([], env=env)\n", [LACKS]),
+    ("def t():\n    global _E\n    if c:\n        _E['HOME'] = '/h'\n"
+     "    subprocess.run([], env=_E)\n",
+     [UNKNOWN]),
+    ("def t():\n    a = {'X': '1'}\n    b = {'Y': '1'}\n    while c:\n        a = {**b}\n"
+     "        b = {**a}\n        subprocess.run([], env=a)\n", [UNKNOWN]),
+    # Branches that may not run: a match guard and an except clause's type.
+    ("def t():\n    env = {'HOME': '/h'}\n    match x:\n        case 1 if (env := {'X': '1'}):\n"
+     "            pass\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'HOME': '/h'}\n    try:\n        pass\n    except (env := {'X': '1'}):\n"
+     "        pass\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    # Module code, and the order of writes by line.
+    ("def f():\n    env['HOME'] = '/h'\n\n\nenv = {'X': '1'}\nf()\nsubprocess.run([], env=env)\n",
+     [UNKNOWN]),
+    ("mp.setitem(globals(), '_E', {})\n_E = {'X': '1'}\nsubprocess.run([], env=_E)\n", [LACKS]),
+    ("a = {'X': '1'}\nb = a\na = {'Y': '1'}\nsubprocess.run([], env=a)\n", [LACKS]),
+    ("def t():\n    env = {'X': '1'}\n    d = {'a': env.update(HOME='/h'), env.pop('HOME'): 1}\n"
+     "    subprocess.run([], env=env)\n", [LACKS]),
+    ("_E = {'X': '1'}\n\n\ndef f():\n    _E = {'HOME': '/h'}\n\n\ndef t():\n"
+     "    subprocess.run([], env=_E)\n", [LACKS]),
+    # A closure write holds past a later rebinding; it reaches only the nearest binder.
+    ("def t():\n    env = {'X': '1'}\n\n    def g():\n        env.pop('HOME')\n"
+     "    env = dict(os.environ)\n    g()\n    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'X': '1'}\n\n    def m():\n        env = {'Y': '1'}\n\n"
+     "        def i():\n            env['HOME'] = '/h'\n    subprocess.run([], env=env)\n",
+     [LACKS]),
+    ("X = {'X': '1'}\n\n\nclass C:\n    X = {'HOME': '/h'}\n\n    def t(self):\n"
+     "        subprocess.run([], env=X)\n", [LACKS]),
+    # The module's names for os and os.environ, exactly.
+    ("import json as o\n\n\ndef t():\n    o.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n",
+     [HAS]),
+    ("from os import path as E\n\n\ndef t():\n    E.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n",
+     [HAS]),
+    ("from os import getcwd\n\n\ndef t():\n    getcwd()\n    subprocess.run([], env=None)\n",
+     [HAS]),
+    ("def t():\n    setattr(os, 'environ', {})\n    subprocess.run([], env=None)\n", [UNKNOWN]),
+    # Writes are ordered as Python evaluates them, not by column.
+    ("def t():\n    env = {'X': '1'}\n    x = env.pop('HOME') if env.update(HOME='/h') else 0\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = dict(os.environ)\n"
+     "    x = env.update(HOME='/h') if env.pop('HOME') else env.update(HOME='/h')\n"
+     "    subprocess.run([], env=env)\n", [HAS]),
+    ("def t():\n    env = dict(os.environ)\n    env = {**env, 'X': env.pop('HOME')}\n"
+     "    subprocess.run([], env=env)\n", [HAS]),
+    ("def t():\n    env = dict(os.environ)\n    env = dict(env, X=env.pop('HOME'))\n"
+     "    subprocess.run([], env=env)\n", [LACKS]),
+    ("def t():\n    env = dict(os.environ)\n    subprocess.run([], env=env, x=env.pop('HOME'))\n",
+     [LACKS]),
+    ("def t():\n    env = dict(os.environ)\n    subprocess.run([], env=env) or env.pop('HOME')\n",
+     [HAS]),
+    ("def t():\n    a = dict(os.environ)\n    subprocess.run([], env=a | {'X': a.pop('HOME')})\n",
+     [LACKS]),
+    ("def t():\n    env = {'X': '1'}\n    xs = [env.pop('HOME') for x in env.update(HOME='/h')]\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'X': '1'}\n    xs = [x for x in env.update(HOME='/h')]\n"
+     "    subprocess.run([], env=env)\n", [HAS]),
+    ("def t():\n    env = {'X': '1'}\n    env.update(HOME=env.pop('Y'))\n"
+     "    subprocess.run([], env=env)\n", [HAS]),
+    ("def t():\n    env = {'X': '1'}\n    x = dict(env)\n    subprocess.run([], env=env)\n"
+     "", [LACKS]),
+    ("def t():\n    env = {'X': '1'}\n    d[env.pop('HOME')] = env.update(HOME='/h')\n"
+     "    subprocess.run([], env=env)\n", [LACKS]),
+    ("def t():\n    env = {'X': '1'}\n    d[env.pop('HOME')]: int = env.update(HOME='/h')\n"
+     "    subprocess.run([], env=env)\n", [LACKS]),
+    ("def t():\n    env = {'X': '1'}\n"
+     "    xs = {env.pop('HOME'): 1 for x in env.update(HOME='/h')}\n"
+     "    subprocess.run([], env=env)\n", [UNKNOWN]),
+    ("def t():\n    env = {'X': '1'}\n    xs = [1 for env in [env.update(HOME='/h')]]\n"
+     "    subprocess.run([], env=env)\n", [HAS]),
+    ("def t():\n    env = {'X': '1'}\n\n    @mark(env.update(HOME='/h'))\n"
+     "    def g(x=env.pop('HOME')):\n        pass\n    subprocess.run([], env=env)\n", [LACKS]),
+    ("def t(env):\n    if c:\n        env['HOME'] = '/h'\n    subprocess.run([], env=env)\n",
+     [UNKNOWN]),
+    # A loop, with or except target is bound before its block runs.
+    ("def t():\n    env = dict(os.environ)\n    for env in env.pop('HOME'):\n"
+     "        subprocess.run([], env=env)\n", [UNKNOWN]),
+    *[(f"def t():\n    env = {{'X': '1'}}\n{block}\n        subprocess.run([], env=env)\n",
+       [UNKNOWN]) for block in ("    for env in envs:", "    with f() as env:",
+                                "    try:\n        pass\n    except E as env:")],
+    # Decorators, defaults and class bases run in the scope around them.
+    *[(f"def t():\n    env = dict(os.environ)\n{part}\n    subprocess.run([], env=env)\n", [LACKS])
+      for part in ("\n    def g(x=env.pop('HOME')):\n        pass",
+                   "\n    def g(*, x=env.pop('HOME')):\n        pass",
+                   "\n    @mark(env.pop('HOME'))\n    def g():\n        pass",
+                   "\n    class C(env.pop('HOME')):\n        pass",
+                   "\n    class C(Base, meta=env.pop('HOME')):\n        pass",
+                   "    f = lambda x=env.pop('HOME'): x")],
+    # Another scope only adding HOME: harmless, unless this scope removed it first.
+    ("def f(mp):\n    mp.setenv('HOME', '/h')\n\n\ndef t():\n"
+     "    subprocess.run([], env=os.environ.copy())\n", [HAS]),
+    ("def f(mp, k):\n    mp.setenv(k, '1')\n\n\ndef t():\n    subprocess.run([], env=None)\n",
+     [HAS]),
+    ("def f(mp):\n    mp.setenv('HOME', '/h')\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=os.environ.copy())\n", [UNKNOWN]),
+    ("def f(mp):\n    mp.setenv('HOME', '/h')\n\n\ndef t(mp):\n    mp.delenv('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("def t():\n    os.environ.pop('HOME')\n    os.environ |= {'HOME': '/h'}\n"
+     "    subprocess.run([], env=None)\n", [HAS]),
+    ("def f(c):\n    os.environ |= c\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [UNKNOWN]),
+    ("def f():\n    os.environ.clear()\n\n\ndef t():\n    subprocess.run([], env=None)\n",
+     [UNKNOWN]),
+    ("def f(mp):\n    mp.setenv('X', '1')\n    mp.delenv('Y')\n    os.environ['Z'] = '1'\n"
+     "    os.environ.pop('W')\n\n\ndef t():\n    os.environ.pop('HOME')\n"
+     "    subprocess.run([], env=None)\n", [LACKS]),
+    ("def t(mp):\n    mp.delenv('HOME')\n    subprocess.run([], env=None)\n", [LACKS]),
     # Class bodies are scopes of their own.
     ("class C:\n    e = {'X': '1'}\n    subprocess.run([], env=e)\n", [LACKS]),
     ("class C:\n    e = {'X': '1'}\n\n    def t(self):\n        subprocess.run([], env=e)\n",
@@ -1094,3 +1658,17 @@ def _judge_module(source: str) -> list:
 ])
 def test_the_scan_judges_scope_and_control_flow(source, verdicts):
     assert _judge_module(source) == verdicts
+
+
+def test_one_modules_names_for_os_do_not_carry_into_the_next():
+    """The scan records each module's names for os, os.environ, os.putenv and
+    os.unsetenv; judging another module first must not leave them behind."""
+    _judge_module("import os as o\nfrom os import environ as E\nfrom os import unsetenv\n"
+                  "xs = [x for x in ys]\n")
+    later = ("def t():\n    o.environ.pop('HOME')\n    E.pop('HOME')\n    unsetenv()\n"
+             "    subprocess.run([], env=None)\n")
+    assert _judge_module(later) == [HAS]
+    _judge_module("xs = [x for x in ys]\n")
+    assert _judge_module("def t():\n    env = {'X': '1'}\n"
+                         "    xs = [x for x in env.update(HOME='/h')]\n"
+                         "    subprocess.run([], env=env)\n") == [HAS]
