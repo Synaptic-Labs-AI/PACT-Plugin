@@ -2669,7 +2669,15 @@ class PACTMemory:
                 # one's gate, and it refuses with a write-oriented error that
                 # must never escape a read.
                 gate_roots = []
+                # The common dir GIT reported for the identity root. It anchors
+                # both the worktree listing and the gate's submodule exemption;
+                # None (git failed) only narrows the gate, never fails the read.
+                gate_common = None
                 if repo_root is not None:
+                    try:
+                        gate_common = main_repo_common_dir(str(repo_root))
+                    except Exception:
+                        gate_common = None
                     # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
                     # entry is what the repository's own `.git` CLAIMS, and a
                     # delivered `.git` can claim another project's checkout.
@@ -2677,7 +2685,7 @@ class PACTMemory:
                         gate_roots.extend(
                             str(root)
                             for root in _verified_worktree_roots(
-                                Path(repo_root), main_repo_common_dir(str(repo_root))
+                                Path(repo_root), gate_common
                             )
                         )
                     except Exception:
@@ -2686,7 +2694,7 @@ class PACTMemory:
                         gate_roots = [str(Path(repo_root).resolve())]
                 deduped = list(dict.fromkeys(gate_roots))
                 outcome, detail = legacy_candidate_plausibility(
-                    connection, candidate, deduped or None
+                    connection, candidate, deduped or None, root_common=gate_common
                 )
                 # ADMISSION. `verified` is read; `excluded` is not. An
                 # UNVERIFIED bucket (no absolute file row places it) is read

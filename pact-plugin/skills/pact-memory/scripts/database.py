@@ -1412,42 +1412,43 @@ def _gitfile_target(marker: str) -> Optional[str]:
         return None
 
 
-def _root_common_dir(root: str) -> Optional[str]:
-    """The git common dir of the checkout at `root`, read without git.
+def _worktree_admin_of(root: str, root_common: str, name: str) -> bool:
+    """Whether `<root_common>/worktrees/<name>` is the admin dir of `root`.
 
-    A `.git` directory is its own common dir. A `.git` file (a linked
-    worktree, a submodule, a separate git dir) names a git dir; that dir's
-    `commondir` file, when present, names the common dir relative to it.
+    Read from the COMMON DIR's side, never from the root's own `.git`: the
+    admin dir's `gitdir` file must name `<root>/.git` back. Never raises.
     """
-    marker = os.path.join(root, ".git")
-    if os.path.isdir(marker) and not os.path.islink(marker):
-        return os.path.realpath(marker)
-    git_dir = _gitfile_target(marker)
-    if git_dir is None:
-        return None
+    admin = os.path.join(root_common, "worktrees", name)
     try:
-        with open(os.path.join(git_dir, "commondir"), encoding="utf-8") as handle:
-            common = handle.readline(4096).strip()
+        with open(os.path.join(admin, "gitdir"), encoding="utf-8") as handle:
+            back = handle.readline(4096).strip()
+        if not back:
+            return False
+        if not os.path.isabs(back):
+            back = os.path.join(admin, back)
+        return os.path.realpath(back) == os.path.realpath(os.path.join(root, ".git"))
     except (OSError, UnicodeDecodeError, ValueError):
-        return git_dir
-    if not common:
-        return git_dir
-    if not os.path.isabs(common):
-        common = os.path.join(git_dir, common)
-    try:
-        return os.path.realpath(common)
-    except (OSError, ValueError):
-        return git_dir
+        return False
 
 
-def _owns_row_instead_of(directory: str, root_common: Optional[str]) -> bool:
-    """Whether a `.git` at `directory` makes it a different checkout.
+def _owns_row_instead_of(
+    directory: str, root: str, root_common: Optional[str]
+) -> bool:
+    """Whether a `.git` at `directory` makes it a different checkout of `root`.
 
     A ROOT'S OWN SUBMODULE STILL BELONGS TO THE ROOT: its `.git` is a file
-    naming a git dir under the root's `<common dir>/modules/`, and a
-    superproject session's rows inside it are the superproject's. Any other
+    naming a git dir under `<root_common>/modules/`, or, when `root` is a
+    linked worktree, under `<root_common>/worktrees/<root's admin>/modules/`
+    (git keeps a worktree's submodules in that worktree's own admin dir), and
+    a superproject session's rows inside it are the superproject's. Any other
     `.git` (a directory, or a file naming a git dir anywhere else) is a
     separate checkout, which owns the rows below it.
+
+    `root_common` IS THE COMMON DIR GIT REPORTED for the root, never one this
+    module re-derives from the root's own `.git` and `commondir` files: a
+    second parser accepts shapes git refuses, so the exemption's anchor would
+    be a value git never verified. None means no verified value, and then no
+    nested `.git` is exempt.
     """
     marker = os.path.join(directory, ".git")
     if not os.path.lexists(marker):
@@ -1455,12 +1456,21 @@ def _owns_row_instead_of(directory: str, root_common: Optional[str]) -> bool:
     if root_common is None or os.path.isdir(marker) or os.path.islink(marker):
         return True
     target = _gitfile_target(marker)
-    modules = os.path.join(root_common, "modules") + os.sep
-    return target is None or not target.startswith(modules)
+    if target is None:
+        return True
+    if target.startswith(os.path.join(root_common, "modules") + os.sep):
+        return False
+    worktrees = os.path.join(root_common, "worktrees") + os.sep
+    if not target.startswith(worktrees):
+        return True
+    name, _, rest = target[len(worktrees):].partition(os.sep)
+    if not name or not rest.startswith("modules" + os.sep):
+        return True
+    return not _worktree_admin_of(root, root_common, name)
 
 
 def _contained_by_root(
-    resolved: str, root: str, nested: Dict[tuple, bool], commons: Dict[str, Optional[str]]
+    resolved: str, root: str, nested: Dict[tuple, bool], root_common: Optional[str]
 ) -> bool:
     """Whether `resolved` belongs to the checkout at `root` itself.
 
@@ -1468,17 +1478,16 @@ def _contained_by_root(
     the row that is a separate checkout (`_owns_row_instead_of`: a nested
     repository, or one unpacked inside another) owns the row, so an ancestor
     root must not count it; the root's own submodules do not end its claim.
-    `nested` and `commons` cache each answer for one gate call.
+    `root_common` is git's verified common dir for the root (None: no
+    exemption). `nested` caches each answer for one gate call.
     """
     if resolved != root and not resolved.startswith(root + os.sep):
         return False
-    if root not in commons:
-        commons[root] = _root_common_dir(root)
     directory = os.path.dirname(resolved)
     while directory != root and directory.startswith(root + os.sep):
         key = (root, directory)
         if key not in nested:
-            nested[key] = _owns_row_instead_of(directory, commons[root])
+            nested[key] = _owns_row_instead_of(directory, root, root_common)
         if nested[key]:
             return False
         directory = os.path.dirname(directory)
@@ -1489,6 +1498,8 @@ def legacy_candidate_plausibility(
     conn: sqlite3.Connection,
     candidate_id: str,
     roots: Optional[Union[Path, str, Sequence[Union[Path, str]]]],
+    *,
+    root_common: Optional[Union[Path, str]] = None,
 ) -> Tuple[str, Dict[str, int]]:
     """Whether a legacy basename bucket plausibly belongs to `roots`.
 
@@ -1523,7 +1534,11 @@ def legacy_candidate_plausibility(
     only when no directory strictly between the root and the row is a
     separate checkout (`_contained_by_root`): an identity root that is an
     ANCESTOR of another checkout must not claim that checkout's rows. The
-    root's own registered submodules are part of it, not separate.
+    root's own registered submodules are part of it, not separate, and
+    "registered" is judged against `root_common`: the common dir GIT reported
+    for the roots (the identity root and its listed worktrees share one). The
+    caller passes it; this module never derives it. Without it no nested
+    `.git` is exempt, the fail-closed direction.
 
     Containment RESOLVES BOTH SIDES (`realpath` on the row path and on each
     root) and then does a literal prefix comparison, with no case folding: a
@@ -1558,7 +1573,12 @@ def legacy_candidate_plausibility(
     )
     root_paths = _gate_root_paths(roots)
     nested: Dict[tuple, bool] = {}
-    commons: Dict[str, Optional[str]] = {}
+    verified_common: Optional[str] = None
+    if root_common:
+        try:
+            verified_common = os.path.realpath(str(root_common))
+        except (OSError, ValueError):
+            verified_common = None
     file_rows = 0
     absolute_rows = 0
     contained_rows = 0
@@ -1575,7 +1595,7 @@ def legacy_candidate_plausibility(
             # UNRESOLVABLE ROW above.
             continue
         if any(
-            _contained_by_root(resolved, root, nested, commons)
+            _contained_by_root(resolved, root, nested, verified_common)
             for root in root_paths
         ):
             contained_rows += 1

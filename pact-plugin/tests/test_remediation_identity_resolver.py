@@ -1374,11 +1374,11 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
         assert state["verified"] is False and state["included"] is False
 
     @staticmethod
-    def _gate(store, bucket, roots):
+    def _gate(store, bucket, roots, **kwargs):
         from scripts.database import db_connection, legacy_candidate_plausibility
 
         with db_connection(store) as conn:
-            return legacy_candidate_plausibility(conn, bucket, roots)
+            return legacy_candidate_plausibility(conn, bucket, roots, **kwargs)
 
     def test_a_registered_submodules_rows_stay_the_superprojects(self, identity_env):
         """A superproject session that saved a memory naming a file inside its
@@ -1395,7 +1395,10 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
         )
         store = identity_env / "store.db"
         _seed(store, "super", path=str(superproject / "vendor" / "lib" / "x.py"))
-        outcome, detail = self._gate(store, "super", [superproject])
+        common = run_git(
+            "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=superproject
+        )
+        outcome, detail = self._gate(store, "super", [superproject], root_common=common)
         assert outcome == LEGACY_PLAUSIBLE_VERIFIED, detail
 
     def test_a_nested_gitfile_naming_a_foreign_git_dir_is_a_separate_checkout(
