@@ -259,7 +259,8 @@ not a canonical `host/owner/repo` id, and `update` refuses a `session_id`
 change on a row stored under a folder-name bucket. Both exit 2 and write
 nothing. To move rows, run `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`,
 with the folder-name bucket and the canonical id filled in; to write a
-folder-name bucket, save from that non-repository folder.
+folder-name bucket, save from a folder whose project id is that name
+(`project-id show` reports it).
 
 A `project_id` or `session_id` DETECTED from the environment or the session
 context is held to the same rule, and the outcome depends on the operation. A
@@ -324,7 +325,7 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
-| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. For `gitfile_redirect`, never write an override: Fix or remove the `.git` file, or run from the repository it points at. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
+| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. For `gitfile_redirect`: Fix or remove the `.git` file, or run from the repository it points at. If this checkout is your own `git init --separate-git-dir=<dir>/.git` layout, write its canonical id to `<dir>/.git/pact-project-id` instead. Never write an override anywhere else: it would re-pin the repository the `.git` file points at. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
 | `project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply]`, or `project-id rekey --candidates` alone | Move an ENTIRE project bucket to a canonical id in one transaction: memories, file rows, graph links and vector partitions. `--dry-run` is the default posture. `--candidates` lists the buckets as `show` does and takes no other option. An omitted `--to` is accepted only when `--from` is this checkout's own legacy candidate and it is neither excluded nor unproven; otherwise the move is refused with `REKEY_REFUSED`. Exit codes: 0 clean plan or applied move, 1 refused (`REKEY_REFUSED`; `PROJECT_IDENTITY_UNRESOLVED` when no canonical identity resolves; `DB_PATH_NOT_FOUND` when `--db-path` names a store that is not present, and nothing is created), 2 bad input, 3 operational failure (nothing moved). When the default store does not exist yet, the command answers `store_absent: true` and creates nothing; a `--from` bucket with no rows answers `from_bucket_empty: true`. The envelope also carries `target_defaulted` and `legacy_verdict`. A merged memory link keeps the TARGET's relationship; `links_repointed` counts the links on file rows merged into an existing target row, and `links_conflicted` counts relationship types dropped | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "links_repointed": N, "links_conflicted": N, "vectors_moved": N, "from_bucket_empty": false, "target_defaulted": true, "legacy_verdict": "verified", ...}` |
 
 WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
@@ -370,7 +371,10 @@ one of `included`, `excluded` and `unproven` is true:
   repository wrote into it (`session_evidence` is `false`). It is not read, and
   its `rekey` command is printed once per process. A repository that was
   moved, copied, restored or cloned again, a repository with no `description`
-  file, and a folder that is not a repository all read as `unproven` too.
+  file, and a folder that is not a repository all read as `unproven` too. A
+  session folder that an earlier version of the plugin removed left no line,
+  so a project whose writing sessions were all removed that way reads as
+  `unproven` until its rekey command is run.
 
 `suppressed` is set for a submodule checkout, as `{source:
 submodule_admin_dir, reason: repository_chosen_name, override_path: null,
@@ -404,6 +408,18 @@ uppercase `%XX`, for example `dev.azure.com/fabrikam/My%20Project/_git/repo`.
 Azure DevOps Services spells one repository several ways (https, ssh, and the
 older `visualstudio.com` hosts), and all of them resolve to that one
 `dev.azure.com/<org>/<project>/_git/<repo>` id.
+
+One repository can still produce two ids, and two repositories can share one.
+The host is lowercased but the path keeps its case, so
+`https://GitHub.com/Owner/Repo` and `https://github.com/owner/repo` are two ids
+even on a host that ignores path case: `project-id show` lists the other
+spelling as an ordinary bucket with no command, and only an explicit
+`project-id rekey --from=<id> --to=<id>` joins them. A relative and an absolute
+scp path are one id (`git@host:srv/repo` and `git@host:/srv/repo` both give
+`host/srv/repo`), so two different repositories at `~/srv/repo` and
+`/srv/repo` on one plain ssh server share a bucket. The login is dropped too,
+so `alice@host:repo` and `bob@host:repo` are one id even when each names a
+repository in its own home directory.
 
 On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. A file link whose recorded path cannot be re-tracked stays on the old project, is counted in the `update` envelope's `last_cascade_skipped`, and does not stop the rest of the re-key. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 

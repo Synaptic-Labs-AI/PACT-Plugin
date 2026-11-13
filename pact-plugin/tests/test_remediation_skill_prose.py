@@ -205,6 +205,44 @@ class TestPercentEncodedIdsAreDocumented:
 
         assert is_canonical(self.EXAMPLE)
 
+    def test_the_path_case_split_is_documented_and_measured(self):
+        from scripts.project_identity import normalize_remote_url
+
+        body = _body(SKILL)
+        assert (
+            "The host is lowercased but the path keeps its case, so "
+            "https://GitHub.com/Owner/Repo and https://github.com/owner/repo "
+            "are two ids even on a host that ignores path case: project-id "
+            "show lists the other spelling as an ordinary bucket with no "
+            "command, and only an explicit project-id rekey --from=<id> "
+            "--to=<id> joins them."
+        ) in body
+        assert normalize_remote_url("https://GitHub.com/Owner/Repo") == "github.com/Owner/Repo"
+        assert normalize_remote_url("https://github.com/owner/repo") == "github.com/owner/repo"
+
+    def test_the_scp_relative_absolute_collision_is_documented_and_measured(self):
+        from scripts.project_identity import normalize_remote_url
+
+        assert (
+            "A relative and an absolute scp path are one id "
+            "(git@host:srv/repo and git@host:/srv/repo both give "
+            "host/srv/repo), so two different repositories at ~/srv/repo and "
+            "/srv/repo on one plain ssh server share a bucket."
+        ) in _body(SKILL)
+        assert normalize_remote_url("git@host:srv/repo") == "host/srv/repo"
+        assert normalize_remote_url("git@host:/srv/repo") == "host/srv/repo"
+
+    def test_the_login_strip_collision_is_documented_and_measured(self):
+        from scripts.project_identity import normalize_remote_url
+
+        assert (
+            "The login is dropped too, so alice@host:repo and bob@host:repo "
+            "are one id even when each names a repository in its own home "
+            "directory."
+        ) in _body(SKILL)
+        assert normalize_remote_url("alice@host:repo") == "host/repo"
+        assert normalize_remote_url("bob@host:repo") == "host/repo"
+
     def test_the_azure_spellings_share_one_id(self):
         assert (
             "all of them resolve to that one "
@@ -252,12 +290,22 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
     def test_the_retired_condition_is_gone(self):
         assert "null when no repository was found" not in _body(SKILL).lower()
 
-    def test_the_redirect_remedy_is_the_code_remedy_and_never_a_pin(self):
+    def test_the_redirect_remedy_is_the_code_remedy(self):
         from scripts.memory_api import _REDIRECT_REMEDY
 
         clause = self._clause()
-        assert "For gitfile_redirect, never write an override:" in clause
-        assert _flatten(_REDIRECT_REMEDY) in clause
+        assert "For gitfile_redirect: " + _flatten(_REDIRECT_REMEDY) in clause
+
+    def test_an_override_is_written_only_in_the_users_own_git_dir(self):
+        clause = self._clause()
+        assert (
+            "If this checkout is your own git init "
+            "--separate-git-dir=<dir>/.git layout, write its canonical id to "
+            "<dir>/.git/pact-project-id instead. Never write an override "
+            "anywhere else: it would re-pin the repository the .git file "
+            "points at."
+        ) in clause
+        assert "For gitfile_redirect, never write an override:" not in clause
 
 
 class TestLegacyScopeStatesAreDocumented:
@@ -302,6 +350,14 @@ class TestLegacyScopeStatesAreDocumented:
             "the line recorded for it when it was removed."
         ) in body
         assert "inode" not in body.lower()
+
+    def test_sessions_removed_before_the_ledger_read_as_unproven(self):
+        assert (
+            "A session folder that an earlier version of the plugin removed "
+            "left no line, so a project whose writing sessions were all "
+            "removed that way reads as unproven until its rekey command is "
+            "run."
+        ) in _body(SKILL)
 
     def test_a_copied_or_recloned_repository_reads_as_unproven(self):
         assert (
@@ -444,8 +500,10 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
         assert (
             "To move rows, run " + remedy + ", with the folder-name bucket and "
             "the canonical id filled in; to write a folder-name bucket, save "
-            "from that non-repository folder."
+            "from a folder whose project id is that name (project-id show "
+            "reports it)."
         ) in _body(SKILL)
+        assert "save from that non-repository folder" not in _body(SKILL)
         assert remedy in source.replace("`", "")
         assert "--to=<canonical id>" not in source
 
