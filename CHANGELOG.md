@@ -40,6 +40,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - An unusable override file behind a redirected `.git`, or in a git directory outside the checkout, is reported again by its reason (`override_ignored` with a null path, the warning and the save refusal), while its path stays withheld.
 - The memory skill states that `override_path` is also null, for any cause, when the checkout's git directory lies outside it (a pin may remedy the decline there, but the path is withheld), and the documented null causes are measured from the emitted envelope across every decline cause and layout instead of restated.
 - Tests: the git-environment guard now resolves the program a subprocess call runs from its argv in any form and treats an unresolvable argv as git; the NUL-bytes arm checks that no row was written before checking the error type; the fake-executable scan reads every memory script with verbs taken from the CLI's own parser; and the planning-label scan catches remediation-cycle, cycle and review-round labels.
+- Tests: the decline-record and keyword-construction guards now find a hand-built decline dict or a positional identity construction in every form the code can write one (dict calls, subscript stores, update and setdefault, attribute and aliased constructors, _make and partial), through one shared scanner per rule.
 
 ### Corrected during review
 

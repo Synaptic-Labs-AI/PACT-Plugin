@@ -18,6 +18,7 @@ from fixtures.identity_git import (
     assert_outside_repository,
     common_dir,
     make_repo,
+    reason_dict_sites,
     run_git,
     seed_session_evidence,
     write_common_dir_override,
@@ -627,9 +628,10 @@ class TestOneDeclineRecord:
             pi.decline_record(reason, None)
 
     def test_no_decline_dict_is_built_outside_the_record(self):
-        """Every dict literal carrying a `reason` key, other than the
-        `override_ignored` `{path, reason}` pair, must go through
-        `decline_record`, so its shape and its reason set cannot drift."""
+        """Every dict carrying a `reason` key, other than the `override_ignored`
+        `{path, reason}` pair, must go through `decline_record`, so its shape
+        and its reason set cannot drift. The sites are found in every form the
+        code can build such a dict (`reason_dict_sites`), not only a literal."""
         import ast
         import inspect
 
@@ -638,14 +640,45 @@ class TestOneDeclineRecord:
             node for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == "decline_record"
         )
-        inside = {id(node) for node in ast.walk(builder)}
-        literals = [
-            node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.Dict) and id(node) not in inside
-            and any(isinstance(k, ast.Constant) and k.value == "reason" for k in node.keys)
-            and not any(isinstance(k, ast.Constant) and k.value == "path" for k in node.keys)
-        ]
-        assert literals == []
+        inside = frozenset(id(node) for node in ast.walk(builder))
+        sites = reason_dict_sites(tree, inside)
+        assert [line for line, has_path in sites if not has_path] == []
+        # The override_ignored pairs are found, so the scan is reading the module.
+        assert len(sites) >= 2, sites
+
+    def test_the_reason_scan_reads_every_form(self):
+        """Live control for the scan above. Each line in the fixture carries
+        the verdict it must reach: `decline` (a reason dict without a path),
+        `pair` (a reason dict that also sets `path`) or `none`."""
+        import ast
+        import textwrap
+
+        source = textwrap.dedent("""
+            def build(base, reason, items):
+                a = {"reason": reason, "rung": "git"}  # decline
+                b = {**base, "reason": reason}  # decline
+                c = dict(reason=reason, rung="git")  # decline
+                d = dict([("reason", reason), ("rung", "git")])  # decline
+                base["reason"] = reason  # decline
+                base.update(reason=reason)  # decline
+                base.setdefault("reason", reason)  # decline
+                e = {"path": "p", "reason": reason}  # pair
+                f = dict(path="p", reason=reason)  # pair
+                g = {"reasons": reason}  # none
+                h = ["reason", reason]  # none
+                items.update(rung="git")  # none
+        """)
+        expected = {
+            number: line.rsplit("# ", 1)[1]
+            for number, line in enumerate(source.splitlines(), start=1)
+            if line.rstrip().endswith(("# decline", "# pair", "# none"))
+        }
+        assert len(expected) == 12, expected
+        found = {
+            line: ("pair" if has_path else "decline")
+            for line, has_path in reason_dict_sites(ast.parse(source))
+        }
+        assert {number: found.get(number, "none") for number in expected} == expected
 
     def test_a_real_decline_is_built_by_the_record(self, tmp_path):
         assert_outside_repository(tmp_path)

@@ -17,6 +17,8 @@ from fixtures.identity_git import (
     make_repo,
     make_separate_git_dir_repo,
     make_worktree,
+    positional_constructions,
+    reason_dict_sites,
     run_git,
     seed_session_evidence,
     write_common_dir_override,
@@ -55,6 +57,8 @@ class TestOneDeclineRecord:
     SUPPRESSION_BUILDER = "_suppression_record"
 
     def test_no_decline_dict_literal_remains(self):
+        """No dict carrying a `reason` key is built outside the suppression
+        builder, in any form the code can build one (`reason_dict_sites`)."""
         tree = _module_tree()
         exempt = set()
         for function in ast.walk(tree):
@@ -63,35 +67,60 @@ class TestOneDeclineRecord:
                 and function.name == self.SUPPRESSION_BUILDER
             ):
                 exempt.update(id(node) for node in ast.walk(function))
-        offenders = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Dict) or id(node) in exempt:
-                continue
-            keys = {
-                key.value
-                for key in node.keys
-                if isinstance(key, ast.Constant) and isinstance(key.value, str)
-            }
-            if "reason" in keys:
-                offenders.append(node.lineno)
+        offenders = [line for line, _has_path in reason_dict_sites(tree, frozenset(exempt))]
         assert offenders == [], (
             f"memory_api.py builds a decline dict by hand at lines {offenders}; "
             "build it with project_identity.decline_record through _decline"
         )
+        # The suppression builder's own dict is found when not exempt, so
+        # the scan is reading the module.
+        assert reason_dict_sites(tree), "the scan found no reason dict at all"
 
     def test_every_detected_identity_is_built_by_keyword(self):
-        positional = [
-            node.lineno
-            for node in ast.walk(_module_tree())
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_DetectedIdentity"
-            and node.args
-        ]
+        """Every `_DetectedIdentity` is built with its fields by keyword, in
+        whatever form the code reaches the class (`positional_constructions`:
+        a bare name, an attribute, an alias, `_make`, `functools.partial`)."""
+        positional = positional_constructions(_module_tree(), "_DetectedIdentity")
         assert positional == [], (
             f"_DetectedIdentity is built positionally at lines {positional}; "
             "every field must be passed by keyword"
         )
+
+    def test_the_construction_scan_reads_every_form(self):
+        """Live control for the scan above: each fixture line carries the
+        verdict it must reach, `positional` or `keyword`."""
+        import textwrap
+
+        source = textwrap.dedent("""
+            import functools
+            from functools import partial
+
+            def build(fields, module):
+                _DetectedIdentity("a", source="b")  # positional
+                _DetectedIdentity(*fields)  # positional
+                module._DetectedIdentity("a")  # positional
+                alias = _DetectedIdentity
+                again = alias
+                again("a")  # positional
+                _DetectedIdentity._make(fields)  # positional
+                alias._make(fields)  # positional
+                partial(_DetectedIdentity, "a")  # positional
+                functools.partial(module._DetectedIdentity, "a")  # positional
+                _DetectedIdentity(project_id="a", source="b")  # keyword
+                module._DetectedIdentity(project_id="a")  # keyword
+                partial(_DetectedIdentity, project_id="a")  # keyword
+                _OtherRecord("a")  # keyword
+        """)
+        expected = {
+            number: line.rsplit("# ", 1)[1]
+            for number, line in enumerate(source.splitlines(), start=1)
+            if line.rstrip().endswith(("# positional", "# keyword"))
+        }
+        assert len(expected) == 12, expected
+        found = set(positional_constructions(ast.parse(source), "_DetectedIdentity"))
+        assert {
+            number: ("positional" if number in found else "keyword") for number in expected
+        } == expected
 
     def test_the_suppression_record_has_one_builder(self):
         """The exemption above names a function that exists and is used."""
