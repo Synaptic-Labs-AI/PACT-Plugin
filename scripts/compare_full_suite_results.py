@@ -90,6 +90,8 @@ CENSUS_HEADERS = {
     "clock_shift": re.compile(
         _PROGRESS_PREFIX + r"clock-shift census: ([0-9]{1,9}) problem\(s\); "
         r"this run did not shift every clock"),
+    "home": re.compile(
+        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) child\(ren\) started without HOME"),
 }
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so

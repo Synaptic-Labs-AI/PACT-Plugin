@@ -543,6 +543,7 @@ def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
 CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 pytest child(ren) started without "
                        "blocking pytest-randomly")
 CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
+HOME_CENSUS_HEADER = "HOME CENSUS: 1 child(ren) started without HOME"
 
 
 @pytest.mark.parametrize("finish, name", [
@@ -551,7 +552,11 @@ CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift 
     ((CLOCK_CENSUS_HEADER, "  the shim did not load in children"), "clock_shift"),
     (("." * 40 + " [100%]" + CHILD_CENSUS_HEADER, "  [gw1] test_y (call): child"),
      "child_pytest"),
-], ids=["child", "clock", "child-after-xdist-progress"])
+    ((HOME_CENSUS_HEADER, "  [gw0] test_z (call): child [git status] is given an "
+      "environment without HOME"), "home"),
+    (("." * 40 + " [100%]" + HOME_CENSUS_HEADER, "  [gw2] test_w (call): child"),
+     "home"),
+], ids=["child", "clock", "child-after-xdist-progress", "home", "home-after-xdist-progress"])
 def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=finish)
@@ -663,12 +668,18 @@ def test_the_census_comparison_is_by_name_not_by_count(tmp_path):
     assert comparison["deltas"] == []
 
 
-@pytest.mark.parametrize("module_name", ["child_pytest_census", "clock_shift_census"])
+@pytest.mark.parametrize("module_name", ["child_pytest_census", "clock_shift_census",
+                                         "home_census"])
 def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_name):
     """The comparator's census patterns match the line each real finish() writes."""
     if module_name == "child_pytest_census":
         import child_pytest_census as census
         name = "child_pytest"
+        monkeypatch.setitem(census._state, "misses", ["a miss"])
+        monkeypatch.setitem(census._state, "forwarded", [])
+    elif module_name == "home_census":
+        import home_census as census
+        name = "home"
         monkeypatch.setitem(census._state, "misses", ["a miss"])
         monkeypatch.setitem(census._state, "forwarded", [])
     else:

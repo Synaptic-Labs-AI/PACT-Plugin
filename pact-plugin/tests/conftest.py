@@ -89,9 +89,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-# The clock-shift and child-pytest censuses and the pytest-randomly seed gate;
-# tests/ is on sys.path from the insert above.
+# The clock-shift, child-pytest and HOME censuses and the pytest-randomly seed
+# gate; tests/ is on sys.path from the insert above.
 import child_pytest_census  # noqa: E402
+import home_census  # noqa: E402
 import randomly_seed_gate  # noqa: E402
 from clock_shift import clock_shift_census  # noqa: E402
 
@@ -233,6 +234,20 @@ def pytest_configure(config):
     # block pytest-randomly.
     child_pytest_census.install()
 
+    # HOME CENSUS. Always on: refuses a child process started without HOME.
+    config.addinivalue_line("markers", home_census.MARKER_HELP)
+    home_census.install()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Tell the HOME census which test is running, for its opt-out marker."""
+    home_census.enter(item)
+    try:
+        yield
+    finally:
+        home_census.leave()
+
 
 def pytest_runtest_setup(item):
     """Skip a `requires_non_root` test when the suite runs as root."""
@@ -248,13 +263,16 @@ def pytest_testnodedown(node, error):
     """Collect the census findings an xdist worker handed over."""
     clock_shift_census.collect(node)
     child_pytest_census.collect(node)
+    home_census.collect(node)
 
 
 def pytest_sessionfinish(session):
-    """Fail a clock-shift sweep in which a child ran on the real clock, and a
-    run in which a pytest child started without blocking pytest-randomly."""
+    """Fail a clock-shift sweep in which a child ran on the real clock, a run in
+    which a pytest child started without blocking pytest-randomly, and a run in
+    which a child started without HOME."""
     clock_shift_census.finish(session)
     child_pytest_census.finish(session)
+    home_census.finish(session)
 
 
 @pytest.fixture

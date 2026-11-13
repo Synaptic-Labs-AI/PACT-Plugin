@@ -71,21 +71,20 @@ _EXCLUSION_KEYS = frozenset({
     "path", "displayed_seconds", "tests", "mechanism", "production_seams",
 })
 
-# The ten discovery/isolation guards are ALWAYS retained, and the loader pins
+# The nine discovery/isolation guards are ALWAYS retained, and the loader pins
 # their IDENTITIES, not merely their number. A count-only check is a hole with
-# exactly the shape it looks like it closes: a manifest could name ten other
+# exactly the shape it looks like it closes: a manifest could name nine other
 # files as guards and move a real guard into `exclusions`, and the
 # guard-in-exclusions rule -- which only tests membership against the
 # substituted list -- would accept it. The fast lane would then silently skip
-# the module that protects instruction-file content. Ten entries is not the
-# property; the RIGHT ten is. Changing this set is a reviewed change to the
+# the module that protects instruction-file content. Nine entries is not the
+# property; the RIGHT nine is. Changing this set is a reviewed change to the
 # manifest AND this constant, in the same commit.
 EXPECTED_GUARD_FILES = frozenset({
     "tests/test_ci_collection_scope.py",
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",
@@ -431,7 +430,7 @@ def _validate_guard_files(entries: object, plugin_root: Path,
         unexpected = sorted(seen - EXPECTED_GUARD_FILES)
         errors.append(
             "guard_files: the guard set changed. Missing: "
-            f"{missing}. Unexpected: {unexpected}. The ten discovery/"
+            f"{missing}. Unexpected: {unexpected}. The nine discovery/"
             "isolation guards are always retained; substituting another file "
             "lets a real guard be moved into exclusions without tripping the "
             "membership rule. Update EXPECTED_GUARD_FILES only in a reviewed "
@@ -597,7 +596,7 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
         if exclusion.path in guard_set:
             errors.append(
                 f"exclusions: {exclusion.path!r} is also a guard file. The "
-                f"ten guards are always retained."
+                f"nine guards are always retained."
             )
 
     if errors:

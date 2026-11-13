@@ -82,9 +82,10 @@ their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 `micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
 matrix selectors). Each wrapper's options that take a separate value are in
 _WRAPPERS, read from the tool's own `--help` (coreutils, GNU time, xvfb-run,
-uv 0.13.6, pipx, pdm, hatch, pipenv, poetry), sudo's manual page, micromamba's
-source (`micromamba run` and its prefix options), and the current online
-documentation of `conda run`, `rye run` and `pixi run`.
+uv 0.13.6, pipx, pdm, hatch, pipenv, poetry), bash's `help exec` for the
+`exec` builtin, sudo's manual page, micromamba's source (`micromamba run` and
+its prefix options), and the current online documentation of `conda run`,
+`rye run` and `pixi run`.
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
@@ -179,8 +180,9 @@ _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
 # separate value.
 # The option tables come from each wrapper's own `--help`: coreutils timeout,
 # nice, stdbuf and env, GNU time, xvfb-run, uv 0.13.6 (`uv run`, `uv tool run`),
-# pipx, pdm, hatch, pipenv and poetry. sudo comes from its manual page,
-# micromamba from its source, and conda, rye and pixi from their documentation.
+# pipx, pdm, hatch, pipenv and poetry. The shell builtin exec comes from bash's
+# `help exec`, sudo from its manual page, micromamba from its source, and conda,
+# rye and pixi from their documentation.
 _UV_COMMON_VALUE_OPTIONS = frozenset({
     "-w", "--with", "--with-editable", "--with-requirements", "--env-file",
     "--python-platform", "--index", "--default-index", "-i", "--index-url",

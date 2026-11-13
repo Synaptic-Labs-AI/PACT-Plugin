@@ -41,14 +41,13 @@ SELECTION_MACHINERY = (
     "constraints-ci.in",
     "pyproject.toml",
 )
-# The exact ten discovery/isolation guards the manifest pins. The loader
+# The exact nine discovery/isolation guards the manifest pins. The loader
 # rejects any other set, so this constant is the contract, not a sample.
 GUARD_FILES = (
     "tests/test_ci_collection_scope.py",
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",
@@ -634,7 +633,7 @@ def _write(path, text="def test_ok():\n    assert True\n"):
 
 
 def _build_rig(tmp_path):
-    """A valid manifest rig: 24 exclusions, 10 guards, every path existing."""
+    """A valid manifest rig: 24 exclusions, 9 guards, every path existing."""
     root = tmp_path / "rig"
     (root / ".claude-plugin").mkdir(parents=True)
     (root / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
@@ -697,7 +696,7 @@ def test_valid_rig_loads(core, tmp_path):
     root, _, document = _build_rig(tmp_path)
     manifest = core.load_manifest(_write_manifest(root, document))
     assert len(manifest.exclusions) == 24
-    assert len(manifest.guard_files) == 10
+    assert len(manifest.guard_files) == 9
 
 
 def test_value_inert_keys_and_empty_seams_load(core, tmp_path):
@@ -720,7 +719,7 @@ def _swap_a_guard_for_a_real_but_wrong_path(document, root):
 
     Distinct from the guard-in-exclusions row: that one moves a guard into the
     exclusions and the membership rule can see the overlap. This one keeps the
-    shape legal — ten entries, every path exists, every path is a test module —
+    shape legal — nine entries, every path exists, every path is a test module —
     and is caught ONLY by the loader's identity pin. A count-only loader
     accepts it, and the substituted list then lets a real guard be moved into
     exclusions without the membership rule firing.
