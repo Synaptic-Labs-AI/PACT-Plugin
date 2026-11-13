@@ -123,6 +123,17 @@ def test_without_an_explicit_env_the_inherited_env_decides(monkeypatch):
     (["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "bash", "-c", "cd x && pytest"], {}),
     # `env -i` empties the environment, then its own assignment applies.
     (["env", "-i", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "pytest"], {}),
+    # A tool runner's --env option sets the variable for the command.
+    (["pdm", "run", "--env", "PYTEST_ADDOPTS=-p no:randomly", "pytest"], {}),
+    (["pdm", "run", "--env=PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "pytest"], {}),
+    (["micromamba", "run", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "pytest"], {}),
+    (["micromamba", "run", "--env", "PYTEST_ADDOPTS=-p no:randomly", "pytest"], {}),
+    (["micromamba", "run", "--env=PYTEST_ADDOPTS=-p no:randomly", "pytest"], {}),
+    # micromamba's clean environment keeps a name `-e` gives, and applies an
+    # assignment whichever side of --clean-env it is written on.
+    (["micromamba", "run", "--clean-env", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "pytest"],
+     {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}),
+    (["micromamba", "run", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "--clean-env", "pytest"], {}),
 ])
 def test_a_child_blocked_through_its_environment_is_accepted(argv, env):
     assert census._miss(argv, None, env) is None, argv
@@ -145,6 +156,14 @@ def test_a_child_blocked_through_its_environment_is_accepted(argv, env):
     (["sh", "-c", "PYTEST_DISABLE_PLUGIN_AUTOLOAD= pytest"], None),
     # sudo resets the environment unless asked to keep it.
     (["sudo", "pytest"], None),
+    # A tool runner's --env option can empty the variable, and --clean-env
+    # drops every name micromamba's `-e` does not keep.
+    (["pdm", "run", "--env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=", "pytest"], None),
+    (["pdm", "run", "--env=PYTEST_DISABLE_PLUGIN_AUTOLOAD=", "pytest"], None),
+    (["micromamba", "run", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=", "pytest"], None),
+    (["micromamba", "run", "--clean-env", "pytest"], None),
+    (["micromamba", "run", "--clean-env", "-e", "HOME", "pytest"], None),
+    (["pixi", "run", "--clean-env", "pytest"], None),
 ])
 def test_a_child_whose_environment_does_not_block_is_refused(argv, env, monkeypatch):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
@@ -444,6 +463,7 @@ _OPTION_VALUE_REFUSED = [
     ["uv", "run", "--python", "python3.12", "python", "-m", "pytest"],
     ["uv", "run", "--python=python3.12", "python", "-m", "pytest"],
     ["uv", "run", "-p", "python3", "python", "/venv/bin/pytest"],
+    ["uv", "run", "--python", "python3.12", "python", "/venv/bin/pytest"],
     ["conda", "run", "-n", "python3", "python", "-m", "pytest"],
     ["conda", "run", "-p", "/envs/python3", "python", "-m", "pytest"],
     ["sudo", "-u", "python", "-E", "python", "-m", "pytest"],
@@ -504,6 +524,181 @@ def test_an_option_value_named_like_an_interpreter_makes_no_launch_pytest(argv):
         "known-flag-then-interpreter", "unknown-option-then-echo"])
 def test_the_script_candidates_step_only_past_an_option_value(accepted, refused_twin):
     assert census._miss(accepted, None, {}) is None, accepted
+    assert census._miss(refused_twin, None, {}) is not None, refused_twin
+
+
+# EACH WRAPPER OPTION THAT TAKES A SEPARATE VALUE. Every value is one the option
+# really takes and is neither an option, a number nor a NAME=VALUE word, so an
+# option missing from its wrapper's table makes its value the program and the
+# row is no longer refused.
+_WRAPPER_VALUE_REFUSED = [
+    ["uv", "run", "--with-editable", "./plugin", "pytest"],
+    ["uv", "run", "--with-requirements", "requirements.txt", "pytest"],
+    ["uv", "run", "--env-file", ".env", "pytest"],
+    ["uv", "run", "--python-platform", "linux", "pytest"],
+    ["uv", "run", "--index", "https://pypi.org/simple", "pytest"],
+    ["uv", "run", "--default-index", "https://pypi.org/simple", "pytest"],
+    ["uv", "run", "--extra-index-url", "https://example.org/simple", "pytest"],
+    ["uv", "run", "-f", "./wheels", "pytest"],
+    ["uv", "run", "--find-links", "./wheels", "pytest"],
+    ["uv", "run", "--index-strategy", "unsafe-best-match", "pytest"],
+    ["uv", "run", "--keyring-provider", "subprocess", "pytest"],
+    ["uv", "run", "-P", "requests", "pytest"],
+    ["uv", "run", "--upgrade-package", "requests", "pytest"],
+    ["uv", "run", "--upgrade-group", "dev", "pytest"],
+    ["uv", "run", "--resolution", "lowest", "pytest"],
+    ["uv", "run", "--prerelease", "allow", "pytest"],
+    ["uv", "run", "--prerelease-package", "requests", "pytest"],
+    ["uv", "run", "--fork-strategy", "fewest", "pytest"],
+    ["uv", "run", "--exclude-newer-package", "typing-extensions=2024-01-01", "pytest"],
+    ["uv", "run", "--no-sources-package", "requests", "pytest"],
+    ["uv", "run", "--reinstall-package", "requests", "pytest"],
+    ["uv", "run", "--link-mode", "copy", "pytest"],
+    ["uv", "run", "-C", "cmake.define.FOO=ON", "pytest"],
+    ["uv", "run", "--config-setting", "cmake.define.FOO=ON", "pytest"],
+    ["uv", "run", "--config-settings-package", "numpy:setup-args=-Dblas=none", "pytest"],
+    ["uv", "run", "--no-build-isolation-package", "requests", "pytest"],
+    ["uv", "run", "--no-build-package", "requests", "pytest"],
+    ["uv", "run", "--no-binary-package", "requests", "pytest"],
+    ["uv", "run", "--cache-dir", ".cache/uv", "pytest"],
+    ["uv", "run", "--refresh-package", "requests", "pytest"],
+    ["uv", "run", "--color", "always", "pytest"],
+    ["uv", "run", "--allow-insecure-host", "localhost", "pytest"],
+    ["uv", "run", "--directory", "src", "pytest"],
+    ["uv", "run", "--project", "src", "pytest"],
+    ["uv", "run", "--config-file", "uv.toml", "pytest"],
+    ["uv", "run", "--extra", "test", "pytest"],
+    ["uv", "run", "--no-extra", "docs", "pytest"],
+    ["uv", "run", "--group", "test", "pytest"],
+    ["uv", "run", "--only-group", "test", "pytest"],
+    ["uv", "run", "--no-editable-package", "mypkg", "pytest"],
+    ["uv", "run", "--package", "mypkg", "pytest"],
+    ["uvx", "--from", "pytest>=8", "pytest"],
+    ["uvx", "--constraints", "constraints.txt", "pytest"],
+    ["uvx", "-b", "build-constraints.txt", "pytest"],
+    ["uvx", "--build-constraints", "build-constraints.txt", "pytest"],
+    ["uvx", "--overrides", "overrides.txt", "pytest"],
+    ["uvx", "--torch-backend", "cpu", "pytest"],
+    ["conda", "run", "--name", "dev", "pytest"],
+    ["conda", "run", "-p", "/envs/dev", "pytest"],
+    ["conda", "run", "--prefix", "/envs/dev", "pytest"],
+    ["micromamba", "run", "--name", "dev", "pytest"],
+    ["micromamba", "run", "-p", "/envs/dev", "pytest"],
+    ["micromamba", "run", "--prefix", "/envs/dev", "pytest"],
+    ["micromamba", "run", "-r", "/opt/mamba", "pytest"],
+    ["micromamba", "run", "--root-prefix", "/opt/mamba", "pytest"],
+    ["micromamba", "run", "--cwd", "src", "pytest"],
+    ["micromamba", "run", "--attach", "stdout", "pytest"],
+    ["micromamba", "run", "-e", "HOME", "pytest"],
+    ["micromamba", "run", "--env", "HOME", "pytest"],
+    ["nice", "-n", "+5", "pytest"],
+    ["nice", "--adjustment", "+5", "pytest"],
+    ["pdm", "run", "-p", "./sub", "pytest"],
+    ["pdm", "run", "--project", "./sub", "pytest"],
+    ["pdm", "run", "--skip", "pre_test", "pytest"],
+    ["pdm", "run", "--venv", "in-project", "pytest"],
+    ["pdm", "run", "--env-file", ".env", "pytest"],
+    ["pipx", "run", "--spec", "pytest>=8", "pytest"],
+    ["pipx", "run", "--with", "requests", "pytest"],
+    ["pipx", "run", "-i", "https://pypi.org/simple", "pytest"],
+    ["pipx", "run", "--index-url", "https://pypi.org/simple", "pytest"],
+    ["pixi", "run", "-e", "test", "pytest"],
+    ["pixi", "run", "--environment", "test", "pytest"],
+    ["pixi", "run", "--manifest-path", "pixi.toml", "pytest"],
+    ["pixi", "run", "--color", "always", "pytest"],
+    ["pixi", "run", "--pypi-keyring-provider", "subprocess", "pytest"],
+    ["poetry", "run", "-C", "./sub", "pytest"],
+    ["poetry", "run", "-P", "./sub", "pytest"],
+    ["poetry", "run", "--project", "./sub", "pytest"],
+    ["rye", "run", "--pyproject", "./sub/pyproject.toml", "pytest"],
+    ["stdbuf", "-i", "1K", "pytest"],
+    ["stdbuf", "--input", "1K", "pytest"],
+    ["stdbuf", "-e", "L", "pytest"],
+    ["stdbuf", "--error", "L", "pytest"],
+    ["sudo", "-u", "root", "pytest"],
+    ["sudo", "-g", "wheel", "pytest"],
+    ["sudo", "--group", "wheel", "pytest"],
+    ["sudo", "-h", "buildhost", "pytest"],
+    ["sudo", "--host", "buildhost", "pytest"],
+    ["sudo", "-p", "Password:", "pytest"],
+    ["sudo", "--prompt", "Password:", "pytest"],
+    ["sudo", "-D", "/srv", "pytest"],
+    ["sudo", "--chdir", "/srv", "pytest"],
+    ["sudo", "--chroot", "/srv/root", "pytest"],
+    ["sudo", "-r", "sysadm_r", "pytest"],
+    ["sudo", "--role", "sysadm_r", "pytest"],
+    ["sudo", "-t", "sysadm_t", "pytest"],
+    ["sudo", "--type", "sysadm_t", "pytest"],
+    ["sudo", "-U", "alice", "pytest"],
+    ["sudo", "--other-user", "alice", "pytest"],
+    ["sudo", "-T", "1h30m", "pytest"],
+    ["sudo", "--command-timeout", "1h30m", "pytest"],
+    ["time", "-f", "%e", "pytest"],
+    ["time", "--format", "%e", "pytest"],
+    ["time", "-o", "time.log", "pytest"],
+    ["timeout", "-k", "inf", "60", "pytest"],
+    ["timeout", "--kill-after", "inf", "60", "pytest"],
+    ["xvfb-run", "-s", "+extension GLX", "pytest"],
+    ["xvfb-run", "--server-args", "+extension GLX", "pytest"],
+    ["xvfb-run", "-f", ".Xauthority", "pytest"],
+    ["xvfb-run", "--auth-file", ".Xauthority", "pytest"],
+    ["xvfb-run", "-e", "xvfb.log", "pytest"],
+    ["xvfb-run", "--error-file", "xvfb.log", "pytest"],
+    ["xvfb-run", "-p", "MIT-MAGIC-COOKIE-1", "pytest"],
+    ["xvfb-run", "--xauth-protocol", "MIT-MAGIC-COOKIE-1", "pytest"],
+]
+
+
+@pytest.mark.parametrize("argv", _WRAPPER_VALUE_REFUSED)
+def test_each_wrapper_option_value_is_stepped_over(argv):
+    assert census._miss(argv, None, {}) is not None, argv
+    blocked = [*argv, *_BLOCK]
+    assert census._miss(blocked, None, {}) is None, blocked
+
+
+# EACH KNOWN FLAG, UNDER A WRAPPER THAT HAS IT. A known flag takes no value, so
+# in `<wrapper> <flag> python3 python /venv/bin/pytest` the program is python3,
+# whose script is a file named `python`, and no pytest starts. A flag missing
+# from _KNOWN_FLAGS reads as an option whose value may be `python3`, and the
+# row is refused like its twin with an unknown option.
+_KNOWN_FLAG_WRAPPERS = {
+    "uv run": ("--active", "--all-extras", "--all-groups", "--all-packages",
+               "--compile-bytecode", "--exact", "--frozen", "--gui-script", "--help",
+               "--isolated", "--locked", "--managed-python", "--module", "--no-binary",
+               "--no-build", "--no-build-isolation", "--no-cache", "--no-config",
+               "--no-default-groups", "--no-dev", "--no-editable", "--no-env-file",
+               "--no-index", "--no-managed-python", "--no-progress", "--no-project",
+               "--no-python-downloads", "--no-require-build-hashes", "--no-sources",
+               "--no-sync", "--offline", "--only-dev", "--quiet", "--refresh",
+               "--reinstall", "--require-build-hashes", "--script", "--system-certs",
+               "--upgrade", "--verbose", "-m", "-q"),
+    "uvx": ("--lfs",),
+    "timeout": ("--preserve-status", "--foreground"),
+    "env": ("--ignore-environment", "-0", "--null", "--debug", "--list-signal-handling"),
+    "xvfb-run": ("--auto-servernum", "-l", "--listen-tcp"),
+    "time": ("--append", "--portability"),
+    "sudo": ("-A", "-E", "-H", "-K", "-S", "-V", "--askpass", "--background",
+             "--preserve-env", "--edit", "--set-home", "--login", "--remove-timestamp",
+             "--reset-timestamp", "--list", "--non-interactive", "--preserve-groups",
+             "--stdin", "--shell", "--version", "--validate"),
+    "pipx run": ("--skip-maintenance", "--global", "--no-path-check", "--path",
+                 "--pypackages", "--fetch-missing-python", "--system-site-packages",
+                 "--editable"),
+    "pdm run": ("-j", "--json", "--site-packages", "--recreate"),
+    "poetry run": ("--ansi", "--no-ansi", "--no-interaction", "--no-plugins", "-vv", "-vvv"),
+    "pipenv run": ("--system",),
+    "conda run": ("--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream"),
+    "micromamba run": ("-d", "--detach", "--clean-env"),
+    "pixi run": ("--force-activate", "--revalidate", "--skip-deps", "--dry-run"),
+}
+
+
+@pytest.mark.parametrize("wrapper, flag", [
+    (wrapper, flag) for wrapper, flags in _KNOWN_FLAG_WRAPPERS.items() for flag in flags])
+def test_a_known_flag_takes_no_value(wrapper, flag):
+    accepted = [*wrapper.split(), flag, "python3", "python", "/venv/bin/pytest"]
+    assert census._miss(accepted, None, {}) is None, accepted
+    refused_twin = [*wrapper.split(), "--made-up-option", "python3", "python", "/venv/bin/pytest"]
     assert census._miss(refused_twin, None, {}) is not None, refused_twin
 
 

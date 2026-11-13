@@ -27,6 +27,10 @@ and so do the `env` wrapper's own options: `-i`, `--ignore-environment` and a
 bare `-` empty it, `-u NAME`, `-uNAME` and `--unset=NAME` remove a name, and its
 NAME=VALUE words set one. `sudo` starts from an empty environment unless it is
 given `-E` or `--preserve-env`, or `--preserve-env=NAMES` for those names.
+`pdm run --env NAME=VALUE` and micromamba's `-e NAME=VALUE` and `--env
+NAME=VALUE` (either tool also as `--env=NAME=VALUE`) set one. `micromamba run
+--clean-env` and `pixi run --clean-env` empty it, except that micromamba keeps
+each name a bare `-e NAME` or `--env NAME` gives.
 
 THE CENSUS REFUSES THESE LAUNCH FAMILIES, AND ONLY THESE. A launch in one of
 them that does not block pytest-randomly is refused:
@@ -135,7 +139,8 @@ Blind spots, examples of launches outside the census:
     the console script, a zipapp (`python pytest.pyz`), or a module other than
     `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
     plugin's own entry point). The census judges a launch by its words, not by
-    what the named file does.
+    what the named file does, nor by what an environment file sets (`uv run
+    --env-file`, `pdm run --env-file`).
 11. An interpreter not named above: `jython` (which cannot run current
     pytest), a custom-named or embedded interpreter, or one renamed on disk.
 """
@@ -198,10 +203,10 @@ _WRAPPERS = {
     "time": frozenset({"-f", "--format", "-o", "--output"}),
     "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
     "sudo": frozenset({"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
-                       "-C", "--close-from", "-D", "--chdir", "-R", "--chroot", "-r", "--role",
+                       "-D", "--chdir", "-R", "--chroot", "-r", "--role",
                        "-t", "--type", "-U", "--other-user", "-T", "--command-timeout"}),
     "env": frozenset({"-C", "--chdir"}),
-    "xvfb-run": frozenset({"-n", "-s", "-f", "-e", "-p", "--server-num", "--server-args",
+    "xvfb-run": frozenset({"-s", "-f", "-e", "-p", "--server-args",
                            "--auth-file", "--error-file", "--xauth-protocol"}),
     "uv run": _UV_COMMON_VALUE_OPTIONS | {
         "--extra", "--no-extra", "--group", "--no-group", "--only-group",
@@ -210,22 +215,28 @@ _WRAPPERS = {
     "poetry run": frozenset({"-C", "--directory", "-P", "--project"}),
     "uv tool run": _UV_TOOL_RUN_VALUE_OPTIONS,
     "uvx": _UV_TOOL_RUN_VALUE_OPTIONS,
-    "pipx run": frozenset({"--spec", "--python", "--python-args", "--with", "-i", "--index-url",
-                           "--pip-args", "--cooldown", "--backend", "--fetch-python"}),
-    "pdm run": frozenset({"-p", "--project", "-k", "--skip", "--venv", "--env", "--env-file",
+    "pipx run": frozenset({"--spec", "--python", "--with", "-i", "--index-url", "--backend",
+                           "--fetch-python"}),
+    "pdm run": frozenset({"-p", "--project", "-k", "--skip", "--venv", "--env-file",
                           "--working-dir"}),
     "hatch run": frozenset(),
     "conda run": frozenset({"-n", "--name", "-p", "--prefix", "--cwd"}),
     "micromamba run": frozenset({"-n", "--name", "-p", "--prefix", "-r", "--root-prefix",
-                                 "--cwd", "-a", "--attach", "--label", "-e", "--env"}),
+                                 "--cwd", "-a", "--attach", "--label"}),
     "pipenv run": frozenset(),
     "rye run": frozenset({"--pyproject"}),
     "pixi run": frozenset({"-e", "--environment", "--manifest-path", "--auth-file", "--color",
-                           "--pypi-keyring-provider", "--concurrent-solves",
-                           "--concurrent-downloads"}),
+                           "--pypi-keyring-provider"}),
+}
+# micromamba's options that set one environment variable for the command
+# (`-e NAME=VALUE`), or keep one through `--clean-env` (`-e NAME`). pdm's
+# `--env NAME=VALUE` needs no entry: its value is a NAME=VALUE word.
+_ENV_OPTIONS = {
+    "micromamba run": frozenset({"-e", "--env"}),
 }
 # The listed wrappers' options that take no value, from the same sources. The
-# script-route candidates never step past a word after one of these.
+# script-route candidates never step past a word after one of these; a letter
+# that takes a value under another wrapper is known from that table.
 _KNOWN_FLAGS = frozenset({
     # uv run / uv tool run / uvx (uv 0.13.6 --help)
     "--active", "--all-extras", "--all-groups", "--all-packages", "--compile-bytecode", "--exact",
@@ -235,17 +246,17 @@ _KNOWN_FLAGS = frozenset({
     "--no-managed-python", "--no-progress", "--no-project", "--no-python-downloads",
     "--no-require-build-hashes", "--no-sources", "--no-sync", "--offline", "--only-dev", "--quiet",
     "--refresh", "--reinstall", "--require-build-hashes", "--script", "--system-certs", "--upgrade",
-    "--verbose", "--lfs", "-U", "-h", "-m", "-n", "-q", "-s", "-v",
+    "--verbose", "--lfs", "-m", "-q", "-v",
     # timeout, env, xvfb-run, time, exec, sudo
-    "--preserve-status", "--foreground", "-i", "--ignore-environment", "-0", "--null", "--debug",
-    "--list-signal-handling", "-a", "--auto-servernum", "-l", "--listen-tcp", "-p", "--append",
-    "--portability", "-c", "-A", "-b", "-E", "-e", "-H", "-K", "-k", "-P", "-S", "-V",
+    "--preserve-status", "--foreground", "--ignore-environment", "-0", "--null", "--debug",
+    "--list-signal-handling", "--auto-servernum", "-l", "--listen-tcp", "--append",
+    "--portability", "-A", "-E", "-H", "-K", "-S", "-V",
     "--askpass", "--background", "--preserve-env", "--edit", "--set-home", "--login",
     "--remove-timestamp", "--reset-timestamp", "--list", "--non-interactive",
     "--preserve-groups", "--stdin", "--shell", "--version", "--validate",
     # pipx run, pdm run, poetry run, pipenv run
     "--skip-maintenance", "--global", "--no-path-check", "--path", "--pypackages",
-    "--fetch-missing-python", "--system-site-packages", "--editable", "-g", "-j", "--json",
+    "--fetch-missing-python", "--system-site-packages", "--editable", "-j", "--json",
     "--site-packages", "--recreate", "--ansi", "--no-ansi", "--no-interaction", "--no-plugins",
     "-vv", "-vvv", "--system",
     # conda run, micromamba run, rye run, pixi run (documentation)
@@ -444,9 +455,20 @@ def _wrapper_options(part, i, name, env):
     inherited = dict(env)
     if name == "sudo":
         env.clear()
+    clean = False
+    env_args = []  # pdm's and micromamba's --env values, applied after the loop
     while i < len(part):
         arg = part[i]
-        if name == "env" and arg in ("-i", "--ignore-environment", "-"):
+        if arg in _ENV_OPTIONS.get(name, ()) and i + 1 < len(part):
+            env_args.append(part[i + 1])
+            i += 2
+        elif name in ("pdm run", "micromamba run") and arg.startswith("--env="):
+            env_args.append(arg.split("=", 1)[1])
+            i += 1
+        elif arg == "--clean-env" and name in ("micromamba run", "pixi run"):
+            clean = True
+            i += 1
+        elif name == "env" and arg in ("-i", "--ignore-environment", "-"):
             env.clear()
             i += 1
         elif name == "env" and arg in ("-u", "--unset") and i + 1 < len(part):
@@ -474,6 +496,13 @@ def _wrapper_options(part, i, name, env):
             i += 1  # a matrix selector, as in `hatch run +py=3.12 test:pytest`
         else:
             break
+    if clean:
+        env.clear()
+    for value in env_args:
+        if _is_assignment(value):
+            _assign(env, value)
+        elif clean and value in inherited:
+            env[value] = inherited[value]  # micromamba's `-e NAME` keeps NAME
     return i
 
 
