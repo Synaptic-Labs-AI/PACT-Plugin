@@ -140,21 +140,25 @@ def test_main_repo_root_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, unre
     )
 
 
-# (file, function) -> the number of git subprocess calls it holds. A scan that
-# finds fewer is not reading the function it names.
-_RESOLVER_GIT_CALLS = {
-    # `main_repo_root` now delegates its git calls to this helper, so the
-    # guard follows the call to the helper rather than pinning a body that no
-    # longer contains a subprocess.
-    ("skills/pact-memory/scripts/memory_api.py", "_git_rev_parse"): 1,
-    # The origin reader is a resolver git call too; it must strip the git
-    # location variables or an exported GIT_DIR names another repository.
-    ("skills/pact-memory/scripts/project_identity.py", "read_origin"): 1,
+# EVERY git call in the memory scripts is a resolver call: each one answers a
+# question about "the repository this session is in", and an inherited GIT_DIR
+# would answer it for another repository. The arm below therefore walks EVERY
+# function of EVERY module in this directory, so a git call added anywhere
+# there without the location-free environment fails it.
+_SCRIPTS_DIR = "skills/pact-memory/scripts"
+# Per-module floors: the git calls each module holds today. A scan that finds
+# fewer is not reading the module it names (a parse or detection regression),
+# so the floor fails it rather than letting an empty scan pass.
+_GIT_CALL_FLOORS = {
+    "memory_api.py": 4,
+    "project_identity.py": 3,
 }
+_SUBPROCESS_CALLS = frozenset({"run", "check_output", "check_call", "call", "Popen"})
 
 
 def _git_calls(function: ast.FunctionDef):
-    """Yield (call, passes_location_free_env) for each `subprocess.run` git call.
+    """Yield (call, passes_location_free_env) for each `subprocess` git call
+    (`run`, `check_output`, `check_call`, `call` or `Popen`).
 
     The argv counts as git when it is a list literal starting with "git", or a
     name the function assigned a list literal starting with "git".
@@ -169,7 +173,8 @@ def _git_calls(function: ast.FunctionDef):
     }
     for node in ast.walk(function):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "run" and isinstance(node.func.value, ast.Name)
+                and node.func.attr in _SUBPROCESS_CALLS
+                and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "subprocess" and node.args):
             continue
         argv = node.args[0]
@@ -237,16 +242,38 @@ def _function(source: str, name: str) -> ast.FunctionDef:
     raise AssertionError(f"function {name} not found")
 
 
+def _module_git_calls(source: str):
+    """Every git call in a module, found function by function, each once.
+
+    A call inside a nested function is reached from both functions' walks, so
+    calls are keyed by their position.
+    """
+    seen = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for call, passes in _git_calls(node):
+                seen[(call.lineno, call.col_offset)] = (node.name, call, passes)
+    return list(seen.values())
+
+
 def test_every_resolver_git_call_passes_the_location_free_env():
-    """Guard arm: a later git call added to a resolver without the environment
-    fails here, whichever form its argv takes."""
-    missing = []
-    for (rel, name), floor in _RESOLVER_GIT_CALLS.items():
-        calls = list(_git_calls(_function((_PLUGIN / rel).read_text(encoding="utf-8"), name)))
-        assert len(calls) >= floor, (
-            f"{rel}::{name}: found {len(calls)} git calls, expected at least {floor}"
+    """Guard arm: every git subprocess call in every memory script passes
+    `env=git_env_without_location()` (or an inline key filter of it), whatever
+    function it sits in and whether its argv is a list literal or a name
+    assigned one. A git call added anywhere in that directory without the
+    environment fails here."""
+    missing, counts = [], {}
+    for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
+        calls = _module_git_calls(path.read_text(encoding="utf-8"))
+        counts[path.name] = len(calls)
+        missing += [
+            f"{_SCRIPTS_DIR}/{path.name}::{name}:{call.lineno}"
+            for name, call, passes in calls if not passes
+        ]
+    for name, floor in _GIT_CALL_FLOORS.items():
+        assert counts.get(name, 0) >= floor, (
+            f"{name}: found {counts.get(name, 0)} git calls, expected at least {floor}"
         )
-        missing += [f"{rel}::{name}:{call.lineno}" for call, passes in calls if not passes]
     assert missing == [], f"git calls without env=git_env_without_location(): {missing}"
 
 

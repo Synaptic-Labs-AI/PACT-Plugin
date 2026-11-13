@@ -1276,6 +1276,7 @@ class TestReviewDbSearchByFileOrder:
                     "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
                 },
                 check=True,
+                timeout=120,
             )
             outputs.append(out.stdout.strip())
         assert outputs == ["m0,m1,m2", "m0,m1,m2"], (
@@ -1315,11 +1316,12 @@ class TestReviewDbGateWorktreeRoots:
 
         Ruling: an unreadable absolute row counts as `absolute_rows` and can
         never count as `contained_rows`, so a bucket whose only absolute rows
-        are unreadable lands in EXCLUDED (disclosed, with the rekey remedy).
+        are unreadable lands in EXCLUDED (disclosed with its counts; an
+        excluded bucket gets no rekey command).
 
         RED WHEN: the realpath call is unguarded (ValueError escapes) or the
         unreadable row is dropped from `absolute_rows` (the bucket then lands
-        in `unverified` and its rows are read).
+        in `unverified`, the state session evidence can admit).
         """
         from scripts.database import (
             LEGACY_PLAUSIBLE_EXCLUDED,

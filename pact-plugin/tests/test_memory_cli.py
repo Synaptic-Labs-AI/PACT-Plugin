@@ -299,7 +299,7 @@ class TestCliArgParsing:
         assert set(_COMMANDS.keys()) == expected
 
     def test_the_project_id_rows_are_documented_and_dispatched(self):
-        """F11: the SKILL.md rows and the CLI dispatch table agree.
+        """The SKILL.md rows and the CLI dispatch table agree.
 
         The rows tell an agent to run `project-id show` when a project looks
         empty, so a row for a verb the dispatcher does not accept is an
@@ -4646,7 +4646,7 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         )
         # The patched root is NOT a repository here, so the resolver takes its
         # designed basename branch and the raw spelling flows through. A
-        # DECLINE path yields None instead (S2-bk: no folder pseudo-id).
+        # DECLINE path yields None instead (no folder pseudo-id).
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_common_dir",
             lambda *args, **kwargs: None,

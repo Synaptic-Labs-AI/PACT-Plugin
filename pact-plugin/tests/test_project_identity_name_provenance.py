@@ -99,9 +99,10 @@ def _seed_bucket(store: Path, bucket: str, memory_id: str = "victim") -> None:
     """One memory and one RELATIVE file row — the measured legacy shape.
 
     A relative path carries no location, so the plausibility gate answers
-    `unverified` and INCLUDES the bucket. That inclusion is what these arms
-    bound: it is legitimate for the caller's own name and must not be
-    reachable when the repository chose the name.
+    `unverified`, and the bucket is read only when a recorded session from
+    this repository wrote it (otherwise it is `unproven`). That admission is
+    what these arms bound: it is legitimate for the caller's own name and
+    must not be reachable when the repository chose the name.
     """
     with db_connection(store) as conn:
         ensure_initialized(conn)

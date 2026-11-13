@@ -799,9 +799,11 @@ class TestStatusNeverWritesIntoACorruptStore:
         and vectors: the integrity check must pass and the pending memory must
         gain its vector.
 
-        Catches a check that judges a healthy vec0 store as corrupt (a driver
-        or extension the store's own reads do not use), which would stop every
-        later embedding silently.
+        Catches a check that judges a healthy vec0 store as corrupt, which
+        would stop every later embedding silently. Which driver and extension
+        the check uses is pinned by the spy arm below, because on a store this
+        healthy a check on another driver, or without the extension, still
+        answers "ok".
         """
         sqlite_vec = pytest.importorskip("sqlite_vec")
         import struct
@@ -849,6 +851,52 @@ class TestStatusNeverWritesIntoACorruptStore:
         finally:
             conn.close()
         assert embedded == {"embedded01", "pending001"}, embedded
+
+    def test_the_check_connects_through_the_store_driver_and_loads_its_extension(
+        self, identity_env, monkeypatch, capfd
+    ):
+        """Spy arm: the integrity check opens ONE read-only connection through
+        the module `database` binds as its driver, and loads the vector
+        extension on that same connection before it reads.
+
+        RED WHEN the check imports its own sqlite3 (the spy then sees no
+        connection), opens the store read-write, or skips the extension load
+        or runs it on another connection.
+        """
+        from scripts import config, database, embedding_catchup
+
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        store = identity_env / "store.db"
+        assert _cli(["setup", "--db-path", str(store)], capfd)[0] == 0
+        monkeypatch.setattr(config, "resolve_db_path", lambda: store)
+
+        real_driver = database.sqlite3
+        opened = []
+
+        class DriverSpy:
+            def __getattr__(self, name):
+                return getattr(real_driver, name)
+
+            def connect(self, *args, **kwargs):
+                connection = real_driver.connect(*args, **kwargs)
+                opened.append((args, kwargs, connection))
+                return connection
+
+        monkeypatch.setattr(database, "sqlite3", DriverSpy())
+        real_load = embedding_catchup._load_vector_extension
+        loaded_on = []
+
+        def load_spy(connection):
+            loaded_on.append(connection)
+            return real_load(connection)
+
+        monkeypatch.setattr(embedding_catchup, "_load_vector_extension", load_spy)
+
+        assert embedding_catchup._store_integrity_fault() is None
+        assert len(opened) == 1, opened
+        args, kwargs, connection = opened[0]
+        assert kwargs.get("uri") is True and str(args[0]).endswith("?mode=ro"), (args, kwargs)
+        assert len(loaded_on) == 1 and loaded_on[0] is connection, loaded_on
 
     @pytest.mark.parametrize("journal", ["wal", "delete"])
     def test_the_real_pending_query_writes_no_schema(

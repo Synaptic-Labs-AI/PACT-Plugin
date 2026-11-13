@@ -995,7 +995,7 @@ class TestR4BimodalGit:
         alive answers the MAIN repo (Strategy 2); git dead now DECLINES,
         because the worktree's `.git` FILE marker cannot be answered for.
         The answer changing (main-proj -> None) is the proof the shim took
-        effect — and the bimodal shape #1600 recorded."""
+        effect, and it is the bimodal git-alive / git-dead shape."""
         main, linked = self._worktree_pair(tmp_path)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(linked)

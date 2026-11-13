@@ -140,7 +140,7 @@ class TestTrackFile:
         )
 
     def test_a_path_object_carrying_a_nul_is_refused(self, db_conn):
-        """N-8: the guard tested `isinstance(path, str)`, so a `pathlib.Path`
+        """The guard tested `isinstance(path, str)`, so a `pathlib.Path`
         carrying the NUL passed it and reached the INSERT. The check now runs
         on the normalised spelling, which every accepted input type produces.
 

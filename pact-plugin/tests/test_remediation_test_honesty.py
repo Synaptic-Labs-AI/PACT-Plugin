@@ -267,6 +267,9 @@ class TestIdentityFilesCarryNoPlanningLabels:
         # code point, an ISO timestamp and `UTF-8` never match.
         (re.compile(r"(?<![%+\w-])[A-Z]\d{1,2}(?![\w+])(?!:\d)"),
          "finding, corpus-row or design id"),
+        # One capital letter, a hyphen and one or two digits. The same
+        # boundaries as above, so `UTF-8` and an ISO timestamp never match.
+        (re.compile(r"(?<![%+\w-])[A-Z]-\d{1,2}(?![\w+])"), "lettered finding id"),
     )
     # The Unicode control-set names are terms, not labels. (`[C]` keeps this
     # pattern's own source text from reading as a label to the scan.)
@@ -309,6 +312,7 @@ class TestIdentityFilesCarryNoPlanningLabels:
         ('"""' + "A" + "4/" + "S" + "1: read", "finding, corpus-row or design id"),
         ("(" + "G" + "4/" + "G" + "5): seams", "finding, corpus-row or design id"),
         ("parses under " + "R" + "1.", "finding, corpus-row or design id"),
+        ('"""' + "N" + "-7 (cascade half): the row", "lettered finding id"),
     )
     CLEAN = (
         "# Reject C0, DEL and C1 controls and lone surrogates",
@@ -318,6 +322,7 @@ class TestIdentityFilesCarryNoPlanningLabels:
         'f"2026-01-0{i + 1}T00:00:00+00:00"',
         "an ISO-8601 stamp read as UTF-8 by sha256",
         "the 255-byte cap",
+        "a sha-1 digest and the x-1 offset",
         "_R1_GRAMMAR = re.compile(CANONICAL_ID_RE)",
         "SELECT r1.id FROM memories AS r1 JOIN files AS f2 ON f2.id = r1.id",
     )

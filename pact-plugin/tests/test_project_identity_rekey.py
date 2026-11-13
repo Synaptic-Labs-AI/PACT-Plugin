@@ -713,13 +713,13 @@ class TestRekeyCounterMeaning:
     """
 
     def test_links_repointed_counts_every_examined_memory_link(self, rekey_env):
-        """Two memories linked to the retiring file row.
+        """Two memories linked to a retiring file row whose path already
+        exists under the target.
 
-        `links_repointed` is the number of old links EXAMINED (the documented
-        meaning since `links_conflicted` was added), so with no conflicting
-        target rows both are examined and both are re-pointed. RED WHEN the
-        counter reports the surviving link rows instead of the links moved
-        (e.g. `+= 1`).
+        `links_repointed` counts the links on file rows MERGED into an
+        existing target row, so both links are counted and both follow to
+        the target row. RED WHEN the counter reports the surviving link rows
+        instead of the links moved (e.g. `+= 1`), or the links do not follow.
         """
         _seed(
             rekey_env,
@@ -748,8 +748,9 @@ class TestRekeyCounterMeaning:
         `memory_files` is keyed by `(memory_id, file_id)`, so the target's row
         wins and the retiring link's RELATIONSHIP is dropped. `INSERT OR
         IGNORE` used to hide that; `links_conflicted` makes it visible while
-        `links_repointed` still counts the link as examined. RED WHEN the
-        conflict count stays 0 or the target's relationship is overwritten.
+        `links_repointed` still counts the link, because it sat on a merged
+        row. RED WHEN the conflict count stays 0 or the target's relationship
+        is overwritten.
         """
         _seed(
             rekey_env,

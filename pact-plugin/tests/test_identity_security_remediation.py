@@ -12,6 +12,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -139,10 +140,31 @@ def test_the_identifier_cap_comes_from_database():
 class TestOverrideContract:
     def test_a_fifo_is_refused_without_blocking(self, tmp_path):
         """Catches a regression to a plain open(), which would hang every
-        memory operation that resolves an identity."""
+        memory operation that resolves an identity. The read runs on a daemon
+        thread, so that regression fails by assertion after a bounded wait
+        instead of hanging the suite."""
         fifo = tmp_path / "pact-project-id"
         os.mkfifo(fifo)
-        read = pi.read_override(tmp_path)
+        result = []
+        reader = threading.Thread(
+            target=lambda: result.append(pi.read_override(tmp_path)), daemon=True
+        )
+        reader.start()
+        reader.join(timeout=10)
+        hung = reader.is_alive()
+        if hung:
+            # Open the write end so the blocked open returns and the thread
+            # ends instead of outliving the test.
+            try:
+                release = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                release = None
+            if release is not None:
+                os.close(release)
+            reader.join(timeout=10)
+        assert not hung, "read_override blocked on a FIFO for 10 s"
+        assert len(result) == 1
+        read = result[0]
         assert read.value is None
         assert read.reason == "not_regular"
         assert read.path == fifo
@@ -1153,6 +1175,7 @@ class TestProjectIdShowRoots:
         show = subprocess.run(
             [sys.executable, str(cli), "project-id", "show", "--db-path", str(store)],
             capture_output=True, text=True, env=env, cwd=str(process_repo),
+            timeout=120,
         )
         assert show.returncode == 0, show.stderr
         payload = json.loads(show.stdout)["result"]
@@ -1238,6 +1261,7 @@ class TestTheRenderedCommandExecutes:
         show = subprocess.run(
             [sys.executable, str(cli), "project-id", "show", "--db-path", str(store)],
             capture_output=True, text=True, env=env, cwd=str(tmp_path),
+            timeout=120,
         )
         assert show.returncode == 0, show.stderr
         rows = json.loads(show.stdout)["result"]["candidates"]
@@ -1247,6 +1271,7 @@ class TestTheRenderedCommandExecutes:
         run = subprocess.run(
             rendered, shell=True, capture_output=True, text=True,
             env=env, cwd=str(tmp_path),
+            timeout=120,
         )
         assert run.returncode == 0, (rendered, run.stderr)
         payload = json.loads(run.stdout)["result"]

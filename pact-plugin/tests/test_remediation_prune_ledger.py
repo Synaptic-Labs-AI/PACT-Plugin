@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -223,12 +224,35 @@ class TestTheLedgerIsNeverWrittenThroughALink:
 
     def test_a_fifo_ledger_never_hangs_the_reaper(self, world):
         """Catches a blocking open on a planted FIFO. RED WHEN the open lacks
-        O_NONBLOCK and the regular-file check (the test then hangs), or the
-        writer records nothing once the FIFO is gone."""
+        O_NONBLOCK and the regular-file check: the reap then blocks, and the
+        arm fails by assertion after a bounded wait instead of hanging. Also
+        RED WHEN the writer records nothing once the FIFO is gone."""
         project, slug_dir = world
-        os.mkfifo(slug_dir / LEDGER)
+        fifo = slug_dir / LEDGER
+        os.mkfifo(fifo)
         entry = _session(slug_dir, project)
-        _reap(slug_dir)
+        errors = []
+
+        def reap():
+            try:
+                _reap(slug_dir)
+            except BaseException as exc:  # surfaced by the assertion below
+                errors.append(exc)
+
+        reaper = threading.Thread(target=reap, daemon=True)
+        reaper.start()
+        reaper.join(timeout=10)
+        hung = reaper.is_alive()
+        if hung:
+            # Open the read end so the blocked writer's open returns and the
+            # thread ends instead of outliving the test.
+            release = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                reaper.join(timeout=10)
+            finally:
+                os.close(release)
+        assert not hung, "the reaper blocked on a FIFO ledger for 10 s"
+        assert errors == []
         assert not entry.exists()
         (slug_dir / LEDGER).unlink()
         _with_control(slug_dir, project)

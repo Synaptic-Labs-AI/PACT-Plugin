@@ -3481,7 +3481,7 @@ class TestUpdatePayloadProjectIdGuard:
     def test_a_poisoned_file_link_is_quarantined_not_fatal(
         self, tmp_path, caplog
     ):
-        """N-7 (cascade half): `update_memory` commits the row's NEW project
+        """The cascade half: `update_memory` commits the row's NEW project
         before the cascade runs, so a refusal that escaped here would leave
         the update half applied — row moved, link stranded under the old
         project — and re-issuing the update would hit the same row forever.
@@ -4287,7 +4287,7 @@ class TestTheSaveDisclosureStaysRawOnTheInstance:
         )
         # The patched root is NOT a repository here, so the resolver takes its
         # designed basename branch and the raw spelling flows through. A
-        # DECLINE path yields None instead (S2-bk: no folder pseudo-id).
+        # DECLINE path yields None instead (no folder pseudo-id).
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_common_dir",
             lambda *args, **kwargs: None,
