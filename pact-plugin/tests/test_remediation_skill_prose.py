@@ -854,9 +854,13 @@ class TestNullOverridePathIsMeasured:
     decides: a cause that is null in every cell belongs in the SKILL's cause
     list, and a cell that nulls a cause which elsewhere carries a path is a
     location route the SKILL clause must name. A new null route, a new cause,
-    a new resolver route, or a dropped route therefore reds an arm here
-    without anyone editing a list. The `project-id show` envelope anchors the
-    in-process measurement on the CLAUDE_PROJECT_DIR route.
+    or a dropped route therefore reds an arm here without anyone editing a
+    list, and a route added to `ROUTES` is measured here without an edit. A
+    resolver rung added without a route reds the rung-parity test's call-site
+    census; a route input added without a route (an environment variable, a
+    record reader) reds TestEveryRouteEntryConditionIsARoute. The `project-id
+    show` envelope anchors the in-process measurement on the
+    CLAUDE_PROJECT_DIR route.
     """
 
     BAD_ORIGIN = "https://host/own%ZZr/repo.git"
@@ -1124,8 +1128,9 @@ def override_read_matrix(tmp_path_factory):
     """{(shape, route): cell} for every shape x every resolver route.
 
     The routes and the hostile shapes come from `fixtures.identity_routes`,
-    the set the rung-parity test derives from the code's rung call sites, so a
-    route or shape added there is measured here without an edit. The shapes
+    which the rung-parity test checks against the code's rung call sites and
+    TestEveryRouteEntryConditionIsARoute checks against the resolver's route
+    inputs, so a route or shape added there is measured here without an edit. The shapes
     below add the outcomes the skill sentence also covers: resolved
     checkouts, decline causes, a home-directory root and a no-working-tree
     repository. Each cell plants an UNUSABLE override at the common dir git
@@ -1443,3 +1448,263 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
             "an unusable file is reported as override_ignored and resolution "
             "continues without it."
         ) in _body(SKILL)
+
+
+# --- every route entry condition is a route ---------------------------------
+# The resolver chooses its route from a small set of inputs: an environment
+# variable it reads, a record or setting a helper returns, the working
+# directory. Each one is read here from the code of the detection path, and
+# each must be driven by a route in `identity_routes.ROUTES` (so the matrices
+# above measure it) or be listed in NOT_A_ROUTE with the reason it selects no
+# route. A route added through an EXISTING rung (a new variable handed to the
+# declared rung) adds no rung call site, so only this census sees it.
+
+DETECTION_MODULES = ("memory_api", "project_identity")
+DETECTION_ENTRY = ("memory_api", "PACTMemory._detect_project_identity_with_legacy")
+
+
+def _detection_defs() -> tuple:
+    """({(module, qualified def): node}, {module: import aliases})."""
+    import ast
+
+    from fixtures.identity_git import import_aliases
+
+    defs, aliases = {}, {}
+    for module in DETECTION_MODULES:
+        tree = ast.parse((SCRIPTS / f"{module}.py").read_text(encoding="utf-8"))
+        aliases[module] = import_aliases(tree)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs[(module, node.name)] = node
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        defs[(module, f"{node.name}.{item.name}")] = item
+    return defs, aliases
+
+
+def _local_target(call, module: str, defs: dict, aliases: dict):
+    """The (module, def) a call reaches inside the detection modules: a
+    module-level function by name or through an import of the other module,
+    or a method through its class, `self` or `cls`. None otherwise."""
+    import ast
+
+    func = call.func
+    if isinstance(func, ast.Name):
+        if (module, func.id) in defs:
+            return module, func.id
+        owner, _, name = aliases[module].get(func.id, "").rpartition(".")
+        other = owner.rpartition(".")[2]
+        return (other, name) if (other, name) in defs else None
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        base = func.value.id
+        for (owner, qualified) in defs:
+            cls, _, method = qualified.partition(".")
+            if owner == module and method == func.attr and base in (cls, "self", "cls"):
+                return owner, qualified
+        other = aliases[module].get(base, base).rpartition(".")[2]
+        if (other, func.attr) in defs:
+            return other, func.attr
+    return None
+
+
+def route_entry_conditions() -> dict:
+    """{condition: sorted sites} for every input the detection path reads,
+    from `_detect_project_identity_with_legacy` through every function the two
+    detection modules define that it calls, directly or not.
+
+    A condition is `("env", KEY)` for `os.environ.get`, `os.getenv` or
+    `os.environ[...]` (imported in any form) with a constant key, or with a
+    parameter resolved from the constant arguments at its call sites;
+    `("cwd",)` and `("home",)` for the process directory and the home
+    directory; and `("call", NAME)` for every call of a function defined in
+    another project module (not the standard library). A key that cannot be
+    resolved is `("env", "<unresolved: ...>")`, which nothing classifies, so
+    it fails closed.
+
+    NOT COVERED: a call through a variable holding a function, `getattr` or
+    `exec`, and what a reader reads inside its own module (the reader call is
+    the condition).
+    """
+    import ast
+    import sys
+
+    from fixtures.identity_git import qualified_name
+
+    defs, aliases = _detection_defs()
+    reached, pending = set(), [DETECTION_ENTRY]
+    while pending:
+        key = pending.pop()
+        if key in reached:
+            continue
+        reached.add(key)
+        for node in ast.walk(defs[key]):
+            if isinstance(node, ast.Call):
+                target = _local_target(node, key[0], defs, aliases)
+                if target is not None:
+                    pending.append(target)
+
+    def params(node):
+        return [arg.arg for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
+
+    found, parameter_keys = {}, {}
+    for key in sorted(reached):
+        module, names = key[0], aliases[key[0]]
+        for node in ast.walk(defs[key]):
+            condition, read = None, None
+            if isinstance(node, ast.Subscript) and qualified_name(node.value, names) == "os.environ":
+                read = node.slice
+            elif isinstance(node, ast.Call):
+                called = qualified_name(node.func, names) or ""
+                if called in ("os.environ.get", "os.getenv") and node.args:
+                    read = node.args[0]
+                elif called in ("pathlib.Path.cwd", "Path.cwd", "os.getcwd"):
+                    condition = ("cwd",)
+                elif called in ("pathlib.Path.home", "Path.home", "os.path.expanduser"):
+                    condition = ("home",)
+                elif _local_target(node, module, defs, aliases) is None:
+                    head = node.func
+                    while isinstance(head, ast.Attribute):
+                        head = head.value
+                    origin = names.get(head.id, "") if isinstance(head, ast.Name) else ""
+                    if origin and origin.split(".")[0] not in sys.stdlib_module_names:
+                        condition = ("call", called.rpartition(".")[2])
+            if read is not None:
+                if isinstance(read, ast.Constant) and isinstance(read.value, str):
+                    condition = ("env", read.value)
+                elif isinstance(read, ast.Name) and read.id in params(defs[key]):
+                    parameter_keys[key] = params(defs[key]).index(read.id)
+                    continue
+                else:
+                    condition = ("env", f"<unresolved: {ast.unparse(read)}>")
+            if condition is not None:
+                found.setdefault(condition, set()).add(f"{module}.py:{node.lineno}")
+    # A helper reading the key it is handed: every call site in the path names it.
+    for key in sorted(reached):
+        for node in ast.walk(defs[key]):
+            if not isinstance(node, ast.Call):
+                continue
+            target = _local_target(node, key[0], defs, aliases)
+            if target not in parameter_keys:
+                continue
+            position = parameter_keys[target]
+            argument = node.args[position] if len(node.args) > position else None
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                condition = ("env", argument.value)
+            else:
+                condition = ("env", f"<unresolved: argument of {target[1]}>")
+            found.setdefault(condition, set()).add(f"{key[0]}.py:{node.lineno}")
+    return {condition: sorted(sites) for condition, sites in found.items()}
+
+
+class _RecordingMonkeyPatch(pytest.MonkeyPatch):
+    """A MonkeyPatch that also records which inputs a route sets."""
+
+    def __init__(self):
+        super().__init__()
+        self.driven = set()
+
+    def setenv(self, name, value, prepend=None):
+        self.driven.add(("env", name))
+        super().setenv(name, value, prepend)
+
+    def setattr(self, target, *args, **kwargs):
+        # `setattr("module.name", value)` or `setattr(obj, "name", value)`.
+        if isinstance(target, str) and len(args) == 1:
+            name = target.rpartition(".")[2]
+        else:
+            name = args[0]
+        self.driven.add(("call", name))
+        super().setattr(target, *args, **kwargs)
+
+    def chdir(self, path):
+        self.driven.add(("cwd",))
+        super().chdir(path)
+
+
+@pytest.fixture(scope="module")
+def route_driven_conditions(tmp_path_factory):
+    """{condition: routes that set it}, measured by running every route."""
+    from fixtures import identity_routes as routes
+
+    driven = {}
+    for route, (run, _sources) in routes.ROUTES.items():
+        base = tmp_path_factory.mktemp("route_inputs")
+        target = routes.SHAPES["control_own_checkout"](base)
+        elsewhere = base / "elsewhere"
+        elsewhere.mkdir()
+        mp = _RecordingMonkeyPatch()
+        try:
+            routes._clear(mp)
+            mp.driven.clear()
+            run(mp, target, elsewhere)
+        finally:
+            mp.undo()
+        for condition in mp.driven:
+            driven.setdefault(condition, set()).add(route)
+    return driven
+
+
+class TestEveryRouteEntryConditionIsARoute:
+    """Every input that selects a resolver route is a route the matrices
+    measure.
+
+    `route_entry_conditions` reads the inputs from the detection path's code;
+    `route_driven_conditions` measures what each route in
+    `identity_routes.ROUTES` sets. Every input must be set by some route or
+    be listed in NOT_A_ROUTE, and every route input must still be read. A
+    new route through any rung, a new reader of a record or setting, or a new
+    environment variable therefore reds an arm here until a route drives it
+    or an exclusion names it. A new rung call site is the rung-parity test's
+    census (every `_root_guard` and `_identity_at_root` call site must run).
+    """
+
+    # Inputs the detection path reads that select no route.
+    NOT_A_ROUTE = {
+        ("env", "GIT_DISCOVERY_ACROSS_FILESYSTEM"): (
+            "git's own discovery bound, honoured so the marker walk stops where git stops"
+        ),
+        ("home",): "a landing property, measured as the home_root shape",
+        ("call", "get_worktree_identity_from_session_record"): (
+            "its record is consumed only by recorded_main_root, which the worktree "
+            "identity record route drives"
+        ),
+        ("call", "get_user_memory_dir"): (
+            "the user-scope setting binds a chosen id and reads no repository, "
+            "so it has no override file to measure"
+        ),
+        ("call", "git_env_without_location"): "strips location variables from every git call",
+        ("call", "is_canonical_id"): "validates an id value",
+        ("call", "validate_identifier_for_write"): "validates an id value",
+    }
+
+    def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
+        conditions = route_entry_conditions()
+        unclassified = {
+            condition: sites for condition, sites in conditions.items()
+            if condition not in route_driven_conditions and condition not in self.NOT_A_ROUTE
+        }
+        assert unclassified == {}, (
+            f"the resolver reads an input no route drives and no exclusion names: {unclassified}"
+        )
+
+    def test_every_route_input_is_read_by_the_resolver(self, route_driven_conditions):
+        conditions = route_entry_conditions()
+        unread = {
+            condition: sorted(routes) for condition, routes in route_driven_conditions.items()
+            if condition not in conditions
+        }
+        assert unread == {}, f"a route sets an input the resolver no longer reads: {unread}"
+
+    def test_no_exclusion_is_stale_or_driven(self, route_driven_conditions):
+        conditions = route_entry_conditions()
+        stale = set(self.NOT_A_ROUTE) - set(conditions)
+        assert stale == set(), f"an exclusion names an input the resolver no longer reads: {stale}"
+        driven = set(self.NOT_A_ROUTE) & set(route_driven_conditions)
+        assert driven == set(), f"an exclusion names an input a route drives: {driven}"
+
+    def test_the_census_reads_the_declaration_routes(self, route_driven_conditions):
+        """Control: the known declaration inputs are found on both sides."""
+        conditions = route_entry_conditions()
+        for known in (("env", "CLAUDE_PROJECT_DIR"), ("call", "get_project_dir_from_session_record")):
+            assert known in conditions and known in route_driven_conditions, known
