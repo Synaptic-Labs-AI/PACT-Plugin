@@ -225,6 +225,7 @@ class _Scope:
         self.nonlocals: set = set()
         self.aliases: list = []
         self.loop_bodies = {(id(n), "body") for n, _ in self.pairs if isinstance(n, _LOOPS)}
+        self.nodes = {id(n): n for n, _ in self.pairs}
         if isinstance(node, _FUNCTIONS):
             arguments = node.args
             for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
@@ -435,12 +436,47 @@ class _Scope:
         entries = self.events.get(name, ())
         before = [e for e in entries if e[0] < at]
         back = [e for e in entries if e[0] > at and any(loop in e[3] for loop in loops)]
-        for entry in before:
-            state = self._step(name, state, entry, entry[3] == chain[:len(entry[3])], seen)
-        for entry in back:
-            state = self._step(name, state, entry, False, seen)
+        state = self._apply(name, before, chain, state, seen)
+        if back:
+            state = _join(state, self._apply(name, back, chain, state, seen))
         if self._alias_written(name, at, loops):
             return UNKNOWN
+        return state
+
+    def _apply(self, name, entries, chain, state, seen):
+        """Apply entries in order to `state`, as seen from code whose enclosing
+        bodies are `chain`. An entry in a body that encloses that code is
+        definite. Entries in one compound statement that does not are taken
+        together: each arm runs from the state before it, and the arms' results
+        are joined with that state, except that an if with an else (or a
+        conditional expression) joins its two arms alone, since one of them
+        always runs."""
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            if entry[3] == chain[:len(entry[3])]:
+                state = self._step(name, state, entry, True, seen)
+                index += 1
+                continue
+            depth = next(i for i, key in enumerate(entry[3])
+                         if i >= len(chain) or key != chain[i])
+            owner = entry[3][depth][0]
+            arms: dict = {}
+            while index < len(entries):
+                candidate = entries[index][3]
+                if len(candidate) <= depth or candidate[:depth] != entry[3][:depth] \
+                        or candidate[depth][0] != owner:
+                    break
+                arms.setdefault(candidate[depth], []).append(entries[index])
+                index += 1
+            results = [self._apply(name, arm, arm[0][3][:depth + 1], state, seen)
+                       for arm in arms.values()]
+            node = self.nodes.get(owner)
+            if isinstance(node, (ast.If, ast.IfExp)) and node.orelse and len(results) == 2:
+                state = _join(*results)
+            else:
+                for result in results:
+                    state = _join(state, result)
         return state
 
     def _alias_written(self, name, at, loops) -> bool:
@@ -648,19 +684,26 @@ def test_no_child_environment_built_in_a_test_leaves_out_home():
 
     CONDITIONAL CODE. A binding or write counts as definite only when the
     statement body that holds it also holds the call. Anything else is read as
-    conditional: it can only keep the verdict it meets or turn it UNKNOWN. That
-    covers every if, elif and else branch, every for and while body and their
-    else, every try body, except handler, else and finally, every with body,
-    every match case, a conditional expression branch, the right side of
-    `and`/`or`, and a comprehension. When the call sits inside a loop, a
-    binding or write later in that loop is also read as conditional (the next
-    pass). Reachability is not read: a return, raise, break or continue does
-    not change how the code around it is read.
+    conditional, one compound statement at a time: each of its arms is applied
+    to the verdict before the statement, and the results are joined (equal
+    verdicts stay, unequal ones become UNKNOWN). For an if with an else, and a
+    conditional expression, the two arms are joined with each other alone,
+    since one of them always runs; for every other statement the verdict before
+    it joins in too, since none of its arms need run. That covers every if,
+    elif and else branch, every for and while body and their else, every try
+    body, except handler, else and finally, every with body (read as possibly
+    not running), every match case, a conditional expression branch, the right
+    side of `and`/`or`, and a comprehension. When the call sits inside a loop,
+    the bindings and writes later in that loop are applied the same way and
+    joined in (the next pass). Reachability is not read: a return, raise,
+    break or continue does not change how the code around it is read.
 
     MODULE NAMES. A name a function never binds is read from the module's
-    top-level bindings and writes, then from the function's own bindings
-    (under `global`) and writes before the call, unless another function or class body in the module writes,
-    strips, rebinds (including under `global`) or passes it on, in which case
+    top-level bindings and writes (all of them: module statements run before
+    any test, so the last top-level binding counts), then from the function's
+    own bindings (under `global`) and writes before the call, unless another
+    function or class body in the module writes, strips, rebinds (including
+    under `global`) or passes it on, in which case
     it is UNKNOWN. A name an enclosing function binds (a closure) is UNKNOWN.
 
     EVERY OTHER SHAPE IS UNJUDGED AND READ AS UNKNOWN, so it is never flagged.
@@ -809,6 +852,19 @@ def _verdict(source: str, scope_source: str = "") -> str:
     ("env", "if c:\n    env = {'PATH': '/bin'}\nelse:\n    env = {'X': '1'}", LACKS),
     ("env", "if c:\n    env = {'PATH': '/bin'}\nelse:\n    env = dict(os.environ)", UNKNOWN),
     ("env", "env = {'PATH': '/bin'}\nx = 1 if c else env.update(os.environ)", UNKNOWN),
+    # The auditor's battery: rebinds and writes in branches, joined per statement.
+    ("env", "env = dict(os.environ)\nif c:\n    env = {'PATH': '/bin'}", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelse:\n    env['HOME'] = '/h'", HAS),
+    ("env", "env = dict(os.environ)\nif c:\n    env.pop('HOME')\nelse:\n    del env['HOME']", LACKS),
+    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelif d:\n    env['HOME'] = '/h'\n"
+            "else:\n    env['HOME'] = '/h'", HAS),
+    ("env", "env = {'PATH': '/bin'}\nif c:\n    env['HOME'] = '/h'\nelif d:\n    env['HOME'] = '/h'", UNKNOWN),
+    ("env", "if c:\n    env = dict(os.environ)\nelse:\n    env = {'HOME': '/h'}", HAS),
+    ("env", "x = (env := {'X': '1'}) if c else (env := {'Y': '2'})", LACKS),
+    ("env", "env = {'PATH': '/bin'}\nmatch x:\n    case 1:\n        env['HOME'] = '/h'", UNKNOWN),
+    ("env", "env = {'PATH': '/bin'}\nwhile c:\n    env.update(os.environ)", UNKNOWN),
+    ("{**helper()}", "", UNKNOWN),
+    ("{**b}", "b = {'PATH': '/bin'}", LACKS),
     # Not judgeable from this scope: passed.
     ("helper()", "", UNKNOWN),
     ("param", "", UNKNOWN),
@@ -942,6 +998,12 @@ def _judge_module(source: str) -> list:
      "    subprocess.run([], env=_ENV)\n", [HAS]),
     ("_ENV = {'PATH': '/bin'}\n\n\ndef test_x():\n    _ENV['HOME'] = '/h'\n"
      "    subprocess.run([], env=_ENV)\n", [HAS]),
+    ("_ENV = {'HOME': '/h'}\n\n\ndef test_x():\n    subprocess.run([], env=_ENV)\n", [HAS]),
+    # Module statements all run before any test, so the last top-level binding counts.
+    ("_ENV = {'PATH': '/bin'}\n\n\ndef test_x():\n    subprocess.run([], env=_ENV)\n\n\n"
+     "_ENV = dict(os.environ)\n", [HAS]),
+    ("_ENV = dict(os.environ)\n\n\ndef test_x():\n    subprocess.run([], env=_ENV)\n\n\n"
+     "_ENV = {'PATH': '/bin'}\n", [LACKS]),
     # ...unless another function writes, strips or rebinds it.
     ("_ENV = {'PATH': '/bin'}\n\n\ndef setup():\n    _ENV['HOME'] = '/h'\n\n\n"
      "def test_x():\n    subprocess.run([], env=_ENV)\n", [UNKNOWN]),
