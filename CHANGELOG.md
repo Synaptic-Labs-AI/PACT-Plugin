@@ -44,6 +44,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - The session-evidence check reads a session folder it cannot list as unknown rather than empty: when the listing fails for any reason but the folder being missing, each session's folder is checked on its own, so the prune ledger stands in only for a session whose folder is gone.
 - Tests: a forged worktree pointer's warning, save refusal and decline envelope are checked to carry no path into the store it names, and the code text states the exact rule for a null `override_path` (a redirect, or a git directory outside the checkout that is neither a linked worktree's nor a submodule's admin directory).
 - Tests: the memory skill's null-`override_path` pins measure that condition per layout with git itself, and take the decline reasons from the code's own registry.
+- Tests: three tests that hid a module through `patch.dict(sys.modules)` now bind only that key, so a module first imported inside the window (numpy) is no longer evicted for later tests in the same worker; one of them also binds the module name the import actually resolves, so its stub is used.
 
 ### Corrected during review
 

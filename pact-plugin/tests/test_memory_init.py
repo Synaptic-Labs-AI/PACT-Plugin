@@ -2301,9 +2301,20 @@ class TestMaybeEmbedPending:
             mock_catchup = MagicMock()
             mock_catchup.embed_pending_memories = MagicMock(return_value={'processed': 0})
 
-            with patch.dict(sys.modules, {'.embedding_catchup': mock_catchup}):
+            # The key is the name `from .embedding_catchup import ...` resolves
+            # to inside the `scripts` package, so the stub is what the import
+            # returns. setitem, not patch.dict: patch.dict restores the WHOLE
+            # of sys.modules on exit and evicts every module first imported
+            # inside the window (numpy among them), so a later numpy import in
+            # this process fails. Only the one key is restored here.
+            with pytest.MonkeyPatch.context() as modules:
+                modules.setitem(sys.modules, 'scripts.embedding_catchup', mock_catchup)
                 # First call creates marker and attempts embedding
                 result1 = maybe_embed_pending()
+                assert mock_catchup.embed_pending_memories.called, (
+                    "the real catch-up ran instead of the stub: the binding "
+                    "does not name the module the import resolves"
+                )
 
                 # Marker should now exist
                 assert marker_path.exists()

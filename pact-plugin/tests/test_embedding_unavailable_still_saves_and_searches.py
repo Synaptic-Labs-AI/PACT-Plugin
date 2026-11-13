@@ -58,7 +58,13 @@ def _model_unavailable():
     """Drive the real ImportError handler, and leave the singleton clean."""
     reset_embedding_service()
     try:
-        with patch.dict(sys.modules, {"model2vec": None}):
+        # setitem, not patch.dict: patch.dict restores the WHOLE of
+        # sys.modules on exit, so a module first imported inside the window
+        # (numpy, through the save and search paths) is evicted with it, and
+        # the next numpy import in this process fails. Only the one key is
+        # restored here.
+        with pytest.MonkeyPatch.context() as modules:
+            modules.setitem(sys.modules, "model2vec", None)
             yield
     finally:
         # The service caches `_available = False`; a later test in this process
