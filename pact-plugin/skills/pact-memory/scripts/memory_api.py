@@ -443,17 +443,26 @@ def _legacy_session_evidence(
     # A PRESENT ENTRY IS A LIVE FOLDER, exactly as the per-session existence
     # test it replaces: its context is read (and anything unreadable is no
     # evidence), and only an ABSENT entry lets the ledger stand in.
+    #
+    # THE LISTING IS A SPEEDUP, NEVER THE ANSWER. A slug folder that does not
+    # exist (or is a file) has no live session folders, so every session is
+    # absent, as the per-session test would also find. Any OTHER failure (a
+    # folder that is searchable but not readable, say) says nothing about
+    # which entries exist, so that root falls back to the per-session
+    # existence test (`present` is None).
     folders: Dict[str, tuple] = {}
     for root in sorted(roots):
         base: Optional[Path] = None
-        present: set = set()
+        present: Optional[set] = set()
         try:
             probe = reconstruct_session_dir(root, "_")
             base = Path(probe).parent if probe else None
             if base is not None:
                 present = set(os.listdir(base))
+        except (FileNotFoundError, NotADirectoryError):
+            present = set()
         except OSError:
-            pass
+            present = None
         except Exception:
             base = None
         folders[root] = (base, present)
@@ -466,7 +475,11 @@ def _legacy_session_evidence(
                 if base is None:
                     continue
                 session_path = base / safe_id
-                if safe_id in present:
+                if (
+                    safe_id in present
+                    if present is not None
+                    else os.path.lexists(session_path)
+                ):
                     context = session_path / "pact-session-context.json"
                     recorded = json.loads(context.read_text(encoding="utf-8"))
                     if isinstance(recorded, dict) and _session_record_counts(
