@@ -148,8 +148,10 @@ class _DetectedIdentity(NamedTuple):
 
     `override_ignored` is a structured {path, reason} when an override file
     was present but unusable — a stderr warning alone is invisible to a
-    caller that parses the envelope. `path` is None when the file sits in a
-    git directory the checkout's `.git` points at; the reason is kept.
+    caller that parses the envelope. `path` is None (the reason is kept) when
+    the checkout's `.git` is a redirect, or points at a git directory outside
+    the checkout that is neither a linked worktree's nor a submodule's admin
+    dir.
     """
 
     project_id: Optional[str]
@@ -2179,8 +2181,9 @@ class PACTMemory:
         if not ignored:
             return
         if ignored.get("path") is None:
-            # THE PATH IS WITHHELD, NOT THE REPORT: the file sits in a git
-            # directory this checkout's `.git` points at.
+            # THE PATH IS WITHHELD, NOT THE REPORT: the checkout's `.git` is
+            # a redirect, or points at an outside git directory that is no
+            # linked worktree's or submodule's admin dir.
             logger.warning(
                 "ignoring an unusable project override (%s) in the git "
                 "directory this checkout's `.git` points at; resolution "
@@ -3155,7 +3158,9 @@ class PACTMemory:
           envelope);
         - `override_ignored` — `{path, reason}` when a present
           `<git-common-dir>/pact-project-id` was unusable, else None; `path`
-          is None when that git dir is one the checkout's `.git` points at;
+          is None when the checkout's `.git` is a redirect or points at an
+          outside git dir that is no linked worktree's or submodule's admin
+          dir;
         - `legacy_scope` — the legacy candidate, its admission state and the
           canonical bucket's prior count (the same state `project-id show`
           reports);

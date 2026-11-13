@@ -1027,6 +1027,55 @@ class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
         assert memory.project_id == self.VICTIM_ID
         assert memory._decline_reason is None
 
+    BAD_ORIGIN = "https://bad host.example/victim/repo.git"
+
+    @pytest.mark.parametrize("declared", [False, True], ids=["cwd", "declared"])
+    def test_a_forgery_prints_no_path_into_the_victims_store(
+        self, tmp_path, monkeypatch, caplog, declared
+    ):
+        """The victim's own worktree, with an origin that cannot be
+        represented, prints the override path inside the victim's store (its
+        own git dir), and the store holds an unusable pin. The forged pointer
+        must print neither path: not in the warning, the save refusal or the
+        envelope. Catches the forged route reaching the override read (where
+        the worktree-admin target is not a redirect to the resolver and its
+        common dir is the victim's store) instead of being refused first."""
+        import logging
+
+        from scripts import memory_api
+        from scripts.memory_api import PACTMemory
+
+        worktree, delivered, store = self._victim(tmp_path)
+        run_git("remote", "set-url", "origin", self.BAD_ORIGIN, cwd=worktree)
+        victim_store = tmp_path / "vgit"
+        (victim_store / "pact-project-id").write_text("victim-folder-name\n", encoding="utf-8")
+        pin = str(victim_store / "pact-project-id")
+
+        genuine = _memory_in(monkeypatch, worktree, store)
+        assert genuine._decline_reason["override_path"] == pin, (
+            "control: the genuine worktree offers its own store's pin"
+        )
+
+        elsewhere = tmp_path / "plain"
+        elsewhere.mkdir()
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            if declared:
+                memory = _memory_in(monkeypatch, elsewhere, store, declared=delivered)
+            else:
+                memory = _memory_in(monkeypatch, delivered, store)
+            monkeypatch.setattr(memory_api, "_ensure_ready", lambda: None)
+            monkeypatch.setattr(PACTMemory, "_store_embedding", lambda self, *a, **k: None)
+            with pytest.raises(Exception) as refused:
+                memory.save({"context": "from the forged checkout"}, sync_to_claude=False)
+        envelope = repr((memory._decline_reason, memory._override_ignored))
+        texts = [record.getMessage() for record in caplog.records]
+        texts += [str(refused.value), envelope]
+        for text in texts:
+            assert pin not in text and str(victim_store) not in text, text
+        assert memory._decline_reason["reason"] == "gitfile_redirect"
+
 
 class TestAnEmptyOriginUrlValueAgainstRealGit:
     """Differential against this machine's git: which url `git fetch` really

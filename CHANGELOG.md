@@ -42,6 +42,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the git-environment guard now resolves the program a subprocess call runs from its argv in any form and treats an unresolvable argv as git; the NUL-bytes arm checks that no row was written before checking the error type; the fake-executable scan reads every memory script with verbs taken from the CLI's own parser; and the planning-label scan catches remediation-cycle, cycle and review-round labels.
 - Tests: the decline-record and keyword-construction guards now find a hand-built decline dict or a positional identity construction in every form the code can write one (dict calls, subscript stores, update and setdefault, attribute and aliased constructors, _make and partial), through one shared scanner per rule.
 - The session-evidence check reads a session folder it cannot list as unknown rather than empty: when the listing fails for any reason but the folder being missing, each session's folder is checked on its own, so the prune ledger stands in only for a session whose folder is gone.
+- Tests: a forged worktree pointer's warning, save refusal and decline envelope are checked to carry no path into the store it names, and the code text states the exact rule for a null `override_path` (a redirect, or a git directory outside the checkout that is neither a linked worktree's nor a submodule's admin directory).
 
 ### Corrected during review
 

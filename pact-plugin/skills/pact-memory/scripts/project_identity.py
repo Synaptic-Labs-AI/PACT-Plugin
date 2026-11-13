@@ -134,8 +134,9 @@ class RootIdentity(NamedTuple):
     decided it. `override_ignored` is a structured {path, reason} when a
     PRESENT override file was unusable and resolution continued without it;
     `detect_id_for_root` sets it, and the caller discloses it. Its `path` is
-    None (the `reason` is kept) when the file sits in a git directory the
-    checkout's `.git` points at: a redirect, or a git dir outside the checkout.
+    None (the `reason` is kept) when the checkout's `.git` is a redirect, or
+    points at a git directory outside the checkout that is neither a linked
+    worktree's nor a submodule's admin dir.
     `decline_reason` is a structured {source, reason, override_path} built by
     `decline_record` for every decline with a named cause (a
     `DECLINE_REASONS` token), so `project-id show` can report it rather than
@@ -161,8 +162,9 @@ EMPTY_URL_ENTRY_DETAIL = (
     "depends on the git version; remove the empty value"
 )
 
-# The `detail` for a decline whose git directory lies outside the checkout.
-# Its override file sits in that external directory, which a forged `.git`
+# The `detail` for a decline whose `.git` points at a git directory outside
+# the checkout that is neither a linked worktree's nor a submodule's admin
+# dir. Its override file sits in that external directory, which a forged `.git`
 # pointer can name as easily as the user's own store, so no path is printed.
 EXTERNAL_GIT_DIR_DETAIL = (
     "this checkout's git directory lies outside it, so pinning it is a user "
@@ -1483,7 +1485,8 @@ def detect_id_for_root(
             decline_record("gitfile_redirect", None),
         )
 
-    # A GIT DIR OUTSIDE THE CHECKOUT NAMES NO OVERRIDE PATH. Its override file
+    # A GIT DIR OUTSIDE THE CHECKOUT THAT IS NEITHER A LINKED WORKTREE'S NOR A
+    # SUBMODULE'S ADMIN DIR NAMES NO OVERRIDE PATH. Its override file
     # lives in that external directory, and the user's own store and a forged
     # pointer at another repository's store are the same shape, so a printed
     # path could lead a reader to re-pin a repository it does not own. The
