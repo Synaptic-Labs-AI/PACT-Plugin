@@ -81,9 +81,10 @@ their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 (and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
 `micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
 matrix selectors). Each wrapper's options that take a separate value are in
-_WRAPPERS, read from the tool's own `--help` where it is installed (coreutils,
-xvfb-run, uv 0.13.6, pipx, pdm, hatch, pipenv, poetry) and from its
-documentation otherwise (sudo, GNU time, conda, micromamba, rye, pixi).
+_WRAPPERS, read from the tool's own `--help` (coreutils, GNU time, xvfb-run,
+uv 0.13.6, pipx, pdm, hatch, pipenv, poetry), sudo's manual page, micromamba's
+source (`micromamba run` and its prefix options), and the current online
+documentation of `conda run`, `rye run` and `pixi run`.
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
@@ -177,9 +178,9 @@ _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
 # Programs that run the command after them, each with its options that take a
 # separate value.
 # The option tables come from each wrapper's own `--help`: coreutils timeout,
-# nice, stdbuf and env, xvfb-run, uv 0.13.6 (`uv run`, `uv tool run`), pipx,
-# pdm, hatch, pipenv and poetry. sudo, GNU time, conda, micromamba, rye and pixi
-# come from their documentation.
+# nice, stdbuf and env, GNU time, xvfb-run, uv 0.13.6 (`uv run`, `uv tool run`),
+# pipx, pdm, hatch, pipenv and poetry. sudo comes from its manual page,
+# micromamba from its source, and conda, rye and pixi from their documentation.
 _UV_COMMON_VALUE_OPTIONS = frozenset({
     "-w", "--with", "--with-editable", "--with-requirements", "--env-file",
     "--python-platform", "--index", "--default-index", "-i", "--index-url",
@@ -222,11 +223,13 @@ _WRAPPERS = {
     "hatch run": frozenset(),
     "conda run": frozenset({"-n", "--name", "-p", "--prefix", "--cwd"}),
     "micromamba run": frozenset({"-n", "--name", "-p", "--prefix", "-r", "--root-prefix",
-                                 "--cwd", "-a", "--attach", "--label"}),
+                                 "--relocate-prefix", "--cwd", "-a", "--attach", "--label"}),
     "pipenv run": frozenset(),
     "rye run": frozenset({"--pyproject"}),
-    "pixi run": frozenset({"-e", "--environment", "--manifest-path", "--auth-file", "--color",
-                           "--pypi-keyring-provider"}),
+    "pixi run": frozenset({"-e", "--environment", "-p", "--platform", "-m", "--manifest-path",
+                           "-w", "--workspace", "-s", "--script", "--config-file",
+                           "--auth-file", "--pinning-strategy", "--pypi-keyring-provider",
+                           "--tls-root-certs", "--color"}),
 }
 # micromamba's options that set one environment variable for the command
 # (`-e NAME=VALUE`), or keep one through `--clean-env` (`-e NAME`). pdm's
@@ -235,8 +238,8 @@ _ENV_OPTIONS = {
     "micromamba run": frozenset({"-e", "--env"}),
 }
 # The listed wrappers' options that take no value, from the same sources. The
-# script-route candidates never step past a word after one of these; a letter
-# that takes a value under another wrapper is known from that table.
+# script-route candidates never step past a word after one of these; an
+# option that takes a value under another wrapper is known from that table.
 _KNOWN_FLAGS = frozenset({
     # uv run / uv tool run / uvx (uv 0.13.6 --help)
     "--active", "--all-extras", "--all-groups", "--all-packages", "--compile-bytecode", "--exact",
@@ -245,12 +248,13 @@ _KNOWN_FLAGS = frozenset({
     "--no-default-groups", "--no-dev", "--no-editable", "--no-env-file", "--no-index",
     "--no-managed-python", "--no-progress", "--no-project", "--no-python-downloads",
     "--no-require-build-hashes", "--no-sources", "--no-sync", "--offline", "--only-dev", "--quiet",
-    "--refresh", "--reinstall", "--require-build-hashes", "--script", "--system-certs", "--upgrade",
-    "--verbose", "--lfs", "-m", "-q", "-v",
+    "--refresh", "--reinstall", "--require-build-hashes", "--system-certs", "--upgrade",
+    "--verbose", "--lfs", "-q", "-v",
     # timeout, env, xvfb-run, time, exec, sudo
     "--preserve-status", "--foreground", "--ignore-environment", "-0", "--null", "--debug",
-    "--list-signal-handling", "--auto-servernum", "-l", "--listen-tcp", "--append",
-    "--portability", "-A", "-E", "-H", "-K", "-S", "-V",
+    "--list-signal-handling", "--block-signal", "--default-signal", "--ignore-signal",
+    "--auto-servernum", "-l", "--listen-tcp", "--append", "--portability",
+    "-A", "-B", "-E", "-H", "-K", "-N", "-S", "-V", "--bell", "--no-update",
     "--askpass", "--background", "--preserve-env", "--edit", "--set-home", "--login",
     "--remove-timestamp", "--reset-timestamp", "--list", "--non-interactive",
     "--preserve-groups", "--stdin", "--shell", "--version", "--validate",
@@ -259,9 +263,12 @@ _KNOWN_FLAGS = frozenset({
     "--fetch-missing-python", "--system-site-packages", "--editable", "-j", "--json",
     "--site-packages", "--recreate", "--ansi", "--no-ansi", "--no-interaction", "--no-plugins",
     "-vv", "-vvv", "--system",
-    # conda run, micromamba run, rye run, pixi run (documentation)
-    "--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream", "-d", "--detach",
-    "--clean-env", "--force-activate", "--revalidate", "--skip-deps", "--dry-run",
+    # conda run, micromamba run, rye run, pixi run
+    "--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream", "-vvvv", "-d",
+    "--detach", "--clean-env", "--force-activate", "--revalidate", "--skip-deps", "--dry-run",
+    "-x", "--executable", "--experimental", "--templated", "--run-post-link-scripts",
+    "--no-symbolic-links", "--no-hard-links", "--no-ref-links", "--tls-no-verify",
+    "--use-environment-activation-cache", "--no-completions", "--no-install", "--as-is",
 })
 # Wrappers named by more than one word, longest first.
 _MULTI_WORD_WRAPPERS = tuple(sorted(
