@@ -682,10 +682,12 @@ class TestUpdateCascadeQuarantineIsDocumented:
 
 
 @pytest.fixture(scope="module")
-def matrix(tmp_path_factory):
-    """{(cause, layout): (emitted reason, emitted override_path)}."""
-    import json
+def null_rig(tmp_path_factory):
+    """The layout cells of `TestNullOverridePathIsMeasured`, built once, with
+    the CLI runner, the origin-read shim and git's outside-store measurement.
+    """
     import os
+    import types
     import shutil
     import subprocess
     import sys
@@ -752,14 +754,94 @@ def matrix(tmp_path_factory):
         return outside and git_dir == common and not superproject
 
     run(["setup"], base, None, False)
+    layouts = TestNullOverridePathIsMeasured._layouts(base)
+    return types.SimpleNamespace(
+        base=base, home=home, run=run, layouts=layouts,
+        shim_path=str(shim) + os.pathsep + plain_path,
+        outside={cell: points_at_outside_store(cwd) for cell, (cwd, _, _) in layouts.items()},
+    )
+
+
+@pytest.fixture(scope="module")
+def matrix(null_rig):
+    """{(cause, layout): (emitted reason, emitted override_path, outside)},
+    from the `project-id show` envelope with CLAUDE_PROJECT_DIR set."""
+    import json
+
     result = {}
-    for (cause, layout), (cwd, declared, shimmed) in TestNullOverridePathIsMeasured._layouts(base).items():
-        out = run(["project-id", "show"], cwd, cwd if declared is None else declared, shimmed)
+    for (cause, layout), (cwd, declared, shimmed) in null_rig.layouts.items():
+        out = null_rig.run(["project-id", "show"], cwd, cwd if declared is None else declared, shimmed)
         record = json.loads(out.stdout)["result"]["decline_reason"] or {}
         result[(cause, layout)] = (
-            record.get("reason"), record.get("override_path"), points_at_outside_store(cwd),
+            record.get("reason"), record.get("override_path"), null_rig.outside[(cause, layout)],
         )
     return result
+
+
+@pytest.fixture(scope="module")
+def routed_matrix(null_rig):
+    """{(cause, layout, route): (reason, override_path, outside)} for every
+    resolver route that reaches the cell, measured in-process.
+
+    Every route in `identity_routes.ROUTES` is pointed at every cell. A route
+    reaches a cell when its own rung answered. A declaration cell names a
+    missing directory, so a route that must enter it cannot address it and is
+    skipped. Any other raise is recorded in `errors`, a route whose rung did
+    not answer in `unreached`, and a reached route that bound instead of
+    declining in `bound`, with whether git, run as the route ran it, finds no
+    repository (the route then cannot see the cause it was pointed at).
+    """
+    import os
+    import subprocess
+
+    from fixtures import identity_routes as routes
+
+    cells, errors, unreached, bound = {}, {}, {}, {}
+    runs = 0
+    for (cause, layout), (cwd, declared, shimmed) in null_rig.layouts.items():
+        target = cwd if declared is None else declared
+        if declared is None:
+            (target / "sub").mkdir(exist_ok=True)
+        for route, (fn, sources) in routes.ROUTES.items():
+            runs += 1
+            elsewhere = null_rig.base / "elsewhere" / f"r{runs}"
+            elsewhere.mkdir(parents=True)
+            with pytest.MonkeyPatch.context() as mp:
+                routes._clear(mp)
+                mp.setenv("HOME", str(null_rig.home))
+                if shimmed:
+                    mp.setenv("PATH", null_rig.shim_path)
+                try:
+                    detected = fn(mp, target, elsewhere)
+                except Exception as exc:  # recorded and asserted on, not hidden
+                    unaddressable = isinstance(exc, FileNotFoundError) and not os.path.exists(target)
+                    if not (declared is not None and unaddressable):
+                        errors[(cause, layout, route)] = repr(exc)
+                    continue
+                looked = subprocess.run(
+                    ["git", "rev-parse", "--git-dir"], cwd=os.getcwd(), env=dict(os.environ),
+                    capture_output=True, text=True, timeout=30,
+                )
+            _, rung = routes._answer(detected)
+            if rung not in sources:
+                unreached[(cause, layout, route)] = rung
+                continue
+            record = detected.decline_reason or {}
+            if not record:
+                bound[(cause, layout, route)] = (
+                    not os.path.exists(target) or looked.returncode != 0
+                )
+                continue
+            cells[(cause, layout, route)] = (
+                record.get("reason"), record.get("override_path"),
+                null_rig.outside[(cause, layout)],
+            )
+    return {"cells": cells, "errors": errors, "unreached": unreached, "bound": bound}
+
+
+@pytest.fixture(scope="module")
+def null_cells(routed_matrix):
+    return routed_matrix["cells"]
 
 
 
@@ -767,12 +849,14 @@ class TestNullOverridePathIsMeasured:
     """When `override_path` is null is MEASURED, never restated.
 
     Every cause the code defines (`DECLINE_REASONS`) is produced in every
-    layout that can produce it, and `project-id show` is run on each. The
-    emitted envelope decides: a cause that is null in every layout belongs in
-    the SKILL's cause list, and a layout that nulls a cause which elsewhere
-    carries a path is a location route the SKILL clause must name. A new
-    null route, a new cause, or a dropped route therefore reds an arm here
-    without anyone editing a list.
+    layout that can produce it, and every resolver route in
+    `identity_routes.ROUTES` is pointed at each cell. The detected decline
+    decides: a cause that is null in every cell belongs in the SKILL's cause
+    list, and a cell that nulls a cause which elsewhere carries a path is a
+    location route the SKILL clause must name. A new null route, a new cause,
+    a new resolver route, or a dropped route therefore reds an arm here
+    without anyone editing a list. The `project-id show` envelope anchors the
+    in-process measurement on the CLAUDE_PROJECT_DIR route.
     """
 
     BAD_ORIGIN = "https://host/own%ZZr/repo.git"
@@ -917,10 +1001,10 @@ class TestNullOverridePathIsMeasured:
 
     @staticmethod
     def _always_null(matrix) -> set:
-        causes = {cause for cause, _ in matrix}
+        causes = {cell[0] for cell in matrix}
         return {
             cause for cause in causes
-            if all(path is None for (c, _), (_, path, _) in matrix.items() if c == cause)
+            if all(path is None for cell, (_, path, _) in matrix.items() if cell[0] == cause)
         }
 
     def _location_nulls(self, matrix) -> dict:
@@ -932,43 +1016,66 @@ class TestNullOverridePathIsMeasured:
         }
 
     def _location_routes(self, matrix) -> set:
-        return {layout for (_, layout) in self._location_nulls(matrix)}
+        return {cell[1] for cell in self._location_nulls(matrix)}
 
-    def test_each_cell_declines_for_the_cause_it_was_built_for(self, matrix):
-        wrong = {cell: got for cell, (got, _, _) in matrix.items() if got != cell[0]}
+    def test_no_route_raises_on_any_cell(self, routed_matrix):
+        assert routed_matrix["errors"] == {}
+
+    def test_every_route_reaches_every_cell(self, routed_matrix):
+        """A route whose rung does not answer measures nothing here."""
+        assert routed_matrix["unreached"] == {}
+
+    def test_a_route_binds_only_where_git_finds_no_repository(self, routed_matrix):
+        """A reached route that binds instead of declining is judged only
+        where the route cannot see the repository it was pointed at."""
+        seen = {cell for cell, hidden in routed_matrix["bound"].items() if not hidden}
+        assert seen == set(), f"bound although git finds the repository: {seen}"
+
+    def test_every_route_and_every_cell_is_measured(self, null_rig, null_cells):
+        from fixtures import identity_routes as routes
+
+        assert {cell[2] for cell in null_cells} == set(routes.ROUTES)
+        assert {cell[:2] for cell in null_cells} == set(null_rig.layouts)
+
+    def test_the_envelope_reports_what_the_detection_set(self, matrix, null_cells):
+        detected = {cell[:2]: value for cell, value in null_cells.items() if cell[2] == "CLAUDE_PROJECT_DIR"}
+        assert matrix == detected
+
+    def test_each_cell_declines_for_the_cause_it_was_built_for(self, null_cells):
+        wrong = {cell: got for cell, (got, _, _) in null_cells.items() if got != cell[0]}
         assert wrong == {}, f"a layout builder produced another cause: {wrong}"
 
-    def test_every_cause_the_code_defines_is_measured(self, matrix):
+    def test_every_cause_the_code_defines_is_measured(self, null_cells):
         from scripts.project_identity import DECLINE_REASONS
 
-        assert {cause for cause, _ in matrix} == set(DECLINE_REASONS)
+        assert {cell[0] for cell in null_cells} == set(DECLINE_REASONS)
 
-    def test_the_documented_causes_are_the_always_null_causes(self, matrix):
-        assert self._documented_causes() == self._always_null(matrix)
+    def test_the_documented_causes_are_the_always_null_causes(self, null_cells):
+        assert self._documented_causes() == self._always_null(null_cells)
 
-    def test_every_location_route_is_named(self, matrix):
+    def test_every_location_route_is_named(self, null_cells):
         """Every location null is a cell that points at an outside store, and
         the clause names that route."""
-        nulls = self._location_nulls(matrix)
+        nulls = self._location_nulls(null_cells)
         unnamed = {cell for cell, outside in nulls.items() if not outside}
         assert unnamed == set(), f"override_path is null by a route the SKILL does not name: {unnamed}"
         if nulls:
             assert self.OUTSIDE_PHRASE in self._clause()
 
-    def test_the_outside_clause_holds_in_every_outside_cell(self, matrix):
+    def test_the_outside_clause_holds_in_every_outside_cell(self, null_cells):
         """The clause claims EVERY outside-store cell is null for a pathed
         cause; such a cell that prints a path falsifies it."""
         if self.OUTSIDE_PHRASE not in self._clause():
             return
-        always = self._always_null(matrix)
+        always = self._always_null(null_cells)
         printed = {
-            cell: path for cell, (_, path, outside) in matrix.items()
+            cell: path for cell, (_, path, outside) in null_cells.items()
             if outside and cell[0] not in always and path is not None
         }
         assert printed == {}, f"outside store, yet a path is printed: {printed}"
 
-    def test_no_unmeasured_location_route_is_claimed(self, matrix):
-        if not self._location_nulls(matrix):
+    def test_no_unmeasured_location_route_is_claimed(self, null_cells):
+        if not self._location_nulls(null_cells):
             assert self.OUTSIDE_PHRASE not in self._clause(), "documented but measures no null"
 
     def test_the_withheld_path_is_the_users_decision(self):
@@ -980,7 +1087,7 @@ class TestNullOverridePathIsMeasured:
 
     DOC_LEAD = "It is None for "
 
-    def test_the_decline_record_docstring_lists_the_always_null_causes(self, matrix):
+    def test_the_decline_record_docstring_lists_the_always_null_causes(self, null_cells):
         from scripts.project_identity import decline_record
 
         doc = _flatten(decline_record.__doc__ or "")
@@ -988,7 +1095,7 @@ class TestNullOverridePathIsMeasured:
         start = doc.index(self.DOC_LEAD) + len(self.DOC_LEAD)
         listed = doc[start:doc.index(".", start)]
         names = {n.strip() for n in listed.replace(" and ", ", ").split(",") if n.strip()}
-        assert names == self._always_null(matrix)
+        assert names == self._always_null(null_cells)
         assert "when no repository was found" not in doc
 
     DOC_LOCATION = (
@@ -996,11 +1103,11 @@ class TestNullOverridePathIsMeasured:
         "points at a git directory outside the checkout"
     )
 
-    def test_the_decline_record_docstring_names_the_location_route(self, matrix):
+    def test_the_decline_record_docstring_names_the_location_route(self, null_cells):
         from scripts.project_identity import decline_record
 
         doc = _flatten(decline_record.__doc__ or "")
-        if "external" in self._location_routes(matrix):
+        if "external" in self._location_routes(null_cells):
             assert self.DOC_LOCATION in doc
         else:
             assert self.DOC_LOCATION not in doc
@@ -1014,28 +1121,29 @@ class TestNullOverridePathIsMeasured:
 
 @pytest.fixture(scope="module")
 def override_read_matrix(tmp_path_factory):
-    """{cell: {"read", "placeable", "bare", "unlinked_admin"}} from live envelopes.
+    """{(shape, route): cell} for every shape x every resolver route.
 
-    Each cell plants an UNUSABLE override (a folder-name value) at the
-    `<git-common-dir>/pact-project-id` git reports for the cell's root, runs
-    the real `project-id show`, and records `read` = an `override_ignored`
-    record was emitted. The other keys are measured by git on the same root,
-    never assigned by the builder.
+    The routes and the hostile shapes come from `fixtures.identity_routes`,
+    the set the rung-parity test derives from the code's rung call sites, so a
+    route or shape added there is measured here without an edit. The shapes
+    below add the outcomes the skill sentence also covers: resolved
+    checkouts, decline causes, a home-directory root and a no-working-tree
+    repository. Each cell plants an UNUSABLE override at the common dir git
+    reports for the target, runs the route in-process, and records:
+    `reached` (the route's own rung answered, by the route's source set),
+    `read` (an `override_ignored` record was set), and the never-read
+    properties measured by git and the environment on the same target.
     """
-    import json
     import os
     import shutil
     import subprocess
-    import sys
+
+    from fixtures import identity_routes as routes
 
     T = TestNullOverridePathIsMeasured
-    base = tmp_path_factory.mktemp("override_read_matrix")
-    home, mem = base / "home", base / "mem"
-    home.mkdir()
-    mem.mkdir()
-    store = mem / "memory.db"
+    base_root = tmp_path_factory.mktemp("override_read_matrix")
     real_git = shutil.which("git")
-    shim = base / "shim"
+    shim = base_root / "shim"
     shim.mkdir()
     (shim / "git").write_text(
         "#!/bin/sh\n"
@@ -1044,159 +1152,210 @@ def override_read_matrix(tmp_path_factory):
         encoding="utf-8",
     )
     os.chmod(shim / "git", 0o755)
-    plain_path = os.pathsep.join((os.path.dirname(real_git), "/usr/bin", "/bin"))
-    bad = T.BAD_ORIGIN
     good = "https://github.com/acme/{}.git"
-    w = base / "w"
-    (w / "stores").mkdir(parents=True)
-    cells = {}  # name -> (root measured by git, cwd, declared, shim, extra env)
 
-    def add(name, root, cwd=None, declared="root", shimmed=False, extra=None):
-        cells[name] = (root, cwd or root, root if declared == "root" else declared, shimmed, extra)
+    def with_sub(target):
+        (target / "sub").mkdir(exist_ok=True)
+        return target
 
-    # A repository that IS the user's home directory (its run sets HOME to it).
-    homerepo = T._repo(w / "homerepo", good.format("homerepo"))
-    add("home directory root", homerepo, extra={"HOME": str(homerepo)})
+    def own_unrepresentable(base):
+        return with_sub(T._repo(base / "target", T.BAD_ORIGIN))
 
-    add("resolved own", T._repo(w / "r_own", good.format("r_own")))
-    main = T._repo(w / "r_wtmain", good.format("r_wt"), commit=True)
-    T._git("-C", str(main), "worktree", "add", "-q", str(w / "r_wt"))
-    add("resolved worktree", w / "r_wt")
-    src = T._repo(w / "r_subsrc", None, commit=True)
-    sup = T._repo(w / "r_super", good.format("r_super"), commit=True)
-    T._git("-C", str(sup), "submodule", "add", "-q", str(src), "mod")
-    T._git("-C", str(sup / "mod"), "remote", "set-url", "origin", good.format("r_mod"))
-    add("resolved submodule", sup / "mod")
-    T._repo(w / "r_sym", good.format("r_sym"))
-    (w / "r_sym" / ".git").rename(w / "stores" / "r_sym.git")
-    (w / "r_sym" / ".git").symlink_to(w / "stores" / "r_sym.git")
-    add("resolved symlink", w / "r_sym")
-    T._git("init", "-q", f"--separate-git-dir={w / 'stores' / 'r_ext.git'}", str(w / "r_ext"))
-    T._git("-C", str(w / "r_ext"), "remote", "add", "origin", good.format("r_ext"))
-    add("resolved external", w / "r_ext")
-    T._git("init", "-q", f"--separate-git-dir={w / 'stores' / 'r_swm.git'}", str(w / "r_swm"))
-    T._git("-C", str(w / "r_swm"), "remote", "add", "origin", good.format("r_swm"))
-    T._git("-C", str(w / "r_swm"), "commit", "-q", "--allow-empty", "-m", "i")
-    T._git("-C", str(w / "r_swm"), "worktree", "add", "-q", str(w / "r_swm-wt"))
-    add("resolved sepworktree", w / "r_swm-wt")
-    (w / "dotstore").mkdir()
-    T._git("init", "-q", f"--separate-git-dir={w / 'dotstore' / '.git'}", str(w / "r_dot"))
-    T._git("-C", str(w / "r_dot"), "remote", "add", "origin", good.format("r_dot"))
-    add("redirect own separate dir named .git", w / "r_dot")
-    add("decline own unrepresentable", T._repo(w / "d_own", bad))
-    add("decline own origin unreadable", T._repo(w / "d_own2", good.format("d2")), shimmed=True)
-    (w / "d_broken").mkdir()
-    (w / "d_broken" / ".git").write_text("garbage\n", encoding="utf-8")
-    add("decline broken marker", w / "d_broken")
-    add("decline bare declared", T._repo(w / "d_bare.git", good.format("d_bare"), bare=True))
-    (w / "d_cwd").mkdir()
-    add("decline declaration unresolved", w / "d_cwd", declared=w / "missing")
-    src2 = T._repo(w / "d_subsrc", None, commit=True)
-    sup2 = T._repo(w / "d_super", good.format("d_super"), commit=True)
-    T._git("-C", str(sup2), "submodule", "add", "-q", str(src2), "mod")
-    add("decline submodule local origin", sup2 / "mod")
-    victim = T._repo(w / "victim", good.format("victim"), commit=True)
-    (w / "d_redir").mkdir()
-    (w / "d_redir" / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
-    add("redirect at another repository's .git", w / "d_redir")
-    T._git("-C", str(victim), "worktree", "add", "-q", str(w / "victim-wt"))
-    (w / "d_forged").mkdir()
-    (w / "d_forged" / ".git").write_text(
-        f"gitdir: {victim / '.git' / 'worktrees' / 'victim-wt'}\n", encoding="utf-8"
-    )
-    add("redirect forged worktree-admin pointer", w / "d_forged")
-    # The same forgery reached through the cwd-marker rung: a ceiling at the
-    # forged checkout stops git's own walk, so only the resolver's marker walk
-    # finds the `.git` file, and its repository guard is the only defence.
-    victim2 = T._repo(w / "victim2", good.format("victim2"), commit=True)
-    T._git("-C", str(victim2), "worktree", "add", "-q", str(w / "victim2-wt"))
-    (w / "ceil_forged" / "proj" / "sub").mkdir(parents=True)
-    (w / "ceil_forged" / "proj" / ".git").write_text(
-        f"gitdir: {victim2 / '.git' / 'worktrees' / 'victim2-wt'}\n", encoding="utf-8"
-    )
-    add("cwd-marker rung forged worktree-admin pointer", w / "ceil_forged" / "proj",
-        cwd=w / "ceil_forged" / "proj" / "sub", declared=None,
-        extra={"GIT_CEILING_DIRECTORIES": str(w / "ceil_forged" / "proj")})
-    T._repo(w / "stores" / "ext_bare.git", good.format("extbare"), bare=True)
-    (w / "d_extbare").mkdir()
-    (w / "d_extbare" / ".git").write_text(
-        f"gitdir: {w / 'stores' / 'ext_bare.git'}\n", encoding="utf-8"
-    )
-    add("decline .git at external bare", w / "d_extbare")
-    T._git("init", "-q", f"--separate-git-dir={w / 'stores' / 'd_ext.git'}", str(w / "d_ext"))
-    T._git("-C", str(w / "d_ext"), "remote", "add", "origin", bad)
-    add("decline external unrepresentable", w / "d_ext")
-    # The cwd-marker rung: a ceiling above the working directory stops git's
-    # own walk, so only the resolver's marker walk reaches the `.git` file.
-    T._repo(w / "stores" / "ceil_bare.git", good.format("ceilbare"), bare=True)
-    (w / "ceil" / "proj" / "sub").mkdir(parents=True)
-    (w / "ceil" / "proj" / ".git").write_text(
-        f"gitdir: {w / 'stores' / 'ceil_bare.git'}\n", encoding="utf-8"
-    )
-    add("cwd-marker rung .git at bare", w / "ceil" / "proj", cwd=w / "ceil" / "proj" / "sub",
-        declared=None, extra={"GIT_CEILING_DIRECTORIES": str(w / "ceil" / "proj")})
+    def own_origin_unreadable(base):
+        return with_sub(T._repo(base / "target", good.format("unreadable")))
 
-    def git_out(root, *args):
+    def own_symlinked_store(base):
+        T._repo(base / "target", good.format("symstore"))
+        (base / "target" / ".git").rename(base / "symstore.git")
+        (base / "target" / ".git").symlink_to(base / "symstore.git")
+        return with_sub(base / "target")
+
+    def own_external_store(base):
+        T._git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "target"))
+        T._git("-C", str(base / "target"), "remote", "add", "origin", good.format("extstore"))
+        return with_sub(base / "target")
+
+    def own_external_unrepresentable(base):
+        T._git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "target"))
+        T._git("-C", str(base / "target"), "remote", "add", "origin", T.BAD_ORIGIN)
+        return with_sub(base / "target")
+
+    def own_store_worktree(base):
+        T._git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "main"))
+        T._git("-C", str(base / "main"), "remote", "add", "origin", good.format("storewt"))
+        T._git("-C", str(base / "main"), "commit", "-q", "--allow-empty", "-m", "i")
+        T._git("-C", str(base / "main"), "worktree", "add", "-q", str(base / "target"))
+        return with_sub(base / "target")
+
+    def own_store_named_dotgit(base):
+        (base / "store").mkdir()
+        T._git("init", "-q", f"--separate-git-dir={base / 'store' / '.git'}", str(base / "target"))
+        T._git("-C", str(base / "target"), "remote", "add", "origin", good.format("dotgit"))
+        return with_sub(base / "target")
+
+    def own_submodule_local_origin(base):
+        src = T._repo(base / "src", None, commit=True)
+        sup = T._repo(base / "super", good.format("super"), commit=True)
+        T._git("-C", str(sup), "submodule", "add", "-q", str(src), "mod")
+        return with_sub(sup / "mod")
+
+    def own_bare_repository(base):
+        return with_sub(T._repo(base / "target.git", good.format("bare"), bare=True))
+
+    def home_root(base):
+        return with_sub(T._repo(base / "target", good.format("home")))
+
+    # name -> (builder, environment the cell runs under, given the target)
+    extra = {
+        "own_unrepresentable": (own_unrepresentable, None),
+        "own_origin_unreadable": (
+            own_origin_unreadable, lambda target: {"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"},
+        ),
+        "own_symlinked_store": (own_symlinked_store, None),
+        "own_external_store": (own_external_store, None),
+        "own_external_unrepresentable": (own_external_unrepresentable, None),
+        "own_store_worktree": (own_store_worktree, None),
+        "own_store_named_dotgit": (own_store_named_dotgit, None),
+        "own_submodule_local_origin": (own_submodule_local_origin, None),
+        "own_bare_repository": (own_bare_repository, None),
+        "home_root": (home_root, lambda target: {"HOME": str(target)}),
+    }
+    shapes = {name: (build, None) for name, build in routes.SHAPES.items()}
+    shapes.update(extra)
+
+    def git_out(target, *args):
         out = subprocess.run(
-            [real_git, "-C", str(root), *args], capture_output=True, text=True,
-            timeout=30, env={"PATH": plain_path, "HOME": str(home)},
+            [real_git, "-C", str(target), *args], capture_output=True, text=True, timeout=30,
         )
         return out.stdout.strip() if out.returncode == 0 else None
 
-    def run_show(cwd, declared, shimmed, extra):
-        env = {
-            "PATH": (str(shim) + os.pathsep + plain_path) if shimmed else plain_path,
-            "HOME": str(home),
-            "PACT_TEST_MEMORY_DIR": str(mem),
-        }
-        if declared is not None:
-            env["CLAUDE_PROJECT_DIR"] = str(declared)
-        env.update(extra or {})
-        out = subprocess.run(
-            [sys.executable, str(SCRIPTS / "cli.py"), "project-id", "show", "--db-path", str(store)],
-            cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
-        )
-        return json.loads(out.stdout)["result"], env["HOME"]
-
-    subprocess.run(
-        [sys.executable, str(SCRIPTS / "cli.py"), "setup", "--db-path", str(store)],
-        cwd=base, env={"PATH": plain_path, "HOME": str(home), "PACT_TEST_MEMORY_DIR": str(mem)},
-        capture_output=True, timeout=60,
-    )
-    result = {}
-    for name, (root, cwd, declared, shimmed, extra) in cells.items():
-        common = git_out(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        placeable = bool(common) and os.path.isdir(common)
-        if placeable:
-            with open(os.path.join(common, "pact-project-id"), "w", encoding="utf-8") as pin:
-                pin.write("just-a-folder-name\n")
-        git_dir = git_out(root, "rev-parse", "--absolute-git-dir")
+    def properties(target, home):
+        common = git_out(target, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        git_dir = git_out(target, "rev-parse", "--absolute-git-dir")
         unlinked_admin = False
-        if placeable and git_dir and os.path.realpath(git_dir) != os.path.realpath(common):
-            # A linked worktree's admin dir names its checkout in `gitdir`;
-            # it links back only when that names this root's `.git`.
+        if common and git_dir and os.path.realpath(git_dir) != os.path.realpath(common):
             back = os.path.join(git_dir, "gitdir")
-            target = open(back, encoding="utf-8").read().strip() if os.path.isfile(back) else ""
-            unlinked_admin = os.path.realpath(target) != os.path.realpath(os.path.join(root, ".git"))
-        record, run_home = run_show(cwd, declared, shimmed, extra)
-        result[name] = {
-            "read": record.get("override_ignored") is not None,
-            "placeable": placeable,
-            "bare": git_out(root, "rev-parse", "--is-bare-repository") == "true",
+            linked = open(back, encoding="utf-8").read().strip() if os.path.isfile(back) else ""
+            unlinked_admin = os.path.realpath(linked) != os.path.realpath(os.path.join(target, ".git"))
+        return {
+            "bare": git_out(target, "rev-parse", "--is-bare-repository") == "true",
             "unlinked_admin": unlinked_admin,
-            "home_root": os.path.realpath(root) == os.path.realpath(run_home),
+            "home_root": os.path.realpath(target) == os.path.realpath(home),
         }
-    return result
+
+    cells = {}
+    for shape, (build, env_for) in shapes.items():
+        for route, (run, sources) in routes.ROUTES.items():
+            base = base_root / f"c{len(cells)}"
+            base.mkdir()
+            target = build(base)
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            pin = routes.plant_unusable_pin(target)
+            env = env_for(target) if env_for else {}
+            with pytest.MonkeyPatch.context() as mp:
+                routes._clear(mp)
+                for key, value in env.items():
+                    mp.setenv(key, value)
+                try:
+                    detected = run(mp, target, elsewhere)
+                except Exception as exc:  # noqa: BLE001 - a raising route is a result
+                    cells[(shape, route)] = {"reached": False, "error": repr(exc)}
+                    continue
+                home = os.environ["HOME"]
+            _answer, rung = routes._answer(detected)
+            cells[(shape, route)] = {
+                "error": None,
+                "reached": rung in sources,
+                "placeable": pin is not None,
+                "read": routes._override(detected) is not None,
+                **properties(target, home),
+            }
+    # The one decline that is a property of the route, not of a shape.
+    base = base_root / "declaration_unresolved"
+    (base / "elsewhere").mkdir(parents=True)
+    with pytest.MonkeyPatch.context() as mp:
+        routes._clear(mp)
+        mp.chdir(base / "elsewhere")
+        mp.setenv("CLAUDE_PROJECT_DIR", str(base / "missing"))
+        detected = routes._detect()
+    cells[("declaration_unresolved", "CLAUDE_PROJECT_DIR")] = {
+        "error": None, "reached": True, "placeable": False,
+        "read": routes._override(detected) is not None,
+        "bare": False, "unlinked_admin": False, "home_root": False,
+    }
+    return cells
+
+
+@pytest.fixture(scope="module")
+def override_cli_anchors(tmp_path_factory):
+    """{route: (in-process override, CLI-envelope override)} for the routes a
+    plain subprocess can take, on one read shape and one never-read shape."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from fixtures import identity_routes as routes
+
+    base_root = tmp_path_factory.mktemp("override_cli_anchors")
+    mem = base_root / "mem"
+    mem.mkdir()
+    store = mem / "memory.db"
+    env0 = {"PATH": os.environ["PATH"], "HOME": str(base_root), "PACT_TEST_MEMORY_DIR": str(mem)}
+    subprocess.run([sys.executable, str(SCRIPTS / "cli.py"), "setup", "--db-path", str(store)],
+                   cwd=base_root, env=env0, capture_output=True, timeout=60)
+    # route -> (cwd, CLAUDE_PROJECT_DIR, GIT_CEILING_DIRECTORIES), given target/elsewhere
+    plain = {
+        "git root": lambda t, e: (t, None, None),
+        "git root (subdirectory)": lambda t, e: (t / "sub", None, None),
+        "CLAUDE_PROJECT_DIR": lambda t, e: (e, t, None),
+        "CLAUDE_PROJECT_DIR (subdirectory)": lambda t, e: (e, t / "sub", None),
+        "cwd marker": lambda t, e: (t / "sub", None, t),
+    }
+    anchors = {}
+    for shape in ("foreign_external_store", "bare_target"):
+        for route, place in plain.items():
+            run, _sources = routes.ROUTES[route]
+            base = base_root / f"{shape}-{len(anchors)}"
+            base.mkdir()
+            target = routes.SHAPES[shape](base)
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            routes.plant_unusable_pin(target)
+            with pytest.MonkeyPatch.context() as mp:
+                routes._clear(mp)
+                inproc = routes._override(run(mp, target, elsewhere))
+            cwd, declared, ceiling = place(target, elsewhere)
+            env = dict(env0)
+            if declared is not None:
+                env["CLAUDE_PROJECT_DIR"] = str(declared)
+            if ceiling is not None:
+                env["GIT_CEILING_DIRECTORIES"] = str(ceiling)
+            out = subprocess.run(
+                [sys.executable, str(SCRIPTS / "cli.py"), "project-id", "show", "--db-path", str(store)],
+                cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
+            )
+            ignored = json.loads(out.stdout)["result"].get("override_ignored")
+            cli = (ignored.get("reason"), ignored.get("path") is None) if ignored else None
+            anchors[(shape, route)] = (inproc, cli)
+    return anchors
 
 
 class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
-    """Where an unusable override file is READ (and so reported) is measured.
+    """Where an unusable override file is READ (and so reported) is measured,
+    over every shape x every resolver route.
 
-    `read` comes from the emitted envelope; the properties that name each
-    never-read route are measured by git on the same root. Every placeable
-    cell that is not read must carry a property the SKILL names, every
-    placeable cell carrying one must not be read, and the SKILL names a
-    property exactly when some cell measures it.
+    `read` is whether the detection set `override_ignored`; the properties
+    that name each never-read route are measured by git and the environment
+    on the same target. Only cells whose own rung answered are judged (a route
+    that hands a shape to another rung measures that rung, not itself). Every
+    reached placeable cell that is not read must carry a property the SKILL
+    names, every reached cell carrying one must not be read, the SKILL names
+    a property exactly when some reached cell measures it, and every route
+    and every shape is reached somewhere. Cross-route AGREEMENT of the
+    override disclosure is the rung-parity test's assertion; this class owns
+    the skill sentence.
     """
 
     # Each measured property and the SKILL phrase that names its route.
@@ -1222,33 +1381,62 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
     def _named(cell) -> set:
         return {prop for prop in TestOverrideIsReadOnEveryRouteItIsSaidToBe.NEVER_READ if cell[prop]}
 
+    @staticmethod
+    def _reached(matrix) -> dict:
+        return {key: cell for key, cell in matrix.items() if cell["reached"]}
+
+    def test_no_route_raises_on_any_shape(self, override_read_matrix):
+        raised = {key: cell["error"] for key, cell in override_read_matrix.items() if cell["error"]}
+        assert raised == {}, f"a resolver route raised instead of answering: {raised}"
+
+    def test_every_route_and_every_shape_is_reached(self, override_read_matrix):
+        from fixtures.identity_routes import ROUTES
+
+        reached = self._reached(override_read_matrix)
+        routes = {route for _shape, route in reached}
+        shapes = {shape for shape, _route in override_read_matrix}
+        assert set(ROUTES) <= routes, f"a resolver route no cell reaches: {set(ROUTES) - routes}"
+        unreached = shapes - {shape for shape, _route in reached}
+        assert unreached == set(), f"a shape no route reaches: {unreached}"
+
     def test_every_unread_placeable_cell_is_on_a_named_route(self, override_read_matrix):
         unnamed = {
-            name for name, cell in override_read_matrix.items()
+            key for key, cell in self._reached(override_read_matrix).items()
             if cell["placeable"] and not cell["read"] and not self._named(cell)
         }
         assert unnamed == set(), f"an unusable override is silently not read on: {unnamed}"
 
     def test_no_named_route_reads_the_file(self, override_read_matrix):
         read_anyway = {
-            name: sorted(self._named(cell)) for name, cell in override_read_matrix.items()
+            key: sorted(self._named(cell))
+            for key, cell in self._reached(override_read_matrix).items()
             if cell["placeable"] and cell["read"] and self._named(cell)
         }
         assert read_anyway == {}, f"a route the SKILL calls never-read reads the file: {read_anyway}"
 
     def test_the_skill_names_exactly_the_measured_routes(self, override_read_matrix):
         sentence = self._sentence()
+        reached = self._reached(override_read_matrix).values()
         for prop, phrase in self.NEVER_READ.items():
-            measured = any(
-                cell[prop] and cell["placeable"] for cell in override_read_matrix.values()
-            )
+            measured = any(cell[prop] and cell["placeable"] for cell in reached)
             assert (phrase in sentence) == measured, prop
 
     def test_the_no_git_dir_route_is_named_when_measured(self, override_read_matrix):
-        unplaceable = [n for n, c in override_read_matrix.items() if not c["placeable"]]
+        unplaceable = [
+            key for key, cell in self._reached(override_read_matrix).items()
+            if not cell["placeable"]
+        ]
         assert unplaceable, "no cell measures a decline that finds no git directory"
-        assert all(not override_read_matrix[n]["read"] for n in unplaceable)
+        assert all(not override_read_matrix[key]["read"] for key in unplaceable)
         assert self.NO_GIT_DIR in self._sentence()
+
+    def test_the_cli_envelope_reports_what_the_detection_set(self, override_cli_anchors):
+        """The in-process value is the one `project-id show` emits, on every
+        route a plain subprocess can take, for a read and a never-read shape."""
+        differ = {key: pair for key, pair in override_cli_anchors.items() if pair[0] != pair[1]}
+        assert differ == {}, f"the CLI envelope and the detection disagree: {differ}"
+        assert any(pair[0] is not None for pair in override_cli_anchors.values())
+        assert any(pair[0] is None for pair in override_cli_anchors.values())
 
     def test_the_read_rule_is_stated(self):
         assert (
