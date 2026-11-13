@@ -280,11 +280,12 @@ class TestOneLedgerName:
         memory store's reader spells the name as a literal."""
         hooks = Path(session_end.__file__).parent
         scripts = hooks.parent / "skills" / "pact-memory" / "scripts"
-        literal = '"' + LEDGER + '"'
         for source in (hooks / "session_end.py", scripts / "memory_api.py"):
             text = source.read_text(encoding="utf-8")
             assert "PRUNE_LEDGER_NAME" in text, f"{source.name} does not use the constant"
-            assert literal not in text, f"{source.name} spells the ledger name literally"
+            for quote in ('"', "'"):
+                literal = quote + LEDGER + quote
+                assert literal not in text, f"{source.name} spells the ledger name literally"
 
 
 class TestEndToEndOverTheRealSeam:

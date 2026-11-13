@@ -364,13 +364,16 @@ class TestReadOrigin:
 
     def test_a_configured_origin_is_returned_raw(self, tmp_path):
         """Catches normalization inside the reader (the canonicaliser must see
-        the raw value, including any whitespace it is required to reject)."""
+        the raw value, including any whitespace it is required to reject).
+        RED WHEN the reader strips, case-folds or canonicalises the value: the
+        configured url carries surrounding whitespace and an upper-case host,
+        and the reader must return it byte for byte."""
         assert_outside_repository(tmp_path)
-        repo = make_repo(tmp_path / "repo", remote="https://github.com/o/r.git")
+        raw = "  https://GitHub.com/o/r.git \t"
+        repo = make_repo(tmp_path / "repo", remote=raw)
         origin = pi.read_origin(repo)
         assert origin.state == pi.ORIGIN_PRESENT
-        assert origin.value is not None
-        assert origin.value.strip() == "https://github.com/o/r.git"
+        assert origin.value == raw
 
     def test_missing_git_is_unavailable(self, tmp_path, monkeypatch):
         """Catches an absent-reader fallback when git cannot run at all."""

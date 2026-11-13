@@ -186,6 +186,19 @@ class TestRekeyLifecycle:
             f"the merge lost or refused rows: legacy={legacy}, canonical={canonical}"
         )
 
+    def test_the_store_refuses_a_basename_target_without_the_cli(self, rekey_env):
+        """The store's own refusal, reached without the CLI's check in front
+        of it. RED WHEN `rekey_project` accepts a non-canonical target: the
+        CLI refuses one first, so no CLI arm can see the store accept it."""
+        _seed(rekey_env, [("m1", LEGACY)])
+        with db_connection(rekey_env.store) as conn:
+            with pytest.raises(ValueError, match="canonical"):
+                rekey_project(conn, LEGACY, "just-a-folder", dry_run=False)
+        with db_connection(rekey_env.store) as conn:
+            assert conn.execute(
+                "SELECT project_id FROM memories WHERE id = 'm1'"
+            ).fetchone()[0] == LEGACY
+
     def test_from_equals_to_is_a_zero_noop(self, rekey_env):
         _seed(rekey_env, [("m1", LEGACY)])
         before = _rows(rekey_env.store)

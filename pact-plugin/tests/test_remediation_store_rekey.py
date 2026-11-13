@@ -108,8 +108,9 @@ class TestTheRekeyOwnsItsTransaction:
 
         The initialiser the rekey used to call committed whatever the caller
         had open, so a caller's later ROLLBACK undid nothing. RED WHEN the
-        refusal is removed (the move then commits the caller's row) or the
-        refusal comes after a commit.
+        refusal is removed (the apply's own BEGIN then fails inside the
+        caller's transaction with a different error) or the refusal comes
+        after a commit (the caller's row then survives its ROLLBACK).
         """
         path, conn = _store(tmp_path)
         _memory(conn, "m0", LEGACY)
@@ -460,13 +461,18 @@ class TestBucketSessionIds:
         sessions no record can be found for.
 
         RED WHEN another bucket's session appears, a NULL or empty session id
-        is returned, a session repeats, or the order is not newest first.
+        is returned, a session repeats, or the sessions are not ordered by
+        their newest memory, newest first. Three sessions, so the expected
+        order is neither id order in either direction; the session written
+        twice holds both the oldest and the newest memory, so no order by
+        first memory produces it either.
         """
         _path, conn = _store(tmp_path)
         rows = [
-            ("a1", LEGACY, "old-session", "2026-01-01T00:00:00+00:00"),
-            ("a2", LEGACY, "new-session", "2026-03-01T00:00:00+00:00"),
-            ("a3", LEGACY, "old-session", "2026-02-01T00:00:00+00:00"),
+            ("a1", LEGACY, "s2-written-twice", "2026-01-01T00:00:00+00:00"),
+            ("a2", LEGACY, "s3-written-once", "2026-03-01T00:00:00+00:00"),
+            ("a6", LEGACY, "s1-written-once", "2026-02-01T00:00:00+00:00"),
+            ("a3", LEGACY, "s2-written-twice", "2026-03-15T00:00:00+00:00"),
             ("a4", LEGACY, None, "2026-04-01T00:00:00+00:00"),
             ("a5", LEGACY, "", "2026-04-02T00:00:00+00:00"),
             ("b1", "other", "foreign-session", "2026-05-01T00:00:00+00:00"),
@@ -480,7 +486,9 @@ class TestBucketSessionIds:
             )
         conn.commit()
         try:
-            assert bucket_session_ids(conn, LEGACY) == ["new-session", "old-session"]
+            assert bucket_session_ids(conn, LEGACY) == [
+                "s2-written-twice", "s3-written-once", "s1-written-once",
+            ]
             assert bucket_session_ids(conn, "no-such-bucket") == []
         finally:
             conn.close()
