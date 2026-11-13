@@ -1427,6 +1427,48 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
         assert outcome == LEGACY_PLAUSIBLE_VERIFIED, detail
 
 
+class TestTheScopeSaysWhatDegradesAndWhatRaises:
+    """`_read_project_scopes` degrades only for a store with no schema, and
+    raises for a present store it cannot open.
+
+    Catches the disclosure calling an unreadable store "degraded" (the
+    caller would then read the canonical scope alone and hide every legacy
+    row the store holds), and comments that describe a decline record the
+    code no longer builds.
+    """
+
+    def test_a_schema_less_store_degrades_and_says_why(self, identity_env, monkeypatch, caplog):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        store = identity_env / "store.db"
+        sqlite3_module = memory_api.sqlite3
+        sqlite3_module.connect(str(store)).close()
+        monkeypatch.chdir(repo)
+        memory = PACTMemory(session_id="s", db_path=store)
+        caplog.clear()
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert memory._legacy_scope_state["degraded"] == "no schema"
+        warnings = [r.getMessage() for r in caplog.records if "could not be checked" in r.getMessage()]
+        assert len(warnings) == 1 and "has no schema yet" in warnings[0], warnings
+        assert "unreadable" not in warnings[0]
+
+    def test_a_present_store_that_is_not_a_database_raises(self, identity_env, monkeypatch):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        store = identity_env / "store.db"
+        store.write_bytes(b"not a sqlite store, " * 8)
+        monkeypatch.chdir(repo)
+        memory = PACTMemory(session_id="s", db_path=store)
+        with pytest.raises(memory_api.StoreFaultError):
+            memory._read_project_scopes()
+
+    def test_the_source_describes_the_decline_record_it_builds(self):
+        source = Path(memory_api.__file__).read_text(encoding="utf-8")
+        assert "{reason, override}" not in source
+        doc = PACTMemory._read_project_scopes.__doc__
+        assert "StoreFaultError" in doc and "uninitialized or unreadable store" not in doc
+
+
 class TestTheGateTrustsOnlyLinkedWorktrees:
     """A worktree widens the gate only when it links back to the repository.
 

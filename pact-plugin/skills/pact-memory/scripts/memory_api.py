@@ -1727,8 +1727,9 @@ class PACTMemory:
                 else None
             )
             # STRUCTURED DECLINE DISCLOSURE, carried from the same pass. None
-            # on every resolution that produced an id; `{reason, override}`
-            # when a rung refused a repository-chosen basename.
+            # on every resolution that produced an id; otherwise
+            # `{source, reason, override_path}` from `decline_record`, for
+            # whichever rung declined and why.
             self._decline_reason = detected.decline_reason
             self._decline_detail = detected.decline_detail
             # STRUCTURED SUPPRESSION DISCLOSURE. A submodule admin dir yields
@@ -2498,10 +2499,16 @@ class PACTMemory:
 
         READS NEVER WRITE. An absent store returns the canonical scope alone
         rather than being created, and when `conn` is not supplied the probe
-        opens the store READ-ONLY, so an uninitialized or unreadable store
-        cannot run `init_schema` behind a read. That state is DEGRADED, not
-        fatal: the scope narrows to the canonical id and the degraded state
-        is disclosed in `_legacy_scope_state`; the result is not cached.
+        opens the store READ-ONLY, so a read never runs `init_schema`.
+
+        WHAT DEGRADES AND WHAT RAISES. A store with no schema yet, or one that
+        vanished between the presence check and the open, is DEGRADED, not
+        fatal: the scope narrows to the canonical id, the state is disclosed
+        in `_legacy_scope_state` (`degraded` is `no schema` or
+        `store_unreadable`), and the result is not cached. A store that is
+        PRESENT but cannot be opened, or is not a readable SQLite database,
+        RAISES `StoreFaultError` with the remedy named: reporting the
+        canonical scope alone for it would hide every legacy row it holds.
 
         THE CACHE KEY STATS BOTH THE DATABASE AND ITS `-wal` SIBLING. The
         store runs in WAL mode, and another process's commit can land only in
@@ -2569,16 +2576,18 @@ class PACTMemory:
         # same file.
         with _legacy_probe_context(store, conn) as (connection, degraded_reason):
             if connection is None:
-                # FAIL-SOFT, DISCLOSED. The read-only probe could not read the
-                # store (no schema, or unreadable), so the legacy bucket
+                # FAIL-SOFT, DISCLOSED. The store has no schema yet, or it
+                # vanished before the read-only open, so the legacy bucket
                 # cannot be judged. Narrow to the canonical scope and say so;
                 # nothing was written and the degraded result is NOT cached,
-                # so repairing the store is observed on the next read.
+                # so a store that appears is observed on the next read. A
+                # present store that cannot be opened never reaches here:
+                # the probe raises StoreFaultError.
                 logger.warning(
                     "the legacy project bucket could not be checked: the store "
-                    "at %r is uninitialized or unreadable (%s). Reads are "
-                    "limited to the canonical project id %r until the store is "
-                    "repaired.",
+                    "at %r has no schema yet or was not there to open (%s). "
+                    "Reads are limited to the canonical project id %r until "
+                    "the store holds memories.",
                     store,
                     degraded_reason,
                     scope,
