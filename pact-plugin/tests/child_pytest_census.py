@@ -52,10 +52,13 @@ them that does not block pytest-randomly is refused:
 - [script] The program is an interpreter that runs pytest's program or
   `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
-  `echo python /venv/bin/pytest` no interpreter runs a script. When the word
-  before the program is an option the wrapper tables below do not list, the
-  program may be that option's value, so each later word that would then be the
-  program is tried too (`uv run --made-up-option python3 python /venv/bin/pytest`).
+  `echo python /venv/bin/pytest` no interpreter runs a script. When the program
+  word is named like an interpreter and follows an option the wrapper tables
+  below do not know (neither a value option nor a flag), it may be that option's
+  value, so the next word that would then be the program is tried too
+  (`uv run --made-up-option python3 python /venv/bin/pytest`). A known flag
+  (`uv run -v python3 ...`) or a program not named like an interpreter
+  (`uv run -v echo python ...`) is never stepped past.
 - [wrapper] Any family above behind NAME=VALUE words, the shell's reserved words
   or the listed wrappers and tool runners (below).
 - [shell] Any family above inside the command text of a shell run with `-c`
@@ -121,8 +124,9 @@ Blind spots, examples of launches outside the census:
    before its run verb (`hatch -e test run pytest`, `conda -v run pytest`), and
    process wrappers such as `chrt`, `taskset`, `ionice` or `setsid`; or behind a
    listed wrapper's option whose separate value _WRAPPERS does not name, which
-   hides a bare `pytest` program, `coverage run` or a shell after it. The
-   interpreter forms ([module], [mention], [script]) are still caught there.
+   hides a bare `pytest` program, `coverage run` or a shell after it, and hides
+   an interpreter running pytest's script unless the hidden value is itself
+   named like an interpreter. [module] and [mention] are still caught there.
 9. Shell text the census does not expand or track: `$( )` and backtick
    substitutions, variables (`$PYTEST`), `export`, aliases, functions, `eval`,
    `env -S`, and a script fed to a shell's stdin (`bash <<EOF`, `bash -s`). An
@@ -220,6 +224,34 @@ _WRAPPERS = {
                            "--pypi-keyring-provider", "--concurrent-solves",
                            "--concurrent-downloads"}),
 }
+# The listed wrappers' options that take no value, from the same sources. The
+# script-route candidates never step past a word after one of these.
+_KNOWN_FLAGS = frozenset({
+    # uv run / uv tool run / uvx (uv 0.13.6 --help)
+    "--active", "--all-extras", "--all-groups", "--all-packages", "--compile-bytecode", "--exact",
+    "--frozen", "--gui-script", "--help", "--isolated", "--locked", "--managed-python", "--module",
+    "--no-binary", "--no-build", "--no-build-isolation", "--no-cache", "--no-config",
+    "--no-default-groups", "--no-dev", "--no-editable", "--no-env-file", "--no-index",
+    "--no-managed-python", "--no-progress", "--no-project", "--no-python-downloads",
+    "--no-require-build-hashes", "--no-sources", "--no-sync", "--offline", "--only-dev", "--quiet",
+    "--refresh", "--reinstall", "--require-build-hashes", "--script", "--system-certs", "--upgrade",
+    "--verbose", "--lfs", "-U", "-h", "-m", "-n", "-q", "-s", "-v",
+    # timeout, env, xvfb-run, time, exec, sudo
+    "--preserve-status", "--foreground", "-i", "--ignore-environment", "-0", "--null", "--debug",
+    "--list-signal-handling", "-a", "--auto-servernum", "-l", "--listen-tcp", "-p", "--append",
+    "--portability", "-c", "-A", "-b", "-E", "-e", "-H", "-K", "-k", "-P", "-S", "-V",
+    "--askpass", "--background", "--preserve-env", "--edit", "--set-home", "--login",
+    "--remove-timestamp", "--reset-timestamp", "--list", "--non-interactive",
+    "--preserve-groups", "--stdin", "--shell", "--version", "--validate",
+    # pipx run, pdm run, poetry run, pipenv run
+    "--skip-maintenance", "--global", "--no-path-check", "--path", "--pypackages",
+    "--fetch-missing-python", "--system-site-packages", "--editable", "-g", "-j", "--json",
+    "--site-packages", "--recreate", "--ansi", "--no-ansi", "--no-interaction", "--no-plugins",
+    "-vv", "-vvv", "--system",
+    # conda run, micromamba run, rye run, pixi run (documentation)
+    "--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream", "-d", "--detach",
+    "--clean-env", "--force-activate", "--revalidate", "--skip-deps", "--dry-run",
+})
 # Wrappers named by more than one word, longest first.
 _MULTI_WORD_WRAPPERS = tuple(sorted(
     (tuple(name.split()) for name in _WRAPPERS if " " in name), key=len, reverse=True))
@@ -575,14 +607,16 @@ def _pytest_args(part, program):
 def _program_candidates(part, program):
     """The program index, then each later word that is the program if the word
     before it was the value of an option the wrapper tables do not list
-    (`uv run --made-up-option python3 python ...`). A part with no program word
-    (only assignments or a bare wrapper) has none."""
+    (`uv run --made-up-option python3 python ...`). A step is taken only past an
+    interpreter-named word that follows an option the tables do not know: a
+    known flag (`-v`) takes no value, and any other word (`echo`, `ls`) is the
+    program itself. A part with no program word (only assignments or a bare
+    wrapper) has none."""
     if program >= len(part):
         return []
     candidates = [program]
     i = program
-    while 0 < i < len(part) and part[i - 1].startswith("-") and "=" not in part[i - 1] \
-            and part[i - 1] not in ("-", "--"):
+    while 0 < i < len(part) and _is_interpreter(part[i]) and _unknown_option(part[i - 1]):
         i += 1
         while i < len(part) and part[i].startswith("-") and part[i] not in ("-", "--"):
             i += 1
@@ -590,6 +624,13 @@ def _program_candidates(part, program):
             break
         candidates.append(i)
     return candidates
+
+
+def _unknown_option(word):
+    """True for an option word that may take the next word as its value: an
+    option no wrapper table knows, written without `=`."""
+    return word.startswith("-") and "=" not in word and word not in ("-", "--") \
+        and word not in _KNOWN_FLAGS and not any(word in values for values in _WRAPPERS.values())
 
 
 def _split(text):

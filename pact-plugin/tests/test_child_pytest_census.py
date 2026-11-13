@@ -437,6 +437,76 @@ def test_a_neighbouring_form_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None, argv
 
 
+# A WRAPPER OPTION'S VALUE NAMED LIKE AN INTERPRETER. Each refused row starts
+# pytest; each accepted row does not.
+_OPTION_VALUE_REFUSED = [
+    ["uv", "run", "-p", "python3", "python", "-m", "pytest"],
+    ["uv", "run", "--python", "python3.12", "python", "-m", "pytest"],
+    ["uv", "run", "--python=python3.12", "python", "-m", "pytest"],
+    ["uv", "run", "-p", "python3", "python", "/venv/bin/pytest"],
+    ["conda", "run", "-n", "python3", "python", "-m", "pytest"],
+    ["conda", "run", "-p", "/envs/python3", "python", "-m", "pytest"],
+    ["sudo", "-u", "python", "-E", "python", "-m", "pytest"],
+    ["bash", "-c", "uv run -p python3 python -m pytest"],
+    ["bash", "-c", "conda run -n python3 python -m pytest"],
+    ["uvx", "--python", "python3.12", "pytest"],
+    ["uv", "tool", "run", "--python", "python3.12", "pytest"],
+    ["pipx", "run", "--python", "python3.12", "pytest"],
+    ["nice", "-n", "5", "pytest"],
+    ["timeout", "-s", "KILL", "60", "pytest"],
+    ["stdbuf", "-o", "L", "pytest"],
+    ["xvfb-run", "-a", "pytest"],
+    ["env", "-u", "X", "pytest"],
+    ["env", "-C", "/tmp", "pytest"],
+    ["time", "-p", "pytest"],
+    ["nohup", "pytest"],
+    ["exec", "pytest"],
+    ["coverage", "run", "--rcfile", "python.cfg", "-m", "pytest"],
+    ["py", "-V:3.12", "-m", "pytest"],
+]
+
+
+@pytest.mark.parametrize("argv", _OPTION_VALUE_REFUSED)
+def test_an_option_value_named_like_an_interpreter_hides_nothing(argv):
+    assert census._miss(argv, None, {}) is not None, argv
+    blocked = ([argv[0], argv[1], argv[2] + " -p no:randomly"] if argv[0] == "bash"
+               else [*argv, "-p", "no:randomly"])
+    assert census._miss(blocked, None, {}) is None, blocked
+
+
+@pytest.mark.parametrize("argv", [
+    ["uv", "run", "-p", "python3", "python", "-m", "pip", "list"],
+    ["uv", "pip", "install", "pytest"],
+    ["conda", "install", "-n", "python3", "pytest"],
+    ["uv", "run", "-p", "python3", "python", "script.py", "-m", "pytest"],
+    ["sudo", "-u", "python", "ls"],
+    ["timeout", "60", "git", "status"],
+])
+def test_an_option_value_named_like_an_interpreter_makes_no_launch_pytest(argv):
+    assert census._miss(argv, None, {}) is None, argv
+
+
+# The script-route candidates step past an interpreter-named word only, and only
+# when it follows an option the tables do not know: a known flag (`-v`) has no
+# value, and a non-interpreter program (`echo`, `ls`) is the program.
+@pytest.mark.parametrize("accepted, refused_twin", [
+    (["uv", "run", "-v", "echo", "python", "/venv/bin/pytest"],
+     ["uv", "run", "-v", "python", "/venv/bin/pytest"]),
+    (["uv", "run", "--frozen", "ls", "-l", "python", "/venv/bin/pytest"],
+     ["uv", "run", "--frozen", "python", "/venv/bin/pytest"]),
+    (["timeout", "-v", "echo", "python", "/venv/bin/pytest"],
+     ["timeout", "-v", "python", "/venv/bin/pytest"]),
+    (["uv", "run", "-v", "python3", "python", "/venv/bin/pytest"],
+     ["uv", "run", "--made-up-option", "python3", "python", "/venv/bin/pytest"]),
+    (["uv", "run", "--made-up-option", "echo", "python", "/venv/bin/pytest"],
+     ["uv", "run", "--made-up-option", "py", "python", "/venv/bin/pytest"]),
+], ids=["known-flag-then-echo", "known-flag-then-ls", "timeout-flag-then-echo",
+        "known-flag-then-interpreter", "unknown-option-then-echo"])
+def test_the_script_candidates_step_only_past_an_option_value(accepted, refused_twin):
+    assert census._miss(accepted, None, {}) is None, accepted
+    assert census._miss(refused_twin, None, {}) is not None, refused_twin
+
+
 # THE ENUMERATED FAMILIES. The census docstring lists the launch families it
 # refuses, each under a [label]; this map holds at least one refused row per
 # label, and the two sets must be equal, so neither can change alone.
