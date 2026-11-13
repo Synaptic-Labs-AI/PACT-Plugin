@@ -1010,3 +1010,236 @@ class TestNullOverridePathIsMeasured:
 
         with pytest.raises(ValueError):
             decline_record("gitfile_redirect", "/r/.git/pact-project-id")
+
+
+@pytest.fixture(scope="module")
+def override_read_matrix(tmp_path_factory):
+    """{cell: {"read", "placeable", "bare", "unlinked_admin"}} from live envelopes.
+
+    Each cell plants an UNUSABLE override (a folder-name value) at the
+    `<git-common-dir>/pact-project-id` git reports for the cell's root, runs
+    the real `project-id show`, and records `read` = an `override_ignored`
+    record was emitted. The other keys are measured by git on the same root,
+    never assigned by the builder.
+    """
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    T = TestNullOverridePathIsMeasured
+    base = tmp_path_factory.mktemp("override_read_matrix")
+    home, mem = base / "home", base / "mem"
+    home.mkdir()
+    mem.mkdir()
+    store = mem / "memory.db"
+    real_git = shutil.which("git")
+    shim = base / "shim"
+    shim.mkdir()
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *"--get-all remote.origin.url"*) exit 2;; esac\n'
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    os.chmod(shim / "git", 0o755)
+    plain_path = os.pathsep.join((os.path.dirname(real_git), "/usr/bin", "/bin"))
+    bad = T.BAD_ORIGIN
+    good = "https://github.com/acme/{}.git"
+    w = base / "w"
+    (w / "stores").mkdir(parents=True)
+    cells = {}  # name -> (root measured by git, cwd, declared, shim, extra env)
+
+    def add(name, root, cwd=None, declared="root", shimmed=False, extra=None):
+        cells[name] = (root, cwd or root, root if declared == "root" else declared, shimmed, extra)
+
+    # A repository that IS the user's home directory (its run sets HOME to it).
+    homerepo = T._repo(w / "homerepo", good.format("homerepo"))
+    add("home directory root", homerepo, extra={"HOME": str(homerepo)})
+
+    add("resolved own", T._repo(w / "r_own", good.format("r_own")))
+    main = T._repo(w / "r_wtmain", good.format("r_wt"), commit=True)
+    T._git("-C", str(main), "worktree", "add", "-q", str(w / "r_wt"))
+    add("resolved worktree", w / "r_wt")
+    src = T._repo(w / "r_subsrc", None, commit=True)
+    sup = T._repo(w / "r_super", good.format("r_super"), commit=True)
+    T._git("-C", str(sup), "submodule", "add", "-q", str(src), "mod")
+    T._git("-C", str(sup / "mod"), "remote", "set-url", "origin", good.format("r_mod"))
+    add("resolved submodule", sup / "mod")
+    T._repo(w / "r_sym", good.format("r_sym"))
+    (w / "r_sym" / ".git").rename(w / "stores" / "r_sym.git")
+    (w / "r_sym" / ".git").symlink_to(w / "stores" / "r_sym.git")
+    add("resolved symlink", w / "r_sym")
+    T._git("init", "-q", f"--separate-git-dir={w / 'stores' / 'r_ext.git'}", str(w / "r_ext"))
+    T._git("-C", str(w / "r_ext"), "remote", "add", "origin", good.format("r_ext"))
+    add("resolved external", w / "r_ext")
+    T._git("init", "-q", f"--separate-git-dir={w / 'stores' / 'r_swm.git'}", str(w / "r_swm"))
+    T._git("-C", str(w / "r_swm"), "remote", "add", "origin", good.format("r_swm"))
+    T._git("-C", str(w / "r_swm"), "commit", "-q", "--allow-empty", "-m", "i")
+    T._git("-C", str(w / "r_swm"), "worktree", "add", "-q", str(w / "r_swm-wt"))
+    add("resolved sepworktree", w / "r_swm-wt")
+    (w / "dotstore").mkdir()
+    T._git("init", "-q", f"--separate-git-dir={w / 'dotstore' / '.git'}", str(w / "r_dot"))
+    T._git("-C", str(w / "r_dot"), "remote", "add", "origin", good.format("r_dot"))
+    add("redirect own separate dir named .git", w / "r_dot")
+    add("decline own unrepresentable", T._repo(w / "d_own", bad))
+    add("decline own origin unreadable", T._repo(w / "d_own2", good.format("d2")), shimmed=True)
+    (w / "d_broken").mkdir()
+    (w / "d_broken" / ".git").write_text("garbage\n", encoding="utf-8")
+    add("decline broken marker", w / "d_broken")
+    add("decline bare declared", T._repo(w / "d_bare.git", good.format("d_bare"), bare=True))
+    (w / "d_cwd").mkdir()
+    add("decline declaration unresolved", w / "d_cwd", declared=w / "missing")
+    src2 = T._repo(w / "d_subsrc", None, commit=True)
+    sup2 = T._repo(w / "d_super", good.format("d_super"), commit=True)
+    T._git("-C", str(sup2), "submodule", "add", "-q", str(src2), "mod")
+    add("decline submodule local origin", sup2 / "mod")
+    victim = T._repo(w / "victim", good.format("victim"), commit=True)
+    (w / "d_redir").mkdir()
+    (w / "d_redir" / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+    add("redirect at another repository's .git", w / "d_redir")
+    T._git("-C", str(victim), "worktree", "add", "-q", str(w / "victim-wt"))
+    (w / "d_forged").mkdir()
+    (w / "d_forged" / ".git").write_text(
+        f"gitdir: {victim / '.git' / 'worktrees' / 'victim-wt'}\n", encoding="utf-8"
+    )
+    add("redirect forged worktree-admin pointer", w / "d_forged")
+    T._repo(w / "stores" / "ext_bare.git", good.format("extbare"), bare=True)
+    (w / "d_extbare").mkdir()
+    (w / "d_extbare" / ".git").write_text(
+        f"gitdir: {w / 'stores' / 'ext_bare.git'}\n", encoding="utf-8"
+    )
+    add("decline .git at external bare", w / "d_extbare")
+    T._git("init", "-q", f"--separate-git-dir={w / 'stores' / 'd_ext.git'}", str(w / "d_ext"))
+    T._git("-C", str(w / "d_ext"), "remote", "add", "origin", bad)
+    add("decline external unrepresentable", w / "d_ext")
+    # The cwd-marker rung: a ceiling above the working directory stops git's
+    # own walk, so only the resolver's marker walk reaches the `.git` file.
+    T._repo(w / "stores" / "ceil_bare.git", good.format("ceilbare"), bare=True)
+    (w / "ceil" / "proj" / "sub").mkdir(parents=True)
+    (w / "ceil" / "proj" / ".git").write_text(
+        f"gitdir: {w / 'stores' / 'ceil_bare.git'}\n", encoding="utf-8"
+    )
+    add("cwd-marker rung .git at bare", w / "ceil" / "proj", cwd=w / "ceil" / "proj" / "sub",
+        declared=None, extra={"GIT_CEILING_DIRECTORIES": str(w / "ceil" / "proj")})
+
+    def git_out(root, *args):
+        out = subprocess.run(
+            [real_git, "-C", str(root), *args], capture_output=True, text=True,
+            timeout=30, env={"PATH": plain_path, "HOME": str(home)},
+        )
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    def run_show(cwd, declared, shimmed, extra):
+        env = {
+            "PATH": (str(shim) + os.pathsep + plain_path) if shimmed else plain_path,
+            "HOME": str(home),
+            "PACT_TEST_MEMORY_DIR": str(mem),
+        }
+        if declared is not None:
+            env["CLAUDE_PROJECT_DIR"] = str(declared)
+        env.update(extra or {})
+        out = subprocess.run(
+            [sys.executable, str(SCRIPTS / "cli.py"), "project-id", "show", "--db-path", str(store)],
+            cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
+        )
+        return json.loads(out.stdout)["result"], env["HOME"]
+
+    subprocess.run(
+        [sys.executable, str(SCRIPTS / "cli.py"), "setup", "--db-path", str(store)],
+        cwd=base, env={"PATH": plain_path, "HOME": str(home), "PACT_TEST_MEMORY_DIR": str(mem)},
+        capture_output=True, timeout=60,
+    )
+    result = {}
+    for name, (root, cwd, declared, shimmed, extra) in cells.items():
+        common = git_out(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        placeable = bool(common) and os.path.isdir(common)
+        if placeable:
+            with open(os.path.join(common, "pact-project-id"), "w", encoding="utf-8") as pin:
+                pin.write("just-a-folder-name\n")
+        git_dir = git_out(root, "rev-parse", "--absolute-git-dir")
+        unlinked_admin = False
+        if placeable and git_dir and os.path.realpath(git_dir) != os.path.realpath(common):
+            # A linked worktree's admin dir names its checkout in `gitdir`;
+            # it links back only when that names this root's `.git`.
+            back = os.path.join(git_dir, "gitdir")
+            target = open(back, encoding="utf-8").read().strip() if os.path.isfile(back) else ""
+            unlinked_admin = os.path.realpath(target) != os.path.realpath(os.path.join(root, ".git"))
+        record, run_home = run_show(cwd, declared, shimmed, extra)
+        result[name] = {
+            "read": record.get("override_ignored") is not None,
+            "placeable": placeable,
+            "bare": git_out(root, "rev-parse", "--is-bare-repository") == "true",
+            "unlinked_admin": unlinked_admin,
+            "home_root": os.path.realpath(root) == os.path.realpath(run_home),
+        }
+    return result
+
+
+class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
+    """Where an unusable override file is READ (and so reported) is measured.
+
+    `read` comes from the emitted envelope; the properties that name each
+    never-read route are measured by git on the same root. Every placeable
+    cell that is not read must carry a property the SKILL names, every
+    placeable cell carrying one must not be read, and the SKILL names a
+    property exactly when some cell measures it.
+    """
+
+    # Each measured property and the SKILL phrase that names its route.
+    NEVER_READ = {
+        "bare": "when the repository has no working tree",
+        "unlinked_admin": (
+            "when the checkout's .git names a linked worktree's admin directory "
+            "that does not link back to it"
+        ),
+        "home_root": "when the project root is the user's home directory",
+    }
+    NO_GIT_DIR = (
+        "or when no git directory is found (a broken .git marker or a "
+        "declaration that cannot be resolved)"
+    )
+
+    def _sentence(self) -> str:
+        body = _body(SKILL)
+        start = body.index("The file is never read, so nothing is reported,")
+        return body[start:body.index(".", body.index("resolved)", start)) + 1]
+
+    @staticmethod
+    def _named(cell) -> set:
+        return {prop for prop in TestOverrideIsReadOnEveryRouteItIsSaidToBe.NEVER_READ if cell[prop]}
+
+    def test_every_unread_placeable_cell_is_on_a_named_route(self, override_read_matrix):
+        unnamed = {
+            name for name, cell in override_read_matrix.items()
+            if cell["placeable"] and not cell["read"] and not self._named(cell)
+        }
+        assert unnamed == set(), f"an unusable override is silently not read on: {unnamed}"
+
+    def test_no_named_route_reads_the_file(self, override_read_matrix):
+        read_anyway = {
+            name: sorted(self._named(cell)) for name, cell in override_read_matrix.items()
+            if cell["placeable"] and cell["read"] and self._named(cell)
+        }
+        assert read_anyway == {}, f"a route the SKILL calls never-read reads the file: {read_anyway}"
+
+    def test_the_skill_names_exactly_the_measured_routes(self, override_read_matrix):
+        sentence = self._sentence()
+        for prop, phrase in self.NEVER_READ.items():
+            measured = any(
+                cell[prop] and cell["placeable"] for cell in override_read_matrix.values()
+            )
+            assert (phrase in sentence) == measured, prop
+
+    def test_the_no_git_dir_route_is_named_when_measured(self, override_read_matrix):
+        unplaceable = [n for n, c in override_read_matrix.items() if not c["placeable"]]
+        assert unplaceable, "no cell measures a decline that finds no git directory"
+        assert all(not override_read_matrix[n]["read"] for n in unplaceable)
+        assert self.NO_GIT_DIR in self._sentence()
+
+    def test_the_read_rule_is_stated(self):
+        assert (
+            "an unusable file is reported as override_ignored and resolution "
+            "continues without it."
+        ) in _body(SKILL)
