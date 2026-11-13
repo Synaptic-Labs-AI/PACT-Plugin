@@ -1451,6 +1451,12 @@ class TestAnUnpinnableDeclineOffersNoPin:
         messages = [record.getMessage() for record in caplog.records]
         assert messages, "no decline warning was logged"
         for message in messages:
+            if reason == "gitfile_redirect":
+                # The redirect's remedy names ONE pin, conditional on the
+                # user's own `--separate-git-dir=<dir>/.git` store, which an
+                # override there recovers; no other pin may be offered.
+                assert memory_api._REDIRECT_REMEDY in message, message
+                message = message.replace(memory_api._REDIRECT_REMEDY, "")
             assert "pact-project-id" not in message, message
             assert "<git-common-dir>" not in message, message
 
@@ -1764,6 +1770,293 @@ class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
     def test_neither_copy_keeps_the_old_fallback(self):
         for copy in self._copies():
             assert "otherwise by folder name" not in copy, copy
+
+
+# ---------------------------------------------------------------------------
+# Remediation cycle 3: update ordering, the evidence scan's cost, and prose
+# ---------------------------------------------------------------------------
+
+def _insert_row(store: Path, memory_id: str, project_id) -> None:
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute(
+            "INSERT INTO memories "
+            "(id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES (?, 'row', ?, 'old', ?, ?)",
+            (memory_id, project_id, CREATED_AT, CREATED_AT),
+        )
+        conn.commit()
+
+
+class TestUpdateFindsTheRowBeforeItRefuses:
+    """`update` reports a missing row as not found before any ingress
+    refusal, and the folder-name refusal covers folder-name buckets only.
+
+    Catches a full id that resolves without a query reaching the refusal
+    first (a missing row refused with a folder-name message, exit 2 instead
+    of not found), and a NULL-project row refused as if it were a
+    folder-name bucket.
+    """
+
+    MISSING = "d" * 32
+
+    def _memory(self, identity_env, monkeypatch, rows=()):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        store = identity_env / "store.db"
+        for memory_id, project_id in rows:
+            _insert_row(store, memory_id, project_id)
+        return PACTMemory(session_id="s", db_path=store), store
+
+    @pytest.mark.parametrize(
+        "updates", [{"session_id": "new"}, {"project_id": "proj"}],
+        ids=["session_id", "folder-name project_id"],
+    )
+    def test_a_missing_row_is_not_found_not_refused(
+        self, identity_env, monkeypatch, updates
+    ):
+        memory, _store = self._memory(identity_env, monkeypatch)
+        assert memory.project_id == CANONICAL
+        assert memory.update(self.MISSING, updates) is None
+
+    def test_a_null_project_rows_session_can_change(self, identity_env, monkeypatch):
+        from scripts.database import db_connection, get_memory
+
+        row = "b" * 32
+        memory, store = self._memory(identity_env, monkeypatch, [(row, None)])
+        assert memory.update(row, {"session_id": "new"}) == row
+        with db_connection(store) as conn:
+            assert get_memory(conn, row)["session_id"] == "new"
+
+    def test_a_folder_name_rows_session_is_still_refused(
+        self, identity_env, monkeypatch
+    ):
+        row = "a" * 32
+        memory, _store = self._memory(identity_env, monkeypatch, [(row, "proj")])
+        with pytest.raises(ValueError, match="folder-name bucket 'proj'"):
+            memory.update(row, {"session_id": "new"})
+
+    def test_filing_an_existing_row_into_a_folder_name_is_still_refused(
+        self, identity_env, monkeypatch
+    ):
+        row = "c" * 32
+        memory, _store = self._memory(identity_env, monkeypatch, [(row, CANONICAL)])
+        with pytest.raises(ValueError, match="update to project_id 'proj'"):
+            memory.update(row, {"project_id": "proj"})
+
+
+class TestTheEvidenceCheckScansEachRootOnce:
+    """The session-evidence check lists each root's session folder once and
+    parses an unchanged prune ledger once per process.
+
+    Catches the evidence check building and resolving a session path for
+    every writing session, and re-reading the ledger on every read while a
+    bucket stays unproven (measured 0.41 s at 1,000 sessions x 5,000 ledger
+    lines).
+    """
+
+    SESSIONS = 40
+
+    def _rig(self, identity_env, monkeypatch):
+        from scripts.database import db_connection, ensure_initialized
+        from shared.pact_context import PRUNE_LEDGER_NAME, reconstruct_session_dir
+
+        _fresh_scope_state()
+        getattr(memory_api, "_PRUNED_SESSION_INDEX", {}).clear()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        store = identity_env / "store.db"
+        with db_connection(store) as conn:
+            ensure_initialized(conn)
+            conn.executemany(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, 'x', 'proj', ?, ?, ?)",
+                [(f"{i:032x}", f"sess-{i}", CREATED_AT, CREATED_AT)
+                 for i in range(self.SESSIONS)],
+            )
+            conn.commit()
+        slug_dir = Path(reconstruct_session_dir(str(repo), "sess-0")).parent
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        ledger = slug_dir / PRUNE_LEDGER_NAME
+        ledger.write_text(
+            '{"session_id": "other", "project_dir": "/nowhere", '
+            '"started_at": "2026-01-01T00:00:00+00:00"}\n',
+            encoding="utf-8",
+        )
+        return repo, store, slug_dir, ledger
+
+    def test_one_session_path_is_built_per_root_not_per_session(
+        self, identity_env, monkeypatch
+    ):
+        import shared.pact_context as pact_context
+
+        _repo, store, _slug, _ledger = self._rig(identity_env, monkeypatch)
+        calls = []
+        real = pact_context.reconstruct_session_dir
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pact_context, "reconstruct_session_dir", spy)
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert memory._legacy_scope_state["unproven"]
+        assert 1 <= len(calls) <= 2, f"{len(calls)} session paths for {self.SESSIONS} sessions"
+
+    def test_an_unchanged_ledger_is_parsed_once_per_process(
+        self, identity_env, monkeypatch
+    ):
+        _repo, store, _slug, ledger = self._rig(identity_env, monkeypatch)
+        parses = []
+        real = memory_api._pruned_session_records
+
+        def spy(path):
+            parses.append(path)
+            return real(path)
+
+        monkeypatch.setattr(memory_api, "_pruned_session_records", spy)
+        for _ in range(2):
+            _fresh_scope_state()
+            PACTMemory(session_id="s", db_path=store)._read_project_scopes()
+        assert len(parses) == 1, parses
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write('{"session_id": "late", "project_dir": "/x", "started_at": "y"}\n')
+        _fresh_scope_state()
+        PACTMemory(session_id="s", db_path=store)._read_project_scopes()
+        assert len(parses) == 2, "an appended line must be seen on the next read"
+
+    def test_a_present_entry_is_a_live_folder_not_a_reaped_one(
+        self, identity_env, monkeypatch
+    ):
+        """An entry named like the session that is not a readable session
+        folder is no evidence, and the ledger does not stand in for it; with
+        the entry gone, the same ledger line is evidence. This is the
+        per-session existence test the one listing replaced."""
+        import json
+
+        repo, store, slug_dir, ledger = self._rig(identity_env, monkeypatch)
+        good = {"session_id": "sess-0", "project_dir": str(repo),
+                "started_at": datetime_now_iso()}
+        ledger.write_text(json.dumps(good) + "\n", encoding="utf-8")
+        (slug_dir / "sess-0").write_text("not a folder", encoding="utf-8")
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert memory._legacy_scope_state["unproven"]
+        (slug_dir / "sess-0").unlink()
+        _fresh_scope_state()
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._read_project_scopes() == (CANONICAL, "proj")
+
+
+def datetime_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+class TestOneConstructionAsksGitEachQuestionOnce:
+    """A construction and its first legacy read never run the same git
+    command twice.
+
+    Catches the detection pass and the first read each running
+    `git rev-parse --git-common-dir` for the identity root: repeated
+    identical subprocess work in one process.
+    """
+
+    @pytest.mark.parametrize("route", ["declared", "cwd"])
+    def test_no_git_command_repeats(self, identity_env, monkeypatch, route):
+        import collections
+        import subprocess
+
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        if route == "declared":
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        calls = []
+        real = subprocess.run
+
+        def counting(argv, *args, **kwargs):
+            if argv and Path(str(argv[0])).name == "git":
+                calls.append((tuple(map(str, argv)), str(kwargs.get("cwd") or Path.cwd())))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", counting)
+        memory = PACTMemory(session_id="s", db_path=store)
+        memory._read_project_scopes()
+        repeats = {call: n for call, n in collections.Counter(calls).items() if n > 1}
+        assert not repeats, repeats
+        common = [call for call in calls if "--git-common-dir" in call[0]]
+        assert len(common) == 1, common
+
+    def test_a_later_construction_asks_again(self, identity_env, monkeypatch):
+        """The detection pass's answers belong to one construction."""
+        assert memory_api._DETECTION_COMMON_DIRS.get() is None
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        PACTMemory(session_id="s", db_path=identity_env / "store.db")
+        assert memory_api._DETECTION_COMMON_DIRS.get() is None
+
+
+class TestTheGateProseMatchesTheCode:
+    """Docstrings and help text state the current admission and rekey rules.
+
+    Catches prose that still says an unverified bucket is included, that an
+    excluded bucket prints a rekey command, that a defaulted `--to` needs
+    only a non-excluded bucket, or that detection falls back to the folder
+    name after the git root.
+    """
+
+    def test_the_database_docstrings(self):
+        from scripts import database
+
+        gate = database.legacy_candidate_plausibility.__doc__
+        assert "reads the bucket only\n                       on session evidence" in gate
+        assert "the caller INCLUDES the bucket" not in gate
+        assert "counts and no rekey command" in gate
+        assert "counts and the rekey command" not in gate
+        assert "`description` file was created" in database.bucket_session_ids.__doc__
+
+    def test_the_cli_help_and_docstring(self):
+        from scripts import cli
+
+        source = Path(cli.__file__).read_text(encoding="utf-8")
+        assert "bucket and it is neither excluded nor unproven. Run --apply only" in source
+        assert "bucket and it is not excluded. Run --apply" not in source
+        assert "only when that bucket is " in source and "neither excluded nor unproven." in source
+        assert "own legacy candidate that is neither excluded nor\n    unproven" in cli._project_id_rekey.__doc__
+        assert "every populated bucket with its rekey command." not in source
+
+    def test_the_memory_api_docstrings(self):
+        init = PACTMemory.__init__.__doc__
+        assert "the user-scope setting (only\n                        with no declaration" in init
+        assert "git repo root, or current working" not in init
+        assert "detection runs 4 git subprocesses" in init
+        scopes = PACTMemory._read_project_scopes.__doc__
+        assert "An excluded or\n        unproven bucket is not read." in scopes
+        assert "the plausibility gate does not exclude it." not in scopes
+        assert "the inclusion is disclosed\n    as unverified" not in MEMORY_API.read_text(encoding="utf-8")
+
+    def test_the_redirect_remedy_names_the_pin_for_an_own_separate_git_dir(self):
+        """A remedy must not forbid the one action that recovers the case: an
+        override pin in the user's own `--separate-git-dir=<dir>/.git` store
+        answers before the redirect check."""
+        remedy = memory_api._REDIRECT_REMEDY
+        assert remedy.startswith(
+            "Fix or remove the `.git` file, or run from the repository it points at."
+        )
+        assert (
+            "If this checkout is your own `git init --separate-git-dir=<dir>/.git` "
+            "layout, write its canonical id to `<dir>/.git/pact-project-id` instead."
+        ) in remedy
 
 
 class TestTheGateTrustsOnlyLinkedWorktrees:

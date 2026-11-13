@@ -200,7 +200,10 @@ def decline_record(
     A `gitfile_redirect` given a path raises ValueError: the common dir git
     reports there belongs to the repository the `.git` file points at, so a
     pin written to it would re-pin that other repository. The remedy is the
-    `.git` file itself. `source` is the rung that declined; this module
+    `.git` file itself, except for the user's own
+    `git init --separate-git-dir=<dir>/.git` layout, which a pin at
+    `<dir>/.git/pact-project-id` recovers (the remedy text says so; the
+    record still names no path). `source` is the rung that declined; this module
     leaves it None, and the resolver in memory_api, the only layer that
     knows the rung, fills it in.
     """

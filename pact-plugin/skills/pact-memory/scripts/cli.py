@@ -29,7 +29,8 @@ Commands:
     project-file         Print this session's project memory file path, or
                          `unavailable: <reason>` (exit 3). Writes nothing.
     project-id show      Report the detected project id, how it was decided,
-                         and every populated bucket with its rekey command.
+                         and every populated bucket; this checkout's own
+                         bucket carries its rekey command.
 """
 
 from __future__ import annotations
@@ -1080,12 +1081,14 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     --to` is a no-op success.
 
     A DEFAULTED `--to` is the detected canonical id, and it is accepted only
-    for THIS checkout's own legacy candidate that the gate did not exclude:
+    for THIS checkout's own legacy candidate that is neither excluded nor
+    unproven:
     a defaulted target applied to any other bucket moves rows the session
     cannot show are its own. Every other move names its target.
 
     Exit codes: 0 for a clean plan or an applied move, 1 for a refusal (no
-    canonical identity, or a defaulted target the gate does not support), 2
+    canonical identity, a defaulted target the gate does not support, or a
+    `--db-path` store that is not present), 2
     for BAD INPUT only, and 3 for an OPERATIONAL failure (a locked store, an
     integrity error, an I/O fault), with nothing moved.
     """
@@ -1695,7 +1698,8 @@ def build_parser():
             "`--dry-run` is the default and reports the plan by running it "
             "inside a rolled-back savepoint. Name both ends: an omitted `--to` "
             "is accepted only when `--from` is this checkout's own legacy "
-            "bucket and it is not excluded. Run --apply only with the user's "
+            "bucket and it is neither excluded nor unproven. Run --apply only "
+            "with the user's "
             "explicit approval, and never for an excluded bucket or another "
             "repository's id: the move merges rows and cannot be undone. Exit "
             "codes: 0 for a clean plan or an applied move, 1 for a refusal, 2 "
@@ -1717,7 +1721,8 @@ def build_parser():
         metavar="<canonical>",
         help=(
             "Target canonical id. Name it: it defaults only for this "
-            "checkout's own legacy bucket."
+            "checkout's own legacy bucket, and only when that bucket is "
+            "neither excluded nor unproven."
         ),
     )
     project_id_rekey_parser.add_argument(

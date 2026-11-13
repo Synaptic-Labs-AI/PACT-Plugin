@@ -1337,8 +1337,9 @@ def bucket_session_ids(conn: sqlite3.Connection, project_id: str) -> List[str]:
     """Every session id that wrote a memory into `project_id`, newest first.
 
     The legacy-admission evidence check reads this: a session that wrote into
-    the bucket and whose recorded project directory is this repository is
-    evidence the bucket belongs here. NULL and empty session ids are
+    the bucket, whose recorded project directory is this repository, and
+    which started after the repository's `description` file was created is
+    evidence the bucket belongs here (see `_legacy_session_evidence`). NULL and empty session ids are
     excluded, because no session record can be found for them. Ordered by
     each session's most recent memory (newest first, ties by id), so a caller
     that stops at the first hit tries the sessions most likely to still have
@@ -1525,9 +1526,11 @@ def legacy_candidate_plausibility(
     Returns `(outcome, detail)` where outcome is one of:
       - `verified`   — at least one absolute row lies under SOME root;
       - `unverified` — no roots, or no absolute rows exist at all, so the
-                       store cannot judge; the caller INCLUDES the bucket but
-                       must disclose the inclusion as unverified, never as
-                       proved;
+                       store cannot judge; the caller reads the bucket only
+                       on session evidence (a recorded session from this
+                       repository wrote into it), disclosed as
+                       `included_unverified`, and otherwise reports it
+                       `unproven` and does not read it;
       - `excluded`   — absolute rows exist and none lies under ANY root.
 
     A ROW UNDER A NESTED CHECKOUT IS NOT CONTAINED. A row counts for a root
@@ -1556,7 +1559,8 @@ def legacy_candidate_plausibility(
     is the other failure: a row the store cannot read would then buy the
     bucket an INCLUDE. So the row counts in `absolute_rows` and can never count
     in `contained_rows`: a bucket whose only absolute rows are unreadable lands
-    in `excluded`, which is DISCLOSED with its counts and the rekey command,
+    in `excluded`, which is DISCLOSED with its counts and no rekey command
+    (its rows are taken to belong to the repository their paths name),
     rather than being read on the strength of a row nobody can judge. The write
     seam (`graph.track_file`) refuses a NUL path so such rows cannot be created
     in the first place; this is the read-side backstop for rows already stored.

@@ -19,6 +19,7 @@ eliminating startup cost for non-memory users.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import json
 import logging
@@ -365,6 +366,37 @@ def _pruned_session_records(ledger: Path) -> List[dict]:
         os.close(fd)
 
 
+# One parsed ledger per (path, size, mtime) for the life of the process. A
+# bucket that stays unproven re-runs the evidence check whenever the store
+# changes, and without this each run re-reads and re-parses the same ledger.
+_PRUNED_SESSION_INDEX: Dict[str, tuple] = {}
+
+
+def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
+    """The ledger's parseable lines grouped by `session_id`; never raises.
+
+    Built once per ledger state and then reused, so the evidence check costs
+    one dictionary lookup per writing session instead of a scan of every
+    line. The cache key carries the file's size and mtime, so an appended
+    line (the reaper's only write) is seen on the next read.
+    """
+    try:
+        status = os.lstat(ledger)
+        stamp = (status.st_size, status.st_mtime_ns)
+    except OSError:
+        return {}
+    cached = _PRUNED_SESSION_INDEX.get(str(ledger))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    index: Dict[str, List[dict]] = {}
+    for record in _pruned_session_records(ledger):
+        session_id = record.get("session_id")
+        if isinstance(session_id, str):
+            index.setdefault(session_id, []).append(record)
+    _PRUNED_SESSION_INDEX[str(ledger)] = (stamp, index)
+    return index
+
+
 def _legacy_session_evidence(
     conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
 ) -> bool:
@@ -382,7 +414,11 @@ def _legacy_session_evidence(
     cannot be manufactured after the upgrade. Stops at the first hit. Never
     raises: any failure for one record is "no evidence" for that record.
     """
-    from shared.pact_context import PRUNE_LEDGER_NAME, reconstruct_session_dir
+    from shared.pact_context import (
+        PRUNE_LEDGER_NAME,
+        _UNSAFE_SLUG_CHARS_RE,
+        reconstruct_session_dir,
+    )
 
     from .database import bucket_session_ids
 
@@ -398,15 +434,38 @@ def _legacy_session_evidence(
         session_ids = bucket_session_ids(conn, candidate)
     except sqlite3.Error:
         return False
-    ledgers: Dict[str, List[dict]] = {}
+    # ONE LISTING PER ROOT, NOT A PATH BUILD PER SESSION. Every session of
+    # one root lives in the same slug folder, and a sanitized id holds no
+    # separator, so `<slug folder>/<safe id>` is the folder
+    # `reconstruct_session_dir` names. Listing it once replaces one resolve
+    # per writing session (measured: most of the cost at 1,000 sessions).
+    # A PRESENT ENTRY IS A LIVE FOLDER, exactly as the per-session existence
+    # test it replaces: its context is read (and anything unreadable is no
+    # evidence), and only an ABSENT entry lets the ledger stand in.
+    folders: Dict[str, tuple] = {}
+    for root in sorted(roots):
+        base: Optional[Path] = None
+        present: set = set()
+        try:
+            probe = reconstruct_session_dir(root, "_")
+            base = Path(probe).parent if probe else None
+            if base is not None:
+                present = set(os.listdir(base))
+        except OSError:
+            pass
+        except Exception:
+            base = None
+        folders[root] = (base, present)
+    ledgers: Dict[str, Dict[str, List[dict]]] = {}
     for session_id in session_ids:
+        safe_id = _UNSAFE_SLUG_CHARS_RE.sub("_", str(session_id))
         for root in sorted(roots):
             try:
-                session_dir = reconstruct_session_dir(root, session_id)
-                if not session_dir:
+                base, present = folders[root]
+                if base is None:
                     continue
-                session_path = Path(session_dir)
-                if os.path.lexists(session_path):
+                session_path = base / safe_id
+                if safe_id in present:
                     context = session_path / "pact-session-context.json"
                     recorded = json.loads(context.read_text(encoding="utf-8"))
                     if isinstance(recorded, dict) and _session_record_counts(
@@ -417,11 +476,9 @@ def _legacy_session_evidence(
                 # THE FOLDER IS GONE: its line in the prune ledger stands in.
                 ledger = str(session_path.parent / PRUNE_LEDGER_NAME)
                 if ledger not in ledgers:
-                    ledgers[ledger] = _pruned_session_records(Path(ledger))
-                for record in ledgers[ledger]:
-                    if record.get("session_id") == session_id and (
-                        _session_record_counts(record, roots, common_dir)
-                    ):
+                    ledgers[ledger] = _pruned_session_index(Path(ledger))
+                for record in ledgers[ledger].get(session_id, ()):
+                    if _session_record_counts(record, roots, common_dir):
                         return True
             except Exception:
                 continue
@@ -576,12 +633,17 @@ _UNPINNABLE_REMEDIES = {
     ),
 }
 
-# THE REDIRECT'S REMEDY IS THE MARKER, NEVER A PIN. The override path a
-# redirect could name belongs to the repository the `.git` file points AT:
-# writing it leaves this checkout declined and re-pins that other
-# repository and every genuine checkout of it.
+# THE REDIRECT'S REMEDY IS THE MARKER, AND A PIN ONLY FOR THE USER'S OWN
+# SEPARATE GIT DIR. The decline names no override path: the common dir it
+# would name belongs to the repository the `.git` file points AT, so a pin
+# written there for a forged redirect re-pins that other repository. A
+# `git init --separate-git-dir=<dir>/.git` layout the user owns takes the
+# same shape, and the override is read before the redirect check, so a pin
+# in its own store recovers it.
 _REDIRECT_REMEDY = (
-    "Fix or remove the `.git` file, or run from the repository it points at."
+    "Fix or remove the `.git` file, or run from the repository it points at. "
+    "If this checkout is your own `git init --separate-git-dir=<dir>/.git` "
+    "layout, write its canonical id to `<dir>/.git/pact-project-id` instead."
 )
 
 
@@ -1202,8 +1264,10 @@ def _match_legacy_candidate(
     bucket holding thousands of memories on a case-folding path mismatch —
     silent loss, which is the defect this change exists to remove. The guards
     that keep a fold from merging two projects are the FILESYSTEM CAPABILITY
-    gate and UNIQUENESS (exactly one folded match); the inclusion is disclosed
-    as unverified.
+    gate and UNIQUENESS (exactly one folded match). The matched bucket then
+    passes the same admission as an exact match: read when verified, or when
+    unverified with session evidence (disclosed `included_unverified`), and
+    otherwise `unproven` and not read.
 
     THE RETURNED VALUE IS THE STORED SPELLING, BYTE FOR BYTE. Folding finds a
     candidate; it never produces one.
@@ -1301,6 +1365,16 @@ def _with_store_scope(method):
     return wrapper
 
 
+# ONE DETECTION PASS'S git common-dir answers, keyed by the resolved start.
+# Set only while a constructor detects its identity (a fresh dict per
+# construction), and handed to that instance's FIRST legacy read, which asks
+# the same question about the same directory. Nothing survives into another
+# construction. A ContextVar, so concurrent constructions never share one.
+_DETECTION_COMMON_DIRS: "contextvars.ContextVar[Optional[Dict[str, Optional[Path]]]]" = (
+    contextvars.ContextVar("_DETECTION_COMMON_DIRS", default=None)
+)
+
+
 def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
     """Resolve the repository's GIT COMMON DIR via `git rev-parse`.
 
@@ -1319,6 +1393,25 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         The resolved common dir, or None when git is absent, times out, exits
         non-zero, or the path is not inside a repository.
     """
+    # INSIDE ONE DETECTION PASS, ONE ANSWER PER DIRECTORY (see
+    # `_DETECTION_COMMON_DIRS`): a second call for the same resolved
+    # directory returns the first answer instead of running the identical
+    # git command again. Outside a pass every call runs git.
+    memo = _DETECTION_COMMON_DIRS.get()
+    if memo is not None:
+        try:
+            key = os.path.realpath(start if start is not None else os.getcwd())
+        except (OSError, ValueError):
+            key = None
+        if key is not None:
+            if key not in memo:
+                outside_pass = _DETECTION_COMMON_DIRS.set(None)
+                try:
+                    memo[key] = main_repo_common_dir(start)
+                finally:
+                    _DETECTION_COMMON_DIRS.reset(outside_pass)
+            return memo[key]
+
     command = ["git"]
     if start is not None:
         command += ["-C", str(start)]
@@ -1364,6 +1457,7 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         # resolved. NOT an undecodable answer: stdout is bytes and decoded by
         # os.fsdecode, which cannot raise.
         return None
+
 
 
 def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Optional[set]:
@@ -1761,10 +1855,19 @@ class PACTMemory:
         Initialize the PACTMemory API.
 
         Args:
-            project_id: Project identifier. If not provided, auto-detected using
-                        (in order): CLAUDE_PROJECT_DIR env var, the session
-                        record's project_dir, git repo root, or current working
-                        directory basename (home scope warns).
+            project_id: Project identifier. If not provided, it is the
+                        repository identity of the first rung that resolves:
+                        CLAUDE_PROJECT_DIR, the session record's project_dir,
+                        the git root (each reading its repository's override
+                        file, then its origin), the user-scope setting (only
+                        with no declaration and no repository), then the
+                        working directory's folder name (home scope warns).
+                        Measured: detection runs 4 git subprocesses (5 in a
+                        linked worktree) and the first legacy-scope read 1
+                        or 2 more (the worktree list, plus the common dir
+                        when detection asked about another directory), with
+                        no call repeated with the same argument; each takes
+                        about 1 ms.
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
 
@@ -1821,7 +1924,12 @@ class PACTMemory:
             self._legacy_suppressed = None
             self._legacy_suppressed_name = None
         else:
-            detected = self._detect_project_identity_with_legacy()
+            detection_pass = _DETECTION_COMMON_DIRS.set({})
+            try:
+                detected = self._detect_project_identity_with_legacy()
+            finally:
+                self._detection_common_dirs = _DETECTION_COMMON_DIRS.get()
+                _DETECTION_COMMON_DIRS.reset(detection_pass)
             self._project_id = detected.project_id
             self._project_id_source = detected.source
             # The name the PRE-change resolver produced for this location.
@@ -2603,7 +2711,10 @@ class PACTMemory:
         canonical/legacy split to reconcile.
 
         For a canonical id, the PRE-change basename joins the scope ONLY when
-        its bucket has rows and the plausibility gate does not exclude it.
+        its bucket has rows and either the plausibility gate verifies it, or
+        the gate finds it unverified and a recorded session from this
+        repository wrote into it (`_legacy_session_evidence`). An excluded or
+        unproven bucket is not read.
         The candidate is matched exact-case first and folded only as a
         fallback, and only when the identity root's filesystem PROVABLY
         folds case (`project_identity.filesystem_case_insensitive`): a
@@ -2792,7 +2903,15 @@ class PACTMemory:
                 gate_common = None
                 if repo_root is not None:
                     try:
-                        gate_common = main_repo_common_dir(str(repo_root))
+                        # THE DETECTION PASS ASKED THIS ALREADY. Its answer for
+                        # the same directory is taken ONCE, by the first read;
+                        # every later read asks git afresh.
+                        passed = getattr(self, "_detection_common_dirs", None) or {}
+                        key = os.path.realpath(str(repo_root))
+                        gate_common = (
+                            passed.pop(key) if key in passed
+                            else main_repo_common_dir(str(repo_root))
+                        )
                     except Exception:
                         gate_common = None
                     # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
@@ -2901,8 +3020,8 @@ class PACTMemory:
             "repository identity), and a repository session does not write "
             "into a folder-name bucket. Nothing was written. To move rows, "
             "run `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`; "
-            "to write a folder-name bucket, save from that non-repository "
-            "folder."
+            "to write a folder-name bucket, save from a folder whose project "
+            "id is that name (`project-id show` reports it)."
         )
 
     def _project_id_for_write(self) -> Optional[str]:
@@ -4348,15 +4467,6 @@ class PACTMemory:
                     f"{_identity_field} unchanged. Nothing was written."
                 )
 
-        if (
-            "project_id" in updates
-            and self._detected_identity_is_canonical()
-            and not is_canonical(updates["project_id"])
-        ):
-            self._refuse_legacy_write(
-                f"update to project_id {updates['project_id']!r} was refused"
-            )
-
         # NO ADOPTED-SESSION GUARD BELONGS HERE. `update_memory` writes only
         # the fields this payload carries, so update() never binds
         # `self._session_id`: the only session id it can write is a SUPPLIED
@@ -4376,14 +4486,37 @@ class PACTMemory:
                 return None
             memory_id = resolved
 
-            if "session_id" in updates and self._detected_identity_is_canonical():
-                # RELABELLING A LEGACY ROW'S SESSION is the evidence route
-                # without a project change, so it is refused the same way.
-                stored = get_memory(conn, memory_id) or {}
-                if not is_canonical(stored.get("project_id")):
+            # NOT FOUND COMES BEFORE EVERY REFUSAL. A full id resolves without
+            # a query, so a missing row must be detected here; otherwise a
+            # refusal below would report a folder-name bucket the row does
+            # not have, and exit 2 where the caller should learn "no row".
+            stored = get_memory(conn, memory_id)
+            if stored is None:
+                return None
+
+            # THE WRITE-INGRESS RULE PROTECTS FOLDER-NAME BUCKETS ONLY: a
+            # canonical session may neither file a row into one (a project_id
+            # change) nor relabel a session in one (a session_id change),
+            # because either can create the session evidence that admits that
+            # bucket to its own reads. A row with NO project (NULL) is not a
+            # folder-name bucket, so its session_id may change.
+            if self._detected_identity_is_canonical():
+                if "project_id" in updates and not is_canonical(
+                    updates["project_id"]
+                ):
+                    self._refuse_legacy_write(
+                        f"update to project_id {updates['project_id']!r} "
+                        "was refused"
+                    )
+                stored_project = stored.get("project_id")
+                if (
+                    "session_id" in updates
+                    and stored_project is not None
+                    and not is_canonical(stored_project)
+                ):
                     self._refuse_legacy_write(
                         "update of session_id on a row in the folder-name "
-                        f"bucket {stored.get('project_id')!r} was refused"
+                        f"bucket {stored_project!r} was refused"
                     )
 
             # Snapshot CONTENT_FIELDS before the
