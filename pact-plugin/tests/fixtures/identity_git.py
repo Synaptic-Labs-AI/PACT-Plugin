@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 
 def run_git(*args: str, cwd: Path) -> str:
@@ -113,18 +114,23 @@ def make_separate_git_dir_repo(path: Path, external_git_dir: Path) -> Path:
     run_git("commit", "-qm", "seed", cwd=path)
     return path
 
-def seed_session_evidence(config_dir, project_dir: Path, session_id: str) -> Path:
+def seed_session_evidence(
+    config_dir, project_dir: Path, session_id: str, started_at: Optional[str] = None
+) -> Path:
     """Record a session for `project_dir`, where the legacy-admission check looks.
 
     Writes `pact-session-context.json` into the session directory
     `reconstruct_session_dir(project_dir, session_id)` names, with the
-    `project_dir` it records. A legacy bucket whose rows carry `session_id`
-    is then read by a session whose identity root is `project_dir`.
+    `project_dir` it records and a zone-aware `started_at` (now, unless
+    given). A legacy bucket whose rows carry `session_id` is then read by a
+    session whose identity root is `project_dir`, provided the repository's
+    `description` was created before that start.
     `config_dir` is the isolated config root the file must land under (the
     suite sandboxes it at `tmp_path / "home" / ".claude"`); the helper
     refuses to write anywhere else, so a test can never seed a real session.
     """
     import json
+    from datetime import datetime, timezone
 
     from shared.pact_context import reconstruct_session_dir
 
@@ -135,7 +141,11 @@ def seed_session_evidence(config_dir, project_dir: Path, session_id: str) -> Pat
     session_dir.mkdir(parents=True, exist_ok=True)
     context = session_dir / "pact-session-context.json"
     context.write_text(
-        json.dumps({"project_dir": str(project_dir), "session_id": session_id}),
+        json.dumps({
+            "project_dir": str(project_dir),
+            "session_id": session_id,
+            "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+        }),
         encoding="utf-8",
     )
     return context

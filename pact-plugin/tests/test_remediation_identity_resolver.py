@@ -680,6 +680,264 @@ class TestSessionEvidenceAdmitsAnUnverifiedBucket:
         assert memory._legacy_scope_state["unproven"]
 
 
+class TestTheSessionMustPostdateTheRepository:
+    """A recorded session is evidence only if it started after this
+    repository's `description` was created, through its live context or,
+    once the folder is reaped, its prune-ledger line.
+
+    Catches a repository re-cloned, restored or copied at a deleted
+    checkout's path inheriting that checkout's legacy bucket through the
+    session records the old checkout left behind.
+    """
+
+    HOUR = 3600
+
+    @staticmethod
+    def _iso(offset_seconds: float) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        return (
+            datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+        ).isoformat()
+
+    def _checkout(self, identity_env, monkeypatch):
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        _seed(identity_env / "store.db", "proj")
+        return repo
+
+    @staticmethod
+    def _state(identity_env):
+        memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+        scopes = memory._read_project_scopes()
+        return scopes, memory._legacy_scope_state
+
+    @staticmethod
+    def _reap(context: Path) -> None:
+        """Record the folder in the prune ledger with the real writer, then
+        remove it, as the session reaper does."""
+        import shutil
+
+        import session_end
+
+        session_dir = context.parent
+        session_end._record_pruned_session(session_dir.parent, session_dir)
+        shutil.rmtree(session_dir)
+
+    @staticmethod
+    def _ledger(context: Path) -> Path:
+        from shared.pact_context import PRUNE_LEDGER_NAME
+
+        return context.parent.parent / PRUNE_LEDGER_NAME
+
+    @staticmethod
+    def _reclone(repo: Path, monkeypatch) -> None:
+        """Delete the checkout and create a new one at the same path. The
+        working directory leaves first, or it would name the deleted one."""
+        import shutil
+
+        monkeypatch.chdir(repo.parent)
+        shutil.rmtree(repo)
+        make_repo(repo, remote=REMOTE)
+        monkeypatch.chdir(repo)
+
+    def test_a_session_after_the_description_is_evidence(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL, "proj") and state["session_evidence"] is True
+
+    def test_a_session_before_the_description_is_no_evidence(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session",
+            started_at=self._iso(-self.HOUR),
+        )
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_a_recloned_repository_does_not_inherit_its_sessions(
+        self, identity_env, monkeypatch, caplog
+    ):
+        repo = self._checkout(identity_env, monkeypatch)
+        seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session",
+            started_at=self._iso(-60),
+        )
+        self._reclone(repo, monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+        notices = [
+            r.getMessage() for r in caplog.records
+            if "no recorded session" in r.getMessage()
+        ]
+        assert len(notices) == 1 and "project-id rekey" in notices[0], notices
+
+    def test_a_naive_start_is_no_evidence(self, identity_env, monkeypatch):
+        """A day ahead and zone-less: read as local time it would pass."""
+        from datetime import datetime, timedelta
+
+        repo = self._checkout(identity_env, monkeypatch)
+        naive = (datetime.now() + timedelta(days=1)).isoformat()
+        seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session", started_at=naive
+        )
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_an_unparseable_start_is_no_evidence(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session", started_at="yesterday"
+        )
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_a_symlinked_description_is_no_evidence(self, identity_env, monkeypatch):
+        """The link points at a file older than the session, so following it
+        would pass; `lstat` sees a link and refuses it."""
+        repo = self._checkout(identity_env, monkeypatch)
+        old = identity_env / "old-description"
+        old.write_text("old\n", encoding="utf-8")
+        description = repo / ".git" / "description"
+        description.unlink()
+        description.symlink_to(old)
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_a_repository_with_no_description_is_unproven(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        (repo / ".git" / "description").unlink()
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_a_linked_worktree_session_dates_against_the_main_description(
+        self, identity_env, monkeypatch
+    ):
+        """The worktree's `.git` is a file; the description read is the MAIN
+        repository's, shared by every worktree."""
+        _fresh_scope_state()
+        main = make_repo(identity_env / "proj", remote=REMOTE)
+        worktree = make_worktree(main, identity_env / "wt")
+        _seed(identity_env / "store.db", "proj")
+        seed_session_evidence(_config_root(identity_env), worktree, "legacy-session")
+        monkeypatch.chdir(worktree)
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL, "proj") and state["session_evidence"] is True, state
+
+    def test_a_separate_git_dir_dates_against_its_own_description(
+        self, identity_env, monkeypatch
+    ):
+        """The checkout's `.git` is a file naming a git dir elsewhere; the
+        description read is the one in that common dir. The git dir's parent
+        is named like the checkout, because the legacy candidate is derived
+        from it."""
+        _fresh_scope_state()
+        repo = make_separate_git_dir_repo(
+            identity_env / "proj", identity_env / "gitdirs" / "proj" / "git"
+        )
+        run_git("remote", "add", "origin", REMOTE, cwd=repo)
+        assert (repo / ".git").is_file()
+        _seed(identity_env / "store.db", "proj")
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        monkeypatch.chdir(repo)
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL, "proj") and state["session_evidence"] is True, state
+
+    def test_a_ledger_line_stands_in_for_a_reaped_folder(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        self._reap(context)
+        assert not context.parent.exists() and self._ledger(context).is_file()
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL, "proj") and state["session_evidence"] is True, state
+
+    def test_a_ledger_line_from_before_a_reclone_is_no_evidence(
+        self, identity_env, monkeypatch
+    ):
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session",
+            started_at=self._iso(-60),
+        )
+        self._reap(context)
+        self._reclone(repo, monkeypatch)
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_the_ledger_is_read_only_when_the_folder_is_gone(
+        self, identity_env, monkeypatch
+    ):
+        """A live folder whose context fails is not rescued by a ledger line
+        that would pass."""
+        import json
+
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session",
+            started_at=self._iso(-self.HOUR),
+        )
+        line = {"session_id": "legacy-session", "project_dir": str(repo),
+                "started_at": self._iso(0)}
+        self._ledger(context).write_text(json.dumps(line) + "\n", encoding="utf-8")
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_a_ledger_line_for_another_session_is_no_evidence(
+        self, identity_env, monkeypatch
+    ):
+        """The bucket was written by `legacy-session`; a reaped folder of a
+        different session from this repository proves nothing about it."""
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(_config_root(identity_env), repo, "someone-else")
+        self._reap(context)
+        gone = context.parent.parent / "legacy-session"
+        assert not gone.exists() and self._ledger(context).is_file()
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_malformed_ledger_lines_are_skipped(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        self._reap(context)
+        ledger = self._ledger(context)
+        good = ledger.read_text(encoding="utf-8")
+        ledger.write_text(
+            "not json\n[1, 2]\n{\"session_id\": \n" + good + "\x00\n",
+            encoding="utf-8",
+        )
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL, "proj") and state["session_evidence"] is True, state
+
+    def test_a_symlinked_ledger_is_not_read(self, identity_env, monkeypatch):
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        self._reap(context)
+        ledger = self._ledger(context)
+        real = identity_env / "real-ledger.jsonl"
+        ledger.rename(real)
+        ledger.symlink_to(real)
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+    def test_a_line_beyond_the_tail_bound_is_not_read(self, identity_env, monkeypatch):
+        """Only the end of the ledger is read; an older line reads unproven."""
+        repo = self._checkout(identity_env, monkeypatch)
+        context = seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        self._reap(context)
+        ledger = self._ledger(context)
+        filler = '{"session_id": "other", "project_dir": "/nowhere", "started_at": "x"}\n'
+        count = memory_api._PRUNE_LEDGER_TAIL_BYTES // len(filler) + 10
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(filler * count)
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL,) and state["unproven"], state
+
+
 class TestLegacyScopeHasOneKeySet:
     """`legacy_scope` carries the same keys in every state.
 

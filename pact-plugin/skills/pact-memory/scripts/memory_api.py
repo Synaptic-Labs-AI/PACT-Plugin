@@ -24,11 +24,13 @@ import json
 import logging
 import os
 import shlex
+import stat
 import struct
 import subprocess
 import threading
 import unicodedata
 from contextlib import closing, contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
@@ -265,18 +267,122 @@ def _suppressed_bucket_rows(store: str, bucket: Optional[str]) -> int:
     return count
 
 
-def _legacy_session_evidence(conn: Any, candidate: str, gate_roots: list) -> bool:
+# The prune ledger is read from its end, at most this many bytes. A line is
+# about 200 bytes, so this covers roughly the last 5,000 pruned sessions of
+# one project; an older pruned session reads as no evidence (unproven), the
+# fail-closed direction, and the unproven notice prints its remedy.
+_PRUNE_LEDGER_TAIL_BYTES = 1024 * 1024
+
+
+def _description_predates(common_dir: Optional[Path], started_at: Any) -> bool:
+    """Whether `<common_dir>/description` was created before `started_at`.
+
+    `started_at` must be an ISO-8601 timestamp that carries its zone; a naive
+    or unparseable one fails closed. The description must be a regular file
+    by `lstat` (a symlink to an old file is refused), and its ctime must be
+    STRICTLY earlier than the session's start. A copied, restored or
+    re-cloned repository has a new description, so its old sessions fail.
+    Never raises.
+    """
+    if common_dir is None or not isinstance(started_at, str) or not started_at:
+        return False
+    try:
+        started = datetime.fromisoformat(started_at)
+        if started.tzinfo is None:
+            return False
+        described = os.lstat(Path(common_dir) / "description")
+        return (
+            stat.S_ISREG(described.st_mode)
+            and described.st_ctime < started.timestamp()
+        )
+    except Exception:
+        return False
+
+
+def _session_record_counts(
+    record: Any, roots: set, common_dir: Optional[Path]
+) -> bool:
+    """Whether one recorded session (a live context or a ledger line) counts.
+
+    It ran in a gate root (its `project_dir` resolves to one) and started
+    after this repository's description was created. Never raises.
+    """
+    try:
+        project_dir = record.get("project_dir")
+        return (
+            isinstance(project_dir, str)
+            and bool(project_dir)
+            and os.path.realpath(project_dir) in roots
+            and _description_predates(common_dir, record.get("started_at"))
+        )
+    except Exception:
+        return False
+
+
+def _pruned_session_records(ledger: Path) -> List[dict]:
+    """The parseable lines at the end of a prune ledger, newest last.
+
+    Reads at most `_PRUNE_LEDGER_TAIL_BYTES` from the end of a REGULAR file
+    (a symlink or FIFO is refused, O_NONBLOCK keeps a FIFO from blocking the
+    open), drops the partial first line of a cut read, and skips every line
+    that is not a JSON object. Never raises; any failure is an empty list.
+    """
+    try:
+        if not stat.S_ISREG(os.lstat(ledger).st_mode):
+            return []
+        fd = os.open(ledger, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except Exception:
+        return []
+    try:
+        size = os.fstat(fd).st_size
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return []
+        offset = max(0, size - _PRUNE_LEDGER_TAIL_BYTES)
+        os.lseek(fd, offset, os.SEEK_SET)
+        chunks = []
+        remaining = size - offset
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if offset > 0:
+            data = data.partition(b"\n")[2]
+        records = []
+        for line in data.split(b"\n"):
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+    except Exception:
+        return []
+    finally:
+        os.close(fd)
+
+
+def _legacy_session_evidence(
+    conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
+) -> bool:
     """Whether a recorded session from one of `gate_roots` wrote `candidate`.
 
     The evidence an UNVERIFIED legacy bucket needs to be read: a session id
-    that wrote into the bucket, whose session context file (reconstructed
-    from a gate root) records a `project_dir` that IS a gate root. A
-    delivered checkout with the same folder name has no such record, and
-    every new write binds the canonical id, so the evidence cannot be
-    manufactured after the upgrade. Stops at the first hit. Never raises:
-    any failure for one record is "no evidence" for that record.
+    that wrote into the bucket, whose record names a `project_dir` that IS a
+    gate root and a zone-aware `started_at` later than the ctime of
+    `<common_dir>/description` (`common_dir` is the MAIN repository's, so
+    every linked worktree shares one file). The record is the session
+    folder's context file while the folder exists, and its line in the
+    project's prune ledger once the reaper has removed the folder; both pass
+    the same test. A delivered checkout with the same folder name has no such
+    record, and every new write binds the canonical id, so the evidence
+    cannot be manufactured after the upgrade. Stops at the first hit. Never
+    raises: any failure for one record is "no evidence" for that record.
     """
-    from shared.pact_context import reconstruct_session_dir
+    from shared.pact_context import PRUNE_LEDGER_NAME, reconstruct_session_dir
 
     from .database import bucket_session_ids
 
@@ -286,27 +392,37 @@ def _legacy_session_evidence(conn: Any, candidate: str, gate_roots: list) -> boo
             roots.add(os.path.realpath(root))
         except (OSError, ValueError):
             continue
-    if not roots:
+    if not roots or common_dir is None:
         return False
     try:
         session_ids = bucket_session_ids(conn, candidate)
     except sqlite3.Error:
         return False
+    ledgers: Dict[str, List[dict]] = {}
     for session_id in session_ids:
         for root in sorted(roots):
             try:
                 session_dir = reconstruct_session_dir(root, session_id)
                 if not session_dir:
                     continue
-                context = Path(session_dir) / "pact-session-context.json"
-                recorded = json.loads(context.read_text(encoding="utf-8"))
-                project_dir = recorded.get("project_dir")
-                if (
-                    isinstance(project_dir, str)
-                    and project_dir
-                    and os.path.realpath(project_dir) in roots
-                ):
-                    return True
+                session_path = Path(session_dir)
+                if os.path.lexists(session_path):
+                    context = session_path / "pact-session-context.json"
+                    recorded = json.loads(context.read_text(encoding="utf-8"))
+                    if isinstance(recorded, dict) and _session_record_counts(
+                        recorded, roots, common_dir
+                    ):
+                        return True
+                    continue
+                # THE FOLDER IS GONE: its line in the prune ledger stands in.
+                ledger = str(session_path.parent / PRUNE_LEDGER_NAME)
+                if ledger not in ledgers:
+                    ledgers[ledger] = _pruned_session_records(Path(ledger))
+                for record in ledgers[ledger]:
+                    if record.get("session_id") == session_id and (
+                        _session_record_counts(record, roots, common_dir)
+                    ):
+                        return True
             except Exception:
                 continue
     return False
@@ -2670,7 +2786,8 @@ class PACTMemory:
                 # must never escape a read.
                 gate_roots = []
                 # The common dir GIT reported for the identity root. It anchors
-                # both the worktree listing and the gate's submodule exemption;
+                # the worktree listing and the gate's submodule exemption, and
+                # its `description` dates the repository for session evidence;
                 # None (git failed) only narrows the gate, never fails the read.
                 gate_common = None
                 if repo_root is not None:
@@ -2702,7 +2819,9 @@ class PACTMemory:
                 # into it: its folder name alone cannot tell this checkout's
                 # rows from a same-named checkout's.
                 session_evidence = (
-                    _legacy_session_evidence(connection, candidate, deduped)
+                    _legacy_session_evidence(
+                        connection, candidate, deduped, gate_common
+                    )
                     if outcome == "unverified"
                     else None
                 )

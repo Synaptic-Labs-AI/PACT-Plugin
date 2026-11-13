@@ -418,7 +418,7 @@ class TestBrokenRepositoryDeclines:
 # ---------------------------------------------------------------------------
 
 class TestTheGateDoesNotRaiseOnAReadPath:
-    def test_a_user_setting_identity_widens_instead_of_raising(
+    def test_a_user_setting_identity_reads_unproven_instead_of_raising(
         self, tmp_path, monkeypatch
     ):
         """End-to-end: canonical id from config.json, no
@@ -432,6 +432,10 @@ class TestTheGateDoesNotRaiseOnAReadPath:
         negative control below is kept to pin the FIXTURE, so a later
         simplification cannot quietly turn this into a shape that never
         exercised the defect.
+
+        The folder is not a repository, so it has no `description` file to
+        date the recorded session against: the bucket is unproven, not read,
+        and the read still answers without raising.
         """
         memory_dir = tmp_path / "mem"
         memory_dir.mkdir()
@@ -456,7 +460,8 @@ class TestTheGateDoesNotRaiseOnAReadPath:
                     "session_id": "workspace-session",
                 },
             )
-        # The row is this workspace's own: a recorded session of it wrote it.
+        # A recorded session of this workspace wrote the row, but a folder
+        # with no repository cannot date it, so it is no evidence.
         seed_session_evidence(
             tmp_path / "home" / ".claude", umbrella.resolve(), "workspace-session"
         )
@@ -479,12 +484,12 @@ class TestTheGateDoesNotRaiseOnAReadPath:
 
         memory = memory_api.PACTMemory(db_path=store)
         rows = memory.list(limit=10)
-        assert any(
+        assert not any(
             "legacy row" in (getattr(row, "context", "") or "") for row in rows
         ), rows
         state = memory._legacy_scope_state
         assert state is not None, "the legacy gate never ran"
-        assert state["included_unverified"] is True, state
+        assert state["unproven"] is True and state["session_evidence"] is False, state
 
 
 # ---------------------------------------------------------------------------

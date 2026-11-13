@@ -159,6 +159,7 @@ KNOWN_NAME_SITES = Counter({
     ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 1,       # read
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
     ("skills/pact-memory/scripts/memory_api.py", "_legacy_session_evidence"): 1,  # read (legacy-admission evidence)
+    ("hooks/session_end.py", "_pruned_session_line"): 1,  # read (prune-ledger evidence before a reap)
     ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
 })
 

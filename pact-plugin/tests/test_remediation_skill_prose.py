@@ -290,6 +290,33 @@ class TestLegacyScopeStatesAreDocumented:
             "session from this repository wrote into it (session_evidence is true)"
         ) in _body(SKILL)
 
+    def test_a_recorded_session_counts_only_before_the_description_ctime(self):
+        body = _body(SKILL)
+        assert (
+            "A recorded session counts only when it ran in this repository or "
+            "one of its linked worktrees, and <git-common-dir>/description is a "
+            "regular file whose ctime is earlier than the session's start."
+        ) in body
+        assert (
+            "A session folder that was cleaned up counts the same way through "
+            "the line recorded for it when it was removed."
+        ) in body
+        assert "inode" not in body.lower()
+
+    def test_a_copied_or_recloned_repository_reads_as_unproven(self):
+        assert (
+            "A repository that was moved, copied, restored or cloned again, a "
+            "repository with no description file, and a folder that is not a "
+            "repository all read as unproven too."
+        ) in _body(SKILL)
+
+    def test_the_moved_repository_residual_is_stated(self):
+        assert (
+            "a result can contain rows from another checkout that shares the "
+            "folder name, including one that used this exact folder before "
+            "this repository was moved into it."
+        ) in _body(SKILL)
+
     def test_excluded_is_not_read(self):
         assert (
             "excluded: its absolute file rows place it in another repository, "

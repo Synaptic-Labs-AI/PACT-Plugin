@@ -344,7 +344,8 @@ resolves by id, so `get <id>` is a way to check one record when you know it.
 A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. An `included_unverified` bucket is
 read because a recorded session from this repository wrote into it, not because
 its file rows place it here, so a result can contain rows from another checkout
-that shares the folder name. Treat it as a discovery to review, not as proof
+that shares the folder name, including one that used this exact folder before
+this repository was moved into it. Treat it as a discovery to review, not as proof
 that every row belongs here.
 
 `legacy_scope` carries the same keys in every state: `candidate`,
@@ -358,12 +359,18 @@ one of `included`, `excluded` and `unproven` is true:
 - `included`: the bucket is read. `verified` means an absolute file row places
   it in this repository. `included_unverified` means no file row places it but
   a recorded session from this repository wrote into it (`session_evidence` is
-  `true`).
+  `true`). A recorded session counts only when it ran in this repository or
+  one of its linked worktrees, and `<git-common-dir>/description` is a regular
+  file whose ctime is earlier than the session's start. A session folder that
+  was cleaned up counts the same way through the line recorded for it when it
+  was removed.
 - `excluded`: its absolute file rows place it in another repository, and it is
   not read.
 - `unproven`: no file row places it and no recorded session from this
   repository wrote into it (`session_evidence` is `false`). It is not read, and
-  its `rekey` command is printed once per process.
+  its `rekey` command is printed once per process. A repository that was
+  moved, copied, restored or cloned again, a repository with no `description`
+  file, and a folder that is not a repository all read as `unproven` too.
 
 `suppressed` is set for a submodule checkout, as `{source:
 submodule_admin_dir, reason: repository_chosen_name, override_path: null,
