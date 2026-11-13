@@ -2005,6 +2005,29 @@ class TestTheEvidenceCheckScansEachRootOnce:
         PACTMemory(session_id="s", db_path=store)._read_project_scopes()
         assert len(parses) == 2, "an appended line must be seen on the next read"
 
+    def test_each_session_folder_is_listed_once_per_process(
+        self, identity_env, monkeypatch
+    ):
+        """Repeated reads and instances in one process list the root's session
+        folder exactly once: never zero (each session checked on its own) and
+        never again for an unchanged store."""
+        import os
+
+        _repo, store, slug_dir, _ledger = self._rig(identity_env, monkeypatch)
+        real = os.listdir
+        listed = []
+
+        def spy(path="."):
+            listed.append(os.path.realpath(str(path)))
+            return real(path)
+
+        monkeypatch.setattr(memory_api.os, "listdir", spy)
+        for _ in range(3):
+            memory = PACTMemory(session_id="s", db_path=store)
+            for _ in range(3):
+                memory._read_project_scopes()
+        assert listed == [os.path.realpath(str(slug_dir))], listed
+
     def test_a_present_entry_is_a_live_folder_not_a_reaped_one(
         self, identity_env, monkeypatch
     ):
