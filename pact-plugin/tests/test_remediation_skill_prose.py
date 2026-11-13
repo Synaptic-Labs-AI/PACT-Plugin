@@ -19,22 +19,17 @@ from pathlib import Path
 
 import pytest
 
+from scripts.project_identity import DECLINE_REASONS
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILL = PLUGIN_ROOT / "skills" / "pact-memory" / "SKILL.md"
 SECRETARY = PLUGIN_ROOT / "agents" / "pact-secretary.md"
 SCRIPTS = PLUGIN_ROOT / "skills" / "pact-memory" / "scripts"
 
 # The decline causes `project-id show` and `status` can carry in
-# `decline_reason.reason`.
-DECLINE_TOKENS = (
-    "origin_unreadable",
-    "origin_unrepresentable",
-    "gitfile_redirect",
-    "broken_git_marker",
-    "no_working_tree",
-    "submodule_checkout",
-    "declaration_unresolved",
-)
+# `decline_reason.reason`, taken from the code's own registry so a cause
+# added there reds the row pin until SKILL.md names it.
+DECLINE_TOKENS = tuple(sorted(DECLINE_REASONS))
 
 
 def _flatten(text: str) -> str:
@@ -87,23 +82,18 @@ class TestDeclineReasonIsDocumentedAsEmitted:
     def test_each_cause_is_named_in_the_row(self, token):
         assert token in _table_row(SKILL, "project-id show")
 
-    @pytest.mark.parametrize("token", DECLINE_TOKENS)
-    def test_each_documented_cause_is_one_the_code_emits(self, token):
-        """A renamed token reds here instead of leaving the prose stale."""
-        source = "".join(
-            (SCRIPTS / name).read_text(encoding="utf-8")
-            for name in ("memory_api.py", "project_identity.py")
-        )
-        assert f'"{token}"' in source
+    REASON_LIST_START = "reason is one of "
+    REASON_LIST_END = ", and override_path is"
 
-    def test_the_documented_causes_match_the_code_registry_when_present(self):
-        """Once the code declares its cause set, the prose lists exactly it."""
-        from scripts import project_identity
+    def _documented_reasons(self) -> set:
+        row = _table_row(SKILL, "project-id show")
+        start = row.index(self.REASON_LIST_START) + len(self.REASON_LIST_START)
+        listed = row[start:row.index(self.REASON_LIST_END, start)]
+        return {n.strip() for n in listed.replace(" or ", ", ").split(",") if n.strip()}
 
-        registry = getattr(project_identity, "DECLINE_REASONS", None)
-        if registry is None:
-            pytest.skip("the code declares no DECLINE_REASONS registry yet")
-        assert set(registry) == set(DECLINE_TOKENS)
+    def test_the_documented_causes_are_the_code_registry(self):
+        """The row's list is exactly the registry: a stale or extra name reds."""
+        assert self._documented_reasons() == set(DECLINE_REASONS)
 
 
 class TestExitCodeThreeCoversBothVerbs:
@@ -734,12 +724,41 @@ def matrix(tmp_path_factory):
             cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
         )
 
+    def points_at_outside_store(cwd):
+        """Whether the checkout's `.git` names a git dir outside the checkout
+        that is neither a linked worktree's nor a submodule's admin dir.
+
+        Measured by git itself: the git dir lies outside the checkout, it is
+        its own common dir (a linked worktree's admin dir is not), and the
+        checkout has no superproject (a submodule's admin dir has one).
+        """
+        out = subprocess.run(
+            [
+                real_git, "-C", str(cwd), "rev-parse", "--absolute-git-dir",
+                "--path-format=absolute", "--git-common-dir",
+                "--show-superproject-working-tree",
+            ],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": plain_path, "HOME": str(home)},
+        )
+        if out.returncode != 0:
+            return False
+        lines = out.stdout.splitlines()
+        git_dir = os.path.realpath(lines[0])
+        common = os.path.realpath(lines[1])
+        superproject = lines[2] if len(lines) > 2 else ""
+        root = os.path.realpath(cwd)
+        outside = os.path.commonpath([git_dir, root]) != root
+        return outside and git_dir == common and not superproject
+
     run(["setup"], base, None, False)
     result = {}
     for (cause, layout), (cwd, declared, shimmed) in TestNullOverridePathIsMeasured._layouts(base).items():
         out = run(["project-id", "show"], cwd, cwd if declared is None else declared, shimmed)
         record = json.loads(out.stdout)["result"]["decline_reason"] or {}
-        result[(cause, layout)] = (record.get("reason"), record.get("override_path"))
+        result[(cause, layout)] = (
+            record.get("reason"), record.get("override_path"), points_at_outside_store(cwd),
+        )
     return result
 
 
@@ -758,11 +777,12 @@ class TestNullOverridePathIsMeasured:
 
     BAD_ORIGIN = "https://host/own%ZZr/repo.git"
 
-    # The phrase the SKILL clause uses for each location route. A measured
-    # route with no phrase here fails `test_every_location_route_is_named`.
-    LAYOUT_PHRASES = {
-        "external": "when the checkout's git directory lies outside it",
-    }
+    # The SKILL clause states the location route as a PROPERTY of the cell,
+    # measured per cell by git (see `points_at_outside_store`).
+    OUTSIDE_PHRASE = (
+        "when the checkout's .git points at a git directory outside it that is "
+        "neither a linked worktree's nor a submodule's admin directory"
+    )
 
     CLAUSE_START = (
         "First, when no override file can remedy the decline: that is the case for"
@@ -855,6 +875,33 @@ class TestNullOverridePathIsMeasured:
             f"gitdir: {ext / 'stores' / 'e3.git'}\n", encoding="utf-8"
         )
         cells[("no_working_tree", "external")] = (ext / "e3", None, False)
+
+        sym = base / "symlink"
+        (sym / "stores").mkdir(parents=True)
+        for name, origin, shim, cause in (
+            ("y1", bad, False, "origin_unrepresentable"),
+            ("y2", good.format("y2"), True, "origin_unreadable"),
+        ):
+            cls._repo(sym / name, origin)
+            (sym / name / ".git").rename(sym / "stores" / f"{name}.git")
+            (sym / name / ".git").symlink_to(sym / "stores" / f"{name}.git")
+            cells[(cause, "symlink")] = (sym / name, None, shim)
+        victim2 = cls._repo(sym / "victim", good.format("victim2"))
+        (sym / "linked").mkdir()
+        (sym / "linked" / ".git").symlink_to(victim2 / ".git")
+        cells[("gitfile_redirect", "symlink")] = (sym / "linked", None, False)
+
+        swt = base / "sepworktree"
+        (swt / "stores").mkdir(parents=True)
+        for name, origin, shim, cause in (
+            ("w1", bad, False, "origin_unrepresentable"),
+            ("w2", good.format("sw2"), True, "origin_unreadable"),
+        ):
+            cls._git("init", "-q", f"--separate-git-dir={swt / 'stores' / (name + '.git')}", str(swt / name))
+            cls._git("-C", str(swt / name), "remote", "add", "origin", origin)
+            cls._git("-C", str(swt / name), "commit", "-q", "--allow-empty", "-m", "i")
+            cls._git("-C", str(swt / name), "worktree", "add", "-q", str(swt / f"{name}-linked"))
+            cells[(cause, "sepworktree")] = (swt / f"{name}-linked", None, shim)
         return cells
 
     def _clause(self) -> str:
@@ -873,18 +920,22 @@ class TestNullOverridePathIsMeasured:
         causes = {cause for cause, _ in matrix}
         return {
             cause for cause in causes
-            if all(path is None for (c, _), (_, path) in matrix.items() if c == cause)
+            if all(path is None for (c, _), (_, path, _) in matrix.items() if c == cause)
+        }
+
+    def _location_nulls(self, matrix) -> dict:
+        """Cells nulled by location: a cause that is pathed elsewhere."""
+        always = self._always_null(matrix)
+        return {
+            cell: outside for cell, (_, path, outside) in matrix.items()
+            if path is None and cell[0] not in always
         }
 
     def _location_routes(self, matrix) -> set:
-        always = self._always_null(matrix)
-        return {
-            layout for (cause, layout), (_, path) in matrix.items()
-            if path is None and cause not in always
-        }
+        return {layout for (_, layout) in self._location_nulls(matrix)}
 
     def test_each_cell_declines_for_the_cause_it_was_built_for(self, matrix):
-        wrong = {cell: got for cell, (got, _) in matrix.items() if got != cell[0]}
+        wrong = {cell: got for cell, (got, _, _) in matrix.items() if got != cell[0]}
         assert wrong == {}, f"a layout builder produced another cause: {wrong}"
 
     def test_every_cause_the_code_defines_is_measured(self, matrix):
@@ -896,19 +947,29 @@ class TestNullOverridePathIsMeasured:
         assert self._documented_causes() == self._always_null(matrix)
 
     def test_every_location_route_is_named(self, matrix):
-        routes = self._location_routes(matrix)
-        unnamed = routes - set(self.LAYOUT_PHRASES)
-        assert unnamed == set(), f"a layout nulls override_path with no SKILL phrase: {unnamed}"
-        clause = self._clause()
-        for layout in routes:
-            assert self.LAYOUT_PHRASES[layout] in clause, layout
+        """Every location null is a cell that points at an outside store, and
+        the clause names that route."""
+        nulls = self._location_nulls(matrix)
+        unnamed = {cell for cell, outside in nulls.items() if not outside}
+        assert unnamed == set(), f"override_path is null by a route the SKILL does not name: {unnamed}"
+        if nulls:
+            assert self.OUTSIDE_PHRASE in self._clause()
+
+    def test_the_outside_clause_holds_in_every_outside_cell(self, matrix):
+        """The clause claims EVERY outside-store cell is null for a pathed
+        cause; such a cell that prints a path falsifies it."""
+        if self.OUTSIDE_PHRASE not in self._clause():
+            return
+        always = self._always_null(matrix)
+        printed = {
+            cell: path for cell, (_, path, outside) in matrix.items()
+            if outside and cell[0] not in always and path is not None
+        }
+        assert printed == {}, f"outside store, yet a path is printed: {printed}"
 
     def test_no_unmeasured_location_route_is_claimed(self, matrix):
-        routes = self._location_routes(matrix)
-        clause = self._clause()
-        for layout, phrase in self.LAYOUT_PHRASES.items():
-            if layout not in routes:
-                assert phrase not in clause, f"{layout} is documented but measures no null"
+        if not self._location_nulls(matrix):
+            assert self.OUTSIDE_PHRASE not in self._clause(), "documented but measures no null"
 
     def test_the_withheld_path_is_the_users_decision(self):
         assert (
