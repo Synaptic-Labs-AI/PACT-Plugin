@@ -1170,6 +1170,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         legacy_verdict = (
             "excluded" if state.get("excluded")
             else "verified" if state.get("verified")
+            else "unproven" if state.get("unproven")
             else "unverified"
         )
     if target_defaulted:
@@ -1212,6 +1213,21 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 escape_for_envelope(
                     f"--from={from_id!r} is not this checkout's legacy "
                     "candidate; pass --to explicitly after confirming the rows "
+                    "belong here. Nothing was moved."
+                ),
+            )
+        if legacy_verdict == "unproven":
+            # THE READ GATE REFUSED IT, SO A DEFAULTED TARGET MUST TOO. No
+            # file row places it and no recorded session from this
+            # repository wrote it: its folder name alone cannot tell this
+            # checkout's rows from another checkout of the same name.
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} is unproven: no file row places it "
+                    "and no recorded session from this repository wrote it, "
+                    "so it is not read here and a defaulted --to cannot "
+                    "claim it. Pass --to explicitly after confirming the rows "
                     "belong here. Nothing was moved."
                 ),
             )

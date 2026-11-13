@@ -973,6 +973,168 @@ class TestAStoreFaultNamesItsRemedyOnce:
         assert envelope["message"].count("exists but cannot be opened") == 1, envelope
 
 
+def _clear_disclosure_memos():
+    from scripts import memory_api
+
+    for memo in (
+        memory_api._LEGACY_SCOPE_CACHE, memory_api._EXCLUSION_WARNED,
+        memory_api._UNPROVEN_WARNED, memory_api._CASE_VARIANT_WARNED,
+    ):
+        memo.clear()
+
+
+class TestADefaultedTargetRefusesAnUnprovenBucket:
+    """A defaulted `--to` claims only what the read gate admits.
+
+    Catches the rekey default accepting a bucket the read gate refused as
+    unproven: no file row places it and no session from this repository
+    wrote it, so it may be another checkout's rows under the same name.
+    """
+
+    def _rig(self, identity_env, monkeypatch, store, evidence):
+        from fixtures.identity_git import seed_session_evidence
+
+        _clear_disclosure_memos()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        _seed(store, "proj", memory_id="legacy0001", path="src/relative.py")
+        if evidence:
+            seed_session_evidence(identity_env / "home" / ".claude", repo, "legacy-session")
+        monkeypatch.chdir(repo)
+
+    def test_an_unproven_bucket_is_refused(self, identity_env, store, monkeypatch, capfd):
+        self._rig(identity_env, monkeypatch, store, evidence=False)
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+        assert "is unproven" in envelope["message"]
+        assert _snapshot(store) == before
+
+    def test_the_same_bucket_with_session_evidence_moves(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        """Control: a recorded session admits it, and the default then works."""
+        self._rig(identity_env, monkeypatch, store, evidence=True)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
+        )
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1
+        assert envelope["result"]["target_defaulted"] is True
+
+
+class TestAPrintedRekeyCommandRunsAsPrinted:
+    """The unproven and case-variant warnings print a command that runs.
+
+    Catches the command printed through `%r` (one quoted word that no shell
+    runs), and a control character in the command forging a log line.
+    """
+
+    @staticmethod
+    def _printed_command(caplog, marker):
+        messages = [r.getMessage() for r in caplog.records if marker in r.getMessage()]
+        assert len(messages) == 1, messages
+        return messages[0].split("explicitly with: ", 1)[1]
+
+    @staticmethod
+    def _run_printed(text, capfd):
+        import shlex
+
+        argv = shlex.split(text)
+        assert argv[0] == "python3" and argv[1].endswith("cli.py"), argv
+        return _cli(argv[2:], capfd)
+
+    @pytest.mark.parametrize("folder", ["proj", "my proj", "-proj", "pro'j"])
+    def test_the_unproven_warning_command_moves_the_bucket(
+        self, identity_env, store, monkeypatch, capfd, caplog, folder
+    ):
+        _clear_disclosure_memos()
+        repo = make_repo(identity_env / folder, remote="https://github.com/o/proj.git")
+        _seed(store, folder, memory_id="legacy0001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        text = self._printed_command(caplog, "no recorded session from this repository")
+        code, envelope = self._run_printed(text + " --apply", capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    def test_the_case_variant_warning_command_moves_the_bucket(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts.project_identity import filesystem_case_insensitive
+
+        _clear_disclosure_memos()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        if filesystem_case_insensitive(repo):
+            pytest.skip("case variants are suppressed only on a case-sensitive filesystem")
+        _seed(store, "Proj", memory_id="variant001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        text = self._printed_command(caplog, "only by case")
+        code, envelope = self._run_printed(text + " --apply", capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    def test_a_store_path_with_a_newline_points_at_show_and_its_command_runs(
+        self, identity_env, monkeypatch, capfd, caplog
+    ):
+        """The id is fine but the store path holds a newline: the warning must
+        not print it (one log line), and `project-id show` must carry a
+        command that runs."""
+        import shlex
+
+        _clear_disclosure_memos()
+        store = identity_env / "st\nore.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.close()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        _seed(store, "proj", memory_id="legacy0001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        messages = [
+            r.getMessage() for r in caplog.records
+            if "no recorded session from this repository" in r.getMessage()
+        ]
+        assert len(messages) == 1 and "\n" not in messages[0], messages
+        assert "printed by the `project-id show` verb" in messages[0]
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, show
+        rows = [row for row in show["result"]["candidates"] if row["id"] == "proj"]
+        argv = shlex.split(rows[0]["rekey"])
+        code, envelope = _cli([*argv[2:], "--apply"], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    def test_an_id_rekey_refuses_gets_no_command_anywhere(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        """A newline in the bucket id: rekey refuses the id, so neither the
+        warning nor `project-id show` may print a command, and the warning
+        stays one line."""
+        _clear_disclosure_memos()
+        folder = "pro\nj"
+        repo = make_repo(identity_env / folder, remote="https://github.com/o/proj.git")
+        _seed(store, folder, memory_id="legacy0001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        messages = [
+            r.getMessage() for r in caplog.records
+            if "no recorded session from this repository" in r.getMessage()
+        ]
+        assert len(messages) == 1 and "\n" not in messages[0], messages
+        assert "refuses a bucket id that holds a control character" in messages[0]
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, show
+        rows = [row for row in show["result"]["candidates"] if row["id"] == folder]
+        assert rows and rows[0]["rekey"] is None, rows
+
+
 class TestRekeyInputAndStoreEdges:
     def test_candidates_takes_no_other_option(self, identity_env, store, capfd):
         code, envelope = _cli(

@@ -11,7 +11,6 @@ query), which returns the whole store instead of one project.
 
 from __future__ import annotations
 
-import ast
 import logging
 import os
 import re
@@ -1540,10 +1539,10 @@ class TestReviewQuoting:
     def test_the_unproven_command_round_trips_a_hostile_bucket_id(
         self, tmp_path, monkeypatch, caplog
     ):
-        """The unproven notice renders the command with `shlex.join`, so a
-        hostile bucket id is ONE `--from=` argument, logged with repr so a
-        newline cannot forge a log line. RED WHEN the renderer is unquoted or
-        the id is split across arguments.
+        """The unproven notice prints the shell-quoted command as it runs, so
+        a hostile bucket id is ONE `--from=` argument when the printed text
+        is pasted. RED WHEN the renderer is unquoted, the id is split across
+        arguments, or the command is printed through repr.
         """
         assert_outside_repository(tmp_path)
         hostile = "Legacy;echo PWNED"
@@ -1566,7 +1565,7 @@ class TestReviewQuoting:
         assert match is not None, (
             f"the unproven notice did not render a rekey command: {caplog.text!r}"
         )
-        argv = shlex.split(ast.literal_eval(match.group(1)))
+        argv = shlex.split(match.group(1))
         assert f"--from={hostile}" in argv, (
             f"the bucket id did not round-trip as ONE --from argument: {argv!r}"
         )

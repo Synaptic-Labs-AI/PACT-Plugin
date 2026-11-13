@@ -509,6 +509,11 @@ class TestCliSurface:
 
     def test_rekey_dry_run_then_apply_then_noop(self, rekey_env, capfd):
         _seed(rekey_env, [("l1", LEGACY)])
+        # A defaulted --to moves only an ADMITTED bucket: a recorded session
+        # of this checkout wrote the row (an unproven one is refused).
+        seed_session_evidence(
+            rekey_env.tmp_path / "home" / ".claude", rekey_env.repo, "s"
+        )
         code, payload = _cli(
             [
                 "project-id",

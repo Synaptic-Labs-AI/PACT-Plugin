@@ -27,6 +27,7 @@ import shlex
 import struct
 import subprocess
 import threading
+import unicodedata
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
@@ -56,7 +57,8 @@ from .database import (
     resolve_memory_id_prefix,
     _unusable_identifier,
     MEMORY_ID_LENGTH,
-    SQLITE_EXTENSIONS_ENABLED
+    SQLITE_EXTENSIONS_ENABLED,
+    validate_identifier_for_write,
 )
 from .embeddings import (
     generate_embedding,
@@ -339,6 +341,34 @@ def _warn_legacy_excluded(
     )
 
 
+def _printed_rekey_remedy(commands: list) -> str:
+    """The remedy text a warning prints: the commands as they run, or why not.
+
+    A rendered command is shell-quoted, so pasted as printed it runs (`%r`
+    made it one quoted word). None (`runnable_rekey_command` found the id is
+    one rekey refuses) prints why no command exists. A command holding a
+    control or format character (a store path with a newline) is NOT
+    printed: in a log line it would start a forged line. `project-id show`
+    carries the same command in its JSON envelope, where it is escaped.
+    """
+    if any(command is None for command in commands):
+        return (
+            "no command: `project-id rekey` refuses a bucket id that holds a "
+            "control character"
+        )
+    if any(
+        unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp")
+        for command in commands
+        for char in command
+    ):
+        return (
+            "the command printed by the `project-id show` verb (its bucket id "
+            "or store path holds a control character, so it is not printed "
+            "in this log line)"
+        )
+    return " ; ".join(commands)
+
+
 def _warn_legacy_unproven(
     store: str, candidate: str, target: str, memories: int, file_paths: int
 ) -> None:
@@ -352,12 +382,14 @@ def _warn_legacy_unproven(
         "no file row places it and no recorded session from this repository "
         "wrote it, so it is NOT in this read scope: its folder name alone "
         "cannot tell this checkout's rows from another checkout of the same "
-        "name. If the rows belong here, move them explicitly with: %r",
+        "name. If the rows belong here, move them explicitly with: %s",
         candidate,
         memories,
         file_paths,
         "" if file_paths == 1 else "s",
-        render_rekey_command(candidate, target, db_path=store),
+        _printed_rekey_remedy(
+            [runnable_rekey_command(candidate, target, db_path=store)]
+        ),
     )
 
 
@@ -376,15 +408,15 @@ def _warn_case_variant(
     if key in _CASE_VARIANT_WARNED:
         return
     _CASE_VARIANT_WARNED.add(key)
-    commands = " ; ".join(
-        render_rekey_command(variant, target, db_path=store) for variant in variants
+    commands = _printed_rekey_remedy(
+        [runnable_rekey_command(variant, target, db_path=store) for variant in variants]
     )
     logger.warning(
         "the legacy project basename %r matches stored bucket(s) %s only by "
         "case, and this filesystem distinguishes case, so none is in this "
         "read scope: on a case-sensitive filesystem those are different "
         "projects, not one project spelled differently. If a bucket belongs "
-        "to this project, move its rows explicitly with: %r",
+        "to this project, move its rows explicitly with: %s",
         legacy,
         ", ".join(repr(variant) for variant in variants),
         commands,
@@ -699,6 +731,23 @@ def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
     whole point of the pin is that a human chose it.
     """
     return "override file" if identity.source == "override file" else rung_label
+
+
+def runnable_rekey_command(
+    from_id: str, to_id: str, db_path: Any = None
+) -> Optional[str]:
+    """`render_rekey_command`, or None when rekey would refuse `from_id`.
+
+    A printed remedy must run as printed. `project-id rekey` binds `--from`
+    through the write-ingress rule, so an id that rule refuses (a control
+    character, a lone surrogate, an over-long id) has no runnable command,
+    and printing one would be a remedy that fails.
+    """
+    try:
+        validate_identifier_for_write(from_id)
+    except ValueError:
+        return None
+    return render_rekey_command(from_id, to_id, db_path=db_path)
 
 
 def render_rekey_command(
@@ -2589,7 +2638,7 @@ class PACTMemory:
                     canonical_count=canonical_count,
                     case_variant=case_variants,
                     case_variant_rekey=[
-                        render_rekey_command(bucket, scope, db_path=store)
+                        runnable_rekey_command(bucket, scope, db_path=store)
                         for bucket in case_variants
                     ],
                 )
@@ -2654,7 +2703,7 @@ class PACTMemory:
                     rekey=(
                         None
                         if outcome == "excluded"
-                        else render_rekey_command(candidate, scope, db_path=store)
+                        else runnable_rekey_command(candidate, scope, db_path=store)
                     ),
                     included=included,
                     verified=outcome == "verified",
