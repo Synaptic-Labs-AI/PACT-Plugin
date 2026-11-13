@@ -270,6 +270,12 @@ class TestIdentityFilesCarryNoPlanningLabels:
         # One capital letter, a hyphen and one or two digits. The same
         # boundaries as above, so `UTF-8` and an ISO timestamp never match.
         (re.compile(r"(?<![%+\w-])[A-Z]-\d{1,2}(?![\w+])"), "lettered finding id"),
+        # Review-process labels: a remediation cycle, a bare cycle and a
+        # review round, each followed by its number. The bare-cycle pattern
+        # skips the remediation prefix so each label has one owning pattern.
+        (re.compile(r"(?i)\bremediation cycle[- ]?\d"), "remediation cycle label"),
+        (re.compile(r"(?i)(?<!remediation )\bcycle[- ]\d+\b"), "cycle label"),
+        (re.compile(r"(?i)\bround[- ]\d+\b"), "review round label"),
     )
     # The Unicode control-set names are terms, not labels. (`[C]` keeps this
     # pattern's own source text from reading as a label to the scan.)
@@ -313,6 +319,9 @@ class TestIdentityFilesCarryNoPlanningLabels:
         ("(" + "G" + "4/" + "G" + "5): seams", "finding, corpus-row or design id"),
         ("parses under " + "R" + "1.", "finding, corpus-row or design id"),
         ('"""' + "N" + "-7 (cascade half): the row", "lettered finding id"),
+        ("# Remediation " + "cyc" + "le 3: update ordering", "remediation cycle label"),
+        ("# fixed in " + "cyc" + "le 2 of the review", "cycle label"),
+        ("# see verify " + "rou" + "nd 4 synthesis", "review round label"),
     )
     CLEAN = (
         "# Reject C0, DEL and C1 controls and lone surrogates",
@@ -323,6 +332,8 @@ class TestIdentityFilesCarryNoPlanningLabels:
         "an ISO-8601 stamp read as UTF-8 by sha256",
         "the 255-byte cap",
         "a sha-1 digest and the x-1 offset",
+        "the hook's lifecycle 3 times over, then round(x, 2)",
+        "a round-trip through the cycle-free graph",
         "_R1_GRAMMAR = re.compile(CANONICAL_ID_RE)",
         "SELECT r1.id FROM memories AS r1 JOIN files AS f2 ON f2.id = r1.id",
     )

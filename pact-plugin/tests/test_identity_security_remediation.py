@@ -1006,7 +1006,9 @@ class TestSaveIngressRejectsNulFilePaths:
     def test_a_bytes_path_with_a_nul_is_refused_before_any_row(self, tmp_path):
         """Catches `str(b'bad\\x00.py')`, which renders the NUL as an ESCAPE
         and so slipped past a character check on `str(...)`; measured: the
-        memory row was committed and the file layer raised TypeError later."""
+        memory row was committed and the file layer raised TypeError later.
+        The row count is checked BEFORE the error type, so that regression
+        reds at the row count whichever exception the late failure raises."""
         import sqlite3
 
         import scripts.memory_api as memory_api
@@ -1014,7 +1016,7 @@ class TestSaveIngressRejectsNulFilePaths:
         store = tmp_path / "store" / "memory.db"
         store.parent.mkdir()
         memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
-        with pytest.raises(ValueError):
+        with pytest.raises(Exception) as caught:
             memory.save(
                 {"context": "bytes nul"},
                 files=[b"/tmp/bad\x00.py"],
@@ -1033,6 +1035,7 @@ class TestSaveIngressRejectsNulFilePaths:
             finally:
                 check.close()
         assert rows == 0, f"the refused save left {rows} memory row(s)"
+        assert caught.type is ValueError, caught.value
 
 
 class TestForgedSubmoduleAdminEndToEnd:
@@ -1319,24 +1322,50 @@ class TestUserSettingRungCarriesTheLegacyCandidate:
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts"
 
-_FAKE_EXECUTABLE_RE = __import__("re").compile(
-    r"\bpact-memory\s+(?:project-id|rekey|save|search|list|get|update|delete|sync|status|setup|project-file)\b"
-)
+def _cli_verbs() -> set:
+    """Every verb the memory CLI accepts, read from its own parser: each
+    subcommand and each subcommand's own actions, so a verb added to the CLI
+    is covered without editing this module."""
+    import argparse
+
+    from scripts.cli import build_parser
+
+    verbs, parsers = set(), [build_parser()]
+    while parsers:
+        parser = parsers.pop()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                verbs.update(action.choices)
+                parsers.extend(action.choices.values())
+    return verbs
 
 
 def test_no_user_facing_text_names_a_pact_memory_executable():
     """Catches a remedy that tells the operator to run an executable that
-    does not exist. Comments are exempt (`cli.py`'s explanation of the bug)."""
+    does not exist: `pact-memory` followed by any verb the CLI accepts, in a
+    string anywhere in the memory scripts. Comments are exempt (`cli.py`'s
+    explanation of the bug)."""
     import ast
+    import re
 
-    offences = []
-    for name in ("memory_api.py", "cli.py"):
-        tree = ast.parse((_SCRIPTS_DIR / name).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+    verbs = _cli_verbs()
+    assert {"project-id", "rekey", "save"} <= verbs, verbs
+    invocation = re.compile(
+        r"\bpact-memory\s+(?:"
+        + "|".join(re.escape(verb) for verb in sorted(verbs, key=len, reverse=True))
+        + r")\b"
+    )
+    offences, scanned = [], 0
+    for path in sorted(_SCRIPTS_DIR.glob("*.py")):
+        scanned += 1
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if _FAKE_EXECUTABLE_RE.search(node.value):
-                    offences.append((name, node.value[:80]))
+                if invocation.search(node.value):
+                    offences.append((path.name, node.value[:80]))
+    assert scanned >= 10, scanned
     assert not offences, offences
+    assert invocation.search("run `pact-memory project-id rekey`"), "the pattern is dead"
+
 
 def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
     tmp_path, monkeypatch, caplog

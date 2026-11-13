@@ -156,33 +156,90 @@ _GIT_CALL_FLOORS = {
 _SUBPROCESS_CALLS = frozenset({"run", "check_output", "check_call", "call", "Popen"})
 
 
-def _git_calls(function: ast.FunctionDef):
-    """Yield (call, passes_location_free_env) for each `subprocess` git call
-    (`run`, `check_output`, `check_call`, `call` or `Popen`).
+def _bindings(scope, top_level_only: bool = False) -> dict:
+    """Every value each plain name is assigned inside `scope`, or only in its
+    top-level statements (a module's constants), so a name in one function
+    is never resolved through another function's assignment."""
+    found: dict = {}
+    for node in (scope.body if top_level_only else ast.walk(scope)):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                found.setdefault(target.id, []).append(value)
+    return found
 
-    The argv counts as git when it is a list literal starting with "git", or a
-    name the function assigned a list literal starting with "git".
+
+def _program(node, bindings: dict, seen: frozenset = frozenset()):
+    """The program an argv expression runs, or None when it cannot be
+    resolved statically.
+
+    A string names its first word (the `shell=True` form). A list or tuple
+    names its first element, and a starred first element names whatever its
+    operand names. A `+` concatenation names what its left operand names, or
+    its right operand when the left is an empty literal. A name names what
+    its bindings name, followed through aliases to a fixed point: any
+    binding that names git makes the name git, and any binding that cannot
+    be resolved makes the name unresolvable. `sys.executable` names the
+    Python interpreter. Anything else (a call, a subscript, an imported
+    attribute) cannot be resolved.
     """
-    git_names = {
-        target.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.List)
-        and node.value.elts and isinstance(node.value.elts[0], ast.Constant)
-        and node.value.elts[0].value == "git"
-        for target in node.targets if isinstance(target, ast.Name)
-    }
+    if isinstance(node, ast.Constant):
+        words = node.value.split() if isinstance(node.value, str) else []
+        return words[0] if words else None
+    if isinstance(node, (ast.List, ast.Tuple)):
+        if not node.elts:
+            return None
+        first = node.elts[0]
+        if isinstance(first, ast.Starred):
+            return _program(first.value, bindings, seen)
+        return _program(first, bindings, seen)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = node.left
+        if isinstance(left, (ast.List, ast.Tuple)) and not left.elts:
+            return _program(node.right, bindings, seen)
+        return _program(left, bindings, seen)
+    if isinstance(node, ast.Name):
+        if node.id in seen or node.id not in bindings:
+            return None
+        names = {_program(value, bindings, seen | {node.id}) for value in bindings[node.id]}
+        if "git" in names:
+            return "git"
+        if None in names:
+            return None
+        return min(names)
+    if (
+        isinstance(node, ast.Attribute) and node.attr == "executable"
+        and isinstance(node.value, ast.Name) and node.value.id == "sys"
+    ):
+        return "python"
+    return None
+
+
+def _git_calls(function: ast.FunctionDef, module_bindings: dict = None):
+    """Yield (call, passes_location_free_env) for each `subprocess` call
+    (`run`, `check_output`, `check_call`, `call` or `Popen`) whose argv runs
+    git OR cannot be resolved statically.
+
+    The program is resolved from the argv expression (`_program`), with the
+    function's own bindings taking precedence over the module's. An argv
+    that cannot be resolved FAILS CLOSED: it is treated as git, so it must
+    carry the location-free environment too.
+    """
+    bindings = dict(module_bindings or {})
+    bindings.update(_bindings(function))
     for node in ast.walk(function):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in _SUBPROCESS_CALLS
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "subprocess" and node.args):
             continue
-        argv = node.args[0]
-        is_git = (
-            isinstance(argv, ast.List) and argv.elts
-            and isinstance(argv.elts[0], ast.Constant) and argv.elts[0].value == "git"
-        ) or (isinstance(argv, ast.Name) and argv.id in git_names)
-        if not is_git:
+        program = _program(node.args[0], bindings)
+        if program is not None and program != "git":
             continue
         passes = any(
             kw.arg == "env" and (
@@ -248,20 +305,25 @@ def _module_git_calls(source: str):
     A call inside a nested function is reached from both functions' walks, so
     calls are keyed by their position.
     """
+    tree = ast.parse(source)
+    module_bindings = _bindings(tree, top_level_only=True)
     seen = {}
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for call, passes in _git_calls(node):
+            for call, passes in _git_calls(node, module_bindings):
                 seen[(call.lineno, call.col_offset)] = (node.name, call, passes)
     return list(seen.values())
 
 
 def test_every_resolver_git_call_passes_the_location_free_env():
-    """Guard arm: every git subprocess call in every memory script passes
-    `env=git_env_without_location()` (or an inline key filter of it), whatever
-    function it sits in and whether its argv is a list literal or a name
-    assigned one. A git call added anywhere in that directory without the
-    environment fails here."""
+    """Guard arm: every subprocess call in every memory script whose argv
+    runs git, or cannot be resolved statically, passes
+    `env=git_env_without_location()` (or an inline key filter of it). The
+    program is resolved from the argv expression whatever its form (a string,
+    a list or tuple, a starred splice, a `+` concatenation, a name bound in
+    the function or the module); an argv that cannot be resolved (a call's
+    return value, an imported constant) is treated as git. A git call added
+    anywhere in that directory without the environment fails here."""
     missing, counts = [], {}
     for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
         calls = _module_git_calls(path.read_text(encoding="utf-8"))
@@ -277,18 +339,65 @@ def test_every_resolver_git_call_passes_the_location_free_env():
     assert missing == [], f"git calls without env=git_env_without_location(): {missing}"
 
 
-def test_the_scan_sees_both_argv_forms_and_a_missing_env():
-    """Live control for the guard arm above."""
+def test_the_scan_resolves_every_argv_form_and_fails_closed():
+    """Live control for the guard arm above. Each call in the fixture carries
+    the verdict the scan must reach: `ok` (git, with the environment), `bad`
+    (git or unresolvable, without it) or `skip` (resolves to another
+    program). The expected verdicts are read from those markers, so a form
+    the resolver misreads reds here by line. Every resolvable form has a
+    non-git twin marked `skip`, because a form the resolver stopped reading
+    would fail closed to `bad` and look like a correct git verdict."""
     source = textwrap.dedent("""
-        def resolver():
-            subprocess.run(["git", "rev-parse"], env=git_env_without_location())
+        import sys
+        BASE = ["git"]
+        FROZEN = ("git",)
+        LISTER = ["ls"]
+
+        def resolver(args):
+            subprocess.run(["git", "rev-parse"], env=git_env_without_location())  # ok
             command = ["git"]
             command += ["rev-parse"]
-            subprocess.run(command)
-            subprocess.run(["ls"])
+            subprocess.run(command)  # bad
+            subprocess.run(("git", "status"))  # bad
+            frozen = ("git", "log")
+            subprocess.run(frozen)  # bad
+            subprocess.run("git status", shell=True)  # bad
+            local = ["git"]
+            subprocess.run([*local, "status"])  # bad
+            subprocess.run([*BASE, "status"])  # bad
+            subprocess.run((*FROZEN, "status"))  # bad
+            subprocess.run(["git"] + args)  # bad
+            joined = BASE + ["status"]
+            alias = joined
+            subprocess.run(alias)  # bad
+            subprocess.run([] + ["git", "log"])  # bad
+            subprocess.run(build_argv())  # bad
+            subprocess.run(args)  # bad
+            subprocess.run(["ls"])  # skip
+            subprocess.run("gitk", shell=True)  # skip
+            subprocess.run([sys.executable, "-m", "pip"])  # skip
+            listing = ["ls", "-l"]
+            subprocess.run(listing + args)  # skip
+            subprocess.run(("ls", "-l"))  # skip
+            near = ["ls"]
+            subprocess.run([*near, "-l"])  # skip
+            subprocess.run([*LISTER, "-l"])  # skip
+            lister_alias = listing
+            subprocess.run(lister_alias)  # skip
     """)
-    calls = list(_git_calls(_function(source, "resolver")))
-    assert [passes for _call, passes in calls] == [True, False]
+    expected = {
+        number: line.rsplit("# ", 1)[1]
+        for number, line in enumerate(source.splitlines(), start=1)
+        if line.rstrip().endswith(("# ok", "# bad", "# skip"))
+    }
+    seen = {
+        call.lineno: ("ok" if passes else "bad")
+        for _name, call, passes in _module_git_calls(source)
+    }
+    assert len(expected) == 21, expected  # every marked fixture line was read
+    got = {number: seen.get(number, "skip") for number in expected}
+    assert got == expected
+    assert sorted(seen) == sorted(n for n, v in expected.items() if v != "skip")
 
 
 def test_the_scan_accepts_only_an_inline_key_filter_of_the_location_free_env():
