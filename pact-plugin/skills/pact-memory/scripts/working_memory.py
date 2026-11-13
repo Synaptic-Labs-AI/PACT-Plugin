@@ -121,7 +121,7 @@ _WORKING_MEMORY_TERMINATOR = re.compile(r"#\s|##\s(?!Working Memory)|---")
 # one converts a consistent statement into a disagreement.
 # `hooks/shared/session_resume.py` IMPORTS the name and must not be given a
 # definition of its own; the mirror gate names it the importer for that reason.
-WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. Keyed by repository identity when the checkout has a parseable origin, otherwise by folder name. -->"
+WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. Keyed by repository identity (from the repository's override file or its origin remote) when one resolves; by folder name when there is no override file and the origin is absent or a local path, except in a submodule; otherwise, including a broken, redirected or bare .git, the identity declines and nothing is written. -->"
 MAX_WORKING_MEMORIES = 3
 
 # Constants for retrieved context section (searched/retrieved memories)

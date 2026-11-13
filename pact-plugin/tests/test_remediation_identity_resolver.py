@@ -1469,6 +1469,42 @@ class TestTheScopeSaysWhatDegradesAndWhatRaises:
         assert "StoreFaultError" in doc and "uninitialized or unreadable store" not in doc
 
 
+class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
+    """The managed comment names every way the projection is keyed, and the
+    declines.
+
+    Catches the comment telling a reader that any checkout without a
+    parseable origin falls back to its folder name ("otherwise by folder
+    name"), when the override file keys it canonically, a submodule with a
+    local-path origin declines, and a broken, redirected or bare `.git`
+    declines with nothing written.
+    """
+
+    CLAUSES = (
+        "from the repository's override file or its origin remote",
+        "when there is no override file",
+        "except in a submodule",
+        "including a broken, redirected or bare .git",
+        "the identity declines and nothing is written",
+    )
+
+    @staticmethod
+    def _copies():
+        from scripts.working_memory import WORKING_MEMORY_COMMENT as script_copy
+        from shared.claude_md_manager import WORKING_MEMORY_COMMENT as hook_copy
+
+        return (script_copy, hook_copy)
+
+    @pytest.mark.parametrize("clause", CLAUSES)
+    def test_both_copies_carry_the_clause(self, clause):
+        for copy in self._copies():
+            assert clause in copy, copy
+
+    def test_neither_copy_keeps_the_old_fallback(self):
+        for copy in self._copies():
+            assert "otherwise by folder name" not in copy, copy
+
+
 class TestTheGateTrustsOnlyLinkedWorktrees:
     """A worktree widens the gate only when it links back to the repository.
 

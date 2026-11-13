@@ -126,7 +126,7 @@ OPENERS = {"t1": ("<pre>", "</pre>"), "t3": ("<?xml version=1.0", "?>"), "t4": (
 MEMORY_COMMENTS = (
     "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->",
     "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
-    "Keyed by repository identity when the checkout has a parseable origin, otherwise by folder name. -->",
+    "Keyed by repository identity (from the repository's override file or its origin remote) when one resolves; by folder name when there is no override file and the origin is absent or a local path, except in a submodule; otherwise, including a broken, redirected or bare .git, the identity declines and nothing is written. -->",
 )
 
 

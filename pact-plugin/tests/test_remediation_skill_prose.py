@@ -128,28 +128,39 @@ class TestSecretaryProjectionKey:
     def test_the_projection_is_keyed_by_repository_identity(self):
         assert (
             "The projection is keyed by the repository identity "
-            "(host/owner/repo from the origin remote) when the checkout has a "
-            "parseable one, and by the project root's folder name when the "
-            "origin is absent or local."
+            "(host/owner/repo from the repository's override file or its "
+            "origin remote) when one resolves, and by the project root's "
+            "folder name when there is no override file and the origin is "
+            "absent or a local path, except in a submodule."
         ) in _body(SECRETARY)
 
     def test_an_unrepresentable_origin_declines_rather_than_falling_back(self):
         body = _body(SECRETARY)
         assert (
-            "A present origin that cannot be represented declines instead: "
+            "Every other case declines instead, including a present origin "
+            "that cannot be represented and a broken, redirected or bare .git: "
             "sync reports empty with a null project_id, and nothing is "
             "projected."
         ) in body
         assert "folder name otherwise" not in body.lower()
+        assert "origin is absent or local." not in body
         # `unresolved` names a missing CLAUDE.md, not an identity cause.
-        start = body.index("A present origin that cannot be represented")
+        start = body.index("Every other case declines instead")
         assert "reports unresolved" not in body[start:start + 200]
 
-    def test_the_legacy_bucket_is_named_as_read_beside_it(self):
+    def test_the_legacy_bucket_is_read_only_on_evidence(self):
+        body = _body(SECRETARY)
         assert (
-            "A legacy folder-name bucket is read beside the repository "
-            "identity until it is rekeyed"
-        ) in _body(SECRETARY)
+            "This checkout's legacy folder-name bucket is read beside the "
+            "repository identity while it holds rows, but only when a file row "
+            "places it under this repository or its linked worktrees, or a "
+            "recorded session from this repository wrote into it."
+        ) in body
+        assert (
+            "An admitted bucket is shared with every checkout whose root "
+            "folder has that name"
+        ) in body
+        assert "until it is rekeyed" not in body.lower()
 
     def test_the_retired_folder_name_key_is_gone(self):
         assert "keyed by the basename of the project root" not in _body(SECRETARY).lower()
