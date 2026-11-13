@@ -2040,7 +2040,10 @@ class TestOneConstructionAsksGitEachQuestionOnce:
 
     Catches the detection pass and the first read each running
     `git rev-parse --git-common-dir` for the identity root: repeated
-    identical subprocess work in one process.
+    identical subprocess work in one process. These arms run a plain
+    repository on the declared and cwd routes; the same property over every
+    own layout and every real route is pinned by test_identity_rung_parity.py's
+    TestTheDocumentedGitCallFloor.
     """
 
     @pytest.mark.parametrize("route", ["declared", "cwd"])

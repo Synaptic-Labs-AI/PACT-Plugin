@@ -756,8 +756,11 @@ ROUTES = ("cwd", "declared-root", "declared-sub", "record-root", "record-sub")
 class TestForgedPointerMatrix:
     """ROUTES x SHAPES: no cell may bind the victim's id.
 
-    The per-shape arms each pinned one cell; this matrix is the regression
-    guarantee for the CLASS. Every assertion is `!= VICTIM_ID` rather than
+    The per-shape arms each pinned one cell; this matrix runs them end to
+    end on these five routes and three shapes. The class over every route
+    and every shape is pinned by test_identity_rung_parity.py's
+    test_no_hostile_shape_binds_the_victim, which reads both from
+    fixtures/identity_routes.py. Every assertion is `!= VICTIM_ID` rather than
     `is None`, because a declined declaration legitimately falls through to
     later rungs — what must never happen is binding the victim.
     """

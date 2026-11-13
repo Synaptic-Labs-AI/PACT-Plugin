@@ -9,7 +9,9 @@ other; both import this module.
 
 SHAPES maps a name to `builder(base) -> target`. Every target has a `sub/`
 directory. Hostile shapes redirect the target's `.git` at a git directory
-that is not its own; the `control_` shapes are genuine checkouts.
+that is not its own; the `control_` shapes are genuine checkouts. Each
+`control_own_` builder carries `layout`, its row name in PACTMemory.__init__'s
+git-call table.
 
 ROUTES maps a name to `(fn(monkeypatch, target, elsewhere), sources)`.
 `fn` points one resolver rung at the target and returns the detected
@@ -154,6 +156,58 @@ def _own_submodule(base: Path) -> Path:
     return superproject / "target"
 
 
+def _own_separate_git_dir(base: Path) -> Path:
+    run_git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "target"), cwd=base)
+    run_git("remote", "add", "origin", OWN, cwd=base / "target")
+    run_git(
+        "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q",
+        "--allow-empty", "-m", "i", cwd=base / "target",
+    )
+    return base / "target"
+
+
+def _own_committed_superproject(base: Path) -> Path:
+    """A superproject holding the own repository as submodule `target`, with
+    the submodule recorded in a commit so worktrees of either can be added."""
+    upstream = make_repo(base / "upstream", remote=OWN)
+    superproject = make_repo(base / "super", remote="https://github.com/own/super.git")
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        str(upstream), "target", cwd=superproject,
+    )
+    run_git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "s", cwd=superproject)
+    run_git("remote", "set-url", "origin", OWN, cwd=superproject / "target")
+    return superproject
+
+
+def _own_submodule_worktree(base: Path) -> Path:
+    superproject = _own_committed_superproject(base)
+    run_git("worktree", "add", "-q", str(base / "target"), "-b", "wt", cwd=superproject / "target")
+    return base / "target"
+
+
+def _own_superproject_worktree_submodule(base: Path) -> Path:
+    superproject = _own_committed_superproject(base)
+    run_git("worktree", "add", "-q", str(base / "super-wt"), "-b", "swt", cwd=superproject)
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init",
+        cwd=base / "super-wt",
+    )
+    run_git("remote", "set-url", "origin", OWN, cwd=base / "super-wt" / "target")
+    return base / "super-wt" / "target"
+
+
+# THE OWN LAYOUTS' NAMES IN PACTMemory.__init__'s git-call table. Every
+# `control_own_` builder carries one; the git-call floor reads its layouts
+# from these, so a new own layout must state its row there.
+_own_checkout.layout = "checkout"
+_own_linked_worktree.layout = "linked worktree"
+_own_submodule.layout = "submodule"
+_own_separate_git_dir.layout = "separate-git-dir checkout"
+_own_submodule_worktree.layout = "linked worktree of a submodule"
+_own_superproject_worktree_submodule.layout = "submodule of a superproject worktree"
+
+
 _BUILDERS = {
     "forged_worktree_admin": _forged_worktree_admin,
     "forged_submodule_admin": _forged_submodule_admin,
@@ -169,6 +223,9 @@ _BUILDERS = {
     "control_own_checkout": _own_checkout,
     "control_own_linked_worktree": _own_linked_worktree,
     "control_own_submodule": _own_submodule,
+    "control_own_separate_git_dir": _own_separate_git_dir,
+    "control_own_submodule_worktree": _own_submodule_worktree,
+    "control_own_superproject_worktree_submodule": _own_superproject_worktree_submodule,
 }
 
 
@@ -179,6 +236,8 @@ def _with_sub(build):
         return target
 
     builder.__name__ = build.__name__
+    if hasattr(build, "layout"):
+        builder.layout = build.layout
     return builder
 
 

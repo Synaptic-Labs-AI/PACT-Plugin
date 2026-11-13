@@ -467,11 +467,68 @@ class TestEveryIdentityCallerIsCovered:
 # that no call repeats. Every number is measured here on every real route;
 # the forced routes are left out because their stubs replace git answers.
 
+# Every own layout the shared fixture builds, by its row name in the table:
+# each `control_own_` shape, read from SHAPES, so a new own layout joins here.
 FLOOR_LAYOUTS = {
-    "checkout": "control_own_checkout",
-    "linked worktree": "control_own_linked_worktree",
-    "submodule": "control_own_submodule",
+    build.layout: name for name, build in SHAPES.items() if name.startswith("control_own_")
 }
+
+
+# The `.git`-layout predicates: every `-> bool` function of project_identity
+# that detect_id_for_root reaches from the asked root (the marker predicates
+# and every project_identity function they call, transitively). Each truthy
+# `return` is one layout outcome the identity code distinguishes, and each
+# operand of a returned `or` is one outcome of its own.
+#
+# NOT A FLOOR LAYOUT: the outcomes of these predicates, which only a hostile
+# `.git` produces, or which describe no layout at all. A layout that reaches
+# them declines, or never binds an id, so it has no documented count.
+NOT_A_FLOOR_LAYOUT = {
+    "_gitfile_points_at_foreign_gitdir": "true only for a `.git` that points at another repository's git dir, which declines",
+    "_redirect_target_is_foreign": "the redirect test behind the predicate above; true only for a foreign target",
+    "_admin_dir_names_another_checkout": "true only for a forged admin dir that names another checkout, which declines",
+    "_git_env_bool": "reads a git environment flag, not the `.git` layout",
+}
+
+
+def _layout_predicates() -> set:
+    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    reached, frontier = set(_marker_predicates()), list(_marker_predicates())
+    while frontier:
+        for call in ast.walk(defined[frontier.pop()]):
+            if (
+                isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id in defined and call.func.id not in reached
+            ):
+                reached.add(call.func.id)
+                frontier.append(call.func.id)
+    return {
+        name for name in reached
+        if isinstance(defined[name].returns, ast.Name) and defined[name].returns.id == "bool"
+    }
+
+
+def _layout_outcomes(predicates: set) -> dict:
+    """{(predicate, return line, operand index or None): operand node} for
+    every truthy `return` of each predicate."""
+    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    outcomes = {}
+    for function in tree.body:
+        if not (isinstance(function, ast.FunctionDef) and function.name in predicates):
+            continue
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            value = node.value
+            if isinstance(value, ast.Constant) and not value.value:
+                continue
+            if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
+                for index, operand in enumerate(value.values):
+                    outcomes[(function.name, node.lineno, index)] = operand
+            else:
+                outcomes[(function.name, node.lineno, None)] = value
+    return outcomes
 
 
 def _rung_family(route: str) -> str:
@@ -487,7 +544,9 @@ def _documented_floor() -> tuple:
     doc = " ".join(PACTMemory.__init__.__doc__.split())
     table = {}
     for layout in FLOOR_LAYOUTS:
-        line = re.search(rf"{layout}: ((?:[A-Za-z_ ]+ \d+(?:-\d+)?(?:, )?)+)[;.]", doc)
+        line = re.search(
+            rf"(?<=[;:] ){re.escape(layout)}: ((?:[A-Za-z_ ]+ \d+(?:-\d+)?(?:, )?)+)[;.]", doc
+        )
         assert line, f"the docstring states no git-call counts for {layout!r}"
         table[layout] = {
             rung.strip(): (int(low), int(high or low))
@@ -495,6 +554,12 @@ def _documented_floor() -> tuple:
                 r"([A-Za-z_ ]+?) (\d+)(?:-(\d+))?(?:, |$)", line.group(1)
             )
         }
+    rows = re.search(r"routes \(each takes about 1 ms\): (.+?)\.(?: |$)", doc)
+    assert rows, "the docstring has no git-call table"
+    stated = {row.split(": ", 1)[0] for row in rows.group(1).split("; ")}
+    assert stated == set(FLOOR_LAYOUTS), (
+        f"table rows {sorted(stated)} are not the own layouts {sorted(FLOOR_LAYOUTS)}"
+    )
     read = re.search(r"first legacy-scope read adds up to (\d+)", doc)
     assert read, "the docstring states no first-read count"
     assert "No call is repeated with the same argument." in doc
@@ -528,12 +593,41 @@ def _fresh_scope_state() -> None:
 
 @pytest.fixture(scope="module")
 def git_calls(tmp_path_factory):
-    """{(layout, route): (detection calls, first-read calls, repeated calls)}."""
+    """{(layout, route): (detection calls, first-read calls, repeated calls)},
+    and {layout outcome: the layouts that reached it} over the same runs."""
     import subprocess
 
     real = subprocess.run
     measured = {}
+    predicates = _layout_predicates()
+    outcomes = _layout_outcomes(predicates)
+    operands = collections.defaultdict(dict)
+    for (name, line, index), node in outcomes.items():
+        if index is not None:
+            operands[(name, line)][index] = compile(ast.Expression(node), "<operand>", "eval")
+    reached = collections.defaultdict(set)
+    current = []
+
+    def tracer(frame, event, arg):
+        code = frame.f_code
+        if event != "return" or not arg or code.co_name not in predicates:
+            return None
+        if code.co_filename != pi.__file__:
+            return None
+        key = (code.co_name, frame.f_lineno)
+        if key in operands:
+            # The operands are compiled from project_identity's own source and
+            # re-evaluated on the returning frame's values, to tell which side
+            # of a returned `or` made it true; no outside text is evaluated.
+            for index, operand in operands[key].items():
+                if eval(operand, frame.f_globals, dict(frame.f_locals)):
+                    reached[(*key, index)].add(current[0])
+        elif (*key, None) in outcomes:
+            reached[(*key, None)].add(current[0])
+        return None
+
     for layout, shape in FLOOR_LAYOUTS.items():
+        current[:] = [layout]
         for route, (run, _sources) in ROUTES.items():
             if route in FORCED_ROUTES:
                 continue
@@ -556,21 +650,34 @@ def git_calls(tmp_path_factory):
                 run(cell_patch, target, elsewhere)  # puts the process on this route
                 _fresh_scope_state()
                 cell_patch.setattr(subprocess, "run", counting)
-                memory = PACTMemory(session_id="s", db_path=store)
+                previous = sys.getprofile()
+                sys.setprofile(tracer)
+                try:
+                    memory = PACTMemory(session_id="s", db_path=store)
+                finally:
+                    sys.setprofile(previous)
                 detection = len(calls)
                 memory._read_project_scopes()
             repeated = sorted(c for c, n in collections.Counter(calls).items() if n > 1)
             measured[(layout, route)] = (detection, len(calls) - detection, repeated)
-    return measured
+    return measured, dict(reached)
 
 
 class TestTheDocumentedGitCallFloor:
+    """The git-call counts PACTMemory.__init__ documents, measured on every
+    own layout the shared fixture builds (FLOOR_LAYOUTS, read from SHAPES)
+    and every real route. The forced routes are left out because their stubs
+    replace git answers. The layout set is complete when every truthy
+    outcome of the `.git`-layout predicates is reached by some own layout,
+    except the outcomes NOT_A_FLOOR_LAYOUT names with its reason."""
+
     def test_every_rung_runs_the_documented_detection_counts(self, git_calls):
         """Each layout and rung's documented (fewest, most) is exactly the
         measured range over that rung's real routes."""
+        measured_calls, _reached = git_calls
         table, _read = _documented_floor()
         measured = collections.defaultdict(list)
-        for (layout, route), counts in git_calls.items():
+        for (layout, route), counts in measured_calls.items():
             measured[(layout, _rung_family(route))].append(counts[0])
         wrong = {
             key: ((min(values), max(values)), table[key[0]].get(key[1]))
@@ -580,11 +687,13 @@ class TestTheDocumentedGitCallFloor:
         assert wrong == {}, f"(measured, documented) detection calls: {wrong}"
 
     def test_the_first_read_adds_at_most_the_documented_count(self, git_calls):
+        measured_calls, _reached = git_calls
         _table, read = _documented_floor()
-        assert max(counts[1] for counts in git_calls.values()) == read
+        assert max(counts[1] for counts in measured_calls.values()) == read
 
     def test_no_route_repeats_a_git_call(self, git_calls):
-        repeated = {cell: counts[2] for cell, counts in git_calls.items() if counts[2]}
+        measured_calls, _reached = git_calls
+        repeated = {cell: counts[2] for cell, counts in measured_calls.items() if counts[2]}
         assert repeated == {}
 
     def test_every_documented_rung_has_a_real_route(self):
@@ -592,3 +701,20 @@ class TestTheDocumentedGitCallFloor:
         families = {_rung_family(route) for route in ROUTES if route not in FORCED_ROUTES}
         for layout, rungs in table.items():
             assert set(rungs) == families, (layout, set(rungs), families)
+
+    def test_the_own_layouts_reach_every_layout_outcome(self, git_calls):
+        """Every truthy outcome of every `.git`-layout predicate is reached by
+        some own layout, so a layout the identity code distinguishes cannot
+        be missing from the floor. NOT_A_FLOOR_LAYOUT names the predicates
+        whose outcomes no own layout can reach, and each must still be one."""
+        _measured, reached = git_calls
+        predicates = _layout_predicates()
+        assert {"_marker_names_external_git_dir", "_submodule_checkout"} <= predicates  # control
+        assert set(NOT_A_FLOOR_LAYOUT) <= predicates, set(NOT_A_FLOOR_LAYOUT) - predicates
+        outcomes = _layout_outcomes(predicates)
+        unreached = sorted(
+            key for key in outcomes
+            if key[0] not in NOT_A_FLOOR_LAYOUT and not reached.get(key)
+        )
+        assert unreached == [], f"a layout outcome no own layout reaches: {unreached}"
+

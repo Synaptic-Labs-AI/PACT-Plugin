@@ -1926,7 +1926,10 @@ class PACTMemory:
                         routes (each takes about 1 ms):
                           checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
                           linked worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
-                          submodule: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6.
+                          submodule: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6;
+                          separate-git-dir checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+                          linked worktree of a submodule: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6;
+                          submodule of a superproject worktree: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6.
                         A submodule asked about from a subdirectory costs the
                         one more. The cwd marker is reached through a
                         GIT_CEILING_DIRECTORIES entry above the cwd. The first
