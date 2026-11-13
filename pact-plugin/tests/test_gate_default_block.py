@@ -158,6 +158,12 @@ class TestSeedGate:
         ["-p", "randomly", "--randomly-seed=7"],
         ["-p", "randomly", "--randomly-seed", "0"],
         ["-p", "randomly", "--randomly-seed=last", "--randomly-seed=123456789"],
+        # Past a bare `--`: pytest applies the seed when no path precedes `--`.
+        ["-p", "randomly", "--", "--randomly-seed=5"],
+        # A path before `--` makes pytest read the word as a path and stop with
+        # "file or directory not found"; the gate's verdict is pinned as is.
+        ["-p", "randomly", "tests", "--", "--randomly-seed=5"],
+        ["tests", "-p", "randomly", "--", "--randomly-seed=5"],
     ])
     def test_a_seeded_session_passes(self, args):
         randomly_seed_gate.refuse_unseeded(_config(args))
@@ -171,6 +177,8 @@ class TestSeedGate:
         ["--randomly-seed"],
         ["--randomly-seed=٣"],
         ["--randomly-seed=7", "--randomly-seed=last"],
+        # pytest parses a post-`--` word as the option here and refuses `x`.
+        ["-p", "randomly", "--randomly-seed=5", "--", "--randomly-seed=x"],
     ])
     def test_an_unseeded_session_is_refused(self, args):
         with pytest.raises(pytest.UsageError, match="names no integer --randomly-seed"):

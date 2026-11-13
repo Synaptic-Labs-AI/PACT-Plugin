@@ -35,7 +35,13 @@ def _is_seed(value):
 def explicit_seed(args):
     """True when the last --randomly-seed in the args has an integer value.
 
-    The last one counts because it is the one argparse keeps.
+    The last one counts because it is the one argparse keeps. The scan reads
+    past a bare `--` on purpose: pytest applies a `--randomly-seed` placed after
+    `--` when no path precedes the `--` (measured with pytest 9.2.0 and
+    pytest-randomly 5.1.0: `-p randomly -- --randomly-seed=5` runs with seed 5).
+    Where a path does precede it, pytest reads the word as a path and stops
+    with "file or directory not found" before any test runs. So stopping at
+    `--`, as plain argparse would, refuses a run pytest seeds; do not change it.
     """
     verdict = False
     for index, word in enumerate(args):
