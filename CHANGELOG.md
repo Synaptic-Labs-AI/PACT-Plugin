@@ -45,6 +45,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: a forged worktree pointer's warning, save refusal and decline envelope are checked to carry no path into the store it names, and the code text states the exact rule for a null `override_path` (a redirect, or a git directory outside the checkout that is neither a linked worktree's nor a submodule's admin directory).
 - Tests: the memory skill's null-`override_path` pins measure that condition per layout with git itself, and take the decline reasons from the code's own registry.
 - Tests: three tests that hid a module through `patch.dict(sys.modules)` now bind only that key, so a module first imported inside the window (numpy) is no longer evicted for later tests in the same worker; one of them also binds the module name the import actually resolves, so its stub is used.
+- Tests: the cwd-marker rung's forged-pointer and broken-marker guard is now tested on the route that reaches it (a `GIT_CEILING_DIRECTORIES` entry at the checkout root, with the cwd below it), and two other guards no test could make fail now have arms: a submodule whose origin was removed, and the worktree identity record's recorded root.
 
 ### Corrected during review
 

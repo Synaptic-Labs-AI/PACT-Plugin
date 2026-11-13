@@ -2589,7 +2589,11 @@ class PACTMemory:
                 cwd_common_dir = main_repo_common_dir(str(cwd_root))
                 # The same guards as the declared rungs: a marker without a
                 # git answer, and the forged worktree-admin shape
-                # (`main_repo_root` is not called on this rung).
+                # (`main_repo_root` is not called on this rung). This rung
+                # meets a `.git` marker when a `GIT_CEILING_DIRECTORIES` entry
+                # above the cwd hid the checkout from git and from
+                # `find_git_marker`: `_find_project_root` does not stop at a
+                # ceiling, and `git -C <root>` examines the root itself.
                 guarded = _root_guard(cwd_root, cwd_common_dir, "cwd", root=cwd_root)
                 if guarded is not None:
                     return guarded._replace(pre_change_name=cwd_name)

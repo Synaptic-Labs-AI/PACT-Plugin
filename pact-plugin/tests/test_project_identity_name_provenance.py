@@ -378,6 +378,30 @@ class TestNoRepositoryChosenNameBindsAStoreKey:
                 "checkout path"
             )
 
+    def test_a_submodule_with_no_origin_does_not_bind_its_basename(
+        self, tmp_path, monkeypatch
+    ):
+        """Route 4 with the origin removed (`git remote remove origin` in the
+        submodule). An absent origin takes its own branch, before the origin
+        is classified, so the local-path arm above does not reach it: the
+        submodule refusal there must still decline instead of answering the
+        checkout root's basename."""
+        checkout = _submodule(
+            tmp_path, name=None, path="checks/ForeignProj", network_remote=None
+        )
+        run_git("remote", "remove", "origin", cwd=checkout)
+        store = tmp_path / "store.db"
+        _seed_bucket(store, "ForeignProj", memory_id="attacker")
+        _enter(monkeypatch, tmp_path, checkout)
+        memory = _memory(store)
+
+        assert memory.project_id is None, (
+            "a submodule with no origin bound the repository-chosen checkout "
+            f"basename as its primary id: {memory.project_id!r}"
+        )
+        assert memory._decline_reason["reason"] == "submodule_checkout"
+        assert _ids(memory.list(limit=10)) == []
+
 
 # ---------------------------------------------------------------------------
 # The forged-`.git` guard vs a DEINIT-ED submodule admin dir

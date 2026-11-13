@@ -1020,6 +1020,51 @@ class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
 
         self._assert_refused(memory, store, monkeypatch, "CLAUDE_PROJECT_DIR")
 
+    def test_a_ceiling_at_the_delivered_checkout_binds_nothing(self, tmp_path, monkeypatch):
+        """`GIT_CEILING_DIRECTORIES` naming the delivered checkout, with the
+        cwd below it, hides the checkout from git and from the marker walk, so
+        the git-root rung finds nothing and resolution reaches the cwd-marker
+        rung, whose project-root walk does not stop at a ceiling. That rung's
+        own guard must refuse the pointer."""
+        _worktree, delivered, store = self._victim(tmp_path)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(delivered))
+        memory = _memory_in(monkeypatch, delivered / "sub", store)
+
+        self._assert_refused(memory, store, monkeypatch, "cwd")
+
+    @pytest.mark.parametrize("marker", ["forged", "broken"])
+    def test_a_recorded_root_is_guarded_like_every_other_rung(
+        self, tmp_path, monkeypatch, marker
+    ):
+        """A gone declaration resolves through the worktree identity record
+        to the root the record check proves. That check already requires the
+        root to be its own toplevel and its common dir's parent, so no record
+        it accepts names a forged or broken checkout; the resolver's own guard
+        on the recorded root is the defence if that shared check ever admits
+        one. Forced here by making the record check return such a root."""
+        from shared import project_scope
+
+        _worktree, delivered, store = self._victim(tmp_path)
+        root = delivered
+        if marker == "broken":
+            root = tmp_path / "broken"
+            root.mkdir()
+            (root / ".git").write_text(f"gitdir: {tmp_path / 'missing'}\n", encoding="utf-8")
+        monkeypatch.setattr(
+            project_scope, "recorded_main_root", lambda declared, identity: root
+        )
+        elsewhere = tmp_path / "plain"
+        elsewhere.mkdir()
+        memory = _memory_in(
+            monkeypatch, elsewhere, store, declared=tmp_path / "gone-worktree"
+        )
+
+        assert memory.project_id is None
+        assert memory._decline_reason["reason"] == (
+            "gitfile_redirect" if marker == "forged" else "broken_git_marker"
+        )
+        assert memory.list(limit=10) == []
+
     def test_the_genuine_worktree_still_resolves(self, tmp_path, monkeypatch):
         worktree, _delivered, store = self._victim(tmp_path)
         memory = _memory_in(monkeypatch, worktree, store)
@@ -1029,9 +1074,13 @@ class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
 
     BAD_ORIGIN = "https://bad host.example/victim/repo.git"
 
-    @pytest.mark.parametrize("declared", [False, True], ids=["cwd", "declared"])
+    # The rung each route reaches: the ceiling route hides the checkout from
+    # the git-root rung and lands on the cwd-marker rung.
+    RUNGS = {"cwd": "git root", "declared": "CLAUDE_PROJECT_DIR", "ceiling": "cwd"}
+
+    @pytest.mark.parametrize("route", ["cwd", "declared", "ceiling"])
     def test_a_forgery_prints_no_path_into_the_victims_store(
-        self, tmp_path, monkeypatch, caplog, declared
+        self, tmp_path, monkeypatch, caplog, route
     ):
         """The victim's own worktree, with an origin that cannot be
         represented, prints the override path inside the victim's store (its
@@ -1061,8 +1110,11 @@ class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
         memory_api._LEGACY_SCOPE_CACHE.clear()
         with caplog.at_level(logging.WARNING):
             caplog.clear()
-            if declared:
+            if route == "declared":
                 memory = _memory_in(monkeypatch, elsewhere, store, declared=delivered)
+            elif route == "ceiling":
+                monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(delivered))
+                memory = _memory_in(monkeypatch, delivered / "sub", store)
             else:
                 memory = _memory_in(monkeypatch, delivered, store)
             monkeypatch.setattr(memory_api, "_ensure_ready", lambda: None)
@@ -1074,7 +1126,46 @@ class TestAPointerAtASeparateGitDirWorktreeAdminDirIsRefused:
         texts += [str(refused.value), envelope]
         for text in texts:
             assert pin not in text and str(victim_store) not in text, text
-        assert memory._decline_reason["reason"] == "gitfile_redirect"
+        assert memory._decline_reason == pi.decline_record(
+            "gitfile_redirect", None, self.RUNGS[route]
+        )
+
+
+class TestABrokenMarkerAboveACeilingDeclinesOnTheCwdRung:
+    """A `.git` git cannot answer for, at a checkout root named by
+    `GIT_CEILING_DIRECTORIES`, with the cwd below it: git and the marker walk
+    both stop at the ceiling, so the git-root rung sees no marker, and the
+    cwd-marker rung's project-root walk lands on the checkout. That rung's own
+    guard must decline it as a broken marker instead of naming the folder.
+    Without the ceiling the git-root rung declines the same checkout."""
+
+    @pytest.mark.parametrize("ceiling", [True, False], ids=["ceiling", "no_ceiling"])
+    @pytest.mark.parametrize("cause", ["dangling_gitfile", "git_fails"])
+    def test_the_checkout_declines(self, tmp_path, monkeypatch, cause, ceiling):
+        assert_outside_repository(tmp_path)
+        top = tmp_path / "top"
+        if cause == "dangling_gitfile":
+            (top / "sub").mkdir(parents=True)
+            (top / ".git").write_text(f"gitdir: {tmp_path / 'missing'}\n", encoding="utf-8")
+        else:
+            make_repo(top, remote="https://github.com/v/p.git")
+            (top / "sub").mkdir()
+            shim = tmp_path / "bin"
+            shim.mkdir()
+            (shim / "git").write_text("#!/bin/sh\nexit 128\n", encoding="utf-8")
+            (shim / "git").chmod(0o755)
+            monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+        if ceiling:
+            monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(top))
+        else:
+            monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        memory = _memory_in(monkeypatch, top / "sub", tmp_path / "m.db")
+
+        assert memory.project_id is None
+        assert memory._decline_reason == pi.decline_record(
+            "broken_git_marker", None, "cwd" if ceiling else "git root"
+        )
+        assert memory.list(limit=10) == []
 
 
 class TestAnEmptyOriginUrlValueAgainstRealGit:
