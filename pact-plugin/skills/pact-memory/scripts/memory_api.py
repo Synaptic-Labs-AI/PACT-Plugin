@@ -2017,7 +2017,19 @@ class PACTMemory:
                         legacy-scope read adds up to 2 more (the worktree
                         list, plus the common dir when detection asked about
                         another directory). No call is repeated with the same
-                        argument.
+                        argument. These counts assume no override pin. With
+                        a canonical override pin, which answers before the
+                        origin is read, the counts are:
+                          checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
+                          linked worktree: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+                          submodule: git root 3-4, CLAUDE_PROJECT_DIR 3-4, cwd marker 4;
+                          separate-git-dir checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
+                          linked worktree of a submodule: git root 4-5, CLAUDE_PROJECT_DIR 4-5, cwd marker 5;
+                          submodule of a superproject worktree: git root 3-4, CLAUDE_PROJECT_DIR 3-4, cwd marker 4;
+                          dot-git store checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4.
+                        A dot-git store checkout, made with `git init
+                        --separate-git-dir=<dir>/.git`, declines without a
+                        pin and binds only through one.
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
 

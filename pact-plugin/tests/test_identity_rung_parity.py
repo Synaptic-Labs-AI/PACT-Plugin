@@ -31,7 +31,8 @@ What is derived from the code, not typed here:
   one of the sites NO_IDENTITY_BOUND counts with the reason it binds no store
   key;
 - the git-call floor: the per-layout, per-rung counts PACTMemory.__init__
-  documents are measured on every real route.
+  documents, with no override pin and with one, are measured on every real
+  route.
 
 A route reaches a shape when its own rung answers (the decline's `source`,
 or the bound identity's). A route that does not is listed in NOT_REACHED, and
@@ -57,10 +58,12 @@ from fixtures.identity_git import (
     bindings,
     import_aliases,
     qualified_name,
+    run_git,
 )
 from fixtures.identity_routes import (
     FORCED_ROUTES,
     NOT_REACHED,
+    OWN,
     ROUTES,
     SHAPES,
     VICTIM_ID,
@@ -487,9 +490,22 @@ FLOOR_LAYOUTS = {
 # `.git` produces, or which describe no layout at all. A layout that reaches
 # them declines, or never binds an id, so it has no documented count.
 NOT_A_FLOOR_LAYOUT = {
-    "_gitfile_points_at_foreign_gitdir": "true only for a `.git` that points at another repository's git dir, which declines",
-    "_redirect_target_is_foreign": "the redirect test behind the predicate above; true only for a foreign target",
-    "_admin_dir_names_another_checkout": "true only for a forged admin dir that names another checkout, which declines",
+    "_gitfile_points_at_foreign_gitdir": (
+        "true for a `.git` that points at a directory named `.git`: another "
+        "repository's git dir, which declines, or the user's own "
+        "`--separate-git-dir=<dir>/.git` store, which declines without a pin "
+        "and is measured pinned (TestTheGitCallFloorWithAPin), because a pin "
+        "answers before this predicate runs"
+    ),
+    "_redirect_target_is_foreign": (
+        "the redirect test behind the predicate above, true for the same "
+        "targets: a foreign git dir, or the user's own dot-git store"
+    ),
+    "_admin_dir_names_another_checkout": (
+        "true for a submodule admin dir whose recorded core.worktree names "
+        "another checkout (a forgery) or is unset (the user's own submodule "
+        "after `git submodule deinit`, which is unprovable); both decline"
+    ),
     "_git_env_bool": "reads a git environment flag, not the `.git` layout",
 }
 
@@ -677,7 +693,8 @@ def git_calls(tmp_path_factory):
 class TestTheDocumentedGitCallFloor:
     """The git-call counts PACTMemory.__init__ documents, measured on every
     own layout the shared fixture builds (FLOOR_LAYOUTS, read from SHAPES)
-    and every real route. The forced routes are left out because their stubs
+    and every real route, with no override pin (TestTheGitCallFloorWithAPin
+    measures the pinned table). The forced routes are left out because their stubs
     replace git answers. Every other shape (a hostile pointer that declines,
     or the accepted external-store bind) has no documented count but is held
     to no repeated call on every route too. The layout set is complete when
@@ -738,6 +755,129 @@ class TestTheDocumentedGitCallFloor:
             if key[0] not in NOT_A_FLOOR_LAYOUT and not reached.get(key)
         )
         assert unreached == [], f"a layout outcome no own layout reaches: {unreached}"
+
+
+# --- the git-call floor with an override pin --------------------------------
+
+FLOOR_PIN = "github.com/pinned/floor"
+# The pinned table's row name for the own layout that binds only through a
+# pin: a checkout made with `git init --separate-git-dir=<dir>/.git`.
+DOT_GIT_STORE = "dot-git store checkout"
+
+
+def _own_dot_git_store(base: Path) -> Path:
+    """The user's own checkout whose separate git dir is named `.git`: its
+    `.git` file names a directory called `.git`, the redirect shape, so the
+    origin is not read and only a pin binds it."""
+    store = base / "store" / ".git"
+    store.parent.mkdir()
+    run_git("init", "-q", f"--separate-git-dir={store}", str(base / "target"), cwd=base)
+    run_git("remote", "add", "origin", OWN, cwd=base / "target")
+    run_git(
+        "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q",
+        "--allow-empty", "-m", "i", cwd=base / "target",
+    )
+    (base / "target" / "sub").mkdir()
+    return base / "target"
+
+
+def _detection_calls(tmp_path_factory, build, pin: bool) -> dict:
+    """{route: (git calls in one construction, bound id)} for one layout on
+    every real route, measured as `git_calls` measures detection."""
+    import subprocess
+
+    real = subprocess.run
+    measured = {}
+    for route, (run, _sources) in ROUTES.items():
+        if route in FORCED_ROUTES:
+            continue
+        base = tmp_path_factory.mktemp("pinned_floor")
+        assert_outside_repository(base)
+        target = build(base)
+        if pin:
+            assert plant_unusable_pin(target, FLOOR_PIN + "\n") is not None, route
+        elsewhere = base / "elsewhere"
+        elsewhere.mkdir()
+        store = elsewhere / "m.db"
+        _seed_bucket(store, target.name)
+        calls = []
+
+        def counting(argv, *args, **kwargs):
+            if argv and Path(str(argv[0])).name == "git":
+                calls.append(argv)
+            return real(argv, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as cell_patch:
+            _clear(cell_patch)
+            run(cell_patch, target, elsewhere)  # puts the process on this route
+            _fresh_scope_state()
+            cell_patch.setattr(subprocess, "run", counting)
+            memory = PACTMemory(session_id="s", db_path=store)
+        measured[route] = (len(calls), memory.project_id)
+    return measured
+
+
+@pytest.fixture(scope="module")
+def pinned_git_calls(tmp_path_factory):
+    """({(layout, route): (detection calls, bound id)} with a canonical pin
+    planted, over every own layout and the dot-git store checkout, and
+    {route: (calls, bound id)} for that checkout unpinned)."""
+    builds = {layout: SHAPES[shape] for layout, shape in FLOOR_LAYOUTS.items()}
+    builds[DOT_GIT_STORE] = _own_dot_git_store
+    pinned = {
+        (layout, route): counts
+        for layout, build in builds.items()
+        for route, counts in _detection_calls(tmp_path_factory, build, True).items()
+    }
+    return pinned, _detection_calls(tmp_path_factory, _own_dot_git_store, False)
+
+
+def _documented_pinned_floor() -> dict:
+    """{layout: {rung: (fewest, most)}} from the docstring's pinned table,
+    after checking it states that the main table assumes no pin."""
+    import re
+
+    doc = " ".join(PACTMemory.__init__.__doc__.split())
+    assert "These counts assume no override pin." in doc
+    rows = re.search(
+        r"With a canonical override pin, which answers before the origin is "
+        r"read, the counts are: (.+?)\.(?: |$)", doc,
+    )
+    assert rows, "the docstring has no pinned git-call table"
+    table = {}
+    for row in rows.group(1).split("; "):
+        layout, counts = row.split(": ", 1)
+        table[layout] = {
+            rung.strip(): (int(low), int(high or low))
+            for rung, low, high in re.findall(r"([A-Za-z_ ]+?) (\d+)(?:-(\d+))?(?:, |$)", counts)
+        }
+    return table
+
+
+class TestTheGitCallFloorWithAPin:
+    """The main table assumes no override pin. A canonical pin answers before
+    the origin is read, so the docstring states a second table, measured here
+    on every own layout and real route, plus the dot-git store checkout,
+    which declines without a pin and binds only through one."""
+
+    def test_every_pinned_layout_runs_the_documented_counts(self, pinned_git_calls):
+        pinned, _unpinned = pinned_git_calls
+        ranges = collections.defaultdict(list)
+        for (layout, route), (calls, _answer) in pinned.items():
+            ranges[(layout, _rung_family(route))].append(calls)
+        measured = collections.defaultdict(dict)
+        for (layout, rung), values in ranges.items():
+            measured[layout][rung] = (min(values), max(values))
+        assert dict(measured) == _documented_pinned_floor()
+
+    def test_every_pinned_layout_binds_the_pin(self, pinned_git_calls):
+        pinned, _unpinned = pinned_git_calls
+        wrong = {cell: answer for cell, (_calls, answer) in pinned.items() if answer != FLOOR_PIN}
+        assert wrong == {}, f"a pinned layout did not bind its pin: {wrong}"
+
+    def test_the_dot_git_store_declines_without_a_pin(self, pinned_git_calls):
+        _pinned, unpinned = pinned_git_calls
+        assert {answer for _calls, answer in unpinned.values()} == {None}, unpinned
 
 
 # --- a repository pin outranks the user setting ----------------------------
