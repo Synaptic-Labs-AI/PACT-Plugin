@@ -423,10 +423,11 @@ def _identity_call_forms() -> tuple:
     """(sites, unresolved). `sites` is {(file, enclosing function, callee,
     first line, last line)}: one site per call expression of an identity
     function in the memory scripts and the backlog writer, module-level code
-    included (`<module>`). FAIL CLOSED: an identity function referenced other
-    than as a call target or the value of a plain assignment (which `_callee`
+    included (`<module>`). FAIL CLOSED: an identity function read other than
+    as a call target or the value of a plain assignment (which `_callee`
     resolves through the scope's bindings), for example passed to `partial`
-    or stored in a container, is listed in `unresolved`."""
+    or stored in a container, is listed in `unresolved`. Only reads count:
+    an assignment's target is a name being bound, not a reference."""
     sites, unresolved = set(), []
     for path in _identity_caller_files():
         rel = path.relative_to(PLUGIN_ROOT).as_posix()
@@ -447,6 +448,7 @@ def _identity_call_forms() -> tuple:
                         sites.add((rel, function, callee, child.lineno, child.end_lineno))
                 elif (
                     isinstance(child, (ast.Name, ast.Attribute))
+                    and isinstance(child.ctx, ast.Load)
                     and not (isinstance(node, ast.Call) and child is node.func)
                     and not (isinstance(node, ast.Assign) and child is node.value)
                     and _callee(child, aliases, scope_bindings) is not None
