@@ -226,6 +226,35 @@ def _derives_a_session_path(function):
     return any(marker in name for name in names for marker in _SESSION_PATH_NAMES)
 
 
+# ANCHOR of the name census: the context file's name or a piece of it, in
+# any string constant or f-string piece outside a docstring. `pact-sessions`
+# (the sessions root) is another word, and `context.json` counts only as the
+# file's own tail (`context.json`, `-context.json`, `session-context.json`),
+# not inside another name such as `planted-context.json`.
+_NAME_ANCHOR = re.compile(
+    r"pact-session(?![s\w])|session-context|(?:^-?|session-)context\.json"
+)
+# A complete literal file name in the sessions folder other than the context
+# file: `pact-session-<word>.<ext>`, no placeholder.
+_OTHER_SESSION_FILE = re.compile(r"pact-session-(?!context\b)[a-z0-9_]+\.[a-z]+\b")
+
+
+def _unreadable_name(text):
+    """Whether `text` holds an anchor occurrence the census cannot judge.
+
+    Called for a constant `_names_the_file` did not count. An occurrence that
+    is part of a complete other session-file name is read as benign; every
+    other occurrence (a `%`, `{}` or `$` template, a piece such as
+    `"context.json"` or `"pact-session-ctx"` that a join, a replace or a `+`
+    completes) is unreadable, so a context-file name the census cannot see
+    fails the census instead of escaping it."""
+    for match in _NAME_ANCHOR.finditer(text):
+        if match.group().startswith("pact-session") and _OTHER_SESSION_FILE.match(text, match.start()):
+            continue
+        return True
+    return False
+
+
 def _names_the_file(text):
     """A string piece that names the context file, or the piece of a name
     assembled from several (`"pact-session-" + "context.json"`, an f-string
@@ -269,6 +298,7 @@ class _Census(ast.NodeVisitor):
         self.docstrings = set()
         self.api_refs = Counter()
         self.name_sites = Counter()
+        self.unreadable_names = []
         self.path_refs = Counter()
         self.module_path_uses = Counter()
         self.relocations = Counter()
@@ -354,12 +384,12 @@ class _Census(ast.NodeVisitor):
             self.module_path_uses[(self.rel, self._where())] += 1
 
     def visit_Constant(self, node):
-        if (
-            isinstance(node.value, str)
-            and _names_the_file(node.value)
-            and id(node) not in self.docstrings
-        ):
+        if not isinstance(node.value, str) or id(node) in self.docstrings:
+            return
+        if _names_the_file(node.value):
             self.name_sites[(self.rel, self._where())] += 1
+        elif _unreadable_name(node.value):
+            self.unreadable_names.append(f"{self.rel}:{node.lineno}: {node.value[:60]!r}")
 
     def visit_Attribute(self, node):
         if isinstance(node.ctx, ast.Load) and node.attr in self.aliases:
@@ -422,7 +452,7 @@ def _python_census(plugin):
     found = {
         "scanned": {root: 0 for root in _ROOTS}, "write_calls": Counter(),
         "path_builder_calls": Counter(), "path_accessor_refs": Counter(),
-        "name_sites": Counter(), "path_refs": Counter(),
+        "name_sites": Counter(), "unreadable_names": [], "path_refs": Counter(),
         "module_path_uses": Counter(), "relocations": Counter(),
         "direct_writes": Counter(),
     }
@@ -439,6 +469,7 @@ def _python_census(plugin):
                 else:
                     found["path_accessor_refs"][(rel, where)] += count
             found["name_sites"] += census.name_sites
+            found["unreadable_names"] += census.unreadable_names
             found["path_refs"] += census.path_refs
             found["module_path_uses"] += census.module_path_uses
             found["relocations"] += census.relocations
@@ -783,6 +814,37 @@ class TestCensus:
     def test_every_code_string_naming_the_file_is_known(self):
         name_sites = _shipped_python_census()["name_sites"]
         assert name_sites == KNOWN_NAME_SITES, _differs(name_sites, KNOWN_NAME_SITES)
+
+    def test_each_name_form_is_counted_read_or_reported(self):
+        """Live control for the name census: each form below is a counted
+        name site, read as another file, or unreadable, as written."""
+        cases = {
+            "pact-session-context.json": "site",
+            "pact-session-": "site",
+            ".pact-session-context-": "site",
+            "pact-session-%s.json": "unreadable",
+            "pact-session-{}.json": "unreadable",
+            "pact-session-$kind.json": "unreadable",
+            "context.json": "unreadable",
+            "pact-session-ctx": "unreadable",
+            "pact-session-journal.jsonl": "other",
+            "pact-sessions": "other",
+            "-context.json": "unreadable",
+            "planted-context.json": "other",
+            "the pact-sessions root": "other",
+        }
+        verdicts = {
+            text: "site" if _names_the_file(text) else "unreadable" if _unreadable_name(text) else "other"
+            for text in cases
+        }
+        assert verdicts == cases
+
+    def test_no_string_names_the_file_in_a_form_the_census_cannot_read(self):
+        """FAIL CLOSED: every anchor occurrence (`_NAME_ANCHOR`) is a counted
+        name site, part of another session file's complete name, or
+        reported here."""
+        unreadable = _shipped_python_census()["unreadable_names"]
+        assert unreadable == [], f"the context file named in a form the census cannot read: {unreadable}"
 
     def test_nothing_outside_the_context_module_reaches_its_path_global(self):
         path_refs = _shipped_python_census()["path_refs"]

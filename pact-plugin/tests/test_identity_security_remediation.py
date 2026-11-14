@@ -7,9 +7,11 @@ that cannot be pasted, a log line a directory name can forge.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1343,41 +1345,117 @@ def _cli_verbs() -> set:
     return verbs
 
 
+# The executable name, as a whole word (`pact-memory-x` is another word).
+_EXECUTABLE = re.compile(r"(?<![\\w-])pact-memory(?![\\w-])")
+# Calls whose string arguments are path segments.
+_PATH_CALLS = {"Path", "PurePath", "PosixPath", "join", "joinpath"}
+
+
+def _pact_memory_census(tree: ast.AST, verbs: set) -> tuple:
+    """(offences, unreadable): every occurrence of the executable name in a
+    string of `tree`, each READ or REPORTED, never skipped.
+
+    ANCHOR: the word `pact-memory` in any str or bytes constant, f-string
+    pieces included, docstrings included (comments are invisible to the
+    AST). Each occurrence is READ when the scan can judge it:
+    - a path segment: a `/` or `\\` beside it, or a whole constant used as
+      an operand of `/` or an argument of a path call (`_PATH_CALLS`);
+    - followed, inside the same string, by whitespace and a word: a CLI verb
+      there is an OFFENCE (an invocation of an executable that does not
+      exist), any other word is prose;
+    - followed by punctuation (`.`, `,`, `)`, a possessive `'s`): prose,
+      wherever the string sits, since no neighbour can turn it into a verb;
+    - a whole, stand-alone string that ends on the name (with at most a
+      closing quote): a name, not a command.
+    Every other occurrence is UNREADABLE: the name is a piece whose
+    neighbour supplies the rest (a list or tuple element, a dict value, an
+    argument to `join`, `format` or `%`, a `+` operand, an f-string piece),
+    so the scan cannot see whether a verb follows it."""
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    offences, unreadable = [], []
+    verb = re.compile(
+        r"[`'\"]?\s+[`'\"]?(" + "|".join(re.escape(v) for v in sorted(verbs, key=len, reverse=True)) + r")\b"
+    )
+    word = re.compile(r"[`'\"]?\s+[`'\"]?\w")
+    punctuation = re.compile(r"[`'\"]?(?:[.,;:!?)]|'s\b)")
+    ending = re.compile(r"[`'\"]?$")
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
+            continue
+        text = node.value if isinstance(node.value, str) else node.value.decode("latin-1")
+        parent = parents.get(node)
+        whole = not isinstance(parent, (ast.JoinedStr, ast.BinOp, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Call, ast.keyword, ast.Starred, ast.Subscript))
+        path_position = (
+            (isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div))
+            or (isinstance(parent, ast.Call) and getattr(parent.func, "attr", getattr(parent.func, "id", None)) in _PATH_CALLS)
+        )
+        for match in _EXECUTABLE.finditer(text):
+            before, after = text[:match.start()], text[match.end():]
+            site = f"{node.lineno}: {text[max(0, match.start() - 20):match.end() + 20]!r}"
+            if before.endswith(("/", "\\")) or after.startswith(("/", "\\")):
+                continue
+            if verb.match(after):
+                offences.append(site)
+            elif word.match(after) or punctuation.match(after):
+                continue
+            elif ending.match(after) and (whole or path_position):
+                continue
+            else:
+                unreadable.append(site)
+    return offences, unreadable
+
+
 def test_no_user_facing_text_names_a_pact_memory_executable():
     """Catches a remedy that tells the operator to run an executable that
     does not exist: `pact-memory` followed by any verb the CLI accepts, in a
     string anywhere in the memory scripts. Comments are exempt (`cli.py`'s
-    explanation of the bug). A string piece that ends on `pact-memory` and
-    whitespace, or puts a placeholder after it, takes its verb from another
-    piece (an f-string field, a `+`, a `%` or `.format`), so it fails closed."""
-    import ast
-    import re
-
+    explanation of the bug). FAILS CLOSED (`_pact_memory_census`): an
+    occurrence the scan cannot judge, such as the name as a list element of
+    a command `shlex.join` prints, fails as unreadable."""
     verbs = _cli_verbs()
     assert {"project-id", "rekey", "save"} <= verbs, verbs
-    invocation = re.compile(
-        r"\bpact-memory\s+(?:"
-        + "|".join(re.escape(verb) for verb in sorted(verbs, key=len, reverse=True))
-        + r")\b"
-    )
-    assembled = re.compile(r"\bpact-memory\s+(?:$|%|\{)")
-    offences, scanned = [], 0
+    offences, unreadable, scanned, occurrences = [], [], 0, 0
     for path in sorted(_SCRIPTS_DIR.glob("*.py")):
         scanned += 1
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if invocation.search(node.value) or assembled.search(node.value):
-                    offences.append((path.name, node.value[:80]))
+        source = path.read_text(encoding="utf-8")
+        occurrences += len(_EXECUTABLE.findall(source))
+        found, unread = _pact_memory_census(ast.parse(source), verbs)
+        offences += [f"{path.name}:{site}" for site in found]
+        unreadable += [f"{path.name}:{site}" for site in unread]
     assert scanned >= 10, scanned
-    assert not offences, offences
-    assert invocation.search("run `pact-memory project-id rekey`"), "the pattern is dead"
-    pieces = [
-        node.value
-        for node in ast.walk(ast.parse('f"run `pact-memory {verb}`"; "pact-memory %s" % verb'))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    ]
-    assert [bool(assembled.search(piece)) for piece in pieces] == [True, False, True], pieces
-    assert not assembled.search("skills/pact-memory/scripts"), "a path segment is not an invocation"
+    assert occurrences >= 10, "the anchor matched nothing: the census read no text"
+    assert offences == [], offences
+    assert unreadable == [], f"pact-memory in a form the scan cannot judge: {unreadable}"
+
+
+def test_the_executable_census_reads_or_reports_every_form():
+    """Live control for `_pact_memory_census`: each form is an offence,
+    unreadable or read as benign, as its comment says."""
+    verbs = {"project-id", "rekey", "save"}
+    cases = {
+        '"run `pact-memory project-id rekey`"': "offence",
+        'shlex.join(["pact-memory", "project-id", "rekey"])': "unreadable",
+        '" ".join(["pact-memory", "rekey"])': "unreadable",
+        'f"run `pact-memory {verb}`"': "unreadable",
+        '"pact-memory " + verb': "unreadable",
+        '"pact-memory %s" % verb': "unreadable",
+        '"{} {}".format("pact-memory", "rekey")': "unreadable",
+        '{"cmd": "pact-memory"}["cmd"] + " rekey"': "unreadable",
+        'b"pact-memory rekey"': "offence",
+        '"see the pact-memory skill"': "read",
+        '"skills/pact-memory/scripts"': "read",
+        'Path.home() / ".claude" / "pact-memory"': "read",
+        '"pact-memory-cache"': "read",
+        'helper = "named pact-memory."': "read",
+        'warn("run setup for pact-memory.")': "read",
+        'note = "pact-memory\'s store"': "read",
+        'warn("the executable `pact-memory")': "unreadable",
+    }
+    verdicts = {}
+    for source, _expected in cases.items():
+        offences, unreadable = _pact_memory_census(ast.parse(source), verbs)
+        verdicts[source] = "offence" if offences else "unreadable" if unreadable else "read"
+    assert verdicts == cases
 
 
 def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
