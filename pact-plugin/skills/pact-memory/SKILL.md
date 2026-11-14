@@ -402,13 +402,17 @@ Two operator surfaces answer, and they are deliberately ordered:
   repository has no working tree, when the checkout's `.git` names a linked
   worktree's admin directory that does not link back to it, when the project
   root is the user's home directory, or when no git directory is found (a broken `.git` marker or a declaration that cannot be
-  resolved).
+  resolved). When git cannot see a home directory that is itself a
+  repository from the working directory, the user-scope `project_id` below
+  binds there if it is set.
 - `config.json` → `"project_id"` in the user memory directory, the directory
   that holds the default `memory.db` named under Storage — a USER-scoped
   setting, read there whatever store a command names: `--db-path` does not
   move it. It
-  answers ONLY when no declaration was present and no repository resolved, so
-  a repository pin always outranks it. Use it for a non-repository working
+  answers ONLY when no declaration was present and no repository was found,
+  from the working directory or by walking up to its project marker (a home
+  directory the walk reaches is not asked, as above), so a repository pin
+  always outranks it. Use it for a non-repository working
   directory that should share one identity. Only the user sets it: it changes
   the identity of every session it answers for, so an agent asks the user
   instead of writing it.

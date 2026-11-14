@@ -1780,7 +1780,8 @@ class TestEveryRouteEntryConditionIsARoute:
             "selects no route outside tests"
         ),
         ("env", "PACT_TEST_MEMORY_DIR"): (
-            "where get_user_memory_dir finds the user-scope setting, read with it"
+            "where get_user_memory_dir finds the user-scope setting; read inside "
+            "get_user_memory_dir, which the user-setting route replaces"
         ),
         ("env", "<shared.project_scope.git_env_without_location: os.environ.items>"): (
             "copies the environment for git subprocesses with the location "
@@ -1790,10 +1791,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "get_worktree_identity_from_session_record"): (
             "its record is consumed only by recorded_main_root, which the worktree "
             "identity record route drives"
-        ),
-        ("call", "get_user_memory_dir"): (
-            "the user-scope setting binds a chosen id and reads no repository, "
-            "so it has no override file to measure"
         ),
         ("call", "git_env_without_location"): "strips location variables from every git call",
         ("call", "is_canonical_id"): "validates an id value",

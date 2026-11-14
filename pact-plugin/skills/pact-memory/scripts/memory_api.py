@@ -1995,10 +1995,13 @@ class PACTMemory:
             project_id: Project identifier. If not provided, it is the
                         repository identity of the first rung that resolves:
                         CLAUDE_PROJECT_DIR, the session record's project_dir,
-                        the git root (each reading its repository's override
-                        file, then its origin), the user-scope setting (only
-                        with no declaration and no repository), then the
-                        working directory's folder name (home scope warns).
+                        the git root, then a repository the working
+                        directory's marker walk finds (each reading its
+                        repository's override file, then its origin), then
+                        the user-scope setting (only
+                        with no declaration and no repository found), then
+                        the working directory's folder name (home scope
+                        warns).
                         Measured git subprocesses per detection, by layout
                         and rung, as the fewest to the most over that rung's
                         routes (each takes about 1 ms):
@@ -2533,8 +2536,9 @@ class PACTMemory:
         """Detect the project identity, its provenance, and the legacy name.
 
         The precedence is `supplied` (handled by the constructor, never here)
-        -> CLAUDE_PROJECT_DIR -> session record -> git root -> user setting ->
-        cwd marker. The repository override is NOT a rung of its own: it
+        -> CLAUDE_PROJECT_DIR -> session record -> git root -> a repository
+        the cwd marker finds -> user setting -> the cwd marker's folder name.
+        The repository override is NOT a rung of its own: it
         follows the identity root, so each root rung reads its own
         `<git-common-dir>/pact-project-id`. That is what stops a cwd pin from
         retargeting a declared session, and what stops a declared repo's pin
@@ -2543,7 +2547,10 @@ class PACTMemory:
         A declaration that is PRESENT but cannot be honoured DECLINES before
         the user-scope setting is consulted: a stale declaration must not be
         silently absorbed by a user setting. The setting answers only when no
-        declaration was present at all.
+        declaration was present at all and no repository was found, so a
+        repository pin outranks it on every route. On the cwd-marker route a
+        HOME directory is a landing that never asks git, so a home that is
+        itself a repository binds the user setting there when one exists.
         """
         # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
         # instance, module or thread state.
@@ -2669,83 +2676,89 @@ class PACTMemory:
                 decline_reason=declined_reason,
             )
 
-        # Strategy 2.5: the USER-SCOPE setting. Reached only when NO
-        # declaration was present and no repository answered. A repo-scoped
-        # override and this setting can therefore never disagree within one
-        # resolution — that is why there is no disagreement warning to emit.
-        user_setting = read_user_setting(get_user_memory_dir() / "config.json")
-        if user_setting is not None:
-            # THE PRE-CHANGE VALUE IS STILL COMPUTABLE, so it must be carried.
-            # Dropping it would silently strand every row filed under the
-            # folder name (the union has no legacy candidate to widen to) and
-            # would make `_detect_project_basename()` return None, which makes
-            # the backlog writer refuse to write at all. `_find_project_root`
-            # falls back to the cwd itself, which is exactly the value the
-            # pre-change resolver produced for this location.
-            # A DELETED CWD MUST NOT CRASH CONSTRUCTION. `Path.cwd()` raises
-            # FileNotFoundError once the directory is gone, and this rung is
-            # reachable in exactly that state (no declaration, no repository).
-            setting_start = _cwd_or_none()
-            setting_root = (
-                PACTMemory._find_project_root(setting_start)
-                if setting_start is not None
-                else None
-            )
-            return _DetectedIdentity(
-                project_id=user_setting,
-                source="user setting",
-                legacy_basename=setting_root.name if setting_root is not None else None,
-                override_ignored=None,
-                identity_root=setting_root,
-                pre_change_name=setting_root.name if setting_root is not None else None,
-            )
-
         # Strategy 3: Current working directory — walk UP to nearest project
         # marker. A walk that lands on HOME WARNS and never canonicalises.
-        try:
-            cwd_start = _cwd_or_none()
-            if cwd_start is None:
-                return _DetectedIdentity(
-                    project_id=None, source="unresolved", legacy_basename=None,
-                    override_ignored=None, identity_root=None,
-                )
-            cwd_root = PACTMemory._find_project_root(cwd_start)
-            cwd_name = cwd_root.name
-            if cwd_name:
-                if _is_home(cwd_root):
-                    _warn_home_landing(cwd_root)
-                    return _DetectedIdentity(
-                        project_id=cwd_name, source="cwd", legacy_basename=cwd_name,
-                        override_ignored=None, identity_root=cwd_root,
-                        pre_change_name=cwd_name,
-                    )
-                cwd_common_dir = main_repo_common_dir(str(cwd_root))
-                # The same guards as the declared rungs: a marker without a
-                # git answer, the forged worktree-admin shape, and a
-                # repository with no working tree (`main_repo_root` is not
-                # called on this rung, so the guard asks git). This rung
-                # meets a `.git` marker when a `GIT_CEILING_DIRECTORIES` entry
-                # above the cwd hid the checkout from git and from
-                # `find_git_marker`: `_find_project_root` does not stop at a
-                # ceiling, and `git -C <root>` examines the root itself.
-                guarded = _root_guard(cwd_root, cwd_common_dir, "cwd", root=cwd_root)
-                if guarded is not None:
-                    return guarded._replace(pre_change_name=cwd_name)
-                return PACTMemory._identity_at_root(
-                    cwd_root,
-                    cwd_common_dir,
-                    asked_root=cwd_root,
-                    source="cwd",
-                    label="cwd",
-                    decline_label="unresolved",
-                )._replace(pre_change_name=cwd_name)
-        except OSError:
-            logger.debug("Failed to detect project_id from cwd")
-
-        return _DetectedIdentity(
+        unresolved = _DetectedIdentity(
             project_id=None, source="unresolved", legacy_basename=None,
             override_ignored=None, identity_root=None,
         )
+        try:
+            cwd_start = _cwd_or_none()
+            cwd_root = (
+                PACTMemory._find_project_root(cwd_start) if cwd_start is not None else None
+            )
+            cwd_common_dir = None
+            if cwd_root is not None and cwd_root.name and not _is_home(cwd_root):
+                cwd_common_dir = main_repo_common_dir(str(cwd_root))
+                # A REPOSITORY THE WALK FINDS DECIDES BEFORE THE USER SETTING,
+                # exactly as on the git-root rung: it binds its pin or its
+                # origin, or declines, and the setting is never read. The same
+                # guards as the declared rungs: a marker without a git answer,
+                # the forged worktree-admin shape, and a repository with no
+                # working tree (`main_repo_root` is not called on this rung, so
+                # the guard asks git). This rung meets a `.git` marker when git
+                # cannot see the checkout from the cwd: a
+                # `GIT_CEILING_DIRECTORIES` entry above the cwd hid it from git
+                # and from `find_git_marker`, but `_find_project_root` does not
+                # stop at a ceiling, and `git -C <root>` examines the root
+                # itself.
+                guarded = _root_guard(cwd_root, cwd_common_dir, "cwd", root=cwd_root)
+                if guarded is not None:
+                    return guarded._replace(pre_change_name=cwd_root.name)
+            if cwd_common_dir is None:
+                # Strategy 3.5: the USER-SCOPE setting. Reached only when NO
+                # declaration was present, no repository answered from the cwd,
+                # and the cwd marker found no repository: a repository found on
+                # any route has decided by now, so a repo-scoped override and
+                # this setting never disagree within one resolution — that is
+                # why there is no disagreement warning to emit. The one
+                # repository it outranks is a HOME directory that is itself a
+                # repository, on this route only: the walk's HOME landing never
+                # asks git (the git-root rung reaches such a home and lands
+                # there instead).
+                user_setting = read_user_setting(get_user_memory_dir() / "config.json")
+                if user_setting is not None:
+                    # THE PRE-CHANGE VALUE IS STILL COMPUTABLE, so it must be
+                    # carried. Dropping it would silently strand every row
+                    # filed under the folder name (the union has no legacy
+                    # candidate to widen to) and would make
+                    # `_detect_project_basename()` return None, which makes the
+                    # backlog writer refuse to write at all.
+                    # `_find_project_root` falls back to the cwd itself, which
+                    # is exactly the value the pre-change resolver produced for
+                    # this location. A DELETED CWD leaves `cwd_root` None and
+                    # must not crash construction: the setting still answers.
+                    setting_name = cwd_root.name if cwd_root is not None else None
+                    return _DetectedIdentity(
+                        project_id=user_setting,
+                        source="user setting",
+                        legacy_basename=setting_name,
+                        override_ignored=None,
+                        identity_root=cwd_root,
+                        pre_change_name=setting_name,
+                    )
+                if cwd_root is None or not cwd_root.name:
+                    return unresolved
+                if _is_home(cwd_root):
+                    _warn_home_landing(cwd_root)
+                    return _DetectedIdentity(
+                        project_id=cwd_root.name, source="cwd",
+                        legacy_basename=cwd_root.name, override_ignored=None,
+                        identity_root=cwd_root, pre_change_name=cwd_root.name,
+                    )
+            # A repository, or a non-home folder: `cwd_root` is set on both.
+            cwd_root = cast(Path, cwd_root)
+            return PACTMemory._identity_at_root(
+                cwd_root,
+                cwd_common_dir,
+                asked_root=cwd_root,
+                source="cwd",
+                label="cwd",
+                decline_label="unresolved",
+            )._replace(pre_change_name=cwd_root.name)
+        except OSError:
+            logger.debug("Failed to detect project_id from cwd")
+        return unresolved
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:
@@ -2784,7 +2797,8 @@ class PACTMemory:
            in a multi-repo workspace the cwd's git root can be the WRONG
            scope, so the session's own recorded identity outranks it.
         2. Git repository root (worktree-safe)
-        3. The user-scope setting, then the cwd marker.
+        3. A repository the cwd marker finds, then the user-scope setting,
+           then the cwd marker's folder name.
 
         A declaration that is present but cannot be honoured declines. `source`
         is one of `supplied`, `override file`, `CLAUDE_PROJECT_DIR`,

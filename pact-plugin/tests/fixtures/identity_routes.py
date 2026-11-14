@@ -37,6 +37,7 @@ VICTIM = "https://github.com/victim/private.git"
 VICTIM_ID = "github.com/victim/private"
 OWN = "https://github.com/own/project.git"
 UNUSABLE_PIN = "not a canonical id\n"
+USER_SETTING_ID = "github.com/user/chosen"
 
 
 # --- target shapes ---------------------------------------------------------
@@ -244,9 +245,10 @@ def _with_sub(build):
 SHAPES = {name: _with_sub(build) for name, build in _BUILDERS.items()}
 
 
-def plant_unusable_pin(target: Path) -> Optional[Path]:
-    """Write an unusable `pact-project-id` in the common dir git reports for
-    `target`. Returns its path, or None when git reports no common dir."""
+def plant_unusable_pin(target: Path, text: str = UNUSABLE_PIN) -> Optional[Path]:
+    """Write `text` (an unusable id unless given) as the `pact-project-id` in
+    the common dir git reports for `target`. Returns its path, or None when
+    git reports no common dir."""
     result = subprocess.run(
         ["git", "-C", str(target), "rev-parse", "--path-format=absolute", "--git-common-dir"],
         capture_output=True, text=True, timeout=30, check=False,
@@ -254,7 +256,7 @@ def plant_unusable_pin(target: Path) -> Optional[Path]:
     if result.returncode != 0 or not result.stdout.strip():
         return None
     pin = Path(result.stdout.strip()) / "pact-project-id"
-    pin.write_text(UNUSABLE_PIN, encoding="utf-8")
+    pin.write_text(text, encoding="utf-8")
     return pin
 
 
@@ -354,6 +356,24 @@ def _cwd_marker_deeper(monkeypatch, target, elsewhere):
     return _detect()
 
 
+def _user_setting_over_cwd_marker(monkeypatch, target, elsewhere):
+    """FORCED: as `_cwd_marker`, with a user-scope `project_id` set. The
+    setting's directory is stubbed (`get_user_memory_dir`) because the suite
+    points the real one at a shared test directory; the stub replaces no git
+    answer. A repository the cwd marker finds outranks the setting, so the
+    cwd rung answers on every repository it finds and the setting is read
+    only where it finds none."""
+    import json
+
+    setting_dir = elsewhere / "user-memory"
+    setting_dir.mkdir(exist_ok=True)
+    (setting_dir / "config.json").write_text(
+        json.dumps({"project_id": USER_SETTING_ID}), encoding="utf-8"
+    )
+    monkeypatch.setattr(memory_api, "get_user_memory_dir", lambda: setting_dir)
+    return _cwd_marker(monkeypatch, target, elsewhere)
+
+
 ROUTES = {
     "git root": (_git_root, {"git root", "origin remote"}),
     "git root (subdirectory)": (_git_root_subdirectory, {"git root", "origin remote"}),
@@ -370,6 +390,10 @@ ROUTES = {
     ),
     "cwd marker": (_cwd_marker, {"cwd"}),
     "cwd marker (ceiling one level down)": (_cwd_marker_deeper, {"cwd"}),
+    # The setting answers only where the cwd marker finds no repository.
+    "user setting over a cwd marker (forced)": (
+        _user_setting_over_cwd_marker, {"cwd", "user setting"},
+    ),
 }
 
 FORCED_ROUTES = frozenset(name for name in ROUTES if "(forced)" in name or ", forced)" in name)

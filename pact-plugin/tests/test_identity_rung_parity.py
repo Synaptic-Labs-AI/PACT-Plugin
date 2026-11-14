@@ -213,12 +213,15 @@ def _reached(cells) -> dict:
 class TestEveryRungGivesAShapeTheSameAnswer:
     def test_every_route_that_reaches_a_shape_agrees(self, matrix):
         cells, _sites, _fired, _executed = matrix
-        disagreements = {
-            shape: answers
-            for shape, answers in _reached(cells).items()
-            if len(set(answers.values())) > 1
-        }
-        assert disagreements == {}, disagreements
+        disagreements = {}
+        for shape, answers in _reached(cells).items():
+            if len(set(answers.values())) > 1:
+                # Grouped by answer, so the route that differs is named.
+                grouped = collections.defaultdict(list)
+                for route, answer in answers.items():
+                    grouped[answer].append(route)
+                disagreements[shape] = {answer: sorted(routes) for answer, routes in grouped.items()}
+        assert disagreements == {}, f"routes that answer a shape differently: {disagreements}"
 
     def test_every_unreached_cell_is_a_recorded_exception(self, matrix):
         cells, _sites, _fired, _executed = matrix
@@ -736,3 +739,44 @@ class TestTheDocumentedGitCallFloor:
         )
         assert unreached == [], f"a layout outcome no own layout reaches: {unreached}"
 
+
+# --- a repository pin outranks the user setting ----------------------------
+
+PIN_ID = "github.com/pinned/project"
+
+
+@pytest.fixture(scope="module")
+def pinned_answers(tmp_path_factory):
+    """{(own layout, route): answer} with a CANONICAL pin planted in the
+    layout's common dir, on every route, the user-setting route included."""
+    answers = {}
+    for layout, shape in FLOOR_LAYOUTS.items():
+        for route, (run, _sources) in ROUTES.items():
+            base = tmp_path_factory.mktemp("pinned")
+            assert_outside_repository(base)
+            target = SHAPES[shape](base)
+            assert plant_unusable_pin(target, PIN_ID + "\n") is not None, (layout, route)
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            with pytest.MonkeyPatch.context() as cell_patch:
+                _clear(cell_patch)
+                answers[(layout, route)] = _answer(run(cell_patch, target, elsewhere))
+    return answers
+
+
+class TestARepositoryPinOutranksTheUserSetting:
+    """A canonical pin binds on every route, so no rung (the user setting
+    over a cwd marker included) can answer before the repository the route
+    finds. The unusable-pin report on the same route is the parity matrix's
+    override column."""
+
+    def test_every_route_binds_the_pin(self, pinned_answers):
+        wrong = {
+            cell: answer for cell, answer in pinned_answers.items()
+            if answer != (f"bound:{PIN_ID}", "override file")
+        }
+        assert wrong == {}, f"a route did not bind the repository pin: {wrong}"
+
+    def test_the_user_setting_route_is_measured(self, pinned_answers):
+        """Control: the route that sets a user setting is one of the cells."""
+        assert any("user setting" in route for _layout, route in pinned_answers)
