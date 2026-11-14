@@ -1137,7 +1137,10 @@ def override_read_matrix(tmp_path_factory):
     reports for the target, runs the route in-process, and records:
     `reached` (the route's own rung answered, by the route's source set),
     `read` (an `override_ignored` record was set), and the never-read
-    properties measured by git and the environment on the same target.
+    properties measured by git and the environment on the same target. A
+    shared shape that documents a HOME (`identity_routes.home_for`) runs with
+    HOME set to it, and its cells record the HOME they ran with (`home`), the
+    one the shape documents (`home_expected`) and the target.
     """
     import os
     import shutil
@@ -1225,7 +1228,13 @@ def override_read_matrix(tmp_path_factory):
         "own_bare_repository": (own_bare_repository, None),
         "home_root": (home_root, lambda target: {"HOME": str(target)}),
     }
-    shapes = {name: (build, None) for name, build in routes.SHAPES.items()}
+    def home_env(name):
+        """The environment a shared shape runs under: its documented HOME."""
+        if getattr(routes.SHAPES[name], "home", None) is None:
+            return None
+        return lambda target: {"HOME": str(routes.home_for(name, target))}
+
+    shapes = {name: (build, home_env(name)) for name, build in routes.SHAPES.items()}
     shapes.update(extra)
 
     def git_out(target, *args):
@@ -1269,10 +1278,14 @@ def override_read_matrix(tmp_path_factory):
                     continue
                 home = os.environ["HOME"]
             _answer, rung = routes._answer(detected)
+            documented = routes.home_for(shape, target) if shape in routes.SHAPES else None
             cells[(shape, route)] = {
                 "error": None,
                 "reached": rung in sources,
                 "placeable": pin is not None,
+                "home": os.path.realpath(home),
+                "home_expected": os.path.realpath(documented) if documented else None,
+                "target": os.path.realpath(target),
                 "read": routes._override(detected) is not None,
                 **properties(target, home),
             }
@@ -1421,6 +1434,39 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
             if cell["placeable"] and cell["read"] and self._named(cell)
         }
         assert read_anyway == {}, f"a route the SKILL calls never-read reads the file: {read_anyway}"
+
+    def test_each_home_shape_is_measured_at_its_home(self, override_read_matrix):
+        """A shared shape that documents a HOME runs every route at it, and
+        answers as the skill says: where the target (the checkout the session
+        is in) IS that HOME, a linked worktree included, the cell is a
+        home-directory root and never reads the file, the user-setting route
+        included; where the target is a worktree outside a home main
+        checkout, it is not one and reads the file. The expected verdict is
+        derived from the shape's own documented HOME, not typed per shape."""
+        from fixtures import identity_routes as routes
+
+        home_shapes = {
+            name for name, build in routes.SHAPES.items() if getattr(build, "home", None) is not None
+        }
+        assert home_shapes, "the shared fixture documents no home shape"
+        cells = {key: cell for key, cell in override_read_matrix.items() if key[0] in home_shapes}
+        assert {shape for shape, _route in cells} == home_shapes
+        not_at_home = {
+            key: (cell.get("error"), cell.get("home"), cell.get("home_expected"))
+            for key, cell in cells.items()
+            if cell.get("error") or cell["home"] != cell["home_expected"]
+        }
+        assert not_at_home == {}, f"a home shape ran away from its documented HOME: {not_at_home}"
+        wrong = {}
+        for key, cell in cells.items():
+            at_home = cell["target"] == cell["home_expected"]
+            expected = (True, False) if at_home else (False, True)
+            if (cell["home_root"], cell["read"]) != expected or not cell["reached"]:
+                wrong[key] = {"home_root": cell["home_root"], "read": cell["read"], "reached": cell["reached"]}
+        assert wrong == {}, f"a home shape's verdict differs from the skill's: {wrong}"
+        assert any(cell["target"] == cell["home_expected"] for cell in cells.values()), (
+            "no shared home shape has its target at HOME"
+        )
 
     def test_the_skill_names_exactly_the_measured_routes(self, override_read_matrix):
         sentence = self._sentence()
