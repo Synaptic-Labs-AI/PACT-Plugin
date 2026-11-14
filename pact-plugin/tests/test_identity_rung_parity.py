@@ -94,51 +94,119 @@ def _resolver_call_sites() -> dict:
     return sites
 
 
-def _guard_reasons() -> set:
-    """Every decline reason `_root_guard` can return, read from its body."""
+RUNGS = ("_root_guard", "_identity_at_root")
+
+
+def _unresolved_rung_references() -> list:
+    """Every reference to a rung in memory_api other than as a called name or
+    attribute. FAIL CLOSED: a rung bound to a variable, passed as a value or
+    wrapped (`partial`) is a call site `_resolver_call_sites` cannot list."""
+    tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    return [
+        f"{node.lineno}: {ast.unparse(node)}"
+        for node in ast.walk(tree)
+        if (
+            (isinstance(node, ast.Name) and node.id in RUNGS)
+            or (isinstance(node, ast.Attribute) and node.attr in RUNGS)
+        )
+        and id(node) not in called
+    ]
+
+
+def _guard_reason_forms() -> tuple:
+    """(reasons, unresolved): every decline reason `_root_guard` can return,
+    read from its body, and every form that census cannot read.
+
+    FAIL CLOSED: a `_decline` call whose reason is not a string literal
+    (positional or `reason=`), a `_decline` used other than as a called
+    name, and a `return` that is neither None nor such a call are listed as
+    unresolved, so a guard arm the census cannot see fails the arm instead
+    of passing it."""
     tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
     guard = next(
         node for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_root_guard"
     )
-    reasons = set()
+    calls = [
+        node for node in ast.walk(guard)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_decline"
+    ]
+    called = {id(call.func) for call in calls}
+    returned = {id(call) for call in calls}
+    reasons, unresolved = set(), []
+    for call in calls:
+        reason = call.args[1] if len(call.args) >= 2 else next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "reason"), None,
+        )
+        if isinstance(reason, ast.Constant) and isinstance(reason.value, str):
+            reasons.add(reason.value)
+        else:
+            unresolved.append(f"{call.lineno}: {ast.unparse(call)}")
     for node in ast.walk(guard):
-        if (
-            isinstance(node, ast.Call)
-            and getattr(node.func, "id", None) == "_decline"
-            and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-        ):
-            reasons.add(node.args[1].value)
-    return reasons
+        if isinstance(node, ast.Name) and node.id == "_decline" and id(node) not in called:
+            unresolved.append(f"{node.lineno}: _decline used as a value")
+        if isinstance(node, ast.Return) and node.value is not None:
+            value = node.value
+            if (isinstance(value, ast.Constant) and value.value is None) or id(value) in returned:
+                continue
+            unresolved.append(f"{node.lineno}: return {ast.unparse(value)}")
+    return reasons, unresolved
 
 
 ASKED_NAMES = frozenset({"asked", "asked_root"})
 
 
-def _marker_predicates() -> set:
-    """The `.git`-marker predicates the identity layer applies to the asked
-    root: every function `detect_id_for_root` calls with `asked` or
-    `asked_root` as an argument, positional or keyword, wherever the call
-    sits (an `if` test or an assignment such as the submodule check), that
-    `project_identity` itself defines (a constructor such as `Path` is not a
-    predicate)."""
+# Calls the identity layer makes with the asked root that return no layout
+# outcome, with the reason.
+NOT_A_PREDICATE = {"Path": "builds the asked path; it answers no layout question"}
+
+
+def _marker_predicate_forms() -> tuple:
+    """(predicates, unresolved, excluded): the `.git`-marker predicates the
+    identity layer applies to the asked root, every use of the asked root
+    that census cannot read, and the NOT_A_PREDICATE calls it met.
+
+    A predicate is a function `project_identity` itself defines that
+    `detect_id_for_root` calls by name with `asked` or `asked_root` as a
+    direct argument, positional or keyword, wherever the call sits (an `if`
+    test or an assignment such as the submodule check). FAIL CLOSED: every
+    other read of the asked root, except a test against None and a
+    NOT_A_PREDICATE call, is unresolved: a call through a variable, an
+    attribute or a call result, an alias, or the root passed inside an
+    expression could hide a predicate the census would never count."""
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
     defined = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     detect = next(
         node for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "detect_id_for_root"
     )
-    names = set()
-    for call in ast.walk(detect):
-        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+    parents = {child: node for node in ast.walk(detect) for child in ast.iter_child_nodes(node)}
+    names, unresolved, excluded = set(), [], set()
+    for node in ast.walk(detect):
+        if not (isinstance(node, ast.Name) and node.id in ASKED_NAMES and isinstance(node.ctx, ast.Load)):
             continue
-        arguments = list(call.args) + [keyword.value for keyword in call.keywords]
-        if call.func.id in defined and any(
-            isinstance(a, ast.Name) and a.id in ASKED_NAMES for a in arguments
+        parent = parents[node]
+        if isinstance(parent, ast.keyword):
+            parent = parents[parent]
+        if isinstance(parent, ast.Compare) and all(
+            isinstance(c, ast.Constant) and c.value is None for c in parent.comparators
         ):
-            names.add(call.func.id)
-    return names
+            continue
+        if isinstance(parent, ast.Call) and node is not parent.func and isinstance(parent.func, ast.Name):
+            if parent.func.id in defined:
+                names.add(parent.func.id)
+                continue
+            if parent.func.id in NOT_A_PREDICATE:
+                excluded.add(parent.func.id)
+                continue
+        unresolved.append(f"{node.lineno}: {ast.unparse(parent)}")
+    return names, unresolved, excluded
+
+
+def _marker_predicates() -> set:
+    """The predicate names `_marker_predicate_forms` reads."""
+    return _marker_predicate_forms()[0]
 
 
 @pytest.fixture(scope="module")
@@ -254,19 +322,26 @@ class TestEveryRungGivesAShapeTheSameAnswer:
 class TestTheMatrixCoversTheCode:
     def test_every_rung_call_site_is_executed(self, matrix):
         _cells, sites, _fired, _executed = matrix
+        unresolved = _unresolved_rung_references()
+        assert unresolved == [], f"a rung reference the call-site census cannot read: {unresolved}"
         unexecuted = [key for key, hits in sites.items() if hits == 0]
         assert unexecuted == [], f"a rung no route reaches: {unexecuted}"
 
     def test_every_guard_arm_is_produced(self, matrix):
         cells, _sites, _fired, _executed = matrix
+        reasons, unresolved = _guard_reason_forms()
+        assert unresolved == [], f"a guard decline the census cannot read: {unresolved}"
         produced = {answer for answer, _rung, _override_ in cells.values()}
-        assert _guard_reasons() - produced == set()
+        assert reasons - produced == set()
 
     def test_every_marker_predicate_fires(self, matrix):
         """Each `.git`-marker predicate the identity layer applies answers
         True for some shape, so a new predicate needs a shape here."""
         _cells, _sites, fired, _executed = matrix
-        assert _marker_predicates() - fired == set()
+        predicates, unresolved, excluded = _marker_predicate_forms()
+        assert unresolved == [], f"a use of the asked root the census cannot read: {unresolved}"
+        assert excluded == set(NOT_A_PREDICATE), f"a stale NOT_A_PREDICATE entry: {set(NOT_A_PREDICATE) - excluded}"
+        assert predicates - fired == set()
 
     def test_every_measured_reason_is_registered(self, matrix):
         cells, _sites, _fired, _executed = matrix
@@ -344,11 +419,15 @@ def _callee(func, aliases: dict, scope_bindings: dict):
     return None
 
 
-def _identity_call_sites() -> set:
-    """{(file, enclosing function, callee, first line, last line)}: one site
-    per call expression of an identity function in the memory scripts and the
-    backlog writer, module-level code included (`<module>`)."""
-    sites = set()
+def _identity_call_forms() -> tuple:
+    """(sites, unresolved). `sites` is {(file, enclosing function, callee,
+    first line, last line)}: one site per call expression of an identity
+    function in the memory scripts and the backlog writer, module-level code
+    included (`<module>`). FAIL CLOSED: an identity function referenced other
+    than as a call target or the value of a plain assignment (which `_callee`
+    resolves through the scope's bindings), for example passed to `partial`
+    or stored in a container, is listed in `unresolved`."""
+    sites, unresolved = set(), []
     for path in _identity_caller_files():
         rel = path.relative_to(PLUGIN_ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -366,10 +445,22 @@ def _identity_call_sites() -> set:
                     callee = _callee(child.func, aliases, scope_bindings)
                     if callee is not None:
                         sites.add((rel, function, callee, child.lineno, child.end_lineno))
+                elif (
+                    isinstance(child, (ast.Name, ast.Attribute))
+                    and not (isinstance(node, ast.Call) and child is node.func)
+                    and not (isinstance(node, ast.Assign) and child is node.value)
+                    and _callee(child, aliases, scope_bindings) is not None
+                ):
+                    unresolved.append(f"{rel}:{child.lineno}: {ast.unparse(node)}")
                 visit(child, function, scope_bindings)
 
         visit(tree, "<module>", module_bindings)
-    return sites
+    return sites, unresolved
+
+
+def _identity_call_sites() -> set:
+    """The call sites `_identity_call_forms` reads."""
+    return _identity_call_forms()[0]
 
 
 def _cwd_repo(monkeypatch, target, elsewhere):
@@ -439,6 +530,8 @@ def _excused_counts() -> collections.Counter:
 class TestEveryIdentityCallerIsCovered:
     def test_every_call_site_runs_or_binds_nothing(self, identity_callers):
         executed, _cwd_ids = identity_callers
+        unresolved = _identity_call_forms()[1]
+        assert unresolved == [], f"an identity reference the call-site census cannot read: {unresolved}"
         uncovered = sorted(
             site for site in _unexecuted_sites(executed) if site[:3] not in NO_IDENTITY_BOUND
         )
@@ -510,22 +603,41 @@ NOT_A_FLOOR_LAYOUT = {
 }
 
 
-def _layout_predicates() -> set:
+def _layout_predicate_forms() -> tuple:
+    """(predicates, unresolved): the `-> bool` functions reached from the
+    marker predicates through called names, and every form that walk cannot
+    read. FAIL CLOSED: a reached function with no return annotation (it could
+    be a predicate the `-> bool` filter drops) and a `project_identity`
+    function referenced other than as a called name (a call through a
+    variable or a wrapper the walk cannot follow) are unresolved."""
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
     defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     reached, frontier = set(_marker_predicates()), list(_marker_predicates())
+    unresolved = []
     while frontier:
-        for call in ast.walk(defined[frontier.pop()]):
+        function = defined[frontier.pop()]
+        if function.returns is None:
+            unresolved.append(f"{function.lineno}: {function.name} has no return annotation")
+        called = {id(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name) and node.id in defined and id(node) not in called:
+                unresolved.append(f"{node.lineno}: {function.name} uses {node.id} as a value")
             if (
-                isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                and call.func.id in defined and call.func.id not in reached
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in defined and node.func.id not in reached
             ):
-                reached.add(call.func.id)
-                frontier.append(call.func.id)
-    return {
+                reached.add(node.func.id)
+                frontier.append(node.func.id)
+    predicates = {
         name for name in reached
         if isinstance(defined[name].returns, ast.Name) and defined[name].returns.id == "bool"
     }
+    return predicates, unresolved
+
+
+def _layout_predicates() -> set:
+    """The predicate names `_layout_predicate_forms` reads."""
+    return _layout_predicate_forms()[0]
 
 
 def _layout_outcomes(predicates: set) -> dict:
@@ -746,7 +858,8 @@ class TestTheDocumentedGitCallFloor:
         be missing from the floor. NOT_A_FLOOR_LAYOUT names the predicates
         whose outcomes no own layout can reach, and each must still be one."""
         _measured, reached = git_calls
-        predicates = _layout_predicates()
+        predicates, unresolved = _layout_predicate_forms()
+        assert unresolved == [], f"a layout-predicate form the walk cannot read: {unresolved}"
         assert {"_marker_names_external_git_dir", "_submodule_checkout"} <= predicates  # control
         assert set(NOT_A_FLOOR_LAYOUT) <= predicates, set(NOT_A_FLOOR_LAYOUT) - predicates
         outcomes = _layout_outcomes(predicates)
